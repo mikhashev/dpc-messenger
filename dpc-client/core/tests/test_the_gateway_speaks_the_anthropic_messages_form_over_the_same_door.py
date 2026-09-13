@@ -10,9 +10,9 @@ Anthropic envelope `{"type": "error", "error": {"type", "message"}}`.
 
 The conversation reaches the provider layer un-flattened, through
 `LLMManager.query_messages`, and `flatten_messages` is what the same turns
-render as for the OpenAI route and for a provider that takes only a prompt.
-Tools are accepted and ignored by this HTTP shape (ADR-041 M1): the answer is
-a text block, and its `stop_reason` is the one the provider reported.
+render as for a provider that takes only a prompt. Tools reach the door as
+sent, and the `stop_reason` is the one the provider reported; what the
+gateway renders when the door returns a call is the tool-call test file's.
 
 The stand-in service, the running listener and the key are the ones the
 OpenAI-shape test file builds; the listener is a real `aiohttp` `TCPSite` on
@@ -116,11 +116,12 @@ async def test_a_messages_request_on_a_local_alias_is_messages_shaped_and_leaves
         assert service.calls[0]["system"] == SYSTEM
         assert "prompt" not in service.calls[0], "the Messages route flattened the conversation"
 
-        # The OpenAI route still flattens, and to what the same turns render as.
+        # The OpenAI route reaches the same door with the same turns, and both render to one prompt.
         status, _ = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path), body=_chat(LOCAL))
         assert status == 200
-        assert service.calls[1]["prompt"] == OPENAI_PROMPT
+        assert (service.calls[1]["messages"], service.calls[1]["system"]) == ([{"role": "user", "content": "hi"}], SYSTEM)
         assert flatten_messages(service.calls[0]["messages"], service.calls[0]["system"]) == OPENAI_PROMPT
+        assert flatten_messages(service.calls[1]["messages"], service.calls[1]["system"]) == OPENAI_PROMPT
 
 
 # --- (2) two header forms, one key -------------------------------------------------
@@ -192,9 +193,10 @@ async def test_stream_true_yields_the_six_message_events_with_the_whole_text_in_
         assert events[2][1] == {"type": "content_block_delta", "index": 0,
                                 "delta": {"type": "text_delta", "text": ANSWER}}
         assert events[3][1] == {"type": "content_block_stop", "index": 0}
+        # Cumulative on the wire: the input count travels here as well as in the head.
         assert events[4][1] == {"type": "message_delta",
                                 "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                                "usage": {"output_tokens": row["completion_tokens"]}}
+                                "usage": {"input_tokens": 12, "output_tokens": row["completion_tokens"]}}
         assert events[5][1] == {"type": "message_stop"}
 
 
@@ -247,11 +249,11 @@ async def test_a_provider_failure_is_502_api_error_and_an_unloaded_provider_503_
         assert listed_but_unloaded.calls == [] and list(ledger.rows()) == []
 
 
-# --- (5) tools are accepted and ignored: text and end_turn, nothing raises ------------
+# --- (5) tools reach the door as sent; a turn the door answers with text is end_turn ---
 
 
 @pytest.mark.asyncio
-async def test_tools_and_a_tool_result_in_the_history_are_answered_with_text_and_end_turn(tmp_path):
+async def test_tools_and_a_tool_result_in_the_history_reach_the_door_as_sent_and_a_text_answer_is_end_turn(tmp_path):
     service = _service(tmp_path, BOTH_LISTS)
     body = {
         "model": LOCAL, "max_tokens": 256, "system": SYSTEM,
@@ -277,11 +279,11 @@ async def test_tools_and_a_tool_result_in_the_history_are_answered_with_text_and
         assert answer["stop_reason"] == "end_turn"
         assert len(list(ledger.rows())) == 1
 
-        # Every block reaches the door as it was sent — the `tool_use` the answer
-        # cannot yet carry back is at least not destroyed on the way in.
+        # Every block reaches the door as it was sent, and the tools beside them.
         (call,) = service.calls
         assert call["messages"] == body["messages"]
         assert call["messages"][1]["content"][1]["type"] == "tool_use"
+        assert call["kwargs"]["tools"] == body["tools"], "the tools did not reach the door as sent"
 
         # And what a provider taking only a prompt would be given still holds them.
         prompt = flatten_messages(call["messages"], call["system"])

@@ -254,13 +254,20 @@ SDKs and Claude Code send it — `model` is the alias, `system` a string or text
 `messages` the user/assistant turns — and answers with one `message` object holding one
 text block; an error is the Anthropic envelope (`not_found_error` for an alias outside
 the lists, `rate_limit_error` for a spent vendor ceiling, `api_error` for a provider
-failure). Two caveats, both ADR-041 M1: **tools are ignored in v1** — a request carrying
-`tools` is answered with text and `stop_reason: "end_turn"`, never a `tool_use` block,
-so Claude Code can chat through the gateway but cannot run its tools on the model behind
-it; and **the stream is one delta** — `stream: true` yields the six Messages events with
-the whole answer in a single `text_delta`, nothing arrives token by token. `max_tokens`,
-`temperature`, `thinking` and the rest are accepted and ignored: sampling is the alias's
-own configuration on this node.
+failure). **Tools cross the door** (since 2026-09-14, on a local alias): `tools` in
+either form reach the model, a call comes back as a `tool_use` block with
+`stop_reason: "tool_use"` (OpenAI form: `tool_calls` with `finish_reason: "tool_calls"`),
+and the next request carrying `tool_result` (OpenAI: `role: "tool"`) completes the round
+trip. Forcing is not available — `tool_choice` `any` / `tool` / `required` and
+`parallel_tool_calls: false` are refused with 400, because every provider here runs
+`auto`; a peer alias (`remote:<node>:<alias>`) refuses tools with 400 too, since
+`REMOTE_INFERENCE_REQUEST` carries no tools. **The stream is real** on a local alias:
+`stream: true` yields text deltas as the provider produces them, with the cumulative
+usage in `message_delta` (OpenAI: the usage-only chunk under `stream_options.include_usage`)
+equal to the usage row of the same request; a tool call arrives as one block at the end,
+and a provider that hands the answer back whole still yields one delta. A peer alias
+streams one delta, as before. `max_tokens`, `temperature`, `thinking` and the rest are
+accepted and ignored: sampling is the alias's own configuration on this node.
 
 **Example** (Claude Code, environment):
 ```bash

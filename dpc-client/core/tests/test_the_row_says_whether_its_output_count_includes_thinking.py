@@ -260,7 +260,10 @@ async def test_the_messages_shape_counts_fifty_seven_in_the_body_and_in_the_stre
             async with session.post(url, json=_messages(LOCAL, stream=True),
                                     headers={"x-api-key": _key(tmp_path)}) as resp:
                 events = dict(_sse_events(await resp.text()))
-        assert events["message_delta"]["usage"] == {"output_tokens": 57, "output_tokens_details": {"thinking_tokens": 56}}
+        # `message_delta` usage is cumulative on the wire and carries the input count too.
+        assert events["message_delta"]["usage"] == {
+            "input_tokens": 8, "output_tokens": 57, "output_tokens_details": {"thinking_tokens": 56},
+        }
         assert events["message_start"]["message"]["usage"] == {"input_tokens": 8, "output_tokens": 0}
         assert all(r["output_includes_thinking"] == "excludes" for r in ledger.rows())
 

@@ -468,6 +468,18 @@ are accepted and ignored in v1, a named narrowing rather than an omission. Step
 4 keeps its shape — one chunk — and the re-chunked buffer is said in
 `docs/CONFIGURATION.md` under `[gateway]`.)*
 
+*(**Amendment, 2026-09-14 — the two narrowings above are closed on the local
+route.** Both forms now pass `tools` to `LLMManager.query_messages` and answer a
+call as a `tool_use` block (Anthropic form) or `tool_calls` (OpenAI form), and
+both stream through the provider's chunk callback with the cumulative usage in
+the final event equal to the usage row of the same `request_id`. What stays
+narrow, and is refused rather than dropped: forcing a tool (`tool_choice`
+`any`/`tool`/`required`, `parallel_tool_calls: false`), because every provider
+here runs `auto`; tools on the peer route, because `REMOTE_INFERENCE_REQUEST`
+carries none; and token-level deltas under a tool call, because no provider on
+this node streams while holding tools. Step 4 — the peer route — still answers
+whole. Mike's ask, 2026-09-13.)*
+
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
 Sharing a vendor-backed alias is a different act: **the node holding the key

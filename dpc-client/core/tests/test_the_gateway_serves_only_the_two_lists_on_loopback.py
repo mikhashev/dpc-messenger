@@ -9,8 +9,9 @@ the node ledger, and nothing falls back to the default provider. Every
 completion leaves one usage row with `caller_kind=gateway` (D3).
 
 The listener is a real `aiohttp` `TCPSite` on port 0; the provider layer is
-stood in for by a fake `LLMManager.query` returning the `return_metadata`
-dict the real one does. Cross-platform: pure asyncio, no socket options.
+stood in for by a fake `LLMManager.query_messages` returning the
+`return_metadata` dict the real one does. Cross-platform: pure asyncio, no
+socket options.
 """
 
 import asyncio
@@ -30,6 +31,7 @@ from dpc_client_core.gateway import (
     GatewayConfigError,
     GatewayServer,
 )
+from dpc_client_core.llm_manager import flatten_messages
 from dpc_client_core.node_ledger import NodeLedger, usage_row
 from dpc_client_core.settings import Settings
 
@@ -43,11 +45,15 @@ INFERENCE_TIMEOUT_S = 0.2
 
 
 class _Provider:
-    """What the gateway reads off a built provider: its config and its model."""
+    """What the gateway reads off a built provider: its config, its model,
+    and whether it has a native tool path — the gateway asks only that."""
 
     def __init__(self, type_, model):
         self.config = {"type": type_, "model": model}
         self.model = model
+
+    async def generate_with_tools(self, *args, **kwargs):
+        raise AssertionError("the gateway speaks to the manager, never to the provider")
 
 
 def _providers():
@@ -61,8 +67,9 @@ def _providers():
 def _service(tmp_path: Path, compute: dict, *, providers=None, fail=None, finish_reason=None):
     """A stand-in for CoreService with only what the gateway reads: a real
     firewall over a rules file in tmp_path, a fake registry, and both doors on
-    `LLMManager` — `query` for the OpenAI route, `query_messages` for the
-    Messages one, each recording what it was actually given."""
+    `LLMManager` — `query_messages`, which both HTTP shapes go through, and
+    `query`, kept so a route that fell back to it would be seen — each
+    recording what it was actually given."""
     rules = tmp_path / "privacy_rules.json"
     rules.write_text(json.dumps({"compute": compute}), encoding="utf-8")
     providers = _providers() if providers is None else providers
@@ -248,9 +255,13 @@ async def test_a_local_completion_is_openai_shaped_and_leaves_one_gateway_row(tm
         assert body["usage"] == {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17,
                                  "completion_tokens_details": {"reasoning_tokens": 0}}
 
-        # One call, flattened with the adapter's role markers, on the alias asked for.
-        assert [c["alias"] for c in service.calls] == [LOCAL]
-        assert service.calls[0]["prompt"] == "[SYSTEM]\nbe brief\n\n[USER]\nhi"
+        # One call, on the alias asked for, the turns un-flattened and the system
+        # beside them; what they render to is still the adapter's role markers.
+        (call,) = service.calls
+        assert call["alias"] == LOCAL
+        assert "prompt" not in call, "the OpenAI route flattened the conversation before the door"
+        assert (call["system"], call["messages"]) == ("be brief", [{"role": "user", "content": "hi"}])
+        assert flatten_messages(call["messages"], call["system"]) == "[SYSTEM]\nbe brief\n\n[USER]\nhi"
 
         rows = list(ledger.rows())
         assert len(rows) == 1

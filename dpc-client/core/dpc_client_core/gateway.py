@@ -15,13 +15,20 @@ class, quota or card, one call, one row — and knows nothing about HTTP.
 `GatewayServer` is the HTTP surface over it — the listener, the key, the
 Host check, parsing and rendering — in two wire shapes: the OpenAI one and,
 over the same `Gateway`, listener, key, lists, quota and row writer, the
-Anthropic Messages one (D4 amendment). Two narrowings are named rather than
-discovered (M1): a stream in either shape is still the whole answer in one
-chunk or one `text_delta`, and `tools` in a Messages request are accepted and
-ignored — the answer is a text block, never a `tool_use` block. Both are HTTP
-layer, not manager layer, since `LLMManager.query_messages`: the Messages
-route hands that door the turns un-flattened and prints the stop reason it
-reports, while `/v1/chat/completions` still flattens through `query`.
+Anthropic Messages one (D4 amendment). Both shapes hand the turns to
+`LLMManager.query_messages` un-flattened, in the Anthropic shape — the one
+shape the provider layer takes together with tools: a `tools` list travels
+to a provider that calls tools natively and a returned call comes back as a
+`tool_use` block or a `tool_calls` entry, so the client's own loop — Claude
+Code's, Continue's — runs against the model behind this node. The OpenAI
+form converts at this edge and nowhere else: `arguments` is a JSON string
+on its wire and an object inside. A stream on the local route is written as
+the door hands chunks back; the peer route answers whole, because its wire
+carries one request and one response (M1), and carries no tools either — a
+request with tools on a peer alias is refused, never quietly answered
+without them. What a tool field asks and no provider here can do
+(`tool_choice` forcing, one call at a time) is refused by name rather than
+dropped: every degradation is said on the wire.
 
 A third kind of name, `remote:<node_id>:<alias>`, is a connected peer's
 alias as that peer serves it to this node (D4 step 4): `/v1/models` lists
@@ -47,14 +54,14 @@ import secrets
 import stat
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from aiohttp import web
 
-from .dpc_agent.llm_adapter import messages_to_prompt
+from .dpc_agent.llm_adapter import DpcLlmAdapter
 from .dpc_agent.pricing import compute_cost_usd, get_billing_model
 from .firewall import ServingLists
 from .llm_manager import flatten_messages
@@ -150,6 +157,18 @@ class Completion:
     finish_reason: Optional[str] = None
     # Whether `completion_tokens` already holds `thinking_tokens`, as the node that counted said.
     output_includes_thinking: str = "unknown"
+    # The calls the model made, as the Anthropic `tool_use` blocks the door
+    # returns them in; the OpenAI form converts on its way out.
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def _finish_reason(reported: Optional[str], tool_calls: List[Dict[str, Any]]) -> Optional[str]:
+    """The provider's own word, except that a turn which returned a call
+    stopped on it: DeepSeek's tools path reports no stop word at all, and a
+    client handed a `tool_use` block under `end_turn` would not run the tool."""
+    if tool_calls and reported in (None, "stop"):
+        return "tool_calls"
+    return reported
 
 
 def parse_remote_name(name: str) -> Optional[Tuple[str, str]]:
@@ -242,15 +261,28 @@ class Gateway:
         *,
         messages: Optional[List[Dict[str, Any]]] = None,
         system: Any = "",
+        tools: Optional[List[Dict[str, Any]]] = None,
+        on_chunk: Optional[Callable[..., Any]] = None,
         request_id: Optional[str] = None,
     ) -> Completion:
         """One call on one alias. `messages` is the conversation un-flattened,
-        for the shapes that have one: the local route then goes through
-        `LLMManager.query_messages` and the providers see the turns. The peer
-        route takes `prompt` either way — REMOTE_INFERENCE_REQUEST carries a
-        prompt and no message array."""
+        in the Anthropic shape: the local route goes through
+        `LLMManager.query_messages`, and the providers see the turns, the
+        `tools` beside them, and hand each chunk to `on_chunk` as it is made.
+        The peer route takes `prompt` alone — REMOTE_INFERENCE_REQUEST carries
+        a prompt, no message array and no tools (ADR-041 D4, M1) — so tools on
+        it are refused here, and the answer comes back whole: `on_chunk` is
+        never called on that route and the shape layer sends what it got."""
         remote = parse_remote_name(alias)
         if remote is not None:
+            if tools:
+                raise GatewayError(
+                    400,
+                    f"model '{alias}' is a peer's alias and the request carries {len(tools)} tool(s): the "
+                    "peer wire (REMOTE_INFERENCE_REQUEST) carries a prompt and no tools, so the call cannot "
+                    "be made as asked; send it without tools, or to a local alias",
+                    "tools_unsupported",
+                )
             return await self._complete_via_peer(alias, *remote, prompt)
         try:
             lists = self.serving_lists()
@@ -268,6 +300,17 @@ class Gateway:
         providers = getattr(self._core.llm_manager, "providers", None) or {}
         if alias not in providers:
             raise GatewayError(503, f"model '{alias}' is listed but its provider is not loaded", "provider_unavailable")
+        if tools and not hasattr(providers[alias], "generate_with_tools"):
+            # Refused, not quietly answered without them: a text answer to a
+            # request that asked for tools breaks the loop on the client's side.
+            provider_type = (getattr(providers[alias], "config", None) or {}).get("type") or "unknown"
+            raise GatewayError(
+                400,
+                f"model '{alias}' cannot take tools: its provider type '{provider_type}' has no native "
+                f"tool-calling path (generate_with_tools), and the request carries {len(tools)} tool(s); "
+                "use an alias whose provider calls tools natively, or send the request without tools",
+                "tools_unsupported",
+            )
 
         ledger = self._ledger or default_ledger()
         caller = self.caller
@@ -283,7 +326,7 @@ class Gateway:
                 )
             # Money bounds a vendor alias, not the card: no queue.
             return await self._call(alias, owner, prompt, ledger, caller, request_id,
-                                    messages=messages, system=system)
+                                    messages=messages, system=system, tools=tools, on_chunk=on_chunk)
 
         timeout = float(self._core.settings.get_remote_inference_timeout())
         try:
@@ -297,7 +340,7 @@ class Gateway:
             )
         try:
             return await self._call(alias, owner, prompt, ledger, caller, request_id,
-                                    messages=messages, system=system)
+                                    messages=messages, system=system, tools=tools, on_chunk=on_chunk)
         finally:
             self._inference_lock.release()
 
@@ -312,6 +355,8 @@ class Gateway:
         *,
         messages: Optional[List[Dict[str, Any]]] = None,
         system: Any = "",
+        tools: Optional[List[Dict[str, Any]]] = None,
+        on_chunk: Optional[Callable[..., Any]] = None,
     ) -> Completion:
         # Clocked after any wait: the price depends on the hour the call is made (D3).
         started_at = datetime.now(timezone.utc)
@@ -321,7 +366,8 @@ class Gateway:
                 result = await self._core.llm_manager.query(prompt, provider_alias=alias, return_metadata=True)
             else:
                 result = await self._core.llm_manager.query_messages(
-                    messages, system=system, provider_alias=alias, return_metadata=True,
+                    messages, system=system, tools=tools or None, on_chunk=on_chunk,
+                    provider_alias=alias, return_metadata=True,
                 )
         except Exception as e:
             logger.warning("Gateway call on '%s' failed: %s", alias, e)
@@ -331,6 +377,7 @@ class Gateway:
         model = result.get("model")
         prompt_tokens = result.get("prompt_tokens")
         completion_tokens = result.get("response_tokens")
+        tool_calls = [call for call in result.get("tool_calls") or [] if isinstance(call, dict)]
         billing = get_billing_model(alias, model)
         cost_usd = compute_cost_usd(
             alias, prompt_tokens or 0, completion_tokens or 0, model=model, at=started_at,
@@ -365,8 +412,9 @@ class Gateway:
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=result.get("thinking_tokens"),
             started_at=started_at, duration_s=duration_s, billing=billing, cost_usd=cost_usd,
-            finish_reason=result.get("finish_reason"),
+            finish_reason=_finish_reason(result.get("finish_reason"), tool_calls),
             output_includes_thinking=result.get("output_includes_thinking", "unknown"),
+            tool_calls=tool_calls,
         )
 
     async def _complete_via_peer(self, name: str, peer_id: str, remote_alias: str, prompt: str) -> Completion:
@@ -516,50 +564,270 @@ def _usage(completion: Completion) -> Dict[str, Any]:
     }
 
 
+def _openai_finish_reason(completion: Completion) -> str:
+    return completion.finish_reason or "stop"
+
+
+def _openai_tool_calls(completion: Completion) -> List[Dict[str, Any]]:
+    """The calls as the OpenAI wire writes them: `arguments` is a JSON string
+    there and an object inside (the `input` of a `tool_use` block)."""
+    return [
+        {
+            "id": call.get("id") or f"call_{index}",
+            "type": "function",
+            "function": {"name": call.get("name") or "", "arguments": json.dumps(call.get("input") or {})},
+        }
+        for index, call in enumerate(completion.tool_calls)
+    ]
+
+
 def _chat_completion_json(completion: Completion) -> Dict[str, Any]:
     # `model` echoes the alias the client asked for, which is what it matches on.
+    message: Dict[str, Any] = {"role": "assistant", "content": completion.text}
+    if completion.tool_calls:
+        # `null` content beside the calls when the model said nothing, as OpenAI writes it.
+        message["content"] = completion.text or None
+        message["tool_calls"] = _openai_tool_calls(completion)
     return {
         "id": f"chatcmpl-{completion.request_id}",
         "object": "chat.completion",
         "created": int(completion.started_at.timestamp()),
         "model": completion.alias,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": completion.text},
-            "finish_reason": completion.finish_reason or "stop",
-        }],
+        "choices": [{"index": 0, "message": message, "finish_reason": _openai_finish_reason(completion)}],
         "usage": _usage(completion),
     }
 
 
-def _chat_completion_chunk_json(completion: Completion) -> Dict[str, Any]:
+def _chunk_json(
+    request_id: str,
+    created: int,
+    alias: str,
+    delta: Optional[Dict[str, Any]],
+    finish_reason: Optional[str] = None,
+    usage: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """One `chat.completion.chunk`; `delta=None` is the usage-only chunk with
+    no choices that `stream_options.include_usage` asks for."""
     return {
-        "id": f"chatcmpl-{completion.request_id}",
+        "id": f"chatcmpl-{request_id}",
         "object": "chat.completion.chunk",
-        "created": int(completion.started_at.timestamp()),
-        "model": completion.alias,
-        "choices": [{
-            "index": 0,
-            "delta": {"role": "assistant", "content": completion.text},
-            "finish_reason": completion.finish_reason or "stop",
-        }],
-        "usage": _usage(completion),
+        "created": created,
+        "model": alias,
+        "choices": [] if delta is None else [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        "usage": usage,
     }
 
 
-def _openai_messages(messages: Any) -> List[Dict[str, Any]]:
-    """The request's `messages`, or a 400 saying what is wrong with them."""
+def _sse_data(payload: Dict[str, Any]) -> bytes:
+    return f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+
+
+class _EventStream:
+    """An SSE response opened on its first write, so that everything the
+    gateway refuses before the first byte — an alias outside the lists, a
+    spent quota, a busy card — is still an HTTP status, and only a failure
+    after the first byte has to be said inside the stream."""
+
+    def __init__(self, request: web.Request):
+        self._request = request
+        self.response: Optional[web.StreamResponse] = None
+
+    @property
+    def opened(self) -> bool:
+        return self.response is not None
+
+    async def _open(self) -> web.StreamResponse:
+        if self.response is None:
+            self.response = web.StreamResponse(
+                status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+            )
+            await self.response.prepare(self._request)
+        return self.response
+
+    async def write(self, data: bytes) -> None:
+        await (await self._open()).write(data)
+
+    async def close(self) -> web.StreamResponse:
+        response = await self._open()
+        await response.write_eof()
+        return response
+
+
+def _text_of(content: Any, *, what: str) -> str:
+    """The text of an OpenAI `content`: a string, `null`, or an array of parts
+    of which only `text` is carried — an `image_url` part is refused, since no
+    image crosses the gateway (the door's `query_messages` carries none)."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise GatewayError(400, f"{what} 'content' must be a string, null or an array of parts", "invalid_request_error")
+    parts: List[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            raise GatewayError(400, f"{what} 'content' parts must be objects", "invalid_request_error")
+        kind = part.get("type")
+        if kind != "text":
+            raise GatewayError(
+                400, f"{what} 'content' carries a part of type {kind!r}; only 'text' parts cross the gateway",
+                "invalid_request_error",
+            )
+        parts.append(str(part.get("text") or ""))
+    return "\n\n".join(p for p in parts if p)
+
+
+def _tool_use_from_openai(call: Any, position: int) -> Dict[str, Any]:
+    """An OpenAI `tool_calls` entry as the `tool_use` block inside. The
+    arguments string must parse: one that does not is the client's error,
+    said so, rather than an empty input handed to the model."""
+    function = call.get("function") if isinstance(call, dict) else None
+    if not isinstance(function, dict) or not isinstance(function.get("name"), str) or not function["name"]:
+        raise GatewayError(
+            400, f"tool_calls[{position}] must be {{id, type: 'function', function: {{name, arguments}}}}",
+            "invalid_request_error",
+        )
+    arguments = function.get("arguments")
+    if arguments in (None, ""):
+        input_data: Any = {}
+    elif isinstance(arguments, str):
+        try:
+            input_data = json.loads(arguments)
+        except json.JSONDecodeError as e:
+            raise GatewayError(400, f"tool_calls[{position}].function.arguments is not JSON: {e}", "invalid_request_error")
+    elif isinstance(arguments, dict):
+        input_data = arguments  # some clients send the object itself; read, not refused
+    else:
+        raise GatewayError(400, f"tool_calls[{position}].function.arguments must be a JSON string", "invalid_request_error")
+    if not isinstance(input_data, dict):
+        raise GatewayError(400, f"tool_calls[{position}].function.arguments must encode a JSON object", "invalid_request_error")
+    return {"type": "tool_use", "id": call.get("id") or f"call_{position}", "name": function["name"], "input": input_data}
+
+
+def _openai_messages(messages: Any) -> Tuple[str, List[Dict[str, Any]]]:
+    """The request's `messages` as `(system, turns)` in the Anthropic shape the
+    door takes, or a 400 saying what is wrong with them.
+
+    Mirrors `DpcLlmAdapter._convert_messages_to_anthropic`, the in-house
+    consumer of the same shapes: `system` and `developer` turns become the
+    system part, an assistant turn's `tool_calls` become `tool_use` blocks,
+    and a run of `tool` turns becomes one user turn of `tool_result` blocks —
+    the providers' converters take them from there. What differs is that a
+    malformed turn is a 400 here rather than a silent default.
+    """
     if not isinstance(messages, list) or not messages:
         raise GatewayError(400, "'messages' must be a non-empty array", "invalid_request_error")
-    out: List[Dict[str, Any]] = []
-    for message in messages:
+    system_parts: List[str] = []
+    turns: List[Dict[str, Any]] = []
+    for position, message in enumerate(messages):
         if not isinstance(message, dict):
             raise GatewayError(400, "each message must be an object with 'role' and 'content'", "invalid_request_error")
-        # OpenAI's newer name for the system turn; the role markers know one word for it.
-        if message.get("role") == "developer":
-            message = dict(message, role="system")
-        out.append(message)
-    return out
+        role = message.get("role")
+        what = f"messages[{position}]"
+        if role in ("system", "developer"):
+            # OpenAI's newer name for the system turn; the door knows one word for it.
+            system_parts.append(_text_of(message.get("content"), what=what))
+        elif role == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                turns.append({"role": "user", "content": content})
+            else:
+                turns.append({"role": "user", "content": [{"type": "text", "text": _text_of(content, what=what)}]})
+        elif role == "assistant":
+            if "function_call" in message:
+                raise GatewayError(
+                    400, f"{what} carries the legacy 'function_call' field; send 'tool_calls'", "invalid_request_error",
+                )
+            blocks: List[Dict[str, Any]] = []
+            text = _text_of(message.get("content"), what=what)
+            if text:
+                blocks.append({"type": "text", "text": text})
+            tool_calls = message.get("tool_calls") or []
+            if not isinstance(tool_calls, list):
+                raise GatewayError(400, f"{what} 'tool_calls' must be an array", "invalid_request_error")
+            blocks.extend(_tool_use_from_openai(call, index) for index, call in enumerate(tool_calls))
+            turns.append({"role": "assistant", "content": blocks or [{"type": "text", "text": ""}]})
+        elif role == "tool":
+            tool_call_id = message.get("tool_call_id")
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                raise GatewayError(400, f"{what} is a tool turn without 'tool_call_id'", "invalid_request_error")
+            block = {"type": "tool_result", "tool_use_id": tool_call_id,
+                     "content": _text_of(message.get("content"), what=what)}
+            previous = turns[-1] if turns else None
+            if (previous is not None and previous["role"] == "user" and isinstance(previous["content"], list)
+                    and all(b.get("type") == "tool_result" for b in previous["content"])):
+                previous["content"].append(block)
+            else:
+                turns.append({"role": "user", "content": [block]})
+        else:
+            raise GatewayError(
+                400, f"{what} has role {role!r}; the roles are system, developer, user, assistant and tool",
+                "invalid_request_error",
+            )
+    return "\n\n".join(p for p in system_parts if p), turns
+
+
+# What no provider on this node can do with a tool field, said once for both shapes.
+_CANNOT_FORCE = ("cannot be honoured: every native tool path on this node asks its model with "
+                 "tool_choice auto, so a call cannot be forced; send auto and name the tool in the prompt")
+_CANNOT_LIMIT_PARALLEL = ("cannot be honoured: the providers on this node decide how many calls a turn "
+                          "makes; omit it")
+
+
+def _openai_tools(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """The request's `tools` in the Anthropic shape the door takes, or None
+    when there are none or `tool_choice` is `none` — honoured by omission,
+    which is what `none` means. A tool field this node cannot honour is a
+    400 naming it, never dropped."""
+    if "functions" in body or "function_call" in body:
+        raise GatewayError(
+            400, "the legacy 'functions' / 'function_call' fields are not served; send 'tools' and 'tool_choice'",
+            "invalid_request_error",
+        )
+    tools = body.get("tools")
+    if tools is None:
+        tools = []
+    if not isinstance(tools, list):
+        raise GatewayError(400, "'tools' must be an array", "invalid_request_error")
+    for position, tool in enumerate(tools):
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if (not isinstance(tool, dict) or tool.get("type", "function") != "function"
+                or not isinstance(function, dict) or not isinstance(function.get("name"), str) or not function["name"]):
+            raise GatewayError(
+                400, f"tools[{position}] must be {{type: 'function', function: {{name, description, parameters}}}}",
+                "invalid_request_error",
+            )
+    choice = body.get("tool_choice")
+    if choice is None or choice == "auto":
+        pass
+    elif choice == "none":
+        tools = []
+    elif choice == "required" or isinstance(choice, dict):
+        raise GatewayError(400, f"tool_choice {json.dumps(choice)} {_CANNOT_FORCE}", "invalid_request_error")
+    else:
+        raise GatewayError(400, "'tool_choice' must be 'auto', 'none', 'required' or an object", "invalid_request_error")
+    if body.get("parallel_tool_calls") is False:
+        raise GatewayError(400, f"parallel_tool_calls: false {_CANNOT_LIMIT_PARALLEL}", "invalid_request_error")
+    if not tools:
+        return None
+    return DpcLlmAdapter._convert_tools_to_anthropic(tools)
+
+
+async def _json_body(request: web.Request) -> Dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        raise GatewayError(400, "the request body is not JSON", "invalid_request_error")
+    if not isinstance(body, dict):
+        raise GatewayError(400, "the request body must be a JSON object", "invalid_request_error")
+    return body
+
+
+def _alias_of(body: Dict[str, Any]) -> str:
+    alias = body.get("model")
+    if not isinstance(alias, str) or not alias:
+        raise GatewayError(400, "'model' must name a provider alias this node serves", "invalid_request_error")
+    return alias
 
 
 class GatewayServer:
@@ -715,51 +983,98 @@ class GatewayServer:
         return web.json_response({"object": "list", "data": data})
 
     async def _chat_completions(self, request: web.Request) -> web.StreamResponse:
-        try:
-            body = await request.json()
-        except Exception:
-            raise GatewayError(400, "the request body is not JSON", "invalid_request_error")
-        if not isinstance(body, dict):
-            raise GatewayError(400, "the request body must be a JSON object", "invalid_request_error")
-        alias = body.get("model")
-        if not isinstance(alias, str) or not alias:
-            raise GatewayError(400, "'model' must name a provider alias this node serves", "invalid_request_error")
-        prompt = messages_to_prompt(_openai_messages(body.get("messages")))
+        body = await _json_body(request)
+        alias = _alias_of(body)
+        system, messages = _openai_messages(body.get("messages"))
+        tools = _openai_tools(body)
+        # Rendered here only for the peer route, which sends a prompt, and for
+        # the emptiness test below; the local route is handed the turns.
+        prompt = flatten_messages(messages, system)
         if not prompt:
             raise GatewayError(400, "no message carries text", "invalid_request_error")
         # Sampling parameters (temperature, max_tokens, ...) are the alias's own
         # configuration on this node and are not read from the request.
-        completion = await self.gateway.complete(alias, prompt)
         if body.get("stream"):
-            return await self._stream(request, completion)
+            options = body.get("stream_options") if isinstance(body.get("stream_options"), dict) else {}
+            return await self._stream(request, alias, prompt, messages, system, tools,
+                                      include_usage=bool(options.get("include_usage")))
+        completion = await self.gateway.complete(alias, prompt, messages=messages, system=system, tools=tools)
         return web.json_response(_chat_completion_json(completion))
 
-    async def _stream(self, request: web.Request, completion: Completion) -> web.StreamResponse:
-        # ADR-041 M1: `LLMManager.query` has no streaming form, so the answer is
-        # complete before the first byte leaves. The wire shape is still SSE —
-        # one chunk carrying the whole text, then [DONE] — so a client that
-        # sent stream=true parses what it expects. Token-by-token delivery
-        # needs a streaming entry point on LLMManager first.
-        response = web.StreamResponse(
-            status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
-        )
-        await response.prepare(request)
-        await response.write(f"data: {json.dumps(_chat_completion_chunk_json(completion))}\n\n".encode("utf-8"))
-        await response.write(b"data: [DONE]\n\n")
-        await response.write_eof()
-        return response
+    async def _stream(
+        self,
+        request: web.Request,
+        alias: str,
+        prompt: str,
+        messages: List[Dict[str, Any]],
+        system: Any,
+        tools: Optional[List[Dict[str, Any]]],
+        *,
+        include_usage: bool,
+    ) -> web.StreamResponse:
+        """One `chat.completion.chunk` per chunk the door hands back, then the
+        calls, the stop word and the usage, then `[DONE]`. Where no chunk came
+        before the answer (the peer route's wire answers whole, M1) the text
+        and the stop word share one chunk, as this route wrote before; a call
+        is one chunk, since the door hands it back parsed."""
+        request_id = str(uuid.uuid4())
+        created = int(time.time())
+        stream = _EventStream(request)
+        wrote_text = False
+
+        async def emit(delta: Optional[Dict[str, Any]], finish_reason: Optional[str] = None,
+                       usage: Optional[Dict[str, Any]] = None) -> None:
+            await stream.write(_sse_data(_chunk_json(request_id, created, alias, delta, finish_reason, usage)))
+
+        async def on_chunk(text: str, _conversation_id: Any = None) -> None:
+            nonlocal wrote_text
+            if not text:
+                return
+            delta = {"content": text} if wrote_text else {"role": "assistant", "content": text}
+            wrote_text = True
+            await emit(delta)
+
+        try:
+            completion = await self.gateway.complete(
+                alias, prompt, messages=messages, system=system, tools=tools, on_chunk=on_chunk, request_id=request_id,
+            )
+        except GatewayError as e:
+            if not stream.opened:
+                raise
+            # OpenAI has no error event; its clients surface an `error` object on a data line.
+            await stream.write(_sse_data({"error": {
+                "message": e.message, "type": _ERROR_TYPES.get(e.status, "server_error"), "code": e.code or None,
+            }}))
+            await stream.write(b"data: [DONE]\n\n")
+            return await stream.close()
+
+        # The wire id on the peer route; on the local route the id minted above.
+        request_id = completion.request_id
+        finish_reason = _openai_finish_reason(completion)
+        inline_usage = None if include_usage else _usage(completion)
+        finished = False
+        if not wrote_text and completion.text:
+            if completion.tool_calls:
+                await emit({"role": "assistant", "content": completion.text})
+            else:
+                await emit({"role": "assistant", "content": completion.text}, finish_reason, inline_usage)
+                finished = True
+            wrote_text = True
+        if completion.tool_calls:
+            calls = [dict(call, index=index) for index, call in enumerate(_openai_tool_calls(completion))]
+            await emit({"tool_calls": calls} if wrote_text else {"role": "assistant", "tool_calls": calls})
+        if not finished:
+            await emit({}, finish_reason, inline_usage)
+        if include_usage:
+            await emit(None, None, _usage(completion))
+        await stream.write(b"data: [DONE]\n\n")
+        return await stream.close()
 
     async def _messages(self, request: web.Request) -> web.StreamResponse:
-        try:
-            body = await request.json()
-        except Exception:
-            raise GatewayError(400, "the request body is not JSON", "invalid_request_error")
-        if not isinstance(body, dict):
-            raise GatewayError(400, "the request body must be a JSON object", "invalid_request_error")
-        alias = body.get("model")
-        if not isinstance(alias, str) or not alias:
-            raise GatewayError(400, "'model' must name a provider alias this node serves", "invalid_request_error")
+        body = await _json_body(request)
+        alias = _alias_of(body)
         system, messages = _anthropic_request(body)
+        tools = _anthropic_tools(body)
         # Rendered here only for the peer route, which sends a prompt, and for
         # the emptiness test below; the local route is handed the turns.
         prompt = flatten_messages(messages, system)
@@ -768,32 +1083,76 @@ class GatewayServer:
         # `max_tokens` is required by the Messages API and read by nobody here:
         # sampling (max_tokens, temperature, top_p, stop_sequences, thinking) is
         # the alias's own configuration on this node, as on the OpenAI route.
-        # `tools` and `tool_choice` are accepted and ignored (ADR-041 M1): the
-        # answer is a text block, never a `tool_use` block.
-        completion = await self.gateway.complete(alias, prompt, messages=messages, system=system)
         if body.get("stream"):
-            return await self._stream_messages(request, completion)
+            return await self._stream_messages(request, alias, prompt, messages, system, tools)
+        completion = await self.gateway.complete(alias, prompt, messages=messages, system=system, tools=tools)
         return web.json_response(_message_json(completion))
 
-    async def _stream_messages(self, request: web.Request, completion: Completion) -> web.StreamResponse:
-        # ADR-041 M1, as in `_stream`: the answer is complete before the first
-        # byte leaves, so the six Messages events carry the whole text in one
-        # `text_delta`. A client that sent stream=true parses what it expects.
-        response = web.StreamResponse(
-            status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
-        )
-        await response.prepare(request)
-        for event in (
-            _message_start(completion),
-            _content_block_start(),
-            _content_block_delta(completion),
-            _content_block_stop(),
-            _message_delta(completion),
-            _message_stop(),
-        ):
-            await response.write(_sse_event(event))
-        await response.write_eof()
-        return response
+    async def _stream_messages(
+        self,
+        request: web.Request,
+        alias: str,
+        prompt: str,
+        messages: List[Dict[str, Any]],
+        system: Any,
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> web.StreamResponse:
+        """`message_start`, a text block fed by the door's chunks, one `tool_use`
+        block per call with its whole input in one `input_json_delta` (the door
+        hands the call back parsed), `message_delta` with the counts, `message_stop`.
+        A head written before the door has counted says `input_tokens: 0`; the
+        cumulative usage on `message_delta` carries the count. Thinking is not streamed."""
+        minted = str(uuid.uuid4())
+        stream = _EventStream(request)
+        text_block_open = False
+
+        async def on_chunk(text: str, _conversation_id: Any = None) -> None:
+            nonlocal text_block_open
+            if not text:
+                return
+            if not stream.opened:
+                await stream.write(_sse_event(_message_head(minted, alias, input_tokens=0)))
+                await stream.write(_sse_event(_content_block_start(0)))
+                text_block_open = True
+            await stream.write(_sse_event(_text_delta(0, text)))
+
+        try:
+            completion = await self.gateway.complete(
+                alias, prompt, messages=messages, system=system, tools=tools, on_chunk=on_chunk, request_id=minted,
+            )
+        except GatewayError as e:
+            if not stream.opened:
+                raise
+            await stream.write(_sse_event({"type": "error", "error": {
+                "type": _ANTHROPIC_ERROR_TYPES.get(e.status, "api_error"), "message": e.message,
+            }}))
+            return await stream.close()
+
+        index = 0
+        if not stream.opened:
+            await stream.write(_sse_event(_message_start(completion)))
+            if completion.text or not completion.tool_calls:
+                # A text block even when empty, as the non-stream shape has one.
+                await stream.write(_sse_event(_content_block_start(0)))
+                await stream.write(_sse_event(_text_delta(0, completion.text)))
+                text_block_open = True
+        if text_block_open:
+            await stream.write(_sse_event(_content_block_stop(0)))
+            index = 1
+        for call in completion.tool_calls:
+            await stream.write(_sse_event({
+                "type": "content_block_start", "index": index,
+                "content_block": {"type": "tool_use", "id": call.get("id"), "name": call.get("name"), "input": {}},
+            }))
+            await stream.write(_sse_event({
+                "type": "content_block_delta", "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": json.dumps(call.get("input") or {})},
+            }))
+            await stream.write(_sse_event(_content_block_stop(index)))
+            index += 1
+        await stream.write(_sse_event(_message_delta(completion)))
+        await stream.write(_sse_event(_message_stop()))
+        return await stream.close()
 
 
 # --- the Anthropic Messages shape ------------------------------------------------
@@ -839,46 +1198,67 @@ def _anthropic_usage(completion: Completion) -> Dict[str, Any]:
     return {"input_tokens": completion.prompt_tokens or 0, **_anthropic_output(completion)}
 
 
+def _message_content(completion: Completion) -> List[Dict[str, Any]]:
+    """The text block — always, unless the turn is calls alone — then one
+    `tool_use` block per call, as the door returned them."""
+    blocks: List[Dict[str, Any]] = []
+    if completion.text or not completion.tool_calls:
+        blocks.append({"type": "text", "text": completion.text})
+    blocks.extend(
+        {"type": "tool_use", "id": call.get("id"), "name": call.get("name"), "input": call.get("input") or {}}
+        for call in completion.tool_calls
+    )
+    return blocks
+
+
 def _message_json(completion: Completion) -> Dict[str, Any]:
-    # `model` echoes the alias, as the OpenAI shape does; one text block, end_turn.
+    # `model` echoes the alias, as the OpenAI shape does.
     return {
         "id": f"msg_{completion.request_id}",
         "type": "message",
         "role": "assistant",
         "model": completion.alias,
-        "content": [{"type": "text", "text": completion.text}],
+        "content": _message_content(completion),
         "stop_reason": _stop_reason(completion),
         "stop_sequence": None,
         "usage": _anthropic_usage(completion),
     }
 
 
-# The six stream events, in the order the wire wants them.
+# The stream events, in the order the wire wants them.
+
+
+def _message_head(request_id: str, alias: str, *, input_tokens: int) -> Dict[str, Any]:
+    return {"type": "message_start", "message": {
+        "id": f"msg_{request_id}", "type": "message", "role": "assistant", "model": alias,
+        "content": [], "stop_reason": None, "stop_sequence": None,
+        "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+    }}
 
 
 def _message_start(completion: Completion) -> Dict[str, Any]:
-    message = dict(_message_json(completion), content=[], stop_reason=None)
-    message["usage"] = {"input_tokens": completion.prompt_tokens or 0, "output_tokens": 0}
-    return {"type": "message_start", "message": message}
+    return _message_head(completion.request_id, completion.alias, input_tokens=completion.prompt_tokens or 0)
 
 
-def _content_block_start() -> Dict[str, Any]:
-    return {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
+def _content_block_start(index: int) -> Dict[str, Any]:
+    return {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}}
 
 
-def _content_block_delta(completion: Completion) -> Dict[str, Any]:
-    return {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": completion.text}}
+def _text_delta(index: int, text: str) -> Dict[str, Any]:
+    return {"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": text}}
 
 
-def _content_block_stop() -> Dict[str, Any]:
-    return {"type": "content_block_stop", "index": 0}
+def _content_block_stop(index: int) -> Dict[str, Any]:
+    return {"type": "content_block_stop", "index": index}
 
 
 def _message_delta(completion: Completion) -> Dict[str, Any]:
+    # Cumulative, as the wire defines it: the input count travels here too,
+    # because the head may have left before the door had counted anything.
     return {
         "type": "message_delta",
         "delta": {"stop_reason": _stop_reason(completion), "stop_sequence": None},
-        "usage": _anthropic_output(completion),
+        "usage": _anthropic_usage(completion),
     }
 
 
@@ -914,3 +1294,52 @@ def _anthropic_request(body: Dict[str, Any]) -> Tuple[Any, List[Dict[str, Any]]]
                 400, "each message's 'content' must be a string or an array of blocks", "invalid_request_error",
             )
     return system, messages
+
+
+def _anthropic_tools(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """The request's `tools` as the door takes them — `name`, `description`,
+    `input_schema`, the three keys the providers' converters read — or None
+    when there are none or `tool_choice` is `none`, honoured by omission. A
+    server tool (`type: web_search_...`) runs on Anthropic's side and is
+    refused rather than dropped; so is any `tool_choice` this node cannot
+    honour (`any`, `tool`, `disable_parallel_tool_use`)."""
+    tools = body.get("tools")
+    if tools is None:
+        tools = []
+    if not isinstance(tools, list):
+        raise GatewayError(400, "'tools' must be an array", "invalid_request_error")
+    for position, tool in enumerate(tools):
+        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str) or not tool["name"]:
+            raise GatewayError(
+                400, f"tools[{position}] must be {{name, description, input_schema}}", "invalid_request_error",
+            )
+        kind = tool.get("type")
+        if kind not in (None, "custom"):
+            raise GatewayError(
+                400,
+                f"tools[{position}] ({tool['name']}) is of type {kind!r}: a server tool runs on Anthropic's side "
+                "and is not served here; only custom tools with an input_schema cross the gateway",
+                "invalid_request_error",
+            )
+    choice = body.get("tool_choice")
+    if choice is not None:
+        if not isinstance(choice, dict) or choice.get("type") not in ("auto", "any", "tool", "none"):
+            raise GatewayError(400, "'tool_choice' must be {type: auto | any | tool | none}", "invalid_request_error")
+        if choice.get("disable_parallel_tool_use") is True:
+            raise GatewayError(
+                400, f"tool_choice.disable_parallel_tool_use {_CANNOT_LIMIT_PARALLEL}", "invalid_request_error",
+            )
+        if choice["type"] in ("any", "tool"):
+            raise GatewayError(400, f"tool_choice {json.dumps(choice)} {_CANNOT_FORCE}", "invalid_request_error")
+        if choice["type"] == "none":
+            tools = []
+    if not tools:
+        return None
+    return [
+        {
+            "name": tool["name"],
+            "description": tool.get("description") or "",
+            "input_schema": tool.get("input_schema") or {"type": "object", "properties": {}},
+        }
+        for tool in tools
+    ]
