@@ -399,6 +399,34 @@ validator in the same commit; `free_nodes` / `free_groups` sit beside
 `allow_nodes` / `allow_groups`, the `allow` / `send_to` pattern the
 transcription block already has.)*
 
+*(**Amendment, 2026-09-13 — the balance is v2, the caller pays, the amount
+column is `tariff_amount`, and reasoning is billable output.** Mike's call,
+2026-09-13, on four of the five questions left open above. The prepaid balance
+of stage 2 — credits minus debits from rows, as decided in shape — is v2, not
+v1. The payer is the caller: a guest funds his own balance, the host tops
+nothing up; and with the balance in v2 the top-up has no v1 form at all. v1 is
+therefore a row that names the tariff and the amount, charged per call against
+no balance, with no settlement mechanism — the honest shape, since settlement
+is the part this protocol cannot enforce. The amount column is
+`tariff_amount`, the last ledger name that had to be fixed before the first
+paid row, because after it a column changes only by migration. Reasoning is
+billable output at `tariff_out`; there is no separate thinking rate. Read from
+the vendors' own pages the same day: Anthropic, OpenAI and Google all bill
+reasoning as output tokens at the output rate and none prices it at a rate of
+its own; DeepSeek and Z.AI document nothing, so for those two the convention
+is established here by measurement (659 engine rows, thinking never above
+completion). What the decision leaves is carried by two board entries.
+THE-LABEL-ON-A-USAGE-ROW-SAYS-WHO-COUNTED-AND-THE-ARITHMETIC-NEEDS-TO-KNOW-WHAT-WAS-COUNTED
+gives the row a three-state field (proposed `output_includes_thinking`:
+includes / excludes / unknown), set where the count is made, and the formula:
+includes → `tariff_out × completion_tokens`; excludes → `tariff_out ×
+(completion_tokens + thinking_tokens)`; unknown → not billed, analytics only —
+the state of every row written so far.
+THE-GATEWAY-REPORTS-AN-OUTPUT-COUNT-THAT-EXCLUDES-REASONING-IN-TWO-FORMS-WHOSE-OWN-SPECS-INCLUDE-IT
+carries the wire's output count, exclusive until it is fixed there. The fifth
+question, the artifact hash in the receipt, is answered as well: not in v1
+(Mike's call, 2026-09-13); it returns as a v2 question beside the balance.)*
+
 ### D4 — Shipping order, and the colleague is served at step 4
 
 Replaces the earlier «narrow first version», which GLM showed contradicted
@@ -618,12 +646,16 @@ exposure; 8888 is the large one.
 
 ## Open Questions
 
-Three, all Mike's, from the tariff amendment of 2026-09-10 (Ark #107): whether
-the prepaid balance of stage 2 is v1 or v2; who tops a balance up — the host by
-hand or the guest in advance; whether an artifact hash of the answer joins the
-receipt in v1. And one name: the column for a call's amount in the host's
-currency (`tariff_amount` proposed). D6 was closed by the two outside reviews:
-`aiohttp.web`, declared in the base dependencies.
+None of the five from the tariff amendment of 2026-09-10 (Ark #107) remain
+open. The last, restated on 2026-09-13 — does the v1 receipt keep a digest
+of the answer that was paid for, so that later either side can prove which
+answer a charge belongs to — at the cost of the host retaining a fingerprint of
+every answer it ever served to a guest — is not in v1 (Mike's call, 2026-09-13,
+DPC Project group); back in v2 beside the balance. The other four — balance in
+v1 or v2, who tops it up, the amount column's name, whether reasoning is
+billable output — are answered in the amendment of 2026-09-13 under D3. D6 was
+closed by the two outside reviews: `aiohttp.web`, declared in the base
+dependencies.
 
 ## Falsifiers
 
