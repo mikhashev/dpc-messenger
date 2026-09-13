@@ -4152,13 +4152,20 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def get_usage_summary(self, since: str = None, until: str = None) -> Dict[str, Any]:
-        """The node ledger's rows folded by caller, alias and month
+        """This node's own burn: `node_ledger.owner_rows` filtered to this
+        node's own vendor spend, folded by caller, alias and month
         (`node_ledger.summarize`) — the ledger's first reader beyond
         `spent_today`, board entry A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-
-        INSTRUMENT. `since`/`until` are optional ISO datetime bounds."""
+        INSTRUMENT, re-pointed at the ledger 2026-09-14 per board entry
+        TWO-SERIES-CARRY-ONE-PAID-CALL-AND-THE-BURN-READER-STILL-READS-THE-
+        OLD-ONE (Mike's call, 2026-09-13: the ledger is the record, not the
+        `DeepSeek usage:` log line). `since`/`until` are optional ISO datetime
+        bounds. Response shape is unchanged from before the re-pointing."""
         try:
             ledger = node_ledger.default_ledger()
-            summary = node_ledger.summarize(ledger.rows(), since=since, until=until)
+            summary = node_ledger.summarize(
+                node_ledger.owner_rows(ledger.rows()), since=since, until=until
+            )
             return {"status": "success", **summary}
         except ValueError as e:
             return {"status": "error", "message": str(e)}

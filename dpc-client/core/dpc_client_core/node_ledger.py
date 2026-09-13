@@ -475,6 +475,22 @@ class NodeLedger:
         return total
 
 
+def owner_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+    """This node's own vendor spend — what a burn reader wants in place of the
+    provider's own usage log line (ADR-041 D3, 2026-09-13: the ledger is the
+    record). One predicate, `route == "local"`: this node made the vendor call
+    itself, whoever asked — its own agent, its own gateway client, or a guest
+    this node served on its own key (the guest's tokens, this node's dollars;
+    what the guest is charged is `tariff_amount`, not `cost_usd`). `route=peer`
+    is excluded regardless of `caller_kind`: the money stayed with the node
+    that ran the call. Filtered on `route`, not on `cost_usd is not None`,
+    because `route` is the row's own answer to who ran the call.
+    """
+    for row in rows:
+        if row.get("route") == "local":
+            yield row
+
+
 def _parse_started_at(value: Any) -> datetime:
     """An ISO-8601 datetime, timezone-aware; raises ValueError naming `value`
     otherwise, so a malformed `since`/`until` reaches the API as a refusal."""
