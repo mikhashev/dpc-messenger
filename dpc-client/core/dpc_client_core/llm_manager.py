@@ -733,6 +733,8 @@ class LLMManager:
                 "vision_used": bool(images),  # Indicate if vision API was used
                 "thinking": thinking_content,  # Thinking/reasoning content (if any)
                 "thinking_tokens": thinking_tokens,  # Tokens used for thinking
+                # `response_tokens` counts `response` after the thinking was taken out of it.
+                "output_includes_thinking": "excludes",
             }
         return response
 
@@ -843,6 +845,7 @@ class LLMManager:
                 "vision_used": False,  # images stay on `query`; this door carries none
                 "thinking": thinking_content,
                 "thinking_tokens": thinking_tokens,
+                "output_includes_thinking": "excludes",  # same rule as `query`
                 # ... and what the provider was given, did, and stopped on.
                 "streamed": streamed,
                 "flattened": flattened,

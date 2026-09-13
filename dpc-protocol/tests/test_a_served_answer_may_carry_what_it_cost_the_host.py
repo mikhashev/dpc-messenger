@@ -44,3 +44,17 @@ def test_the_billing_model_travels_beside_the_price_and_never_on_an_error():
     assert priced["payload"]["billing"] == "pay_per_use"
     assert "billing" not in silent["payload"]
     assert "billing" not in failed["payload"]
+
+
+def test_the_host_says_whether_its_output_count_includes_thinking_and_never_on_an_error():
+    """`output_includes_thinking` (includes | excludes | unknown) travels beside
+    `response_tokens` so the requester can check the arithmetic instead of
+    trusting it; absent when the host did not say, never on an error."""
+    stated = create_remote_inference_response("req-1", response="ok", response_tokens=1,
+                                              thinking_tokens=56, output_includes_thinking="excludes")
+    silent = create_remote_inference_response("req-1", response="ok", response_tokens=1)
+    failed = create_remote_inference_response("req-1", error="refused", output_includes_thinking="excludes")
+
+    assert stated["payload"]["output_includes_thinking"] == "excludes"
+    assert "output_includes_thinking" not in silent["payload"]
+    assert "output_includes_thinking" not in failed["payload"]

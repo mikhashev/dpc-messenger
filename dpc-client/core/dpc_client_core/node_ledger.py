@@ -5,7 +5,10 @@ the same node's card and the same node's vendor key, so the record of a call is
 kept by the node, not by the caller. A row says who called (`caller`,
 `caller_kind`), what ran (`alias`, `model`, `route`), what it took
 (`prompt_tokens`, `completion_tokens`, `thinking_tokens`, `duration_s`), whose
-numbers those are (`counts_source`) and what it cost (`billing`, `cost_usd`) —
+numbers those are (`counts_source`), whether `completion_tokens` already holds
+the reasoning (`output_includes_thinking`: `includes` | `excludes` | `unknown`,
+set where the count was made; a row written before the column reads as
+`unknown`) and what it cost (`billing`, `cost_usd`) —
 priced at `started_at` by the node that made the call and never re-priced,
 which is the invariant `dpc_agent/pricing.py` states for itself. A null
 `cost_usd` is a call nobody priced; a zero is a price.
@@ -59,6 +62,21 @@ log = logging.getLogger(__name__)
 CALLER_KINDS = ("agent", "peer", "gateway")
 ROUTES = ("local", "peer")
 COUNTS_SOURCES = ("ours", "engine")
+OUTPUT_INCLUDES_THINKING = ("includes", "excludes", "unknown")
+
+
+def stated_output_includes_thinking(value: Any, *, peer: str, log: logging.Logger) -> str:
+    """The word a peer sent, when it is one of the three; `unknown` for anything
+    else, with one WARNING naming the peer and the value. Checked where the wire
+    is read: `usage_row` refuses a fourth word, and a refusal there would cost the
+    requester its row on every call while the answer was still delivered."""
+    if value in OUTPUT_INCLUDES_THINKING:
+        return value
+    log.warning(
+        "Peer %s sent output_includes_thinking=%r, which is none of %s; the row says unknown",
+        peer, value, "/".join(OUTPUT_INCLUDES_THINKING),
+    )
+    return "unknown"
 BILLINGS = ("subscription", "pay_per_use")
 
 LOCK_TIMEOUT_S = 2.0
@@ -97,6 +115,7 @@ def usage_row(
     tariff_out: Any = None,
     tariff_currency: Optional[str] = None,
     tariff_at: Any = None,
+    output_includes_thinking: str = "unknown",
 ) -> Dict[str, Any]:
     """One row in D3's column order.
 
@@ -115,6 +134,7 @@ def usage_row(
         ("caller_kind", caller_kind, CALLER_KINDS),
         ("route", route, ROUTES),
         ("counts_source", counts_source, COUNTS_SOURCES),
+        ("output_includes_thinking", output_includes_thinking, OUTPUT_INCLUDES_THINKING),
         ("billing", billing, BILLINGS),
     ):
         if value not in allowed:
@@ -132,6 +152,7 @@ def usage_row(
         "completion_tokens": _count(completion_tokens),
         "thinking_tokens": _count(thinking_tokens),
         "counts_source": counts_source,
+        "output_includes_thinking": output_includes_thinking,
         "started_at": started_at.astimezone(timezone.utc).isoformat(),
         "duration_s": round(float(duration_s), 3),
         "billing": billing,
@@ -290,6 +311,7 @@ class NodeLedger:
                             log.warning("%s:%d is not a usage row and was skipped", path, number)
                             continue
                         if isinstance(row, dict):
+                            row.setdefault("output_includes_thinking", "unknown")
                             yield row
             except FileNotFoundError:
                 continue

@@ -245,7 +245,8 @@ async def test_a_local_completion_is_openai_shaped_and_leaves_one_gateway_row(tm
         assert body["model"] == LOCAL
         assert body["choices"] == [{"index": 0, "finish_reason": "stop",
                                     "message": {"role": "assistant", "content": ANSWER}}]
-        assert body["usage"] == {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17}
+        assert body["usage"] == {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17,
+                                 "completion_tokens_details": {"reasoning_tokens": 0}}
 
         # One call, flattened with the adapter's role markers, on the alias asked for.
         assert [c["alias"] for c in service.calls] == [LOCAL]

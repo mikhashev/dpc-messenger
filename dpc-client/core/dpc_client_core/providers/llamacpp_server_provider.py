@@ -570,6 +570,11 @@ class LlamaServerProvider(DeepSeekProvider):
             usage["reasoning_tokens"] = max(1, len(reasoning_text) // 4)
             usage["content_tokens"] = max(0, usage["completion_tokens"] - usage["reasoning_tokens"])
             estimated = True
+        # The server's `completion_tokens` counts every decoded token and the
+        # reasoning block is parsed out of that same text (the subtraction
+        # above depends on it): a missing split is not a missing convention.
+        if usage.get("output_includes_thinking") == "unknown":
+            usage["output_includes_thinking"] = "includes"
         # Why the caller gets to see it: `length` is the only signal that
         # separates "the model was cut at the ceiling" from "the model
         # finished on its own", and the two need opposite repairs. It sits on

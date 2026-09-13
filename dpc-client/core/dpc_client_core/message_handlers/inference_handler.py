@@ -2,6 +2,7 @@
 
 from typing import Dict, Any, Optional
 from . import MessageHandler
+from ..node_ledger import stated_output_includes_thinking
 
 
 class RemoteInferenceRequestHandler(MessageHandler):
@@ -78,6 +79,12 @@ class RemoteInferenceResponseHandler(MessageHandler):
         # host counted it (v1.7). Absent stays absent: a zero would read as free.
         cost_usd = payload.get("cost_usd")
         billing = payload.get("billing")
+        # Any string can arrive here; only the three words go further (v1.7).
+        output_includes_thinking = payload.get("output_includes_thinking")
+        if output_includes_thinking is not None:
+            output_includes_thinking = stated_output_includes_thinking(
+                output_includes_thinking, peer=sender_node_id, log=self.logger,
+            )
 
         if request_id in self.service._pending_inference_requests:
             future = self.service._pending_inference_requests[request_id]
@@ -101,6 +108,8 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         result_data["cost_usd"] = cost_usd
                     if billing is not None:
                         result_data["billing"] = billing
+                    if output_includes_thinking is not None:
+                        result_data["output_includes_thinking"] = output_includes_thinking
                     future.set_result(result_data)
                 else:
                     future.set_exception(RuntimeError(error or "Remote inference failed"))

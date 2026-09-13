@@ -58,7 +58,7 @@ from .dpc_agent.llm_adapter import messages_to_prompt
 from .dpc_agent.pricing import compute_cost_usd, get_billing_model
 from .firewall import ServingLists
 from .llm_manager import flatten_messages
-from .node_ledger import NodeLedger, default_ledger, usage_row
+from .node_ledger import NodeLedger, default_ledger, stated_output_includes_thinking, usage_row
 
 if TYPE_CHECKING:
     from .service import CoreService
@@ -148,6 +148,8 @@ class Completion:
     # What the provider said it stopped on, in its own OpenAI vocabulary, or
     # None when it said nothing; each shape converts on its way to the wire.
     finish_reason: Optional[str] = None
+    # Whether `completion_tokens` already holds `thinking_tokens`, as the node that counted said.
+    output_includes_thinking: str = "unknown"
 
 
 def parse_remote_name(name: str) -> Optional[Tuple[str, str]]:
@@ -346,6 +348,7 @@ class Gateway:
                 completion_tokens=completion_tokens,
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source="ours",
+                output_includes_thinking=result.get("output_includes_thinking", "unknown"),
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,
@@ -363,6 +366,7 @@ class Gateway:
             thinking_tokens=result.get("thinking_tokens"),
             started_at=started_at, duration_s=duration_s, billing=billing, cost_usd=cost_usd,
             finish_reason=result.get("finish_reason"),
+            output_includes_thinking=result.get("output_includes_thinking", "unknown"),
         )
 
     async def _complete_via_peer(self, name: str, peer_id: str, remote_alias: str, prompt: str) -> Completion:
@@ -422,9 +426,16 @@ class Gateway:
         completion_tokens = result.get("response_tokens")
         if prompt_tokens and completion_tokens:
             counts_source = "engine"
+            # The host's word about its own count, checked here: the wire can carry anything.
+            output_includes_thinking = stated_output_includes_thinking(
+                result.get("output_includes_thinking", "unknown"), peer=peer_id, log=logger,
+            )
         else:
             counts_source = "ours"
             prompt_tokens, completion_tokens = self._count_here(prompt, text, model)
+            # Counted here over the visible text, which the host had already
+            # separated from its thinking; the label is this node's to set.
+            output_includes_thinking = "excludes"
         # The host's billing model and price travel on the wire when it counted
         # them; absent, the billing model is this node's table for the model the
         # host named and the cost stays null — never 0.0, which would read as free.
@@ -444,6 +455,7 @@ class Gateway:
                 completion_tokens=completion_tokens,
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source=counts_source,
+                output_includes_thinking=output_includes_thinking,
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,
@@ -458,6 +470,7 @@ class Gateway:
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=result.get("thinking_tokens"),
             started_at=started_at, duration_s=duration_s, billing=billing, cost_usd=cost_usd,
+            output_includes_thinking=output_includes_thinking,
         )
 
     def _count_here(self, prompt: str, text: str, model: str) -> Tuple[int, int]:
@@ -480,10 +493,27 @@ def _error(status: int, message: str, code: str = "") -> web.Response:
     return web.json_response(body, status=status)
 
 
-def _usage(completion: Completion) -> Dict[str, int]:
+def _output_tokens(completion: Completion) -> Tuple[int, Optional[int]]:
+    """`(output total, reasoning share)` as both shapes define the counter:
+    reasoning inside the total, the share beside it. `excludes` adds the
+    thinking count; `includes` and `unknown` send the count as it came —
+    on `unknown` adding would assume what this field exists to state."""
+    count = completion.completion_tokens or 0
+    thinking = completion.thinking_tokens
+    if completion.output_includes_thinking == "excludes":
+        return count + (thinking or 0), thinking
+    return count, thinking
+
+
+def _usage(completion: Completion) -> Dict[str, Any]:
     prompt = completion.prompt_tokens or 0
-    answer = completion.completion_tokens or 0
-    return {"prompt_tokens": prompt, "completion_tokens": answer, "total_tokens": prompt + answer}
+    output, reasoning = _output_tokens(completion)
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": output,
+        "total_tokens": prompt + output,
+        "completion_tokens_details": {"reasoning_tokens": reasoning or 0},
+    }
 
 
 def _chat_completion_json(completion: Completion) -> Dict[str, Any]:
@@ -796,8 +826,17 @@ def _stop_reason(completion: Completion) -> str:
     return _STOP_REASONS.get(completion.finish_reason, completion.finish_reason)
 
 
-def _anthropic_usage(completion: Completion) -> Dict[str, int]:
-    return {"input_tokens": completion.prompt_tokens or 0, "output_tokens": completion.completion_tokens or 0}
+def _anthropic_output(completion: Completion) -> Dict[str, Any]:
+    """`output_tokens_details` only when thinking was counted: the SDK's field is optional."""
+    output, thinking = _output_tokens(completion)
+    usage: Dict[str, Any] = {"output_tokens": output}
+    if thinking is not None:
+        usage["output_tokens_details"] = {"thinking_tokens": thinking}
+    return usage
+
+
+def _anthropic_usage(completion: Completion) -> Dict[str, Any]:
+    return {"input_tokens": completion.prompt_tokens or 0, **_anthropic_output(completion)}
 
 
 def _message_json(completion: Completion) -> Dict[str, Any]:
@@ -839,7 +878,7 @@ def _message_delta(completion: Completion) -> Dict[str, Any]:
     return {
         "type": "message_delta",
         "delta": {"stop_reason": _stop_reason(completion), "stop_sequence": None},
-        "usage": {"output_tokens": completion.completion_tokens or 0},
+        "usage": _anthropic_output(completion),
     }
 
 

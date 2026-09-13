@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from ..node_ledger import NodeLedger, default_ledger, usage_row
+from ..node_ledger import NodeLedger, default_ledger, stated_output_includes_thinking, usage_row
 from .pricing import compute_cost_usd, get_billing_model
 
 if TYPE_CHECKING:
@@ -350,6 +350,8 @@ class DpcLlmAdapter:
                 # `reasoning_tokens` in the usage dict; `thinking_tokens` on the wire and in D3.
                 thinking_tokens=usage.get("reasoning_tokens"),
                 counts_source=facts.get("counts_source", "ours"),
+                # Set by whoever made the count: the provider's usage dict or the wire.
+                output_includes_thinking=usage.get("output_includes_thinking", "unknown"),
                 started_at=started_at,
                 duration_s=duration_s,
                 # Priced by the route; on the peer route both are the host's copy
@@ -583,6 +585,8 @@ class DpcLlmAdapter:
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
                 "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
+                # Counted over the visible text; the thinking, if any, was already apart from it.
+                "output_includes_thinking": "excludes",
             }
 
             self._note_call(counts_source="ours")
@@ -709,6 +713,8 @@ class DpcLlmAdapter:
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
                 "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
+                # Counted over the visible text; the thinking, if any, was already apart from it.
+                "output_includes_thinking": "excludes",
             }
 
             self._note_call(counts_source="ours")
@@ -797,6 +803,8 @@ class DpcLlmAdapter:
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
                 "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
+                # Counted over `content` alone; `thinking` came apart from it.
+                "output_includes_thinking": "excludes",
             }
             self._note_call(counts_source="ours")
         else:
@@ -1047,8 +1055,15 @@ class DpcLlmAdapter:
                 # the peer sent a count rather than defaulted to zero.
                 if remote_thinking_tokens:
                     usage["reasoning_tokens"] = remote_thinking_tokens
+                if _peer.get("output_includes_thinking") is not None:
+                    # The host's word about its count, checked: the wire can carry anything.
+                    usage["output_includes_thinking"] = stated_output_includes_thinking(
+                        _peer["output_includes_thinking"],
+                        peer=getattr(dpc_agent_provider, "peer_id", None) or "?", log=log,
+                    )
             elif self._token_counter:
-                # Count locally using TokenCountManager
+                # Count locally using TokenCountManager, over the visible text: the
+                # host sent its thinking apart from `response`, so the label is ours.
                 model_name = self.default_model()
                 prompt_tokens = self._token_counter.count_tokens(prompt, model_name)
                 completion_tokens = self._token_counter.count_tokens(response_text, model_name)
@@ -1056,15 +1071,17 @@ class DpcLlmAdapter:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
+                    "output_includes_thinking": "excludes",
                 }
             else:
-                # Final fallback to character estimation
+                # Final fallback to character estimation, over the same visible text
                 est_prompt_tokens = len(prompt) // 4
                 est_completion_tokens = len(response_text) // 4
                 usage: Dict[str, Any] = {
                     "prompt_tokens": est_prompt_tokens,
                     "completion_tokens": est_completion_tokens,
                     "total_tokens": est_prompt_tokens + est_completion_tokens,
+                    "output_includes_thinking": "excludes",
                 }
             # The host priced the call, or nobody did; this node does not (D3).
             if _peer.get("cost_usd") is not None:

@@ -754,6 +754,32 @@ class TestReasoningAccounting:
         )
         assert out["reasoning_tokens"] == 50
         assert out["content_tokens"] == 50
+        assert out["output_includes_thinking"] == "includes"
+
+    def test_the_servers_total_includes_the_reasoning_it_estimates_the_share_of(self):
+        """`completion_tokens` is the server's count of everything it decoded;
+        the reasoning block is cut out of that same text, which is why the
+        estimate above is subtracted from it. So the total is `includes` even
+        when the server sent no split — the split is estimated, the
+        convention is not."""
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        out = p._record_usage(
+            SimpleNamespace(prompt_tokens=10, completion_tokens=100, total_tokens=110),
+            path="plain", reasoning_text="y" * 400,
+        )
+        assert out["reasoning_tokens"] == 100
+        assert out["output_includes_thinking"] == "includes"
+
+    def test_a_split_larger_than_the_total_keeps_the_parents_excludes(self):
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        out = p._record_usage(
+            SimpleNamespace(prompt_tokens=10, completion_tokens=1, total_tokens=11,
+                            completion_tokens_details=SimpleNamespace(reasoning_tokens=56)),
+            path="plain", reasoning_text="",
+        )
+        assert out["output_includes_thinking"] == "excludes"
 
     @pytest.mark.asyncio
     async def test_the_streaming_entry_estimates_too_four_of_four(self, caplog):

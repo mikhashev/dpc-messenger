@@ -179,7 +179,8 @@ async def test_a_peer_completion_is_openai_shaped_echoes_the_remote_name_and_lea
         assert body["id"] == "chatcmpl-" + WIRE_ID
         assert body["choices"] == [{"index": 0, "finish_reason": "stop",
                                     "message": {"role": "assistant", "content": PEER_ANSWER}}]
-        assert body["usage"] == {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}
+        assert body["usage"] == {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30,
+                                 "completion_tokens_details": {"reasoning_tokens": 0}}
 
         # One call to the peer: the flattened prompt, the alias as the peer names it.
         assert service.calls == [], "the local provider layer is not touched"

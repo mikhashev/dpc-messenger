@@ -215,7 +215,9 @@ async def test_generate_with_tools_maps_response_to_contract():
     assert result["content"] == "working on it"
     assert result["thinking"] == "thinking about dirs"
     # No native cache fields on the response → hit=0, miss=prompt_tokens (conservative).
-    # No completion_tokens_details → reasoning=0, content=completion.
+    # No completion_tokens_details → the vendor said nothing about reasoning:
+    # the numbers stay as reported, and the row's convention is `unknown`,
+    # never a defaulted «reasoning=0, so completion excludes nothing».
     assert result["usage"] == {
         "prompt_tokens": 100, "completion_tokens": 20,
         "reasoning_tokens": 0, "content_tokens": 20,
@@ -223,6 +225,7 @@ async def test_generate_with_tools_maps_response_to_contract():
         "cache_read_input_tokens": 0,
         "prompt_cache_hit_tokens": 0,
         "prompt_cache_miss_tokens": 100,
+        "output_includes_thinking": "unknown",
     }
     assert len(result["tool_calls_raw"]) == 1
     tc = result["tool_calls_raw"][0]
@@ -730,3 +733,40 @@ async def test_the_stream_has_somewhere_to_put_an_effort_and_sends_it():
     _, kwargs = p.client.chat.completions.create.call_args
     assert kwargs["extra_body"]["reasoning_effort"] == "medium"
 
+
+
+# --- what the output count includes, decided where the number is born -----------------
+
+
+def test_a_reported_split_inside_the_total_is_includes():
+    """`completion_tokens_details.reasoning_tokens` present and not above
+    `completion_tokens`: the total contains the reasoning, and says so."""
+    usage = DeepSeekProvider._usage_from_response(SimpleNamespace(
+        prompt_tokens=10, completion_tokens=100, total_tokens=110,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=60),
+    ))
+    assert usage["output_includes_thinking"] == "includes"
+    assert (usage["reasoning_tokens"], usage["content_tokens"]) == (60, 40)
+
+
+def test_a_reported_split_larger_than_the_total_is_excludes_and_is_said_out_loud(caplog):
+    """The day the vendor moves reasoning outside `completion_tokens`, the
+    subtraction goes negative. That used to clamp to zero in silence; now the
+    row says `excludes`, the visible count is the total, and the log names it."""
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="dpc_client_core.providers.deepseek_provider"):
+        usage = DeepSeekProvider._usage_from_response(SimpleNamespace(
+            prompt_tokens=10, completion_tokens=1, total_tokens=11,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=56),
+        ))
+    assert usage["output_includes_thinking"] == "excludes"
+    assert (usage["completion_tokens"], usage["reasoning_tokens"], usage["content_tokens"]) == (1, 56, 1)
+    assert any("output_includes_thinking" in r.getMessage() for r in caplog.records)
+
+
+def test_no_split_at_all_is_unknown_not_zero_reasoning_asserted():
+    usage = DeepSeekProvider._usage_from_response(SimpleNamespace(
+        prompt_tokens=10, completion_tokens=100, total_tokens=110,
+    ))
+    assert usage["output_includes_thinking"] == "unknown"

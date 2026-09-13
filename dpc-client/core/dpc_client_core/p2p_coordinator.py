@@ -278,6 +278,7 @@ class P2PCoordinator:
                 completion_tokens=result.get("response_tokens"),
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source="ours",
+                output_includes_thinking=result.get("output_includes_thinking", "unknown"),
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,
@@ -386,6 +387,7 @@ class P2PCoordinator:
                 thinking_tokens=result.get("thinking_tokens"),
                 cost_usd=cost_usd,
                 billing=billing,
+                output_includes_thinking=result.get("output_includes_thinking"),
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)

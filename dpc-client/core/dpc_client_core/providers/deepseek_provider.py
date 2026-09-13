@@ -147,15 +147,36 @@ class DeepSeekProvider(AIProvider):
         _completion = getattr(u, "completion_tokens", 0) or 0
         _ctd = getattr(u, "completion_tokens_details", None)
         _reasoning = (getattr(_ctd, "reasoning_tokens", 0) or 0) if _ctd else 0
+        # No details block: nothing is known about reasoning, and the 0 above is
+        # for the log line only. DeepSeek's documentation does not say whether
+        # `completion_tokens` includes `reasoning_tokens`; `includes` is inferred
+        # from reasoning <= completion, which an excluding vendor with short
+        # reasoning would also satisfy. The inference is held only by the invoice
+        # reconciliation, the third detector level on THE-LABEL-ON-A-USAGE-ROW-….
+        if _ctd is None:
+            convention = "unknown"
+            content = _completion
+        elif _reasoning <= _completion:
+            convention = "includes"
+            content = _completion - _reasoning
+        else:
+            convention = "excludes"
+            content = _completion
+            logger.error(
+                "completion_tokens=%d is smaller than reasoning_tokens=%d: reasoning is "
+                "no longer counted inside completion; output_includes_thinking=excludes",
+                _completion, _reasoning,
+            )
         return {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": _completion,
             "reasoning_tokens": _reasoning,
-            "content_tokens": max(0, _completion - _reasoning),
+            "content_tokens": content,
             "total_tokens": getattr(u, "total_tokens", 0) or 0,
             "cache_read_input_tokens": _hit or 0,
             "prompt_cache_hit_tokens": _hit or 0,
             "prompt_cache_miss_tokens": _miss or 0,
+            "output_includes_thinking": convention,
         }
 
     def _effort_label(self, requested: Optional[str], extra_body: Dict[str, Any]) -> str:
