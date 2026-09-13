@@ -75,6 +75,7 @@ from .dpc_agent.pricing import compute_cost_usd, get_billing_model
 from .firewall import ServingLists
 from .llm_manager import flatten_messages
 from .node_ledger import NodeLedger, default_ledger, stated_output_includes_thinking, usage_row
+from .p2p_manager import PROVED_CONNECTION_TYPES
 
 if TYPE_CHECKING:
     from .service import CoreService
@@ -115,10 +116,6 @@ _ANTHROPIC_ERROR_TYPES = {
 # — the form this node already gives a peer's provider for transcription and
 # in `remote_peer` configs, so one name means one thing everywhere.
 REMOTE_PREFIX = "remote:"
-# The connection types on which the peer's key has been proved (ADR-041 D2).
-# `PeerConnection` is direct TLS both ways; the WebRTC, relay, gossip and
-# hole-punched wrappers carry other values and are not served.
-PROVED_CONNECTION_TYPES = ("direct_tls",)
 # Requests under this prefix are answered in the Anthropic envelope, the rest
 # in the OpenAI one; the guard chooses by path because it answers before any
 # handler runs.
@@ -433,6 +430,8 @@ class Gateway:
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source="ours",
                 output_includes_thinking=result.get("output_includes_thinking", "unknown"),
+                # The word the door applied; no peer is in this row to prove.
+                served_effort=result.get("served_effort"),
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,
@@ -541,6 +540,13 @@ class Gateway:
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source=counts_source,
                 output_includes_thinking=output_includes_thinking,
+                # The host's word after its clamp, copied from the wire.
+                served_effort=result.get("served_effort"),
+                # The connection this call was gated on above, not one read
+                # again here: a peer that dropped mid-call does not unprove the
+                # call that was made.
+                peer_proved=True,
+                peer_connection_type=connection_type,
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,

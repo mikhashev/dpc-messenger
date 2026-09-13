@@ -30,6 +30,29 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+# The connection types on which the peer's key has been proved (ADR-041 D2):
+# `_verify_hello_identity` inbound, `_validate_peer_certificate` outbound.
+PROVED_CONNECTION_TYPES = ("direct_tls",)
+
+
+def peer_proof(peers: Any, peer_id: str) -> tuple[Optional[bool], Optional[str]]:
+    """The two columns a usage row carries about the node at the other end of
+    the call: whether its key was proved, and the tier that says so.
+
+    `(None, None)` when there is no connection to read — the peer is gone by
+    the time the row is written, or the row has no peer in it at all (an agent
+    or a gateway client on this machine is not reached over a tier). A wrapper
+    that names no tier is `"unknown"`, and unknown is not proved.
+    """
+    connection = peers.get(peer_id) if hasattr(peers, "get") else None
+    if connection is None:
+        return None, None
+    connection_type = getattr(connection, "connection_type", None)
+    if not isinstance(connection_type, str):
+        connection_type = "unknown"
+    return connection_type in PROVED_CONNECTION_TYPES, connection_type
+
+
 class PeerConnection:
     """A unified wrapper for a direct TLS P2P connection."""
     def __init__(self, node_id: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):

@@ -355,6 +355,10 @@ class DpcLlmAdapter:
                 # On the peer route, the host's word after its clamp, copied from
                 # the wire; the local routes do not set it yet.
                 served_effort=usage.get("served_effort"),
+                # The connection the round went over, noted by the peer route
+                # before it called; a local route has no far end to prove.
+                peer_proved=facts.get("peer_proved"),
+                peer_connection_type=facts.get("peer_connection_type"),
                 started_at=started_at,
                 duration_s=duration_s,
                 # Priced by the route; on the peer route both are the host's copy
@@ -969,6 +973,15 @@ class DpcLlmAdapter:
         service = getattr(dpc_agent_provider, '_service', None)
         if not service:
             raise RuntimeError("DpcAgentProvider missing CoreService reference - cannot route to remote peer")
+
+        # Read before the call and kept for the row: what the answer travelled
+        # over, and so whether the host's name was proved (ADR-041 D2).
+        from ..p2p_manager import peer_proof
+        proved, connection_type = peer_proof(
+            getattr(getattr(service, "p2p_manager", None), "peers", None),
+            dpc_agent_provider.peer_id,
+        )
+        self._note_call(peer_proved=proved, peer_connection_type=connection_type)
 
         # Convert messages to prompt
         prompt = self._messages_to_prompt(messages)

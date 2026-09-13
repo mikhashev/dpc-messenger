@@ -263,7 +263,8 @@ class P2PCoordinator:
         served_effort: Optional[str] = None,
     ) -> tuple[float, str]:
         """Price a served call once, at the moment it was made, and write its
-        usage row under the peer's name (ADR-041 D3), naming the effort it ran at.
+        usage row under the peer's name (ADR-041 D3), naming the effort it ran
+        at and whether the transport proved the name the row is written under.
 
         Returns `(cost_usd, billing)`, which also travel to the peer as the
         informational tail of the response — attribution, not a price it owes. A row
@@ -271,7 +272,9 @@ class P2PCoordinator:
         tokens have already been generated and paid for.
         """
         from .dpc_agent.pricing import compute_cost_usd, get_billing_model
+        from .p2p_manager import peer_proof
 
+        proved, connection_type = peer_proof(getattr(self.p2p_manager, "peers", None), peer_id)
         billing = get_billing_model(serving_alias, model)
         cost_usd = compute_cost_usd(
             serving_alias,
@@ -294,6 +297,8 @@ class P2PCoordinator:
                 counts_source="ours",
                 output_includes_thinking=result.get("output_includes_thinking", "unknown"),
                 served_effort=served_effort,
+                peer_proved=proved,
+                peer_connection_type=connection_type,
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,

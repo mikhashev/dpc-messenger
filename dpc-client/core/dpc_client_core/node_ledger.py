@@ -12,7 +12,10 @@ set where the count was made; a row written before the column reads as
 one word of the shared scale off/low/medium/high/max, the host's word after its
 clamp — on the host's own row from the clamp, on the requester's row from the
 wire; None means no effort control was applied, which is not `off`, and a row
-written before the column reads as None) and what it cost (`billing`, `cost_usd`) —
+written before the column reads as None), whether the node at the other end of
+the call had its key proved and over which tier (`peer_proved`,
+`peer_connection_type`; see `usage_row` for what «proved» means on each side)
+and what it cost (`billing`, `cost_usd`) —
 priced at `started_at` by the node that made the call and never re-priced,
 which is the invariant `dpc_agent/pricing.py` states for itself. A null
 `cost_usd` is a call nobody priced; a zero is a price.
@@ -121,6 +124,8 @@ def usage_row(
     tariff_at: Any = None,
     output_includes_thinking: str = "unknown",
     served_effort: Optional[str] = None,
+    peer_proved: Optional[bool] = None,
+    peer_connection_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """One row in D3's column order.
 
@@ -131,6 +136,21 @@ def usage_row(
     The four `tariff_*` columns are written when `tariff_in` is given and
     then all together: half a tariff would be a price to one reader and a
     gift to another, so a group with a member missing is refused.
+
+    `peer_proved` is what ADR-041 D2 draws its line on, written by whoever
+    knows the connection this call travelled over. True means the far end's
+    key was proved on that connection, and that is two different checks:
+    inbound, `P2PManager._verify_hello_identity` required the certificate's CN
+    to be the claimed node_id, its public key to hash to that node_id, and an
+    RSA-PSS signature over a nonce this node chose to verify under it;
+    outbound, `_validate_peer_certificate` required the same CN and the same
+    key hash, TLS having already made the far end prove it holds the private
+    half. False means a tier that runs neither — the name is then the Hub's
+    assertion, this node's own intention or an envelope field. None means
+    there is no far end to prove: an agent or a gateway client on this machine
+    is not reached over a tier, and a row written before the column reads the
+    same way. `peer_connection_type` is the connection's own word for its
+    tier, which is where the answer came from.
     """
     if not request_id:
         raise ValueError("a usage row needs a request_id")
@@ -148,6 +168,10 @@ def usage_row(
         raise ValueError("started_at must carry a timezone; the row is priced by the UTC hour")
     if served_effort is not None and not isinstance(served_effort, str):
         raise ValueError(f"served_effort={served_effort!r} is not a word of the effort scale")
+    if peer_proved is not None and not isinstance(peer_proved, bool):
+        raise ValueError(f"peer_proved={peer_proved!r} is not True, False or None")
+    if peer_connection_type is not None and not isinstance(peer_connection_type, str):
+        raise ValueError(f"peer_connection_type={peer_connection_type!r} is not a connection's word for itself")
     row: Dict[str, Any] = {
         "request_id": str(request_id),
         "caller": caller,
@@ -161,6 +185,8 @@ def usage_row(
         "counts_source": counts_source,
         "output_includes_thinking": output_includes_thinking,
         "served_effort": served_effort,
+        "peer_proved": peer_proved,
+        "peer_connection_type": peer_connection_type,
         "started_at": started_at.astimezone(timezone.utc).isoformat(),
         "duration_s": round(float(duration_s), 3),
         "billing": billing,
@@ -321,6 +347,8 @@ class NodeLedger:
                         if isinstance(row, dict):
                             row.setdefault("output_includes_thinking", "unknown")
                             row.setdefault("served_effort", None)
+                            row.setdefault("peer_proved", None)
+                            row.setdefault("peer_connection_type", None)
                             yield row
             except FileNotFoundError:
                 continue

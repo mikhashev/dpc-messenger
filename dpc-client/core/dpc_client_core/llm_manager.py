@@ -17,6 +17,7 @@ from .providers import (
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
+from .providers.base import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -735,6 +736,11 @@ class LLMManager:
                 "thinking_tokens": thinking_tokens,  # Tokens used for thinking
                 # `response_tokens` counts `response` after the thinking was taken out of it.
                 "output_includes_thinking": "excludes",
+                # The effort word this door passed to the provider, normalised
+                # as the provider will read it; None is «none was applied»,
+                # which is not `off`. What the provider's own configuration
+                # then does is the provider's, and is not claimed here.
+                "served_effort": normalize_reasoning_effort(kwargs.get("reasoning_effort")),
             }
         return response
 
@@ -846,6 +852,9 @@ class LLMManager:
                 "thinking": thinking_content,
                 "thinking_tokens": thinking_tokens,
                 "output_includes_thinking": "excludes",  # same rule as `query`
+                # This door takes no effort and passes none to any of its three
+                # paths, so the word it applied is None until it does.
+                "served_effort": None,
                 # ... and what the provider was given, did, and stopped on.
                 "streamed": streamed,
                 "flattened": flattened,
