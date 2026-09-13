@@ -20,11 +20,31 @@ from dpc_client_core.node_ledger import NodeLedger
 from dpc_client_core.p2p_coordinator import P2PCoordinator
 
 
-def make_coordinator():
-    """Create a P2PCoordinator with mocked service."""
+class ProvedConnection:
+    """What `p2p_manager.peers[peer_id]` is on the tier that proves a key: a
+    wrapper naming `direct_tls` (p2p_manager.py:62). A request arrives over a
+    connection, and since ADR-041 D2 the host serves peer inference only where
+    that connection proved the sender — so the fixture has to hold one."""
+
+    connection_type = "direct_tls"
+
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+
+
+def make_coordinator(peers=None):
+    """Create a P2PCoordinator with mocked service.
+
+    `peers` is what `p2p_manager.peers` holds; the default is the two peers
+    these tests call on, each on a proved connection. Pass `{}` for a node
+    nobody is connected to.
+    """
     service = MagicMock()
     service.p2p_manager = MagicMock()
-    service.p2p_manager.peers = {}
+    service.p2p_manager.peers = (
+        {"peer-1": ProvedConnection("peer-1"), "peer-2": ProvedConnection("peer-2")}
+        if peers is None else peers
+    )
     service.p2p_manager.node_id = "dpc-node-test123"
     service.p2p_manager.send_message_to_peer = AsyncMock()
     service.hub_client = MagicMock()
@@ -353,7 +373,7 @@ async def test_cancel_file_transfer_broadcasts_event():
 
 @pytest.mark.asyncio
 async def test_request_inference_peer_not_connected():
-    coord, svc = make_coordinator()
+    coord, svc = make_coordinator(peers={})
 
     with pytest.raises(ConnectionError):
         await coord.request_inference_from_peer("peer-1", "hello")

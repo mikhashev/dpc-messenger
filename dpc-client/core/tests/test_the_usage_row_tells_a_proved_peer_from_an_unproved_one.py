@@ -11,8 +11,11 @@ asserted, our own intention supplied or an envelope carried
 `peer_proved` and `peer_connection_type` are that distinction, written by
 whoever knows the connection the call travelled over: the host's row for a
 peer's call, the gateway's requester row for its own peer route, and the
-agent's requester row for a peer-routed round. This marks the row; it refuses
-nothing — the refusal is the CRITICAL's other half and is not touched here.
+agent's requester row for a peer-routed round. This file is about the columns;
+the host's refusal — D2's other half, which is why an unproved peer leaves no
+host row at all any more — lives in
+`test_peer_inference_is_served_only_over_a_proved_connection.py`. A requester
+row still carries every tier, because this node may ask over any of them.
 
 A row with no peer in it — an agent or a gateway client on this machine — says
 None to both: there is no far end to prove. A row written before the columns
@@ -144,26 +147,26 @@ async def test_a_call_served_over_direct_tls_leaves_a_row_that_says_proved(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_call_served_over_another_tier_leaves_a_row_that_says_so(tmp_path):
-    """WebRTC takes the name from the Hub's signal; the row must not read as
-    the direct tier's row does."""
-    coord, _ = _host(tmp_path, _Connection(HOST_PEER, "webrtc"))
+async def test_a_call_over_another_tier_is_refused_and_leaves_no_row(tmp_path):
+    """WebRTC takes the name from the Hub's signal. The row used to say so and
+    the call still ran; since D2 the call does not run, so there is nothing to
+    write down — a refused call is not a call."""
+    coord, svc = _host(tmp_path, _Connection(HOST_PEER, "webrtc"))
 
     await coord.handle_inference_request(HOST_PEER, "req-1", "ping")
 
-    (row,) = coord._ledger.rows()
-    assert (row["peer_proved"], row["peer_connection_type"]) == (False, "webrtc")
+    svc.llm_manager.query.assert_not_called()
+    assert list(coord._ledger.rows()) == []
 
 
 @pytest.mark.asyncio
-async def test_a_caller_whose_connection_is_gone_by_the_row_claims_nothing(tmp_path):
-    coord, _ = _host(tmp_path)
+async def test_a_caller_with_no_connection_of_record_is_refused_and_leaves_no_row(tmp_path):
+    coord, svc = _host(tmp_path)
 
     await coord.handle_inference_request(HOST_PEER, "req-1", "ping")
 
-    (row,) = coord._ledger.rows()
-    assert row["caller_kind"] == "peer"
-    assert (row["peer_proved"], row["peer_connection_type"]) == (None, None)
+    svc.llm_manager.query.assert_not_called()
+    assert list(coord._ledger.rows()) == []
 
 
 # --- the gateway's requester row: proved by the gate it passed ----------------------

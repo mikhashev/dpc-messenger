@@ -29,6 +29,14 @@ class WebRTCPeerConnection:
     def __init__(self, node_id: str, is_initiator: bool = False):
         self.node_id = node_id
         self.is_initiator = is_initiator
+        # The tier this wrapper is, named the way the direct wrapper names its
+        # own (`PeerConnection`, p2p_manager.py:62). `peer_proof` reads it for
+        # the usage row and for the D2 refusal, and read nothing here before,
+        # so both said "unknown" about a connection whose tier is known. It is
+        # deliberately absent from `PROVED_CONNECTION_TYPES`: `node_id` here is
+        # the Hub's assertion in the signalling envelope, and the DTLS
+        # certificate aiortc generates is unrelated to ~/.dpc/node.crt.
+        self.connection_type = "webrtc"
 
         # Load TURN credentials from Settings (environment variables or config file)
         dpc_home = Path.home() / ".dpc"

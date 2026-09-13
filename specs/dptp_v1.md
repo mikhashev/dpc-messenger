@@ -211,7 +211,7 @@ Requests the peer to execute an AI inference query using their local compute res
 
 **Response:** REMOTE_INFERENCE_RESPONSE message
 
-**Security:** Peer may reject request based on firewall rules (`privacy_rules.json` → `compute.enabled`)
+**Security:** Peer may reject request based on firewall rules (`privacy_rules.json` → `compute.enabled`). Peer inference is served only over a connection whose key is proved — direct TLS; other tiers (WebRTC, relay, gossip) receive the error response (ADR-041 D2), because on those the requester's `node_id` is asserted by the signalling path rather than proved by the transport, and it is the name the firewall, the usage row and any quota key on.
 
 ---
 
@@ -2147,6 +2147,10 @@ DPTP is designed to be extensible. New commands can be added by:
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `served_effort`: the word the
   host actually ran at after its clamp, so the guest can check the depth it
   paid for; absent means no effort control was applied. Added 2026-09-14
+- **§3.4 REMOTE_INFERENCE_REQUEST** — the tier the host requires is stated:
+  served only over a connection whose key is proved — direct TLS; other tiers
+  receive the error response (ADR-041 D2). Added 2026-09-14 with the host-side
+  refusal
 - **§3.4 REMOTE_INFERENCE_REQUEST** — the `thinking {enabled, budget_tokens}`
   object of v1.4 is removed from the text: never emitted or read by any
   implementation since it was written. `reasoning_effort` is the channel it

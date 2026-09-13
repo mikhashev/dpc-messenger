@@ -315,8 +315,40 @@ class P2PCoordinator:
     async def handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None):
         """Handle incoming remote inference request from a peer."""
         from dpc_protocol.protocol import create_remote_inference_response
+        from .p2p_manager import peer_proof
 
         logger.debug("Handling inference request from %s (request_id: %s, images: %s)", peer_id, request_id, "yes" if images else "no")
+
+        # Identity before every other gate (ADR-041 D2). `peer_id` is the name
+        # the firewall admits on, the ledger writes under and a quota counts
+        # against, and only the direct tier proved it: WebRTC takes it from the
+        # Hub's signal, relay from our own intention, gossip from an envelope
+        # field. This request reaches here over any of them, so the tier is
+        # asked here — before `can_request_inference`, before the serving alias
+        # is read, before any provider call. The order matters beyond the cost:
+        # a sender the transport could not prove must learn nothing about this
+        # node's alias list, and both gates below answer about aliases (D7
+        # part 1, D4-0). No usage row either — a refused call is not a call.
+        proved, connection_type = peer_proof(getattr(self.p2p_manager, "peers", None), peer_id)
+        if proved is not True:
+            over = "no connection of record" if connection_type is None else repr(connection_type)
+            logger.warning(
+                "Peer inference refused for %s: the request arrived over %s, and the peer's "
+                "key is proved only on direct TLS (ADR-041 D2)", peer_id, over,
+            )
+            error_response = create_remote_inference_response(
+                request_id=request_id,
+                error=(
+                    "This node serves peer inference only over a connection whose key is "
+                    "proved — direct TLS, where the peer's key has been proved (ADR-041 D2). "
+                    f"This request arrived over {over}."
+                ),
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
 
         # The alias the peer named is evidence for the gate, never an instruction
         # to the router (ADR-040 D4-0).
