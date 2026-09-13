@@ -31,7 +31,7 @@ import logging
 import time
 import uuid
 from typing import Any, Optional, List, Dict, TYPE_CHECKING
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from ..models.relay_node import RelayNode, RelaySession
 
@@ -118,6 +118,22 @@ class RelayManager:
         # _active_relay_connections: peer_id -> RelayedPeerConnection
         #   Used by RelayMessageHandler to dispatch incoming relay messages
         self._active_relay_connections: Dict[str, "RelayedPeerConnection"] = {}
+
+        # _pending_relay_register_by_relay: relay_node_id -> {peer_id, ...}
+        #   Every peer_id currently awaiting RELAY_READY through this relay
+        #   connection. The relay's ERROR frame carries no peer/session
+        #   correlation id (relay_register_handler.py), so a relay-wide
+        #   condition such as not_volunteering is routed by RelayErrorHandler
+        #   to every registration still pending on that relay — see
+        #   fail_pending_registers().
+        self._pending_relay_register_by_relay: Dict[str, set] = defaultdict(set)
+
+        # _pending_forwards_by_relay: relay_node_id -> deque[Future]
+        #   One Future per in-flight RELAY_MESSAGE send on that relay
+        #   connection, oldest first. RELAY_MESSAGE also carries no
+        #   correlation id (relay_message_handler.py), so forward_failed /
+        #   invalid_sender is matched FIFO — see fail_pending_forward().
+        self._pending_forwards_by_relay: Dict[str, "deque[asyncio.Future]"] = defaultdict(deque)
 
         # Client mode cache
         self._relay_cache: List[RelayNode] = []
@@ -341,6 +357,9 @@ class RelayManager:
         loop = asyncio.get_running_loop()
         ready_future: asyncio.Future = loop.create_future()
         self._pending_relay_sessions[peer_id] = ready_future
+        # Also index by relay_node_id so RelayErrorHandler can find this
+        # registration from an ERROR frame, which names no peer_id.
+        self._pending_relay_register_by_relay[relay_node.node_id].add(peer_id)
 
         try:
             # Step 1: Connect to relay (TLS + HELLO handshake, starts _listen_to_peer)
@@ -391,6 +410,7 @@ class RelayManager:
                 session_id=session_id,
                 own_node_id=self.dht_manager.node_id,
                 dht_manager=self.dht_manager,
+                relay_manager=self,
             )
 
             # Register so RelayMessageHandler can dispatch incoming messages to it
@@ -412,8 +432,11 @@ class RelayManager:
             logger.error("Failed to connect via relay to %s: %s", peer_id[:20], e)
             raise ConnectionError(f"Relay connection failed: {e}")
         finally:
-            # Always clean up the pending Future
+            # Always clean up the pending Future and its relay-side index
             self._pending_relay_sessions.pop(peer_id, None)
+            pending_for_relay = self._pending_relay_register_by_relay.get(relay_node.node_id)
+            if pending_for_relay is not None:
+                pending_for_relay.discard(peer_id)
 
     # ===== Client Mode: Incoming relay message dispatch =====
 
@@ -457,6 +480,86 @@ class RelayManager:
         """Remove an active relay connection from the dispatch registry."""
         self._active_relay_connections.pop(peer_id, None)
         logger.debug("Deregistered relay connection for peer %s", peer_id[:20])
+
+    # ===== Client Mode: RELAY_MESSAGE forward tracking (for ERROR routing) =====
+
+    def register_pending_forward(self, relay_node_id: str) -> asyncio.Future:
+        """
+        Create and index a Future for one outgoing RELAY_MESSAGE send.
+
+        Called by RelayedPeerConnection.send_message() right before writing
+        the envelope to the relay TLS connection. send_message() does not
+        wait on it — RelayErrorHandler settles it later, asynchronously, if
+        the relay answers with forward_failed / invalid_sender, and the
+        connection's own done-callback (_on_forward_settled) marks the
+        connection dead from that. A Future that is never settled (the
+        common, no-error case — the protocol has no success ack) is
+        discarded on disconnect instead; see discard_pending_forward().
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._pending_forwards_by_relay[relay_node_id].append(future)
+        return future
+
+    def discard_pending_forward(self, relay_node_id: str, future: asyncio.Future) -> None:
+        """Remove a forward Future once its sender is done waiting on it."""
+        queue = self._pending_forwards_by_relay.get(relay_node_id)
+        if not queue:
+            return
+        try:
+            queue.remove(future)
+        except ValueError:
+            pass
+
+    # ===== Client Mode: ERROR routing (RelayErrorHandler) =====
+
+    def fail_pending_registers(self, relay_node_id: str, error_code: str, message: str) -> int:
+        """
+        Fail every RELAY_REGISTER still pending through relay_node_id.
+
+        Used for relay-wide conditions (not_volunteering) where the ERROR
+        frame carries no peer/session id to narrow the target down to one
+        registration — see connect_via_relay() and
+        _pending_relay_register_by_relay.
+
+        Returns:
+            Number of Futures failed.
+        """
+        peer_ids = list(self._pending_relay_register_by_relay.get(relay_node_id, ()))
+        failed = 0
+        for peer_id in peer_ids:
+            future = self._pending_relay_sessions.get(peer_id)
+            if future is not None and not future.done():
+                future.set_exception(
+                    ConnectionError(f"Relay register failed ({error_code}): {message}")
+                )
+                failed += 1
+            self._pending_relay_register_by_relay[relay_node_id].discard(peer_id)
+        return failed
+
+    def fail_pending_forward(self, relay_node_id: str, error_code: str, message: str) -> bool:
+        """
+        Fail the oldest RELAY_MESSAGE forward still pending through relay_node_id.
+
+        forward_failed / invalid_sender answer the most recently sent
+        RELAY_MESSAGE on this connection; the wire protocol carries no
+        per-message id, so FIFO order on the single relay connection is the
+        best correlation available — see _pending_forwards_by_relay.
+
+        Returns:
+            True if a pending Future was failed, False if none was pending.
+        """
+        queue = self._pending_forwards_by_relay.get(relay_node_id)
+        if not queue:
+            return False
+        while queue:
+            future = queue.popleft()
+            if not future.done():
+                exc = ConnectionError(f"Relay forward failed ({error_code}): {message}")
+                exc.relay_error_code = error_code  # bare code for the done-callback
+                future.set_exception(exc)
+                return True
+        return False
 
     # ===== Server Mode: Relay Volunteering =====
 

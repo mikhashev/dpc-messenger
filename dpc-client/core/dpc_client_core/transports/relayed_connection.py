@@ -40,6 +40,7 @@ from dpc_protocol.crypto import (
 if TYPE_CHECKING:
     from ..models.relay_node import RelayNode
     from ..dht.manager import DHTManager
+    from ..managers.relay_manager import RelayManager
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class RelayedPeerConnection:
         session_id: str,
         own_node_id: str = "",
         dht_manager: Optional["DHTManager"] = None,
+        relay_manager: Optional["RelayManager"] = None,
     ):
         self.peer_id = peer_id
         self.relay_node = relay_node
@@ -95,10 +97,33 @@ class RelayedPeerConnection:
         self.session_id = session_id
         self.own_node_id = own_node_id
         self.dht_manager = dht_manager
+        #: RelayManager that owns this connection — used to register/settle
+        #: pending-forward Futures for ERROR routing (RelayErrorHandler).
+        #: Optional so direct construction (tests, docstring example) still
+        #: works: without it, send_message() skips forward tracking entirely.
+        self.relay_manager = relay_manager
 
         self.running = False
         self._receive_queue: asyncio.Queue = asyncio.Queue()
         self._own_private_key = None  # Lazy-loaded, cached after first use
+
+        #: Set by RelayDisconnectAckHandler when RELAY_DISCONNECT_ACK for
+        #: this session arrives. Nothing awaits it today (stop() below does
+        #: not wait for a reply) — it is recorded here for callers/tests
+        #: that want to confirm the relay actually cleaned up server-side.
+        self.disconnect_acked = False
+        self.disconnect_ack_status: Optional[str] = None
+
+        #: Error code recorded by _on_forward_settled() the first time a
+        #: forward_failed/invalid_sender ERROR settles one of our pending
+        #: Futures. Sticky: send_message() checks this before writing and
+        #: refuses once it is set — see is_connected().
+        self.last_forward_error: Optional[str] = None
+        #: Futures this connection itself registered via
+        #: relay_manager.register_pending_forward(), so stop() can settle
+        #: and discard exactly its own — not a sibling connection's — from
+        #: the shared per-relay queue.
+        self._pending_forwards: list = []
 
         logger.info(
             "RelayedPeerConnection created: peer=%s, relay=%s, session=%s",
@@ -174,6 +199,11 @@ class RelayedPeerConnection:
 
     async def stop(self):
         """Stop relayed connection and notify relay."""
+        # Settle our own pending-forward Futures unconditionally, even if
+        # running was already False (a prior forward_failed sets it) — a
+        # forward failure must not skip this cleanup and leak the queue.
+        self._settle_stale_pending_forwards()
+
         if not self.running:
             return
         self.running = False
@@ -189,6 +219,41 @@ class RelayedPeerConnection:
         except Exception as e:
             logger.debug("Failed to send RELAY_DISCONNECT: %s", e)
         logger.info("RelayedPeerConnection stopped for peer %s", self.peer_id[:20])
+
+    def _settle_stale_pending_forwards(self) -> None:
+        """Cancel and discard this connection's own not-yet-settled forward
+        Futures, so a session that never gets an ERROR back does not leak
+        entries in relay_manager._pending_forwards_by_relay forever."""
+        if self.relay_manager is None:
+            return
+        for future in self._pending_forwards:
+            if not future.done():
+                future.cancel()
+            self.relay_manager.discard_pending_forward(self.relay_node.node_id, future)
+        self._pending_forwards.clear()
+
+    def _on_forward_settled(self, future: asyncio.Future) -> None:
+        """Done-callback on a pending-forward Future: record the first
+        forward_failed/invalid_sender this connection sees and mark it
+        dead. Runs after send_message() has already returned — sends do
+        not block on this, so the failure is reported on the next call."""
+        try:
+            self._pending_forwards.remove(future)
+        except ValueError:
+            pass
+        if future.cancelled():
+            return
+        exc = future.exception()
+        if exc is None:
+            return
+        if self.last_forward_error is not None:
+            return  # Already recorded and logged once.
+        self.last_forward_error = getattr(exc, "relay_error_code", str(exc))
+        self.running = False
+        logger.warning(
+            "Relay forward failed for peer %s: %s — connection marked dead",
+            self.peer_id[:20], self.last_forward_error
+        )
 
     # ===== Incoming message dispatch (called by RelayMessageHandler) =====
 
@@ -226,6 +291,11 @@ class RelayedPeerConnection:
         Encrypts with recipient's public key (AES-256-GCM + RSA-OAEP)
         then wraps in relay envelope. Relay forwards opaque blob.
         """
+        if self.last_forward_error is not None:
+            raise ConnectionError(
+                f"Relay connection dropped: a previous forward failed "
+                f"({self.last_forward_error})"
+            )
         if not self.running:
             raise ConnectionError("RelayedPeerConnection not running")
 
@@ -249,6 +319,20 @@ class RelayedPeerConnection:
             }
         }
 
+        # Register a pending-forward Future *before* sending, so an ERROR
+        # that comes back fast can never race ahead of us registering it.
+        # We do NOT wait on it — a chat message must return as soon as it is
+        # handed to the relay. If forward_failed/invalid_sender arrives
+        # later, _on_forward_settled marks this connection dead and the
+        # *next* send_message() call reports it (see the check above).
+        pending_forward = None
+        if self.relay_manager is not None:
+            pending_forward = self.relay_manager.register_pending_forward(
+                self.relay_node.node_id
+            )
+            self._pending_forwards.append(pending_forward)
+            pending_forward.add_done_callback(self._on_forward_settled)
+
         try:
             await self.relay_connection.send(relay_envelope)
             logger.debug(
@@ -256,6 +340,14 @@ class RelayedPeerConnection:
                 self.peer_id[:20], len(encrypted)
             )
         except Exception as e:
+            if pending_forward is not None:
+                self.relay_manager.discard_pending_forward(
+                    self.relay_node.node_id, pending_forward
+                )
+                try:
+                    self._pending_forwards.remove(pending_forward)
+                except ValueError:
+                    pass
             logger.error("Relay send failed: %s", e)
             raise ConnectionError(f"Relay send failed: {e}")
 
@@ -271,7 +363,12 @@ class RelayedPeerConnection:
             return None
 
     def is_connected(self) -> bool:
-        """Check if relayed connection is active."""
+        """Check if relayed connection is active.
+
+        False after a recorded forward failure too — _on_forward_settled
+        clears self.running, so a health poll sees the same drop a caller
+        of send_message() would hit.
+        """
         return self.running
 
     def __repr__(self) -> str:

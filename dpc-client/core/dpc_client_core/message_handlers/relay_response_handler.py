@@ -1,15 +1,11 @@
 """
-Relay Response Handlers - Client-side RELAY_READY / RELAY_WAITING
+Relay Response Handlers - Client-side RELAY_READY / RELAY_WAITING / RELAY_DISCONNECT_ACK
 
-Handles responses from the relay node during session establishment.
-
-RELAY_WAITING: Relay received our RELAY_REGISTER but the other peer has not
-    registered yet. We stay waiting — connect_via_relay holds an asyncio.Future
-    that will be resolved when RELAY_READY arrives.
-
-RELAY_READY: Both peers have registered; the relay has created the session.
-    Resolves the pending Future in relay_manager._pending_relay_sessions so
-    connect_via_relay can proceed to create the RelayedPeerConnection.
+Handles responses from the relay node during session establishment and teardown.
+RELAY_WAITING logs and keeps waiting; RELAY_READY resolves the pending Future
+in relay_manager._pending_relay_sessions; RELAY_DISCONNECT_ACK has no pending
+Future to settle (stop() sends RELAY_DISCONNECT fire-and-forget), so it is
+recorded on the matching RelayedPeerConnection instead.
 """
 
 import logging
@@ -94,4 +90,58 @@ class RelayReadyHandler(MessageHandler):
         logger.info(
             "Relay session ready: session=%s peer=%s relay=%s",
             session_id, peer_id[:20], sender_node_id[:20]
+        )
+
+
+class RelayDisconnectAckHandler(MessageHandler):
+    """
+    Handle RELAY_DISCONNECT_ACK from relay node (client mode, spec §3.13).
+
+    Payload:
+        session_id: The session the relay just cleaned up (or reports not_found)
+        status: "cleaned_up" or "not_found"
+
+    Carries no peer_id, so the matching RelayedPeerConnection is found by
+    session_id among relay_manager._active_relay_connections.
+    """
+
+    @property
+    def command_name(self) -> str:
+        return "RELAY_DISCONNECT_ACK"
+
+    async def handle(self, sender_node_id: str, payload: dict) -> None:
+        session_id = payload.get("session_id")
+        status = payload.get("status", "unknown")
+
+        if not session_id:
+            logger.warning(
+                "RELAY_DISCONNECT_ACK missing session_id from %s", sender_node_id[:20]
+            )
+            return
+
+        relay_manager = getattr(self.service, 'relay_manager', None)
+        if not relay_manager:
+            logger.debug("RelayManager not initialized — ignoring RELAY_DISCONNECT_ACK")
+            return
+
+        conn = next(
+            (
+                c for c in relay_manager._active_relay_connections.values()
+                if c.session_id == session_id
+            ),
+            None,
+        )
+        if conn is None:
+            logger.info(
+                "RELAY_DISCONNECT_ACK for session %s (status=%s) from %s — "
+                "no matching active connection (already torn down)",
+                session_id, status, sender_node_id[:20]
+            )
+            return
+
+        conn.disconnect_acked = True
+        conn.disconnect_ack_status = status
+        logger.info(
+            "Relay disconnect acknowledged: session=%s status=%s peer=%s",
+            session_id, status, conn.peer_id[:20]
         )

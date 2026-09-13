@@ -79,7 +79,10 @@ from .message_handlers.gossip_handler import GossipSyncHandler, GossipMessageHan
 from .message_handlers.relay_register_handler import RelayRegisterHandler
 from .message_handlers.relay_message_handler import RelayMessageHandler
 from .message_handlers.relay_disconnect_handler import RelayDisconnectHandler
-from .message_handlers.relay_response_handler import RelayWaitingHandler, RelayReadyHandler
+from .message_handlers.relay_response_handler import (
+    RelayWaitingHandler, RelayReadyHandler, RelayDisconnectAckHandler
+)
+from .message_handlers.relay_error_handler import RelayErrorHandler
 from .message_handlers.file_offer_handler import FileOfferHandler
 from .message_handlers.file_accept_handler import FileAcceptHandler
 from .message_handlers.file_chunk_handler import FileChunkHandler
@@ -554,6 +557,8 @@ class CoreService:
         # Relay response handlers (client mode — connecting via relay)
         self.message_router.register_handler(RelayWaitingHandler(self))    # Waiting for other peer
         self.message_router.register_handler(RelayReadyHandler(self))      # Session ready
+        self.message_router.register_handler(RelayDisconnectAckHandler(self))  # Disconnect acked
+        self.message_router.register_handler(RelayErrorHandler(self))      # ERROR: register/forward failures
 
         # File transfer handlers (v0.13.0: FileOfferHandler handles images, voice messages, and regular files)
         self.message_router.register_handler(FileOfferHandler(self))
