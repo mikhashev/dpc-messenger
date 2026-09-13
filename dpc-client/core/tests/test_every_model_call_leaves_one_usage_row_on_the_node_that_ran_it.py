@@ -127,14 +127,18 @@ async def test_counts_source_says_who_counted(tmp_path):
 @pytest.mark.asyncio
 async def test_a_call_routed_to_a_peer_is_this_agents_row_marked_peer(tmp_path):
     """This node's row says the agent here called and a peer ran it, under the
-    wire's request id and with the host's own price and billing model; the
+    wire's request id, with the host's billing model and the host's tariff; the
     peer writes its own row under this node's name. The billing model on the
-    wire wins over what this node's table would guess from the model name."""
+    wire wins over what this node's table would guess from the model name.
+    `cost_usd` stays null: the host's own cost is not on the wire and would not
+    be this node's to copy if it were (ADR-041 D3, amendment)."""
     ledger = NodeLedger(tmp_path / "ledger")
     service = SimpleNamespace(_request_inference_from_peer=AsyncMock(return_value={
         "request_id": "req-from-the-wire", "response": "from afar",
         "prompt_tokens": 40, "response_tokens": 12, "tokens_used": 52,
-        "model": "qwen-on-the-peer", "cost_usd": 0.0041, "billing": "pay_per_use",
+        "model": "qwen-on-the-peer", "billing": "pay_per_use",
+        "tariff_in": 20.0, "tariff_out": 60.0, "tariff_currency": "RUB",
+        "tariff_at": "2026-09-01", "tariff_amount": 0.00152,
     }))
     adapter = _adapter(_PricedProvider(), ledger, compute_host=PEER)
     adapter._llm_manager.providers["dpc_agent"] = SimpleNamespace(
@@ -151,7 +155,8 @@ async def test_a_call_routed_to_a_peer_is_this_agents_row_marked_peer(tmp_path):
     assert row["prompt_tokens"] == 40 and row["completion_tokens"] == 12
     assert row["request_id"] == "req-from-the-wire"
     assert row["billing"] == "pay_per_use"
-    assert row["cost_usd"] == 0.0041 == usage["cost"]
+    assert row["cost_usd"] is None and "cost" not in usage
+    assert row["tariff_amount"] == 0.00152 and row["tariff_currency"] == "RUB"
 
 
 @pytest.mark.asyncio
@@ -255,8 +260,10 @@ async def test_a_served_peer_call_is_written_under_the_peers_name_with_the_wires
     assert row["cost_usd"] == pytest.approx(
         compute_cost_usd("deepseek_pro", 1000, 500, model="deepseek-v4-pro", at=at)
     )
+    # What the call cost us stays here: the wire carries the billing model and,
+    # where one is declared, the tariff — never the host's own dollars.
     sent = svc.p2p_manager.send_message_to_peer.call_args[0][1]
-    assert sent["payload"]["cost_usd"] == pytest.approx(row["cost_usd"])
+    assert "cost_usd" not in sent["payload"]
     assert sent["payload"]["billing"] == "pay_per_use"
 
 
@@ -275,12 +282,12 @@ async def test_a_served_call_on_a_local_alias_costs_the_host_nothing_and_says_so
     assert row["alias"] == "ollama_local" and row["billing"] == "subscription"
     assert row["cost_usd"] == 0.0
     sent = svc.p2p_manager.send_message_to_peer.call_args[0][1]
-    assert sent["payload"]["cost_usd"] == 0.0
+    assert "cost_usd" not in sent["payload"]
     assert sent["payload"]["billing"] == "subscription"
 
 
 @pytest.mark.asyncio
-async def test_the_hosts_price_reaches_the_requester_only_when_the_host_sent_it():
+async def test_the_hosts_tariff_reaches_the_requester_only_when_the_host_sent_one():
     from dpc_client_core.message_handlers.inference_handler import RemoteInferenceResponseHandler
 
     service = MagicMock()
@@ -292,12 +299,19 @@ async def test_the_hosts_price_reaches_the_requester_only_when_the_host_sent_it(
 
     await handler.handle(PEER, {
         "request_id": "req-priced", "status": "success", "response": "ok",
-        "cost_usd": 0.0041, "billing": "pay_per_use",
+        "billing": "pay_per_use", "tariff_in": 20.0, "tariff_out": 60.0,
+        "tariff_currency": "RUB", "tariff_at": "2026-09-01", "tariff_amount": 0.00152,
+        # An older host still sends this. It is the host's number about the
+        # host's money, and the requester does not carry it any further.
+        "cost_usd": 0.0041,
     })
     await handler.handle(PEER, {"request_id": "req-unpriced", "status": "success", "response": "ok"})
 
-    assert priced.result()["cost_usd"] == 0.0041
+    assert priced.result()["tariff_amount"] == 0.00152
+    assert priced.result()["tariff_currency"] == "RUB"
+    assert "cost_usd" not in priced.result()
     assert priced.result()["billing"] == "pay_per_use"
+    assert not [k for k in unpriced.result() if k.startswith("tariff_")]
     assert "cost_usd" not in unpriced.result() and "billing" not in unpriced.result()
     # The wire id comes back either way: it is what the two nodes' rows join on.
     assert priced.result()["request_id"] == "req-priced"

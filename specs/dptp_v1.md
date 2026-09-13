@@ -234,7 +234,11 @@ Returns the result of a remote inference request.
     "thinking": "Let me think about this question...",
     "thinking_tokens": 50,
     "output_includes_thinking": "excludes",
-    "cost_usd": 0.0041,
+    "tariff_in": 20.0,
+    "tariff_out": 60.0,
+    "tariff_currency": "RUB",
+    "tariff_at": "2026-09-01",
+    "tariff_amount": 0.00346,
     "billing": "pay_per_use",
     "served_effort": "low"
   }
@@ -264,9 +268,14 @@ Returns the result of a remote inference request.
 - `thinking` (string, optional): Thinking/reasoning content from models with extended reasoning (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
 - `thinking_tokens` (integer, optional): Tokens used for thinking/reasoning
 - `output_includes_thinking` (string, optional, v1.7+): Whether `response_tokens` already has `thinking_tokens` inside it — `includes`, `excludes` or `unknown` — as the node that produced the count knows it, so the requester can check the arithmetic on the numbers beside it rather than assume a convention. Absent from an older host, which the requester reads as `unknown`. Never sent on an error.
-- `cost_usd` (number, optional, v1.7+): What the call cost the serving node, in USD, priced by that node at the moment of the call and never re-derived (ADR-041 D3). Absent when the host did not count it. Informational to the requester: it attributes a cost, it does not bill one.
-- `billing` (string, optional, v1.7+): The billing model the host priced the call under, `pay_per_use` or `subscription`, so the requester's own usage row copies the host's answer instead of guessing one from the model's name. Absent when the host did not say. Never sent on an error, like `cost_usd`.
+- `tariff_in`, `tariff_out` (number, optional, v1.7+): The owner's tariff for this call, as **applied values** per 1M prompt and per 1M output tokens — never a reference to a configuration that may have changed by the time the row is read (ADR-041 D3, amendment). Reasoning is billable output at `tariff_out`, and whether `response_tokens` already holds it is what `output_includes_thinking` says. The four tariff fields are sent as one group or not at all; the group's absence means the host declared no tariff (the call is a gift), while zeros mean a tariff was declared and this requester pays nothing of it.
+- `tariff_currency` (string, optional, v1.7+): The ISO 4217 unit `tariff_in`, `tariff_out` and `tariff_amount` are in — the host's `compute.currency`, frozen into the message and into both nodes' usage rows, because rows outlive a configuration. The protocol picks no currency; parity between two nodes' units is the pair's own agreement, outside the protocol.
+- `tariff_at` (string, optional, v1.7+): The `from` day (`YYYY-MM-DD`) of the dated tariff entry that applied, so a row can name which line of the declaration priced it.
+- `tariff_amount` (number, optional, v1.7+): What the tariff came to on this call's own counts, in `tariff_currency`, computed by the host at the moment of the call and never re-derived. Rides only with the group above. Absent beside a present group means the call could not be priced — `output_includes_thinking` is `unknown`, so nothing may be billed from the counts — and is not the same as `0`, which is a price.
+- `billing` (string, optional, v1.7+): The billing model the host priced the call under, `pay_per_use` or `subscription`, so the requester's own usage row copies the host's answer instead of guessing one from the model's name. Absent when the host did not say. Never sent on an error.
 - `served_effort` (string, optional, v1.7+): The reasoning effort the host actually ran the call at, one word of the same scale as the request's `reasoning_effort`, after the host clamped the request to its own cap. This is the guest's only way to check the depth it paid for against the depth it asked for; the host's usage row and the guest's carry the same word under the same `request_id`. Absent means the host applied no effort control and answered at its own default — not the same as `off`. Never sent on an error.
+
+What the call cost the *host* is not on the wire. A `cost_usd` field was added here on 2026-09-10 and removed on 2026-09-14, while v1.7 is unreleased: the host's own cost is the host's economy and stays in the host's ledger, and what the guest is asked for is the tariff above (ADR-041 D3, amendment). A requester's usage row therefore carries `cost_usd = null` — it spent nothing of its own — and the tariff fields copied from this message.
 
 **Fields (Error):**
 - `request_id` (string, required): Matches request UUID
@@ -2131,11 +2140,14 @@ DPTP is designed to be extensible. New commands can be added by:
 ## 9. Changelog
 
 ### v1.7 (September 2026)
-- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `cost_usd` and `billing`: what
-  the call cost the serving node, priced by it at the time of the call, and the
-  billing model it priced under (ADR-041 D3). In v1 of the field set on
-  purpose: a cost field added later is the one kind of addition an older
-  client cannot read
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — the tariff fields replace `cost_usd`:
+  optional `tariff_in`, `tariff_out`, `tariff_currency`, `tariff_at` and
+  `tariff_amount`, sent as one group or not at all, carry the owner's price for
+  the call; `cost_usd`, added on 2026-09-10, is removed. The host's own cost is
+  its economy and stays in its ledger, and the guest's row keeps `cost_usd`
+  null (ADR-041 D3, amendment). Changed 2026-09-14 while v1.7 is unreleased, so
+  no released client ever read the field. `billing` stays: it names the meter,
+  not the sum
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `output_includes_thinking`
   (`includes` | `excludes` | `unknown`): whether `response_tokens` already
   contains `thinking_tokens`, stated by the node that counted. Added

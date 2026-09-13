@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import websockets
 
-from .firewall import SERVING_LOCAL_KEY, onward_sharing_refusal
-from .node_ledger import NodeLedger, default_ledger, usage_row
+from .firewall import SERVING_LOCAL_KEY, AppliedTariff, onward_sharing_refusal
+from .node_ledger import NodeLedger, default_ledger, tariff_amount_for, usage_row
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +250,25 @@ class P2PCoordinator:
         config = self._provider_config(alias)
         return config.get("type") if config else None
 
+    def _tariff_for_call(
+        self, serving_alias: str, peer_id: str, started_at: datetime,
+    ) -> Optional[AppliedTariff]:
+        """What this peer is charged for this alias at this moment, or None.
+
+        None is «nothing declared» — the v1 gift — and so is a firewall that
+        cannot answer: a tariff that fails to resolve must not turn a served
+        answer into a refusal, and an unpriced row is the honest record of it.
+        """
+        firewall = getattr(self.service, "firewall", None)
+        try:
+            return firewall.tariff_for(serving_alias, peer_id=peer_id, at=started_at)
+        except Exception:
+            logger.error(
+                "The tariff for %s served to %s could not be resolved; the call is recorded "
+                "as unpriced", serving_alias, peer_id, exc_info=True,
+            )
+            return None
+
     def _record_peer_call(
         self,
         *,
@@ -261,14 +280,18 @@ class P2PCoordinator:
         started_at: datetime,
         duration_s: float,
         served_effort: Optional[str] = None,
-    ) -> tuple[float, str]:
+    ) -> tuple[str, Optional[AppliedTariff], Optional[float]]:
         """Price a served call once, at the moment it was made, and write its
         usage row under the peer's name (ADR-041 D3), naming the effort it ran
         at and whether the transport proved the name the row is written under.
 
-        Returns `(cost_usd, billing)`, which also travel to the peer as the
-        informational tail of the response — attribution, not a price it owes. A row
-        that cannot be built is logged and does not fail the answer: the
+        Two prices, and only one of them leaves this node. `cost_usd` is what
+        the call cost us — a vendor's dollars, or zero for our own card — and
+        stays on this row. The owner's tariff is what the guest is charged, is
+        resolved for this peer at `started_at`, and travels: returned here as
+        `(billing, tariff, tariff_amount)` for the response to carry.
+
+        A row that cannot be built is logged and does not fail the answer: the
         tokens have already been generated and paid for.
         """
         from .dpc_agent.pricing import compute_cost_usd, get_billing_model
@@ -283,6 +306,16 @@ class P2PCoordinator:
             model=model,
             at=started_at,
         )
+        output_includes_thinking = result.get("output_includes_thinking", "unknown")
+        tariff = self._tariff_for_call(serving_alias, peer_id, started_at)
+        tariff_amount = tariff_amount_for(
+            prompt_tokens=result.get("prompt_tokens"),
+            completion_tokens=result.get("response_tokens"),
+            thinking_tokens=result.get("thinking_tokens"),
+            output_includes_thinking=output_includes_thinking,
+            tariff_in=tariff.in_per_1m if tariff else None,
+            tariff_out=tariff.out_per_1m if tariff else None,
+        )
         try:
             row = usage_row(
                 request_id=request_id,
@@ -295,7 +328,7 @@ class P2PCoordinator:
                 completion_tokens=result.get("response_tokens"),
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source="ours",
-                output_includes_thinking=result.get("output_includes_thinking", "unknown"),
+                output_includes_thinking=output_includes_thinking,
                 served_effort=served_effort,
                 peer_proved=proved,
                 peer_connection_type=connection_type,
@@ -303,14 +336,19 @@ class P2PCoordinator:
                 duration_s=duration_s,
                 billing=billing,
                 cost_usd=cost_usd,
+                tariff_in=tariff.in_per_1m if tariff else None,
+                tariff_out=tariff.out_per_1m if tariff else None,
+                tariff_currency=tariff.currency if tariff else None,
+                tariff_at=tariff.at if tariff else None,
+                tariff_amount=tariff_amount,
             )
         except Exception:
             logger.error(
                 "Usage row for peer %s request %s was not built", peer_id, request_id, exc_info=True
             )
-            return cost_usd, billing
+            return billing, tariff, tariff_amount
         (self._ledger or default_ledger()).append(row)
-        return cost_usd, billing
+        return billing, tariff, tariff_amount
 
     async def handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None):
         """Handle incoming remote inference request from a peer."""
@@ -423,7 +461,7 @@ class P2PCoordinator:
             logger.info("Inference completed successfully for %s", peer_id)
 
             actual_model = result.get("model", model)
-            cost_usd, billing = self._record_peer_call(
+            billing, tariff, tariff_amount = self._record_peer_call(
                 peer_id=peer_id, request_id=request_id, serving_alias=serving_alias,
                 result=result, model=actual_model, started_at=started_at,
                 duration_s=duration_s, served_effort=served_effort,
@@ -455,7 +493,11 @@ class P2PCoordinator:
                 provider=result.get("provider"),
                 thinking=result.get("thinking"),
                 thinking_tokens=result.get("thinking_tokens"),
-                cost_usd=cost_usd,
+                tariff_in=tariff.in_per_1m if tariff else None,
+                tariff_out=tariff.out_per_1m if tariff else None,
+                tariff_currency=tariff.currency if tariff else None,
+                tariff_at=tariff.at.isoformat() if tariff else None,
+                tariff_amount=tariff_amount,
                 billing=billing,
                 output_includes_thinking=result.get("output_includes_thinking"),
                 # The word after the clamp, or None: the guest's only way to

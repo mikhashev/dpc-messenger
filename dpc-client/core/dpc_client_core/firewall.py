@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -444,7 +445,23 @@ class ContextFirewall:
                         seen.add(day)
                     for field in ('in', 'out'):
                         rate = entry.get(field)
-                        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate < 0:
+                        if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+                            errors.append(
+                                f"'{where}[{index}].{field}' must be a non-negative number per 1M tokens, "
+                                f"got {rate!r}"
+                            )
+                        elif not math.isfinite(rate):
+                            # `json.loads` reads the bare literals NaN, Infinity and
+                            # -Infinity, and NaN fails every comparison — `rate < 0`
+                            # below is False for it — so without this line a NaN rate
+                            # loads and every amount computed from it is NaN (Zcode,
+                            # 2026-09-10). -Infinity was refused by the sign check
+                            # alone; the other two were not.
+                            errors.append(
+                                f"'{where}[{index}].{field}' must be a finite number per 1M tokens, "
+                                f"got {rate!r}"
+                            )
+                        elif rate < 0:
                             errors.append(
                                 f"'{where}[{index}].{field}' must be a non-negative number per 1M tokens, "
                                 f"got {rate!r}"

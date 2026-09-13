@@ -22,7 +22,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from ..node_ledger import NodeLedger, default_ledger, stated_output_includes_thinking, usage_row
+from ..node_ledger import (
+    TARIFF_FIELDS,
+    NodeLedger,
+    default_ledger,
+    stated_output_includes_thinking,
+    usage_row,
+)
 from .pricing import compute_cost_usd, get_billing_model
 
 if TYPE_CHECKING:
@@ -365,6 +371,8 @@ class DpcLlmAdapter:
                 # from the wire, or absent: this node did not run the call (D3).
                 billing=facts.get("billing") or get_billing_model(alias or "", model),
                 cost_usd=usage.get("cost"),
+                # Copied from the wire on the peer route, never computed here.
+                **{name: facts.get(name) for name in TARIFF_FIELDS},
                 task_id=task_id,
                 conversation_id=conversation_id,
             )
@@ -1057,6 +1065,8 @@ class DpcLlmAdapter:
                 counts_source="engine" if remote_prompt_tokens and remote_response_tokens else "ours",
                 request_id=_peer.get("request_id"),
                 billing=_peer.get("billing"),
+                # The owner's price as it arrived, whole or not at all.
+                **{name: _peer.get(name) for name in TARIFF_FIELDS},
             )
 
             # Use actual token counts from remote if available, otherwise count locally
@@ -1099,9 +1109,9 @@ class DpcLlmAdapter:
                     "total_tokens": est_prompt_tokens + est_completion_tokens,
                     "output_includes_thinking": "excludes",
                 }
-            # The host priced the call, or nobody did; this node does not (D3).
-            if _peer.get("cost_usd") is not None:
-                usage["cost"] = _peer["cost_usd"]
+            # The host's cost does not travel and is not copied: this node spent
+            # nothing of its own and prices nothing, so its row's cost_usd stays
+            # null (D3). What it owes is the tariff, noted above for the row.
             # The effort the host actually served, after its clamp (DPTP v1.7):
             # the only place this node can learn what depth it paid for. Set
             # whether or not the host counted, so the row carries it either way.

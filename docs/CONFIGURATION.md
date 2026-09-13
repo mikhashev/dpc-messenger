@@ -243,6 +243,38 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
 - A `remote_peer` or `dpc_agent` alias may stand in neither list: what is shared is not
   shared onward (ADR-041 D7).
 
+**What it costs a peer.** The owner sets a price for what this node serves; the same block
+holds it (ADR-041 D3, amendment). The peer door applies it, the loopback gateway does not
+charge its own machine:
+
+```json
+"compute": {
+  "currency": "RUB",
+  "serving_tariff": {"ollama_local": [{"from": "2026-09-01", "in": 20, "out": 60}]},
+  "free_nodes": ["dpc-node-alice-123"],
+  "free_groups": ["friends"]
+}
+```
+
+- `currency` — the ISO 4217 code the rates below are in, checked against the standard's
+  list. Unset means no tariff is declared whatever `serving_tariff` says, and every served
+  call is a gift.
+- `serving_tariff` — per alias, dated entries `{from, in, out}` in that currency per 1M
+  prompt and per 1M output tokens. The newest entry whose `from` is on or before the call's
+  UTC day applies; an alias with no entry is a gift. Reasoning is billable output at `out`.
+  A rate that is negative, non-finite (`NaN` and `Infinity` are JSON literals) or malformed
+  is refused at load and at save, naming the alias and the field.
+- `free_nodes` / `free_groups` — which of the peers already allowed are served at zero.
+  Every entry must also be in `allow_nodes` / `allow_groups`: the allow lists are the door,
+  and a free list only distinguishes among those already through it. Inside a declared
+  tariff a free peer gets a rate of `0` — a price; with nothing declared it gets the same
+  gift as everyone else.
+- Each served call leaves the applied rates, their currency, the dated entry and the
+  amount on the host's usage row (`tariff_in`, `tariff_out`, `tariff_currency`,
+  `tariff_at`, `tariff_amount`) and sends the same group to the guest, whose row copies it
+  and keeps `cost_usd` null. `cost_usd` is only ever what a call cost the node that ran it.
+  Resetting the rules to defaults rewrites the block and drops the tariff with it.
+
 **Shape and limits.** `model` in a request is the alias; `/v1/models` lists the aliases
 with `owned_by` `local` or `vendor`. `stream: true` is honoured on the wire as one
 `data:` chunk carrying the whole answer followed by `data: [DONE]` — the provider layer

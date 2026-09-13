@@ -284,3 +284,32 @@ def test_the_default_template_declares_nothing_and_says_where_to(tmp_path):
     assert compute["free_nodes"] == [] and compute["free_groups"] == []
     assert {"_currency", "_serving_tariff", "_free_nodes"} <= set(compute)
     assert fw.tariff_for(LOCAL, peer_id=BOB, at=_at("2026-09-10")) is None
+
+
+# --- (10) a rate that is not a finite number ------------------------------------------
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_a_rate_that_is_not_finite_is_refused_naming_the_alias_and_the_field(tmp_path, literal):
+    """`json.loads` reads the bare literals `NaN`, `Infinity` and `-Infinity`,
+    and `rate < 0` is False for `NaN` — so the step-1 check let a rate through
+    that makes every amount computed from it `NaN` (found by Zcode,
+    2026-09-10). The refusal names the alias and the field, as the other rate
+    refusals do, at load and at save alike."""
+    rules = tmp_path / "privacy_rules.json"
+    text = json.dumps(_rules(dict(DECLARED, serving_tariff={LOCAL: [{"from": "2026-09-01", "in": 20, "out": 60}]})))
+    rules.write_text(text.replace('"out": 60', f'"out": {literal}'), encoding="utf-8")
+
+    with pytest.raises(ValueError) as refused:
+        ContextFirewall(rules)
+    assert LOCAL in str(refused.value) and "out" in str(refused.value), refused.value
+
+    loaded = json.loads(rules.read_text(encoding="utf-8"))
+    ok, errors = ContextFirewall.validate_config(loaded)
+    assert ok is False and any(LOCAL in e and "out" in e for e in errors), errors
+
+
+def test_a_finite_rate_is_still_accepted(tmp_path):
+    """The guard refuses three values and nothing else."""
+    fw = _firewall(tmp_path, DECLARED)
+    assert fw.tariff_for(LOCAL, peer_id=BOB, at=_at("2026-09-10")).out_per_1m == 60.0

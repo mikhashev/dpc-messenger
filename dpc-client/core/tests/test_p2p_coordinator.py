@@ -52,6 +52,9 @@ def make_coordinator(peers=None):
     # The host designates what it serves; without this the coordinator refuses
     # (D4-0). A MagicMock attribute would be truthy and hide that rule.
     service.firewall.compute_serving_alias = "ollama_local"
+    # Nothing declared, so a served call is the v1 gift. A MagicMock here would
+    # stand in for an AppliedTariff and make every row refuse itself.
+    service.firewall.tariff_for.return_value = None
     service.llm_manager = MagicMock()
     service.local_api = MagicMock()
     service.local_api.broadcast_event = AsyncMock()

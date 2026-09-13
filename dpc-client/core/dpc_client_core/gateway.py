@@ -74,7 +74,7 @@ from .dpc_agent.llm_adapter import DpcLlmAdapter
 from .dpc_agent.pricing import compute_cost_usd, get_billing_model
 from .firewall import ServingLists
 from .llm_manager import flatten_messages
-from .node_ledger import NodeLedger, default_ledger, stated_output_includes_thinking, usage_row
+from .node_ledger import TARIFF_FIELDS, NodeLedger, default_ledger, stated_output_includes_thinking, usage_row
 from .p2p_manager import PROVED_CONNECTION_TYPES
 
 if TYPE_CHECKING:
@@ -142,8 +142,9 @@ class Completion:
 
     `alias` is the name the client asked for and both shapes echo — on the
     peer route the `remote:` form, while the row carries the alias as the
-    peer names it. `cost_usd` is None on the peer route when the host sent
-    no price: this node did not run the call and does not price it (D3).
+    peer names it. `cost_usd` is always None on the peer route: this node did
+    not run the call and does not price it, and the host's own cost is not on
+    the wire (D3, amendment).
     """
     request_id: str
     alias: str
@@ -520,11 +521,16 @@ class Gateway:
             # Counted here over the visible text, which the host had already
             # separated from its thinking; the label is this node's to set.
             output_includes_thinking = "excludes"
-        # The host's billing model and price travel on the wire when it counted
-        # them; absent, the billing model is this node's table for the model the
-        # host named and the cost stays null — never 0.0, which would read as free.
+        # The host's billing model travels on the wire when it counted; absent,
+        # it is this node's table for the model the host named. The host's own
+        # cost does not travel and is not copied: this node ran nothing and
+        # prices nothing, so the row's cost stays null (D3). What it owes is the
+        # owner's tariff, copied as one group or not at all.
         billing = result.get("billing") or get_billing_model(remote_alias, model)
-        cost_usd = result.get("cost_usd")
+        cost_usd = None
+        tariff = {name: result.get(name) for name in TARIFF_FIELDS}
+        if any(tariff[name] is None for name in TARIFF_FIELDS[:4]):
+            tariff = {}
         # The wire id, never one minted here: the host's row joins this one on it.
         request_id = result.get("request_id") or ""
         try:
@@ -551,6 +557,7 @@ class Gateway:
                 duration_s=duration_s,
                 billing=billing,
                 cost_usd=cost_usd,
+                **tariff,
             )
         except Exception:
             logger.error("Usage row for gateway request %r via peer %s was not built", request_id, peer_id, exc_info=True)

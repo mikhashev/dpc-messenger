@@ -75,9 +75,17 @@ class RemoteInferenceResponseHandler(MessageHandler):
         thinking = payload.get("thinking")
         thinking_tokens = payload.get("thinking_tokens")
 
-        # What the call cost the host and under which billing model, when the
-        # host counted it (v1.7). Absent stays absent: a zero would read as free.
-        cost_usd = payload.get("cost_usd")
+        # The owner's price for this call (v1.7): the applied rates, their unit,
+        # the dated entry they came from and what they came to. Read as one
+        # group, as it is sent — a half group is no tariff at all — and absent
+        # stays absent, because a zero would read as «declared free».
+        # The host's own cost is not on the wire and is not this node's to copy.
+        tariff = {name: payload.get(name) for name in
+                  ("tariff_in", "tariff_out", "tariff_currency", "tariff_at")}
+        if any(value is None for value in tariff.values()):
+            tariff = {}
+        elif payload.get("tariff_amount") is not None:
+            tariff["tariff_amount"] = payload.get("tariff_amount")
         billing = payload.get("billing")
         # Any string can arrive here; only the three words go further (v1.7).
         output_includes_thinking = payload.get("output_includes_thinking")
@@ -107,8 +115,7 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         "thinking": thinking,
                         "thinking_tokens": thinking_tokens,
                     }
-                    if cost_usd is not None:
-                        result_data["cost_usd"] = cost_usd
+                    result_data.update(tariff)
                     if billing is not None:
                         result_data["billing"] = billing
                     if output_includes_thinking is not None:

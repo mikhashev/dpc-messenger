@@ -225,7 +225,7 @@ def test_the_tariff_columns_travel_as_one_group_or_not_at_all(tmp_path):
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
         "output_includes_thinking", "served_effort", "peer_proved", "peer_connection_type",
         "started_at", "duration_s", "billing", "cost_usd",
-        "tariff_in", "tariff_out", "tariff_currency", "tariff_at", "task_id",
+        "tariff_in", "tariff_out", "tariff_currency", "tariff_at", "tariff_amount", "task_id",
     ]
     assert (priced["tariff_in"], priced["tariff_out"]) == (20.0, 60.0)
     assert isinstance(priced["tariff_out"], float) and priced["cost_usd"] == 0.0041

@@ -29,14 +29,18 @@ chat path a row's `task_id` is the conversation, and the join to
 `task_complete` goes through `conversation_id` and the task's start and
 completion timestamps until that call passes the id it minted.
 
-Four more, optional and travelling as one group: `tariff_in`, `tariff_out`,
-`tariff_currency`, `tariff_at` — the applied values of the owner's tariff
+Four more, optional and travelling as one group, with a fifth beside them:
+`tariff_in`, `tariff_out`, `tariff_currency`, `tariff_at` — the applied values of the owner's tariff
 (`compute.serving_tariff`) at the moment of the call, frozen with their
 currency, because rows are forever and the declaration is not: the rates per
 1M tokens, the ISO 4217 unit they are in, and the `from` day of the entry that
 applied. Absent is «not declared», the gift; zero is «declared free»; more is
 paid (ADR-041 D3, amendment). `cost_usd` beside them is the host's own cost
 and stays USD — what the call cost this node, not what it charges for it.
+`tariff_amount` is what those rates came to on this call's own counts, in
+`tariff_currency` — computed by `tariff_amount_for` at write time and never
+again — or null where the counts' convention is unknown and nothing may be
+billed from them.
 
 Storage is `<DPC_HOME>/ledger/usage-YYYY-MM.jsonl`, one partition per month of
 `started_at`. Not `dpc_agent.utils.append_jsonl`: that rotates at 5 MB by
@@ -56,6 +60,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import time
 from datetime import date, datetime, timezone
@@ -70,6 +75,10 @@ CALLER_KINDS = ("agent", "peer", "gateway")
 ROUTES = ("local", "peer")
 COUNTS_SOURCES = ("ours", "engine")
 OUTPUT_INCLUDES_THINKING = ("includes", "excludes", "unknown")
+# The tariff as it travels: four applied values that go together and the amount
+# they came to. Named once here, where the columns live, and read by every site
+# that copies the group from the wire onto a row.
+TARIFF_FIELDS = ("tariff_in", "tariff_out", "tariff_currency", "tariff_at", "tariff_amount")
 
 
 def stated_output_includes_thinking(value: Any, *, peer: str, log: logging.Logger) -> str:
@@ -122,6 +131,7 @@ def usage_row(
     tariff_out: Any = None,
     tariff_currency: Optional[str] = None,
     tariff_at: Any = None,
+    tariff_amount: Any = None,
     output_includes_thinking: str = "unknown",
     served_effort: Optional[str] = None,
     peer_proved: Optional[bool] = None,
@@ -133,9 +143,12 @@ def usage_row(
     saying `caller_kind=stranger` would be read by nothing. `gateway` is
     accepted and emitted by nothing yet — it is reserved for the gateway child.
 
-    The four `tariff_*` columns are written when `tariff_in` is given and
+    The four rate columns are written when `tariff_in` is given and
     then all together: half a tariff would be a price to one reader and a
     gift to another, so a group with a member missing is refused.
+    `tariff_amount` is written beside them — null when the counts' convention
+    is `unknown` and the arithmetic may not be done — and is refused without
+    them, because its unit is `tariff_currency` and its basis is those rates.
 
     `peer_proved` is what ADR-041 D2 draws its line on, written by whoever
     knows the connection this call travelled over. True means the far end's
@@ -155,6 +168,13 @@ def usage_row(
     if not request_id:
         raise ValueError("a usage row needs a request_id")
     tariff = _tariff_columns(tariff_in, tariff_out, tariff_currency, tariff_at)
+    if tariff:
+        tariff["tariff_amount"] = _tariff_amount_column(tariff_amount)
+    elif tariff_amount is not None:
+        raise ValueError(
+            f"tariff_amount={tariff_amount!r} without a tariff: the amount is in the row's "
+            "tariff_currency and comes from its rates, so it cannot stand without them"
+        )
     for name, value, allowed in (
         ("caller_kind", caller_kind, CALLER_KINDS),
         ("route", route, ROUTES),
@@ -217,6 +237,11 @@ def _tariff_columns(tariff_in: Any, tariff_out: Any, tariff_currency: Any, tarif
         rate = given[name]
         if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate < 0:
             raise ValueError(f"{name}={rate!r} is not a non-negative number per 1M tokens")
+        # The rules file refuses a non-finite rate too (`firewall._tariff_errors`);
+        # this is the same refusal for a rate that arrived over the wire, where a
+        # NaN passes `rate < 0` and would sit in a partition for ever.
+        if not math.isfinite(rate):
+            raise ValueError(f"{name}={rate!r} is not a finite number per 1M tokens")
     if tariff_currency not in ISO_4217_CODES:
         raise ValueError(f"tariff_currency={tariff_currency!r} is not an ISO 4217 code")
     if isinstance(tariff_at, date) and not isinstance(tariff_at, datetime):
@@ -229,6 +254,65 @@ def _tariff_columns(tariff_in: Any, tariff_out: Any, tariff_currency: Any, tarif
         "tariff_currency": tariff_currency,
         "tariff_at": tariff_at,
     }
+
+
+def _tariff_amount_column(amount: Any) -> Optional[float]:
+    """The amount as it is written, or None; anything unusable is refused.
+
+    None is «not billed» — the `unknown` state, or a call whose numbers nobody
+    could price — and is written as a null so a reader can tell it from a
+    declared zero. A bool, a string, a negative or a non-finite number is
+    refused rather than written: a row is forever and nothing re-derives it.
+    """
+    if amount is None:
+        return None
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        raise ValueError(f"tariff_amount={amount!r} is not a number in the row's tariff_currency")
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError(f"tariff_amount={amount!r} is not a finite, non-negative amount")
+    return float(amount)
+
+
+def tariff_amount_for(
+    *,
+    prompt_tokens: Any,
+    completion_tokens: Any,
+    thinking_tokens: Any,
+    output_includes_thinking: str,
+    tariff_in: Any,
+    tariff_out: Any,
+) -> Optional[float]:
+    """What a call's counts come to at the rates applied to it, or None.
+
+    The only place this arithmetic lives, and it is called **once, at write
+    time, by the node that made the call** — never again on a stored row: D3
+    prices a call at `started_at`, and a reader that recomputed an amount from
+    `tariff_in` and `tariff_out` would be answering a different question from
+    the one the row answers.
+
+    Reasoning is billable output at `tariff_out` and has no rate of its own
+    (ADR-041 D3, amendment of 2026-09-13), so which tokens the output rate
+    covers is decided by the convention of the count itself — not by
+    `counts_source`, which says who produced the number, not what is inside it:
+
+        includes -> tariff_out x completion_tokens
+        excludes -> tariff_out x (completion_tokens + thinking_tokens)
+        unknown  -> None: nothing is billed from a count nobody can read
+
+    `unknown` returns None whatever the rates are, zero rates included — one
+    rule rather than two. Rates of None are «no tariff declared», the v1 gift,
+    and also return None, which is not the statement a declared 0.0 makes.
+    The input side is always `tariff_in x prompt_tokens`.
+    """
+    if tariff_in is None or tariff_out is None:
+        return None
+    if output_includes_thinking not in ("includes", "excludes"):
+        return None
+    prompt = max(0, int(prompt_tokens or 0))
+    completion = max(0, int(completion_tokens or 0))
+    thinking = max(0, int(thinking_tokens or 0))
+    billable_out = completion if output_includes_thinking == "includes" else completion + thinking
+    return (prompt * float(tariff_in) + billable_out * float(tariff_out)) / 1_000_000.0
 
 
 def _ends_mid_line(path: Path) -> bool:
@@ -346,6 +430,10 @@ class NodeLedger:
                             continue
                         if isinstance(row, dict):
                             row.setdefault("output_includes_thinking", "unknown")
+                            if "tariff_in" in row:
+                                # Only where a tariff applied: a row with no
+                                # group has no amount column to be missing.
+                                row.setdefault("tariff_amount", None)
                             row.setdefault("served_effort", None)
                             row.setdefault("peer_proved", None)
                             row.setdefault("peer_connection_type", None)
@@ -445,10 +533,11 @@ def summarize(
     """The ledger's first reader (A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-
     INSTRUMENT): rows folded by `caller`, by `alias` and by month of
     `started_at`. Pure — takes whatever `NodeLedger.rows()` yields and
-    touches no disk. Does not compute `tariff_amount` (D3, 2026-09-13
-    amendment): that column does not exist on any row yet, and deriving an
-    amount from `tariff_in`/`tariff_out` here would be the re-derivation D3
-    forbids for `cost_usd`. `since`/`until` are ISO datetimes compared as
+    touches no disk. Does not fold `tariff_amount`, and must never derive one:
+    the amount is written once by the node that made the call, and computing it
+    here from `tariff_in`/`tariff_out` would be the re-derivation D3 forbids
+    for `cost_usd`. Summing the amounts a row already carries is the reader's
+    own next step, and it has to sum per currency. `since`/`until` are ISO datetimes compared as
     datetimes, both bounds inclusive; a row whose `started_at` will not
     parse is excluded from a windowed summary.
     """

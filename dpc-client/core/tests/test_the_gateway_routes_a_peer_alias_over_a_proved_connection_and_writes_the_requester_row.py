@@ -66,21 +66,25 @@ PEER_ROWS = [
 
 
 def _priced_result(**extra):
-    """What the response handler hands the requester when the host priced the call."""
+    """What the response handler hands the requester when the host priced the call.
+
+    No `cost_usd`: the host's own cost is not on the wire (ADR-041 D3,
+    amendment). What the host says about money is its billing model, and its
+    tariff where one is declared."""
     result = {
         "request_id": WIRE_ID, "response": PEER_ANSWER,
         "tokens_used": 30, "model_max_tokens": 32768, "prompt_tokens": 20, "response_tokens": 10,
         "model": HOST_MODEL, "provider": REMOTE_ALIAS, "thinking": None, "thinking_tokens": None,
-        "cost_usd": 0.0041, "billing": "pay_per_use",
+        "billing": "pay_per_use",
     }
     result.update(extra)
     return result
 
 
 def _unpriced_result():
-    """A host that counted tokens and sent no price and no billing model."""
+    """A host that counted tokens and sent no billing model."""
     result = _priced_result()
-    del result["cost_usd"], result["billing"]
+    del result["billing"]
     return result
 
 
@@ -125,7 +129,7 @@ def _rows(ledger):
     return list(ledger.rows())
 
 
-def _assert_requester_row(row, *, billing, cost_usd):
+def _assert_requester_row(row, *, billing, cost_usd=None):
     assert (row["caller"], row["caller_kind"], row["route"]) == (NODE_ID, "gateway", "peer")
     assert row["request_id"] == WIRE_ID, "the wire id, never one minted here"
     assert (row["alias"], row["model"]) == (REMOTE_ALIAS, HOST_MODEL)
@@ -190,7 +194,7 @@ async def test_a_peer_completion_is_openai_shaped_echoes_the_remote_name_and_lea
         assert call["timeout"] == pytest.approx(service.settings.get_remote_inference_timeout())
 
         (row,) = _rows(ledger)
-        _assert_requester_row(row, billing="pay_per_use", cost_usd=0.0041)
+        _assert_requester_row(row, billing="pay_per_use")
 
 
 # --- (3) the same through /v1/messages ----------------------------------------------------
@@ -212,7 +216,7 @@ async def test_a_peer_completion_in_the_messages_form_is_messages_shaped_and_lea
         (call,) = service.peer_calls
         assert (call["peer_id"], call["provider"], call["prompt"]) == (PEER, REMOTE_ALIAS, OPENAI_PROMPT)
         (row,) = _rows(ledger)
-        _assert_requester_row(row, billing="pay_per_use", cost_usd=0.0041)
+        _assert_requester_row(row, billing="pay_per_use")
 
 
 # --- (4) a host that sent no price: null, never 0.0 ---------------------------------------
@@ -221,8 +225,8 @@ async def test_a_peer_completion_in_the_messages_form_is_messages_shaped_and_lea
 @pytest.mark.asyncio
 async def test_a_host_that_sent_no_price_leaves_cost_null_and_billing_from_the_fallback(tmp_path, caplog):
     """This node did not run the call and does not price it (D3): `cost_usd`
-    stays null — a zero would read as free — and `billing` falls back to this
-    node's own table for the model the host named."""
+    stays null on every peer row — a zero would read as free — and `billing`
+    falls back to this node's own table for the model the host named."""
     service = _peer_service(tmp_path, result=_unpriced_result())
     async with _running(tmp_path, service) as (server, ledger):
         status, _ = await _request(server, "POST", "/v1/chat/completions",

@@ -96,7 +96,11 @@ def create_remote_inference_response(
     provider: str = None,
     thinking: str = None,
     thinking_tokens: int = None,
-    cost_usd: float = None,
+    tariff_in: float = None,
+    tariff_out: float = None,
+    tariff_currency: str = None,
+    tariff_at: str = None,
+    tariff_amount: float = None,
     billing: str = None,
     output_includes_thinking: str = None,
     served_effort: str = None,
@@ -107,11 +111,18 @@ def create_remote_inference_response(
     request's `reasoning_effort` (DPTP v1.7); absent means no effort control
     was applied, which is not `off`. Never on an error.
 
-    `cost_usd` is what the call cost the serving node, priced by it at the
-    time of the call, and `billing` is the billing model that price came
-    from (ADR-041 D3, DPTP v1.7). Both optional, so an older client reads
-    the message unchanged; informational to the requester — they
-    attribute a cost, they do not bill one.
+    The tariff group — `tariff_in`, `tariff_out`, `tariff_currency`,
+    `tariff_at` — is the owner's price for this call: the applied rates per 1M
+    tokens, their ISO 4217 unit and the dated entry they came from. It travels
+    whole or not at all, because half of it is a price to one reader and a gift
+    to another. Absent means no tariff was declared; zeros mean declared free.
+    `tariff_amount` is what the rates came to on this call, in that currency,
+    and rides only with the group: absent beside it means the call could not be
+    priced (`output_includes_thinking` unknown), never that it was free.
+
+    What the call cost the *host* does not travel at all (ADR-041 D3,
+    amendment): that is the host's own economy and stays in the host's ledger.
+    `billing` does — it names the meter the host reads, not the sum it paid.
 
     `output_includes_thinking` (`includes` | `excludes` | `unknown`) says
     whether `response_tokens` already holds `thinking_tokens`, as the node
@@ -140,8 +151,14 @@ def create_remote_inference_response(
             payload["thinking"] = thinking
         if thinking_tokens is not None:
             payload["thinking_tokens"] = thinking_tokens
-        if cost_usd is not None:
-            payload["cost_usd"] = cost_usd
+        tariff = {
+            "tariff_in": tariff_in, "tariff_out": tariff_out,
+            "tariff_currency": tariff_currency, "tariff_at": tariff_at,
+        }
+        if all(value is not None for value in tariff.values()):
+            payload.update(tariff)
+            if tariff_amount is not None:
+                payload["tariff_amount"] = tariff_amount
         if billing is not None:
             payload["billing"] = billing
         if output_includes_thinking is not None:

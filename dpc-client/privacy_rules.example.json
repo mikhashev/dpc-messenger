@@ -103,7 +103,17 @@
     "enabled": false,
     "allow_nodes": ["dpc-node-alice-123"],
     "allow_groups": ["trusted_developers"],
-    "allowed_models": ["llama3.1:8b", "llama3:70b"]
+    "allowed_models": ["llama3.1:8b", "llama3:70b"],
+
+    "_currency": "ISO 4217 code of the unit the tariff below is priced in, e.g. \"USD\" or \"RUB\". null = no tariff declared: every call served is a gift, whatever serving_tariff says.",
+    "currency": null,
+    "_serving_tariff": "What the owner charges per 1M input / output tokens, in currency, dated per alias. The newest entry on or before the call's day (UTC) applies; an alias with no entry is a gift. Reasoning is billable output at the out rate.",
+    "serving_tariff": {
+      "ollama_local": [{"from": "2026-09-01", "in": 20, "out": 60}]
+    },
+    "_free_nodes": "Which of the peers already allowed above are served at zero. Each entry must also be in allow_nodes / allow_groups: a free list distinguishes among the admitted, it does not admit.",
+    "free_nodes": ["dpc-node-alice-123"],
+    "free_groups": ["trusted_developers"]
   },
 
   "transcription": {
