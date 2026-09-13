@@ -3,8 +3,10 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand, providersList } from '$lib/coreService';
+  import { sendCommand } from '$lib/coreService';
   import AgentPermissionsPanel from './AgentPermissionsPanel.svelte';
+  import ComputeSharingEditor from './ComputeSharingEditor.svelte';
+  import type { ComputeRules } from './computeSharing';
   import { confirmAsync } from '$lib/utils/dialog';
 
   export let open: boolean = false;
@@ -16,14 +18,9 @@
     hub?: Record<string, string>;
     node_groups?: Record<string, string[]>;
     file_groups?: Record<string, string[]>;
-    compute?: {
-      _comment?: string;
-      enabled: boolean;
-      allow_nodes: string[];
-      allow_groups: string[];
-      allowed_models: string[];
-      serving_alias?: string | null;
-    };
+    // The block's shape is owned by computeSharing.ts, beside the component
+    // that edits it, and mirrors firewall.py's `_parse_compute_settings`.
+    compute?: ComputeRules;
     transcription?: {
       _comment?: string;
       enabled: boolean;
@@ -136,6 +133,9 @@
   let isSaving: boolean = false;
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
+  // The reasons the backend refused the last save with, one per line, kept
+  // apart from the banner so a section can show the ones that concern it.
+  let saveErrors: string[] = [];
 
   // Inline input state — replaces all prompt() calls (blocked on macOS WKWebView)
   // Node Groups tab
@@ -172,10 +172,6 @@
   let newPeerGroupNameInput: string = '';
   let addingRuleToGroupName: string | null = null;
   let newGroupRulePathInput: string = '';
-
-  // Intermediate string variables for textarea editing (compute sharing)
-  let allowNodesText: string = '';
-  let allowGroupsText: string = '';
 
   // Intermediate string variables for textarea editing (transcription sharing)
   let transcriptionAllowNodesText: string = '';
@@ -229,19 +225,6 @@
     } catch (error) {
       console.error('Error saving CC display name:', error);
     }
-  }
-
-  // The aliases that can serve a peer's inference. Whisper is left out: it is
-  // reached through Transcription Sharing, which has a gate of its own.
-  $: servingAliasChoices = ($providersList || []).filter((entry) => entry.type !== 'local_whisper');
-  $: servingAliasMissing =
-    !!displayRules?.compute?.serving_alias &&
-    !servingAliasChoices.some((entry) => entry.alias === displayRules?.compute?.serving_alias);
-
-  // Sync string variables with arrays when entering edit mode
-  $: if (editMode && editedRules?.compute) {
-    allowNodesText = editedRules.compute.allow_nodes.join('\n');
-    allowGroupsText = editedRules.compute.allow_groups.join('\n');
   }
 
   // Sync transcription string variables with arrays when entering edit mode
@@ -308,6 +291,7 @@
     editedRules = null;
     saveMessage = '';
     saveMessageType = '';
+    saveErrors = [];
   }
 
   // Save changes
@@ -317,6 +301,7 @@
     isSaving = true;
     saveMessage = '';
     saveMessageType = '';
+    saveErrors = [];
 
     try {
       const result = await sendCommand('save_firewall_rules', {
@@ -343,6 +328,7 @@
         saveMessage = result.message;
         if (result.errors && result.errors.length > 0) {
           saveMessage += ':\n' + result.errors.join('\n');
+          saveErrors = [...result.errors];
         }
         saveMessageType = 'error';
       }
@@ -1284,137 +1270,16 @@
           </div>
 
         {:else if selectedTab === 'compute'}
-          <div class="section">
-            <h3>Compute Sharing (Remote Inference)</h3>
-            <p class="help-text">Allow peers to use your local AI models for inference.</p>
-
-            {#if displayRules?.compute}
-              <div class="compute-settings">
-                <div class="setting-item">
-                  <label>
-                    {#if editMode && editedRules && editedRules.compute}
-                      <input id="compute-enabled" name="compute-enabled" type="checkbox" bind:checked={editedRules.compute.enabled} />
-                    {:else}
-                      <input id="compute-enabled-display" name="compute-enabled-display" type="checkbox" checked={displayRules.compute.enabled} disabled />
-                    {/if}
-                    <strong>Enable Compute Sharing</strong>
-                  </label>
-                </div>
-
-                {#if displayRules.compute.enabled}
-                  <div class="subsection">
-                    <h4>Allowed Nodes</h4>
-                    {#if editMode && editedRules}
-                      <textarea
-                        id="compute-allow-nodes"
-                        name="compute-allow-nodes"
-                        class="edit-textarea"
-                        rows="3"
-                        placeholder="Enter node IDs (one per line)"
-                        bind:value={allowNodesText}
-                        on:blur={() => {
-                          if (editedRules?.compute) {
-                            // Remove duplicates using Set
-                            const nodes = allowNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
-                            editedRules.compute.allow_nodes = [...new Set(nodes)];
-                            // Update textarea to show deduplicated list
-                            allowNodesText = editedRules.compute.allow_nodes.join('\n');
-                          }
-                        }}
-                      ></textarea>
-                    {:else}
-                      <div class="tags">
-                        {#each displayRules.compute.allow_nodes as nodeId}
-                          <span class="tag">{nodeId}</span>
-                        {:else}
-                          <span class="empty-small">No specific nodes allowed</span>
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-
-                  <div class="subsection">
-                    <h4>Allowed Groups</h4>
-                    {#if editMode && editedRules}
-                      <textarea
-                        id="compute-allow-groups"
-                        name="compute-allow-groups"
-                        class="edit-textarea"
-                        rows="2"
-                        placeholder="Enter group names (one per line)"
-                        bind:value={allowGroupsText}
-                        on:blur={() => {
-                          if (editedRules?.compute) {
-                            // Remove duplicates using Set
-                            const groups = allowGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
-                            editedRules.compute.allow_groups = [...new Set(groups)];
-                            // Update textarea to show deduplicated list
-                            allowGroupsText = editedRules.compute.allow_groups.join('\n');
-                          }
-                        }}
-                      ></textarea>
-                    {:else}
-                      <div class="tags">
-                        {#each displayRules.compute.allow_groups as groupName}
-                          <span class="tag">{groupName}</span>
-                        {:else}
-                          <span class="empty-small">No groups allowed</span>
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-
-                  <div class="subsection">
-                    <h4>Serving Alias</h4>
-                    <p class="help-text-small">
-                      The one provider alias peers are served from. Peers cannot choose:
-                      a request naming any other provider is refused, and choosing nothing
-                      shares no compute at all. This is the only control here &mdash;
-                      <code>compute.allowed_models</code> is still read from the rules file
-                      for compatibility, but once an alias decides what runs, a list of
-                      models can only refuse, never choose (ADR-040 D4-0).
-                    </p>
-                    {#if editMode && editedRules}
-                      <select
-                        id="compute-serving-alias"
-                        name="compute-serving-alias"
-                        class="inline-input"
-                        value={editedRules.compute?.serving_alias ?? ''}
-                        on:change={(e) => {
-                          if (editedRules?.compute) {
-                            const v = (e.currentTarget as HTMLSelectElement).value;
-                            editedRules.compute.serving_alias = v.length > 0 ? v : null;
-                          }
-                        }}
-                      >
-                        <option value="">&mdash; share no compute &mdash;</option>
-                        {#each servingAliasChoices as choice (choice.alias)}
-                          <option value={choice.alias}>{choice.alias} ({choice.model})</option>
-                        {/each}
-                        <!-- An alias no longer in providers.json would otherwise vanish from
-                             the list and be cleared by the next save without a word. It stays
-                             selectable, and says what happened to it. -->
-                        {#if servingAliasMissing}
-                          <option value={displayRules.compute.serving_alias}
-                            >{displayRules.compute.serving_alias} (not in providers.json)</option>
-                        {/if}
-                      </select>
-                    {:else}
-                      <div class="tags">
-                        {#if displayRules.compute.serving_alias}
-                          <span class="tag">{displayRules.compute.serving_alias}</span>
-                        {:else}
-                          <span class="empty-small">No alias designated &mdash; peer inference is refused</span>
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
-                {/if}
-              </div>
-            {:else}
-              <p class="empty">Compute sharing not configured.</p>
-            {/if}
-          </div>
+          <!-- Blocks (1)-(4) of the compute tab live in their own component;
+               the edit object is mutated in place, so saveChanges posts it as is. -->
+          <ComputeSharingEditor
+            displayCompute={displayRules?.compute ?? null}
+            editCompute={editMode && editedRules ? (editedRules.compute ?? null) : null}
+            {editMode}
+            nodeGroups={displayRules?.node_groups ?? null}
+            nodeRuleIds={Object.keys(displayRules?.nodes ?? {}).filter((id) => !id.startsWith('_'))}
+            {saveErrors}
+          />
 
           <!-- Transcription Sharing Section -->
           <div class="section">
