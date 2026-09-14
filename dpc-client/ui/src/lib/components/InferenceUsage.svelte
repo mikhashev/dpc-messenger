@@ -14,6 +14,8 @@
   import { onMount } from 'svelte';
   import { sendCommand, firewallRulesUpdated } from '$lib/coreService';
   import {
+    durationLabel,
+    durationTitle,
     formatAmount,
     formatDuration,
     formatOwed,
@@ -92,6 +94,8 @@
   <p class="help-text-small">
     One call, one row in this node's ledger, read three ways. Amounts are shown as the rows
     carry them and are never recomputed: a call is priced once, by the node that made it.
+    Durations are measured on the side that ran the call and are named accordingly: engine
+    time where this node's own provider answered, round trip where it waited for a peer's.
   </p>
 
   <div class="inline-input-row period-row">
@@ -110,11 +114,7 @@
     <div class="peer-card usage-card">
       <div class="group-header">
         <h5>{list.title}</h5>
-        <span class="muted">
-          {#if list.role === 'served'}to whom, how much, for what
-          {:else if list.role === 'consumed'}from whom, how much, for what
-          {:else}this node's own vendor and local burn{/if}
-        </span>
+        <span class="muted">{list.note}</span>
       </div>
 
       <div class="rule-list">
@@ -131,7 +131,7 @@
               <span>{row.calls} {row.calls === 1 ? 'call' : 'calls'}</span>
               <span>{formatTokens(row.promptTokens)} in / {formatTokens(row.completionTokens)} out</span>
               {#if row.thinkingTokens > 0}<span>{formatTokens(row.thinkingTokens)} thinking</span>{/if}
-              <span>{formatDuration(row.durationS)}</span>
+              <span title={durationTitle(list.role)}>{formatDuration(row.durationS)} {durationLabel(list.role)}</span>
               {#if list.role === 'served'}
                 <span class="money">owed to this node {formatOwed(row.owed)}</span>
                 {#if row.costUsd > 0}<span>cost here ${formatAmount(row.costUsd)}</span>{/if}

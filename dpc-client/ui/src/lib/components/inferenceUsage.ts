@@ -101,6 +101,8 @@ export interface UsageRow {
 export interface UsageList {
   role: UsageRole;
   title: string;
+  /** The line beside the title: what this list counts, and where it was measured. */
+  note: string;
   /** What the list says about itself when it holds nothing. */
   empty: string;
   rows: UsageRow[];
@@ -119,7 +121,18 @@ export interface UsageView {
 const LIST_TITLES: Record<UsageRole, string> = {
   served: 'Served to peers',
   consumed: 'Consumed',
-  own: 'Own',
+  /** `route=local` minus the calls a peer asked for, while the summary's burn
+   *  folds every local row: two questions, so two names. */
+  own: 'Own calls (peers excluded)',
+};
+
+/** The line beside a list's title: what it counts and on which side it was
+ *  measured. Here rather than in the markup so a test can read it. */
+const LIST_NOTES: Record<UsageRole, string> = {
+  served: 'to whom, how much, for what',
+  consumed: 'from whom, how much, for what',
+  own: "this node's own vendor and local burn; a call served to a peer is on the Served list, "
+    + "not here — the summary's burn figure counts every local call, those included",
 };
 
 const LIST_EMPTY: Record<UsageRole, string> = {
@@ -127,6 +140,19 @@ const LIST_EMPTY: Record<UsageRole, string> = {
   consumed: "This node has called no peer's or vendor's model yet.",
   own: 'No own usage this month.',
 };
+
+/** The duration column is not one quantity: a host times its own provider call,
+ *  a guest times its wait, and the same calls read longer on the guest. */
+export function durationLabel(role: UsageRole): string {
+  return role === 'consumed' ? 'round trip' : 'engine time';
+}
+
+/** The same distinction at length, for the column's tooltip. */
+export function durationTitle(role: UsageRole): string {
+  return role === 'consumed'
+    ? "Round trip: this node's wait for the answer, the wire and the host's queue included."
+    : "Engine time: this node's own provider call, the engine's warm-up included.";
+}
 
 // --- The month, which is the default period ------------------------------
 
@@ -214,19 +240,20 @@ function owedOf(group: WireGroup): Owed[] {
 
 /** The badges a group's own counters earn.
  *
- *  `peer_proved` is only asked of a role with a far end: on an own row a
- *  `none` is the ledger saying there is no node to prove (`usage_row`), not
- *  that the proof is unknown, and a badge there would be a false statement.
+ *  Nothing about a far end or a tariff is said on an own row: there is no node
+ *  to prove (`usage_row` writes `none`), and no tariff applies to a call a node
+ *  makes for itself — an own row is priced by `cost_usd`, so 'gift' there would
+ *  deny real spend. 'recounted' says who counted the tokens, true of any row.
  */
 export function badgesOf(group: WireGroup, role: UsageRole): Badge[] {
   const badges: Badge[] = [];
   const rows = number(group.row_count);
   const recounted = number(group.counts_source?.ours);
   if (recounted > 0) badges.push({ kind: 'quota', text: `${recounted} recounted` });
-  const unpriceable = number(group.tariff_unpriceable);
-  if (unpriceable > 0) badges.push({ kind: 'missing', text: `${unpriceable} unpriceable` });
-  if (rows > 0 && number(group.untariffed) === rows) badges.push({ kind: 'gift', text: 'gift' });
   if (role !== 'own') {
+    const unpriceable = number(group.tariff_unpriceable);
+    if (unpriceable > 0) badges.push({ kind: 'missing', text: `${unpriceable} unpriceable` });
+    if (rows > 0 && number(group.untariffed) === rows) badges.push({ kind: 'gift', text: 'gift' });
     const unproved = number(group.peer_proved?.false);
     if (unproved > 0) badges.push({ kind: 'missing', text: `${unproved} unproved` });
     const unknown = number(group.peer_proved?.none);
@@ -281,10 +308,28 @@ function namesOf(nodes: readonly NamedNode[] | null | undefined): Map<string, st
   return names;
 }
 
+/**
+ * A `consumed.by_source` key as `node_ledger.consumed_key` writes it:
+ * `remote:<host>:<alias>`, with `?` for a host the row did not name and an
+ * alias that may itself hold colons. A key with no `remote:` prefix is the bare
+ * alias an older row was grouped under, and is read as that alias.
+ */
+export function parseConsumedKey(key: string): { host: string | null; alias: string | null } {
+  const bare = key ?? '';
+  if (!bare.startsWith('remote:')) return { host: null, alias: bare || null };
+  const rest = bare.slice('remote:'.length);
+  const cut = rest.indexOf(':');
+  if (cut < 0) return { host: null, alias: rest || null };
+  const host = rest.slice(0, cut);
+  const alias = rest.slice(cut + 1);
+  return { host: host && host !== '?' ? host : null, alias: alias || null };
+}
+
 function listOf(role: UsageRole, rows: UsageRow[]): UsageList {
   return {
     role,
     title: LIST_TITLES[role],
+    note: LIST_NOTES[role],
     empty: LIST_EMPTY[role],
     rows: ordered(rows),
     hasUnpriceable: rows.some((row) => row.unpriceable > 0),
@@ -295,11 +340,11 @@ function listOf(role: UsageRole, rows: UsageRow[]): UsageList {
  * The response as three lists: to whom this node served and on what, from whom
  * it consumed and on what, and what it spent on itself.
  *
- * `consumed.by_source` is keyed `remote:<host>:<alias>` where the row named its
- * host and by the bare alias where it did not. The gateway's peer route writes
- * `served_by`, so a consumed row written since then names its host; an older row
- * has no such key and arrives with `node_id: null` under the bare alias — the
- * host is then unnamed rather than misnamed, and the row says so.
+ * `consumed.by_source` is keyed `remote:<host>:<alias>`, with `?` for the host
+ * of a row that named none, so a peer's alias can never key the same bucket as
+ * a local alias of that name. The group's own `node_id` and `alias` are read
+ * first and the key answers where they are absent; an unnamed host is shown as
+ * unrecorded rather than misnamed.
  */
 export function shapeUsage(
   response: UsageResponse | null | undefined,
@@ -320,8 +365,9 @@ export function shapeUsage(
   });
 
   const consumed = Object.entries(response?.consumed?.by_source ?? {}).map(([key, group]) => {
-    const host = group.node_id ?? null;
-    const alias = group.alias ?? null;
+    const fromKey = parseConsumedKey(key);
+    const host = group.node_id ?? fromKey.host;
+    const alias = group.alias ?? fromKey.alias;
     const row = rowOf(key, group, 'consumed', {
       label: host ? nodeLabel(host, names) : alias || key,
       id: host,

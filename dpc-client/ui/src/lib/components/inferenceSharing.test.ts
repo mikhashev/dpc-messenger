@@ -5,6 +5,7 @@ import {
   addAllowedModel,
   addServing,
   addTariffEntry,
+  callerPriceBadge,
   classifyProviderType,
   computeBlockErrors,
   computeErrorsOf,
@@ -21,6 +22,7 @@ import {
   removeAllowedModel,
   removeServing,
   removeTariffEntry,
+  SERVES_NO_LOCAL_ALIAS,
   setCurrency,
   setFree,
   setVendorQuota,
@@ -504,5 +506,34 @@ describe('validate sends exactly what save would post', () => {
     expect(tab).toBeTruthy();
     expect(tab).toContain('export let draftRules');
     expect(tab).toMatch(/if \(draftRules\)\s*\{\s*rules = validationDraft\(draftRules, null, null, null\);/);
+  });
+});
+
+describe('the Serves row of the IDE door, with both lists empty', () => {
+  it("says the local aliases are refused and the peers' models are served", () => {
+    expect(SERVES_NO_LOCAL_ALIAS).toContain("peers' models are served");
+    expect(SERVES_NO_LOCAL_ALIAS).toContain("no alias of this node's own");
+    expect(SERVES_NO_LOCAL_ALIAS).toContain('calls to local aliases are refused');
+  });
+
+  it('never says every call is refused, which the door disproves with a 200', () => {
+    expect(SERVES_NO_LOCAL_ALIAS).not.toContain('every call is refused');
+  });
+});
+
+describe('what an admitted caller is marked with', () => {
+  it('names no price while no currency is declared', () => {
+    expect(callerPriceBadge(false, null)).toBe('at tariff (none declared — gift)');
+    expect(callerPriceBadge(false, undefined)).toBe('at tariff (none declared — gift)');
+    expect(callerPriceBadge(false, '')).toBe('at tariff (none declared — gift)');
+  });
+
+  it('names the tariff once a currency stands behind it', () => {
+    expect(callerPriceBadge(false, 'EUR')).toBe('at tariff');
+  });
+
+  it('marks a free caller free whether or not a tariff exists', () => {
+    expect(callerPriceBadge(true, null)).toBe('free');
+    expect(callerPriceBadge(true, 'EUR')).toBe('free');
   });
 });

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   badgesOf,
+  durationLabel,
+  durationTitle,
   formatAmount,
   formatDuration,
   formatOwed,
@@ -8,6 +10,7 @@ import {
   monthKey,
   monthLabel,
   nodeLabel,
+  parseConsumedKey,
   shapeUsage,
   shiftMonth,
   type NamedNode,
@@ -92,7 +95,9 @@ describe('the three lists', () => {
   it('folds the response into served, consumed and own, in that order', () => {
     const view = shapeUsage(response(), NAMES, '2026-09');
     expect(view.lists.map((l) => l.role)).toEqual(['served', 'consumed', 'own']);
-    expect(view.lists.map((l) => l.title)).toEqual(['Served to peers', 'Consumed', 'Own']);
+    expect(view.lists.map((l) => l.title)).toEqual([
+      'Served to peers', 'Consumed', 'Own calls (peers excluded)',
+    ]);
     expect(view.lists.map((l) => l.rows.length)).toEqual([1, 1, 1]);
     expect(view.month).toBe('2026-09');
   });
@@ -286,5 +291,104 @@ describe('the numbers as they are shown', () => {
     expect(formatDuration(4)).toBe('4.0 s');
     expect(formatDuration(95)).toBe('1 m 35 s');
     expect(formatDuration(3700)).toBe('1 h 1 m');
+  });
+});
+
+describe('which set of rows a list calls its own', () => {
+  it('says peers are excluded in the title of the own list', () => {
+    const view = shapeUsage(response(), NAMES, '2026-09');
+    expect(view.lists[2].title).toBe('Own calls (peers excluded)');
+  });
+
+  it("warns that the summary's burn counts the calls this list leaves out", () => {
+    const note = shapeUsage(response(), NAMES, '2026-09').lists[2].note;
+    expect(note).toContain('a call served to a peer is on the Served list, not here');
+    expect(note).toContain('counts every local call');
+  });
+
+  it('gives the other two lists their own line', () => {
+    const [served, consumed] = shapeUsage(response(), NAMES, '2026-09').lists;
+    expect(served.note).toBe('to whom, how much, for what');
+    expect(consumed.note).toBe('from whom, how much, for what');
+  });
+});
+
+describe('the duration column, which measures a different thing per list', () => {
+  it('is engine time where this node ran the call itself', () => {
+    expect(durationLabel('served')).toBe('engine time');
+    expect(durationLabel('own')).toBe('engine time');
+    expect(durationTitle('own')).toContain("this node's own provider call");
+    expect(durationTitle('served')).toContain("warm-up");
+  });
+
+  it('is round trip where this node waited for a peer', () => {
+    expect(durationLabel('consumed')).toBe('round trip');
+    expect(durationTitle('consumed')).toContain("the wire and the host's queue");
+  });
+});
+
+describe('an own row wears no tariff badge', () => {
+  it('calls no own group a gift, whatever its untariffed count', () => {
+    expect(badgesOf(group({ row_count: 915, untariffed: 915 }), 'own'))
+      .not.toContainEqual({ kind: 'gift', text: 'gift' });
+    expect(badgesOf(group({ row_count: 915, untariffed: 915 }), 'served'))
+      .toContainEqual({ kind: 'gift', text: 'gift' });
+  });
+
+  it('counts no unpriceable tariff on an own group', () => {
+    expect(badgesOf(group({ tariff_unpriceable: 2 }), 'own').map((b) => b.text))
+      .not.toContain('2 unpriceable');
+  });
+
+  it('still says who counted the tokens, which no tariff decides', () => {
+    expect(badgesOf(group({ counts_source: { ours: 3, engine: 0 } }), 'own'))
+      .toContainEqual({ kind: 'quota', text: '3 recounted' });
+  });
+
+  it('leaves the own list of a whole response badgeless where the tariff is all it had', () => {
+    const view = shapeUsage({
+      own: { by_alias: { deepseek_flash: group({ row_count: 915, untariffed: 915, cost_usd: 4.9 }) } },
+    }, NAMES, '2026-09');
+    expect(view.lists[2].rows[0].badges).toEqual([]);
+    expect(view.lists[2].rows[0].costUsd).toBe(4.9);
+  });
+});
+
+describe('the key a consumed row is grouped under', () => {
+  it('reads the host and the alias out of remote:<host>:<alias>', () => {
+    expect(parseConsumedKey(`remote:${BOB}:bob_glm`)).toEqual({ host: BOB, alias: 'bob_glm' });
+  });
+
+  it('reads remote:?:<alias> as a host that was not recorded', () => {
+    expect(parseConsumedKey('remote:?:x')).toEqual({ host: null, alias: 'x' });
+  });
+
+  it('keeps an alias that holds colons of its own whole', () => {
+    expect(parseConsumedKey('remote:?:a:b')).toEqual({ host: null, alias: 'a:b' });
+  });
+
+  it('reads a key with no remote prefix as the bare alias it is', () => {
+    expect(parseConsumedKey('bob_glm')).toEqual({ host: null, alias: 'bob_glm' });
+  });
+
+  it('shows a remote:?: row by its alias and says the host is not recorded', () => {
+    const pending: UsageResponse = {
+      consumed: { by_source: { 'remote:?:qwen_local': group({ node_id: null, alias: null }) } },
+    };
+    const row = shapeUsage(pending, NAMES, '2026-09').lists[1].rows[0];
+    expect(row.id).toBeNull();
+    expect(row.alias).toBe('qwen_local');
+    expect(row.label).toBe('qwen_local');
+    expect(row.badges[0]).toEqual({ kind: 'missing', text: 'host not recorded' });
+  });
+
+  it('never merges a peer row with a local alias of the same name', () => {
+    const both: UsageResponse = {
+      consumed: { by_source: { 'remote:?:qwen_local': group({ row_count: 2 }) } },
+      own: { by_alias: { qwen_local: group({ row_count: 5 }) } },
+    };
+    const view = shapeUsage(both, NAMES, '2026-09');
+    expect(view.lists[1].rows[0].key).toBe('remote:?:qwen_local');
+    expect(view.lists[2].rows[0].key).toBe('qwen_local');
   });
 });

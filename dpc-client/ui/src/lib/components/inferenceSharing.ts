@@ -198,6 +198,15 @@ export function isFree(compute: ComputeRules, kind: CallerKind, id: string): boo
   return cleanList(compute[freeKey(kind)]).includes(id);
 }
 
+/** What an admitted caller's mark reads on screen. With no currency declared
+ *  there is no tariff to charge, so «at tariff» alone would name a price this
+ *  node never set — the block that declares the currency says the same thing
+ *  two blocks below. */
+export function callerPriceBadge(free: boolean, currency: string | null | undefined): string {
+  if (free) return 'free';
+  return currency ? 'at tariff' : 'at tariff (none declared — gift)';
+}
+
 // --- What I share ----------------------------------------------------------
 
 export type ServingList = 'local' | 'vendor';
@@ -618,6 +627,15 @@ export function gatewayVerdict(
   }
   return { tone: 'off', text: 'Nothing is shared.' };
 }
+
+/**
+ * What the Serves row says when both serving lists are empty. The lists close
+ * this node's own aliases only: a `remote:<peer>:<alias>` call travels to the
+ * peer that serves it and is answered with these lists empty, so «every call is
+ * refused» would be false of the door's main road.
+ */
+export const SERVES_NO_LOCAL_ALIAS =
+  "no alias of this node's own — calls to local aliases are refused; peers' models are served";
 
 /** One paste-ready block, as `gateway.client_config_lines` renders it. */
 export interface ClientLine {

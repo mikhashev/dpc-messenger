@@ -15,6 +15,7 @@
     addAllowedModel,
     addServing,
     addTariffEntry,
+    callerPriceBadge,
     clientLabel,
     computeBlockErrors,
     computeErrorsOf,
@@ -33,6 +34,7 @@
     removeAllowedModel,
     removeServing,
     removeTariffEntry,
+    SERVES_NO_LOCAL_ALIAS,
     setCurrency,
     setFree,
     setVendorQuota,
@@ -598,7 +600,7 @@
                     <button class="btn-icon-small" title="Remove {nodeId}" on:click={() => editCompute && apply(removeAllowed(editCompute, 'nodes', nodeId))}>×</button>
                   {:else}
                     <span class="action-badge" class:allow={isFree(view, 'nodes', nodeId)} class:tariff={!isFree(view, 'nodes', nodeId)}>
-                      {isFree(view, 'nodes', nodeId) ? 'free' : 'at tariff'}
+                      {callerPriceBadge(isFree(view, 'nodes', nodeId), view.currency)}
                     </span>
                   {/if}
                 </span>
@@ -659,7 +661,7 @@
                     <button class="btn-icon-small" title="Remove {groupName}" on:click={() => editCompute && apply(removeAllowed(editCompute, 'groups', groupName))}>×</button>
                   {:else}
                     <span class="action-badge" class:allow={isFree(view, 'groups', groupName)} class:tariff={!isFree(view, 'groups', groupName)}>
-                      {isFree(view, 'groups', groupName) ? 'free' : 'at tariff'}
+                      {callerPriceBadge(isFree(view, 'groups', groupName), view.currency)}
                     </span>
                   {/if}
                 </span>
@@ -799,7 +801,9 @@
           An OpenAI-compatible listener for the clients on this machine &mdash; Continue, Cursor,
           Claude Code, curl. It is switched, bound and ported by <code>[gateway]</code> in
           <code>config.ini</code>, which is read once at start, so there is no switch here: what a
-          restart would change is shown, not offered.
+          restart would change is shown, not offered. The serving lists close this node's own
+          aliases only: a call to <code>remote:&lt;peer&gt;:&lt;alias&gt;</code> is carried to the
+          peer that serves it whatever those lists hold.
         </p>
 
         <div class="rule-list">
@@ -832,7 +836,7 @@
             </span>
           </div>
           <div class="rule-row">
-            <span class="alias-cell"><strong>Serves</strong> <span class="muted">the same two lists as block 1</span></span>
+            <span class="alias-cell"><strong>Serves</strong> <span class="muted">the same two lists as block 1 &mdash; this node's own aliases</span></span>
             <span class="quota-cell">
               {#if gateway?.serving_error}
                 <span class="badge badge-missing">the lists were refused</span>
@@ -841,7 +845,7 @@
                   <code class="rule-path">{alias}</code>
                 {/each}
               {:else}
-                <span class="badge badge-missing">no alias &mdash; every call is refused</span>
+                <span class="badge badge-missing">{SERVES_NO_LOCAL_ALIAS}</span>
               {/if}
             </span>
           </div>

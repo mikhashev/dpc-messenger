@@ -1284,9 +1284,12 @@
             {saveErrors}
           />
 
-          <!-- Transcription Sharing Section -->
-          <div class="section">
-            <h3>Transcription Sharing (Remote Whisper)</h3>
+          <!-- (7) Transcription Sharing: block seven of the same tab, numbered
+               and indented like blocks 1-6, which live in the component above.
+               Both classes: .subsection draws the block, .section carries the
+               heading style its h4s read. -->
+          <div class="section subsection">
+            <h4>7. Transcription Sharing (Remote Whisper)</h4>
             <p class="help-text">Allow peers to use your local Whisper model for voice transcription.</p>
 
             {#if displayRules?.transcription}
