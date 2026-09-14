@@ -156,6 +156,7 @@ def usage_row(
     output_includes_thinking: str = "unknown",
     thinking_source: Optional[str] = None,
     served_effort: Optional[str] = None,
+    served_by: Optional[str] = None,
     peer_proved: Optional[bool] = None,
     peer_connection_type: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -203,6 +204,14 @@ def usage_row(
     is not reached over a tier, and a row written before the column reads the
     same way. `peer_connection_type` is the connection's own word for its
     tier, which is where the answer came from.
+
+    `served_by` is the node that ran a call this node only consumed: the host
+    id on a `route=peer` row, written beside the tariff group because the two
+    answer one question together — what this call was charged and by whom. It
+    is optional and written only when given, like `task_id`: on a row this node
+    ran itself there is no other node to name, and a null there would read as
+    «served by nobody» rather than «served here». `alias` stays what it always
+    was, the name the host was asked for, which is unique only under its host.
     """
     if not request_id:
         raise ValueError("a usage row needs a request_id")
@@ -236,6 +245,8 @@ def usage_row(
     )
     if served_effort is not None and not isinstance(served_effort, str):
         raise ValueError(f"served_effort={served_effort!r} is not a word of the effort scale")
+    if served_by is not None and not isinstance(served_by, str):
+        raise ValueError(f"served_by={served_by!r} is not the node id of the host that served the call")
     if peer_proved is not None and not isinstance(peer_proved, bool):
         raise ValueError(f"peer_proved={peer_proved!r} is not True, False or None")
     if peer_connection_type is not None and not isinstance(peer_connection_type, str):
@@ -264,6 +275,8 @@ def usage_row(
     if billing == "pay_per_use" and cost_usd is None:
         log.warning("Usage row %s is pay_per_use with no cost: the price was not computed", request_id)
     row.update(tariff)
+    if served_by:
+        row["served_by"] = served_by
     if task_id:
         row["task_id"] = task_id
     if conversation_id:
@@ -516,6 +529,13 @@ class NodeLedger:
                                 # Only where a tariff applied: a row with no
                                 # group has no amount column to be missing.
                                 row.setdefault("tariff_amount", None)
+                            if row.get("route") == "peer":
+                                # Only on a consumed row: a row this node ran
+                                # itself has no host to name, and the column is
+                                # absent there by construction (`usage_row`).
+                                # None on an older consumed row is «this node
+                                # did not record which host served it».
+                                row.setdefault("served_by", None)
                             row.setdefault("thinking_source", None)
                             row.setdefault("served_effort", None)
                             row.setdefault("peer_proved", None)
@@ -574,6 +594,42 @@ def owner_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
             yield row
 
 
+def served_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+    """What this node ran for somebody else: `route == "local"` and
+    `caller_kind == "peer"`. The owner's side of a shared call — the tokens are
+    the guest's, the dollars in `cost_usd` are this node's, and what the guest
+    owes for them is `tariff_amount`. A `gateway` caller is not here: the
+    gateway door is local, so its client is this node's own user (D3), and its
+    rows belong to `own_rows`.
+    """
+    for row in rows:
+        if row.get("route") == "local" and row.get("caller_kind") == "peer":
+            yield row
+
+
+def consumed_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+    """What another node ran for this one: `route == "peer"`, whoever here
+    asked — an agent, or a gateway client of this node's own door. The guest's
+    side: `cost_usd` is null by construction (this node priced nothing) and the
+    tariff group is the host's copy of what it charges, so `tariff_amount` is
+    what is owed and `served_by` is whom it is owed to.
+    """
+    for row in rows:
+        if row.get("route") == "peer":
+            yield row
+
+
+def own_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+    """This node's own consumption on its own hardware and its own key:
+    `route == "local"` with a caller that is not a peer. The complement of
+    `served_rows` inside `owner_rows`, which stays what the burn reader wants —
+    every local row, this node's dollars whoever asked.
+    """
+    for row in rows:
+        if row.get("route") == "local" and row.get("caller_kind") != "peer":
+            yield row
+
+
 def _parse_started_at(value: Any) -> datetime:
     """An ISO-8601 datetime, timezone-aware; raises ValueError naming `value`
     otherwise, so a malformed `since`/`until` reaches the API as a refusal."""
@@ -626,6 +682,163 @@ def _fold(bucket: Dict[str, Any], key: Any, row: Dict[str, Any]) -> None:
     entry["output_includes_thinking"][includes] += 1
 
 
+def _within(started_at: Any, since_dt: Optional[datetime], until_dt: Optional[datetime]) -> bool:
+    """Whether `started_at` falls inside the window, both bounds inclusive.
+    With no window every row is in, its timestamp unread; with a window, a row
+    whose `started_at` will not parse is out."""
+    if since_dt is None and until_dt is None:
+        return True
+    try:
+        moment = _parse_started_at(started_at) if started_at else None
+    except ValueError:
+        moment = None
+    if moment is None:
+        return False
+    if since_dt is not None and moment < since_dt:
+        return False
+    if until_dt is not None and moment > until_dt:
+        return False
+    return True
+
+
+def _new_role_entry() -> Dict[str, Any]:
+    """The role reader's group: what was spent, on whose counts, and what is
+    owed for it — the last of the three `_new_group_entry` does not answer."""
+    return {
+        "row_count": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "thinking_tokens": 0,
+        "duration_s": 0.0,
+        "counts_source": {"ours": 0, "engine": 0},
+        "peer_proved": {"true": 0, "false": 0, "none": 0},
+        "cost_usd": 0.0,
+        "unpriced": 0,
+        "tariff": {},
+        "tariff_unpriceable": 0,
+        "untariffed": 0,
+    }
+
+
+def _fold_role(
+    bucket: Dict[str, Any], key: Any, row: Dict[str, Any], **fields: Any
+) -> Dict[str, Any]:
+    """Add one row to its group and return the group. `fields` identify the
+    group and are set only when it is created.
+
+    Money is added as the row carries it and never re-derived (D3):
+    `tariff_amount` sums per `tariff_currency`, because two currencies do not
+    add, and the two states that are not an amount are counted rather than
+    summed as zero — `tariff_unpriceable` is a tariff that applied over counts
+    nobody could price, `untariffed` is a call with no tariff declared, the
+    gift. `unpriced` does the same for a null `cost_usd`. A row whose
+    `counts_source` is neither word counts into `row_count` and into neither
+    side of that split.
+    """
+    group_key = str(key) if key is not None else "none"
+    entry = bucket.get(group_key)
+    if entry is None:
+        entry = _new_role_entry()
+        entry.update(fields)
+        bucket[group_key] = entry
+
+    entry["row_count"] += 1
+    entry["prompt_tokens"] += row.get("prompt_tokens") or 0
+    entry["completion_tokens"] += row.get("completion_tokens") or 0
+    entry["thinking_tokens"] += row.get("thinking_tokens") or 0
+    entry["duration_s"] = round(entry["duration_s"] + float(row.get("duration_s") or 0.0), 3)
+
+    source = row.get("counts_source")
+    if source in COUNTS_SOURCES:
+        entry["counts_source"][source] += 1
+
+    proved = row.get("peer_proved")
+    proved_key = "true" if proved is True else "false" if proved is False else "none"
+    entry["peer_proved"][proved_key] += 1
+
+    cost = row.get("cost_usd")
+    if cost is None:
+        entry["unpriced"] += 1
+    else:
+        entry["cost_usd"] += float(cost)
+
+    currency = row.get("tariff_currency")
+    amount = row.get("tariff_amount")
+    if currency is None:
+        entry["untariffed"] += 1
+    elif amount is None:
+        entry["tariff_unpriceable"] += 1
+    else:
+        owed = entry["tariff"].setdefault(str(currency), {"amount": 0.0, "rows": 0})
+        owed["amount"] += float(amount)
+        owed["rows"] += 1
+    return entry
+
+
+def consumed_key(row: Dict[str, Any]) -> str:
+    """`remote:<served_by>:<alias>` where the host is known, the bare alias
+    where it is not: an alias is the name one host answers to, so two hosts
+    serving `ollama_local` are one line only to a reader that ignores whose
+    alias it is."""
+    alias = row.get("alias")
+    host = row.get("served_by")
+    if host:
+        return f"remote:{host}:{alias}"
+    return str(alias) if alias is not None else "none"
+
+
+def usage_by_role(
+    rows: Iterator[Dict[str, Any]], *, since: Optional[str] = None, until: Optional[str] = None
+) -> Dict[str, Any]:
+    """The ledger read by the two sides of a shared call, three series over the
+    same rows (THE-LEDGER-COUNTS-EVERY-SHARED-CALL-AND-NEITHER-SIDE-CAN-SEE-IT-
+    IN-THE-UI):
+
+    * `served` — what this node ran for peers, by the peer that asked
+      (`by_caller`, each carrying its own `by_alias`) and by the alias that
+      answered. `cost_usd` is what this node spent, `tariff` what it is owed.
+    * `consumed` — what peers ran for this node, by `consumed_key`, each group
+      echoing `node_id` and `alias` so no reader parses the key. `cost_usd` is
+      null on every such row by construction, so the money here is `tariff`:
+      what this node owes, per currency.
+    * `own` — this node's own calls on its own key, by alias: no peer asked,
+      and no peer is owed.
+
+    Pure, like `summarize`, and windowed by the same rule.
+    """
+    since_dt = _parse_started_at(since) if since is not None else None
+    until_dt = _parse_started_at(until) if until is not None else None
+
+    served_by_caller: Dict[str, Any] = {}
+    served_by_alias: Dict[str, Any] = {}
+    consumed_by_source: Dict[str, Any] = {}
+    own_by_alias: Dict[str, Any] = {}
+
+    for row in rows:
+        if not _within(row.get("started_at"), since_dt, until_dt):
+            continue
+        route = row.get("route")
+        if route == "peer":
+            _fold_role(
+                consumed_by_source, consumed_key(row), row,
+                node_id=row.get("served_by"), alias=row.get("alias"),
+            )
+        elif route == "local" and row.get("caller_kind") == "peer":
+            caller = _fold_role(served_by_caller, row.get("caller"), row)
+            _fold_role(caller.setdefault("by_alias", {}), row.get("alias"), row)
+            _fold_role(served_by_alias, row.get("alias"), row)
+        elif route == "local":
+            _fold_role(own_by_alias, row.get("alias"), row)
+
+    return {
+        "since": since,
+        "until": until,
+        "served": {"by_caller": served_by_caller, "by_alias": served_by_alias},
+        "consumed": {"by_source": consumed_by_source},
+        "own": {"by_alias": own_by_alias},
+    }
+
+
 def summarize(
     rows: Iterator[Dict[str, Any]], *, since: Optional[str] = None, until: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -650,17 +863,8 @@ def summarize(
 
     for row in rows:
         started_at = row.get("started_at")
-        try:
-            moment = _parse_started_at(started_at) if started_at else None
-        except ValueError:
-            moment = None
-        if since_dt is not None or until_dt is not None:
-            if moment is None:
-                continue
-            if since_dt is not None and moment < since_dt:
-                continue
-            if until_dt is not None and moment > until_dt:
-                continue
+        if not _within(started_at, since_dt, until_dt):
+            continue
 
         row_count += 1
         month = str(started_at)[:7] if started_at else "none"

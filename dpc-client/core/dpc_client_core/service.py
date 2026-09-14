@@ -4195,6 +4195,26 @@ class CoreService:
         except ValueError as e:
             return {"status": "error", "message": str(e)}
 
+    async def get_inference_usage(
+        self, since: str = None, until: str = None, month: str = None
+    ) -> Dict[str, Any]:
+        """The same ledger read by role — `node_ledger.usage_by_role`: what this
+        node served to peers, what peers served it, and what it ran for itself
+        (board entry THE-LEDGER-COUNTS-EVERY-SHARED-CALL-AND-NEITHER-SIDE-CAN-
+        SEE-IT-IN-THE-UI). `get_usage_summary` beside it stays the owner's burn
+        and is unchanged. `since`/`until` are optional ISO datetime bounds;
+        `month` is `YYYY-MM` and reads one partition instead of every one."""
+        try:
+            if month is not None and not re.fullmatch(r"\d{4}-\d{2}", str(month)):
+                raise ValueError(f"month={month!r} is not a partition's YYYY-MM")
+            ledger = node_ledger.default_ledger()
+            return {
+                "status": "success",
+                **node_ledger.usage_by_role(ledger.rows(month=month), since=since, until=until),
+            }
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+
     async def save_firewall_rules(self, rules_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Save updated firewall rules from UI editor.
 

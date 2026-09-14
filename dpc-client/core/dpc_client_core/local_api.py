@@ -101,6 +101,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_firewall_rules",
     # Node ledger (A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-INSTRUMENT)
     "get_usage_summary",
+    "get_inference_usage",
     "save_firewall_rules",
     "list_all_tools",
     "get_cc_config",

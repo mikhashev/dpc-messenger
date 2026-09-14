@@ -369,6 +369,9 @@ class DpcLlmAdapter:
                 # before it called; a local route has no far end to prove.
                 peer_proved=facts.get("peer_proved"),
                 peer_connection_type=facts.get("peer_connection_type"),
+                # The host on the peer route, so the guest's row names whom the
+                # alias belongs to and whom the tariff is owed.
+                served_by=facts.get("served_by"),
                 started_at=started_at,
                 duration_s=duration_s,
                 # Priced by the route; on the peer route both are the host's copy
@@ -457,7 +460,10 @@ class DpcLlmAdapter:
         if effective_peer_id:
             # This node did not run the call; the row says so, under the alias
             # the peer was asked for.
-            self._note_call(route="peer", alias=self._remote_provider_alias(dpc_agent_provider))
+            self._note_call(
+                route="peer", alias=self._remote_provider_alias(dpc_agent_provider),
+                served_by=effective_peer_id,
+            )
             if self._compute_host:
                 # Per-agent remote routing: build a context object from per-agent values
                 from types import SimpleNamespace

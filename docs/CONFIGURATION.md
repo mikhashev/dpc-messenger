@@ -299,6 +299,19 @@ charge its own machine:
   and keeps `cost_usd` null. `cost_usd` is only ever what a call cost the node that ran it.
   Resetting the rules to defaults rewrites the block and drops the tariff with it.
 
+**Reading the rows back.** Two commands on the local API read the node ledger.
+`get_usage_summary` is the owner's burn — every row this node ran itself, folded by
+caller, alias and month. `get_inference_usage` reads the same rows by role and answers
+with three series: `served`, what this node ran for peers, by the peer that asked and by
+the alias that answered, carrying its own `cost_usd` and what it is owed per currency;
+`consumed`, what peers ran for it, keyed `remote:<host node id>:<alias>`, where `cost_usd`
+is null by construction and the money is `tariff_amount`, what this node owes; and `own`,
+its own calls on its own key, neither side of a sharing. Both take optional `since` /
+`until` ISO datetime bounds, and `get_inference_usage` a `month` of `YYYY-MM` to read one
+partition. A tariff that applied over counts nobody could price (`tariff_unpriceable`) and
+a call with no tariff declared at all (`untariffed`) are counted apart from the money and
+never added into it as a zero.
+
 **Shape and limits.** `model` in a request is the alias; `/v1/models` lists the aliases
 with `owned_by` `local` or `vendor`. `stream: true` yields the text as it is made,
 followed by `data: [DONE]`; where the answer arrives whole — an image on either route, a
