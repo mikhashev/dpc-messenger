@@ -47,6 +47,63 @@ class RemoteInferenceRequestHandler(MessageHandler):
         return None
 
 
+class RemoteInferenceChunkHandler(MessageHandler):
+    """Handles REMOTE_INFERENCE_CHUNK messages (a piece of an answer being made).
+
+    Transport, not record: a chunk reaches the caller's callback and nothing
+    else. No count is read off one, no usage row is built from one, and the
+    caller's text comes from the REMOTE_INFERENCE_RESPONSE that ends the
+    stream. A chunk whose `request_id` this node is not waiting for, or whose
+    `seq` is not the next one, is dropped with a warning — this handler does
+    not reorder or buffer, because the answer it would be reconstructing is
+    already in the terminating response.
+    """
+
+    def __init__(self, service):
+        super().__init__(service)
+        self._next_seq: Dict[str, int] = {}
+
+    @property
+    def command_name(self) -> str:
+        return "REMOTE_INFERENCE_CHUNK"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        request_id = payload.get("request_id")
+        seq = payload.get("seq")
+        delta = payload.get("delta")
+
+        pending = getattr(self.service, "_pending_inference_chunks", None) or {}
+        self._next_seq = {rid: n for rid, n in self._next_seq.items() if rid in pending}
+
+        on_chunk = pending.get(request_id)
+        if on_chunk is None:
+            self.logger.warning(
+                "Remote inference chunk discarded: request %s is not streaming here "
+                "(peer %s, seq %s, %d chars)",
+                request_id, sender_node_id, seq, len(delta or ""),
+            )
+            return None
+
+        expected = self._next_seq.get(request_id, 0)
+        if seq != expected:
+            self.logger.warning(
+                "Remote inference chunk discarded: request %s expected seq %d and got %r "
+                "(peer %s) — the answer is taken from the response that ends the stream",
+                request_id, expected, seq, sender_node_id,
+            )
+            return None
+        self._next_seq[request_id] = expected + 1
+
+        try:
+            await on_chunk(delta or "")
+        except Exception:
+            self.logger.error(
+                "Remote inference chunk for request %s from %s was not delivered",
+                request_id, sender_node_id, exc_info=True,
+            )
+        return None
+
+
 class RemoteInferenceResponseHandler(MessageHandler):
     """Handles REMOTE_INFERENCE_RESPONSE messages (peer responding with inference result)."""
 
@@ -109,6 +166,10 @@ class RemoteInferenceResponseHandler(MessageHandler):
         # The effort the host actually ran at, after its clamp (v1.7). Absent
         # means the host applied no effort control, which is not `off`.
         served_effort = payload.get("served_effort")
+        # The calls the model made, as `tool_use` blocks, and the word its
+        # provider stopped on (v1.7). A host that ran no tools sends neither.
+        tool_calls = payload.get("tool_calls")
+        finish_reason = payload.get("finish_reason")
 
         if request_id in self.service._pending_inference_requests:
             future = self.service._pending_inference_requests[request_id]
@@ -137,6 +198,10 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         result_data["thinking_source"] = thinking_source
                     if served_effort is not None:
                         result_data["served_effort"] = served_effort
+                    if tool_calls:
+                        result_data["tool_calls"] = tool_calls
+                    if finish_reason is not None:
+                        result_data["finish_reason"] = finish_reason
                     future.set_result(result_data)
                 else:
                     future.set_exception(RuntimeError(error or "Remote inference failed"))

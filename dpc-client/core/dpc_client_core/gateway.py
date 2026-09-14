@@ -32,13 +32,16 @@ to a provider that calls tools natively and a returned call comes back as a
 `tool_use` block or a `tool_calls` entry, so the client's own loop — Claude
 Code's, Continue's — runs against the model behind this node. The OpenAI
 form converts at this edge and nowhere else: `arguments` is a JSON string
-on its wire and an object inside. A stream on the local route is written as
-the door hands chunks back; the peer route answers whole, because its wire
-carries one request and one response (M1), and carries no tools either — a
-request with tools on a peer alias is refused, never quietly answered
-without them. What a tool field asks and no provider here can do
-(`tool_choice` forcing, one call at a time) is refused by name rather than
-dropped: every degradation is said on the wire.
+on its wire and an object inside. Both routes are handed the turns and the
+tools alike: the peer wire carries `messages`, `system` and `tools` beside
+the prompt (DPTP v1.7), and a stream is written as the chunks arrive —
+REMOTE_INFERENCE_CHUNK frames from the host, the door's own chunks locally.
+A peer whose menu row says it has no tool path is refused here by name
+before the round trip, and refused again by the host on the wire; neither
+answers a request with tools by quietly dropping them. What a tool field
+asks and no provider here can do (`tool_choice` forcing, one call at a
+time) is refused by name rather than dropped: every degradation is said on
+the wire.
 
 Two more things the peer wire under this door already carries now cross it
 (D4 amendment, 2026-09-14). **Reasoning effort**: OpenAI's `reasoning_effort`
@@ -363,10 +366,11 @@ class Gateway:
         in the Anthropic shape: the local route goes through
         `LLMManager.query_messages`, and the providers see the turns, the
         `tools` beside them, and hand each chunk to `on_chunk` as it is made.
-        The peer route takes `prompt` alone — REMOTE_INFERENCE_REQUEST carries
-        a prompt, no message array and no tools (ADR-041 D4, M1) — so tools on
-        it are refused here, and the answer comes back whole: `on_chunk` is
-        never called on that route and the shape layer sends what it got.
+        The peer route sends the same four beside the prompt (DPTP v1.7) and
+        feeds `on_chunk` from the host's REMOTE_INFERENCE_CHUNK frames, so what
+        a guest gets there is what a local caller gets. `prompt` still travels
+        and still carries the same turns flattened, because an older host reads
+        that and nothing else.
 
         `images` are the wire's image dicts (`base64`, `mime_type` — DPTP
         §3.4), carried beside the prompt on both routes because that is the
@@ -386,17 +390,10 @@ class Gateway:
         # peer's, which the peer's own flag guards.
         remote = parse_remote_name(alias)
         if remote is not None:
-            if tools:
-                raise GatewayError(
-                    400,
-                    f"model '{alias}' is a peer's alias and the request carries {len(tools)} tool(s): the "
-                    "peer wire (REMOTE_INFERENCE_REQUEST) carries a prompt and no tools, so the call cannot "
-                    "be made as asked; send it without tools, or to a local alias",
-                    "tools_unsupported",
-                )
             return await self._complete_via_peer(
-                alias, *remote, prompt, images=images, reasoning_effort=reasoning_effort,
-                effort_field=effort_field,
+                alias, *remote, prompt, messages=messages, system=system, tools=tools,
+                images=images, reasoning_effort=reasoning_effort,
+                effort_field=effort_field, on_chunk=on_chunk,
             )
         self.refuse_unless_compute_sharing(alias)
         try:
@@ -567,7 +564,7 @@ class Gateway:
             if images:
                 # `query` is the only door with a vision entry point, and it
                 # answers whole: a stream over this route is the one chunk the
-                # shape layer writes from the finished text, as the peer route is.
+                # shape layer writes from the finished text.
                 result = await self._core.llm_manager.query(
                     prompt, provider_alias=alias, return_metadata=True, images=images, **effort_kwargs,
                 )
@@ -644,9 +641,13 @@ class Gateway:
         remote_alias: str,
         prompt: str,
         *,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        system: Any = "",
+        tools: Optional[List[Dict[str, Any]]] = None,
         images: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: Optional[str] = None,
         effort_field: str = "reasoning_effort",
+        on_chunk: Optional[Callable[..., Any]] = None,
     ) -> Completion:
         """The peer route: connected, proved, on the menu, one call, one row.
 
@@ -656,6 +657,11 @@ class Gateway:
         back to a local alias (D2). The menu row is the peer's own word about
         what its alias can do, so what it denies is refused here rather than
         sent to be dropped on the far side.
+
+        The row is built from the answer and from nothing streamed: chunks
+        reach `on_chunk` and are never counted (DPTP §3.4). A host that sends
+        none answers whole, and the shape layer writes the one chunk it always
+        wrote.
         """
         connection_type = self._connection_type(peer_id)
         if connection_type is None:
@@ -677,6 +683,28 @@ class Gateway:
                 f"peer {peer_id} does not serve alias '{remote_alias}' to this node; "
                 f"its menu lists: {served}",
                 "model_not_found",
+            )
+        if images and tools:
+            # The host's vision door is `query`, which holds no tools, exactly
+            # as this node's own is: the combination is refused on both routes
+            # rather than answered without the tools on either.
+            raise GatewayError(
+                400,
+                f"the request carries {len(images)} image(s) and {len(tools)} tool(s): vision on the "
+                "peer route travels beside the prompt and reaches the host's vision entry point, which "
+                "takes no tools; send the images without tools, or the tools without images",
+                "tools_unsupported",
+            )
+        if tools and not row.get("supports_tools"):
+            # An optimisation over the host's own refusal, not a second gate:
+            # the round trip is saved, and a row that says nothing is read as a
+            # no, because every host that can serve tools says so.
+            raise GatewayError(
+                400,
+                f"peer {peer_id} serves '{remote_alias}' without tools — its menu row does not say "
+                f"supports_tools — and the request carries {len(tools)} tool(s); ask that peer for an "
+                "alias whose provider calls tools natively, or send the request without tools",
+                "tools_unsupported",
             )
         if images and "supports_vision" in row and not row.get("supports_vision"):
             raise GatewayError(
@@ -705,9 +733,20 @@ class Gateway:
             result = await self._core.p2p_coordinator.request_inference_from_peer(
                 peer_id, prompt, provider=remote_alias, images=images or None,
                 reasoning_effort=reasoning_effort, timeout=timeout,
+                messages=messages or None, system=system or None, tools=tools or None,
+                on_chunk=on_chunk,
             )
         except ConnectionError as e:
             raise GatewayError(503, f"peer {peer_id} is not connected: {e}", "peer_unavailable")
+        except ValueError as e:
+            # The frame cap, raised at the origin by `write_message` before a
+            # byte left this node (DPTP §2): tools and images together can pass
+            # it, and the caller must be told which door it hit.
+            raise GatewayError(
+                413,
+                f"the request to peer {peer_id} does not fit one DPTP frame: {e}",
+                "request_too_large",
+            )
         except TimeoutError:
             raise GatewayError(
                 504,
@@ -721,6 +760,7 @@ class Gateway:
 
         result = result if isinstance(result, dict) else {"response": str(result or "")}
         text = result.get("response") or ""
+        tool_calls = [call for call in result.get("tool_calls") or [] if isinstance(call, dict)]
         model = result.get("model") or remote_alias
         prompt_tokens = result.get("prompt_tokens")
         completion_tokens = result.get("response_tokens")
@@ -789,6 +829,8 @@ class Gateway:
             thinking_tokens=result.get("thinking_tokens"),
             started_at=started_at, duration_s=duration_s, billing=billing, cost_usd=cost_usd,
             output_includes_thinking=output_includes_thinking,
+            finish_reason=_finish_reason(result.get("finish_reason"), tool_calls),
+            tool_calls=tool_calls,
         )
 
     def _count_here(self, prompt: str, text: str, model: str) -> Tuple[int, int]:
@@ -1478,8 +1520,8 @@ class GatewayServer:
         )
         tools = _openai_tools(body)
         effort = _openai_effort(body)
-        # Rendered here only for the peer route, which sends a prompt, and for
-        # the emptiness test below; the local route is handed the turns.
+        # The flattened turns both routes carry: what an older host reads on
+        # the peer wire, and the emptiness test below.
         prompt = flatten_messages(messages, system)
         if not prompt and not images:
             raise GatewayError(400, "no message carries text", "invalid_request_error")
@@ -1509,9 +1551,9 @@ class GatewayServer:
     ) -> web.StreamResponse:
         """One `chat.completion.chunk` per chunk the door hands back, then the
         calls, the stop word and the usage, then `[DONE]`. Where no chunk came
-        before the answer (the peer route's wire answers whole, M1) the text
-        and the stop word share one chunk, as this route wrote before; a call
-        is one chunk, since the door hands it back parsed."""
+        before the answer — an image, or a host that sends none — the text and
+        the stop word share one chunk, as this route wrote before; a call is
+        one chunk, since the door hands it back parsed."""
         request_id = str(uuid.uuid4())
         created = int(time.time())
         stream = _EventStream(request)
@@ -1574,8 +1616,8 @@ class GatewayServer:
         )
         tools = _anthropic_tools(body)
         effort = _anthropic_effort(body)
-        # Rendered here only for the peer route, which sends a prompt, and for
-        # the emptiness test below; the local route is handed the turns.
+        # The flattened turns both routes carry: what an older host reads on
+        # the peer wire, and the emptiness test below.
         prompt = flatten_messages(messages, system)
         if not prompt and not images:
             raise GatewayError(400, "no message carries text", "invalid_request_error")

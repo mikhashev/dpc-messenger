@@ -69,7 +69,8 @@ from .message_handlers.context_handler import (
     RequestDeviceContextHandler, DeviceContextResponseHandler
 )
 from .message_handlers.inference_handler import (
-    RemoteInferenceRequestHandler, RemoteInferenceResponseHandler
+    RemoteInferenceChunkHandler, RemoteInferenceRequestHandler,
+    RemoteInferenceResponseHandler,
 )
 from .message_handlers.transcription_handler import (
     RemoteTranscriptionRequestHandler, RemoteTranscriptionResponseHandler
@@ -392,6 +393,10 @@ class CoreService:
         # Track pending inference requests (for request-response matching)
         self._pending_inference_requests: Dict[str, asyncio.Future] = {}
 
+        # Where a REMOTE_INFERENCE_CHUNK goes: the caller's own chunk callback,
+        # keyed by the same request_id as the future above and removed with it.
+        self._pending_inference_chunks: Dict[str, Any] = {}
+
         # Track pending transcription requests (for request-response matching)
         self._pending_transcription_requests: Dict[str, asyncio.Future] = {}
 
@@ -530,6 +535,7 @@ class CoreService:
         # Remote inference (compute sharing)
         self.message_router.register_handler(RemoteInferenceRequestHandler(self))
         self.message_router.register_handler(RemoteInferenceResponseHandler(self))
+        self.message_router.register_handler(RemoteInferenceChunkHandler(self))
 
         # Remote transcription (voice transcription sharing)
         self.message_router.register_handler(RemoteTranscriptionRequestHandler(self))

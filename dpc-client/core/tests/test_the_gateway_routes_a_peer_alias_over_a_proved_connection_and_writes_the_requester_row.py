@@ -98,7 +98,7 @@ class _Connection:
 
 
 def _peer_service(tmp_path, compute=BOTH_LISTS, *, result=None, fail=None,
-                  connection_type="direct_tls", connected=True):
+                  connection_type="direct_tls", connected=True, chunks=()):
     """The OpenAI-shape stand-in, grown a P2P side: one proved peer serving two
     aliases, one connected peer that sent no menu, one menu whose peer is gone."""
     service = _service(tmp_path, compute)
@@ -116,12 +116,21 @@ def _peer_service(tmp_path, compute=BOTH_LISTS, *, result=None, fail=None,
     peer_calls = []
 
     async def request_inference_from_peer(peer_id, prompt, model=None, provider=None,
-                                          images=None, reasoning_effort=None, timeout=1200.0):
+                                          images=None, reasoning_effort=None, timeout=1200.0,
+                                          messages=None, system=None, tools=None, on_chunk=None):
         peer_calls.append({"peer_id": peer_id, "prompt": prompt, "model": model,
                            "provider": provider, "images": images,
-                           "reasoning_effort": reasoning_effort, "timeout": timeout})
+                           "reasoning_effort": reasoning_effort, "timeout": timeout,
+                           "messages": messages, "system": system, "tools": tools,
+                           "on_chunk": on_chunk})
         if fail is not None:
             raise fail
+        # A host that streams hands each delta back before it answers; the
+        # default is a host that sends no chunk at all, which is every
+        # pre-v1.7 host and the shape this route was written against.
+        if on_chunk is not None:
+            for piece in chunks:
+                await on_chunk(piece)
         return _priced_result() if result is None else result
 
     service.p2p_coordinator = types.SimpleNamespace(request_inference_from_peer=request_inference_from_peer)
@@ -390,13 +399,16 @@ async def test_the_peer_route_waits_on_no_local_card_and_needs_no_local_list(tmp
         lock.release()
 
 
-# --- (7) stream: true on a peer alias is one chunk and [DONE] ------------------------------
+# --- (7) a host that sends no chunk: one chunk and [DONE], as this route always wrote -------
 
 
 @pytest.mark.asyncio
-async def test_stream_true_on_a_peer_alias_yields_one_chunk_and_done(tmp_path):
-    """The answer arrives from the peer whole (ADR-041 M1), so the stream is
-    the whole text in one chunk: the caveat is the shape, and this pins it."""
+async def test_stream_true_against_a_host_that_sends_no_chunk_yields_one_chunk_and_done(tmp_path):
+    """Old-host compatibility. A pre-v1.7 host ignores `stream` and answers
+    whole, and the shape layer then writes the finished text as one chunk —
+    what this route did for every host before REMOTE_INFERENCE_CHUNK existed.
+    A host that does send chunks is pinned in
+    test_the_peer_route_is_no_narrower_than_the_local_one.py."""
     async with _running(tmp_path, _peer_service(tmp_path)) as (server, ledger):
         url = f"http://127.0.0.1:{server.port}/v1/chat/completions"
         async with aiohttp.ClientSession() as session:

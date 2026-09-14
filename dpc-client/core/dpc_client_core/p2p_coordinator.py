@@ -883,8 +883,24 @@ class P2PCoordinator:
     # Outgoing P2P requests (Phase C Step 5 Batch 3)
     # ─────────────────────────────────────────────────────────────
 
-    async def request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None, timeout: float = 1200.0) -> str:
-        """Request remote inference from a specific peer."""
+    async def request_inference_from_peer(
+        self, peer_id: str, prompt: str, model: str = None, provider: str = None,
+        images: list = None, reasoning_effort: str = None, timeout: float = 1200.0,
+        messages: list = None, system: Any = None, tools: list = None,
+        on_chunk: Optional[Any] = None,
+    ) -> str:
+        """Request remote inference from a specific peer.
+
+        `prompt` is required whatever else travels, and a caller that has
+        `messages` must render it from those same turns: that is what lets an
+        older host answer this request at all (DPTP §3.4).
+
+        `on_chunk` is called with each REMOTE_INFERENCE_CHUNK's delta as the
+        host makes the answer; asking for it is what sets `stream` on the wire.
+        A host that ignores the field sends no chunk and the whole answer
+        arrives in the response as before, so a caller builds its text from the
+        response, never from what it was handed here.
+        """
         import uuid
         from dpc_protocol.protocol import create_remote_inference_request
 
@@ -897,11 +913,15 @@ class P2PCoordinator:
             request_id = str(uuid.uuid4())
             response_future = asyncio.Future()
             self.service._pending_inference_requests[request_id] = response_future
+            if on_chunk is not None:
+                self.service._pending_inference_chunks[request_id] = on_chunk
 
             request_message = create_remote_inference_request(
                 request_id=request_id, prompt=prompt,
                 model=model, provider=provider, images=images,
                 reasoning_effort=reasoning_effort,
+                messages=messages, system=system, tools=tools,
+                stream=on_chunk is not None,
             )
             await self.p2p_manager.send_message_to_peer(peer_id, request_message)
 
@@ -914,6 +934,7 @@ class P2PCoordinator:
                 raise TimeoutError(f"Inference request to {peer_id} timed out after {timeout}s")
             finally:
                 self.service._pending_inference_requests.pop(request_id, None)
+                self.service._pending_inference_chunks.pop(request_id, None)
         except Exception as e:
             logger.error("Error requesting inference from %s: %s", peer_id, e, exc_info=True)
             raise

@@ -8,7 +8,9 @@ tool_use` in the Messages form, a `tool_calls` entry under `finish_reason:
 tool_calls` in the OpenAI form — and a `tool_result` / `role: tool` turn on the
 next request reaches the provider layer as the Anthropic block the providers
 already convert. `stream: true` on the local route writes each chunk the door
-hands back as it arrives; the peer route still answers whole, as before.
+hands back as it arrives; the peer route's own half of this — tools over the
+wire and a real stream — is pinned in
+test_the_peer_route_is_no_narrower_than_the_local_one.py.
 
 The internal shape is the Anthropic Messages one, because it is the only
 shape the provider layer takes un-flattened (`generate_with_tools`). The
@@ -495,11 +497,14 @@ async def test_a_door_that_fails_after_the_first_byte_ends_the_stream_with_an_er
         assert list(ledger.rows()) == [], "a call that produced no answer is not a row"
 
 
-# --- (4) the peer route: no tools on the wire, and still one chunk --------------------------------
+# --- (4) the peer route: a menu row that claims no tool path is refused off the menu ---------------
 
 
 @pytest.mark.asyncio
-async def test_tools_on_a_peer_alias_are_refused_in_each_envelope_and_reach_neither_the_peer_nor_the_ledger(tmp_path):
+async def test_tools_on_a_peer_alias_whose_menu_claims_no_tool_path_are_refused_before_the_round_trip(tmp_path):
+    """The wire carries tools now, so what is refused here is the peer's own
+    word: a menu row without `supports_tools` (DPTP §3.5) reads as no, and the
+    guest says so rather than spending a round trip the host will refuse."""
     service = _peer_service(tmp_path)
     async with _running(tmp_path, service) as (server, ledger):
         key = _key(tmp_path)
@@ -508,7 +513,7 @@ async def test_tools_on_a_peer_alias_are_refused_in_each_envelope_and_reach_neit
         assert status == 400, text
         error = _anthropic_error(text)
         assert error["type"] == "invalid_request_error"
-        assert "REMOTE_INFERENCE_REQUEST" in error["message"] and REMOTE_MODEL in error["message"]
+        assert "supports_tools" in error["message"] and "mythos" in error["message"]
 
         status, text = await _post_chat(
             server, _chat_body(REMOTE_MODEL, [{"role": "user", "content": "hi"}], tools=[OPENAI_READ_FILE]), key=key)
