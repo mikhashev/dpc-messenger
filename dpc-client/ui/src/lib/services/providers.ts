@@ -3,6 +3,7 @@
 
 import { writable } from 'svelte/store';
 import type { ProviderInfo, DefaultProvidersResponse, AIResponseWithImageEvent } from '$lib/types';
+import type { MenuRow } from '$lib/components/peerMenu';
 
 // Legacy providers list (kept for backward compat) — used with $store.property access, needs any
 export const availableProviders = writable<any>(null);
@@ -11,8 +12,14 @@ export const availableProviders = writable<any>(null);
 export const defaultProviders = writable<DefaultProvidersResponse | null>(null);
 export const providersList = writable<ProviderInfo[]>([]);
 
-// Peer node providers: node_id -> provider list
-export const peerProviders = writable<Map<string, ProviderInfo[]>>(new Map());
+// Peer node providers: node_id -> the rows that peer's PROVIDERS_RESPONSE
+// carried, stored as they arrived. `MenuRow` is the wire shape of one row
+// (DPTP §3.5) rather than `ProviderInfo`, because since `ec686608` a peer's row
+// also carries `tariff` — what this node is charged for the alias — and
+// `settings`, the dials the call will run at. The guest reads both before it
+// calls (peerMenu.ts); typing the store to the narrower shape would have made
+// that read look like an accident.
+export const peerProviders = writable<Map<string, MenuRow[]>>(new Map());
 
 // AI vision response
 export const aiResponseWithImage = writable<AIResponseWithImageEvent | null>(null);

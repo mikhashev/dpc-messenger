@@ -180,6 +180,36 @@ Edit `~/.dpc/privacy_rules.json` to enable inference sharing:
    - Press Enter or click "Send"
    - Query runs on selected peer's hardware
 
+### What a guest sees before it calls
+
+A peer's menu row (`PROVIDERS_RESPONSE`, [DPTP §3.5](../specs/dptp_v1.md)) carries the
+host's `tariff` and `settings` beside the capabilities, and the Text dropdown shows them
+for a `remote:` alias: one summary line — `<alias> · <price> · ctx <n> · effort <default>`
+— that opens into a panel. Both fields are read fail-closed, the way the wire writes them.
+
+**The price has three states, and the first two are not the same thing:**
+
+| On the row | The guest reads | Why |
+|---|---|---|
+| no `tariff` key | "no price declared (a gift)" | The host declared nothing. The word *free* is never used here — it would report a decision the host never made |
+| `free: true`, or rates of `0` | "free for you" | A declared zero is a price somebody chose, for this recipient (`free_nodes` / `free_groups`) |
+| rates > 0 | "₽20 / ₽60 per 1M tokens in / out, from 2026-09-01" | The rate the receipt will carry, formatted for the reader's locale from the ISO 4217 code — a code `Intl` refuses is printed as the bare code, never as a guessed symbol |
+
+A `unit` other than `per_1m_tokens` is shown as raw numbers and priced at nothing: §3.5
+says a receiver that does not know the word must not price the row, and this one does not
+guess a scale.
+
+**The settings block** is titled "Runs at the host's settings" and lists `temperature`,
+`top_p`, `top_k`, `max_output_tokens`, `variant`, then `context_window` and
+`reasoning_default`. A key the host did not state reads **"not stated by the host"** —
+never "default" or "none", because a vendor default the host never chose still applies at
+the vendor. The host's settings are what the guest gets; the one dial the guest owns is
+the header's Reasoning control, under the host's own cap.
+
+The reading itself is `dpc-client/ui/src/lib/components/peerMenu.ts` (`priceLine`,
+`settingsLines`, `menuSummary`), with no DOM in it, and the panel is in
+`ProviderSelector.svelte`.
+
 ### From Python API
 
 ```python
