@@ -98,7 +98,7 @@ class _Connection:
 
 
 def _peer_service(tmp_path, compute=BOTH_LISTS, *, result=None, fail=None,
-                  connection_type="direct_tls", connected=True, chunks=()):
+                  connection_type="direct_tls", connected=True, chunks=(), echoes=True):
     """The OpenAI-shape stand-in, grown a P2P side: one proved peer serving two
     aliases, one connected peer that sent no menu, one menu whose peer is gone."""
     service = _service(tmp_path, compute)
@@ -117,12 +117,13 @@ def _peer_service(tmp_path, compute=BOTH_LISTS, *, result=None, fail=None,
 
     async def request_inference_from_peer(peer_id, prompt, model=None, provider=None,
                                           images=None, reasoning_effort=None, timeout=1200.0,
-                                          messages=None, system=None, tools=None, on_chunk=None):
+                                          messages=None, system=None, tools=None, on_chunk=None,
+                                          request_id=None):
         peer_calls.append({"peer_id": peer_id, "prompt": prompt, "model": model,
                            "provider": provider, "images": images,
                            "reasoning_effort": reasoning_effort, "timeout": timeout,
                            "messages": messages, "system": system, "tools": tools,
-                           "on_chunk": on_chunk})
+                           "on_chunk": on_chunk, "request_id": request_id})
         if fail is not None:
             raise fail
         # A host that streams hands each delta back before it answers; the
@@ -131,7 +132,11 @@ def _peer_service(tmp_path, compute=BOTH_LISTS, *, result=None, fail=None,
         if on_chunk is not None:
             for piece in chunks:
                 await on_chunk(piece)
-        return _priced_result() if result is None else result
+        answer = _priced_result() if result is None else result
+        # The answer echoes the id it was sent (DPTP §3.4); where the caller
+        # minted none, the id the coordinator minted comes back instead, and
+        # `echoes=False` is the host that names something else entirely.
+        return dict(answer, request_id=request_id) if request_id and echoes else answer
 
     service.p2p_coordinator = types.SimpleNamespace(request_inference_from_peer=request_inference_from_peer)
     service.peer_calls = peer_calls
@@ -421,7 +426,10 @@ async def test_stream_true_against_a_host_that_sends_no_chunk_yields_one_chunk_a
         assert len(events) == 2 and events[1] == "[DONE]"
         chunk = json.loads(events[0])
         assert chunk["object"] == "chat.completion.chunk" and chunk["model"] == REMOTE_MODEL
-        assert chunk["id"] == "chatcmpl-" + WIRE_ID
+        # The id the door minted before the call, which went on the wire and
+        # onto the row; one id per response is pinned in
+        # test_a_streamed_call_carries_one_request_id.py.
+        assert chunk["id"] == "chatcmpl-" + _rows(ledger)[0]["request_id"]
         assert chunk["choices"] == [{"index": 0, "finish_reason": "stop",
                                      "delta": {"role": "assistant", "content": PEER_ANSWER}}]
         assert len(_rows(ledger)) == 1

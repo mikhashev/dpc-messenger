@@ -294,7 +294,10 @@ Requests the peer to execute an AI inference query using their local compute res
 ```
 
 **Fields:**
-- `request_id` (string, required): UUID for request/response correlation
+- `request_id` (string, required): UUID for request/response correlation. The requester
+  mints it, or passes on the id a door in front of the wire has already shown its own
+  client — the gateway's peer route does that, so the id an HTTP client reads on its
+  first streamed event is the id both nodes' usage rows are joined on
 - `prompt` (string, required): AI query text
 - `model` (string, optional): Specific model to use
 - `provider` (string, optional): AI provider (ollama, openai, anthropic)
@@ -2442,6 +2445,11 @@ DPTP is designed to be extensible. New commands can be added by:
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `tool_calls` (Anthropic
   `tool_use` blocks) and `finish_reason` (the providers' own `stop`, `length`,
   `tool_calls`). Absent from a host that ran no tools or reported no stop word
+- **§3.4 REMOTE_INFERENCE_REQUEST `request_id`** — says who mints it: the
+  requester, or a door in front of the wire that has already named the call to
+  its own client. No wire change; it is what lets a streamed answer carry one
+  id from its first chunk to the usage rows of both nodes. Added 2026-09-14
+  while v1.7 is unreleased
 - **§3.5 PROVIDERS_RESPONSE** — optional `supports_tools` beside
   `supports_vision`: whether the alias's provider has a native tool-calling
   path. Absent reads as false; the host's wire refusal stays the gate

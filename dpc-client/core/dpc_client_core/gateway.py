@@ -391,7 +391,8 @@ class Gateway:
         remote = parse_remote_name(alias)
         if remote is not None:
             return await self._complete_via_peer(
-                alias, *remote, prompt, messages=messages, system=system, tools=tools,
+                alias, *remote, prompt, request_id=request_id,
+                messages=messages, system=system, tools=tools,
                 images=images, reasoning_effort=reasoning_effort,
                 effort_field=effort_field, on_chunk=on_chunk,
             )
@@ -641,6 +642,7 @@ class Gateway:
         remote_alias: str,
         prompt: str,
         *,
+        request_id: Optional[str] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
         system: Any = "",
         tools: Optional[List[Dict[str, Any]]] = None,
@@ -734,7 +736,7 @@ class Gateway:
                 peer_id, prompt, provider=remote_alias, images=images or None,
                 reasoning_effort=reasoning_effort, timeout=timeout,
                 messages=messages or None, system=system or None, tools=tools or None,
-                on_chunk=on_chunk,
+                on_chunk=on_chunk, request_id=request_id,
             )
         except ConnectionError as e:
             raise GatewayError(503, f"peer {peer_id} is not connected: {e}", "peer_unavailable")
@@ -786,8 +788,16 @@ class Gateway:
         tariff = {name: result.get(name) for name in TARIFF_FIELDS}
         if any(tariff[name] is None for name in TARIFF_FIELDS[:4]):
             tariff = {}
-        # The wire id, never one minted here: the host's row joins this one on it.
-        request_id = result.get("request_id") or ""
+        # The id that went on the wire: the door's where a door minted one, for
+        # its client has already seen that id on the first chunk, and the
+        # coordinator's otherwise. The host's row joins this one on it.
+        echoed = result.get("request_id") or ""
+        if request_id and echoed and echoed != request_id:
+            logger.warning(
+                "Peer %s answered request %s under id %s; the row keeps the id that was sent",
+                peer_id, request_id, echoed,
+            )
+        request_id = request_id or echoed
         try:
             row = usage_row(
                 request_id=request_id,
@@ -1553,7 +1563,10 @@ class GatewayServer:
         calls, the stop word and the usage, then `[DONE]`. Where no chunk came
         before the answer — an image, or a host that sends none — the text and
         the stop word share one chunk, as this route wrote before; a call is
-        one chunk, since the door hands it back parsed."""
+        one chunk, since the door hands it back parsed. Every event carries the
+        id minted here, which is also the id the call runs under on either
+        route — the shape's contract is one id per response, and the ledger
+        rows of both nodes join the client on it."""
         request_id = str(uuid.uuid4())
         created = int(time.time())
         stream = _EventStream(request)
@@ -1586,8 +1599,6 @@ class GatewayServer:
             await stream.write(b"data: [DONE]\n\n")
             return await stream.close()
 
-        # The wire id on the peer route; on the local route the id minted above.
-        request_id = completion.request_id
         finish_reason = _openai_finish_reason(completion)
         inline_usage = None if include_usage else _usage(completion)
         finished = False
@@ -1649,7 +1660,9 @@ class GatewayServer:
         block per call with its whole input in one `input_json_delta` (the door
         hands the call back parsed), `message_delta` with the counts, `message_stop`.
         A head written before the door has counted says `input_tokens: 0`; the
-        cumulative usage on `message_delta` carries the count. Thinking is not streamed."""
+        cumulative usage on `message_delta` carries the count. Thinking is not
+        streamed. `message_start` carries the id minted here whether it leaves
+        before the answer or after it, and that is the id the call runs under."""
         minted = str(uuid.uuid4())
         stream = _EventStream(request)
         text_block_open = False
@@ -1680,7 +1693,8 @@ class GatewayServer:
 
         index = 0
         if not stream.opened:
-            await stream.write(_sse_event(_message_start(completion)))
+            await stream.write(_sse_event(
+                _message_head(minted, alias, input_tokens=completion.prompt_tokens or 0)))
             if completion.text or not completion.tool_calls:
                 # A text block even when empty, as the non-stream shape has one.
                 await stream.write(_sse_event(_content_block_start(0)))
@@ -1784,10 +1798,6 @@ def _message_head(request_id: str, alias: str, *, input_tokens: int) -> Dict[str
         "content": [], "stop_reason": None, "stop_sequence": None,
         "usage": {"input_tokens": input_tokens, "output_tokens": 0},
     }}
-
-
-def _message_start(completion: Completion) -> Dict[str, Any]:
-    return _message_head(completion.request_id, completion.alias, input_tokens=completion.prompt_tokens or 0)
 
 
 def _content_block_start(index: int) -> Dict[str, Any]:

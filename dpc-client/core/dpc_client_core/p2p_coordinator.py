@@ -887,7 +887,7 @@ class P2PCoordinator:
         self, peer_id: str, prompt: str, model: str = None, provider: str = None,
         images: list = None, reasoning_effort: str = None, timeout: float = 1200.0,
         messages: list = None, system: Any = None, tools: list = None,
-        on_chunk: Optional[Any] = None,
+        on_chunk: Optional[Any] = None, request_id: Optional[str] = None,
     ) -> str:
         """Request remote inference from a specific peer.
 
@@ -900,6 +900,10 @@ class P2PCoordinator:
         A host that ignores the field sends no chunk and the whole answer
         arrives in the response as before, so a caller builds its text from the
         response, never from what it was handed here.
+
+        `request_id` is minted here only when the caller supplies none: a door
+        that has already shown an id to its own client passes it in, and the
+        frame, the future, the chunk registry and both rows carry that one.
         """
         import uuid
         from dpc_protocol.protocol import create_remote_inference_request
@@ -910,7 +914,7 @@ class P2PCoordinator:
             raise ConnectionError(f"Peer {peer_id} is not connected")
 
         try:
-            request_id = str(uuid.uuid4())
+            request_id = request_id or str(uuid.uuid4())
             response_future = asyncio.Future()
             self.service._pending_inference_requests[request_id] = response_future
             if on_chunk is not None:
