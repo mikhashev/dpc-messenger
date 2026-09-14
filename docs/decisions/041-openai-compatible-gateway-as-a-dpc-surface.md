@@ -432,6 +432,40 @@ carries the wire's output count, exclusive until it is fixed there. The fifth
 question, the artifact hash in the receipt, is answered as well: not in v1
 (Mike's call, 2026-09-13); it returns as a v2 question beside the balance.)*
 
+*(**Amendment, 2026-09-14 — a consumed row names the host that served it, and
+the ledger reads itself by role.** Mike's ask of 2026-09-14 for usage
+statistics by role. The row gains one optional column, `served_by`: the node id
+of the host on a `route=peer` row, written beside the tariff group because the
+two answer one question together — what this call was charged and by whom.
+Until now a guest's row named the alias and nothing naming the host, so «what I
+owe and to whom» could not be read off the ledger at all: an alias is the name
+one host answers to, and two peers both serving `ollama_local` folded into one
+line. It is optional and written only when given, like `task_id`: on a row this
+node ran itself there is no other node to name, and a null there would read as
+«served by nobody» rather than «served here». `alias` is unchanged — the name
+the host was asked for. Both writers of a consumed row now write it: the
+agent's peer route (`dpc_agent/llm_adapter.py`) and the gateway's
+(`gateway.py` `_complete_via_peer`). Nothing on the wire changes — the guest
+already knows which peer it called.
+
+The reader is `node_ledger.usage_by_role`, reached from the UI as
+`CoreService.get_inference_usage` (optional `since` / `until`, and `month` as
+`YYYY-MM` to read one partition). It folds the same rows three ways and never
+into one table with a role column — Mike's call: three separate lists.
+`served` is what this node ran for peers (`route=local`, `caller_kind=peer`),
+by the peer that asked and by the alias that answered; `consumed` is what peers
+ran for this node (`route=peer`), keyed by `consumed_key` as
+`remote:<served_by>:<alias>` and by the bare alias on a row written before the
+column, each group echoing `node_id` and `alias` so no reader parses the key
+back apart; `own` is this node's own calls on its own key. The money is per
+side: `cost_usd` sums only where this node ran the call, and `tariff_amount`
+sums per `tariff_currency`, because two currencies do not add. The two states
+that are not an amount are counted and never summed as zero — `untariffed` is a
+call with no tariff declared (the v1 gift), `tariff_unpriceable` is a tariff
+applied over counts nobody could price — and `unpriced` does the same for a
+null `cost_usd`. The tab reads the current month by default, one partition per
+request.)*
+
 ### D4 — Shipping order, and the colleague is served at step 4
 
 Replaces the earlier «narrow first version», which GLM showed contradicted

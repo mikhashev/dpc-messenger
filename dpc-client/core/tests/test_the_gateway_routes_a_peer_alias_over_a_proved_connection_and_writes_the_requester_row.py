@@ -28,7 +28,7 @@ import types
 import aiohttp
 import pytest
 
-from dpc_client_core.node_ledger import NodeLedger
+from dpc_client_core.node_ledger import NodeLedger, consumed_key, usage_by_role
 from tests.test_the_gateway_serves_only_the_two_lists_on_loopback import (
     BOTH_LISTS,
     LOCAL,
@@ -151,6 +151,10 @@ def _assert_requester_row(row, *, billing, cost_usd=None):
     assert (row["caller"], row["caller_kind"], row["route"]) == (NODE_ID, "gateway", "peer")
     assert row["request_id"] == WIRE_ID, "the wire id, never one minted here"
     assert (row["alias"], row["model"]) == (REMOTE_ALIAS, HOST_MODEL)
+    # The alias is the name the host answers to; the host is named beside it,
+    # or the row says what was consumed and not from whom (D3, amendment
+    # 2026-09-14).
+    assert row["served_by"] == PEER
     assert (row["prompt_tokens"], row["completion_tokens"], row["thinking_tokens"]) == (20, 10, None)
     assert row["counts_source"] == "engine"
     assert row["billing"] == billing
@@ -445,3 +449,51 @@ async def test_stream_true_against_a_host_that_sends_no_chunk_yields_one_chunk_a
         assert events[2][1]["delta"] == {"type": "text_delta", "text": PEER_ANSWER}
         assert events[0][1]["message"]["model"] == REMOTE_MODEL
         assert len(_rows(ledger)) == 2
+
+
+# --- (8) the guest's row names the host it was served by -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_peer_row_names_the_host_and_a_local_row_names_nobody(tmp_path):
+    """`served_by` is written on the consumed row and on no other.
+
+    A guest's row named the alias and nothing naming the host, so «what I owe
+    and to whom» could not be read off the ledger: two peers serving
+    `ollama_local` folded into one line, and the money had no counterparty. On
+    a row this node ran itself there is no other node to name, so the column is
+    absent rather than null — a null there would read as «served by nobody»
+    instead of «served here» (ADR-041 D3, amendment 2026-09-14)."""
+    service = _peer_service(tmp_path)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _request(server, "POST", "/v1/chat/completions",
+                                      key=_key(tmp_path), body=_chat(REMOTE_MODEL))
+        assert status == 200, text
+        status, text = await _request(server, "POST", "/v1/chat/completions",
+                                      key=_key(tmp_path), body=_chat(LOCAL))
+        assert status == 200, text
+
+        consumed, own = _rows(ledger)
+        assert (consumed["route"], consumed["served_by"]) == ("peer", PEER)
+        assert own["route"] == "local"
+        assert "served_by" not in own, "this node ran it; there is no other node to name"
+
+
+@pytest.mark.asyncio
+async def test_the_reader_keys_the_gateways_peer_row_by_host_and_alias(tmp_path):
+    """What the column is for: `consumed_key` gives the row to the statistics
+    reader as `remote:<peer>:<alias>`, and the consumed series echoes the host
+    and the alias so no reader parses the key back apart."""
+    service = _peer_service(tmp_path)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _request(server, "POST", "/v1/chat/completions",
+                                      key=_key(tmp_path), body=_chat(REMOTE_MODEL))
+        assert status == 200, text
+        (row,) = _rows(ledger)
+
+    key = f"remote:{PEER}:{REMOTE_ALIAS}"
+    assert consumed_key(row) == key
+    by_role = usage_by_role(iter([row]))
+    group = by_role["consumed"]["by_source"][key]
+    assert (group["node_id"], group["alias"]) == (PEER, REMOTE_ALIAS)
+    assert by_role["served"]["by_caller"] == {} and by_role["own"]["by_alias"] == {}

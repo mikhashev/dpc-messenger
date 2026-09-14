@@ -845,6 +845,11 @@ class Gateway:
                 ),
                 # The host's word after its clamp, copied from the wire.
                 served_effort=result.get("served_effort"),
+                # Whose card ran it: the alias alone names no host, and two
+                # peers serving `ollama_local` would read as one line. With it
+                # the reader keys this row `remote:<peer>:<alias>` and can say
+                # what is owed and to whom (D3, amendment 2026-09-14).
+                served_by=peer_id,
                 # The connection this call was gated on above, not one read
                 # again here: a peer that dropped mid-call does not unprove the
                 # call that was made.
