@@ -226,6 +226,9 @@ async def test_generate_with_tools_maps_response_to_contract():
         "prompt_cache_hit_tokens": 0,
         "prompt_cache_miss_tokens": 100,
         "output_includes_thinking": "unknown",
+        # Thinking is on and no rung was named, by the call or by the alias:
+        # the vendor's own default ran, and no word describes it.
+        "served_effort": None,
     }
     assert len(result["tool_calls_raw"]) == 1
     tc = result["tool_calls_raw"][0]

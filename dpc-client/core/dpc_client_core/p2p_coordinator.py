@@ -564,10 +564,14 @@ class P2PCoordinator:
             logger.info("Inference completed successfully for %s", peer_id)
 
             actual_model = result.get("model", model)
+            # What the door decided to serve is a claim about the alias; what
+            # the provider reports is the rung its entry point ran. The guest
+            # and both rows get the second where there is one.
+            ran_effort = result.get("provider_served_effort") or served_effort
             billing, tariff, tariff_amount = self._record_peer_call(
                 peer_id=peer_id, request_id=request_id, serving_alias=serving_alias,
                 result=result, model=actual_model, started_at=started_at,
-                duration_s=duration_s, served_effort=served_effort,
+                duration_s=duration_s, served_effort=ran_effort,
             )
             # The usage row above is the record of this call (ADR-041 D3): a
             # peer's request belongs to no agent, so no events.jsonl carries it,
@@ -583,7 +587,7 @@ class P2PCoordinator:
             logger.info(
                 "Peer inference served: peer=%s alias=%s model=%s effort=%s "
                 "prompt_tokens_est=%s response_tokens_est=%s",
-                peer_id, serving_alias, actual_model, served_effort or "unnamed",
+                peer_id, serving_alias, actual_model, ran_effort or "unnamed",
                 result.get("prompt_tokens"), result.get("response_tokens"),
             )
             success_response = create_remote_inference_response(
@@ -606,7 +610,7 @@ class P2PCoordinator:
                 output_includes_thinking=result.get("output_includes_thinking"),
                 # The rung this call ran on, asked for or not: the guest's only
                 # way to check the depth it paid for against the depth it asked for.
-                served_effort=served_effort,
+                served_effort=ran_effort,
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)

@@ -198,6 +198,17 @@ class DeepSeekProvider(AIProvider):
             return REASONING_OFF if self._normalize_effort(requested) == REASONING_OFF else "alias-off"
         return extra_body.get("reasoning_effort", "server-default")
 
+    def _served_effort(self, extra_body: Dict[str, Any]) -> Optional[str]:
+        """The rung this call ran on, read out of the body that was sent.
+
+        The label above keeps `off` and `alias-off` apart for a person reading
+        the burn history; a usage row wants the rung, and both of those are
+        `off`. None is «the vendor's own default ran», which is not `off`.
+        """
+        if extra_body.get("thinking", {}).get("type") == "disabled":
+            return REASONING_OFF
+        return extra_body.get("reasoning_effort")
+
     def _record_usage(
         self,
         raw_usage: Any,
@@ -206,6 +217,7 @@ class DeepSeekProvider(AIProvider):
         conversation_id: Optional[str] = None,
         tool_calls: int = 0,
         effort: Any = "server-default",
+        served_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Keep the accounting and write the one line the burn history is made of.
 
@@ -216,6 +228,8 @@ class DeepSeekProvider(AIProvider):
         usage = self._usage_from_response(raw_usage) if raw_usage is not None else None
         if usage is None:
             return {}
+        # The rung, for whoever writes the row: the label below is prose.
+        usage["served_effort"] = served_effort
         self._last_usage = usage
         logger.info(
             "DeepSeek usage: alias=%s conv=%s prompt=%d (hit=%d/miss=%d), "
@@ -398,6 +412,7 @@ class DeepSeekProvider(AIProvider):
                 path="plain",
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
+                served_effort=self._served_effort(extra_body),
             )
             return msg.content or ""
 
@@ -451,6 +466,7 @@ class DeepSeekProvider(AIProvider):
                         path="plain-stream",
                         conversation_id=conversation_id,
                         effort=self._effort_label(None, extra_body),
+                        served_effort=self._served_effort(extra_body),
                     )
                 if not chunk.choices:
                     continue
@@ -684,6 +700,7 @@ class DeepSeekProvider(AIProvider):
                 conversation_id=conversation_id,
                 tool_calls=len(tool_calls_raw),
                 effort=self._effort_label(reasoning_effort, extra_body),
+                served_effort=self._served_effort(extra_body),
             )
             return {
                 "content": content,

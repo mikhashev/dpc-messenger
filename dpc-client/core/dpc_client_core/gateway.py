@@ -514,16 +514,21 @@ class Gateway:
             "reasoning_effort_unsupported",
         )
 
-    def _served_effort(self, alias: str, door_word: Optional[str]) -> Optional[str]:
+    def _served_effort(self, alias: str, result: Dict[str, Any]) -> Optional[str]:
         """The word the local row names: the rung the call actually ran on.
 
-        The door reports what it passed — a word of the alias's own vocabulary,
-        or of the shared scale where it has none — and the alias may still run
-        that on a rung of another name, which is what the row wants. Where the
-        caller asked for nothing, `effective_reasoning_default` answers, the same
-        helper the alias's menu row quotes and the peer door serves, so all three
-        name one rung. None is «not knowable here», never `off`.
+        The provider's own word first, because it is the only one read off the
+        body that was sent. A provider with no effort channel reports none, and
+        then the door answers as before: the word it passed, resolved onto the
+        alias's ladder, or `effective_reasoning_default` where the caller asked
+        for nothing — the same helper the alias's menu row quotes and the peer
+        door serves, so all three name one rung. None is «not knowable here»,
+        never `off`.
         """
+        reported = result.get("provider_served_effort")
+        if reported:
+            return reported
+        door_word = result.get("served_effort")
         provider = (getattr(self._core.llm_manager, "providers", None) or {}).get(alias)
         if provider is None:
             return door_word
@@ -597,7 +602,7 @@ class Gateway:
                 output_includes_thinking=result.get("output_includes_thinking", "unknown"),
                 # The rung this call ran on, not the word that asked for it;
                 # no peer is in this row to prove.
-                served_effort=self._served_effort(alias, result.get("served_effort")),
+                served_effort=self._served_effort(alias, result),
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,

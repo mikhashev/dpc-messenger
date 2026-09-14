@@ -366,7 +366,7 @@ Returns the result of a remote inference request.
 - `tariff_at` (string, optional, v1.7+): The `from` day (`YYYY-MM-DD`) of the dated tariff entry that applied, so a row can name which line of the declaration priced it.
 - `tariff_amount` (number, optional, v1.7+): What the tariff came to on this call's own counts, in `tariff_currency`, computed by the host at the moment of the call and never re-derived. Rides only with the group above. Absent beside a present group means the call could not be priced — `output_includes_thinking` is `unknown`, so nothing may be billed from the counts — and is not the same as `0`, which is a price.
 - `billing` (string, optional, v1.7+): The billing model the host priced the call under, `pay_per_use` or `subscription`, so the requester's own usage row copies the host's answer instead of guessing one from the model's name. Absent when the host did not say. Never sent on an error.
-- `served_effort` (string, optional, v1.7+): The reasoning effort the host actually ran the call at — the guest's word clamped to the host's cap where one was asked for, and otherwise the word the host's own configuration runs that alias at. This is the guest's only way to check the depth it paid for against the depth it asked for; the host's usage row and the guest's carry the same word under the same `request_id`. Present on every served call the host can name a rung for, whether or not the guest asked; absent means no word describes the call — the alias has no effort channel, or its host could not read its own configured word — and is not the same as `off`. Never sent on an error.
+- `served_effort` (string, optional, v1.7+): The reasoning effort the host actually ran the call at — the rung its provider reports having sent, where the provider reports one, and otherwise the guest's word clamped to the host's cap, or the word the host's own configuration runs that alias at. The provider's word wins because an entry point may run a rung the configuration does not name. This is the guest's only way to check the depth it paid for against the depth it asked for; the host's usage row and the guest's carry the same word under the same `request_id`. Present on every served call the host can name a rung for, whether or not the guest asked; absent means no word describes the call — the alias has no effort channel, or its host could not read its own configured word — and is not the same as `off`. Never sent on an error.
 
 What the call cost the *host* is not on the wire. A `cost_usd` field was added here on 2026-09-10 and removed on 2026-09-14, while v1.7 is unreleased: the host's own cost is the host's economy and stays in the host's ledger, and what the guest is asked for is the tariff above (ADR-041 D3, amendment). A requester's usage row therefore carries `cost_usd = null` — it spent nothing of its own — and the tariff fields copied from this message.
 
@@ -2448,6 +2448,11 @@ DPTP is designed to be extensible. New commands can be added by:
   instead of being served at the model's default. The request may also carry
   one of the alias's own words, which its menu row advertises. Changed
   2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — `served_effort` is the rung the host's
+  provider reports having sent, where it reports one, and only otherwise the word
+  the door derived from the request or the configuration. The two disagreed on
+  2026-09-14: a vision call on an alias configured `low` ran with thinking off and
+  both nodes' rows said `low`. Changed 2026-09-14 while v1.7 is unreleased
 - **§3.5 PROVIDERS_RESPONSE** — `reasoning_default` is the effort the host serves
   when none is sent, not the one its model's template names: the configured word
   resolved onto the alias's ladder where one is configured. The two were separate

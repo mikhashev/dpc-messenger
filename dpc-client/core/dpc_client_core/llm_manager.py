@@ -188,6 +188,22 @@ def accepts_reasoning_effort(entry_point: Any) -> bool:
     return "reasoning_effort" in parameters
 
 
+def reported_served_effort(provider: Any) -> Optional[str]:
+    """The rung the provider says its last call ran on, or None.
+
+    The provider is the only party that knows: a door derives the word from
+    what it passed or from the alias's configuration, and an entry point may
+    run another rung — llama-server's vision path runs with thinking off where
+    no rung was named, whatever the alias configures for its text turns.
+
+    None is «no word came back», which is every provider with no effort channel
+    and every call whose usage the vendor did not report. The door's own
+    derivation stands there, unchanged.
+    """
+    word = (provider.get_last_usage() or {}).get("served_effort")
+    return word if isinstance(word, str) and word else None
+
+
 def _tool_use_block(call: Any) -> Dict[str, Any]:
     """One returned tool call as an Anthropic `tool_use` block. Providers hand
     these back as `SimpleNamespace(id, name, input)`; a mapping is read too."""
@@ -781,6 +797,9 @@ class LLMManager:
                 # which is not `off`. What the provider's own configuration
                 # then does is the provider's, and is not claimed here.
                 "served_effort": normalize_reasoning_effort(kwargs.get("reasoning_effort")),
+                # ... and the rung the provider says it ran on, which is the
+                # word a usage row wants and the only one that cannot be wrong.
+                "provider_served_effort": reported_served_effort(provider),
             }
         return response
 
@@ -921,6 +940,7 @@ class LLMManager:
                 # copies must move together. None is «no effort control was
                 # applied», which is not `off`.
                 "served_effort": normalize_reasoning_effort(reasoning_effort),
+                "provider_served_effort": reported_served_effort(provider),
                 # ... and what the provider was given, did, and stopped on.
                 "streamed": streamed,
                 "flattened": flattened,

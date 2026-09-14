@@ -32,7 +32,7 @@ from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, REASONING_OFF, image_base64
+from .base import AIProvider, REASONING_OFF, declared_reasoning_words, image_base64
 from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
@@ -421,6 +421,28 @@ class LlamaServerProvider(DeepSeekProvider):
             return REASONING_OFF
         return kwargs.get("reasoning_effort", "server-default")
 
+    def _served_effort(self, extra_body: Dict[str, Any]) -> Optional[str]:
+        """The rung this call ran on, read out of the body that was sent.
+
+        Not `_effort_label` beside it, which is written for a person reading the
+        burn history and says `server-default` where nobody asked — a word of no
+        ladder. This one is written for the usage row: a word this model's
+        template accepts, `off`, or None where no word describes the call.
+
+        The body and the request differ, which is why this reads the body: a
+        door deriving the word from the alias's configuration names a rung the
+        entry point did not run.
+        """
+        kwargs = extra_body.get("chat_template_kwargs", {})
+        if kwargs.get("enable_thinking") is False:
+            return REASONING_OFF
+        word = kwargs.get("reasoning_effort")
+        if word:
+            return word
+        # The template's own default ran. Named only where it was read from the
+        # model: a fallback table must not reach a row wearing the model's name.
+        return declared_reasoning_words(self)[1]
+
     def _sampling_params(
         self,
         temperature_override: Optional[float] = None,
@@ -539,6 +561,7 @@ class LlamaServerProvider(DeepSeekProvider):
         conversation_id: Optional[str] = None,
         tool_calls: int = 0,
         effort: Any = "server-default",
+        served_effort: Optional[str] = None,
         reasoning_text: Optional[str] = None,
         elapsed_s: Optional[float] = None,
         t_first_chunk_s: Optional[float] = None,
@@ -575,6 +598,8 @@ class LlamaServerProvider(DeepSeekProvider):
         # above depends on it): a missing split is not a missing convention.
         if usage.get("output_includes_thinking") == "unknown":
             usage["output_includes_thinking"] = "includes"
+        # The rung, for whoever writes the row: the label below is prose.
+        usage["served_effort"] = served_effort
         # Why the caller gets to see it: `length` is the only signal that
         # separates "the model was cut at the ceiling" from "the model
         # finished on its own", and the two need opposite repairs. It sits on
@@ -727,6 +752,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 path="plain",
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
+                served_effort=self._served_effort(extra_body),
                 reasoning_text=self._last_thinking,
                 elapsed_s=_time.perf_counter() - _t0,
                 finish_reason=getattr(_choice, "finish_reason", None),
@@ -800,6 +826,7 @@ class LlamaServerProvider(DeepSeekProvider):
                             path="plain-stream",
                             conversation_id=conversation_id,
                             effort=self._effort_label(None, extra_body),
+                            served_effort=self._served_effort(extra_body),
                             # The local accumulator, not self._last_thinking:
                             # usage arrives on the terminal chunk, before the
                             # post-loop assignment — the field is still None
@@ -920,6 +947,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 conversation_id=conversation_id,
                 tool_calls=len(tool_calls_raw),
                 effort=self._effort_label(reasoning_effort, extra_body),
+                served_effort=self._served_effort(extra_body),
                 reasoning_text=self._last_thinking,
                 elapsed_s=_time.perf_counter() - _t0,
                 finish_reason=getattr(_choice, "finish_reason", None),
@@ -948,9 +976,10 @@ class LlamaServerProvider(DeepSeekProvider):
         blocks on the same OpenAI-compatible call, the projector comes from
         the alias's mmproj (--mmproj on the child). Probed 2026-08-19: a
         screenshot read accurately at full 262 144 with q4_0 KV; the first
-        probe run also showed why thinking stays off unless asked — the
-        template's own default (xhigh) spent a whole 300-token window
-        thinking and answered nothing."""
+        probe run also showed why the template's own default (xhigh) is not
+        let onto this path — it spent a whole 300-token window thinking and
+        answered nothing. A rung the caller or the alias names is served, and
+        `get_last_usage()['served_effort']` is the one that ran."""
         self._last_thinking = None
         self._last_usage = None
 
@@ -976,14 +1005,13 @@ class LlamaServerProvider(DeepSeekProvider):
             _t0 = _time.perf_counter()  # after ensure: cold start stays out of the number
             effort = kwargs.get("reasoning_effort")
             per_call_budget = kwargs.get("reasoning_budget_tokens")
-            if effort is None and per_call_budget is None:
+            if effort is None and per_call_budget is None and not self._reasoning_effort_raw:
                 # A background read, not a reasoning task: thinking off when
-                # the caller didn't ask. The ALIAS budget is deliberately not
-                # consulted here — it caps thinking for text turns, and
-                # letting it fill extra_body would silently re-enable xhigh
-                # thinking on every image (the alias carries 10000, so the
-                # "empty body" form of this default never fired on production
-                # — caught at review, 2026-08-20).
+                # neither the caller nor the alias asked for a rung. What stays
+                # out is the TEMPLATE's default (`xhigh` here) and the alias
+                # budget that would carry it — thinking a whole 8192 window away
+                # on every image. A word the alias names is the owner's own
+                # choice and is served, on this path as on the others.
                 extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
             else:
                 extra_body = self._build_extra_body(
@@ -1007,6 +1035,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 path="vision",
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(effort, extra_body),
+                served_effort=self._served_effort(extra_body),
                 reasoning_text=self._last_thinking,
                 elapsed_s=_time.perf_counter() - _t0,
                 finish_reason=getattr(_choice, "finish_reason", None),
