@@ -20,13 +20,15 @@ export interface TariffEntry {
 }
 
 /** `compute` as firewall.py reads it (`_parse_compute_settings`, :231-305).
- *  Keys the tab never touches (`allowed_models`, `_comment`, the `_…`
- *  explanations) travel through untouched. */
+ *  Keys the tab never touches (`_comment`, the `_…` explanations) travel
+ *  through untouched. */
 export interface ComputeRules {
   _comment?: string;
   enabled: boolean;
   allow_nodes: string[];
   allow_groups: string[];
+  /** A filter on what a caller may ask for; **empty accepts every model**
+   *  (firewall.py :1928-1938, :2016-2020), the opposite of the serving lists. */
   allowed_models: string[];
   /** Deprecated single form; folded into `serving_local` (firewall.py :248-256). */
   serving_alias?: string | null;
@@ -232,6 +234,49 @@ export function setVendorQuota(compute: ComputeRules, alias: string, usdPerDay: 
   if (usdPerDay === null || Number.isNaN(usdPerDay)) delete quotas[alias];
   else quotas[alias] = usdPerDay;
   return { ...compute, vendor_quotas: quotas };
+}
+
+// --- Which models the door accepts -----------------------------------------
+
+/** A model joins `compute.allowed_models`, the door's model filter. The list
+ *  is read at firewall.py :256 and applied in `can_request_inference`
+ *  (:1928-1938) and `get_available_models_for_peer` (:2016-2020) — both skip
+ *  the check when the list is empty, so **an empty list accepts every model**,
+ *  the opposite of the serving lists, where empty serves nobody. The validator
+ *  asks only that it be a list (:2216), so a free-typed id is as good as a
+ *  picked one: a peer may name a model this node has not configured yet, and
+ *  the fossils of a provider since removed stay listed until someone removes
+ *  them. Pasting follows `splitCallerIds` — the same paste rule the caller
+ *  lists take. */
+export function addAllowedModel(compute: ComputeRules, text: string): ComputeRules {
+  const current = cleanList(compute.allowed_models);
+  const joining = splitCallerIds(text).filter((model) => !current.includes(model));
+  if (joining.length === 0) return compute;
+  return { ...compute, allowed_models: [...current, ...joining] };
+}
+
+/** Removing the last named model widens the door rather than closing it —
+ *  empty accepts every model. Returns the same object when nothing leaves. */
+export function removeAllowedModel(compute: ComputeRules, model: string): ComputeRules {
+  const current = cleanList(compute.allowed_models);
+  if (!current.includes(model)) return compute;
+  return { ...compute, allowed_models: current.filter((m) => m !== model) };
+}
+
+/** The listed models that equal no configured provider's `model`, in list
+ *  order: a name kept from a provider since removed (the Ollama-era entries
+ *  found on the Linux node, 2026-09-14) filters callers down to a model this
+ *  node cannot answer with. Not an error — the backend accepts any string —
+ *  so the tab badges it and leaves the removing to the owner. */
+export function unmatchedModels(
+  compute: ComputeRules | null | undefined,
+  providers: readonly ProviderInfo[] | null | undefined,
+): string[] {
+  const configured = new Set<string>();
+  for (const entry of providers ?? []) {
+    if (typeof entry?.model === 'string' && entry.model.length > 0) configured.add(entry.model);
+  }
+  return cleanList(compute?.allowed_models).filter((model) => !configured.has(model));
 }
 
 /** Every alias with a place in the tariff table, each once: served ones

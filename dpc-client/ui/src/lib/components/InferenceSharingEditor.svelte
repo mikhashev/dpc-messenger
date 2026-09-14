@@ -10,6 +10,7 @@
   import { providersList, nodeStatus } from '$lib/coreService';
   import {
     addAllowed,
+    addAllowedModel,
     addServing,
     addTariffEntry,
     computeBlockErrors,
@@ -22,6 +23,7 @@
     knownNodes,
     offeredProviders,
     removeAllowed,
+    removeAllowedModel,
     removeServing,
     removeTariffEntry,
     setCurrency,
@@ -31,6 +33,7 @@
     tariffEntryErrors,
     tariffHistory,
     tariffState,
+    unmatchedModels,
     utcToday,
     type CallerKind,
     type ComputeRules,
@@ -88,6 +91,33 @@
     if (!editCompute) return;
     const text = raw.trim();
     apply(setVendorQuota(editCompute, alias, text.length === 0 ? null : Number(text)));
+  }
+
+  // --- (1b) Which models the door accepts --------------------------------
+  // The chips come from the same registry the alias pickers read; one model
+  // may be carried by several aliases, so the option names them all.
+  $: modelChoices = [...($providersList || []).reduce((byModel, p) => {
+    if (p.model) byModel.set(p.model, [...(byModel.get(p.model) ?? []), p.alias]);
+    return byModel;
+  }, new Map<string, string[]>())]
+    .filter(([model]) => !(view?.allowed_models ?? []).includes(model))
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  $: unmatched = unmatchedModels(view, $providersList || []);
+  let pickModel = '';
+  let typingModel = false;
+  let typedModel = '';
+
+  function addModel(text: string) {
+    if (!editCompute || !text.trim()) return;
+    apply(addAllowedModel(editCompute, text));
+  }
+
+  function confirmTypedModel() {
+    const model = typedModel.trim();
+    if (!model) return;
+    addModel(model);
+    typedModel = '';
+    typingModel = false;
   }
 
   // --- (2)+(3) Who may call, and who calls for free ----------------------
@@ -298,6 +328,58 @@
               </select>
               <button class="btn-small" disabled={!pickVendor} on:click={() => addPicked('vendor')}>Add</button>
             </div>
+          {/if}
+
+          <h5>1b. Models this door will accept</h5>
+          <p class="help-text-small">
+            A filter on what a caller may ask for, not a third list of what is served.
+            <strong>An empty list accepts every model</strong> &mdash; the opposite of the two lists above,
+            where an empty list serves nobody. Name one model and only that one may be asked for, on any
+            alias shared above.
+          </p>
+          <div class="rule-list">
+            {#each view.allowed_models ?? [] as model (model)}
+              <div class="rule-row">
+                <span class="alias-cell">
+                  <code class="rule-path">{model}</code>
+                  {#if unmatched.includes(model)}
+                    <span class="badge badge-missing">matches no configured provider</span>
+                  {/if}
+                </span>
+                {#if editMode && editCompute}
+                  <button class="btn-icon-small" title="Stop accepting {model}" on:click={() => editCompute && apply(removeAllowedModel(editCompute, model))}>&times;</button>
+                {/if}
+              </div>
+            {:else}
+              <p class="empty-small">No model named &mdash; every model this node serves is accepted.</p>
+            {/each}
+          </div>
+          {#if editMode}
+            {#if typingModel}
+              <div class="inline-input-row">
+                <input
+                  type="text"
+                  class="inline-input"
+                  name="compute-typed-model"
+                  bind:value={typedModel}
+                  placeholder="a model id (several: one per line, or comma-separated)"
+                  on:keydown={(e) => { if (e.key === 'Enter') confirmTypedModel(); if (e.key === 'Escape') { typingModel = false; typedModel = ''; } }}
+                />
+                <button class="btn-small" on:click={confirmTypedModel}>Add</button>
+                <button class="btn-small btn-cancel" on:click={() => { typingModel = false; typedModel = ''; }}>Cancel</button>
+              </div>
+            {:else}
+              <div class="inline-input-row">
+                <select id="compute-pick-model" name="compute-pick-model" class="inline-input" bind:value={pickModel}>
+                  <option value="">&mdash; accept one named model &mdash;</option>
+                  {#each modelChoices as [model, aliases] (model)}
+                    <option value={model}>{model} ({aliases.join(', ')})</option>
+                  {/each}
+                </select>
+                <button class="btn-small" disabled={!pickModel} on:click={() => { addModel(pickModel); pickModel = ''; }}>Add</button>
+                <button class="btn-small btn-cancel" title="A model no configured provider carries yet" on:click={() => (typingModel = true)}>Type a model id</button>
+              </div>
+            {/if}
           {/if}
         </div>
 

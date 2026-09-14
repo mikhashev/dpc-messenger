@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { ProviderInfo } from '$lib/types';
 import {
   addAllowed,
+  addAllowedModel,
   addServing,
   addTariffEntry,
   classifyProviderType,
@@ -13,6 +14,7 @@ import {
   knownNodes,
   offeredProviders,
   removeAllowed,
+  removeAllowedModel,
   removeServing,
   removeTariffEntry,
   setCurrency,
@@ -23,6 +25,7 @@ import {
   tariffEntryErrors,
   tariffHistory,
   tariffState,
+  unmatchedModels,
   type ComputeRules,
 } from './inferenceSharing';
 
@@ -195,6 +198,53 @@ describe('what I share', () => {
     const rows = tariffAliases(block);
     expect(rows).toEqual([{ alias: 'x', served: true }, { alias: 'y', served: false }]);
     expect(new Set(rows.map((r) => r.alias)).size).toBe(rows.length);
+  });
+});
+
+describe('the models this door accepts', () => {
+  it('names models, splitting a paste the way the caller lists split one, each once', () => {
+    let block = addAllowedModel(emptyBlock(), 'llama3.1:8b');
+    block = addAllowedModel(block, 'qwen3:14b, llama3.1:8b\n gpt-4o ; qwen3:14b');
+    expect(block.allowed_models).toEqual(['llama3.1:8b', 'qwen3:14b', 'gpt-4o']);
+    expect(addAllowedModel(block, ' gpt-4o ')).toBe(block);
+    expect(addAllowedModel(block, '  ')).toBe(block);
+  });
+
+  it('removing the last named model widens the door: empty accepts every model', () => {
+    const block = addAllowedModel(emptyBlock(), 'llama3.1:8b');
+    expect(removeAllowedModel(block, 'llama3.1:8b').allowed_models).toEqual([]);
+    expect(removeAllowedModel(block, 'never-listed')).toBe(block);
+  });
+
+  it('badges a model no configured provider carries, by model and not by alias', () => {
+    const providers = [provider('llama', 'ollama'), provider('ds', 'deepseek')];
+    const block = addAllowedModel(emptyBlock(), 'llama-model, ds, gone:70b');
+    expect(unmatchedModels(block, providers)).toEqual(['ds', 'gone:70b']);
+    expect(unmatchedModels(emptyBlock(), providers)).toEqual([]);
+    expect(unmatchedModels(block, [])).toEqual(['llama-model', 'ds', 'gone:70b']);
+    expect(unmatchedModels(null, null)).toEqual([]);
+  });
+
+  it('a list emptied of models is still carried through the pre-check unchanged', () => {
+    expect(computeBlockErrors(addAllowedModel(emptyBlock(), 'gone:70b'))).toEqual([]);
+  });
+
+  // The tab has to say the rule out loud, because it is the opposite of the
+  // serving lists two headings above: there, empty means nobody is served.
+  // Vitest runs in `environment: 'node'` here and the repo carries no DOM
+  // harness, so this reads the component source rather than rendering it
+  // (the same bargain approvalCardContrast.test.ts strikes).
+  it('says in the tab itself that an empty list accepts every model', () => {
+    const sources = import.meta.glob('./InferenceSharingEditor.svelte', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+    const tab = Object.values(sources)[0];
+    expect(tab).toBeTruthy();
+    expect(tab).toContain('<strong>An empty list accepts every model</strong>');
+    expect(tab).toContain('No model named &mdash; every model this node serves is accepted.');
+    expect(tab).toContain('matches no configured provider');
   });
 });
 
