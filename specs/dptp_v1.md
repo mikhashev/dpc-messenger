@@ -342,7 +342,7 @@ Carries one piece of an answer that is still being made (v1.7+). Sent only when 
 - A receiver that sees a `seq` out of order, or a `request_id` it is not waiting for, drops the chunk and says so in its log; it does not reorder, buffer or reconstruct
 - **On a broken stream the host's row is the record.** The host writes its usage row when the call finishes, whatever reached the guest; the guest's row is a mirror built from the response, so a stream cut before the response leaves the guest with no row at all. The two rows join on `request_id`, and a missing guest row is expected in that case rather than a lost call
 
-**Compatibility:** a host that does not know the field sends no chunks and the guest receives one whole answer, which is what every pre-v1.7 host does. A guest that never asks for `stream` is sent no chunks by a host that does.
+**Compatibility:** `stream: true` is a request, not a guarantee. A host sends no chunks when it does not know the field — every pre-v1.7 host — and also when it serves the call by a path that has no chunk channel, which is what a host does for a request carrying `images`, or one carrying no `messages` at all. The guest therefore always builds its text from the response, and a stream of zero chunks is the whole answer arriving at once, as it always did. A guest that never asks for `stream` is sent no chunks by a host that would.
 
 ---
 
