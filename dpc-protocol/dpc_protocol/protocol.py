@@ -64,13 +64,16 @@ def _image_for_the_wire(img: Dict[str, Any]) -> Dict[str, Any]:
 # so nothing here is a second vocabulary: `invalid_value`, `model_not_found`
 # and `tools_unsupported` are the gateway's own codes, and
 # `onward_sharing_refused` is named after the firewall's
-# `onward_sharing_refusal`.
+# `onward_sharing_refusal`. `insufficient_quota` is the word the gateway
+# already refuses a spent vendor ceiling with on its own local route; the peer
+# door refuses with the same word, so one ceiling has one name on both doors.
 REFUSAL_IDENTITY_UNPROVED = "identity_unproved"
 REFUSAL_NOT_ALLOWED = "not_allowed"
 REFUSAL_MODEL_NOT_FOUND = "model_not_found"
 REFUSAL_ONWARD_SHARING_REFUSED = "onward_sharing_refused"
 REFUSAL_INVALID_VALUE = "invalid_value"
 REFUSAL_TOOLS_UNSUPPORTED = "tools_unsupported"
+REFUSAL_INSUFFICIENT_QUOTA = "insufficient_quota"
 
 #: The words a host may send today. A receiver reads it to recognise, never to
 #: refuse: a newer host may name a reason this one has no word for, and an
@@ -82,6 +85,7 @@ REFUSAL_CODES = frozenset({
     REFUSAL_ONWARD_SHARING_REFUSED,
     REFUSAL_INVALID_VALUE,
     REFUSAL_TOOLS_UNSUPPORTED,
+    REFUSAL_INSUFFICIENT_QUOTA,
 })
 
 

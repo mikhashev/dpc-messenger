@@ -315,9 +315,33 @@ ANTHROPIC_TYPE_FOR = {400: "invalid_request_error", 403: "permission_error",
                       404: "not_found_error", 502: "api_error"}
 
 
+#: The word the map does not place yet: a spent vendor ceiling on the peer
+#: door (ADR-041 D5). Its status is 429, one line in `_complete_via_peer`, and
+#: the two tests below hold the gap open until that line lands.
+NOT_PLACED_YET = {"insufficient_quota"}
+
+
 def test_the_gateway_places_every_word_the_protocol_defines():
-    """No word of the vocabulary falls through to the 502 the card was about."""
-    assert set(STATUS_FOR) == set(REFUSAL_CODES)
+    """No word of the vocabulary falls through to the 502 the card was about,
+    but one, which is named rather than forgotten."""
+    assert set(STATUS_FOR) | NOT_PLACED_YET == set(REFUSAL_CODES)
+    assert not set(STATUS_FOR) & NOT_PLACED_YET
+
+
+@pytest.mark.asyncio
+async def test_a_spent_ceiling_is_still_the_502_until_the_gateway_learns_the_word(tmp_path):
+    """What a client sees today when a host refuses on its daily ceiling. This
+    reddens when the mapping lands, which is when `insufficient_quota` moves
+    into `STATUS_FOR` and out of `NOT_PLACED_YET`."""
+    refusal = PeerRefused("your ceiling is spent", code="insufficient_quota")
+    service = _peer_service(tmp_path, fail=refusal)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _request(server, "POST", "/v1/chat/completions",
+                                      key=_key(tmp_path), body=_chat(REMOTE_MODEL))
+
+        assert status == 502
+        assert json.loads(text)["error"]["code"] == "peer_refused"
+        assert _rows(ledger) == []
 
 
 @pytest.mark.asyncio

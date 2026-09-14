@@ -672,6 +672,37 @@ the wrong list is refused at load and at save with the reason. The names were
 put to Mike on 2026-09-10 and taken as decided when the reviews converged on
 them and he did not object.)*
 
+*(**Amendment, 2026-09-14 — the peer door enforces the same ceiling.** The
+quota stood on the gateway's local route alone; the peer door
+(`P2PCoordinator.handle_inference_request`) had none, so a guest calling a
+vendor alias this node serves could spend without bound. It now asks the same
+question from the same objects: the serving lists come from the gateway's own
+`Gateway.serving_lists()` where this node has a gateway and from
+`ContextFirewall.classify_serving_lists` where `[gateway] enabled` is off,
+and a `vendor` alias is weighed against `compute.vendor_quotas` with
+`ledger.spent_today(alias, caller=peer_id, caller_kind="peer")` — the rows
+`_record_peer_call` writes under that guest's own name. The ceiling is per
+caller, so one guest's spending never binds another's, and it is persistent
+because the ledger is a file: a restarted node sums the same rows. The refusal
+comes before the inference queue, writes no usage row, and carries the code
+`insufficient_quota` — the word the gateway already refuses its own spent
+ceiling with (DPTP §3.4).*
+
+*Two things it does not do. There is **no ceiling per call**: a single
+expensive call under the day's ceiling is served whole, and what it cost is
+known only once it is priced — the per-call limit is an open decision and
+Mike's. And the lists classify the serving alias, which today is
+`serving_local[0]`: a paying alias misfiled there makes the lists a
+configuration error, and the door now refuses rather than guess the class,
+where before it served the call and paid for it. Guessing wrong spends the
+host's money, so the unknown class is refused.*
+
+*Follow-up, one line and not in this session's hands: `_complete_via_peer` in
+`gateway.py` maps a host's refusal code to an HTTP status, and
+`insufficient_quota` belongs there as **429**. Until it lands a guest answers
+its IDE client with the 502 it gives any code it cannot place; the gap is held
+open by a test that reddens when the line lands.)*
+
 ### D6 — `aiohttp.web`, declared explicitly
 
 **Re-decided.** The first writing offered two options — hand-written asyncio
@@ -892,6 +923,12 @@ dependencies.
   does not hash to the expected id — the connection must be refused, not logged.
 - **D5:** put a vendor-class alias in the serving list with no quota configured;
   the service must refuse at load.
+- **D5, the peer door (2026-09-14):** serve a guest a vendor alias until its
+  day's rows reach the ceiling, then restart this node and let it ask again —
+  the second request must be refused with `insufficient_quota` naming what it
+  spent, and no new usage row may appear. Not run live: today
+  `compute_serving_alias` is `serving_local[0]`, so the classified-vendor path
+  is reached by the tests and not yet by a configuration.
 - **D7, the enforceable half:** point `compute.serving_alias` at a `remote_peer`
   alias and start the service — it must refuse at load, naming the type. Today
   it starts.

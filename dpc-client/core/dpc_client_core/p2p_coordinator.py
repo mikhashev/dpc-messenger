@@ -13,10 +13,16 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import websockets
 
-from .firewall import SERVING_LOCAL_KEY, AppliedTariff, onward_sharing_refusal
+from .firewall import SERVING_LOCAL_KEY, AppliedTariff, ServingLists, onward_sharing_refusal
 from .node_ledger import NodeLedger, default_ledger, tariff_amount_for, usage_row
 
 logger = logging.getLogger(__name__)
+
+#: What a row this door writes says about who called, and the word the daily
+#: ceiling counts under. One constant for the writer and the counter: a quota
+#: that summed a different word from the one `_record_peer_call` writes would
+#: read zero forever.
+PEER_CALLER_KIND = "peer"
 
 
 class EffortRefused(ValueError):
@@ -335,6 +341,69 @@ class P2PCoordinator:
         config = self._provider_config(alias)
         return config.get("type") if config else None
 
+    def _serving_lists(self) -> Any:
+        """The two serving lists, classified the way the gateway classifies them.
+
+        One classification for both doors (ADR-041 D5): the gateway's own
+        object when this node has one. The listener is opt-in and the ceiling
+        is not, so with no gateway the same predicate is asked of the firewall
+        directly, over the registry reader this door already uses.
+
+        Raises `ValueError` (`GatewayConfigError` is one) when the lists
+        cannot be classified.
+        """
+        from .gateway import Gateway
+
+        gateway = getattr(getattr(self.service, "gateway", None), "gateway", None)
+        if isinstance(gateway, Gateway):
+            return gateway.serving_lists()
+        firewall = getattr(self.service, "firewall", None)
+        providers = getattr(getattr(self.service, "llm_manager", None), "providers", None)
+        aliases = providers if isinstance(providers, dict) else {}
+        return firewall.classify_serving_lists({a: self._provider_type(a) for a in aliases})
+
+    def _vendor_quota_refusal(self, peer_id: str, serving_alias: str) -> Optional[tuple]:
+        """Why this peer may not be served `serving_alias` today, or None.
+
+        ADR-041 D5 on the peer door. A vendor alias is bounded by money â€”
+        `compute.vendor_quotas`, USD per day and per caller â€” summed from the
+        rows `_record_peer_call` wrote under this peer's own name, so a
+        restart changes nothing and one peer's spending never counts against
+        another's. A local alias is bounded by the card, which is the queue
+        below, and passes untouched. Lists that cannot be classified are
+        refused: with the class unknown, Â«not a vendor aliasÂ» is a guess, and
+        the wrong guess spends the host's money.
+
+        Returns `(error text, refusal code)` or None.
+        """
+        from dpc_protocol.protocol import REFUSAL_INSUFFICIENT_QUOTA
+
+        try:
+            lists = self._serving_lists()
+        except ValueError as e:
+            return (
+                f"This node cannot serve '{serving_alias}': its compute serving lists are "
+                f"refused as a configuration error ({e}), and an alias whose class is unknown "
+                "is not served",
+                "",
+            )
+        if not isinstance(lists, ServingLists) or lists.owner_of(serving_alias) != "vendor":
+            return None
+        # A vendor alias with no ceiling is refused when the rules are read, so
+        # a missing one here is absent rather than unlimited.
+        quota = float(lists.quotas.get(serving_alias) or 0.0)
+        spent = (self._ledger or default_ledger()).spent_today(
+            serving_alias, caller=peer_id, caller_kind=PEER_CALLER_KIND,
+        )
+        if spent < quota:
+            return None
+        return (
+            f"This node serves '{serving_alias}' behind a daily ceiling and yours is spent: "
+            f"${spent:.4f} of ${quota:.2f} today (compute.vendor_quotas, per caller); it is "
+            "served again after midnight UTC",
+            REFUSAL_INSUFFICIENT_QUOTA,
+        )
+
     def _tariff_for_call(
         self, serving_alias: str, peer_id: str, started_at: datetime,
     ) -> Optional[AppliedTariff]:
@@ -405,7 +474,7 @@ class P2PCoordinator:
             row = usage_row(
                 request_id=request_id,
                 caller=peer_id,
-                caller_kind="peer",
+                caller_kind=PEER_CALLER_KIND,
                 alias=serving_alias,
                 model=model,
                 route="local",
@@ -553,6 +622,23 @@ class P2PCoordinator:
                 request_id=request_id,
                 error=f"This node cannot serve '{serving_alias}' to a peer: {refusal}",
                 code=REFUSAL_ONWARD_SHARING_REFUSED,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # Money, before the queue and before anything runs: what this peer has
+        # already spent on a vendor alias today is read from the ledger and
+        # weighed against its ceiling. Nothing is written â€” a refused call is
+        # not a call â€” and the guest learns only that its own ceiling is spent.
+        quota_refusal = self._vendor_quota_refusal(peer_id, serving_alias)
+        if quota_refusal:
+            error_text, code = quota_refusal
+            logger.warning("Peer inference refused for %s: %s", peer_id, error_text)
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=error_text, code=code or None,
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
