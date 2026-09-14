@@ -803,11 +803,11 @@ configuration error, and the door now refuses rather than guess the class,
 where before it served the call and paid for it. Guessing wrong spends the
 host's money, so the unknown class is refused.*
 
-*Follow-up, one line and not in this session's hands: `_complete_via_peer` in
-`gateway.py` maps a host's refusal code to an HTTP status, and
-`insufficient_quota` belongs there as **429**. Until it lands a guest answers
-its IDE client with the 502 it gives any code it cannot place; the gap is held
-open by a test that reddens when the line lands.)*
+*Follow-up, closed the same day: `_complete_via_peer` in `gateway.py` maps a
+host's refusal code to an HTTP status, and `insufficient_quota` landed there as
+**429** in `ab13c018`, 2026-09-14 — a guest's IDE client is told to come back
+tomorrow rather than that something broke, and the 502 is left to the codes
+nobody here can place.)*
 
 ### D6 — `aiohttp.web`, declared explicitly
 

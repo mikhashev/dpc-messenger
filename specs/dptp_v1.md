@@ -449,7 +449,7 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
 
   Absent means the host has no word for this refusal — a failure mid-call rather than a gate, or a host that predates the field — and is never itself a reason. A receiver reads an unknown word exactly as it reads an absent one, because a newer host may name a cause this one has no word for; no receiver refuses a message over its code. Sent on the error form only: a served call carries no code.
 
-  What a receiver does with the word is the receiver's own. The guest in this tree answers its own HTTP clients with the status the cause deserves — `invalid_value` and `tools_unsupported` are the client's own 400, `model_not_found` a 404, `identity_unproved`, `not_allowed` and `onward_sharing_refused` a 403 — and keeps the 502 it always gave for an unknown or absent code, which today includes `insufficient_quota`: the word is sent by this tree's hosts and not yet placed by its guests, and a spent ceiling is a 429. Before the code every one of those was the same 502, and an IDE could not tell a request it should fix from a door it should ask a person about.
+  What a receiver does with the word is the receiver's own. The guest in this tree answers its own HTTP clients with the status the cause deserves — `invalid_value` and `tools_unsupported` are the client's own 400, `model_not_found` a 404, `identity_unproved`, `not_allowed` and `onward_sharing_refused` a 403, and `insufficient_quota` a 429 since 2026-09-14, because a spent ceiling means the guest may come back tomorrow and 502 does not say so — and keeps the 502 it always gave for an unknown or absent code, which is now the only cause that lands there. Before the code every one of those was the same 502, and an IDE could not tell a request it should fix from a door it should ask a person about.
 
 ---
 
@@ -2642,9 +2642,9 @@ DPTP is designed to be extensible. New commands can be added by:
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — `insufficient_quota` joins the code list:
   the peer door now weighs a vendor alias against the same daily per-caller
   ceiling the gateway enforces, read from the node ledger (ADR-041 D5). A guest
-  in this tree still answers it with the 502 it gives an unplaceable code, until
-  its own gateway maps the word to 429. Added 2026-09-14 while v1.7 is
-  unreleased
+  in this tree answers it with 429 — "come back tomorrow" rather than "something
+  broke" — since 2026-09-14, the same day the word was added. Added 2026-09-14
+  while v1.7 is unreleased
 - **§3.4 REMOTE_INFERENCE_REQUEST** — the tier the host requires is stated:
   served only over a connection whose key is proved — direct TLS; other tiers
   receive the error response (ADR-041 D2). Added 2026-09-14 with the host-side
