@@ -353,6 +353,52 @@ def parse_remote_name(name: str) -> Optional[Tuple[str, str]]:
     return parts[1], parts[2]
 
 
+# A provider type that transcribes and does not chat. `local_whisper` is the
+# one this node ships (`llm_manager.PROVIDER_REGISTRY`), and its provider
+# answers `generate_response` with `NotImplementedError`; `firewall.py` counts
+# it among `LOCAL_PROVIDER_TYPES`, so such an alias may legitimately stand in
+# `compute.serving_local` and be offered to a peer for transcription — it is
+# simply not a chat model, on either half of this door's menu.
+TRANSCRIPTION_ONLY_PROVIDER_TYPES = frozenset({"local_whisper"})
+
+
+def serves_chat(provider_type: Optional[str]) -> bool:
+    """Whether an alias of this provider type can answer a chat completion.
+
+    The type is the only statement either half of the menu makes about what an
+    alias does — this node's registry for its own aliases, the peer's own
+    `type` field on a `PROVIDERS_RESPONSE` row (`service.build_p2p_provider_info`).
+    A type this node has no name for is read as chat rather than hidden: a host
+    newer than this node may serve a chat provider we cannot name, and a false
+    absence is invisible to the caller while a false presence is now a refusal
+    it can read.
+    """
+    return provider_type not in TRANSCRIPTION_ONLY_PROVIDER_TYPES
+
+
+def refuse_a_transcription_alias(
+    name: str, provider_type: Optional[str], *, served_by: str = "",
+) -> None:
+    """A transcription-only alias is refused here, by name, before any call.
+
+    Refused with `model_not_found` — the word this door already uses for «not
+    on the chat menu», and the same word `/v1/models` now makes true by leaving
+    such an alias off it. No new wire word is coined for the case; the reason
+    is in the message (ADR-041 D1, amendment 2026-09-14).
+    """
+    if serves_chat(provider_type):
+        return
+    says = (f"peer {served_by}'s menu row says its type is '{provider_type}'" if served_by
+            else f"this node's registry gives it type '{provider_type}'")
+    raise GatewayError(
+        404,
+        f"model '{name}' transcribes and does not chat: {says}, a provider with no text "
+        "generation path, and this door serves chat only. GET /v1/models lists the aliases "
+        "that answer a completion and no longer offers this one",
+        "model_not_found",
+    )
+
+
 class Gateway:
     """The internal layer: one alias, one call, one row. No HTTP in here."""
 
@@ -541,6 +587,11 @@ class Gateway:
         providers = getattr(self._core.llm_manager, "providers", None) or {}
         if alias not in providers:
             raise GatewayError(503, f"model '{alias}' is listed but its provider is not loaded", "provider_unavailable")
+        # A `local_whisper` alias is a legitimate entry in `compute.serving_local`
+        # — the P2P door offers it to peers who hold transcription permission —
+        # and it is not a chat model: refused here rather than at the provider,
+        # which would fail after the caller had chosen it.
+        refuse_a_transcription_alias(alias, (getattr(providers[alias], "config", None) or {}).get("type"))
         if images:
             self._refuse_images_the_alias_cannot_take(alias, providers[alias], images, tools)
         if reasoning_effort is not None:
@@ -847,6 +898,11 @@ class Gateway:
                 f"its menu lists: {served}",
                 "model_not_found",
             )
+        # The host offers two kinds of row on one list — the alias it serves for
+        # inference and the one it serves for transcription, each behind its own
+        # permission (`service.menu_for_peer`). Only the first answers a chat
+        # completion, and the row says which it is.
+        refuse_a_transcription_alias(name, row.get("type"), served_by=peer_id)
         if images and tools:
             # The host's vision door is `query`, which holds no tools, exactly
             # as this node's own is: the combination is refused on both routes
@@ -1734,16 +1790,25 @@ class GatewayServer:
             return error(503, f"the gateway's serving lists are refused: {e}", "serving_lists_refused")
 
     async def _models(self, request: web.Request) -> web.Response:
+        """The chat models this door serves, on both halves of the menu.
+
+        Chat models and no others: a transcription-only alias is left off, on
+        this node's serving lists and on a peer's rows alike, because a client
+        reads this list as the menu it may complete against and a row it cannot
+        call is a refusal moved from the door to after the choice.
+        """
         data = []
         # The same flag that refuses a completion on this node's own alias
         # keeps it off the menu: a shut door lists nothing it would refuse.
         if self.gateway.compute_sharing_on():
             lists = self.gateway.serving_lists()
+            types = self.gateway.provider_types()
             data = [
                 {"id": alias, "object": "model", "created": 0, "owned_by": owner,
                  **self.gateway.local_row_extras(alias)}
                 for owner, aliases in (("local", lists.local), ("vendor", lists.vendor))
                 for alias in aliases
+                if serves_chat(types.get(alias))
             ]
         # After the two local lists, each proved peer's menu under the peer's
         # name — listed whatever this node's flag says, since the door those
@@ -1753,6 +1818,7 @@ class GatewayServer:
              "owned_by": peer_id, **_peer_row_extras(row)}
             for peer_id, rows in self.gateway.peer_menu().items()
             for row in rows
+            if serves_chat(row.get("type"))
         )
         return web.json_response({"object": "list", "data": data})
 

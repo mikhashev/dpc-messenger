@@ -261,7 +261,11 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   `[connection] remote_inference_timeout` is answered `503` (the card is busy). The
   first entry is also what the P2P door serves peers from; the older `serving_alias`
   key is still read and folded into this list with a warning, and a file carrying both
-  keys with different values is refused at load.
+  keys with different values is refused at load. A `local_whisper` alias belongs in this
+  list — that is how the P2P door offers transcription to a peer who holds the
+  permission — but it transcribes and does not chat, so the gateway leaves it off
+  `/v1/models` and answers a completion addressed to it `404` saying so. The same
+  applies to a peer's `local_whisper` row: it is not listed as `remote:<peer>:<alias>`.
 - `serving_vendor` — aliases whose provider is a paid API (`anthropic`, `deepseek`,
   `zai`, `openai_compatible`, `gemini`, `github_models`, `gigachat`). Money is the
   scarce resource, so **every entry needs a ceiling in `vendor_quotas`** — USD per UTC
