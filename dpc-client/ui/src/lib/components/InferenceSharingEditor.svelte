@@ -912,7 +912,7 @@
       <div class="subsection">
         <h4>6. What a peer sees</h4>
         <p class="help-text-small">
-          The rows one named peer is sent &mdash; the same selection that answers its
+          The menu rows one named peer is sent &mdash; the same selection that answers its
           <code>GET_PROVIDERS</code>, so this is the exact row set it receives on connect and on
           every save of these rules. Nothing here is editable, and asking changes nothing.
         </p>

@@ -547,7 +547,9 @@ export interface GatewayState {
   running?: boolean;
   port?: number | null;
   bind?: string | null;
-  /** `sk-…abcd`, or null where no key has been written yet. */
+  /** The key's own first four chars, then `…`, then its last four (e.g.
+   *  `wtHZ…opY4`) — no vendor prefix invented — or null where no key has
+   *  been written yet. */
   key_masked?: string | null;
   key_file?: string | null;
   serving_local?: string[] | null;
@@ -735,7 +737,7 @@ export function menuVerdict(result: PeerMenuResult | null | undefined): MenuVerd
   }
   return {
     kind: 'served',
-    text: `${rows.length} ${rows.length === 1 ? 'row' : 'rows'} would be sent to this peer.`,
+    text: `${rows.length} menu ${rows.length === 1 ? 'row' : 'rows'} would be sent to this peer.`,
     detail,
     rows,
   };

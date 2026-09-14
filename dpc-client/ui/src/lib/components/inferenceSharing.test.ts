@@ -346,7 +346,7 @@ describe('the verdict at the top of the tab reads the two doors apart', () => {
     running: true,
     port: 8899,
     bind: '127.0.0.1',
-    key_masked: 'sk-…abcd',
+    key_masked: 'wtHZ…opY4',
     key_file: '/home/u/.dpc/.gateway_key',
     serving_local: ['llama'],
     serving_vendor: [],
@@ -407,16 +407,16 @@ describe('the header of the client blocks carries the masked key only', () => {
         { client: 'claude_code', text: 'export ANTHROPIC_API_KEY=sk-secret-value' },
         { client: 'curl', text: 'curl -H "Authorization: Bearer sk-secret-value"' },
       ],
-      key_masked: 'sk-…alue',
+      key_masked: 'abcd…wxyz',
     });
-    expect(header).toBe('Continue, Cursor, Claude Code, curl — each block carries the key sk-…alue in clear');
+    expect(header).toBe('Continue, Cursor, Claude Code, curl — each block carries the key abcd…wxyz in clear');
     expect(header).not.toContain('sk-secret-value');
   });
 
   it('says there is no key rather than showing an empty one, and prints an unknown client as it arrived', () => {
     expect(maskedHeader({ lines: [{ client: 'zed', text: '…' }], key_masked: null }))
       .toBe('zed — no key has been written yet; start the gateway once');
-    expect(maskedHeader({ lines: [], key_masked: 'sk-…abcd' })).toBe('nothing to paste yet; the key is sk-…abcd');
+    expect(maskedHeader({ lines: [], key_masked: 'wtHZ…opY4' })).toBe('nothing to paste yet; the key is wtHZ…opY4');
     expect(maskedHeader(null)).toBe('nothing to paste yet, and no key has been written');
   });
 });
@@ -439,12 +439,12 @@ describe('what a peer sees has three states, and they ask for different repairs'
     expect(verdict.detail).toBe('no alias is designated in compute.serving_local');
   });
 
-  it('counts the rows that would go out, and drops a row with no alias', () => {
+  it('counts the menu rows that would go out, and drops a row with no alias', () => {
     const served = menuVerdict({ allowed: true, reason: null, rows: [row('llama'), row('whisper')] });
     expect(served.kind).toBe('served');
-    expect(served.text).toBe('2 rows would be sent to this peer.');
+    expect(served.text).toBe('2 menu rows would be sent to this peer.');
     expect(served.detail).toBeNull();
-    expect(menuVerdict({ allowed: true, rows: [row('llama'), {} as MenuRow] }).text).toBe('1 row would be sent to this peer.');
+    expect(menuVerdict({ allowed: true, rows: [row('llama'), {} as MenuRow] }).text).toBe('1 menu row would be sent to this peer.');
     expect(menuVerdict(null).kind).toBe('none');
   });
 });
