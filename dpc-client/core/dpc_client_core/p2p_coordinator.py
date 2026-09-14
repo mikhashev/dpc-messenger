@@ -197,8 +197,10 @@ class P2PCoordinator:
         at. `EffortRefused` for a word the alias has no rung for.
 
         The vocabulary is the alias's own where its model named its words and the
-        shared scale where it did not; `off` is the foot of every scale and always
-        reachable. A word the guest chose is sent to the provider; the host's own
+        shared scale where it did not; `off` is the foot of every scale and is
+        reachable wherever there is a scale at all — an alias whose provider sends
+        no effort has none, and refuses every word including that one. A word the
+        guest chose is sent to the provider; the host's own
         configured word is not, because the alias already holds it and what would
         travel from here is this node's normalisation of it — a downgrade on a
         vendor whose ladder has more words than ours.
@@ -236,6 +238,16 @@ class P2PCoordinator:
                     peer_id, serving_alias, configured,
                 )
             return rung
+
+        if words is not None and not words:
+            # An empty vocabulary is this alias saying it serves no effort at
+            # all — `off` included, since a provider with no effort channel has
+            # no way of saying no either.
+            raise EffortRefused(
+                f"This node serves '{serving_alias}' at no reasoning effort at all — its "
+                f"provider sends none to its engine — so '{asked}' reaches nothing here; "
+                "send the request without an effort"
+            )
 
         wanted = self._rung_of(provider, asked)
         if wanted is None:

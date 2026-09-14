@@ -679,12 +679,12 @@ class Gateway:
         """The word the local row names: the rung the call actually ran on.
 
         The provider's own word first, because it is the only one read off the
-        body that was sent. A provider with no effort channel reports none, and
-        then the door answers as before: the word it passed, resolved onto the
-        alias's ladder, or `effective_reasoning_default` where the caller asked
-        for nothing — the same helper the alias's menu row quotes and the peer
-        door serves, so all three name one rung. None is «not knowable here»,
-        never `off`.
+        body that was sent. A class that declares no effort channel names no
+        rung at all. Otherwise the door answers: the word it passed, resolved
+        onto the alias's ladder, or `effective_reasoning_default` where the
+        caller asked for nothing — the same helper the alias's menu row quotes
+        and the peer door serves, so all three name one rung. None is «not
+        knowable here», never `off`.
         """
         reported = result.get("provider_served_effort")
         if reported:
@@ -693,6 +693,11 @@ class Gateway:
         provider = (getattr(self._core.llm_manager, "providers", None) or {}).get(alias)
         if provider is None:
             return door_word
+        if declared_reasoning_words(provider)[0] == []:
+            # No effort reaches this alias's engine, so nothing here names a
+            # rung — least of all the word its configuration carries, which this
+            # provider never reads.
+            return None
         if door_word is not None:
             return reasoning_word_for(provider, door_word) or door_word
         return effective_reasoning_default(provider)
@@ -1207,6 +1212,18 @@ def _effort_the_alias_knows(
     if word is None:
         return None
     asked = word.strip().lower()
+    if words is not None and not words:
+        # An empty vocabulary is the alias saying it serves no effort at all, so
+        # `off` is refused here too: a provider with no effort channel has no
+        # way of saying no either, and answering `off` would promise a knob
+        # nobody turns.
+        raise GatewayError(
+            400,
+            f"'{what}' is {word!r}: {serves} serves no reasoning effort at all — its provider "
+            "sends none to its engine — so no word reaches it; send the request without an "
+            "effort, or to an alias whose provider takes one",
+            "invalid_value",
+        )
     if asked == REASONING_OFF:
         return REASONING_OFF
     if words:

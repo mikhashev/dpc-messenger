@@ -627,10 +627,14 @@ Returns a list of AI providers available on the peer's system.
     would lose, and the host's refusal on the wire (§3.4) remains the gate
   - `context_window` (integer or null, required): Context window in tokens; `null` when
     the model is unknown to the sender, which a receiver must distinguish from a real size
-  - `reasoning_words` (array of strings, optional): The reasoning-effort words this model
-    accepts. Present only when the sender read them from the model's own chat template;
-    absent when the sender fell back to a general scale, so a receiver may quote them as
-    the model's own whenever they are present
+  - `reasoning_words` (array of strings, optional): The reasoning-effort words this alias
+    accepts — the words its provider can put on the wire, never a table the sender fell
+    back to. Present when the sender read them from the model's own chat template, and
+    present when the sender's provider serves fewer than the general scale. An **empty
+    array** is the alias saying it serves no reasoning effort at all: a receiver must ask
+    it for no word, `off` included, since a provider with no effort channel has no way of
+    saying no either. Absent — and only absent — means the sender fell back to the general
+    scale, which the receiver may then use
   - `reasoning_default` (string or null, optional): The effort the host serves when none
     is sent — the sender's *effective* default for that alias: the word its own
     configuration runs the alias at, resolved onto the alias's ladder, and the default the
@@ -2607,6 +2611,13 @@ DPTP is designed to be extensible. New commands can be added by:
   sentences and disagreed — a row promising `xhigh` beside a door serving the
   configured `low`, which the guest had no way to see. Changed 2026-09-14 while
   v1.7 is unreleased
+- **§3.5 PROVIDERS_RESPONSE** — `reasoning_words` is the words the alias's *provider*
+  can send, not only the words its model's template named, and an empty array is the
+  alias saying it serves no effort at all — `off` included. Absent keeps its old
+  meaning, the general scale. Until now a provider that sends no effort word looked
+  the same on the wire as one that speaks the whole scale, and the host answered
+  `served_effort` with the word its own configuration carried and nobody read.
+  Changed 2026-09-14 while v1.7 is unreleased
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `thinking_source` (`engine` |
   `estimated`): where `thinking_tokens` came from, beside the
   `output_includes_thinking` it qualifies, and with it the invariant that under

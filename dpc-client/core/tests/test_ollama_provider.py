@@ -259,6 +259,9 @@ async def test_generate_with_tools_maps_response_to_contract():
         # The daemon documents `eval_count` as "number of tokens in the response"
         # and never says where a `think` turn is counted.
         "output_includes_thinking": "unknown",
+        # No effort word was asked for and the model reports no thinking, so
+        # `think` carried nothing and no rung describes the call.
+        "served_effort": None,
     }
     assert len(result["tool_calls_raw"]) == 1
     tc = result["tool_calls_raw"][0]

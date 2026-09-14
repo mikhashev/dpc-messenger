@@ -154,6 +154,9 @@ async def test_generate_with_tools_maps_response_to_contract():
         # Read and not found: the vendor's usage object has no reasoning counter
         # and its page never says where the reasoning is counted.
         "output_includes_thinking": "unknown",
+        # The tools path builds its body with no effort at all, so thinking was
+        # neither disabled nor named.
+        "served_effort": None,
     }
 
     assert len(result["tool_calls_raw"]) == 1

@@ -81,14 +81,35 @@ def normalize_reasoning_effort(value: Optional[str]) -> Optional[str]:
 
 
 def declared_reasoning_words(provider: Any) -> Tuple[Optional[List[str]], Optional[str]]:
-    """`(words, default)` this model's own chat template named, or `(None, None)`.
+    """`(words, default)` this alias can be asked for, in three answers.
 
-    Present only when the ladder was read from the model: a fallback table must
-    not reach the UI, a peer or a refusal wearing the model's name. One reader
-    of this fact for all three — the provider rows, the peer menu and the
+    The class states first which words it can put on the wire at all
+    (`AIProvider.reasoning_words_served`); only where it answers «the shared
+    scale» does the model's own chat template get the last word:
+
+    - a list the model named, with the default it named beside it — present
+      only when the ladder was read from the model, so a fallback table never
+      reaches the UI, a peer or a refusal wearing the model's name;
+    - `(None, None)`: the shared scale stands in;
+    - `([], None)`: no effort word reaches this class's engine. An empty
+      vocabulary is a statement, not a silence: both doors refuse every word
+      for such an alias and its menu row promises none.
+
+    One reader for all three — the provider rows, the peer menu and the
     gateway's door — so an alias cannot be told it knows one set of words while
-    it is offered another.
+    it is offered another. An object that is not a provider declares nothing
+    and is answered by the template rule alone; that is not the same thing as a
+    provider declaring no effort channel.
     """
+    ask = getattr(provider, "reasoning_words_served", None)
+    if callable(ask):
+        try:
+            words = ask()
+        except Exception as e:
+            logger.debug("Provider %r could not state its effort words: %s", provider, e)
+            words = []
+        if words is not None:
+            return [w for w in words if isinstance(w, str) and w.strip()], None
     if getattr(provider, "_template_efforts_source", None) != "model":
         return None, None
     return list(provider._template_efforts), provider._template_default
@@ -100,10 +121,14 @@ def reasoning_word_for(provider: Any, word: Optional[str]) -> Optional[str]:
 
     A provider whose ladder is its model's own answers for itself — the
     llama-server one folds `high` and `max` onto the rung its template has —
-    and for the rest the shared scale is the ladder, so the answer is the
-    normalised word. Asked before a call, this says whether the request can be
-    served at all; asked after one, it says which rung it ran on, which is not
-    always the word the caller used.
+    and for the rest the answer is the normalised word, checked against the
+    vocabulary the alias declared. An alias that declared none sends nothing,
+    `off` included: a class with no effort channel has no way of saying no
+    either, and a row naming `off` there would name a knob nobody turned.
+
+    Asked before a call, this says whether the request can be served at all;
+    asked after one, it says which rung it ran on, which is not always the word
+    the caller used.
     """
     if word is None:
         return None
@@ -114,7 +139,11 @@ def reasoning_word_for(provider: Any, word: Optional[str]) -> Optional[str]:
         except Exception as e:  # a provider that cannot answer has not refused
             logger.debug("Provider %r could not resolve effort %r: %s", provider, word, e)
             return normalize_reasoning_effort(word)
-    return normalize_reasoning_effort(word)
+    folded = normalize_reasoning_effort(word)
+    words, _default = declared_reasoning_words(provider)
+    if words is None:
+        return folded
+    return folded if folded is not None and folded in words else None
 
 
 def numeric_setting(value: Any) -> Optional[Any]:
@@ -139,25 +168,41 @@ def positive_ceiling(value: Any) -> Optional[int]:
     return int(number) if number is not None and number > 0 else None
 
 
-def effective_reasoning_default(provider: Any) -> Optional[str]:
-    """The rung this alias runs at when nobody asks for one, or None.
+def configured_reasoning_default(provider: Any) -> Optional[str]:
+    """The alias's configured `reasoning_effort` resolved onto its own ladder,
+    and the default its model's template named where nothing is configured.
 
-    The configured word resolved onto the alias's own ladder, and the default
-    its model's template named where nothing is configured — the same
-    resolution the peer door applies to a request that carries no effort. One
-    reader for both, so the `reasoning_default` a menu row promises is the rung
-    a guest that asks for nothing is actually served: on 2026-09-14 the row
-    said `xhigh` (the template's default) while the host served `low` (its
-    configured word) and the guest chose on the row.
-
-    None is «no word describes it»: an alias whose template named no default
-    and whose configuration names nothing, or a configured word the alias has
-    no rung for — never `off`, which is a rung.
+    The rule for a class that reads `reasoning_effort` off its alias config.
+    A class that reads some other key states its own default instead
+    (`AIProvider.reasoning_default_served`): reading this one on its behalf
+    reports a word that class never sends.
     """
     configured = (getattr(provider, "config", None) or {}).get("reasoning_effort")
     if isinstance(configured, str) and configured.strip():
         return reasoning_word_for(provider, configured)
     return declared_reasoning_words(provider)[1]
+
+
+def effective_reasoning_default(provider: Any) -> Optional[str]:
+    """The rung this alias runs at when nobody asks for one, or None.
+
+    The class answers for itself, because which config key decides the rung is
+    a fact about the code that builds the request. One reader for the menu row
+    and the peer door, so the `reasoning_default` a row promises is the rung a
+    guest that asks for nothing is actually served.
+
+    None is «no word describes it»: a class with no effort channel, an alias
+    whose template named no default and whose configuration names nothing, or a
+    configured word the alias has no rung for — never `off`, which is a rung.
+    """
+    ask = getattr(provider, "reasoning_default_served", None)
+    if callable(ask):
+        try:
+            return ask()
+        except Exception as e:
+            logger.debug("Provider %r could not state its default effort: %s", provider, e)
+            return None
+    return configured_reasoning_default(provider)
 
 
 # --- Shared thinking model constants ---
@@ -665,6 +710,34 @@ class AIProvider:
             Dict with thinking parameters, empty by default
         """
         return {}
+
+    def reasoning_words_served(self) -> Optional[List[str]]:
+        """The effort words a caller may ask this alias for, `off` included.
+
+        `[]` — this base's answer — is «no effort word reaches this engine»:
+        the class builds no request an effort could ride on, so both doors
+        refuse every word for it and its menu row promises none. A subclass
+        that does send one overrides: `None` where the shared scale
+        (`REASONING_OFF` + `REASONING_EFFORTS`) is the ladder, a list where only
+        part of it crosses.
+
+        Declared per class rather than derived, the way
+        `DECLARED_OUTPUT_INCLUDES_THINKING` is: what leaves this process is a
+        fact about the code that builds the body, and a class that forgets to
+        say serves no effort rather than a guessed one.
+        """
+        return []
+
+    def reasoning_default_served(self) -> Optional[str]:
+        """The effort word this alias runs at when the caller names none.
+
+        None here, because a class that sends no effort has no default to
+        report — and None is not `off`, which is a rung somebody turned to. A
+        subclass that reads `reasoning_effort` off its alias config answers
+        `configured_reasoning_default(self)`; one that reads another key answers
+        from that key.
+        """
+        return None
 
     def get_last_usage(self) -> Optional[Dict[str, Any]]:
         """What the vendor said the last call cost in tokens, or None.

@@ -10,7 +10,8 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import (AIProvider, REASONING_OFF, image_base64, network_client_bounds,
+from .base import (AIProvider, REASONING_OFF, configured_reasoning_default,
+                   image_base64, network_client_bounds,
                    normalize_reasoning_effort, positive_ceiling)
 
 logger = logging.getLogger(__name__)
@@ -297,6 +298,17 @@ class DeepSeekProvider(AIProvider):
         dearer effort — so the rewrite was quietly upgrading whoever asked for
         `xhigh`, not translating them."""
         return normalize_reasoning_effort(value)
+
+    def reasoning_words_served(self) -> Optional[List[str]]:
+        """The shared scale: `reasoning_effort` rides `extra_body` on every path
+        that records usage, and this vendor folds the words it does not run onto
+        the ones it does."""
+        return None
+
+    def reasoning_default_served(self) -> Optional[str]:
+        """The alias's configured `reasoning_effort` — the key `__init__` reads
+        into `_reasoning_effort` — resolved onto this alias's ladder."""
+        return configured_reasoning_default(self)
 
     def _thinking_for_call(self, reasoning_effort: Optional[str] = None) -> bool:
         """Whether this one call reasons: the header's `off` beats the alias.

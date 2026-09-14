@@ -666,6 +666,36 @@ because they exist to be pasted into another tool's config and this socket
 already carries `.ws_token`. Recommended by CC, put to Mike on 2026-09-14 and
 not overridden by 13:00Z; implemented on that basis, and his to reverse.)*
 
+*(Amendment, 2026-09-14 — which classes forward an effort, and what the silent
+ones now report.*
+
+`served_effort` is the rung the call ran at, so a class that sends no effort
+must name none. Each provider class now declares what it can put on the wire
+(`AIProvider.reasoning_words_served`, `[]` by default and fail-closed), and both
+doors read that one declaration. As of today:
+
+| Class | Forwards an effort? | `served_effort` | Menu `reasoning_words` |
+|---|---|---|---|
+| `LlamaServerProvider` | yes — `chat_template_kwargs.reasoning_effort` / `enable_thinking` | the word in the body it built | the model's template words |
+| `DeepSeekProvider` | yes — `extra_body.reasoning_effort` | the word in the body it built | absent (the shared scale) |
+| `OllamaProvider` | yes — `think`, a level or `false` | the word `think` carried; null where it carried `true` or nothing | absent where the model can reason, `["off"]` where it cannot or the alias sets `think: false` |
+| `ZaiProvider` | only `off` — `thinking: {type: disabled}` | `off` where it disabled thinking, else null | `["off"]` |
+| `AnthropicProvider`, `OpenAICompatibleProvider`, `GeminiProvider`, `GigaChatProvider`, `GitHubModelsProvider`, `DpcAgentProvider`, `RemotePeerProvider`, `LocalWhisperProvider` | no | null | `[]` |
+
+Anthropic sends a thinking *budget* from its alias config and Z.AI a switch;
+neither is a rung a caller can choose, so neither is offered as one. The three
+that name `reasoning_effort` in a signature and do not forward it say so in the
+code, and are counted as no here.
+
+What changes for a caller: an alias whose row is `[]` refuses every effort word
+at both doors — `off` included, because a class with no effort channel has no
+way of saying no either — and its rows and wire responses carry
+`served_effort: null`, which §3.4 already defines as «no word describes the
+call». What was wrong before: the doors derived the word from the alias's
+configured `reasoning_effort`, a key six of the ten classes never read, so a
+billed row could name a rung the engine was never asked for
+([[SERVED-EFFORT-REPORTS-THE-OWNERS-INTENT-ON-AN-ALIAS-WHOSE-PROVIDER-NEVER-READS-IT]]).*
+
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
 Sharing a vendor-backed alias is a different act: **the node holding the key

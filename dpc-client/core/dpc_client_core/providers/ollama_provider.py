@@ -273,6 +273,34 @@ class OllamaProvider(AIProvider):
             return "thinking" in caps
         return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
 
+    def reasoning_words_served(self) -> Optional[List[str]]:
+        """What `_think_flag` can put on `think`. The shared scale where the
+        model can reason and the alias has not switched reasoning off; `off`
+        alone otherwise, because `think=False` is the one value every model
+        accepts while a level is refused 400 and therefore dropped.
+
+        `reasoning_effort` on an Ollama alias is read by nobody: `think` is the
+        knob, and the two sides of that must be read off the same method.
+        """
+        configured = self.config.get("think")
+        if configured is not None and not configured:
+            return [REASONING_OFF]
+        return None if self.supports_thinking() else [REASONING_OFF]
+
+    def reasoning_default_served(self) -> Optional[str]:
+        """The rung a call that names no effort runs at — whatever `_think_flag`
+        decides from the configuration and the model's capability."""
+        return self._served_effort(None)
+
+    def _served_effort(self, effort: Optional[str] = None) -> Optional[str]:
+        """The rung this call runs at: the word `think` carries, or None where
+        it carries no word. `True` is «reason», at a depth the daemon chooses
+        and nothing here can name; `None` is the parameter never sent."""
+        flag = self._think_flag(effort)
+        if flag is False:
+            return REASONING_OFF
+        return flag if isinstance(flag, str) and flag else None
+
     def _think_flag(self, effort: Optional[str] = None) -> Optional[Union[bool, str]]:
         """What to send as `think`: the per-call effort if there is a usable
         one, else the configuration, else the capability.
@@ -447,12 +475,15 @@ class OllamaProvider(AIProvider):
             )
         return options or None
 
-    def _usage_from(self, response: Any) -> Dict[str, Any]:
+    def _usage_from(self, response: Any, served_effort: Optional[str] = None) -> Dict[str, Any]:
         """What the daemon reported for one call, in this project's shape.
 
         One builder for all three paths: the tools path used to build the same
         dict a second time, which is where a field added to one of them goes
         missing from the other.
+
+        `served_effort` is the rung, for whoever writes the usage row; the
+        daemon reports no such field, so it is read off what `think` carried.
         """
         prompt_tokens = getattr(response, "prompt_eval_count", 0) or 0
         completion_tokens = getattr(response, "eval_count", 0) or 0
@@ -461,9 +492,10 @@ class OllamaProvider(AIProvider):
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
             "output_includes_thinking": self.DECLARED_OUTPUT_INCLUDES_THINKING,
+            "served_effort": served_effort,
         }
 
-    def _log_usage(self, response: Any, path: str) -> None:
+    def _log_usage(self, response: Any, path: str, served_effort: Optional[str] = None) -> None:
         """One line per call carrying what the daemon reported, not what we guessed.
 
         `done_reason` separates a model that stopped from one that was cut off,
@@ -485,10 +517,11 @@ class OllamaProvider(AIProvider):
         # them. Until this existed the tools path built this dict privately and
         # the text path priced a count it made itself (ADR-040, the usage
         # contract on `providers/base.py`).
-        self._record_last_usage(self._usage_from(response))
+        self._record_last_usage(self._usage_from(response, served_effort))
         logger.info(
             "Ollama usage: alias=%s model=%s prompt=%s completion=%s "
-            "thinking_chars=%d done=%s prompt_tps=%s eval_tps=%s load_ms=%s path=%s",
+            "thinking_chars=%d done=%s prompt_tps=%s eval_tps=%s load_ms=%s "
+            "effort=%s path=%s",
             self.alias, self.model,
             getattr(response, "prompt_eval_count", None),
             getattr(response, "eval_count", None),
@@ -499,6 +532,7 @@ class OllamaProvider(AIProvider):
             self._tokens_per_second(getattr(response, "eval_count", None),
                                     getattr(response, "eval_duration", None)),
             self._milliseconds(getattr(response, "load_duration", None)),
+            served_effort,
             path,
         )
 
@@ -568,7 +602,7 @@ class OllamaProvider(AIProvider):
                     "reasoning in its place.", self.alias, len(self._last_thinking),
                 )
                 content = self._last_thinking
-            self._log_usage(response, "plain")
+            self._log_usage(response, "plain", self._served_effort(kwargs.get("reasoning_effort")))
             return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after {timeout}s.")
@@ -648,7 +682,7 @@ class OllamaProvider(AIProvider):
                     self.alias, len(self._last_thinking),
                     getattr(response, "done_reason", None),
                 )
-            self._log_usage(response, "vision")
+            self._log_usage(response, "vision", self._served_effort(kwargs.get("reasoning_effort")))
             return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {timeout}s.")
@@ -800,8 +834,9 @@ class OllamaProvider(AIProvider):
         if on_chunk and content:
             await on_chunk(content, conversation_id)
 
-        self._log_usage(response, "tools")
-        usage = self._usage_from(response)
+        served_effort = self._served_effort(kwargs.get("reasoning_effort"))
+        self._log_usage(response, "tools", served_effort)
+        usage = self._usage_from(response, served_effort)
         return {
             "content": content,
             "tool_calls_raw": tool_calls_raw,

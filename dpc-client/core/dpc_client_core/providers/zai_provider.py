@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, image_base64, network_client_bounds
+from .base import AIProvider, REASONING_OFF, image_base64, network_client_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +205,19 @@ class ZaiProvider(AIProvider):
             return {"thinking": {"type": "enabled"}}
         return None
 
+    def reasoning_words_served(self) -> Optional[List[str]]:
+        """`off` and nothing else. GLM's thinking is a switch: `off` becomes
+        `{"type": "disabled"}`, and every level lands on the same `enabled` that
+        no word at all lands on — so a level here is a word nobody applies."""
+        return [REASONING_OFF]
+
+    def _served_effort(self, extra_body: Optional[Dict[str, Any]]) -> Optional[str]:
+        """The rung this call ran at, read off the body that was sent: `off`
+        where thinking was disabled, None otherwise — `enabled` is thinking at a
+        depth this API names no word for."""
+        thinking = (extra_body or {}).get("thinking") or {}
+        return REASONING_OFF if thinking.get("type") == "disabled" else None
+
     def _effective_temperature(self, override: Optional[float] = None) -> float:
         if override is not None:
             return override
@@ -233,16 +246,22 @@ class ZaiProvider(AIProvider):
             "output_includes_thinking": self.DECLARED_OUTPUT_INCLUDES_THINKING,
         }
 
-    def _log_usage(self, usage: Dict[str, Any], path: str, tool_calls: int = 0) -> None:
+    def _log_usage(
+        self, usage: Dict[str, Any], path: str, tool_calls: int = 0,
+        served_effort: Optional[str] = None,
+    ) -> None:
         if not usage:
             return
+        # The rung, for whoever writes the usage row. Mutated in place because
+        # the tools path hands this same dict back to its caller.
+        usage["served_effort"] = served_effort
         self._record_last_usage(usage)
         logger.info(
             "Z.AI usage: alias=%s model=%s prompt=%d (cache_read=%d), completion=%d, "
-            "tool_calls=%d, path=%s",
+            "tool_calls=%d, effort=%s, path=%s",
             self.alias, self.model,
             usage.get("prompt_tokens", 0), usage.get("cache_read_input_tokens", 0),
-            usage.get("completion_tokens", 0), tool_calls, path,
+            usage.get("completion_tokens", 0), tool_calls, served_effort, path,
         )
 
     # --- plain text generation ---
@@ -266,7 +285,8 @@ class ZaiProvider(AIProvider):
             resp = await self.client.chat.completions.create(**params)
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
-            self._log_usage(self._usage_from(resp), path="plain")
+            self._log_usage(self._usage_from(resp), path="plain",
+                            served_effort=self._served_effort(extra))
             return msg.content or ""
 
         try:
@@ -330,7 +350,7 @@ class ZaiProvider(AIProvider):
             if thinking_text:
                 self._last_thinking = thinking_text
                 logger.info("Z.AI streaming thinking: %d chars", len(thinking_text))
-            self._log_usage(usage, path="plain-stream")
+            self._log_usage(usage, path="plain-stream", served_effort=self._served_effort(extra))
             return full_text
 
         try:
@@ -513,7 +533,8 @@ class ZaiProvider(AIProvider):
                 await on_chunk(content, conversation_id)
 
             usage = self._usage_from(resp)
-            self._log_usage(usage, path="tools", tool_calls=len(tool_calls_raw))
+            self._log_usage(usage, path="tools", tool_calls=len(tool_calls_raw),
+                            served_effort=self._served_effort(extra))
             return {
                 "content": content,
                 "tool_calls_raw": tool_calls_raw,
@@ -551,7 +572,7 @@ class ZaiProvider(AIProvider):
                 messages=[{"role": "user", "content": content}],
                 temperature=self._effective_temperature(kwargs.get("temperature")),
             )
-            self._log_usage(self._usage_from(resp), path="vision")
+            self._log_usage(self._usage_from(resp), path="vision", served_effort=None)
             return resp.choices[0].message.content or ""
 
         try:

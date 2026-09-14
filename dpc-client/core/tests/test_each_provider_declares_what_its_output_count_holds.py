@@ -280,6 +280,7 @@ def test_ollama_leaves_the_convention_unknown_on_every_path():
         "completion_tokens": 500,
         "total_tokens": 620,
         "output_includes_thinking": "unknown",
+        "served_effort": None,
     }
     provider._log_usage(_ollama_response(), "plain")
     assert reported_counts(provider) == (120, 500, "unknown")
