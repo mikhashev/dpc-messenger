@@ -103,6 +103,7 @@ def create_remote_inference_response(
     tariff_amount: float = None,
     billing: str = None,
     output_includes_thinking: str = None,
+    thinking_source: str = None,
     served_effort: str = None,
 ) -> Dict[str, Any]:
     """Creates a remote inference response message with optional token, model, and thinking metadata.
@@ -127,6 +128,14 @@ def create_remote_inference_response(
     `output_includes_thinking` (`includes` | `excludes` | `unknown`) says
     whether `response_tokens` already holds `thinking_tokens`, as the node
     that counted knows it (DPTP v1.7). Optional; absent from an older host.
+    Under `includes`, `thinking_tokens` is inside `response_tokens` and never
+    exceeds it.
+
+    `thinking_source` (`engine` | `estimated`) says where `thinking_tokens`
+    came from — the vendor's own split, or an estimate the host made over the
+    reasoning text, which is what a host serving a build that reports no split
+    sends. Optional; absent means the host said nothing about provenance, which
+    is not a claim that an engine counted.
     """
     payload = {"request_id": request_id}
     if response is not None:
@@ -163,6 +172,8 @@ def create_remote_inference_response(
             payload["billing"] = billing
         if output_includes_thinking is not None:
             payload["output_includes_thinking"] = output_includes_thinking
+        if thinking_source is not None:
+            payload["thinking_source"] = thinking_source
         if served_effort is not None:
             payload["served_effort"] = served_effort
     else:

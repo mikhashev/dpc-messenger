@@ -108,7 +108,8 @@ def test_the_amount_is_written_after_the_tariff_group_it_belongs_to():
     assert list(row) == [
         "request_id", "caller", "caller_kind", "alias", "model", "route",
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
-        "output_includes_thinking", "served_effort", "peer_proved", "peer_connection_type",
+        "output_includes_thinking", "thinking_source", "served_effort", "peer_proved",
+        "peer_connection_type",
         "started_at", "duration_s", "billing", "cost_usd",
         "tariff_in", "tariff_out", "tariff_currency", "tariff_at", "tariff_amount",
     ]

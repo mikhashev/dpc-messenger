@@ -414,6 +414,7 @@ class P2PCoordinator:
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source=result.get("counts_source", "ours"),
                 output_includes_thinking=output_includes_thinking,
+                thinking_source=result.get("thinking_source"),
                 served_effort=served_effort,
                 peer_proved=proved,
                 peer_connection_type=connection_type,
@@ -605,6 +606,9 @@ class P2PCoordinator:
                 tariff_amount=tariff_amount,
                 billing=billing,
                 output_includes_thinking=result.get("output_includes_thinking"),
+                # Where that count came from, so the guest can tell an engine's
+                # split from an estimate made over the reasoning text.
+                thinking_source=result.get("thinking_source"),
                 # The rung this call ran on, asked for or not: the guest's only
                 # way to check the depth it paid for against the depth it asked for.
                 served_effort=ran_effort,

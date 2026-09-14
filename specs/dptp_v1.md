@@ -321,6 +321,7 @@ Returns the result of a remote inference request.
     "thinking": "Let me think about this question...",
     "thinking_tokens": 50,
     "output_includes_thinking": "excludes",
+    "thinking_source": "engine",
     "tariff_in": 20.0,
     "tariff_out": 60.0,
     "tariff_currency": "RUB",
@@ -360,7 +361,8 @@ Returns the result of a remote inference request.
 - `model_max_tokens` (integer, optional): Model's context window size
 - `thinking` (string, optional): Thinking/reasoning content from models with extended reasoning (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
 - `thinking_tokens` (integer, optional): Tokens used for thinking/reasoning
-- `output_includes_thinking` (string, optional, v1.7+): Whether `response_tokens` already has `thinking_tokens` inside it — `includes`, `excludes` or `unknown` — as the node that produced the count knows it, so the requester can check the arithmetic on the numbers beside it rather than assume a convention. Absent from an older host, which the requester reads as `unknown`. Never sent on an error.
+- `output_includes_thinking` (string, optional, v1.7+): Whether `response_tokens` already has `thinking_tokens` inside it — `includes`, `excludes` or `unknown` — as the node that produced the count knows it, so the requester can check the arithmetic on the numbers beside it rather than assume a convention. Absent from an older host, which the requester reads as `unknown`. Never sent on an error. Under `includes` the reasoning is inside the output count and never larger than it: `thinking_tokens <= response_tokens`. A count that breaks the invariant is an estimate that overflowed the total it sits inside, and a receiver writes the row with `thinking_tokens` clamped to `response_tokens` and `thinking_source` set to `estimated` rather than refusing a record of a call that was made.
+- `thinking_source` (string, optional, v1.7+): Where `thinking_tokens` came from — `engine` where the host's vendor reported the reasoning split, `estimated` where the host derived it from the reasoning text, which is what a host whose build reports no split sends. The counts beside it can be exact while the split inside them is a guess, so this is provenance, not arithmetic: `prompt_tokens` and `response_tokens` are unaffected by it, and a tariff is charged on those. Absent means the host said nothing about provenance — an older host, or a call with no reasoning at all — and is not a claim that an engine counted. Never sent on an error.
 - `tariff_in`, `tariff_out` (number, optional, v1.7+): The owner's tariff for this call, as **applied values** per 1M prompt and per 1M output tokens — never a reference to a configuration that may have changed by the time the row is read (ADR-041 D3, amendment). Reasoning is billable output at `tariff_out`, and whether `response_tokens` already holds it is what `output_includes_thinking` says. The four tariff fields are sent as one group or not at all; the group's absence means the host declared no tariff (the call is a gift), while zeros mean a tariff was declared and this requester pays nothing of it.
 - `tariff_currency` (string, optional, v1.7+): The ISO 4217 unit `tariff_in`, `tariff_out` and `tariff_amount` are in — the host's `compute.currency`, frozen into the message and into both nodes' usage rows, because rows outlive a configuration. The protocol picks no currency; parity between two nodes' units is the pair's own agreement, outside the protocol.
 - `tariff_at` (string, optional, v1.7+): The `from` day (`YYYY-MM-DD`) of the dated tariff entry that applied, so a row can name which line of the declaration priced it.
@@ -2464,6 +2466,13 @@ DPTP is designed to be extensible. New commands can be added by:
   sentences and disagreed — a row promising `xhigh` beside a door serving the
   configured `low`, which the guest had no way to see. Changed 2026-09-14 while
   v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `thinking_source` (`engine` |
+  `estimated`): where `thinking_tokens` came from, beside the
+  `output_includes_thinking` it qualifies, and with it the invariant that under
+  `includes` the thinking count never exceeds `response_tokens`. An estimate made
+  over the reasoning text is not bounded by the engine's exact total on its own:
+  a host reported 24 thinking tokens inside a 22-token completion on 2026-09-14.
+  Added 2026-09-14 while v1.7 is unreleased
 - **§3.4 REMOTE_INFERENCE_REQUEST** — the tier the host requires is stated:
   served only over a connection whose key is proved — direct TLS; other tiers
   receive the error response (ADR-041 D2). Added 2026-09-14 with the host-side

@@ -104,7 +104,14 @@ from .dpc_agent.llm_adapter import DpcLlmAdapter
 from .dpc_agent.pricing import compute_cost_usd, get_billing_model
 from .firewall import ServingLists
 from .llm_manager import accepts_reasoning_effort, entry_point_for, flatten_messages
-from .node_ledger import TARIFF_FIELDS, NodeLedger, default_ledger, stated_output_includes_thinking, usage_row
+from .node_ledger import (
+    TARIFF_FIELDS,
+    NodeLedger,
+    default_ledger,
+    stated_output_includes_thinking,
+    stated_thinking_source,
+    usage_row,
+)
 from .p2p_manager import PROVED_CONNECTION_TYPES
 from .providers.base import (
     REASONING_EFFORTS,
@@ -603,6 +610,9 @@ class Gateway:
                 # only where it did not.
                 counts_source=result.get("counts_source", "ours"),
                 output_includes_thinking=result.get("output_includes_thinking", "unknown"),
+                # Whether that thinking count was counted or estimated, as the
+                # door was told; None where nobody said.
+                thinking_source=result.get("thinking_source"),
                 # The rung this call ran on, not the word that asked for it;
                 # no peer is in this row to prove.
                 served_effort=self._served_effort(alias, result),
@@ -751,6 +761,11 @@ class Gateway:
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source=counts_source,
                 output_includes_thinking=output_includes_thinking,
+                # The host's word for where its thinking count came from, checked
+                # here as its convention is: the wire can carry anything.
+                thinking_source=stated_thinking_source(
+                    result.get("thinking_source"), peer=peer_id, log=logger,
+                ),
                 # The host's word after its clamp, copied from the wire.
                 served_effort=result.get("served_effort"),
                 # The connection this call was gated on above, not one read

@@ -27,6 +27,7 @@ from ..node_ledger import (
     NodeLedger,
     default_ledger,
     stated_output_includes_thinking,
+    stated_thinking_source,
     usage_row,
 )
 from .pricing import compute_cost_usd, get_billing_model
@@ -358,6 +359,9 @@ class DpcLlmAdapter:
                 counts_source=facts.get("counts_source", "ours"),
                 # Set by whoever made the count: the provider's usage dict or the wire.
                 output_includes_thinking=usage.get("output_includes_thinking", "unknown"),
+                # ... and whether that thinking count was counted or estimated,
+                # from the same two places; None where neither said.
+                thinking_source=usage.get("thinking_source"),
                 # On the peer route, the host's word after its clamp, copied from
                 # the wire; the local routes do not set it yet.
                 served_effort=usage.get("served_effort"),
@@ -1117,6 +1121,14 @@ class DpcLlmAdapter:
             # whether or not the host counted, so the row carries it either way.
             if _peer.get("served_effort") is not None:
                 usage["served_effort"] = _peer["served_effort"]
+            # Where the host's thinking count came from, checked as its
+            # convention is; a word that is neither of the two is dropped.
+            _source = stated_thinking_source(
+                _peer.get("thinking_source"),
+                peer=getattr(dpc_agent_provider, "peer_id", None) or "?", log=log,
+            )
+            if _source is not None:
+                usage["thinking_source"] = _source
 
             return response_msg, usage
 

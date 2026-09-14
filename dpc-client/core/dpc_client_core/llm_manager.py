@@ -18,7 +18,7 @@ from .providers import (
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
-from .node_ledger import OUTPUT_INCLUDES_THINKING
+from .node_ledger import OUTPUT_INCLUDES_THINKING, THINKING_SOURCES
 from .providers.base import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
@@ -203,6 +203,14 @@ def reported_served_effort(provider: Any) -> Optional[str]:
     """
     word = (provider.get_last_usage() or {}).get("served_effort")
     return word if isinstance(word, str) and word else None
+
+
+def reported_thinking_source(usage: Dict[str, Any]) -> Optional[str]:
+    """The provenance word from a provider's usage dict, or None where it has
+    none: a reasoning count with no word behind it is left unattributed rather
+    than credited to the engine that may not have made it."""
+    word = usage.get("thinking_source")
+    return word if word in THINKING_SOURCES else None
 
 
 def reported_counts(provider: Any) -> Optional[Tuple[int, int, str]]:
@@ -752,6 +760,7 @@ class LLMManager:
         # Check if this is a thinking model and extract thinking content
         thinking_content = None
         thinking_tokens = None
+        thinking_source = None
         if provider.supports_thinking():
             logger.info("Provider '%s' supports thinking mode", provider.model)
 
@@ -782,11 +791,14 @@ class LLMManager:
                 # the split themselves (llama-server, when the server reports none)
                 # put their estimate in the same field — still their own number over
                 # the same text, and better than a second opinion computed here.
-                reported = (provider.get_last_usage() or {}).get("reasoning_tokens")
+                usage = provider.get_last_usage() or {}
+                reported = usage.get("reasoning_tokens")
                 if isinstance(reported, int) and reported > 0:
                     thinking_tokens = reported
+                    thinking_source = reported_thinking_source(usage)
                 else:
                     thinking_tokens = self.count_tokens(thinking_content, provider.model)
+                    thinking_source = "estimated"
         else:
             logger.debug("Provider '%s' does not support thinking mode", provider.model)
 
@@ -815,6 +827,10 @@ class LLMManager:
                 "vision_used": bool(images),  # Indicate if vision API was used
                 "thinking": thinking_content,  # Thinking/reasoning content (if any)
                 "thinking_tokens": thinking_tokens,  # Tokens used for thinking
+                # ... and who made that number: the engine where it reported the
+                # split, this door or the provider where one estimated it, None
+                # where nothing said. A row copies the word; it never infers one.
+                "thinking_source": thinking_source,
                 # Whose numbers those are, and what is inside them: the engine's
                 # where it reported any, and the recount over the visible text —
                 # which the thinking is already out of — only where it did not.
@@ -935,17 +951,21 @@ class LLMManager:
         # recomputed from the text. The two copies must move together.
         thinking_content = None
         thinking_tokens = None
+        thinking_source = None
         if provider.supports_thinking():
             if hasattr(provider, 'get_last_thinking'):
                 thinking_content = provider.get_last_thinking()
             if not thinking_content:
                 response, thinking_content = parse_thinking_tags(response)
             if thinking_content:
-                reported = (provider.get_last_usage() or {}).get("reasoning_tokens")
+                usage = provider.get_last_usage() or {}
+                reported = usage.get("reasoning_tokens")
                 if isinstance(reported, int) and reported > 0:
                     thinking_tokens = reported
+                    thinking_source = reported_thinking_source(usage)
                 else:
                     thinking_tokens = self.count_tokens(thinking_content, provider.model)
+                    thinking_source = "estimated"
 
         if return_metadata:
             counted = reported_counts(provider)
@@ -968,6 +988,7 @@ class LLMManager:
                 "vision_used": False,  # images stay on `query`; this door carries none
                 "thinking": thinking_content,
                 "thinking_tokens": thinking_tokens,
+                "thinking_source": thinking_source,  # `query`'s rule, same two copies
                 "counts_source": counts_source,  # same rule as `query`
                 "output_includes_thinking": output_includes_thinking,
                 # The effort word this door passed to the provider, normalised

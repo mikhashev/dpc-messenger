@@ -2,7 +2,7 @@
 
 from typing import Dict, Any, Optional
 from . import MessageHandler
-from ..node_ledger import stated_output_includes_thinking
+from ..node_ledger import stated_output_includes_thinking, stated_thinking_source
 
 
 class RemoteInferenceRequestHandler(MessageHandler):
@@ -93,6 +93,11 @@ class RemoteInferenceResponseHandler(MessageHandler):
             output_includes_thinking = stated_output_includes_thinking(
                 output_includes_thinking, peer=sender_node_id, log=self.logger,
             )
+        # Where the host's thinking count came from (v1.7); a word that is
+        # neither of the two is dropped, not carried.
+        thinking_source = stated_thinking_source(
+            payload.get("thinking_source"), peer=sender_node_id, log=self.logger,
+        )
         # The effort the host actually ran at, after its clamp (v1.7). Absent
         # means the host applied no effort control, which is not `off`.
         served_effort = payload.get("served_effort")
@@ -120,6 +125,8 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         result_data["billing"] = billing
                     if output_includes_thinking is not None:
                         result_data["output_includes_thinking"] = output_includes_thinking
+                    if thinking_source is not None:
+                        result_data["thinking_source"] = thinking_source
                     if served_effort is not None:
                         result_data["served_effort"] = served_effort
                     future.set_result(result_data)

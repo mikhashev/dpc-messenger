@@ -167,7 +167,7 @@ class DeepSeekProvider(AIProvider):
                 "no longer counted inside completion; output_includes_thinking=excludes",
                 _completion, _reasoning,
             )
-        return {
+        usage = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": _completion,
             "reasoning_tokens": _reasoning,
@@ -178,6 +178,12 @@ class DeepSeekProvider(AIProvider):
             "prompt_cache_miss_tokens": _miss or 0,
             "output_includes_thinking": convention,
         }
+        if _reasoning:
+            # Whose number the split is. DeepSeek reports it, so it is the
+            # engine's; a subclass whose server does not overwrites this key
+            # with its own estimate. Absent where there is no reasoning.
+            usage["thinking_source"] = "engine"
+        return usage
 
     def _effort_label(self, requested: Optional[str], extra_body: Dict[str, Any]) -> str:
         """What the usage line should say this call asked for.

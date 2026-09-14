@@ -737,8 +737,11 @@ class TestReasoningAccounting:
         with caplog.at_level(logging.INFO, logger="dpc_client_core.providers.llamacpp_server_provider"):
             await p.generate_response("q")
 
-        assert p._last_usage["reasoning_tokens"] == 100  # 400 chars / 4
-        assert p._last_usage["content_tokens"] == 0  # completion=7, estimate clamps at 0
+        # 400 chars / 4 is 100, and the server's exact completion is 7: the
+        # estimate is bounded by the total it is a share of.
+        assert p._last_usage["reasoning_tokens"] == 7
+        assert p._last_usage["content_tokens"] == 0
+        assert p._last_usage["thinking_source"] == "estimated"
         assert any("split=estimated" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
@@ -755,6 +758,7 @@ class TestReasoningAccounting:
         assert out["reasoning_tokens"] == 50
         assert out["content_tokens"] == 50
         assert out["output_includes_thinking"] == "includes"
+        assert out["thinking_source"] == "engine"
 
     def test_the_servers_total_includes_the_reasoning_it_estimates_the_share_of(self):
         """`completion_tokens` is the server's count of everything it decoded;
@@ -770,6 +774,7 @@ class TestReasoningAccounting:
         )
         assert out["reasoning_tokens"] == 100
         assert out["output_includes_thinking"] == "includes"
+        assert out["thinking_source"] == "estimated"
 
     def test_a_split_larger_than_the_total_keeps_the_parents_excludes(self):
         p = _provider()

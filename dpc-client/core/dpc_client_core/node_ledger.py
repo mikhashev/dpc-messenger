@@ -8,7 +8,10 @@ kept by the node, not by the caller. A row says who called (`caller`,
 numbers those are (`counts_source`), whether `completion_tokens` already holds
 the reasoning (`output_includes_thinking`: `includes` | `excludes` | `unknown`,
 set where the count was made; a row written before the column reads as
-`unknown`), at which reasoning effort the call actually ran (`served_effort`:
+`unknown`), where the thinking count came from (`thinking_source`: `engine` |
+`estimated` | null for a node that said nothing; under `includes` the count is
+clamped to `completion_tokens` and marked `estimated` rather than written
+larger than the total it is inside), at which reasoning effort the call actually ran (`served_effort`:
 one word of the shared scale off/low/medium/high/max, the host's word after its
 clamp — on the host's own row from the clamp, on the requester's row from the
 wire; None means no effort control was applied, which is not `off`, and a row
@@ -75,6 +78,10 @@ CALLER_KINDS = ("agent", "peer", "gateway")
 ROUTES = ("local", "peer")
 COUNTS_SOURCES = ("ours", "engine")
 OUTPUT_INCLUDES_THINKING = ("includes", "excludes", "unknown")
+# Where `thinking_tokens` came from: the engine reported the split, or the node
+# that wrote the row estimated it from the reasoning text. None is «nobody said»
+# — an older row, a node with no word for it, or a call with no reasoning at all.
+THINKING_SOURCES = ("engine", "estimated")
 # The tariff as it travels: four applied values that go together and the amount
 # they came to. Named once here, where the columns live, and read by every site
 # that copies the group from the wire onto a row.
@@ -93,6 +100,20 @@ def stated_output_includes_thinking(value: Any, *, peer: str, log: logging.Logge
         peer, value, "/".join(OUTPUT_INCLUDES_THINKING),
     )
     return "unknown"
+
+
+def stated_thinking_source(value: Any, *, peer: str, log: logging.Logger) -> Optional[str]:
+    """The word a peer sent for the provenance of its thinking count, when it is
+    one of the two; None for anything else, with one WARNING naming the peer and
+    the value. Absent stays absent: an older host says nothing about provenance,
+    and None is that silence, not a claim that the engine counted."""
+    if value is None or value in THINKING_SOURCES:
+        return value
+    log.warning(
+        "Peer %s sent thinking_source=%r, which is neither of %s; the row says nothing",
+        peer, value, "/".join(THINKING_SOURCES),
+    )
+    return None
 BILLINGS = ("subscription", "pay_per_use")
 
 LOCK_TIMEOUT_S = 2.0
@@ -133,6 +154,7 @@ def usage_row(
     tariff_at: Any = None,
     tariff_amount: Any = None,
     output_includes_thinking: str = "unknown",
+    thinking_source: Optional[str] = None,
     served_effort: Optional[str] = None,
     peer_proved: Optional[bool] = None,
     peer_connection_type: Optional[str] = None,
@@ -149,6 +171,23 @@ def usage_row(
     `tariff_amount` is written beside them — null when the counts' convention
     is `unknown` and the arithmetic may not be done — and is refused without
     them, because its unit is `tariff_currency` and its basis is those rates.
+
+    `thinking_source` says where `thinking_tokens` came from — `engine` when the
+    vendor reported the split, `estimated` when a node derived it from the
+    reasoning text — and None when nobody said, which a row written before the
+    column also reads as. It is provenance, not arithmetic: `counts_source`
+    already says who produced `prompt_tokens` and `completion_tokens`, and a
+    provider can report exact totals with an estimated split inside them.
+
+    Under `includes` the reasoning is inside the output count, so
+    `thinking_tokens <= completion_tokens` is the arithmetic every reader does.
+    An estimate is not bounded by the engine's exact total, and one that
+    overflowed it reached this function from a peer on 2026-09-14 (live rows
+    ab08ff95: completion 22, thinking 24). Refusing the row would lose the
+    record of a call that was made and paid for, so the count is clamped to the
+    completion it is inside, marked `estimated`, and the overflow is named in one
+    WARNING with the request id. The invariant then holds on disk whatever a
+    peer's provider does.
 
     `peer_proved` is what ADR-041 D2 draws its line on, written by whoever
     knows the connection this call travelled over. True means the far end's
@@ -186,6 +225,15 @@ def usage_row(
             raise ValueError(f"{name}={value!r} is not one of {allowed}")
     if started_at.tzinfo is None:
         raise ValueError("started_at must carry a timezone; the row is priced by the UTC hour")
+    if thinking_source is not None and thinking_source not in THINKING_SOURCES:
+        raise ValueError(f"thinking_source={thinking_source!r} is not one of {THINKING_SOURCES}")
+    thinking_tokens, thinking_source = _thinking_inside_the_output(
+        request_id=request_id,
+        completion_tokens=completion_tokens,
+        thinking_tokens=thinking_tokens,
+        output_includes_thinking=output_includes_thinking,
+        thinking_source=thinking_source,
+    )
     if served_effort is not None and not isinstance(served_effort, str):
         raise ValueError(f"served_effort={served_effort!r} is not a word of the effort scale")
     if peer_proved is not None and not isinstance(peer_proved, bool):
@@ -204,6 +252,7 @@ def usage_row(
         "thinking_tokens": _count(thinking_tokens),
         "counts_source": counts_source,
         "output_includes_thinking": output_includes_thinking,
+        "thinking_source": thinking_source,
         "served_effort": served_effort,
         "peer_proved": peer_proved,
         "peer_connection_type": peer_connection_type,
@@ -220,6 +269,39 @@ def usage_row(
     if conversation_id:
         row["conversation_id"] = conversation_id
     return row
+
+
+def _thinking_inside_the_output(
+    *,
+    request_id: Any,
+    completion_tokens: Any,
+    thinking_tokens: Any,
+    output_includes_thinking: str,
+    thinking_source: Optional[str],
+) -> tuple:
+    """`(thinking_tokens, thinking_source)` with the `includes` invariant held.
+
+    A thinking count larger than the output count it sits inside came from an
+    estimate over the reasoning text, never from an engine that counted both, so
+    it is clamped and marked for what it is. Clamped rather than refused: the row
+    records a call already made and paid for, and a peer's arithmetic is not ours
+    to reject. A value that will not read as an integer is left to `_count`.
+    """
+    if output_includes_thinking != "includes":
+        return thinking_tokens, thinking_source
+    try:
+        completion, thinking = int(completion_tokens), int(thinking_tokens)
+    except (TypeError, ValueError):
+        return thinking_tokens, thinking_source
+    if thinking <= completion:
+        return thinking_tokens, thinking_source
+    log.warning(
+        "Usage row %s says completion_tokens=%d with thinking_tokens=%d inside it: "
+        "the thinking count is an estimate that overflowed the count it is inside; "
+        "the row is written with thinking_tokens=%d and thinking_source=estimated",
+        request_id, completion, thinking, completion,
+    )
+    return completion, "estimated"
 
 
 def _tariff_columns(tariff_in: Any, tariff_out: Any, tariff_currency: Any, tariff_at: Any) -> Dict[str, Any]:
@@ -434,6 +516,7 @@ class NodeLedger:
                                 # Only where a tariff applied: a row with no
                                 # group has no amount column to be missing.
                                 row.setdefault("tariff_amount", None)
+                            row.setdefault("thinking_source", None)
                             row.setdefault("served_effort", None)
                             row.setdefault("peer_proved", None)
                             row.setdefault("peer_connection_type", None)

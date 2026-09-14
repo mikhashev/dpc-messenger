@@ -584,14 +584,26 @@ class LlamaServerProvider(DeepSeekProvider):
         estimate is script-blind by design (Cyrillic undercounts ~3-4x,
         TOKEN-ESTIMATE-IS-BLIND-TO-SCRIPT): the total `completion_tokens`
         stays exact so burn cost is never distorted, and the marker says
-        what is estimated."""
+        what is estimated.
+
+        The estimate is bounded by that exact total, because the convention
+        here is `includes` and a part cannot exceed the whole it is inside —
+        unbounded, chars/4 read 24 tokens of thinking inside a 22-token
+        completion on both nodes on 2026-09-14. `thinking_source` carries which
+        of the two made the number, so a reader is not left inferring it from a
+        log marker."""
         usage = self._usage_from_response(raw_usage) if raw_usage is not None else None
         if usage is None:
             return {}
-        estimated = False
+        estimated = clamped = False
         if not usage.get("reasoning_tokens") and reasoning_text:
-            usage["reasoning_tokens"] = max(1, len(reasoning_text) // 4)
-            usage["content_tokens"] = max(0, usage["completion_tokens"] - usage["reasoning_tokens"])
+            exact = usage["completion_tokens"]
+            guess = max(1, len(reasoning_text) // 4)
+            clamped = guess > exact
+            usage["reasoning_tokens"] = min(guess, exact)
+            usage["content_tokens"] = exact - usage["reasoning_tokens"]
+            if usage["reasoning_tokens"]:
+                usage["thinking_source"] = "estimated"
             estimated = True
         # The server's `completion_tokens` counts every decoded token and the
         # reasoning block is parsed out of that same text (the subtraction
@@ -676,7 +688,9 @@ class LlamaServerProvider(DeepSeekProvider):
             "%s%s%s",
             self.alias, conversation_id or "-", usage["prompt_tokens"],
             usage["completion_tokens"], usage["reasoning_tokens"],
-            usage["content_tokens"], ", split=estimated" if estimated else "",
+            usage["content_tokens"],
+            ", split=estimated (clamped to completion)" if clamped
+            else ", split=estimated" if estimated else "",
             tool_calls, effort, path,
             f", finish={finish_reason}" if finish_reason else "",
             "" if cached is None else
