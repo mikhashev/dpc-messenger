@@ -37,6 +37,7 @@
     type ServingList,
     type TariffEntry,
   } from './computeSharing';
+  import InferenceUsage from './InferenceUsage.svelte';
 
   export let displayCompute: ComputeRules | null = null;
   export let editCompute: ComputeRules | null = null;
@@ -94,6 +95,8 @@
   $: nodeChoices = knownNodes(peerInfo, nodeGroups, nodeRuleIds, view).filter((n) => !(view?.allow_nodes ?? []).includes(n.node_id));
   $: groupChoices = knownGroups(nodeGroups, view).filter((g) => !(view?.allow_groups ?? []).includes(g));
   $: nodeLabel = new Map(knownNodes(peerInfo, nodeGroups, nodeRuleIds, view).map((n) => [n.node_id, n]));
+  // The same names the Usage block shows a peer under: one source for the tab.
+  $: usageNodes = [...nodeLabel.values()];
   let pickNode = '';
   let pickGroup = '';
   let typingNode = false;
@@ -521,6 +524,11 @@
           {/each}
         </div>
       {/if}
+
+      <!-- Usage: the ledger these rules produced, read by role. Outside the
+           enabled gate on purpose — a node that serves nobody still consumes
+           from peers and still burns its own key. -->
+      <InferenceUsage nodes={usageNodes} />
     </div>
   {:else}
     <p class="empty">Compute sharing not configured.</p>

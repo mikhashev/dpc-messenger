@@ -310,7 +310,8 @@ its own calls on its own key, neither side of a sharing. Both take optional `sin
 `until` ISO datetime bounds, and `get_inference_usage` a `month` of `YYYY-MM` to read one
 partition. A tariff that applied over counts nobody could price (`tariff_unpriceable`) and
 a call with no tariff declared at all (`untariffed`) are counted apart from the money and
-never added into it as a zero.
+never added into it as a zero. The Compute Sharing tab of the firewall dialog reads
+`get_inference_usage` for the current month and shows the three series as three lists.
 
 **Shape and limits.** `model` in a request is the alias; `/v1/models` lists the aliases
 with `owned_by` `local` or `vendor`. `stream: true` yields the text as it is made,
