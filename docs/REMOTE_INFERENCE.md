@@ -259,18 +259,22 @@ result = await core_service.send_ai_query(
 - [ ] Multi-hop inference (chain multiple peers)
 - [ ] Inference result caching
 
-### ⚠️ Current Limitation: No Streaming Support
+### ⚠️ Current Limitation: the chat UI does not ask for the stream the wire can carry
 
-Remote inference uses a **request-response pattern** over DPTP and does not support streaming responses. This means:
+DPTP v1.7 carries a stream: a request that sets `stream: true` is answered with
+REMOTE_INFERENCE_CHUNK frames as the host makes the answer, terminated by the
+REMOTE_INFERENCE_RESPONSE that still holds the whole text and every count (spec §3.4).
+The gateway's peer route (`remote:<node>:<alias>`) uses it. **The chat UI path does
+not**: it calls `_request_inference_from_peer` with no chunk callback, so nothing is
+asked for and nothing is sent. That means, on that path:
 
 - The requestor waits for the full response before displaying it
 - Long-running queries (e.g., thinking models like GLM-4.7) may take several minutes
 - Users see a loading indicator instead of real-time token streaming
 
-**Why streaming is not yet implemented:**
-1. Protocol changes needed to support chunked responses over DPTP
-2. Remote peer would need to send intermediate chunks during generation
-3. Handler would need to accumulate and forward chunks in real-time
+**What is left to do:** hand `_request_inference_from_peer` an `on_chunk` from the UI
+door and forward each delta over the local WebSocket API as the chat already forwards a
+local model's chunks. Nothing in the protocol or the host is missing.
 
 **Workaround:** the default is now 1200 s on every door, which is the host's own budget plus
 overhead; a shorter one can still be set per alias via `timeout`. (The former advice — «up to
