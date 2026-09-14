@@ -355,16 +355,38 @@ async def test_a_word_this_alias_reaches_no_rung_from_is_refused_naming_its_own_
 
 
 @pytest.mark.asyncio
-async def test_the_row_names_the_rung_the_call_ran_on_not_the_word_that_asked_for_it(tmp_path):
+async def test_the_aliass_own_top_rung_reaches_the_provider_unfolded_and_names_the_row(tmp_path):
+    """The live regression: `xhigh` is this model's top rung and was folded to
+    `high` on the shared scale before anyone asked the alias, so the alias then
+    refused its own word (2026-09-14)."""
     service = _ladder_service(tmp_path)
     async with _running(tmp_path, service) as (server, ledger):
         status, text = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path),
-                                      body=_chat(LOCAL, reasoning_effort="max"))
+                                      body=_chat(LOCAL, reasoning_effort="xhigh"))
         assert status == 200, text
-        assert service.calls[0]["kwargs"]["reasoning_effort"] == "max", "the provider folds, not the door"
+        assert service.calls[0]["kwargs"]["reasoning_effort"] == "xhigh", "the word was folded on the way"
 
         (row,) = list(ledger.rows())
-        assert row["served_effort"] == "xhigh", "the row named the request rather than the rung"
+        assert row["served_effort"] == "xhigh"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asked", ["high", "max", "banana"],
+                         ids=["a shared-scale word this ladder lacks", "the shared scale's top",
+                              "a word off every scale"])
+async def test_a_word_this_ladder_lacks_is_refused_in_this_ladders_words(tmp_path, asked):
+    """One door, one dictionary: whether the word happens to sit on the shared
+    scale decides nothing, because the alias was resolved before it was judged."""
+    service = _ladder_service(tmp_path)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path),
+                                      body=_chat(LOCAL, reasoning_effort=asked))
+        assert status == 400, text
+        message = _openai_error(text)["message"]
+        assert asked in message and "low, medium, xhigh" in message
+        assert "xhigh is read as high" not in message, "the shared scale answered for an alias with words"
+
+        assert service.calls == [] and list(ledger.rows()) == []
 
 
 @pytest.mark.asyncio
@@ -564,3 +586,94 @@ async def test_a_part_that_is_neither_text_nor_an_image_is_still_refused_by_name
         assert status == 400, text
         assert "input_audio" in _openai_error(text)["message"]
         assert service.calls == []
+
+
+# --- (7) one dictionary per alias, on either route --------------------------------
+
+
+def _peer_row_words(service, words):
+    """The menu row the gateway reads for REMOTE_ALIAS, given its own words or
+    none. The row is this peer's copy, so the edit reaches no other test."""
+    row = service.peer_metadata[PEER]["providers"][0]
+    if words is None:
+        row.pop("reasoning_words", None)
+    else:
+        row["reasoning_words"] = list(words)
+    return row
+
+
+ROW_WORDS = ["xhigh", "medium", "low"]
+
+
+@pytest.mark.asyncio
+async def test_the_peers_own_top_word_crosses_unfolded(tmp_path):
+    """The Linux guest's case: `xhigh` is on the row and was folded to `high`
+    before the row was read, so the host was asked for a word it never named."""
+    service = _peer_service(tmp_path)
+    _peer_row_words(service, ROW_WORDS)
+    async with _running(tmp_path, service) as (server, _):
+        status, text = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path),
+                                      body=_chat(REMOTE_MODEL, reasoning_effort="xhigh"))
+        assert status == 200, text
+        assert service.peer_calls[0]["reasoning_effort"] == "xhigh"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asked", ["high", "banana"],
+                         ids=["a shared-scale word the row lacks", "a word off every scale"])
+async def test_a_word_the_peers_row_lacks_is_refused_in_the_rows_words(tmp_path, asked):
+    """`banana` was refused listing the shared scale and `xhigh` listing the
+    row's words, on the same alias and the same call path (2026-09-14)."""
+    service = _peer_service(tmp_path)
+    _peer_row_words(service, ROW_WORDS)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path),
+                                      body=_chat(REMOTE_MODEL, reasoning_effort=asked))
+        assert status == 400, text
+        message = _openai_error(text)["message"]
+        assert asked in message and "xhigh, medium, low" in message
+        assert "xhigh is read as high" not in message, "the shared scale answered for a row with words"
+
+        assert service.peer_calls == [] and list(ledger.rows()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_row_that_names_no_words_is_the_shared_scale_and_folds_xhigh(tmp_path):
+    """Where the host said nothing about its model's rungs there is no other
+    ladder to stand on, and `xhigh` reads as `high` as it always has."""
+    service = _peer_service(tmp_path)
+    _peer_row_words(service, None)
+    async with _running(tmp_path, service) as (server, _):
+        status, text = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path),
+                                      body=_chat(REMOTE_MODEL, reasoning_effort="xhigh"))
+        assert status == 200, text
+        assert service.peer_calls[0]["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_a_word_off_every_scale_on_a_wordless_row_lists_the_shared_scale(tmp_path):
+    service = _peer_service(tmp_path)
+    _peer_row_words(service, None)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path),
+                                      body=_chat(REMOTE_MODEL, reasoning_effort="banana"))
+        assert status == 400, text
+        message = _openai_error(text)["message"]
+        assert "banana" in message
+        assert all(word in message for word in KNOWN_EFFORTS)
+
+        assert service.peer_calls == [] and list(ledger.rows()) == []
+
+
+@pytest.mark.asyncio
+async def test_the_messages_form_names_its_own_field_in_an_aliass_refusal(tmp_path):
+    """The field name survives the move of the check from the shape layer to
+    the door: a client that wrote `output_config.effort` is answered about it."""
+    service = _ladder_service(tmp_path)
+    async with _running(tmp_path, service) as (server, _):
+        status, text = await _post_messages(
+            server, _messages(LOCAL, output_config={"effort": "banana"}), key=_key(tmp_path),
+        )
+        assert status == 400, text
+        message = _anthropic_error(text)["message"]
+        assert "output_config.effort" in message and "low, medium, xhigh" in message

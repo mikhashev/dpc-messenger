@@ -21,6 +21,7 @@ the OpenAI-shape test file builds. Cross-platform: pure asyncio.
 """
 
 import asyncio
+import copy
 import json
 import types
 
@@ -105,10 +106,12 @@ def _peer_service(tmp_path, compute=BOTH_LISTS, *, result=None, fail=None,
     if connected:
         peers[PEER] = _Connection(PEER, connection_type)
     service.p2p_manager.peers = peers
+    # Deep-copied: a test that adds `reasoning_words` to a row is editing one
+    # peer's menu, not every later test's.
     service.peer_metadata = {
-        PEER: {"name": "the colleague", "providers": PEER_ROWS},
+        PEER: {"name": "the colleague", "providers": copy.deepcopy(PEER_ROWS)},
         SILENT_PEER: {"name": "quiet"},
-        GONE_PEER: {"name": "gone", "providers": PEER_ROWS},
+        GONE_PEER: {"name": "gone", "providers": copy.deepcopy(PEER_ROWS)},
     }
     peer_calls = []
 

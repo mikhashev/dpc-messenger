@@ -43,14 +43,17 @@ dropped: every degradation is said on the wire.
 Two more things the peer wire under this door already carries now cross it
 (D4 amendment, 2026-09-14). **Reasoning effort**: OpenAI's `reasoning_effort`
 and the Messages form's `output_config.effort` and `thinking: {type:
-disabled}` become one word of this node's scale — `off, low, medium, high,
-max` — travelling to the provider on the local route and to the host on the
-peer route, where the host caps it and names what it served. The scale is per
-alias where the model named its own rungs (`reasoning_words` on the menu row,
-`declared_reasoning_words` here), and a word that reaches no rung of the alias
-asked for is a 400 listing that alias's words, never a guess; the row then
-names the rung the call ran on rather than the word that asked for it.
-`thinking` enabled or
+disabled}` travel to the provider on the local route and to the host on the
+peer route, where the host caps it and names what it served. The vocabulary is
+the alias's own: the alias is resolved first, and the word is then checked once
+against that alias's words — `reasoning_words` on the peer's menu row,
+`declared_reasoning_words` on this node's — as written and never folded onto
+the shared scale first, which is what made `xhigh` unreachable on the very
+model that named it (live, 2026-09-14). The shared scale `off, low, medium,
+high, max` stands in only for an alias whose model named no words, and folds
+`xhigh` to `high` there alone. A word that reaches no rung is a 400 listing
+that alias's words — one door, one dictionary — and the row then names the rung
+the call ran on rather than the word that asked for it. `thinking` enabled or
 adaptive without an effort word asks for the alias's own default, which is
 not a degradation and is said nowhere. **Images**: a `data:` URL in an
 OpenAI `image_url` part, or an Anthropic `image` block whose source is
@@ -343,6 +346,7 @@ class Gateway:
         tools: Optional[List[Dict[str, Any]]] = None,
         images: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: Optional[str] = None,
+        effort_field: str = "reasoning_effort",
         on_chunk: Optional[Callable[..., Any]] = None,
         request_id: Optional[str] = None,
     ) -> Completion:
@@ -360,9 +364,14 @@ class Gateway:
         only place the peer wire has for them; on the local route they take
         `LLMManager.query`, whose vision entry point holds no tools, so tools
         beside an image are refused here rather than dropped.
-        `reasoning_effort` is one word of this node's scale, normalised by the
-        shape layer: the local route hands it to the provider, the peer route
-        to the host, which caps it and returns what it served."""
+        `reasoning_effort` is the word the client wrote, unfolded: the alias is
+        resolved first and the word is then checked against *that* alias's
+        vocabulary — the menu row's `reasoning_words` on the peer route, this
+        node's `declared_reasoning_words` on the local one, and the shared scale
+        only where the alias named no words of its own. What passes travels
+        unchanged: to the provider on the local route, to the host on the peer
+        route, which caps it and returns what it served. `effort_field` is what
+        the client called the field, so a refusal names it back."""
         # The route first: `compute.enabled` is about what this node gives, so
         # it stands in front of this node's own aliases and not in front of a
         # peer's, which the peer's own flag guards.
@@ -378,6 +387,7 @@ class Gateway:
                 )
             return await self._complete_via_peer(
                 alias, *remote, prompt, images=images, reasoning_effort=reasoning_effort,
+                effort_field=effort_field,
             )
         self.refuse_unless_compute_sharing(alias)
         try:
@@ -399,6 +409,13 @@ class Gateway:
         if images:
             self._refuse_images_the_alias_cannot_take(alias, providers[alias], images, tools)
         if reasoning_effort is not None:
+            # The vocabulary first, the path second: the word this alias knows
+            # is what the refusal about the path should name, and what the
+            # provider is handed.
+            reasoning_effort = _effort_the_alias_knows(
+                reasoning_effort, declared_reasoning_words(providers[alias])[0],
+                serves=f"model '{alias}'", what=effort_field,
+            )
             self._refuse_effort_the_path_cannot_take(
                 alias, providers[alias], reasoning_effort,
                 tools=bool(tools), streaming=on_chunk is not None, images=bool(images),
@@ -475,24 +492,11 @@ class Gateway:
     def _refuse_effort_the_path_cannot_take(
         self, alias: str, provider: Any, effort: str, *, tools: bool, streaming: bool, images: bool,
     ) -> None:
-        """The effort word must be one this alias knows, and must reach the
-        provider entry point this request will actually take — the words are
-        the model's, and the three entry points did not grow the parameter
-        together."""
-        # The scale is per alias, not global: a model whose own template named
-        # its rungs is asked in those words, and the shared scale stands in
-        # only for an alias that named none (the shape layer checked it there).
-        # `off` is never checked against them — it is the foot of the scale and
-        # not a rung, and each provider has its own way of saying no.
-        words, _ = declared_reasoning_words(provider)
-        if words and effort != REASONING_OFF and reasoning_word_for(provider, effort) is None:
-            raise GatewayError(
-                400,
-                f"model '{alias}' knows the efforts {', '.join(words)} — the words its own model named — "
-                f"and reaches none of them from '{effort}'; ask for one of those, or send the request "
-                "without an effort",
-                "invalid_value",
-            )
+        """The effort word must reach the provider entry point this request will
+        actually take: the three entry points did not grow the parameter
+        together, and a word the path cannot carry is refused rather than
+        dropped. Which words the alias knows was settled before this by
+        `_effort_the_alias_knows` — one check, one list."""
         if images:
             path, entry_point = "generate_with_vision", getattr(provider, "generate_with_vision", None)
         else:
@@ -511,12 +515,12 @@ class Gateway:
     def _served_effort(self, alias: str, door_word: Optional[str]) -> Optional[str]:
         """The word the local row names: the rung the call actually ran on.
 
-        The door reports what it passed, in the words of the shared scale; the
-        alias may run that on a ladder of its own, and the row wants the rung,
-        not the request. Where the caller asked for nothing the alias still
-        thinks at something — its configured word, or the default its model's
-        template named — and the row says which when it is knowable. None is
-        «not knowable here», never `off`.
+        The door reports what it passed — a word of the alias's own vocabulary,
+        or of the shared scale where it has none — and the alias may still run
+        that on a rung of another name, which is what the row wants. Where the
+        caller asked for nothing the alias still thinks at something — its
+        configured word, or the default its model's template named — and the row
+        says which when it is knowable. None is «not knowable here», never `off`.
         """
         provider = (getattr(self._core.llm_manager, "providers", None) or {}).get(alias)
         if provider is None:
@@ -625,6 +629,7 @@ class Gateway:
         *,
         images: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: Optional[str] = None,
+        effort_field: str = "reasoning_effort",
     ) -> Completion:
         """The peer route: connected, proved, on the menu, one call, one row.
 
@@ -664,19 +669,16 @@ class Gateway:
                 "ask that peer for a vision-capable alias, or send the request without images",
                 "vision_unsupported",
             )
-        # `off` is the foot of the scale and not a rung of it: every provider
-        # has its own way of saying no, and `reasoning_words` lists the rungs
-        # this model's own template named.
-        words = row.get("reasoning_words")
-        if (reasoning_effort not in (None, REASONING_OFF) and isinstance(words, list) and words
-                and reasoning_effort not in words):
-            raise GatewayError(
-                400,
-                f"peer {peer_id} serves '{remote_alias}' at efforts {', '.join(str(w) for w in words)} "
-                f"— the words its own model named — and '{reasoning_effort}' is not one of them; "
-                "ask for one of those, or send the request without an effort",
-                "invalid_value",
-            )
+        # The menu row is the vocabulary: `reasoning_words` lists the rungs the
+        # host's model named, and the word is matched against them as written —
+        # the guest chose on this list, and a fold onto the shared scale would
+        # refuse the very word the row advertises. Where the row names none,
+        # the shared scale stands in. `off` is the foot of every ladder.
+        menu_words = row.get("reasoning_words")
+        reasoning_effort = _effort_the_alias_knows(
+            reasoning_effort, menu_words if isinstance(menu_words, list) else None,
+            serves=f"peer {peer_id}'s alias '{remote_alias}'", what=effort_field,
+        )
 
         timeout = float(self._core.settings.get_remote_inference_timeout())
         # Clocked before the send: the row's duration is the round trip as this node saw it.
@@ -900,34 +902,77 @@ class _EventStream:
 
 
 # The whole scale this node knows, said in one place because every refusal
-# that lists it must list the same words.
+# that lists it must list the same words. It is the ladder of an alias whose
+# model named none of its own; where one did, its words are the ladder.
 KNOWN_EFFORTS = (REASONING_OFF,) + REASONING_EFFORTS
+
+# What the Messages form calls the field, carried into the door so a refusal
+# names the field the client wrote rather than the OpenAI form's.
+ANTHROPIC_EFFORT_FIELD = "output_config.effort"
 
 
 def _effort_word(value: Any, *, what: str) -> str:
-    """One word of `KNOWN_EFFORTS`, or a 400 naming them all.
+    """The word as the client wrote it, refused here only when it is not a word.
 
-    `normalize_reasoning_effort` returns None for a word off the scale rather
-    than guessing at it, and a guess is what a client billed by the token
-    would pay for; so an unknown word stops here instead of reaching a
-    provider that would quietly ignore it.
+    Which words are served is the *alias's* question and this layer has not
+    resolved one yet: `xhigh` is a rung of its own on a model whose template
+    named it and a synonym for `high` on the shared scale, so folding it here
+    refused the top rung of the ladder that has it (live, 2026-09-14), and
+    listed the shared scale at a door that would have listed the model's words
+    one line later. Nothing is folded and nothing is refused for its meaning
+    here; `_effort_the_alias_knows` is the one check, against the one list the
+    alias asked for actually has.
     """
-    if not isinstance(value, str):
-        raise GatewayError(400, f"'{what}' must be a string", "invalid_value")
-    word = normalize_reasoning_effort(value)
+    if not isinstance(value, str) or not value.strip():
+        raise GatewayError(400, f"'{what}' must be a non-empty string", "invalid_value")
+    return value.strip()
+
+
+def _effort_the_alias_knows(
+    word: Optional[str], words: Optional[List[str]], *, serves: str, what: str,
+) -> Optional[str]:
+    """The rung `word` names on one alias, or a 400 listing that alias's words.
+
+    One check per alias and one list in its refusal. Where the alias's model
+    named its own words those are the vocabulary — matched as written, never
+    folded onto the shared scale first, because a fold is what made `xhigh`
+    unreachable on the model that named it — and the word travels on unchanged.
+    Where it named none the shared scale is the ladder, and `xhigh` reads as
+    `high` there as it always has. `off` is the foot of every ladder and is
+    never checked against the rungs: it is not an amount of thinking, and each
+    provider has its own way of saying no.
+    """
     if word is None:
+        return None
+    asked = word.strip().lower()
+    if asked == REASONING_OFF:
+        return REASONING_OFF
+    if words:
+        for known in words:
+            if isinstance(known, str) and known.strip().lower() == asked:
+                return known
         raise GatewayError(
             400,
-            f"'{what}' is {value!r}, which this node does not know; the words it serves are "
+            f"'{what}' is {word!r}: {serves} serves the efforts {', '.join(str(w) for w in words)} — "
+            "the words its own model named — and reaches none of them; ask for one of those, or send "
+            "the request without an effort",
+            "invalid_value",
+        )
+    folded = normalize_reasoning_effort(word)
+    if folded is None:
+        raise GatewayError(
+            400,
+            f"'{what}' is {word!r}, which {serves} does not know; the words it serves are "
             f"{', '.join(KNOWN_EFFORTS)} (xhigh is read as high)",
             "invalid_value",
         )
-    return word
+    return folded
 
 
 def _openai_effort(body: Dict[str, Any]) -> Optional[str]:
-    """`reasoning_effort` as one word of this node's scale, or None when the
-    request named none — which asks for the alias's own default."""
+    """`reasoning_effort` as the client wrote it, or None when the request named
+    none — which asks for the alias's own default. Which words the alias serves
+    is settled where the alias is, one layer down."""
     value = body.get("reasoning_effort")
     if value is None:
         return None
@@ -955,9 +1000,9 @@ def _anthropic_effort(body: Dict[str, Any]) -> Optional[str]:
     if config is not None and not isinstance(config, dict):
         raise GatewayError(400, "'output_config' must be an object", "invalid_request_error")
     asked = (config or {}).get("effort")
-    word = None if asked is None else _effort_word(asked, what="output_config.effort")
+    word = None if asked is None else _effort_word(asked, what=ANTHROPIC_EFFORT_FIELD)
     if thinking is not None and thinking["type"] == "disabled":
-        if word not in (None, REASONING_OFF):
+        if word is not None and word.lower() != REASONING_OFF:
             raise GatewayError(
                 400,
                 f"'thinking' is disabled and 'output_config.effort' asks for {word!r}: the two contradict "
@@ -1520,7 +1565,8 @@ class GatewayServer:
             return await self._stream_messages(request, alias, prompt, messages, system, tools,
                                                images=images, reasoning_effort=effort)
         completion = await self.gateway.complete(alias, prompt, messages=messages, system=system, tools=tools,
-                                                 images=images, reasoning_effort=effort)
+                                                 images=images, reasoning_effort=effort,
+                                                 effort_field=ANTHROPIC_EFFORT_FIELD)
         return web.json_response(_message_json(completion))
 
     async def _stream_messages(
@@ -1558,6 +1604,7 @@ class GatewayServer:
             completion = await self.gateway.complete(
                 alias, prompt, messages=messages, system=system, tools=tools, on_chunk=on_chunk,
                 images=images, reasoning_effort=reasoning_effort, request_id=minted,
+                effort_field=ANTHROPIC_EFFORT_FIELD,
             )
         except GatewayError as e:
             if not stream.opened:
