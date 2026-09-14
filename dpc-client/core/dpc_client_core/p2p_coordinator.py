@@ -377,6 +377,7 @@ class P2PCoordinator:
         Returns `(error text, refusal code)` or None.
         """
         from dpc_protocol.protocol import REFUSAL_INSUFFICIENT_QUOTA
+        from .gateway import vendor_alias_is_priced
 
         try:
             lists = self._serving_lists()
@@ -389,12 +390,28 @@ class P2PCoordinator:
             )
         if not isinstance(lists, ServingLists) or lists.owner_of(serving_alias) != "vendor":
             return None
+        model = (self._provider_config(serving_alias) or {}).get("model")
+        # No WARNING of its own: `handle_inference_request` logs every refusal
+        # this returns, with this text in it, and one event deserves one line.
+        if not vendor_alias_is_priced(serving_alias, model):
+            return (
+                f"This node cannot serve '{serving_alias}': it is a vendor alias and this node "
+                f"has no rate for it (model {model!r}), so what a call spends cannot be counted "
+                "against the daily ceiling in compute.vendor_quotas — an unpriced alias is "
+                "refused rather than served against a ceiling that would read $0.00 for ever",
+                REFUSAL_INSUFFICIENT_QUOTA,
+            )
         # A vendor alias with no ceiling is refused when the rules are read, so
         # a missing one here is absent rather than unlimited.
         quota = float(lists.quotas.get(serving_alias) or 0.0)
         spent = (self._ledger or default_ledger()).spent_today(
             serving_alias, caller=peer_id, caller_kind=PEER_CALLER_KIND,
         )
+        # The call that crosses the line is served: the ceiling stops the call
+        # *after* the one that reached it, so the overrun is at most one call
+        # — and under streaming a call is long by construction, so «at most
+        # one» is not «by a little». A per-call ceiling is the other half and
+        # is not decided (ADR-041 D5, open).
         if spent < quota:
             return None
         return (

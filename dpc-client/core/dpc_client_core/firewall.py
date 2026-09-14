@@ -522,13 +522,24 @@ class ContextFirewall:
         """The two lists checked against what each alias's provider is.
 
         `provider_types` maps alias -> provider `type` for the aliases that
-        are loaded. An alias not in it keeps its place (it is refused when
-        asked for, and `log_compute_sharing_state` names it); a loaded alias
-        must be of a type its list can hold. Refused, with the reason, are an
-        alias that is somebody else's model — `remote_peer`, `dpc_agent` — in
-        either list (ADR-041 D7 part 1: what is shared is not shared onward),
-        a paying type under `serving_local`, a card type under
-        `serving_vendor`, and a type the tables do not know.
+        are loaded. Every alias named in either list must be in it and must be
+        of a type its list can hold. Refused, with the reason, are an alias
+        that is somebody else's model — `remote_peer`, `dpc_agent` — in either
+        list (ADR-041 D7 part 1: what is shared is not shared onward), a
+        paying type under `serving_local`, a card type under `serving_vendor`,
+        a type the tables do not know, and an alias whose type this mapping
+        does not carry at all.
+
+        That last refusal is the one an earlier reading of this docstring got
+        wrong: an unloaded alias used to keep its place silently, and the
+        place is what `owner_of` answers from. So an empty registry — the
+        state at early start, before the providers are read — made every
+        alias «unknown», and a vendor alias misfiled under `serving_local`
+        then answered `owner_of == "local"`, was never asked for a quota, and
+        ran on the vendor's key (Ark's review of `11b1de5c`, 2026-09-14). The
+        class of an alias is what decides whether money bounds it, so an
+        unknown class is a refusal of that alias and not a pass; both callers
+        already turn the refusal into a shut door.
         """
         for key, aliases, allowed, other_key in (
             (SERVING_LOCAL_KEY, self.compute_serving_local, LOCAL_PROVIDER_TYPES, SERVING_VENDOR_KEY),
@@ -537,7 +548,13 @@ class ContextFirewall:
             for alias in aliases:
                 provider_type = provider_types.get(alias)
                 if provider_type is None:
-                    continue
+                    raise ValueError(
+                        f"compute.{key} names '{alias}', whose provider is not loaded, so what "
+                        "bounds it — the card or a daily ceiling in dollars — cannot be "
+                        "established; it is refused rather than served on a guess (ADR-041 D5). "
+                        "Either the alias is absent from providers.json, or the registry is not "
+                        "up yet at this moment"
+                    )
                 refusal = onward_sharing_refusal(key, alias, provider_type)
                 if refusal:
                     raise ValueError(refusal)

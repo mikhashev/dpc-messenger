@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 import aiohttp
 import pytest
 
+from dpc_client_core.gateway import GatewayConfigError
 from dpc_client_core.llm_manager import flatten_messages
 from dpc_client_core.node_ledger import NodeLedger
 from tests.test_the_gateway_serves_only_the_two_lists_on_loopback import (
@@ -231,7 +232,7 @@ async def test_a_vendor_alias_over_its_quota_is_429_rate_limit_error(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_provider_failure_is_502_api_error_and_an_unloaded_provider_503_api_error(tmp_path):
+async def test_a_provider_failure_is_502_api_error(tmp_path):
     service = _service(tmp_path, BOTH_LISTS, fail=RuntimeError("Ollama is not running"))
     async with _running(tmp_path, service) as (server, ledger):
         status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path))
@@ -240,13 +241,15 @@ async def test_a_provider_failure_is_502_api_error_and_an_unloaded_provider_503_
         assert error["type"] == "api_error" and "Ollama is not running" in error["message"]
         assert list(ledger.rows()) == []
 
+    # An alias listed but not loaded no longer reaches a request at all: it has
+    # no class, and the class is what says whether money bounds it, so the
+    # lists are refused before the port opens (Ark, 2026-09-14). The same
+    # answer in the OpenAI shape is in the sibling file.
     listed_but_unloaded = _service(tmp_path, {"serving_local": ["gone"]}, providers={})
-    async with _running(tmp_path, listed_but_unloaded) as (server, ledger):
-        status, text = await _post_messages(server, _messages("gone"), key=_key(tmp_path))
-        assert status == 503
-        error = _anthropic_error(text)
-        assert error["type"] == "api_error" and "gone" in error["message"]
-        assert listed_but_unloaded.calls == [] and list(ledger.rows()) == []
+    with pytest.raises(GatewayConfigError) as refused:
+        async with _running(tmp_path, listed_but_unloaded):
+            pass
+    assert "gone" in str(refused.value) and "not loaded" in str(refused.value)
 
 
 # --- (5) tools reach the door as sent; a turn the door answers with text is end_turn ---

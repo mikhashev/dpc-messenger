@@ -38,6 +38,9 @@ from tests.test_p2p_coordinator import make_coordinator
 GUEST = "peer-1"
 OTHER = "peer-2"
 VENDOR = "ds_flash"
+#: A model the pricing tables know: an alias nobody can price is refused on
+#: this door now, so a fixture that means «served» must be priceable.
+VENDOR_MODEL = "deepseek-v4-flash"
 LOCAL = "ollama_local"
 QUOTA = 1.00
 
@@ -71,7 +74,11 @@ def _vendor_host(tmp_path: Path, *, quotas=None):
         local=(LOCAL,), vendor=(VENDOR,),
         quotas={VENDOR: QUOTA} if quotas is None else quotas,
     )
-    svc.llm_manager.providers = {VENDOR: SimpleNamespace(config={"type": "deepseek"})}
+    # The model is in the config because that is where providers.json puts it,
+    # and the door reads it to ask whether the alias can be priced at all.
+    svc.llm_manager.providers = {
+        VENDOR: SimpleNamespace(config={"type": "deepseek", "model": VENDOR_MODEL}),
+    }
     svc.llm_manager.query = AsyncMock(return_value={"response": "pong", "model": "m"})
     coord._ledger = NodeLedger(tmp_path / "ledger")
     return coord, svc
@@ -256,3 +263,45 @@ async def test_a_paying_alias_misfiled_under_serving_local_is_refused_not_served
     assert payload.get("code") in (None, "")
     assert VENDOR in payload["error"] and "serving_vendor" in payload["error"]
     assert _requests(coord._ledger) == []
+
+
+# --- an alias nobody can price ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_vendor_alias_this_node_cannot_price_is_refused_before_it_runs(tmp_path, caplog):
+    """A ceiling is money, and money is counted from the rows. An alias no rate
+    table knows writes $0.00 on every row, so `spent_today` never moves and
+    `vendor_quotas` guards nothing — the meter is absent, not slow (Ark's
+    review of `11b1de5c`, 2026-09-14). Refused with the word a spent ceiling
+    already uses; the reason is in the text, because the wire vocabulary is
+    Mike's to extend."""
+    coord, svc = _vendor_host(tmp_path)
+    svc.llm_manager.providers = {
+        VENDOR: SimpleNamespace(config={"type": "anthropic", "model": "claude-sonnet-4-5"}),
+    }
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.p2p_coordinator"):
+        await coord.handle_inference_request(GUEST, "req-1", "ping")
+
+    svc.llm_manager.query.assert_not_awaited()
+    payload = _refusal(svc)
+    assert payload["code"] == "insufficient_quota"
+    assert VENDOR in payload["error"] and "no rate" in payload["error"]
+    assert "vendor_quotas" in payload["error"]
+    assert _requests(coord._ledger) == [], "a refused call is not a call"
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warned) == 1, "one refusal, one line"
+    assert VENDOR in warned[0] and "no rate" in warned[0] and GUEST in warned[0]
+
+
+@pytest.mark.asyncio
+async def test_a_priced_vendor_alias_under_its_ceiling_is_still_served(tmp_path):
+    """The other arm of the same predicate: the refusal above is about the rate
+    table, not about vendor aliases."""
+    coord, svc = _vendor_host(tmp_path)
+
+    await coord.handle_inference_request(GUEST, "req-1", "ping")
+
+    svc.llm_manager.query.assert_awaited_once()
+    assert "req-1" in _requests(coord._ledger)

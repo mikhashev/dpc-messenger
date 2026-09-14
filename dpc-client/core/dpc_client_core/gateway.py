@@ -165,6 +165,20 @@ _ANTHROPIC_ERROR_TYPES = {
     503: "api_error",
     504: "api_error",
 }
+def vendor_alias_is_priced(alias: str, model: Optional[str]) -> bool:
+    """Whether a call on this vendor alias would be written down with a price.
+
+    A daily ceiling is enforced by summing the `cost_usd` of the rows already
+    written (`NodeLedger.spent_today`), and `compute_cost_usd` answers 0.0 —
+    never an error — for an alias no rate table knows. So an unpriced vendor
+    alias is served against a ceiling that reads $0.00 for ever: the meter is
+    not slow, it is absent (Ark's review of `11b1de5c`, 2026-09-14). The
+    question is asked of the same function that fills the row, so the door and
+    the ledger cannot disagree about which aliases have a rate.
+    """
+    return get_billing_model(alias, model) == "pay_per_use"
+
+
 # A model name under this prefix is a peer's alias, `remote:<node_id>:<alias>`
 # — the form this node already gives a peer's provider for transcription and
 # in `remote_peer` configs, so one name means one thing everywhere.
@@ -465,6 +479,7 @@ class Gateway:
         ledger = self._ledger or default_ledger()
         caller = self.caller
         if owner == "vendor":
+            self._refuse_an_unpriced_vendor_alias(alias, providers[alias])
             quota = lists.quotas[alias]
             spent = ledger.spent_today(alias, caller=caller, caller_kind=CALLER_KIND)
             if spent >= quota:
@@ -495,6 +510,33 @@ class Gateway:
                                     images=images, reasoning_effort=reasoning_effort)
         finally:
             self._inference_lock.release()
+
+    def _refuse_an_unpriced_vendor_alias(self, alias: str, provider: Any) -> None:
+        """A vendor alias this node cannot price is refused, not served free.
+
+        The ceiling is money, and money is counted from the rows; an alias no
+        rate table knows writes $0.00 on every row, so its ceiling can never
+        be reached and `vendor_quotas` guards nothing. Refused with the word
+        the spent ceiling already uses — the cause is the same one, the guest
+        may not have this alias's tokens today — and the reason in the text,
+        because the wire vocabulary is not extended from here.
+        """
+        model = getattr(provider, "model", None)
+        if vendor_alias_is_priced(alias, model):
+            return
+        logger.warning(
+            "Vendor alias '%s' (model %s) has no rate in this node's pricing tables, so its "
+            "spend cannot be counted against compute.vendor_quotas; it is refused rather than "
+            "served without a meter", alias, model,
+        )
+        raise GatewayError(
+            429,
+            f"model '{alias}' is refused: it is a vendor alias in compute.serving_vendor, and "
+            f"this node has no rate for it (model {model!r}), so what it spends cannot be "
+            "counted against its daily ceiling in compute.vendor_quotas — an unpriced alias is "
+            "refused rather than served against a ceiling that would read $0.00 for ever",
+            "insufficient_quota",
+        )
 
     def _refuse_images_the_alias_cannot_take(
         self, alias: str, provider: Any, images: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],

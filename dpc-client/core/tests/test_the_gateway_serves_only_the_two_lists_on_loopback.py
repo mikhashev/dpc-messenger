@@ -17,6 +17,7 @@ socket options.
 import asyncio
 import contextlib
 import json
+import logging
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -357,6 +358,48 @@ async def test_a_vendor_alias_over_its_daily_quota_is_429_and_under_it_the_row_a
         assert len(service.calls) == 1, "the refused call must not reach the provider"
 
 
+@pytest.mark.asyncio
+async def test_a_vendor_alias_this_node_cannot_price_is_429_before_anything_runs(tmp_path, caplog):
+    """The ceiling is counted from the rows, and a row for an alias no rate
+    table knows carries $0.00 — so `vendor_quotas` on it guards nothing at all
+    and the meter is absent rather than slow (Ark, 2026-09-14). Refused with
+    the word a spent ceiling already uses, the reason in the text: the wire
+    vocabulary is not extended from here."""
+    providers = dict(_providers(), unpriced=_Provider("anthropic", "claude-sonnet-4-5"))
+    compute = {"serving_vendor": ["unpriced"], "vendor_quotas": {"unpriced": 5.0}}
+    service = _service(tmp_path, compute, providers=providers)
+
+    async with _running(tmp_path, service) as (server, ledger):
+        with caplog.at_level(logging.WARNING, logger="dpc_client_core.gateway"):
+            status, text = await _request(server, "POST", "/v1/chat/completions",
+                                          key=_key(tmp_path), body=_chat("unpriced"))
+
+        assert status == 429
+        error = json.loads(text)["error"]
+        assert error["code"] == "insufficient_quota"
+        assert "unpriced" in error["message"] and "no rate" in error["message"]
+        assert "vendor_quotas" in error["message"]
+        assert service.calls == [], "the refused call must not reach the provider"
+        assert list(ledger.rows()) == [], "a refused call is not a row"
+    warned = [r.getMessage() for r in caplog.records
+              if r.levelno == logging.WARNING and "no rate" in r.getMessage()]
+    assert len(warned) == 1 and "unpriced" in warned[0], "the owner is told which alias"
+
+
+@pytest.mark.asyncio
+async def test_a_priced_vendor_alias_under_its_ceiling_is_served(tmp_path):
+    """The other arm: the refusal above is about the rate table, not about
+    vendor aliases, and `ds_flash` is priced by the same tables the row uses."""
+    service = _service(tmp_path, BOTH_LISTS)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, _ = await _request(server, "POST", "/v1/chat/completions",
+                                   key=_key(tmp_path), body=_chat(VENDOR))
+
+        assert status == 200
+        (row,) = list(ledger.rows())
+        assert row["alias"] == VENDOR and row["cost_usd"] > 0
+
+
 # --- (7) stream: true ---------------------------------------------------------------
 
 
@@ -405,7 +448,7 @@ async def test_an_alias_that_is_itself_remote_is_refused_at_load_in_either_list(
 
 
 @pytest.mark.asyncio
-async def test_a_provider_error_is_502_with_its_message_and_a_missing_provider_503(tmp_path):
+async def test_a_provider_error_is_502_with_its_message(tmp_path):
     service = _service(tmp_path, BOTH_LISTS, fail=RuntimeError("Ollama is not running"))
     async with _running(tmp_path, service) as (server, ledger):
         status, text = await _request(server, "POST", "/v1/chat/completions",
@@ -413,11 +456,21 @@ async def test_a_provider_error_is_502_with_its_message_and_a_missing_provider_5
         assert status == 502 and "Ollama is not running" in json.loads(text)["error"]["message"]
         assert list(ledger.rows()) == [], "a call that produced nothing is not a row"
 
+
+@pytest.mark.asyncio
+async def test_an_alias_listed_but_not_loaded_keeps_the_door_shut_and_names_itself(tmp_path):
+    """It used to open the port and answer 503 on that one alias. An alias
+    whose provider is absent has no class, and the class is what says whether
+    money bounds it, so from 2026-09-14 it is a refused list — the same answer
+    the door already gives a misfiled one, at the same moment (Ark, 2026-09-14).
+    """
     listed_but_unloaded = _service(tmp_path, {"serving_local": ["gone"]}, providers={})
-    async with _running(tmp_path, listed_but_unloaded) as (server, _):
-        status, text = await _request(server, "POST", "/v1/chat/completions",
-                                      key=_key(tmp_path), body=_chat("gone"))
-        assert status == 503 and "gone" in json.loads(text)["error"]["message"]
+
+    with pytest.raises(GatewayConfigError) as refused:
+        async with _running(tmp_path, listed_but_unloaded):
+            pass
+
+    assert "gone" in str(refused.value) and "not loaded" in str(refused.value)
 
 
 @pytest.mark.asyncio

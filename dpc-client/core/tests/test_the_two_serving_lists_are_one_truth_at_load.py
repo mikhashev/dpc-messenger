@@ -121,15 +121,45 @@ def test_an_alias_in_both_lists_and_a_list_that_is_not_a_list_are_refused(tmp_pa
 # --- classification by provider type (D5, D7) ----------------------------------------
 
 
-def test_the_lists_are_classified_by_provider_type_and_an_unloaded_alias_keeps_its_place(tmp_path):
-    fw = _firewall(tmp_path, {"serving_local": [LOCAL, "not_loaded"], "serving_vendor": [VENDOR],
+def test_the_lists_are_classified_by_provider_type(tmp_path):
+    fw = _firewall(tmp_path, {"serving_local": [LOCAL], "serving_vendor": [VENDOR],
                               "vendor_quotas": {VENDOR: 1.5}})
     lists = fw.classify_serving_lists({LOCAL: "ollama", VENDOR: "deepseek", "paid_default": "anthropic"})
-    assert lists.local == (LOCAL, "not_loaded")
+    assert lists.local == (LOCAL,)
     assert lists.vendor == (VENDOR,)
     assert lists.quotas == {VENDOR: 1.5}
     assert lists.owner_of(LOCAL) == "local" and lists.owner_of(VENDOR) == "vendor"
     assert lists.owner_of("paid_default") is None
+
+
+def test_an_alias_whose_provider_is_not_loaded_is_refused_rather_than_kept(tmp_path):
+    """It used to keep its place, and the place is what `owner_of` answers
+    from - so a vendor alias misfiled under `serving_local` read as local and
+    was served with no ceiling (Ark's review, 2026-09-14). The class decides
+    whether money bounds the alias; an unestablished class is a shut door."""
+    fw = _firewall(tmp_path, {"serving_local": [LOCAL, "not_loaded"], "serving_vendor": [VENDOR],
+                              "vendor_quotas": {VENDOR: 1.5}})
+
+    with pytest.raises(ValueError) as refused:
+        fw.classify_serving_lists({LOCAL: "ollama", VENDOR: "deepseek"})
+
+    reason = str(refused.value)
+    assert "not_loaded" in reason and "serving_local" in reason
+    assert "not loaded" in reason, "the refusal says why the class is unknown"
+
+
+def test_an_empty_registry_refuses_the_lists_instead_of_calling_every_alias_local(tmp_path):
+    """The early-start state: the providers are not read yet, so every alias
+    is unknown. A vendor alias misfiled under `serving_local` is exactly the
+    one that must not slip through, so the answer is a refusal rather than two
+    lists taken at face value."""
+    fw = _firewall(tmp_path, {"serving_local": [VENDOR], "serving_vendor": []})
+
+    with pytest.raises(ValueError) as refused:
+        fw.classify_serving_lists({})
+
+    assert VENDOR in str(refused.value)
+    assert "not loaded" in str(refused.value)
 
 
 @pytest.mark.parametrize("list_key, type_", [
