@@ -45,10 +45,16 @@ def _result(**extra):
 
 def _host(tmp_path, *, messages_result=None, chunks=()):
     """A coordinator whose serving alias is loaded and whose two query doors
-    are fakes; `chunks` is what `query_messages` hands to `on_chunk`."""
+    are fakes; `chunks` is what `query_messages` hands to `on_chunk`.
+
+    The provider carries `generate_with_tools`, because a host that answers a
+    tools request must have the path: the door asks `entry_point_for` before the
+    router, and a provider without it is refused there rather than served."""
     coord, svc = make_coordinator()
     svc.firewall.can_request_inference.return_value = True
-    svc.llm_manager.providers = {"ollama_local": SimpleNamespace(config={})}
+    svc.llm_manager.providers = {
+        "ollama_local": SimpleNamespace(config={}, generate_with_tools=lambda *a, **k: None),
+    }
     svc.llm_manager.query = AsyncMock(return_value=_result())
 
     async def query_messages(messages, **kwargs):

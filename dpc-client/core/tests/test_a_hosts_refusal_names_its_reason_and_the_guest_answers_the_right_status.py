@@ -160,45 +160,79 @@ async def test_an_effort_word_the_alias_has_no_rung_for_is_the_guests_own_invali
     assert _rows(coord._ledger) == []
 
 
+_TOOL = [{"name": "ping", "description": "", "input_schema": {}}]
+_TURNS = [{"role": "user", "content": "ping"}]
+
+
 @pytest.mark.asyncio
 async def test_a_tools_request_an_alias_has_no_path_for_is_named_tools_unsupported(tmp_path):
-    """`query_messages` refuses before a token is spent when the provider has no
-    `generate_with_tools`; the code says which of the two things was wrong."""
+    """A gate at the door, before the router: the provider has no
+    `generate_with_tools`, which is the predicate `entry_point_for` asks."""
     coord, svc = _serving_host(tmp_path)
-    svc.llm_manager.query_messages = AsyncMock(side_effect=ValueError(
-        "Provider 'ollama_local' (model: m) has no native tool-calling path, and 1 tool(s) "
-        "were asked for."
-    ))
 
     await coord.handle_inference_request(
-        HOST_PEER, "req-1", "ping",
-        messages=[{"role": "user", "content": "ping"}],
-        tools=[{"name": "ping", "description": "", "input_schema": {}}],
+        HOST_PEER, "req-1", "ping", messages=_TURNS, tools=_TOOL,
     )
 
     payload = _refusal(svc)
     assert payload["code"] == "tools_unsupported"
-    assert "tool-calling path" in payload["error"]
+    assert "tool-calling path" in payload["error"] and "ollama_local" in payload["error"]
+    svc.llm_manager.query_messages.assert_not_called()  # refused before the router
     assert _rows(coord._ledger) == []
 
 
 @pytest.mark.asyncio
-async def test_a_path_refusal_on_an_alias_that_does_call_tools_is_invalid_value(tmp_path):
-    """The predicate is the one `entry_point_for` asks: with a tool path present
-    the same `ValueError` is about the word, not about the tools."""
+async def test_an_alias_that_does_call_tools_passes_the_gate(tmp_path):
+    """The gate is the tool path and nothing else: with one present the request
+    goes to the router, which is where tools are answered."""
     coord, svc = _serving_host(tmp_path, generate_with_tools=lambda *a, **k: None)
-    svc.llm_manager.query_messages = AsyncMock(side_effect=ValueError(
-        "Provider 'ollama_local' (model: m) takes no reasoning effort on its "
-        "generate_with_tools path, and 'high' was asked for."
-    ))
 
     await coord.handle_inference_request(
-        HOST_PEER, "req-1", "ping",
-        messages=[{"role": "user", "content": "ping"}],
-        tools=[{"name": "ping", "description": "", "input_schema": {}}],
+        HOST_PEER, "req-1", "ping", messages=_TURNS, tools=_TOOL,
     )
 
-    assert _refusal(svc)["code"] == "invalid_value"
+    payload = svc.p2p_manager.send_message_to_peer.call_args[0][1]["payload"]
+    assert payload["status"] == "success"
+    svc.llm_manager.query_messages.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attrs,kwargs", [
+    ({}, {}),
+    ({"generate_with_tools": lambda *a, **k: None},
+     {"messages": _TURNS, "tools": _TOOL}),
+])
+async def test_a_value_error_from_inside_the_call_is_the_hosts_own_failure(tmp_path, attrs, kwargs):
+    """The card this pair was written for: `489f47cb` read the *type* of the
+    exception, so a provider's own validation reached the IDE client as 400 with
+    the guest blamed. Whatever is raised inside the call carries no code, and an
+    absent code is the guest's 502."""
+    coord, svc = _serving_host(tmp_path, **attrs)
+    boom = ValueError("boom")
+    svc.llm_manager.query = AsyncMock(side_effect=boom)
+    svc.llm_manager.query_messages = AsyncMock(side_effect=boom)
+
+    await coord.handle_inference_request(HOST_PEER, "req-1", "ping", **kwargs)
+
+    payload = _refusal(svc)
+    assert "code" not in payload, "the host's own failure names no fault of the guest's"
+    assert payload["error"] == "boom"
+    assert _rows(coord._ledger) == []
+
+
+@pytest.mark.asyncio
+async def test_the_codeless_failure_reaches_the_guests_door_as_a_502(tmp_path):
+    """The same frame, carried the next hop: the guest's handler raises a
+    `PeerRefused` with no word, and a word the door cannot place is the 502 the
+    host's own failure deserves."""
+    coord, svc = _serving_host(tmp_path)
+    svc.llm_manager.query = AsyncMock(side_effect=ValueError("boom"))
+    await coord.handle_inference_request(HOST_PEER, "req-1", "ping")
+
+    error = await _settle(_refusal(svc))
+
+    assert isinstance(error, PeerRefused) and error.code == ""
+    assert error.code not in STATUS_FOR, "nothing places it, so the door answers 502"
 
 
 @pytest.mark.asyncio
@@ -213,6 +247,91 @@ async def test_a_failure_mid_call_carries_no_code_at_all(tmp_path):
     payload = _refusal(svc)
     assert "code" not in payload
     assert "the card fell over" in payload["error"]
+
+
+# --- the join key: one id in flight per peer ---------------------------------
+
+
+class _Gate:
+    """A provider call that answers only when the test lets it."""
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, *args, **kwargs):
+        self.started.set()
+        await self.release.wait()
+        return {"response": "pong", "model": "m"}
+
+
+@pytest.mark.asyncio
+async def test_an_id_already_in_flight_from_this_peer_is_refused(tmp_path):
+    """The guest mints the id that keys the host's row and routes its chunks, so
+    the host is the only side that can see a reuse."""
+    coord, svc = _serving_host(tmp_path)
+    gate = _Gate()
+    svc.llm_manager.query = gate
+
+    first = asyncio.create_task(coord.handle_inference_request(HOST_PEER, "req-1", "ping"))
+    await asyncio.wait_for(gate.started.wait(), timeout=5)
+
+    # Refused at the door, so it answers while the first call still holds the
+    # queue; served, it would wait on the queue instead and never answer.
+    await asyncio.wait_for(
+        coord.handle_inference_request(HOST_PEER, "req-1", "again"), timeout=5,
+    )
+
+    payload = _refusal(svc)
+    assert payload["code"] == "invalid_value"
+    assert "already in flight" in payload["error"] and "req-1" in payload["error"]
+    assert _rows(coord._ledger) == [], "a refused call is not a call"
+
+    gate.release.set()
+    await asyncio.wait_for(first, timeout=5)
+    assert len(_rows(coord._ledger)) == 1, "the first call was untouched"
+
+
+@pytest.mark.asyncio
+async def test_the_same_id_serves_again_once_the_first_call_has_answered(tmp_path):
+    """The id is held for the call, not for the peer's lifetime."""
+    coord, svc = _serving_host(tmp_path)
+
+    await coord.handle_inference_request(HOST_PEER, "req-1", "ping")
+    await coord.handle_inference_request(HOST_PEER, "req-1", "ping again")
+
+    payload = svc.p2p_manager.send_message_to_peer.call_args[0][1]["payload"]
+    assert payload["status"] == "success"
+    assert coord._in_flight_requests == {}, "nothing is held after the answer"
+
+
+@pytest.mark.asyncio
+async def test_an_id_is_released_when_the_call_fails_too(tmp_path):
+    coord, svc = _serving_host(tmp_path)
+    svc.llm_manager.query = AsyncMock(side_effect=RuntimeError("the card fell over"))
+
+    await coord.handle_inference_request(HOST_PEER, "req-1", "ping")
+
+    assert coord._in_flight_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_two_peers_may_be_in_flight_under_one_id(tmp_path):
+    """Two guests share no namespace: one guest's uuid4 is no claim on another's."""
+    coord, svc = _serving_host(tmp_path)  # peer-1 and peer-2, both proved
+    gate = _Gate()
+    svc.llm_manager.query = gate
+
+    first = asyncio.create_task(coord.handle_inference_request(HOST_PEER, "req-1", "ping"))
+    await asyncio.wait_for(gate.started.wait(), timeout=5)
+    gate.release.set()
+
+    await coord.handle_inference_request("peer-2", "req-1", "ping")
+
+    payload = svc.p2p_manager.send_message_to_peer.call_args[0][1]["payload"]
+    assert payload["status"] == "success", "the other peer's id is not this one's"
+    await asyncio.wait_for(first, timeout=5)
+    assert len(_rows(coord._ledger)) == 2
 
 
 @pytest.mark.asyncio

@@ -401,7 +401,18 @@ The wire (§3.4) carries the tariff fields and no longer the host's `cost_usd`;
 the guest's row copies them and writes `cost_usd = null`, because it spent
 nothing of its own and prices nothing (the `f7490460` rule, kept). `request_id`
 is minted by the caller and travels with the call, so the host's row and the
-guest's row are a double entry that joins on it. The currency is a property of
+guest's row are a double entry that joins on it. *(Amended 2026-09-15: the
+caller mints the key the host's own row is written under, so the host keeps the
+ids it is serving per peer and refuses one already in flight from that peer
+(`invalid_value`, before the queue and with no row) — two calls under one id
+would cross their chunk streams and collapse two rows into one. The pair (peer,
+id) is what must be unique; the id is free again once the answer has been sent.
+In the same pass the two words that blame the guest, `invalid_value` and
+`tools_unsupported`, moved to the two gates that mean them — the effort
+vocabulary and the tool path — because `489f47cb` set them from the type of the
+exception, and a provider's own validation raises `ValueError` too: a failure
+inside the host's call now carries no code and reaches the guest as the 502 it
+is.)* The currency is a property of
 the node, not of the protocol: «what I owe X» sums in one unit, sums across
 hosts do not, and parity between two units is the pair's own agreement,
 recorded at reconciliation, outside the protocol. Not built, and said so:

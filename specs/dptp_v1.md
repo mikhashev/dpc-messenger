@@ -297,7 +297,12 @@ Requests the peer to execute an AI inference query using their local compute res
 - `request_id` (string, required): UUID for request/response correlation. The requester
   mints it, or passes on the id a door in front of the wire has already shown its own
   client — the gateway's peer route does that, so the id an HTTP client reads on its
-  first streamed event is the id both nodes' usage rows are joined on
+  first streamed event is the id both nodes' usage rows are joined on. The requester
+  chooses the key the host's own row is written under, so the host refuses an id it is
+  already serving for that peer (`invalid_value`), before the call and with no row:
+  two calls under one id would cross their chunk streams and collapse two rows into
+  one. The id is the peer's again as soon as its answer has been sent, and two peers
+  may use the same id at the same time — the pair (peer, id) is what must be unique
 - `prompt` (string, required): AI query text
 - `model` (string, optional): Specific model to use
 - `provider` (string, optional): AI provider (ollama, openai, anthropic)
@@ -438,7 +443,7 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
   - `not_allowed` — the host's firewall does not let this peer ask for inference, or not for what it asked for
   - `model_not_found` — the host serves no alias to this peer, or not the one named: the request is off the menu (§3.5)
   - `onward_sharing_refused` — the alias the host would have served is itself somebody else's model, and what is shared is not shared onward (ADR-041 D7 part 1)
-  - `invalid_value` — the request asked for something the host's alias cannot take, refused before anything ran: a reasoning effort word that alias has no rung for (the text lists the words it accepts), or an effort the entry point this request needs cannot carry
+  - `invalid_value` — the request asked for something the host cannot take, refused at a gate before anything ran: a reasoning effort word the alias has no rung for (the text lists the words it accepts), or a `request_id` already in flight from this peer. A failure raised inside the host's own call carries no code, whatever its type: only a gate that names the guest's request sends a word that blames it
   - `tools_unsupported` — the request carried tools and the host's serving alias has no native tool-calling path, which is refused rather than answered without them
   - `insufficient_quota` — the alias the host serves is a vendor alias, bounded by money rather than by the card, and this guest has spent its daily ceiling on it (ADR-041 D5). The ceiling is per caller and counted from the host's own usage rows, so it is the guest's own spending and not the host's total; the text names what was spent and what the ceiling is, and the call is served again after midnight UTC
 

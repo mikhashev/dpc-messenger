@@ -1106,14 +1106,11 @@ class Gateway:
             tariff = {}
         # The id that went on the wire: the door's where a door minted one, for
         # its client has already seen that id on the first chunk, and the
-        # coordinator's otherwise. The host's row joins this one on it.
-        echoed = result.get("request_id") or ""
-        if request_id and echoed and echoed != request_id:
-            logger.warning(
-                "Peer %s answered request %s under id %s; the row keeps the id that was sent",
-                peer_id, request_id, echoed,
-            )
-        request_id = request_id or echoed
+        # coordinator's otherwise. The host's row joins this one on it. The two
+        # cannot differ: `RemoteInferenceResponseHandler` settles the pending
+        # future found under the id in the payload and echoes that same id here,
+        # so an answer naming another id settles nothing and never arrives.
+        request_id = request_id or result.get("request_id") or ""
         try:
             row = usage_row(
                 request_id=request_id,

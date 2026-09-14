@@ -28,6 +28,10 @@ import types
 import aiohttp
 import pytest
 
+from dpc_protocol.protocol import create_remote_inference_response
+from dpc_client_core.message_handlers.inference_handler import (
+    RemoteInferenceResponseHandler,
+)
 from dpc_client_core.node_ledger import NodeLedger, consumed_key, usage_by_role
 from tests.test_the_gateway_serves_only_the_two_lists_on_loopback import (
     BOTH_LISTS,
@@ -477,6 +481,35 @@ async def test_a_peer_row_names_the_host_and_a_local_row_names_nobody(tmp_path):
         assert (consumed["route"], consumed["served_by"]) == ("peer", PEER)
         assert own["route"] == "local"
         assert "served_by" not in own, "this node ran it; there is no other node to name"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_under_another_id_settles_nothing_on_the_guest(tmp_path):
+    """Why the door no longer compares the id it sent with the id that came
+    back: since `14104e32` the handler looks the pending future up by the id in
+    the payload, so a host that answers under a name of its own settles no
+    future here and the answer is dropped before any row is built. The
+    comparison it would have failed was unreachable, and the WARNING behind it
+    was dead code
+    (THE-WARNING-ABOUT-A-HOSTS-ECHOED-ID-CANNOT-FIRE-ON-THE-REAL-WIRE)."""
+    service = types.SimpleNamespace(
+        _pending_inference_requests={}, _pending_inference_chunks={},
+    )
+    door = asyncio.get_running_loop().create_future()
+    service._pending_inference_requests[WIRE_ID] = door
+    handler = RemoteInferenceResponseHandler(service)
+
+    await handler.handle(PEER, create_remote_inference_response(
+        "another-id-entirely", response=PEER_ANSWER,
+    )["payload"])
+
+    assert not door.done(), "an answer under another id settled the door's future"
+
+    await handler.handle(PEER, create_remote_inference_response(
+        WIRE_ID, response=PEER_ANSWER,
+    )["payload"])
+
+    assert door.result()["request_id"] == WIRE_ID, "the id the row is keyed by"
 
 
 @pytest.mark.asyncio

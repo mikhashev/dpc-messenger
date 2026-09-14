@@ -53,6 +53,10 @@ class P2PCoordinator:
         # priorities and a remote-share cap is D4-β of ADR-040; this is the half
         # that keeps two peers from paging the resident model out between them.
         self._peer_inference_lock = asyncio.Semaphore(1)
+        # The request ids being served right now, per peer: the guest mints the
+        # id that keys the host's row and routes its chunks, so only the host
+        # can see a reuse. Per peer, because two guests share no namespace.
+        self._in_flight_requests: Dict[str, set] = {}
 
     async def connect_via_uri(self, uri: str):
         """
@@ -694,6 +698,55 @@ class P2PCoordinator:
                 logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
             return
 
+        # Tools the serving alias has no path for: the guest's own request, and
+        # the gate that means `tools_unsupported`. The predicate is
+        # `entry_point_for`'s own, and the condition is the one the call below
+        # runs under - images take `query`, which carries no tools.
+        from .llm_manager import entry_point_for
+
+        if tools and messages and not images and entry_point_for(
+            self._provider_for_alias(serving_alias), tools=True, streaming=False,
+        )[1] is None:
+            refused = (
+                f"This node's serving alias '{serving_alias}' has no native tool-calling path, "
+                f"and {len(tools)} tool(s) were asked for. Send the request without tools, or to "
+                "a node whose serving alias implements generate_with_tools."
+            )
+            logger.warning("Peer inference refused for %s: %s", peer_id, refused)
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=refused, code=REFUSAL_TOOLS_UNSUPPORTED,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # An id reused while its first call is still running would cross two
+        # chunk streams and collapse two rows onto one, so it is refused before
+        # the queue and before any row
+        # (THE-GUEST-CHOOSES-THE-REQUEST-ID-THAT-JOINS-ITS-ROW-TO-THE-HOSTS-AND-
+        # THE-HOST-NEVER-CHECKS-IT). Released in the `finally` below, so the same
+        # id serves again once this call has answered.
+        in_flight = self._in_flight_requests.setdefault(peer_id, set())
+        if request_id in in_flight:
+            refused = (
+                f"request_id {request_id!r} is already in flight from this peer: the id keys the "
+                "usage row of the call and routes its chunks, and two calls under one id would "
+                "cross them. Send a new request_id, or wait for the first answer."
+            )
+            logger.warning("Peer inference refused for %s: %s", peer_id, refused)
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=refused, code=REFUSAL_INVALID_VALUE,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+        if request_id:
+            in_flight.add(request_id)
+
         try:
             logger.info("Running inference for %s (requested model: %s, requested provider: %s, serving alias: %s)",
                         peer_id, model or 'default', provider or 'default', serving_alias)
@@ -795,29 +848,22 @@ class P2PCoordinator:
 
         except Exception as e:
             logger.error("Inference failed for %s: %s", peer_id, e, exc_info=True)
-            # A `ValueError` out of the router is a refusal, not a failure: it is
-            # raised before a token is spent, for a request this alias cannot take
-            # — tools where its provider has no native tool-calling path, or an
-            # effort word the path this request needs cannot carry. Both are the
-            # guest's own request, so both are named; the predicate for the first
-            # is the one `entry_point_for` asks, and everything else keeps the
-            # bare error it always had, which the guest reads as «the host
-            # failed».
-            code = None
-            if isinstance(e, ValueError):
-                code = (
-                    REFUSAL_TOOLS_UNSUPPORTED
-                    if tools and not hasattr(self._provider_for_alias(serving_alias),
-                                             "generate_with_tools")
-                    else REFUSAL_INVALID_VALUE
-                )
+            # No code: whatever failed in here failed on this node's side, and the
+            # guest's gateway reads an absent word as 502. The two words that blame
+            # the guest are set at the gates that mean them, because an exception's
+            # type says nothing about whose fault it was - a provider's own
+            # validation raises `ValueError` too.
             error_response = create_remote_inference_response(
-                request_id=request_id, error=str(e), code=code,
+                request_id=request_id, error=str(e),
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
             except Exception as send_err:
                 logger.error("Error sending inference error response to %s: %s", peer_id, send_err, exc_info=True)
+        finally:
+            in_flight.discard(request_id)
+            if not in_flight:
+                self._in_flight_requests.pop(peer_id, None)
 
     async def handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
         """Handle incoming remote transcription request from a peer."""
