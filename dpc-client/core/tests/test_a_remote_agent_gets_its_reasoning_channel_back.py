@@ -65,15 +65,38 @@ def test_empty_content_is_not_an_error():
 # --- the host serves the peer's effort, capped by its own --------------------
 
 
-def _coordinator(configured_effort=None, alias="qwen"):
+def _coordinator(configured_effort=None, alias="qwen", provider=None):
     from dpc_client_core.p2p_coordinator import P2PCoordinator
 
     coord = P2PCoordinator.__new__(P2PCoordinator)
-    provider = SimpleNamespace(config={"reasoning_effort": configured_effort} if configured_effort else {})
+    if provider is None:
+        provider = SimpleNamespace(
+            config={"reasoning_effort": configured_effort} if configured_effort else {}
+        )
     coord.service = SimpleNamespace(
         llm_manager=SimpleNamespace(providers={alias: provider})
     )
     return coord
+
+
+class _ModelWithItsOwnLadder:
+    """An alias whose model's template named its rungs, as llamacpp_server reads
+    them: three words, `high` and `max` both folding onto the top one."""
+
+    _template_efforts = ("low", "medium", "xhigh")
+    _template_efforts_source = "model"
+    _template_default = "xhigh"
+
+    def __init__(self, configured=None):
+        self.config = {"reasoning_effort": configured} if configured else {}
+
+    def _template_effort(self, requested):
+        word = (requested or "").strip().lower()
+        if word == "off":
+            return "off"
+        if word in self._template_efforts:
+            return word
+        return {"high": "xhigh", "max": "xhigh"}.get(word)
 
 
 @pytest.mark.parametrize("wanted", ["off", "low", "medium", "high", "max"])
@@ -97,16 +120,70 @@ def test_the_host_does_not_raise_a_smaller_request():
     assert coord._effort_for_peer("peer", "off", "qwen") == "off"
 
 
-def test_an_unknown_word_is_not_guessed_at():
+def test_an_unknown_word_is_refused_by_name_not_guessed_at():
+    """Served silently at the host's default, the guest paid for a depth it
+    never asked for and the row said nothing. It is answered instead, listing
+    the words this alias knows."""
+    from dpc_client_core.p2p_coordinator import EffortRefused
+
     coord = _coordinator(configured_effort="high")
 
-    assert coord._effort_for_peer("peer", "enthusiastic", "qwen") is None
+    with pytest.raises(EffortRefused) as refusal:
+        coord._effort_for_peer("peer", "enthusiastic", "qwen")
+
+    message = str(refusal.value)
+    assert "enthusiastic" in message
+    assert "off, low, medium, high, max" in message
 
 
-def test_no_request_means_the_host_default():
+def test_a_refusal_names_the_words_the_alias_own_model_named():
+    from dpc_client_core.p2p_coordinator import EffortRefused
+
+    coord = _coordinator(provider=_ModelWithItsOwnLadder())
+
+    with pytest.raises(EffortRefused) as refusal:
+        coord._effort_for_peer("peer", "enthusiastic", "qwen")
+
+    assert "low, medium, xhigh" in str(refusal.value)
+
+
+def test_off_is_never_refused_because_it_is_the_foot_of_every_scale():
+    coord = _coordinator(provider=_ModelWithItsOwnLadder())
+
+    assert coord._effort_for_peer("peer", "off", "qwen") == "off"
+
+
+def test_no_request_means_the_host_says_which_default_it_served():
+    """The guest's only way to check what it was charged for: with nothing
+    asked, the row names the word this node's own configuration runs at."""
     coord = _coordinator(configured_effort="high")
+
+    assert coord._effort_for_peer("peer", None, "qwen") == "high"
+
+
+def test_no_request_and_no_configured_word_falls_to_the_models_own_default():
+    coord = _coordinator(provider=_ModelWithItsOwnLadder())
+
+    assert coord._effort_for_peer("peer", None, "qwen") == "xhigh"
+
+
+def test_an_alias_with_no_effort_channel_at_all_names_nothing():
+    coord = _coordinator(configured_effort=None)
 
     assert coord._effort_for_peer("peer", None, "qwen") is None
+
+
+def test_a_word_the_guest_asked_for_is_served_on_the_models_own_rung():
+    coord = _coordinator(provider=_ModelWithItsOwnLadder())
+
+    assert coord._effort_for_peer("peer", "max", "qwen") == "xhigh"
+
+
+def test_the_cap_is_applied_inside_the_models_own_ladder():
+    coord = _coordinator(provider=_ModelWithItsOwnLadder(configured="medium"))
+
+    assert coord._effort_for_peer("peer", "max", "qwen") == "medium"
+    assert coord._effort_for_peer("peer", "low", "qwen") == "low"
 
 
 def test_xhigh_is_folded_the_way_the_scale_folds_it():

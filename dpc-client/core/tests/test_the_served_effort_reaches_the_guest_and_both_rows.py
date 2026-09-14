@@ -6,9 +6,11 @@ the model call and an INFO line on the host: not into the response and not into
 either ledger row, so a guest paying by the token for reasoning it asked for at
 `low` and was served at `high`, or the reverse, had nothing to check the depth
 against. `served_effort` is that word: on REMOTE_INFERENCE_RESPONSE (DPTP v1.7),
-on the host's row and, copied from the wire, on the requester's row. Absent means
-the host applied no effort control — not the same as `off`. A row written before
-the column reads as None.
+on the host's row and, copied from the wire, on the requester's row. It is filled
+on every served call the host can name a rung for — the guest's clamped word, or
+the word the host's own configuration runs at where the guest asked for none
+(Mike's call, 2026-09-14) — and absent means no word describes the call, which is
+not `off`. A row written before the column reads as None.
 """
 
 import asyncio
@@ -108,6 +110,38 @@ async def test_a_host_that_applied_no_effort_control_sends_no_word_and_its_row_s
     assert "served_effort" not in sent["payload"]
     (row,) = coord._ledger.rows()
     assert row["served_effort"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_guest_that_asked_nothing_is_told_the_word_the_host_runs_at(tmp_path):
+    """The host's model settings are what the guest gets; the row says which.
+
+    Nothing travels to the provider — the alias already holds its configured
+    word — but the wire and the row name the rung the call ran on.
+    """
+    coord, svc = _host(tmp_path, configured_effort="high")
+
+    await coord.handle_inference_request("peer-1", "req-1", "ping")
+
+    assert "reasoning_effort" not in svc.llm_manager.query.call_args.kwargs
+    sent = svc.p2p_manager.send_message_to_peer.call_args[0][1]
+    assert sent["payload"]["served_effort"] == "high"
+    (row,) = coord._ledger.rows()
+    assert row["served_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_a_word_this_alias_has_no_rung_for_is_refused_before_the_call(tmp_path):
+    coord, svc = _host(tmp_path, configured_effort="high")
+
+    await coord.handle_inference_request("peer-1", "req-1", "ping", reasoning_effort="enthusiastic")
+
+    svc.llm_manager.query.assert_not_awaited()
+    sent = svc.p2p_manager.send_message_to_peer.call_args[0][1]
+    assert sent["payload"]["status"] == "error"
+    assert "enthusiastic" in sent["payload"]["error"]
+    assert "off, low, medium, high, max" in sent["payload"]["error"]
+    assert list(coord._ledger.rows()) == []
 
 
 @pytest.mark.asyncio
@@ -240,6 +274,12 @@ def test_section_3_4_lists_reasoning_effort_on_the_request_and_served_effort_on_
     request, response = section.split("#### REMOTE_INFERENCE_RESPONSE")
     assert "`reasoning_effort` (string, optional" in request
     assert "`served_effort` (string, optional" in response
+
+
+def test_section_3_4_says_a_word_the_alias_has_no_rung_for_is_refused():
+    request, response = _section_3_4().split("#### REMOTE_INFERENCE_RESPONSE")
+    assert "error response" in request
+    assert "Present on every served call the host can name a rung for" in response
 
 
 def test_section_3_4_no_longer_names_the_thinking_object_nothing_sends():

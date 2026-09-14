@@ -19,6 +19,14 @@ from .node_ledger import NodeLedger, default_ledger, tariff_amount_for, usage_ro
 logger = logging.getLogger(__name__)
 
 
+class EffortRefused(ValueError):
+    """A guest asked this node to think in a word its serving alias has no rung
+    for. Its message lists the words the alias does know — the ones its menu row
+    advertises — and reaches the guest as the inference error response, before
+    any inference has run and before any usage row exists.
+    """
+
+
 class P2PCoordinator:
     """Coordinates P2P connection lifecycle, messaging, and request handling."""
 
@@ -177,53 +185,122 @@ class P2PCoordinator:
 
     def _effort_for_peer(
         self, peer_id: str, requested: str, serving_alias: str,
-    ) -> str:
-        """How much thinking to serve a peer: its request, capped by ours.
+    ) -> Optional[str]:
+        """The rung a served call runs on: the guest's word under this node's cap,
+        or, where the guest chose nothing, what this node's own configuration runs
+        at. `EffortRefused` for a word the alias has no rung for.
 
-        The peer says what it wants and the host says what it will pay for, and
-        the smaller of the two wins — a request cannot make this node spend more
-        than it chose to. Both are named in the log when they differ, because a
-        peer that asked for `off` and was served `high` has no other way to find
-        out. An unknown word is not guessed at: `normalize_reasoning_effort`
-        returns None and this node answers at its own default.
+        The vocabulary is the alias's own where its model named its words and the
+        shared scale where it did not; `off` is the foot of every scale and always
+        reachable. A word the guest chose is sent to the provider; the host's own
+        configured word is not, because the alias already holds it and what would
+        travel from here is this node's normalisation of it — a downgrade on a
+        vendor whose ladder has more words than ours.
+
+        None is «no word describes this call», which is not `off`: an alias with no
+        effort channel, or a configured ceiling this node cannot read, where the
+        call runs at the host's default and nothing here knows its name.
+        `GatewayServer._served_effort` is the same rule at the other door.
         """
-        from .providers.base import REASONING_EFFORTS, REASONING_OFF, normalize_reasoning_effort
+        from .providers.base import REASONING_EFFORTS, REASONING_OFF, declared_reasoning_words
 
-        ladder = (REASONING_OFF,) + REASONING_EFFORTS
-        wanted = normalize_reasoning_effort(requested)
-        if wanted is None:
-            if requested:
+        provider = self._provider_for_alias(serving_alias)
+        words, template_default = declared_reasoning_words(provider)
+        configured = self._configured_effort_for_alias(serving_alias)
+        asked = (requested or "").strip()
+
+        if not asked:
+            if not configured:
+                return template_default
+            rung = self._rung_of(provider, configured)
+            if rung is None:
                 logger.info(
-                    "Peer %s asked for reasoning effort %r, which is not a word on the "
-                    "scale — serving at this node's default", peer_id, requested,
+                    "Peer %s chose no reasoning effort; %s is configured as %r, which is not "
+                    "a word this alias knows — serving this node's default, under no name",
+                    peer_id, serving_alias, configured,
                 )
+            return rung
+
+        wanted = self._rung_of(provider, asked)
+        if wanted is None:
+            known = ", ".join(words) if words else ", ".join((REASONING_OFF,) + REASONING_EFFORTS)
+            source = "the words its own model named" if words else "the shared scale"
+            raise EffortRefused(
+                f"This node serves '{serving_alias}' at efforts {known} — {source} — and "
+                f"'{asked}' reaches none of them; ask for one of those, or send the request "
+                "without an effort"
+            )
+
+        if not configured:
+            return wanted
+        cap = self._rung_of(provider, configured)
+        if cap is None:
+            # A ceiling this node stated and cannot read back. Serving the
+            # guest's wish would be fail-open, so the call takes the host's
+            # default and the row names nothing rather than a word nobody applied.
+            logger.info(
+                "Peer %s asked for reasoning effort %s; %s is configured as %r, which is "
+                "not a word this alias knows — serving this node's default rather than the "
+                "peer's request", peer_id, wanted, serving_alias, configured,
+            )
             return None
 
-        configured = self._configured_effort_for_alias(serving_alias)
-        cap = normalize_reasoning_effort(configured)
-        if cap is None:
-            if configured:
-                # Configured, and not a word of the shared scale — a provider
-                # whose ladder is its own, such as llamacpp_server reading the
-                # model's jinja template. Serving the peer's wish here would be
-                # fail-open: this node stated a ceiling and we could not read
-                # it. Send nothing instead, which is the host's own default.
-                logger.info(
-                    "Peer %s asked for reasoning effort %s; %s is configured as %r, "
-                    "which is not a word of the shared scale — serving this node's "
-                    "default rather than the peer's request",
-                    peer_id, wanted, serving_alias, configured,
-                )
-                return None
-            return wanted
-
-        served = wanted if ladder.index(wanted) <= ladder.index(cap) else cap
+        served = self._lower_rung(wanted, cap, words)
+        if served is None:
+            logger.info(
+                "Peer %s asked for reasoning effort %s and %s is capped at %s: the two sit "
+                "on ladders this node cannot rank together — serving this node's default",
+                peer_id, wanted, serving_alias, cap,
+            )
+            return None
         if served != wanted:
             logger.info(
                 "Peer %s asked for reasoning effort %s; this node caps %s at %s, serving %s",
                 peer_id, wanted, serving_alias, cap, served,
             )
         return served
+
+    @staticmethod
+    def _lower_rung(wanted: str, cap: str, words: Optional[List[str]]) -> Optional[str]:
+        """The lower of two rungs, or None when the two cannot be ranked.
+
+        The alias's own ladder first, in the order its model named it; the shared
+        scale otherwise, which is where `xhigh` and `max` meet. Neither: a ceiling
+        this node cannot apply, which is not an open door.
+        """
+        from .providers.base import REASONING_EFFORTS, REASONING_OFF, normalize_reasoning_effort
+
+        if words:
+            ladder = (REASONING_OFF,) + tuple(words)
+            if wanted in ladder and cap in ladder:
+                return wanted if ladder.index(wanted) <= ladder.index(cap) else cap
+        shared = (REASONING_OFF,) + REASONING_EFFORTS
+        low, high = normalize_reasoning_effort(wanted), normalize_reasoning_effort(cap)
+        if low is None or high is None:
+            return None
+        return wanted if shared.index(low) <= shared.index(high) else cap
+
+    @staticmethod
+    def _rung_of(provider: Any, word: str) -> Optional[str]:
+        """The rung `word` names on this alias, or None when it names none.
+
+        A provider whose ladder is its model's own answers for itself; the rest
+        are the shared scale. An answer that is not a word is not an answer.
+        """
+        from .providers.base import normalize_reasoning_effort, reasoning_word_for
+
+        if provider is None:
+            return normalize_reasoning_effort(word)
+        rung = reasoning_word_for(provider, word)
+        return rung if isinstance(rung, str) and rung else None
+
+    def _provider_for_alias(self, alias: str) -> Optional[Any]:
+        """The loaded provider behind an alias, or None. The registry is a dict or
+        it is nothing: a stand-in answering every attribute would be read here as
+        a model with a ladder."""
+        manager = getattr(self.service, "llm_manager", None)
+        providers = getattr(manager, "providers", None)
+        return providers.get(alias) if isinstance(providers, dict) else None
 
     def _configured_effort_for_alias(self, alias: str) -> str:
         """The effort this node configured for the alias it serves peers from.
@@ -239,9 +316,7 @@ class P2PCoordinator:
     def _provider_config(self, alias: str) -> Optional[Dict[str, Any]]:
         """The providers.json entry of a loaded alias, or None when the alias
         is not loaded or its provider keeps no dict there."""
-        manager = getattr(self.service, "llm_manager", None)
-        provider = (getattr(manager, "providers", None) or {}).get(alias)
-        config = getattr(provider, "config", None)
+        config = getattr(self._provider_for_alias(alias), "config", None)
         return config if isinstance(config, dict) else None
 
     def _provider_type(self, alias: str) -> Optional[str]:
@@ -441,12 +516,30 @@ class P2PCoordinator:
                 logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
             return
 
+        # Before the call and before any row: a word this alias has no rung for
+        # is answered with the words it has, not served at whatever the model
+        # would have done with silence.
+        try:
+            served_effort = self._effort_for_peer(peer_id, reasoning_effort, serving_alias)
+        except EffortRefused as refusal:
+            logger.warning("Peer inference refused for %s: %s", peer_id, refusal)
+            error_response = create_remote_inference_response(request_id=request_id, error=str(refusal))
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
         try:
             logger.info("Running inference for %s (requested model: %s, requested provider: %s, serving alias: %s)",
                         peer_id, model or 'default', provider or 'default', serving_alias)
 
-            served_effort = self._effort_for_peer(peer_id, reasoning_effort, serving_alias)
-            query_kwargs = {"reasoning_effort": served_effort} if served_effort else {}
+            # Only a word the guest chose travels to the provider: this node's
+            # own configured effort is already inside the alias.
+            query_kwargs = (
+                {"reasoning_effort": served_effort}
+                if served_effort and (reasoning_effort or "").strip() else {}
+            )
 
             async with self._peer_inference_lock:
                 # Clocked inside the lock: the wait is not part of the call, and
@@ -478,8 +571,9 @@ class P2PCoordinator:
             # close and different, and should not have to discover that from
             # the numbers.
             logger.info(
-                "Peer inference served: peer=%s alias=%s model=%s prompt_tokens_est=%s response_tokens_est=%s",
-                peer_id, serving_alias, actual_model,
+                "Peer inference served: peer=%s alias=%s model=%s effort=%s "
+                "prompt_tokens_est=%s response_tokens_est=%s",
+                peer_id, serving_alias, actual_model, served_effort or "unnamed",
                 result.get("prompt_tokens"), result.get("response_tokens"),
             )
             success_response = create_remote_inference_response(
@@ -500,8 +594,8 @@ class P2PCoordinator:
                 tariff_amount=tariff_amount,
                 billing=billing,
                 output_includes_thinking=result.get("output_includes_thinking"),
-                # The word after the clamp, or None: the guest's only way to
-                # check the depth it paid for against the depth it asked for.
+                # The rung this call ran on, asked for or not: the guest's only
+                # way to check the depth it paid for against the depth it asked for.
                 served_effort=served_effort,
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)

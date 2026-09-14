@@ -292,7 +292,7 @@ Requests the peer to execute an AI inference query using their local compute res
 - `images` (array, optional): Image objects for vision queries (v0.12.0+). Peer must support vision (`supports_vision: true` in PROVIDERS_RESPONSE). Reduced to exactly two fields before it travels (`_image_for_the_wire`, `dpc_protocol/protocol.py`) — a `path` field on the sender's side never reaches the wire, deliberately: it names a location on the sender's own filesystem, unreachable and possibly misleading on the receiver's.
   - `base64` (string, required): Base64-encoded image data (data URL format)
   - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
-- `reasoning_effort` (string, optional, v1.7+): How deeply the guest wants the model to think, one word of the shared scale `off`, `low`, `medium`, `high`, `max`. A request, not an instruction: the host may lower it to what it is willing to spend, and answers with the word it served in `served_effort`. Absent means the guest did not choose, and the host answers at its own default — which is not the same as `off`. A word the host does not recognise is not guessed at: the host answers at its own default and `served_effort` is absent.
+- `reasoning_effort` (string, optional, v1.7+): How deeply the guest wants the model to think, one word of the shared scale `off`, `low`, `medium`, `high`, `max`, or one of the words the host's own model named for that alias (`reasoning_words` in PROVIDERS_RESPONSE). A request, not an instruction: the host may lower it to what it is willing to spend, and answers with the word it served in `served_effort`. Absent means the guest did not choose, and the host answers at its own default — which is not the same as `off`, and which `served_effort` names. A word the alias has no rung for is not guessed at and not served silently: the host answers with the error response, listing the words that alias accepts, before it runs anything.
 
 **Response:** REMOTE_INFERENCE_RESPONSE message
 
@@ -366,7 +366,7 @@ Returns the result of a remote inference request.
 - `tariff_at` (string, optional, v1.7+): The `from` day (`YYYY-MM-DD`) of the dated tariff entry that applied, so a row can name which line of the declaration priced it.
 - `tariff_amount` (number, optional, v1.7+): What the tariff came to on this call's own counts, in `tariff_currency`, computed by the host at the moment of the call and never re-derived. Rides only with the group above. Absent beside a present group means the call could not be priced — `output_includes_thinking` is `unknown`, so nothing may be billed from the counts — and is not the same as `0`, which is a price.
 - `billing` (string, optional, v1.7+): The billing model the host priced the call under, `pay_per_use` or `subscription`, so the requester's own usage row copies the host's answer instead of guessing one from the model's name. Absent when the host did not say. Never sent on an error.
-- `served_effort` (string, optional, v1.7+): The reasoning effort the host actually ran the call at, one word of the same scale as the request's `reasoning_effort`, after the host clamped the request to its own cap. This is the guest's only way to check the depth it paid for against the depth it asked for; the host's usage row and the guest's carry the same word under the same `request_id`. Absent means the host applied no effort control and answered at its own default — not the same as `off`. Never sent on an error.
+- `served_effort` (string, optional, v1.7+): The reasoning effort the host actually ran the call at — the guest's word clamped to the host's cap where one was asked for, and otherwise the word the host's own configuration runs that alias at. This is the guest's only way to check the depth it paid for against the depth it asked for; the host's usage row and the guest's carry the same word under the same `request_id`. Present on every served call the host can name a rung for, whether or not the guest asked; absent means no word describes the call — the alias has no effort channel, or its host could not read its own configured word — and is not the same as `off`. Never sent on an error.
 
 What the call cost the *host* is not on the wire. A `cost_usd` field was added here on 2026-09-10 and removed on 2026-09-14, while v1.7 is unreleased: the host's own cost is the host's economy and stays in the host's ledger, and what the guest is asked for is the tariff above (ADR-041 D3, amendment). A requester's usage row therefore carries `cost_usd = null` — it spent nothing of its own — and the tariff fields copied from this message.
 
@@ -2436,6 +2436,13 @@ DPTP is designed to be extensible. New commands can be added by:
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `served_effort`: the word the
   host actually ran at after its clamp, so the guest can check the depth it
   paid for; absent means no effort control was applied. Added 2026-09-14
+- **§3.4 REMOTE_INFERENCE_REQUEST/RESPONSE** — the host names the rung on every
+  served call, the guest's clamped word or its own configured one, and absent
+  now means only that no word describes the call; a word the serving alias has
+  no rung for is refused with the error response listing the words it accepts,
+  instead of being served at the model's default. The request may also carry
+  one of the alias's own words, which its menu row advertises. Changed
+  2026-09-14 while v1.7 is unreleased
 - **§3.4 REMOTE_INFERENCE_REQUEST** — the tier the host requires is stated:
   served only over a connection whose key is proved — direct TLS; other tiers
   receive the error response (ADR-041 D2). Added 2026-09-14 with the host-side
