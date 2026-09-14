@@ -29,13 +29,13 @@ measured both from git and found the number had no source.
 |---|---|---|---|
 | **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted | 150 | 42 |
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted | 122 | 20 |
-| **network** | ADR-040 accepted · ADR-041 accepted | 178 | 37 |
-| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 132 | 23 |
-| **reach** | ADR-035 accepted | 24 | 8 |
+| **network** | ADR-040 accepted · ADR-041 accepted | 175 | 34 |
+| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 134 | 24 |
+| **reach** | ADR-035 accepted | 21 | 5 |
 
-**Observation debt: 125 under an axis + 18 in entries that carry none = 143.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
+**Observation debt: 121 under an axis + 18 in entries that carry none = 139.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
-Not yet placed: 130 of 721 board entries carry no axis, and a guessed one would report coverage this does not have.
+Not yet placed: 130 of 718 board entries carry no axis, and a guessed one would report coverage this does not have.
 
 Rendered from `docs/decisions/*.md` front matter and `backlog.md`. Nothing here is written by hand; correct it at the source and re-run `uv run python tools/backlog/build.py --roadmap`.
 
