@@ -2042,7 +2042,11 @@ class CoreService:
             peer_data = {
                 "node_id": peer_id,
                 "name": self.peer_metadata.get(peer_id, {}).get("name", None),
-                "strategy_used": getattr(peer_conn, 'strategy_used', None)
+                "strategy_used": getattr(peer_conn, 'strategy_used', None),
+                # Every row here is built from `p2p_manager.peers`, which holds
+                # the connections that exist; the field says so rather than
+                # leaving each reader to infer it from the list it came in.
+                "is_connected": True,
             }
             peer_info.append(peer_data)
 

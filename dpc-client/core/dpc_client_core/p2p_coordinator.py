@@ -365,8 +365,8 @@ class P2PCoordinator:
     def _vendor_quota_refusal(self, peer_id: str, serving_alias: str) -> Optional[tuple]:
         """Why this peer may not be served `serving_alias` today, or None.
 
-        ADR-041 D5 on the peer door. A vendor alias is bounded by money â€”
-        `compute.vendor_quotas`, USD per day and per caller â€” summed from the
+        ADR-041 D5 on the peer door. A vendor alias is bounded by money —
+        `compute.vendor_quotas`, USD per day and per caller — summed from the
         rows `_record_peer_call` wrote under this peer's own name, so a
         restart changes nothing and one peer's spending never counts against
         another's. A local alias is bounded by the card, which is the queue
@@ -631,8 +631,8 @@ class P2PCoordinator:
 
         # Money, before the queue and before anything runs: what this peer has
         # already spent on a vendor alias today is read from the ledger and
-        # weighed against its ceiling. Nothing is written â€” a refused call is
-        # not a call â€” and the guest learns only that its own ceiling is spent.
+        # weighed against its ceiling. Nothing is written — a refused call is
+        # not a call — and the guest learns only that its own ceiling is spent.
         quota_refusal = self._vendor_quota_refusal(peer_id, serving_alias)
         if quota_refusal:
             error_text, code = quota_refusal

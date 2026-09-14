@@ -797,6 +797,9 @@ class Gateway:
                 "not_allowed": 403,
                 "identity_unproved": 403,
                 "onward_sharing_refused": 403,
+                # The host's money, spent for today: the guest may come back
+                # tomorrow, which is what 429 says and 502 does not.
+                "insufficient_quota": 429,
             }.get(e.code)
             if status is None:
                 raise GatewayError(502, f"peer {peer_id} refused: {e}", "peer_refused")

@@ -308,39 +308,44 @@ STATUS_FOR = {
     "not_allowed": 403,
     "identity_unproved": 403,
     "onward_sharing_refused": 403,
+    # The host's daily ceiling for this guest, spent (ADR-041 D5): not a
+    # forbidden door but a full one, and tomorrow it is empty again.
+    "insufficient_quota": 429,
 }
 OPENAI_TYPE_FOR = {400: "invalid_request_error", 403: "permission_error",
-                   404: "invalid_request_error", 502: "server_error"}
+                   404: "invalid_request_error", 429: "insufficient_quota",
+                   502: "server_error"}
 ANTHROPIC_TYPE_FOR = {400: "invalid_request_error", 403: "permission_error",
-                      404: "not_found_error", 502: "api_error"}
+                      404: "not_found_error", 429: "rate_limit_error",
+                      502: "api_error"}
 
 
-#: The word the map does not place yet: a spent vendor ceiling on the peer
-#: door (ADR-041 D5). Its status is 429, one line in `_complete_via_peer`, and
-#: the two tests below hold the gap open until that line lands.
-NOT_PLACED_YET = {"insufficient_quota"}
+#: Every word the protocol defines now has a status; the set is kept so the
+#: check below reads as a statement about the whole vocabulary rather than
+#: about whichever words someone remembered to list.
+NOT_PLACED_YET: set = set()
 
 
 def test_the_gateway_places_every_word_the_protocol_defines():
-    """No word of the vocabulary falls through to the 502 the card was about,
-    but one, which is named rather than forgotten."""
+    """No word of the vocabulary falls through to the 502 the card was about."""
     assert set(STATUS_FOR) | NOT_PLACED_YET == set(REFUSAL_CODES)
     assert not set(STATUS_FOR) & NOT_PLACED_YET
 
 
 @pytest.mark.asyncio
-async def test_a_spent_ceiling_is_still_the_502_until_the_gateway_learns_the_word(tmp_path):
-    """What a client sees today when a host refuses on its daily ceiling. This
-    reddens when the mapping lands, which is when `insufficient_quota` moves
-    into `STATUS_FOR` and out of `NOT_PLACED_YET`."""
+async def test_a_spent_ceiling_is_the_429_a_client_can_come_back_from(tmp_path):
+    """A guest that has spent its daily ceiling on this host reads 429 with the
+    host's own word in the body, not the 502 that said only "something broke"."""
     refusal = PeerRefused("your ceiling is spent", code="insufficient_quota")
     service = _peer_service(tmp_path, fail=refusal)
     async with _running(tmp_path, service) as (server, ledger):
         status, text = await _request(server, "POST", "/v1/chat/completions",
                                       key=_key(tmp_path), body=_chat(REMOTE_MODEL))
 
-        assert status == 502
-        assert json.loads(text)["error"]["code"] == "peer_refused"
+        assert status == 429
+        error = json.loads(text)["error"]
+        assert error["code"] == "insufficient_quota"
+        assert "your ceiling is spent" in error["message"]
         assert _rows(ledger) == []
 
 
