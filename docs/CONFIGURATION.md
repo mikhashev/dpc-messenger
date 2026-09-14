@@ -202,14 +202,17 @@ header forms open every route.
 
 **Two switches, one door.** `[gateway] enabled` above is not the only one: `compute.enabled`
 in `privacy_rules.json` governs **both** of this node's doors — the peer door it has always
-governed, and this loopback gateway (Mike's call, 2026-09-13). The table between them is AND:
+governed, and this loopback gateway (Mike's call, 2026-09-13). The table between them is AND.
+`compute.enabled` is about what this node **gives**, never about what it may **ask**: a
+`remote:<peer>:<alias>` row is the peer's door, guarded by the peer's own flag, so a node that
+shares nothing still reaches its peers through its own gateway (Mike's call, 2026-09-14):
 
-| `compute.enabled` | `[gateway] enabled` | The door |
-|---|---|---|
-| `true` | `true` | **Open.** `/v1/models` lists the two serving lists and each proved peer's menu; completions are served |
-| `true` | `false` | **Shut.** No listener at all; the peer door stays open |
-| `false` | `true` | **Shut.** The listener runs, `/v1/models` answers an empty list, and a completion — local, vendor or `remote:` — is `404` naming `compute.enabled`; the peer door is shut too |
-| `false` | `false` | **Shut.** Neither door serves anything |
+| `compute.enabled` | `[gateway] enabled` | This node's own aliases | `remote:<peer>:<alias>` rows |
+|---|---|---|---|
+| `true` | `true` | **Open.** `/v1/models` lists the two serving lists; completions are served | **Open.** Listed and called, one row per proved, connected peer |
+| `true` | `false` | **Shut.** No listener at all; the peer door stays open | **Shut.** No listener to ask through |
+| `false` | `true` | **Shut.** The listener runs, `/v1/models` lists none of them, and a local or vendor completion is `404` naming `compute.enabled`; the peer door is shut too | **Open.** Listed and called as above — what a peer serves is the peer's to refuse |
+| `false` | `false` | **Shut.** Neither door serves anything | **Shut.** No listener to ask through |
 
 The flag is read from the live firewall on every request, so turning sharing off in the UI
 (or editing `privacy_rules.json` and reloading) closes the gateway on the next request
@@ -499,7 +502,7 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `enabled` | `false` | Serve /v1/models and /v1/chat/completions to local tools (ADR-041). Needs `compute.enabled` in `privacy_rules.json` too: the door is open only when both are true |
+| `enabled` | `false` | Serve /v1/models and /v1/chat/completions to local tools (ADR-041). This node's own aliases need `compute.enabled` in `privacy_rules.json` too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone |
 | `port` | `9997` | 9998 is the file server, 9999 the local API |
 | `host` | `127.0.0.1` | Not configurable: any other value is refused at start (ADR-041 D1) |
 

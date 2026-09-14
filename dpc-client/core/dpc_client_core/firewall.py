@@ -1412,7 +1412,7 @@ class ContextFirewall:
                     "personal": ["personal.json", "hobbies.json"]
                 },
                 "compute": {
-                    "_comment": "Compute sharing settings - Allow peers to run AI inference on your GPU/CPU. enabled governs BOTH doors: the peer door and the loopback gateway on 127.0.0.1 that serves your own IDE and CLI tools. With enabled false nothing is served on either, whatever serving_local and serving_vendor name; the gateway also needs [gateway] enabled = true in config.ini, so it is open only when both are on.",
+                    "_comment": "Compute sharing settings - Share this node's models with peers (its peer door and its own aliases on the loopback gateway). Asking a peer for inference does not need it. With enabled false neither door serves this node's own aliases, whatever serving_local and serving_vendor name, while a peer's remote:<node_id>:<alias> stays callable on the gateway; the gateway also needs [gateway] enabled = true in config.ini, so this node's own aliases are served only when both are on.",
                     "enabled": False,
                     "allow_groups": [],
                     "allow_nodes": [],

@@ -181,8 +181,9 @@
           {:else}
             <input id="compute-enabled-display" name="compute-enabled-display" type="checkbox" checked={view.enabled} disabled />
           {/if}
-          <strong>Enable Compute Sharing</strong>
+          <strong>Share my models with peers</strong>
         </label>
+        <p class="help-text-small">Using a peer's model does not need this.</p>
       </div>
 
       {#if refusedWith.length > 0}

@@ -11,13 +11,14 @@ call on `LLMManager` and one usage row with `caller_kind="gateway"` on this
 node's ledger (D3).
 
 Two switches stand on this door and the table between them is AND (Mike's
-call, 2026-09-13): it serves only while `compute.enabled` in
-`privacy_rules.json` and `[gateway] enabled` in `config.ini` are both true.
-One word governs both of this node's doors — `compute.enabled` off shuts the
-peer door as it always has and this one as well, so a node that has stopped
-sharing compute has stopped, whichever side the request arrives from — while
-`[gateway] enabled` shuts this door alone, which is what the owner's own
-tools need.
+call, 2026-09-13): this node's own aliases are served only while
+`compute.enabled` in `privacy_rules.json` and `[gateway] enabled` in
+`config.ini` are both true. `compute.enabled` governs what this node gives —
+off, it shuts the peer door as it always has and its own aliases here as well
+— while `[gateway] enabled` shuts this door alone, which is what the owner's
+own tools need. Neither governs what this node asks for: a `remote:` name is
+the peer's door (Mike's call, 2026-09-14), so a node that shares nothing
+still calls its peers through its own gateway.
 
 Two layers, on purpose. `Gateway` is the internal one — alias, serving
 class, quota or card, one call, one row — and knows nothing about HTTP.
@@ -229,27 +230,30 @@ class Gateway:
         }
 
     def compute_sharing_on(self) -> bool:
-        """Whether `compute.enabled` is true right now (Mike's call, 2026-09-13).
+        """Whether `compute.enabled` is true right now (Mike's call, 2026-09-14).
 
-        One flag governs both doors: the peer one, where `can_request_inference`
-        has always read it, and this one. Two switches stand on the gateway and
-        the table between them is AND — it serves only while `compute.enabled`
-        and `[gateway] enabled` are both true; `[gateway] enabled` never touches
-        the peer door. Asked of the live firewall on every request, never copied
-        at start: the rules reload on save, and a door holding a copy would keep
-        serving for the rest of the session after the owner turned sharing off.
+        The flag governs what this node *gives*: its peer door, where
+        `can_request_inference` reads it, and its own aliases here. Two
+        switches stand on those and the table is AND — served only while
+        `compute.enabled` and `[gateway] enabled` are both true. It governs
+        nothing this node *asks* for: a `remote:<node_id>:<alias>` name is the
+        peer's door, guarded by that peer's own flag. Asked of the live
+        firewall every request: a door holding a copy would keep serving after
+        the owner turned sharing off.
         """
         return bool(getattr(self._core.firewall, "compute_enabled", False))
 
     def refuse_unless_compute_sharing(self, alias: str) -> None:
-        """The one place the shut door is said, for all three routes."""
+        """The one place the shut door is said, for this node's own aliases."""
         if self.compute_sharing_on():
             return
         raise GatewayError(
             404,
-            f"model '{alias}' is not served: compute.enabled is false in privacy_rules.json, and it "
-            "closes both of this node's doors — the peer door and this loopback gateway, which serves "
-            "only while compute.enabled and [gateway] enabled are both true",
+            f"model '{alias}' is not served: compute.enabled is false in privacy_rules.json, which "
+            "closes this node's own aliases on both of its doors — the peer door and this loopback "
+            "gateway, which serves them only while compute.enabled and [gateway] enabled are both "
+            "true. A peer's model is reachable from here whatever this flag says: call it by its "
+            "remote:<node_id>:<alias> name, which that peer's own flag guards",
             "compute_sharing_disabled",
         )
 
@@ -305,9 +309,9 @@ class Gateway:
         a prompt, no message array and no tools (ADR-041 D4, M1) — so tools on
         it are refused here, and the answer comes back whole: `on_chunk` is
         never called on that route and the shape layer sends what it got."""
-        # Before the name is even resolved: with sharing off nothing is served,
-        # and on the peer route nothing leaves this machine either.
-        self.refuse_unless_compute_sharing(alias)
+        # The route first: `compute.enabled` is about what this node gives, so
+        # it stands in front of this node's own aliases and not in front of a
+        # peer's, which the peer's own flag guards.
         remote = parse_remote_name(alias)
         if remote is not None:
             if tools:
@@ -319,6 +323,7 @@ class Gateway:
                     "tools_unsupported",
                 )
             return await self._complete_via_peer(alias, *remote, prompt)
+        self.refuse_unless_compute_sharing(alias)
         try:
             lists = self.serving_lists()
         except GatewayConfigError as e:
@@ -1018,17 +1023,19 @@ class GatewayServer:
             return error(503, f"the gateway's serving lists are refused: {e}", "serving_lists_refused")
 
     async def _models(self, request: web.Request) -> web.Response:
-        if not self.gateway.compute_sharing_on():
-            # The same flag that refuses a completion empties the menu: a shut
-            # door lists nothing rather than advertise what it would refuse.
-            return web.json_response({"object": "list", "data": []})
-        lists = self.gateway.serving_lists()
-        data = [
-            {"id": alias, "object": "model", "created": 0, "owned_by": owner}
-            for owner, aliases in (("local", lists.local), ("vendor", lists.vendor))
-            for alias in aliases
-        ]
-        # After the two local lists, each proved peer's menu under the peer's name.
+        data = []
+        # The same flag that refuses a completion on this node's own alias
+        # keeps it off the menu: a shut door lists nothing it would refuse.
+        if self.gateway.compute_sharing_on():
+            lists = self.gateway.serving_lists()
+            data = [
+                {"id": alias, "object": "model", "created": 0, "owned_by": owner}
+                for owner, aliases in (("local", lists.local), ("vendor", lists.vendor))
+                for alias in aliases
+            ]
+        # After the two local lists, each proved peer's menu under the peer's
+        # name — listed whatever this node's flag says, since the door those
+        # rows stand in is the peer's.
         data.extend(
             {"id": f"{REMOTE_PREFIX}{peer_id}:{row['alias']}", "object": "model", "created": 0, "owned_by": peer_id}
             for peer_id, rows in self.gateway.peer_menu().items()

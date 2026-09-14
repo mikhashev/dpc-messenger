@@ -1,11 +1,13 @@
-"""`compute.enabled` governs both doors: the peer one and the loopback gateway.
+"""`compute.enabled` governs what this node gives, on both of its doors.
 
-Mike's call, 2026-09-13 (board: THE-GATEWAY-SERVES-ITS-OWN-MACHINE-WHATEVER-
-COMPUTE-SHARING-SAYS), option (b). Two switches now stand on one door and the
-table between them is AND (Ark's review, 2026-09-13): the gateway serves only
-while `compute.enabled` in `privacy_rules.json` and `[gateway] enabled` in
-`config.ini` are both true. Either one off shuts it, and `compute.enabled` off
-shuts the peer door as well — which `[gateway] enabled` never touches.
+Mike's calls of 2026-09-13 and 2026-09-14, option (b) both times. This node's
+own aliases are served only while `compute.enabled` in `privacy_rules.json`
+and `[gateway] enabled` in `config.ini` are both true; either one off shuts
+them, and `compute.enabled` off shuts the peer door too, which
+`[gateway] enabled` never touches. The flag says nothing about what this node
+may **ask**: a `remote:<node_id>:<alias>` row is the peer's door, guarded by
+the peer's own flag, so with sharing off here the menu still carries each
+proved peer's rows and a completion on one of them goes through.
 
 The flag is asked of the live firewall on every request, not read once at
 start: the rules reload on save (`firewall_rules_updated`), and a door that
@@ -30,7 +32,11 @@ from dpc_client_core.firewall import ContextFirewall
 from dpc_client_core.settings import Settings
 from tests.test_the_gateway_routes_a_peer_alias_over_a_proved_connection_and_writes_the_requester_row import (
     PEER,
+    PEER_ANSWER,
+    REMOTE_ALIAS,
     REMOTE_MODEL,
+    REMOTE_VISION_ALIAS,
+    WIRE_ID,
     _peer_service,
 )
 from tests.test_the_gateway_serves_only_the_two_lists_on_loopback import (
@@ -67,7 +73,8 @@ def _openai_error(text):
 
 @pytest.mark.asyncio
 async def test_with_compute_sharing_off_models_lists_nothing_though_both_lists_are_full(tmp_path):
-    """The lists are full and classify cleanly; the flag alone empties the menu."""
+    """The lists are full and classify cleanly; the flag alone empties this
+    node's half of the menu, and no peer is connected to fill the other."""
     service = _service(tmp_path, NOT_SHARING)
     async with _running(tmp_path, service) as (server, _):
         status, text = await _request(server, "GET", "/v1/models", key=_key(tmp_path))
@@ -102,23 +109,48 @@ async def test_with_compute_sharing_off_a_completion_is_404_naming_compute_enabl
 
 
 @pytest.mark.asyncio
-async def test_with_compute_sharing_off_a_peer_alias_is_refused_before_any_p2p_call(tmp_path):
-    """The peer route is already shut on the host's side (`can_request_inference`);
-    this shuts it on the requester's, so nothing leaves this machine at all."""
+async def test_with_compute_sharing_off_the_menu_is_the_peers_rows_and_none_of_this_nodes(tmp_path):
+    """A guest lists what it may ask for: the proved peer's rows, never its own."""
+    service = _peer_service(tmp_path, compute=NOT_SHARING)
+    async with _running(tmp_path, service) as (server, _):
+        status, text = await _request(server, "GET", "/v1/models", key=_key(tmp_path))
+        assert status == 200
+        assert [(m["id"], m["owned_by"]) for m in json.loads(text)["data"]] == [
+            (REMOTE_MODEL, PEER), (f"remote:{PEER}:{REMOTE_VISION_ALIAS}", PEER),
+        ]
+        assert LOCAL not in text and VENDOR not in text
+
+
+@pytest.mark.asyncio
+async def test_with_compute_sharing_off_a_peer_alias_is_answered_and_leaves_one_requester_row(tmp_path):
+    """The peer's flag guards the peer's door; ours does not stand in front of it."""
     service = _peer_service(tmp_path, compute=NOT_SHARING)
     async with _running(tmp_path, service) as (server, ledger):
-        key = _key(tmp_path)
         status, text = await _request(server, "POST", "/v1/chat/completions",
-                                      key=key, body=_chat(REMOTE_MODEL))
-        error = _openai_error(text)
-        assert status == 404 and "compute.enabled" in error["message"]
-        assert service.peer_calls == [], "the guard stands before request_inference_from_peer"
-        assert list(ledger.rows()) == []
+                                      key=_key(tmp_path), body=_chat(REMOTE_MODEL))
+        assert status == 200, text
+        assert json.loads(text)["choices"][0]["message"]["content"] == PEER_ANSWER
+        (call,) = service.peer_calls
+        assert (call["peer_id"], call["provider"]) == (PEER, REMOTE_ALIAS)
+        (row,) = list(ledger.rows())
+        assert (row["route"], row["caller_kind"], row["request_id"]) == ("peer", "gateway", WIRE_ID)
+        assert service.calls == [], "the local provider layer is not touched"
 
-        # And the peer's menu is not advertised from a shut door either.
-        status, text = await _request(server, "GET", "/v1/models", key=key)
-        assert (status, json.loads(text)["data"]) == (200, [])
-        assert PEER not in text
+
+@pytest.mark.asyncio
+async def test_with_compute_sharing_off_this_nodes_own_alias_is_still_404_and_says_which_door_is_shut(tmp_path):
+    """The refusal names the flag, what it closed — this node's own aliases —
+    and the route that is still open, so the IDE reads the fix in the error."""
+    service = _peer_service(tmp_path, compute=NOT_SHARING)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _request(server, "POST", "/v1/chat/completions",
+                                      key=_key(tmp_path), body=_chat(LOCAL))
+        error = _openai_error(text)
+        assert status == 404 and error["code"] == "compute_sharing_disabled"
+        assert "compute.enabled" in error["message"] and LOCAL in error["message"]
+        assert "own aliases" in error["message"]
+        assert "remote:<node_id>:<alias>" in error["message"]
+        assert service.calls == [] and service.peer_calls == [] and list(ledger.rows()) == []
 
 
 # --- (2) the truth table: two switches, one door, AND ------------------------------------
@@ -193,12 +225,12 @@ async def test_flipping_the_flag_on_the_live_firewall_changes_the_next_request(t
 # --- (4) the rules file says it, in both places the owner reads -------------------------
 
 
-def test_the_rules_template_and_the_example_say_the_flag_closes_both_doors(tmp_path):
-    """A rule nobody can read from the file is a rule discovered by surprise."""
+def test_the_rules_template_and_the_example_say_what_the_flag_shares_and_what_it_does_not(tmp_path):
+    """A rule nobody can read from the file is a rule discovered by surprise:
+    both places name the two doors it opens and say that asking needs neither."""
     ContextFirewall(tmp_path / "privacy_rules.json")  # writes the default template
     written = json.loads((tmp_path / "privacy_rules.json").read_text(encoding="utf-8"))
     for comment in (written["compute"]["_comment"],
                     json.loads(EXAMPLE_RULES.read_text(encoding="utf-8"))["compute"]["_comment"]):
-        lowered = comment.lower()
-        assert "gateway" in lowered, comment
-        assert "peer" in lowered, comment
+        assert ("Share this node's models with peers (its peer door and its own aliases on the "
+                "loopback gateway). Asking a peer for inference does not need it.") in comment, comment
