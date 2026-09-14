@@ -1,6 +1,9 @@
 """Handlers for remote inference commands (compute sharing)."""
 
 from typing import Dict, Any, Optional
+
+from dpc_protocol.protocol import PeerRefused
+
 from . import MessageHandler
 from ..node_ledger import stated_output_includes_thinking, stated_thinking_source
 
@@ -125,6 +128,14 @@ class RemoteInferenceResponseHandler(MessageHandler):
         status = payload.get("status")
         response = payload.get("response")
         error = payload.get("error")
+        # Why the host refused, in one word (v1.7). It travels beside the prose
+        # and does not replace it: the text is what a person reads. A code this
+        # node has no meaning for is carried anyway — the reader above decides
+        # what it can do with a word, and a word it cannot place it reads like
+        # an absent one. Anything that is not a string is not a code.
+        code = payload.get("code")
+        if not isinstance(code, str):
+            code = ""
 
         # Extract token metadata
         tokens_used = payload.get("tokens_used")
@@ -204,7 +215,12 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         result_data["finish_reason"] = finish_reason
                     future.set_result(result_data)
                 else:
-                    future.set_exception(RuntimeError(error or "Remote inference failed"))
+                    # `PeerRefused` is a `RuntimeError`: a caller that reads
+                    # `.code` tells a bad request from a shut door, and every
+                    # caller written before the code keeps what it had.
+                    future.set_exception(
+                        PeerRefused(error or "Remote inference failed", code=code)
+                    )
             else:
                 self.logger.warning(
                     "Remote inference answer for %s arrived after its future was settled "

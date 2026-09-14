@@ -102,6 +102,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from aiohttp import web
+from dpc_protocol.protocol import PeerRefused
 
 from .dpc_agent.llm_adapter import DpcLlmAdapter
 from .dpc_agent.pricing import compute_cost_usd, get_billing_model
@@ -143,6 +144,7 @@ HOST_NAMES = ("127.0.0.1", "localhost")
 _ERROR_TYPES = {
     400: "invalid_request_error",
     401: "authentication_error",
+    403: "permission_error",
     404: "invalid_request_error",
     413: "invalid_request_error",
     429: "insufficient_quota",
@@ -155,6 +157,7 @@ _ERROR_TYPES = {
 _ANTHROPIC_ERROR_TYPES = {
     400: "invalid_request_error",
     401: "authentication_error",
+    403: "permission_error",
     404: "not_found_error",
     413: "request_too_large",
     429: "rate_limit_error",
@@ -755,8 +758,32 @@ class Gateway:
                 f"peer {peer_id} did not answer within {timeout:g}s ([connection] remote_inference_timeout)",
                 "peer_timeout",
             )
+        except PeerRefused as e:
+            # The host's own refusal, and since v1.7 it names why. The word is
+            # answered with the status the cause deserves, so that a client can
+            # act: its own bad request is a 400 it must fix, a model it cannot
+            # have is a 404, a door shut against it is a 403 it must ask a
+            # person about, and only a refusal nobody here can place stays the
+            # 502 every refusal used to be. The host's own text travels
+            # whichever status it lands on, and the code the client reads is
+            # the host's own word — one vocabulary across the hop, not two.
+            status = {
+                # The guest's own request, refused before the host spent anything.
+                "invalid_value": 400,
+                "tools_unsupported": 400,
+                # Not on that peer's menu.
+                "model_not_found": 404,
+                # The host's door, not the request: a person decides these.
+                "not_allowed": 403,
+                "identity_unproved": 403,
+                "onward_sharing_refused": 403,
+            }.get(e.code)
+            if status is None:
+                raise GatewayError(502, f"peer {peer_id} refused: {e}", "peer_refused")
+            raise GatewayError(status, f"peer {peer_id} refused: {e}", e.code)
         except RuntimeError as e:
-            # The host's own refusal — alias not served, firewall, quota — in its words.
+            # A refusal from a host that predates the code, or from any other
+            # caller in this tree that still raises the bare error.
             raise GatewayError(502, f"peer {peer_id} refused: {e}", "peer_refused")
         duration_s = time.monotonic() - clock
 

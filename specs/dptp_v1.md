@@ -393,7 +393,8 @@ Returns the result of a remote inference request. When the request asked for `st
   "payload": {
     "request_id": "550e8400-e29b-41d4-a716-446655440000",
     "status": "error",
-    "error": "Model not available"
+    "error": "Model not available",
+    "code": "model_not_found"
   }
 }
 ```
@@ -432,6 +433,17 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
 - `request_id` (string, required): Matches request UUID
 - `status` (string, required): `"error"`
 - `error` (string, required): Human-readable error message
+- `code` (string, optional, v1.7+): Why the host refused, in one machine-readable word. It rides beside `error` and does not replace it: the code is what a program reads and the text is what a person reads, and a host sends both. The words:
+  - `identity_unproved` — the request did not arrive over a connection whose key is proved, and this host serves peer inference only over one (§3.4 Security, ADR-041 D2)
+  - `not_allowed` — the host's firewall does not let this peer ask for inference, or not for what it asked for
+  - `model_not_found` — the host serves no alias to this peer, or not the one named: the request is off the menu (§3.5)
+  - `onward_sharing_refused` — the alias the host would have served is itself somebody else's model, and what is shared is not shared onward (ADR-041 D7 part 1)
+  - `invalid_value` — the request asked for something the host's alias cannot take, refused before anything ran: a reasoning effort word that alias has no rung for (the text lists the words it accepts), or an effort the entry point this request needs cannot carry
+  - `tools_unsupported` — the request carried tools and the host's serving alias has no native tool-calling path, which is refused rather than answered without them
+
+  Absent means the host has no word for this refusal — a failure mid-call rather than a gate, or a host that predates the field — and is never itself a reason. A receiver reads an unknown word exactly as it reads an absent one, because a newer host may name a cause this one has no word for; no receiver refuses a message over its code. Sent on the error form only: a served call carries no code.
+
+  What a receiver does with the word is the receiver's own. The guest in this tree answers its own HTTP clients with the status the cause deserves — `invalid_value` and `tools_unsupported` are the client's own 400, `model_not_found` a 404, `identity_unproved`, `not_allowed` and `onward_sharing_refused` a 403 — and keeps the 502 it always gave for an unknown or absent code. Before the code every one of those was the same 502, and an IDE could not tell a request it should fix from a door it should ask a person about.
 
 ---
 
@@ -2557,6 +2569,15 @@ DPTP is designed to be extensible. New commands can be added by:
   over the reasoning text is not bounded by the engine's exact total on its own:
   a host reported 24 thinking tokens inside a 22-token completion on 2026-09-14.
   Added 2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `code` on the error form: one
+  machine-readable word for why a host refused — `identity_unproved`,
+  `not_allowed`, `model_not_found`, `onward_sharing_refused`, `invalid_value`,
+  `tools_unsupported` — beside the prose `error`, which is unchanged. Absent
+  means the host predates it or has no word for this refusal, and an unknown
+  word is read like an absent one. Every host refusal used to reach a guest's
+  gateway as prose and leave it as the same 502, so an unknown effort word (the
+  client's own 400) and a firewall rule (a 403) were one status. Added
+  2026-09-14 while v1.7 is unreleased
 - **§3.4 REMOTE_INFERENCE_REQUEST** — the tier the host requires is stated:
   served only over a connection whose key is proved — direct TLS; other tiers
   receive the error response (ADR-041 D2). Added 2026-09-14 with the host-side

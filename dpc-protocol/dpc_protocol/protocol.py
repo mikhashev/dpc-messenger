@@ -53,6 +53,57 @@ def _image_for_the_wire(img: Dict[str, Any]) -> Dict[str, Any]:
     return {"base64": img["base64"], "mime_type": img["mime_type"]}
 
 
+# --- REMOTE_INFERENCE_RESPONSE refusal codes (DPTP v1.7) ---------------------
+#
+# One machine-readable word beside the prose `error`, so that a refusal keeps
+# its reason across the hop. Without it every host refusal arrives at a guest
+# as the same failure, and a guest answering an HTTP client has to call its
+# own bad request, a firewall rule and a broken model by one status.
+#
+# Each word is the one a refusing site already uses on this side of the wire,
+# so nothing here is a second vocabulary: `invalid_value`, `model_not_found`
+# and `tools_unsupported` are the gateway's own codes, and
+# `onward_sharing_refused` is named after the firewall's
+# `onward_sharing_refusal`.
+REFUSAL_IDENTITY_UNPROVED = "identity_unproved"
+REFUSAL_NOT_ALLOWED = "not_allowed"
+REFUSAL_MODEL_NOT_FOUND = "model_not_found"
+REFUSAL_ONWARD_SHARING_REFUSED = "onward_sharing_refused"
+REFUSAL_INVALID_VALUE = "invalid_value"
+REFUSAL_TOOLS_UNSUPPORTED = "tools_unsupported"
+
+#: The words a host may send today. A receiver reads it to recognise, never to
+#: refuse: a newer host may name a reason this one has no word for, and an
+#: unknown code is read exactly like an absent one.
+REFUSAL_CODES = frozenset({
+    REFUSAL_IDENTITY_UNPROVED,
+    REFUSAL_NOT_ALLOWED,
+    REFUSAL_MODEL_NOT_FOUND,
+    REFUSAL_ONWARD_SHARING_REFUSED,
+    REFUSAL_INVALID_VALUE,
+    REFUSAL_TOOLS_UNSUPPORTED,
+})
+
+
+class PeerRefused(RuntimeError):
+    """A host refused a REMOTE_INFERENCE_REQUEST: its words, and its code.
+
+    `RuntimeError` on purpose. That is what a refused remote inference has
+    raised since before the code existed, and every caller in the tree — the
+    gateway's peer route, `RemotePeerProvider`, an agent's round — is written
+    against it. A caller that reads `.code` tells the reasons apart; a caller
+    that does not keeps the behaviour it had.
+
+    `code` is one word of `REFUSAL_CODES`, or `""` where the host sent none —
+    an older host, or a refusal it has no word for. Empty is not a reason: a
+    reader that cannot name the cause says so rather than guessing one.
+    """
+
+    def __init__(self, message: str, code: str = ""):
+        super().__init__(message)
+        self.code = code or ""
+
+
 def create_remote_inference_request(
     request_id: str,
     prompt: str,
@@ -151,8 +202,16 @@ def create_remote_inference_response(
     served_effort: str = None,
     tool_calls: list = None,
     finish_reason: str = None,
+    code: str = None,
 ) -> Dict[str, Any]:
     """Creates a remote inference response message with optional token, model, and thinking metadata.
+
+    `code` names why a refusal was refused, one word of `REFUSAL_CODES`
+    (DPTP v1.7). It rides on the error form only, beside the prose `error`
+    that keeps saying the same thing in the host's own words — the code is
+    what a machine reads, the text is what a person reads, and neither
+    replaces the other. Absent means the host has no word for this refusal or
+    predates the field, and a receiver then knows only that it was refused.
 
     `served_effort` is the effort word the host ran at after clamping the
     request's `reasoning_effort` (DPTP v1.7); absent means no effort control
@@ -236,6 +295,8 @@ def create_remote_inference_response(
     else:
         payload["error"] = error or "Unknown error"
         payload["status"] = "error"
+        if code:
+            payload["code"] = code
     return {"command": "REMOTE_INFERENCE_RESPONSE", "payload": payload}
 
 def create_remote_transcription_request(

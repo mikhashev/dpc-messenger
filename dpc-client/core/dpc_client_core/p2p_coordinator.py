@@ -456,7 +456,14 @@ class P2PCoordinator:
         call emits no chunk.
         """
         from dpc_protocol.protocol import (
-            create_remote_inference_chunk, create_remote_inference_response,
+            REFUSAL_IDENTITY_UNPROVED,
+            REFUSAL_INVALID_VALUE,
+            REFUSAL_MODEL_NOT_FOUND,
+            REFUSAL_NOT_ALLOWED,
+            REFUSAL_ONWARD_SHARING_REFUSED,
+            REFUSAL_TOOLS_UNSUPPORTED,
+            create_remote_inference_chunk,
+            create_remote_inference_response,
         )
         from .p2p_manager import peer_proof
 
@@ -486,6 +493,7 @@ class P2PCoordinator:
                     "proved — direct TLS, where the peer's key has been proved (ADR-041 D2). "
                     f"This request arrived over {over}."
                 ),
+                code=REFUSAL_IDENTITY_UNPROVED,
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
@@ -501,7 +509,8 @@ class P2PCoordinator:
             logger.warning("Access denied: %s cannot request inference%s", peer_id, denied_for)
             error_response = create_remote_inference_response(
                 request_id=request_id,
-                error="Access denied: You are not authorized to request inference" + denied_for
+                error="Access denied: You are not authorized to request inference" + denied_for,
+                code=REFUSAL_NOT_ALLOWED,
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
@@ -521,6 +530,10 @@ class P2PCoordinator:
             error_response = create_remote_inference_response(
                 request_id=request_id,
                 error="This node shares no compute: no serving alias is configured",
+                # The guest named a model this node does not serve — here because
+                # it serves none at all. One word for «not on the menu», whether
+                # the menu is empty or the alias is simply not on it.
+                code=REFUSAL_MODEL_NOT_FOUND,
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
@@ -539,6 +552,7 @@ class P2PCoordinator:
             error_response = create_remote_inference_response(
                 request_id=request_id,
                 error=f"This node cannot serve '{serving_alias}' to a peer: {refusal}",
+                code=REFUSAL_ONWARD_SHARING_REFUSED,
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
@@ -553,7 +567,12 @@ class P2PCoordinator:
             served_effort = self._effort_for_peer(peer_id, reasoning_effort, serving_alias)
         except EffortRefused as refusal:
             logger.warning("Peer inference refused for %s: %s", peer_id, refusal)
-            error_response = create_remote_inference_response(request_id=request_id, error=str(refusal))
+            # The guest's own request is what is wrong — a word, not this node's
+            # door — so the code says so and its gateway answers 400 rather than
+            # blaming the host for a bad gateway.
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=str(refusal), code=REFUSAL_INVALID_VALUE,
+            )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
             except Exception as e:
@@ -661,7 +680,25 @@ class P2PCoordinator:
 
         except Exception as e:
             logger.error("Inference failed for %s: %s", peer_id, e, exc_info=True)
-            error_response = create_remote_inference_response(request_id=request_id, error=str(e))
+            # A `ValueError` out of the router is a refusal, not a failure: it is
+            # raised before a token is spent, for a request this alias cannot take
+            # — tools where its provider has no native tool-calling path, or an
+            # effort word the path this request needs cannot carry. Both are the
+            # guest's own request, so both are named; the predicate for the first
+            # is the one `entry_point_for` asks, and everything else keeps the
+            # bare error it always had, which the guest reads as «the host
+            # failed».
+            code = None
+            if isinstance(e, ValueError):
+                code = (
+                    REFUSAL_TOOLS_UNSUPPORTED
+                    if tools and not hasattr(self._provider_for_alias(serving_alias),
+                                             "generate_with_tools")
+                    else REFUSAL_INVALID_VALUE
+                )
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=str(e), code=code,
+            )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
             except Exception as send_err:
