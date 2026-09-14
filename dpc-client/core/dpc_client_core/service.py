@@ -9228,40 +9228,69 @@ class CoreService:
         if not local_agents:
             return {"status": "error", "message": "No agents in group"}
 
+        # External participants (`ext:` tags — a Claude Code bridge or anything else
+        # that answers over the local API, see EXTERNAL_AGENT_PREFIX) have no Sleep
+        # mechanism and must be excluded (Mike's call, DPC Project group, 2026-09-14).
+        # Filtered here, before any directory creation or config load: on 2026-09-14
+        # the Linux node's roster carried `ext:CC_linux` and `ext:Zcode` alongside a
+        # real agent, `load_agent_config` raised `ValueError` on the first external
+        # id, and the exception — uncaught — aborted the loop before the agent listed
+        # after it ever ran. The "found N agents" line must count only the agents
+        # that will actually sleep, not the tags mixed into the roster.
+        sleep_agents = [a for a in local_agents if not a.startswith(EXTERNAL_AGENT_PREFIX)]
+        skipped_external = [a for a in local_agents if a.startswith(EXTERNAL_AGENT_PREFIX)]
+        if skipped_external:
+            logger.info("Group sleep: skipping external participants (no Sleep mechanism) "
+                        "for %s: %s", group_id, skipped_external)
+
+        if not sleep_agents:
+            return {"status": "error", "message": "No agents in group",
+                    "skipped_external": skipped_external}
+
         logger.info("Group sleep: found %d agents for %s (node=%s): %s",
-                     len(local_agents), group_id, local_node_id, local_agents)
+                     len(sleep_agents), group_id, local_node_id, sleep_agents)
 
         from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep
         from dpc_client_core.dpc_agent.utils import load_agent_config
 
         triggered = []
-        for agent_id in local_agents:
-            agent_dir = conversations_dir / agent_id
-            if not agent_dir.exists():
-                agent_dir.mkdir(parents=True, exist_ok=True)
-                logger.info("Group sleep: created conversations dir for %s (group-only agent)", agent_id)
-
-            agent_config = load_agent_config(agent_id)
-            sleep_provider = agent_config.get("sleep_provider_alias") or None
-
-            agent_display_name = self._get_agent_display_name(agent_id)
-            if local_node_id:
-                names_map = metadata.get("agent_names", {}).get(local_node_id, {})
-                agent_display_name = names_map.get(agent_id) or agent_display_name
-
-            sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
-            await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
-
-            # Delete stale briefs from this agent BEFORE running new sleep, so the chat
-            # view doesn't accumulate outdated briefs across manual Sleep button presses.
-            # Pattern-match also catches legacy briefs posted before chat_message_id tracking.
+        failures: Dict[str, str] = {}
+        for agent_id in sleep_agents:
             try:
-                await self._delete_group_briefs(group_id, agent_display_name)
-                if agent_display_name != agent_id:
-                    await self._delete_group_briefs(group_id, agent_id)
+                agent_dir = conversations_dir / agent_id
+                if not agent_dir.exists():
+                    agent_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info("Group sleep: created conversations dir for %s (group-only agent)", agent_id)
+
+                agent_config = load_agent_config(agent_id)
+                sleep_provider = agent_config.get("sleep_provider_alias") or None
+
+                agent_display_name = self._get_agent_display_name(agent_id)
+                if local_node_id:
+                    names_map = metadata.get("agent_names", {}).get(local_node_id, {})
+                    agent_display_name = names_map.get(agent_id) or agent_display_name
+
+                sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
+                await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
+
+                # Delete stale briefs from this agent BEFORE running new sleep, so the chat
+                # view doesn't accumulate outdated briefs across manual Sleep button presses.
+                # Pattern-match also catches legacy briefs posted before chat_message_id tracking.
+                try:
+                    await self._delete_group_briefs(group_id, agent_display_name)
+                    if agent_display_name != agent_id:
+                        await self._delete_group_briefs(group_id, agent_id)
+                except Exception as e:
+                    logger.warning("Failed to clean stale briefs for %s in %s: %s",
+                                   agent_display_name, group_id, e)
             except Exception as e:
-                logger.warning("Failed to clean stale briefs for %s in %s: %s",
-                               agent_display_name, group_id, e)
+                # One agent's setup must never abort the others (S2026-09-14: an
+                # external id did exactly that). Recorded in the result too, so the
+                # UI can show which agent failed instead of the command just erroring.
+                logger.error("Group sleep: failed to start %s in %s: %s",
+                             agent_id, group_id, e, exc_info=True)
+                failures[agent_id] = str(e)
+                continue
 
             async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider, dname=agent_display_name):
                 async def _progress(current, total, phase, archive_file):
@@ -9298,7 +9327,12 @@ class CoreService:
             triggered.append(agent_id)
             await asyncio.sleep(2)
 
-        return {"status": "sleeping", "agents": triggered, "group_id": group_id}
+        result = {"status": "sleeping", "agents": triggered, "group_id": group_id}
+        if skipped_external:
+            result["skipped_external"] = skipped_external
+        if failures:
+            result["failures"] = failures
+        return result
 
     async def activate_group_chat(self, group_id: str) -> Dict[str, Any]:
         """Called when user opens a group chat. Posts pending morning briefs."""
