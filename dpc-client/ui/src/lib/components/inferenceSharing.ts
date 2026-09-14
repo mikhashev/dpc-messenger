@@ -726,19 +726,20 @@ export function menuVerdict(result: PeerMenuResult | null | undefined): MenuVerd
 // --- Validate without saving ------------------------------------------------
 
 /**
- * The rules object `validate_firewall_rules` is asked about: the file as last
- * saved, with the blocks this tab edits laid over it.
+ * The rules object `validate_firewall_rules` is asked about.
  *
- * It is not the dict Save posts. Save posts the whole draft; this component
- * is handed its `compute` block and `node_groups` only, so an unsaved edit
- * made on another tab is not in this check — which is why the tab says what
- * the check covers.
+ * `whole`, when given, is the same object Save would post (`editedRules`):
+ * every tab mutates it in place, so it is returned as-is, no overlay. Absent
+ * a `whole` — the component used standalone — this falls back to `saved`
+ * (the file on disk) with `compute` and `node_groups` laid over it.
  */
 export function validationDraft(
+  whole: Record<string, unknown> | null | undefined,
   saved: Record<string, unknown> | null | undefined,
   compute: ComputeRules | null | undefined,
   nodeGroups?: Record<string, unknown> | null,
 ): Record<string, unknown> {
+  if (whole) return whole;
   const draft: Record<string, unknown> = { ...(saved ?? {}) };
   if (compute) draft.compute = compute;
   if (nodeGroups) draft.node_groups = nodeGroups;

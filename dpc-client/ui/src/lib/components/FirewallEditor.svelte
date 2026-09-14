@@ -1271,11 +1271,14 @@
 
         {:else if selectedTab === 'compute'}
           <!-- Blocks (1)-(4) of the compute tab live in their own component;
-               the edit object is mutated in place, so saveChanges posts it as is. -->
+               the edit object is mutated in place, so saveChanges posts it as is.
+               draftRules hands down that same editedRules, so the tab's own
+               Validate button checks exactly what saveChanges would post. -->
           <InferenceSharingEditor
             displayCompute={displayRules?.compute ?? null}
             editCompute={editMode && editedRules ? (editedRules.compute ?? null) : null}
             {editMode}
+            draftRules={editMode && editedRules ? (editedRules as Record<string, unknown>) : null}
             nodeGroups={displayRules?.node_groups ?? null}
             nodeRuleIds={Object.keys(displayRules?.nodes ?? {}).filter((id) => !id.startsWith('_'))}
             {saveErrors}

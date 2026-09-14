@@ -57,6 +57,10 @@
   export let displayCompute: ComputeRules | null = null;
   export let editCompute: ComputeRules | null = null;
   export let editMode: boolean = false;
+  /** The whole draft the parent would post to `save_firewall_rules`
+   *  (`editedRules`), handed down so Validate can check exactly that object.
+   *  Null when the component is used standalone, with no such draft to hand. */
+  export let draftRules: Record<string, unknown> | null = null;
   /** `node_groups` of the rules being shown — the Node Groups tab's data. */
   export let nodeGroups: Record<string, unknown> | null = null;
   /** Keys of `nodes` — every peer with a per-node rule. */
@@ -314,11 +318,15 @@
     validating = true;
     validation = null;
     validationError = null;
-    const saved = await ask<{ rules?: Record<string, unknown> }>('get_firewall_rules');
-    if (saved.error) { validating = false; validationError = saved.error; return; }
-    const answer = await ask<{ valid?: boolean; errors?: string[] }>('validate_firewall_rules', {
-      rules: validationDraft(saved.value?.rules ?? null, editCompute, nodeGroups),
-    });
+    let rules: Record<string, unknown>;
+    if (draftRules) {
+      rules = validationDraft(draftRules, null, null, null);
+    } else {
+      const saved = await ask<{ rules?: Record<string, unknown> }>('get_firewall_rules');
+      if (saved.error) { validating = false; validationError = saved.error; return; }
+      rules = validationDraft(null, saved.value?.rules ?? null, editCompute, nodeGroups);
+    }
+    const answer = await ask<{ valid?: boolean; errors?: string[] }>('validate_firewall_rules', { rules });
     validating = false;
     if (answer.error) { validationError = answer.error; return; }
     validation = { valid: !!answer.value?.valid, errors: answer.value?.errors ?? [] };
@@ -390,8 +398,8 @@
             {validating ? 'Validating…' : 'Validate'}
           </button>
           <span class="muted">
-            Asks the backend's own validator and saves nothing. It checks this tab's draft over the
-            rules as last saved, so an unsaved edit on another tab is not in the answer.
+            Asks the backend's own validator and saves nothing. It checks the same rules Save would
+            write, including any unsaved edit on another tab of this dialog.
           </span>
         </div>
         {#if validationError}

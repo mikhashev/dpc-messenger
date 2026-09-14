@@ -325,9 +325,9 @@ said in words — and carries the door as block «5. IDE door» (address, config
 listening, masked key, serving lists, the Rotate button behind a confirm that names the
 `401`, and the client blocks collapsed behind the masked key) and the preview as block
 «6. What a peer sees», a picker over the peers the application already has a name for,
-connected first. Its Validate button sends the rules on disk with this tab's draft laid
-over them, so an unsaved edit made on another tab of the dialog is not in that answer;
-Save still posts the whole draft.
+connected first. Its Validate button sends `validate_firewall_rules` the exact object Save
+would write — the whole draft the dialog holds, an edit on any other tab included — not a
+narrower copy built from the file on disk.
 
 **Reading the rows back.** Two commands on the local API read the node ledger.
 `get_usage_summary` is the owner's burn — every row this node ran itself, folded by

@@ -447,20 +447,62 @@ describe('what a peer sees has three states, and they ask for different repairs'
   });
 });
 
-describe('the validate call is asked about the file with this tab laid over it', () => {
-  it('replaces compute and node_groups and keeps every other block untouched', () => {
+describe('validate sends exactly what save would post', () => {
+  it('returns the whole draft as-is, so an edit on another block (transcription here) reaches the validator untouched', () => {
+    const whole = {
+      compute: { enabled: false },
+      transcription: { enabled: true, allow_nodes: ['dpc-node-a'] },
+      node_groups: { friends: [] },
+    };
+    // The saved/compute/nodeGroups fallback arguments are ignored once a
+    // whole draft is given — passing conflicting values proves they are not
+    // consulted, not merely that they happen to agree.
+    const conflictingCompute = { ...emptyBlock(), enabled: true };
+    const draft = validationDraft(whole, { compute: { enabled: true } }, conflictingCompute, { friends: ['ignored'] });
+    expect(draft).toBe(whole);
+    expect(draft.transcription).toEqual({ enabled: true, allow_nodes: ['dpc-node-a'] });
+    expect(draft.compute).toEqual({ enabled: false });
+  });
+
+  it('falls back to the file on disk with this tab\'s compute and node_groups laid over it when no whole draft is handed down', () => {
     const saved = { compute: { enabled: false }, transcription: { enabled: true }, node_groups: { friends: [] } };
     const compute = { ...emptyBlock(), allow_nodes: ['dpc-node-a'] };
-    const draft = validationDraft(saved, compute, { friends: ['dpc-node-a'] });
+    const draft = validationDraft(null, saved, compute, { friends: ['dpc-node-a'] });
     expect(draft.compute).toBe(compute);
     expect(draft.node_groups).toEqual({ friends: ['dpc-node-a'] });
     expect(draft.transcription).toEqual({ enabled: true });
     expect(saved.compute).toEqual({ enabled: false });
   });
 
-  it('keeps the saved blocks when the tab has nothing of its own to lay over', () => {
+  it('keeps the saved blocks when the tab has nothing of its own to lay over, and answers {} for no input at all', () => {
     const saved = { compute: { enabled: false }, node_groups: { friends: [] } };
-    expect(validationDraft(saved, null, null)).toEqual(saved);
-    expect(validationDraft(null, null)).toEqual({});
+    expect(validationDraft(null, saved, null, null)).toEqual(saved);
+    expect(validationDraft(null, null, null, null)).toEqual({});
+  });
+
+  // The pure function above proves the merge logic; this proves the wiring
+  // actually uses it — that FirewallEditor.svelte hands the tab the same
+  // object it saves, and the tab prefers it over a fresh disk read. Read as
+  // raw source (Vitest runs in `environment: 'node'`, no DOM harness here),
+  // the same bargain the "empty list" test above strikes.
+  it('the parent hands the tab the exact draft it would save, and the tab checks that draft when given one', () => {
+    const firewallSources = import.meta.glob('./FirewallEditor.svelte', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+    const firewallEditor = Object.values(firewallSources)[0];
+    expect(firewallEditor).toBeTruthy();
+    expect(firewallEditor).toMatch(/draftRules=\{editMode && editedRules \?/);
+
+    const tabSources = import.meta.glob('./InferenceSharingEditor.svelte', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+    const tab = Object.values(tabSources)[0];
+    expect(tab).toBeTruthy();
+    expect(tab).toContain('export let draftRules');
+    expect(tab).toMatch(/if \(draftRules\)\s*\{\s*rules = validationDraft\(draftRules, null, null, null\);/);
   });
 });
