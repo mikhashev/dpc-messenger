@@ -296,11 +296,10 @@ function listOf(role: UsageRole, rows: UsageRow[]): UsageList {
  * it consumed and on what, and what it spent on itself.
  *
  * `consumed.by_source` is keyed `remote:<host>:<alias>` where the row named its
- * host and by the bare alias where it did not. The `served_by` write on the
- * guest's row lands in `gateway.py` (another agent's file as of 2026-09-14), so
- * until it does, every consumed group here arrives with `node_id: null` and the
- * bare alias as its key — the host is then unnamed rather than misnamed, and the
- * row says so.
+ * host and by the bare alias where it did not. The gateway's peer route writes
+ * `served_by`, so a consumed row written since then names its host; an older row
+ * has no such key and arrives with `node_id: null` under the bare alias — the
+ * host is then unnamed rather than misnamed, and the row says so.
  */
 export function shapeUsage(
   response: UsageResponse | null | undefined,

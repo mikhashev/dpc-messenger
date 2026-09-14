@@ -1,26 +1,33 @@
 <!-- InferenceSharingEditor.svelte -->
 <!-- The Inference Sharing section of the firewall dialog: what this node
-     serves, who may call, who calls for free, and at what tariff. Blocks
-     (1)-(4) of the board entry THE-COMPUTE-SHARING-TAB-DESIGNATES-ONE-ALIAS…;
-     the IDE door (5) and the guest preview (6) are not here yet.
+     serves, who may call, who calls for free, at what tariff, what was spent,
+     the IDE door on this machine (5) and what one named peer is sent (6).
+     Blocks (5) and (6) are read from the backend, not edited: the door is
+     config.ini's and the menu is the firewall's answer about a peer.
      Same contract as AgentPermissionsPanel: a display object, an edit object
      mutated in place so the parent's save posts it as is, and editMode. -->
 
 <script lang="ts">
-  import { providersList, nodeStatus } from '$lib/coreService';
+  import { onMount } from 'svelte';
+  import { providersList, nodeStatus, sendCommand, firewallRulesUpdated } from '$lib/coreService';
   import {
     addAllowed,
     addAllowedModel,
     addServing,
     addTariffEntry,
+    clientLabel,
     computeBlockErrors,
     computeErrorsOf,
+    doorAddress,
     foldServingAlias,
+    gatewayVerdict,
     isFree,
     isIso4217,
     ISO_4217_CODES,
     knownGroups,
     knownNodes,
+    maskedHeader,
+    menuVerdict,
     offeredProviders,
     removeAllowed,
     removeAllowedModel,
@@ -35,11 +42,16 @@
     tariffState,
     unmatchedModels,
     utcToday,
+    validationDraft,
     type CallerKind,
+    type ClientLinesResult,
     type ComputeRules,
+    type GatewayState,
+    type PeerMenuResult,
     type ServingList,
     type TariffEntry,
   } from './inferenceSharing';
+  import { priceLine } from './peerMenu';
   import InferenceUsage from './InferenceUsage.svelte';
 
   export let displayCompute: ComputeRules | null = null;
@@ -196,6 +208,135 @@
   function rate(entry: TariffEntry, currency: string | null | undefined): string {
     return `${entry.in} in / ${entry.out} out ${currency ?? ''} per 1M tokens`;
   }
+
+  // --- Talking to the local service --------------------------------------
+  interface Reply { status?: string; message?: string }
+  interface Answer<T> { value: T | null; error: string | null }
+
+  async function ask<T>(
+    command: string,
+    payload: Record<string, unknown> = {},
+  ): Promise<Answer<T & Reply>> {
+    const sent = sendCommand(command, payload);
+    if (sent === false) return { value: null, error: 'Not connected to the local service.' };
+    try {
+      const response = (await (sent as Promise<T & Reply>)) ?? null;
+      if (!response) return { value: null, error: 'The local service answered nothing.' };
+      if (response.status === 'error') return { value: null, error: response.message || 'The local service refused.' };
+      return { value: response, error: null };
+    } catch (e) {
+      return { value: null, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  let copied: string | null = null;
+  let copyError: string | null = null;
+
+  async function copy(text: string, what: string) {
+    copyError = null;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = what;
+      setTimeout(() => { if (copied === what) copied = null; }, 2000);
+    } catch (e) {
+      copied = null;
+      copyError = `${what} could not be copied: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  // --- (5) The IDE door ---------------------------------------------------
+  let gateway: GatewayState | null = null;
+  let gatewayError: string | null = null;
+  let clientLines: ClientLinesResult | null = null;
+  let confirmingRotation = false;
+  let rotating = false;
+  let rotateError: string | null = null;
+  /** The clear key, from the one answer that carries it; dropped on the next
+   *  read of the door, so it is on screen for this rotation only. */
+  let newKey: string | null = null;
+
+  // The firewall in memory is what serves a call; the saved file's flag is
+  // what the tab can say before the door has answered.
+  $: doorVerdict = gatewayVerdict(gateway, gateway ? !!gateway.compute_enabled : !!displayCompute?.enabled);
+
+  async function loadDoor() {
+    const state = await ask<GatewayState>('get_gateway_state');
+    gateway = state.value;
+    gatewayError = state.error;
+    const lines = await ask<ClientLinesResult>('get_gateway_client_lines');
+    clientLines = lines.value;
+  }
+
+  async function rotate() {
+    rotating = true;
+    rotateError = null;
+    const answer = await ask<{ key?: string; key_masked?: string }>('rotate_gateway_key');
+    rotating = false;
+    confirmingRotation = false;
+    if (answer.error) { rotateError = answer.error; return; }
+    newKey = answer.value?.key ?? null;
+    await loadDoor();
+  }
+
+  // --- (6) What a peer sees ------------------------------------------------
+  let peerPick = '';
+  let menu: PeerMenuResult | null = null;
+  let menuError: string | null = null;
+  let menuLoading = false;
+  // Plain, not reactive: the reload below must not depend on the pick, and a
+  // slow answer about one peer must not overwrite a fast answer about another.
+  let peerNow = '';
+  let asked = 0;
+
+  $: menuSeen = menuVerdict(menu);
+
+  async function loadMenu(peerId: string) {
+    const mine = ++asked;
+    peerNow = peerId;
+    if (!peerId) { menu = null; menuError = null; menuLoading = false; return; }
+    menuLoading = true;
+    menuError = null;
+    const answer = await ask<PeerMenuResult>('get_peer_provider_menu', { peer_id: peerId });
+    if (mine !== asked) return;
+    menuLoading = false;
+    menu = answer.value;
+    menuError = answer.error;
+  }
+
+  // --- Validate without saving ---------------------------------------------
+  let validating = false;
+  let validation: { valid: boolean; errors: string[] } | null = null;
+  let validationError: string | null = null;
+  $: if (!editMode) { validation = null; validationError = null; }
+
+  async function validateDraft() {
+    if (!editCompute) return;
+    validating = true;
+    validation = null;
+    validationError = null;
+    const saved = await ask<{ rules?: Record<string, unknown> }>('get_firewall_rules');
+    if (saved.error) { validating = false; validationError = saved.error; return; }
+    const answer = await ask<{ valid?: boolean; errors?: string[] }>('validate_firewall_rules', {
+      rules: validationDraft(saved.value?.rules ?? null, editCompute, nodeGroups),
+    });
+    validating = false;
+    if (answer.error) { validationError = answer.error; return; }
+    validation = { valid: !!answer.value?.valid, errors: answer.value?.errors ?? [] };
+  }
+
+  // A save rewrites the door's serving lists and every peer's menu; the guard
+  // keeps the store's first value, which arrives before any save, from asking.
+  let seenRules = false;
+  $: onRulesSaved($firewallRulesUpdated);
+
+  function onRulesSaved(rules: unknown) {
+    if (!seenRules) { seenRules = true; return; }
+    if (!rules) return;
+    void loadDoor();
+    if (peerNow) void loadMenu(peerNow);
+  }
+
+  onMount(() => { void loadDoor(); });
 </script>
 
 <div class="section">
@@ -204,6 +345,13 @@
     What this node serves to peers, who may call it, who calls for free, and what a call costs.
     Every choice below is picked from data the application already holds.
   </p>
+
+  <!-- The two doors in one sentence: the P2P one these rules govern, and the
+       IDE one on this machine, which config.ini governs and a restart reads. -->
+  <div class="verdict verdict-{doorVerdict.tone}" role="status">{doorVerdict.text}</div>
+  {#if gatewayError}
+    <div class="refusal" role="alert">The IDE door could not be read: {gatewayError}</div>
+  {/if}
 
   {#if view}
     <div class="compute-settings">
@@ -234,6 +382,28 @@
           <strong>This will be refused as it stands:</strong>
           <ul>{#each preCheck as line}<li>{line}</li>{/each}</ul>
         </div>
+      {/if}
+
+      {#if editMode && editCompute}
+        <div class="inline-input-row validate-row">
+          <button class="btn-small" disabled={validating} on:click={validateDraft}>
+            {validating ? 'Validating…' : 'Validate'}
+          </button>
+          <span class="muted">
+            Asks the backend's own validator and saves nothing. It checks this tab's draft over the
+            rules as last saved, so an unsaved edit on another tab is not in the answer.
+          </span>
+        </div>
+        {#if validationError}
+          <div class="refusal" role="alert">The rules could not be validated: {validationError}</div>
+        {:else if validation?.valid}
+          <div class="valid" role="status">Valid — the backend would accept these rules.</div>
+        {:else if validation}
+          <div class="refusal" role="alert">
+            <strong>The backend would refuse these rules:</strong>
+            <ul>{#each validation.errors as line}<li>{line}</li>{/each}</ul>
+          </div>
+        {/if}
       {/if}
 
       {#if view.enabled}
@@ -611,6 +781,183 @@
            enabled gate on purpose — a node that serves nobody still consumes
            from peers and still burns its own key. -->
       <InferenceUsage nodes={usageNodes} />
+
+      <!-- (5) The IDE door. Outside the enabled gate as well: this door is
+           config.ini's, not these rules', and it serves this machine even
+           where no peer is served. -->
+      <div class="subsection">
+        <h4>5. IDE door</h4>
+        <p class="help-text-small">
+          An OpenAI-compatible listener for the clients on this machine &mdash; Continue, Cursor,
+          Claude Code, curl. It is switched, bound and ported by <code>[gateway]</code> in
+          <code>config.ini</code>, which is read once at start, so there is no switch here: what a
+          restart would change is shown, not offered.
+        </p>
+
+        <div class="rule-list">
+          <div class="rule-row">
+            <span class="alias-cell"><strong>Address</strong></span>
+            <span class="quota-cell"><code class="rule-path">http://{doorAddress(gateway)}</code></span>
+          </div>
+          <div class="rule-row">
+            <span class="alias-cell"><strong>Configured</strong> <span class="muted">[gateway] enabled</span></span>
+            <span class="quota-cell">
+              {#if gateway?.enabled}<span class="badge badge-quota">true</span>
+              {:else}<span class="badge badge-missing">false</span>{/if}
+            </span>
+          </div>
+          <div class="rule-row">
+            <span class="alias-cell"><strong>Listening</strong> <span class="muted">right now</span></span>
+            <span class="quota-cell">
+              {#if gateway?.running}<span class="badge badge-live">a listener holds the port</span>
+              {:else}<span class="badge badge-missing">nothing is listening</span>{/if}
+            </span>
+          </div>
+          <div class="rule-row">
+            <span class="alias-cell">
+              <strong>Key</strong>
+              {#if gateway?.key_file}<span class="muted">{gateway.key_file}</span>{/if}
+            </span>
+            <span class="quota-cell">
+              {#if gateway?.key_masked}<code class="rule-path">{gateway.key_masked}</code>
+              {:else}<span class="badge badge-missing">none written yet</span>{/if}
+            </span>
+          </div>
+          <div class="rule-row">
+            <span class="alias-cell"><strong>Serves</strong> <span class="muted">the same two lists as block 1</span></span>
+            <span class="quota-cell">
+              {#if gateway?.serving_error}
+                <span class="badge badge-missing">the lists were refused</span>
+              {:else if (gateway?.serving_local?.length ?? 0) + (gateway?.serving_vendor?.length ?? 0) > 0}
+                {#each [...(gateway?.serving_local ?? []), ...(gateway?.serving_vendor ?? [])] as alias (alias)}
+                  <code class="rule-path">{alias}</code>
+                {/each}
+              {:else}
+                <span class="badge badge-missing">no alias &mdash; every call is refused</span>
+              {/if}
+            </span>
+          </div>
+        </div>
+
+        <div class="inline-input-row">
+          {#if confirmingRotation}
+            <span class="warn-text">
+              Rotate now? Every IDE on this machine still holding the old key gets 401 from its next
+              request, and the old key cannot be brought back.
+            </span>
+            <button class="btn-small btn-danger" disabled={rotating} on:click={rotate}>
+              {rotating ? 'Rotating…' : 'Rotate now'}
+            </button>
+            <button class="btn-small btn-cancel" disabled={rotating} on:click={() => (confirmingRotation = false)}>Cancel</button>
+          {:else}
+            <button class="btn-small" on:click={() => { confirmingRotation = true; newKey = null; }}>Rotate key</button>
+            <span class="muted">Immediate and not part of Save: the file is rewritten when you confirm.</span>
+          {/if}
+        </div>
+
+        {#if rotateError}
+          <div class="refusal" role="alert">The key was not rotated: {rotateError}</div>
+        {/if}
+
+        {#if newKey}
+          <div class="new-key">
+            <strong>The new key, shown once:</strong>
+            <code class="key-clear">{newKey}</code>
+            <button class="btn-small" on:click={() => newKey && copy(newKey, 'The new key')}>Copy</button>
+            <button class="btn-small btn-cancel" on:click={() => (newKey = null)}>Hide</button>
+            <p class="help-text-small">
+              It is on disk in the key file above, and the blocks below now carry it; this box is the
+              one place it is spelled out here.
+            </p>
+          </div>
+        {/if}
+
+        <details class="client-lines">
+          <summary>Client configuration &mdash; {maskedHeader(clientLines)}</summary>
+          <p class="help-text-small">
+            Paste-ready, with the key in clear: these go into another tool's configuration file.
+          </p>
+          {#each clientLines?.lines ?? [] as line (line.client)}
+            <div class="client-block">
+              <div class="group-header">
+                <h5>{clientLabel(line.client)}</h5>
+                <button class="btn-small" on:click={() => copy(line.text, clientLabel(line.client))}>Copy</button>
+              </div>
+              <pre>{line.text}</pre>
+            </div>
+          {:else}
+            <p class="empty-small">Nothing to paste: the door has written no key yet.</p>
+          {/each}
+        </details>
+
+        {#if copied}<p class="help-text-small">{copied} copied to the clipboard.</p>{/if}
+        {#if copyError}<div class="refusal" role="alert">{copyError}</div>{/if}
+      </div>
+
+      <!-- (6) What a peer sees. Read-only, and built by the one selection
+           that answers GET_PROVIDERS, so the preview and the wire cannot
+           differ without one function differing from itself. -->
+      <div class="subsection">
+        <h4>6. What a peer sees</h4>
+        <p class="help-text-small">
+          The rows one named peer is sent &mdash; the same selection that answers its
+          <code>GET_PROVIDERS</code>, so this is the exact row set it receives on connect and on
+          every save of these rules. Nothing here is editable, and asking changes nothing.
+        </p>
+
+        <div class="inline-input-row">
+          <select id="compute-preview-peer" name="compute-preview-peer" class="inline-input" bind:value={peerPick} on:change={() => loadMenu(peerPick)}>
+            <option value="">&mdash; pick a known peer &mdash;</option>
+            {#each usageNodes as n (n.node_id)}
+              <option value={n.node_id}>{n.label}{n.label !== n.node_id ? ` — ${n.node_id}` : ''}{n.connected ? ' (connected)' : ''}</option>
+            {/each}
+          </select>
+          <button class="btn-small" disabled={!peerPick || menuLoading} on:click={() => loadMenu(peerPick)}>Refresh</button>
+          {#if menuLoading}<span class="muted">Asking the firewall&hellip;</span>{/if}
+        </div>
+
+        {#if menuError}
+          <div class="refusal" role="alert">The menu could not be read: {menuError}</div>
+        {/if}
+
+        {#if menu}
+          <div class="peer-card">
+            <div class="group-header">
+              <h5>
+                {nodeLabel.get(menu.peer_id ?? '')?.label ?? menu.peer_id}
+                {#if menu.connected}<span class="badge badge-live">connected</span>
+                {:else if menu.known}<span class="badge badge-first">known, not connected</span>
+                {:else}<span class="badge badge-missing">this node has not met it</span>{/if}
+              </h5>
+              <span class="action-badge" class:allow={menuSeen.kind === 'served'} class:gift={menuSeen.kind === 'empty'} class:tariff={menuSeen.kind === 'refused'}>
+                {menuSeen.kind === 'served' ? 'served' : menuSeen.kind === 'empty' ? 'allowed, empty' : 'refused'}
+              </span>
+            </div>
+
+            <p class="verdict-line">{menuSeen.text}</p>
+            {#if menuSeen.detail}<p class="help-text-small">{menuSeen.detail}</p>{/if}
+
+            <div class="rule-list">
+              {#each menuSeen.rows as row (row.alias)}
+                <div class="rule-row">
+                  <span class="alias-cell">
+                    <code class="rule-path">{row.alias}</code>
+                    <span class="muted">{row.type ?? 'type not stated'}</span>
+                    {#if row.supports_vision}<span class="badge badge-first">vision</span>{/if}
+                    {#if row.supports_voice}<span class="badge badge-first">voice</span>{/if}
+                    {#if row.supports_tools}<span class="badge badge-first">tools</span>{/if}
+                  </span>
+                  <span class="numbers-cell muted">
+                    <span class="money">{priceLine(row.tariff).short}</span>
+                    <span>ctx {row.context_window ?? 'not stated'}</span>
+                    <span>effort {row.reasoning_default ?? 'not stated'}</span>
+                  </span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
     </div>
   {:else}
     <p class="empty">Inference sharing not configured.</p>
@@ -669,6 +1016,27 @@
   .entry-row label { flex: 0 0 auto; }
   .entry-errors, .refusal ul, .precheck ul { margin: 0.25rem 0 0 1rem; padding: 0; font-size: 0.85rem; }
   .refusal { background: #f8d7da; color: #721c24; border-left: 3px solid #dc3545; padding: 0.75rem; font-size: 0.9rem; white-space: pre-wrap; }
+  .valid { background: #d4edda; color: #155724; border-left: 3px solid #28a745; padding: 0.75rem; font-size: 0.9rem; }
+
+  /* The verdict at the top, and the two blocks the backend fills. */
+  .verdict { padding: 0.75rem; border-radius: 4px; font-size: 0.95rem; margin-bottom: 0.75rem; border-left: 3px solid #999; background: #f5f5f5; color: #333; }
+  .verdict-shared { background: #d4edda; color: #155724; border-left-color: #28a745; }
+  .verdict-partial { background: #e3f2fd; color: #0d47a1; border-left-color: #1976d2; }
+  .verdict-off { background: #f5f5f5; color: #555; border-left-color: #9e9e9e; }
+  .verdict-error { background: #f8d7da; color: #721c24; border-left-color: #dc3545; }
+  .verdict-line { font-size: 0.9rem; color: #333; margin: 0 0 0.5rem 0; }
+  .validate-row { align-items: flex-start; }
+  .btn-small.btn-danger { background: #dc3545; }
+  .warn-text { flex: 1 1 18rem; font-size: 0.85rem; color: #721c24; }
+  .new-key { background: #fff3cd; border-left: 3px solid #ffc107; padding: 0.75rem; margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .key-clear { font-family: monospace; font-size: 0.9rem; word-break: break-all; background: white; padding: 0.25rem 0.5rem; border-radius: 4px; }
+  .new-key .help-text-small { flex: 1 1 100%; margin: 0; }
+  .client-lines { margin-top: 0.75rem; }
+  .client-lines summary { cursor: pointer; font-size: 0.9rem; color: #555; }
+  .client-block { margin-top: 0.5rem; }
+  .client-block pre { background: #2a2a2a; color: #e0e0e0; padding: 0.5rem; border-radius: 4px; font-size: 0.8rem; overflow-x: auto; white-space: pre; margin: 0.25rem 0 0 0; }
+  .numbers-cell { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; justify-content: flex-end; }
+  .numbers-cell .money { color: #0d47a1; font-weight: 500; }
   .precheck { background: #fff3cd; color: #856404; border-left: 3px solid #ffc107; padding: 0.75rem; font-size: 0.9rem; }
   .entry-errors { color: #721c24; list-style: disc; }
 </style>

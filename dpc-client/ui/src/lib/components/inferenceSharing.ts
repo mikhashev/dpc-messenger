@@ -8,6 +8,7 @@
 // are shown beside these. No DOM in this file; it is what the tests exercise.
 
 import type { ProviderInfo } from '$lib/types';
+import type { MenuRow } from './peerMenu';
 
 // --- The block as written to privacy_rules.json --------------------------
 
@@ -524,4 +525,222 @@ export function knownGroups(nodeGroups: Record<string, unknown> | null | undefin
   for (const name of Object.keys(nodeGroups ?? {})) if (!name.startsWith('_')) names.add(name);
   for (const name of cleanList(compute?.allow_groups)) names.add(name);
   return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+// --- (5) The IDE door -------------------------------------------------------
+
+/** `get_gateway_state`. Every field optional and read fail-closed: a state
+ *  that arrived without one is not guessed at. */
+export interface GatewayState {
+  /** `[gateway] enabled` in config.ini, which only a restart re-reads. */
+  enabled?: boolean;
+  /** Whether a listener holds the port right now. */
+  running?: boolean;
+  port?: number | null;
+  bind?: string | null;
+  /** `sk-…abcd`, or null where no key has been written yet. */
+  key_masked?: string | null;
+  key_file?: string | null;
+  serving_local?: string[] | null;
+  serving_vendor?: string[] | null;
+  /** Why `classify_serving_lists` refused the lists, or null. */
+  serving_error?: string | null;
+  compute_enabled?: boolean;
+}
+
+export type VerdictTone = 'shared' | 'partial' | 'off' | 'error';
+
+export interface Verdict {
+  tone: VerdictTone;
+  text: string;
+}
+
+/** What the backend reported, not what the defaults say, so a door bound
+ *  elsewhere is not described as loopback. */
+export function doorAddress(state: GatewayState | null | undefined): string {
+  const bind = typeof state?.bind === 'string' && state.bind.length > 0 ? state.bind : '127.0.0.1';
+  const port = typeof state?.port === 'number' && Number.isFinite(state.port) ? String(state.port) : '?';
+  return `${bind}:${port}`;
+}
+
+/**
+ * What is shared right now, from the two independent switches that decide it:
+ * `[gateway] enabled` (the IDE door on this machine) and `compute.enabled`
+ * (the P2P door for peers). Four cells, four sentences.
+ *
+ * Two states are answered before the table, because in them the table would
+ * say something untrue: `serving_error` shuts both doors on the listed
+ * aliases while the socket may well be up, so it is not «the listener did not
+ * open»; and `enabled` disagreeing with `running` is two facts, the setting
+ * being read once at start.
+ */
+export function gatewayVerdict(
+  state: GatewayState | null | undefined,
+  computeEnabled: boolean,
+): Verdict {
+  if (!state) return { tone: 'off', text: 'The IDE door has not been read yet.' };
+  const where = doorAddress(state);
+
+  if (typeof state.serving_error === 'string' && state.serving_error.length > 0) {
+    return {
+      tone: 'error',
+      text: `The serving lists cannot be read, so every call on them is refused — at the IDE door and over P2P alike: ${state.serving_error}`,
+    };
+  }
+  if (state.enabled && !state.running) {
+    return {
+      tone: 'error',
+      text: `The IDE door is configured but not running — see the log; nothing is listening on ${where}.`,
+    };
+  }
+  if (!state.enabled && state.running) {
+    return {
+      tone: 'error',
+      text: `A listener still holds ${where} while [gateway] enabled = false: that setting is read once at start, so this door stays open until the next restart.`,
+    };
+  }
+
+  const doorOpen = !!state.enabled && !!state.running;
+  if (computeEnabled && doorOpen) {
+    return {
+      tone: 'shared',
+      text: `Peers on the allow lists and IDE clients on ${where} can call the serving lists.`,
+    };
+  }
+  if (computeEnabled) {
+    return { tone: 'partial', text: 'Peers can call; the IDE door is off ([gateway] enabled = false).' };
+  }
+  if (doorOpen) {
+    return {
+      tone: 'partial',
+      text: 'The IDE door is open for this machine only; no peer is served (compute.enabled = false).',
+    };
+  }
+  return { tone: 'off', text: 'Nothing is shared.' };
+}
+
+/** One paste-ready block, as `gateway.client_config_lines` renders it. */
+export interface ClientLine {
+  client: string;
+  text: string;
+}
+
+/** `get_gateway_client_lines`: the blocks, and the masked form of the key that
+ *  stands in clear inside them. */
+export interface ClientLinesResult {
+  lines?: ClientLine[] | null;
+  key_masked?: string | null;
+}
+
+const CLIENT_LABELS: Record<string, string> = {
+  continue: 'Continue',
+  cursor: 'Cursor',
+  claude_code: 'Claude Code',
+  curl: 'curl',
+};
+
+/** A client this build has no word for is printed as it arrived, not dropped. */
+export function clientLabel(client: string | null | undefined): string {
+  const name = (client ?? '').trim();
+  if (!name) return 'unnamed client';
+  return CLIENT_LABELS[name] ?? name;
+}
+
+/**
+ * The line on the collapsed «Client configuration» block. The blocks inside
+ * hold the key in clear; what stands on the outside — readable over a
+ * shoulder, or in a screenshot — is the masked form.
+ */
+export function maskedHeader(result: ClientLinesResult | null | undefined): string {
+  const lines = (result?.lines ?? []).filter((line) => line && typeof line.client === 'string');
+  const names = lines.map((line) => clientLabel(line.client)).join(', ');
+  const masked = typeof result?.key_masked === 'string' && result.key_masked.length > 0
+    ? result.key_masked
+    : null;
+  if (lines.length === 0) {
+    return masked
+      ? `nothing to paste yet; the key is ${masked}`
+      : 'nothing to paste yet, and no key has been written';
+  }
+  return masked
+    ? `${names} — each block carries the key ${masked} in clear`
+    : `${names} — no key has been written yet; start the gateway once`;
+}
+
+// --- (6) What a peer sees ---------------------------------------------------
+
+/** `get_peer_provider_menu(peer_id)`. `allowed` is read off the firewall and
+ *  not off the row count: allowed and served nothing is a serving list, not a
+ *  permission, and `reason` says which. */
+export interface PeerMenuResult {
+  peer_id?: string;
+  known?: boolean;
+  connected?: boolean;
+  allowed?: boolean;
+  reason?: string | null;
+  rows?: MenuRow[] | null;
+}
+
+export type MenuVerdictKind = 'none' | 'refused' | 'empty' | 'served';
+
+export interface MenuVerdict {
+  kind: MenuVerdictKind;
+  /** The tab's sentence about this peer. */
+  text: string;
+  /** The backend's own reason, where it gave one, shown beneath. */
+  detail: string | null;
+  rows: MenuRow[];
+}
+
+/** The three states kept apart because they ask for different repairs:
+ *  refused is a permission, empty is a serving list, served is the wire. */
+export function menuVerdict(result: PeerMenuResult | null | undefined): MenuVerdict {
+  if (!result) return { kind: 'none', text: 'No peer picked yet.', detail: null, rows: [] };
+  const rows = (result.rows ?? []).filter((row): row is MenuRow => !!row && typeof row.alias === 'string');
+  const detail = typeof result.reason === 'string' && result.reason.length > 0 ? result.reason : null;
+
+  if (!result.allowed) {
+    return {
+      kind: 'refused',
+      text: 'This peer gets an empty menu: it is on no list that admits it.',
+      detail,
+      rows: [],
+    };
+  }
+  if (rows.length === 0) {
+    return {
+      kind: 'empty',
+      text: 'Allowed, but nothing is designated for it — check the serving lists.',
+      detail,
+      rows: [],
+    };
+  }
+  return {
+    kind: 'served',
+    text: `${rows.length} ${rows.length === 1 ? 'row' : 'rows'} would be sent to this peer.`,
+    detail,
+    rows,
+  };
+}
+
+// --- Validate without saving ------------------------------------------------
+
+/**
+ * The rules object `validate_firewall_rules` is asked about: the file as last
+ * saved, with the blocks this tab edits laid over it.
+ *
+ * It is not the dict Save posts. Save posts the whole draft; this component
+ * is handed its `compute` block and `node_groups` only, so an unsaved edit
+ * made on another tab is not in this check — which is why the tab says what
+ * the check covers.
+ */
+export function validationDraft(
+  saved: Record<string, unknown> | null | undefined,
+  compute: ComputeRules | null | undefined,
+  nodeGroups?: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const draft: Record<string, unknown> = { ...(saved ?? {}) };
+  if (compute) draft.compute = compute;
+  if (nodeGroups) draft.node_groups = nodeGroups;
+  return draft;
 }

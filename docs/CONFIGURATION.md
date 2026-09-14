@@ -319,6 +319,16 @@ command's own output, compared by a test so the page and the button cannot drift
 `validate_firewall_rules(rules)` checks a rules object and names what is wrong without
 saving anything.
 
+**Where they appear.** The Inference Sharing tab of the firewall dialog opens with one
+sentence from `get_gateway_state` and `compute.enabled` together — the AND table above,
+said in words — and carries the door as block «5. IDE door» (address, configured,
+listening, masked key, serving lists, the Rotate button behind a confirm that names the
+`401`, and the client blocks collapsed behind the masked key) and the preview as block
+«6. What a peer sees», a picker over the peers the application already has a name for,
+connected first. Its Validate button sends the rules on disk with this tab's draft laid
+over them, so an unsaved edit made on another tab of the dialog is not in that answer;
+Save still posts the whole draft.
+
 **Reading the rows back.** Two commands on the local API read the node ledger.
 `get_usage_summary` is the owner's burn — every row this node ran itself, folded by
 caller, alias and month. `get_inference_usage` reads the same rows by role and answers

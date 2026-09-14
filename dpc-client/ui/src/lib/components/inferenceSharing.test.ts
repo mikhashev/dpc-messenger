@@ -8,8 +8,12 @@ import {
   classifyProviderType,
   computeBlockErrors,
   computeErrorsOf,
+  doorAddress,
   foldServingAlias,
+  gatewayVerdict,
   isFree,
+  maskedHeader,
+  menuVerdict,
   knownGroups,
   knownNodes,
   offeredProviders,
@@ -26,8 +30,11 @@ import {
   tariffHistory,
   tariffState,
   unmatchedModels,
+  validationDraft,
   type ComputeRules,
+  type GatewayState,
 } from './inferenceSharing';
+import type { MenuRow } from './peerMenu';
 
 const provider = (alias: string, type: string): ProviderInfo => ({ alias, model: `${alias}-model`, type, supports_vision: false });
 
@@ -328,5 +335,132 @@ describe('the callers the tab can offer', () => {
 
   it('keeps only the save refusals that concern compute', () => {
     expect(computeErrorsOf(["'compute.currency' must be …", "'transcription.enabled' must be a boolean"])).toEqual(["'compute.currency' must be …"]);
+  });
+});
+
+describe('the verdict at the top of the tab reads the two doors apart', () => {
+  const door = (over: Partial<GatewayState> = {}): GatewayState => ({
+    enabled: true,
+    running: true,
+    port: 8899,
+    bind: '127.0.0.1',
+    key_masked: 'sk-…abcd',
+    key_file: '/home/u/.dpc/.gateway_key',
+    serving_local: ['llama'],
+    serving_vendor: [],
+    serving_error: null,
+    compute_enabled: true,
+    ...over,
+  });
+
+  it('names both doors when both are open, at the address the backend reported', () => {
+    const verdict = gatewayVerdict(door({ bind: '::1', port: 9100 }), true);
+    expect(verdict.tone).toBe('shared');
+    expect(verdict.text).toBe('Peers on the allow lists and IDE clients on ::1:9100 can call the serving lists.');
+  });
+
+  it('says which door is shut when only one is', () => {
+    expect(gatewayVerdict(door({ enabled: false, running: false }), true)).toEqual({
+      tone: 'partial',
+      text: 'Peers can call; the IDE door is off ([gateway] enabled = false).',
+    });
+    expect(gatewayVerdict(door(), false)).toEqual({
+      tone: 'partial',
+      text: 'The IDE door is open for this machine only; no peer is served (compute.enabled = false).',
+    });
+  });
+
+  it('says nothing is shared when neither is on', () => {
+    expect(gatewayVerdict(door({ enabled: false, running: false }), false)).toEqual({ tone: 'off', text: 'Nothing is shared.' });
+  });
+
+  it('quotes a serving-list refusal and does not call it a listener that failed to open', () => {
+    const verdict = gatewayVerdict(door({ serving_error: "compute.serving_local names 'ghost', whose provider is not loaded" }), true);
+    expect(verdict.tone).toBe('error');
+    expect(verdict.text).toContain('every call on them is refused');
+    expect(verdict.text).toContain("names 'ghost'");
+    expect(verdict.text).not.toContain('listening');
+  });
+
+  it('separates configured from listening in both directions', () => {
+    expect(gatewayVerdict(door({ running: false }), true)).toEqual({
+      tone: 'error',
+      text: 'The IDE door is configured but not running — see the log; nothing is listening on 127.0.0.1:8899.',
+    });
+    expect(gatewayVerdict(door({ enabled: false }), true).text).toContain('stays open until the next restart');
+  });
+
+  it('says so rather than guessing before the state has been read', () => {
+    expect(gatewayVerdict(null, true)).toEqual({ tone: 'off', text: 'The IDE door has not been read yet.' });
+    expect(doorAddress(undefined)).toBe('127.0.0.1:?');
+  });
+});
+
+describe('the header of the client blocks carries the masked key only', () => {
+  it('names the clients and the masked key, never the key itself', () => {
+    const header = maskedHeader({
+      lines: [
+        { client: 'continue', text: '{"apiKey": "sk-secret-value"}' },
+        { client: 'cursor', text: 'API key: sk-secret-value' },
+        { client: 'claude_code', text: 'export ANTHROPIC_API_KEY=sk-secret-value' },
+        { client: 'curl', text: 'curl -H "Authorization: Bearer sk-secret-value"' },
+      ],
+      key_masked: 'sk-…alue',
+    });
+    expect(header).toBe('Continue, Cursor, Claude Code, curl — each block carries the key sk-…alue in clear');
+    expect(header).not.toContain('sk-secret-value');
+  });
+
+  it('says there is no key rather than showing an empty one, and prints an unknown client as it arrived', () => {
+    expect(maskedHeader({ lines: [{ client: 'zed', text: '…' }], key_masked: null }))
+      .toBe('zed — no key has been written yet; start the gateway once');
+    expect(maskedHeader({ lines: [], key_masked: 'sk-…abcd' })).toBe('nothing to paste yet; the key is sk-…abcd');
+    expect(maskedHeader(null)).toBe('nothing to paste yet, and no key has been written');
+  });
+});
+
+describe('what a peer sees has three states, and they ask for different repairs', () => {
+  const row = (alias: string): MenuRow => ({ alias, model: `${alias}-model`, type: 'ollama' });
+
+  it('a peer on no list is refused, and the backend reason stands beneath', () => {
+    const verdict = menuVerdict({ peer_id: 'dpc-node-a', known: true, connected: false, allowed: false, reason: 'dpc-node-a may ask this node for neither inference nor transcription', rows: [] });
+    expect(verdict.kind).toBe('refused');
+    expect(verdict.text).toBe('This peer gets an empty menu: it is on no list that admits it.');
+    expect(verdict.detail).toContain('neither inference nor transcription');
+    expect(verdict.rows).toEqual([]);
+  });
+
+  it('an allowed peer with nothing designated is sent to the serving lists, not to the permissions', () => {
+    const verdict = menuVerdict({ allowed: true, reason: 'no alias is designated in compute.serving_local', rows: [] });
+    expect(verdict.kind).toBe('empty');
+    expect(verdict.text).toBe('Allowed, but nothing is designated for it — check the serving lists.');
+    expect(verdict.detail).toBe('no alias is designated in compute.serving_local');
+  });
+
+  it('counts the rows that would go out, and drops a row with no alias', () => {
+    const served = menuVerdict({ allowed: true, reason: null, rows: [row('llama'), row('whisper')] });
+    expect(served.kind).toBe('served');
+    expect(served.text).toBe('2 rows would be sent to this peer.');
+    expect(served.detail).toBeNull();
+    expect(menuVerdict({ allowed: true, rows: [row('llama'), {} as MenuRow] }).text).toBe('1 row would be sent to this peer.');
+    expect(menuVerdict(null).kind).toBe('none');
+  });
+});
+
+describe('the validate call is asked about the file with this tab laid over it', () => {
+  it('replaces compute and node_groups and keeps every other block untouched', () => {
+    const saved = { compute: { enabled: false }, transcription: { enabled: true }, node_groups: { friends: [] } };
+    const compute = { ...emptyBlock(), allow_nodes: ['dpc-node-a'] };
+    const draft = validationDraft(saved, compute, { friends: ['dpc-node-a'] });
+    expect(draft.compute).toBe(compute);
+    expect(draft.node_groups).toEqual({ friends: ['dpc-node-a'] });
+    expect(draft.transcription).toEqual({ enabled: true });
+    expect(saved.compute).toEqual({ enabled: false });
+  });
+
+  it('keeps the saved blocks when the tab has nothing of its own to lay over', () => {
+    const saved = { compute: { enabled: false }, node_groups: { friends: [] } };
+    expect(validationDraft(saved, null, null)).toEqual(saved);
+    expect(validationDraft(null, null)).toEqual({});
   });
 });
