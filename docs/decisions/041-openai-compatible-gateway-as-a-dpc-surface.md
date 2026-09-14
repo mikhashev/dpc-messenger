@@ -659,6 +659,50 @@ detects re-sharing after the fact and prevents nothing.
 our client; against a modified peer the instruments are attribution and quotas,
 and they are sufficient only in the sense above.
 
+*(**Amendment, 2026-09-14 — the trust model of shared inference is stated, not only
+engineered.** Mike's call, 2026-09-14, DPC Project group. Three decisions, read
+together with M6's table above and D2's proof gate:
+
+1. **A guest trusts the host as a person, not only as a machine.** Every path M6
+   describes is encrypted in transit, but decryption happens *at* the host, by
+   construction: the host's machine receives the prompt in plaintext, and the host
+   can read it if they choose. This application shows, stores and logs none of it on
+   its own side — `handle_inference_request` logs only the peer id, the request id
+   and whether images were attached (`p2p_coordinator.py:358`), never prompt or
+   answer text; its own usage-row write (`p2p_coordinator.py:445`) and D3's columns
+   above carry counts, duration, served effort, tariff and proof, never content.
+   `Observed`, checked empirically by Zcode on the Windows node, 2026-09-14:
+   `llama_server_supervisor.py` starts `llama-server` at default verbosity, which
+   writes only counters and timings to `~/.dpc/logs/llama-server-<alias>.log`; two
+   exceptions exist and DPC never turns them on — `-v` echoes message content, and a
+   chat template's refusal of an unrecognised effort word writes the word, not the
+   prompt. Ollama's own log records method and path only, with its own request-body
+   logging left off (the default). The boundary of that check: one machine, default
+   verbosity, one date — the engine log is append-only with no rotation this project
+   configures, and **this application cannot prove to a guest that nothing is
+   logged**; that limit is stated, not engineered around. Two-sided, so it reads the
+   same from both chairs: the node whose model you call sees your prompt in full; if
+   you serve peers, their prompts arrive on your machine and you could read them.
+2. **A host's own model settings are what a guest gets.** Weights, quantization,
+   chat template, context window, sampling (`max_tokens`, `temperature`, `top_p`,
+   stop sequences) and the output ceiling are the host's configuration on this node,
+   not a per-guest choice — the wire carries no `max_tokens` at all. The one
+   exception is reasoning effort, the caller's own preference, bounded by the host's
+   cap (`_effort_for_peer`; D4's 2026-09-14 amendment above already put this in
+   words: "the host's own settings remain the guest's, the effort excepted"). A
+   guest's protection against an unbounded reply is the declared tariff and the
+   host's own ceiling, not a number the guest sends.
+3. **A guest must be able to see the host's full effective settings before choosing
+   to route a request there — even the ones it cannot change.** Stated here as the
+   principle a future menu card has to satisfy; the rendering itself is a separate
+   board card, not decided here.
+
+Only peer inference over a proved direct-TLS connection reaches a host's model at
+all (D2; `PROVED_CONNECTION_TYPES = ("direct_tls",)`, `p2p_manager.py:35`, checked
+first in `p2p_coordinator.handle_inference_request` before any alias or firewall
+rule) — every other tier is refused by name before this trust model is even asked
+to hold.)*
+
 ### D8 — Harden the DPTP listener before putting it in front of a network we do not own
 
 New, from M7, and it precedes D1 in the shipping order rather than following it.

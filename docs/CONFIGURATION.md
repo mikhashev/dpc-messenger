@@ -370,6 +370,32 @@ path has no streaming, so with `stream: true` the entire reply is emitted as one
 once rather than token by token. That is the shape of the path today, not a fault in
 the peer or the plugin.
 
+**What a host sees, what a guest gets.** Sharing compute is trusting the host as a
+person, not only as a machine (Mike's call, 2026-09-14; ADR-041 D7, amendment
+2026-09-14).
+
+- The host's machine receives the prompt in plaintext by construction — decryption
+  happens *at* the host, whichever encrypted path (direct TLS, WebRTC/DTLS, or the
+  relay/gossip hybrid scheme) carried it — and the host can read it if they choose.
+  This application shows, stores and logs none of it: `handle_inference_request`
+  logs only the peer id, the request id and `images: yes/no`, and the usage row above
+  carries counts, duration, served effort, tariff and proof — never prompt or answer
+  text. Checked on the engine side too (Zcode, 2026-09-14, one machine, default
+  verbosity): `llama-server` and Ollama write counters and timings, not content,
+  unless a host turns on `-v` or the engine's own request-body logging, neither of
+  which DPC turns on by default — and this application cannot prove to a guest that a
+  host has not. Two-sided: the node whose model you call sees your prompt in full;
+  serving peers means their prompts arrive on your machine and you could read them.
+- A host's own model settings — weights, quantization, template, context, sampling,
+  output ceiling — are what a served call runs at; there is no per-guest override and
+  no `max_tokens` on the wire. The one exception is reasoning effort, the caller's
+  preference under the host's own cap (above). A guest's protection against an
+  unbounded reply is the declared tariff and the host's ceiling, not a number it
+  sends.
+- A guest should see the host's full effective settings, even the ones it cannot
+  change, before choosing to route a request there — a future menu card's job; this
+  paragraph states only the principle.
+
 ---
 
 ### System Settings (`[system]`)

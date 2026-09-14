@@ -183,7 +183,11 @@
           {/if}
           <strong>Share my models with peers</strong>
         </label>
-        <p class="help-text-small">Using a peer's model does not need this.</p>
+        <p class="help-text-small">
+          Using a peer's model does not need this. Serving one does: peers' prompts arrive on
+          this machine in plaintext, and this application shows, stores and logs none of them
+          (ADR-041 D7, amendment 2026-09-14).
+        </p>
       </div>
 
       {#if refusedWith.length > 0}
