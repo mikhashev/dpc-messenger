@@ -21,7 +21,10 @@ class RemoteInferenceRequestHandler(MessageHandler):
 
         Args:
             sender_node_id: Node ID of requester
-            payload: Contains "request_id", "prompt", "model", "provider", "images" (optional)
+            payload: "request_id" and "prompt", plus the optional "model",
+                "provider", "images", "reasoning_effort", "messages", "system",
+                "tools" and "stream". A field this node has never heard of is
+                neither read nor refused: a newer guest must still be answered.
         """
         request_id = payload.get("request_id")
         prompt = payload.get("prompt")
@@ -31,10 +34,15 @@ class RemoteInferenceRequestHandler(MessageHandler):
         # What the peer asked to spend on thinking. The host clamps it; absent
         # means it did not choose.
         reasoning_effort = payload.get("reasoning_effort")
+        messages = payload.get("messages")
+        system = payload.get("system")
+        tools = payload.get("tools")
+        stream = bool(payload.get("stream"))
 
         await self.service._handle_inference_request(
             sender_node_id, request_id, prompt, model, provider, images,
-            reasoning_effort,
+            reasoning_effort, messages=messages, system=system, tools=tools,
+            stream=stream,
         )
         return None
 

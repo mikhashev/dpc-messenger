@@ -2320,6 +2320,11 @@ class CoreService:
         for nothing is served (`P2PCoordinator._effort_for_peer`, one helper
         for both). The template's own default alone would promise `xhigh` and
         serve `low` (live, 2026-09-14).
+
+        `supports_tools` is the same predicate the gateway reads on its own
+        route: a provider with a native `generate_with_tools` path. It saves a
+        guest a round trip it would lose; the host's refusal on the wire is
+        still the gate.
         """
         info = {
             "alias": alias,
@@ -2327,6 +2332,7 @@ class CoreService:
             "type": provider.config.get("type", "unknown"),
             "supports_vision": provider.supports_vision(),
             "supports_voice": self._provider_supports_voice(provider),
+            "supports_tools": hasattr(provider, "generate_with_tools"),
             "context_window": self.llm_manager.lookup_context_window(provider.model),
         }
 
@@ -7269,9 +7275,12 @@ class CoreService:
         """
         await self.context_coordinator.handle_device_context_request(peer_id, request_id)
 
-    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None):
+    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None, messages: list = None, system=None, tools: list = None, stream: bool = False):
         """Delegated to P2PCoordinator."""
-        await self.p2p_coordinator.handle_inference_request(peer_id, request_id, prompt, model, provider, images, reasoning_effort)
+        await self.p2p_coordinator.handle_inference_request(
+            peer_id, request_id, prompt, model, provider, images, reasoning_effort,
+            messages=messages, system=system, tools=tools, stream=stream,
+        )
 
     async def _handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
         """Delegated to P2PCoordinator."""

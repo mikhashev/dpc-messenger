@@ -67,6 +67,7 @@ class TestBuildP2PProviderInfo:
             "type": "zai",
             "supports_vision": True,
             "supports_voice": False,
+            "supports_tools": False,
             "context_window": 204800,
         }
 

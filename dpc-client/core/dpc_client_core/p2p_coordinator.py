@@ -436,9 +436,28 @@ class P2PCoordinator:
         (self._ledger or default_ledger()).append(row)
         return billing, tariff, tariff_amount
 
-    async def handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None):
-        """Handle incoming remote inference request from a peer."""
-        from dpc_protocol.protocol import create_remote_inference_response
+    async def handle_inference_request(
+        self, peer_id: str, request_id: str, prompt: str, model: str = None,
+        provider: str = None, images: list = None, reasoning_effort: str = None,
+        messages: list = None, system: Any = None, tools: list = None,
+        stream: bool = False,
+    ):
+        """Handle incoming remote inference request from a peer.
+
+        `messages`, `system`, `tools` and `stream` are the DPTP v1.7 half: with
+        `messages` the call goes to `query_messages`, which sees the turns
+        un-flattened and can call tools and stream; without it the flattened
+        `prompt` takes `query`, as every released guest's request does. Images
+        keep `query` either way — it owns the only vision entry point — so a
+        request carrying both is answered from the prompt, as the gateway's own
+        local route answers it.
+
+        None of this is read before the gates below have passed, and a refused
+        call emits no chunk.
+        """
+        from dpc_protocol.protocol import (
+            create_remote_inference_chunk, create_remote_inference_response,
+        )
         from .p2p_manager import peer_proof
 
         logger.debug("Handling inference request from %s (request_id: %s, images: %s)", peer_id, request_id, "yes" if images else "no")
@@ -552,15 +571,34 @@ class P2PCoordinator:
                 if served_effort and (reasoning_effort or "").strip() else {}
             )
 
+            seq = 0
+
+            async def send_chunk(text: str, _conversation_id: Any = None) -> None:
+                nonlocal seq
+                if not text:
+                    return
+                await self.p2p_manager.send_message_to_peer(
+                    peer_id, create_remote_inference_chunk(request_id, seq, text)
+                )
+                seq += 1
+
             async with self._peer_inference_lock:
                 # Clocked inside the lock: the wait is not part of the call, and
                 # the price depends on the hour the call is made (ADR-041 D3).
                 started_at = datetime.now(timezone.utc)
                 clock = time.monotonic()
-                result = await self.service.llm_manager.query(
-                    prompt, provider_alias=serving_alias, images=images,
-                    return_metadata=True, **query_kwargs,
-                )
+                if messages and not images:
+                    result = await self.service.llm_manager.query_messages(
+                        messages, system=system or "", tools=tools or None,
+                        on_chunk=send_chunk if stream else None,
+                        provider_alias=serving_alias, return_metadata=True,
+                        **query_kwargs,
+                    )
+                else:
+                    result = await self.service.llm_manager.query(
+                        prompt, provider_alias=serving_alias, images=images,
+                        return_metadata=True, **query_kwargs,
+                    )
             duration_s = time.monotonic() - clock
             logger.info("Inference completed successfully for %s", peer_id)
 
@@ -612,6 +650,11 @@ class P2PCoordinator:
                 # The rung this call ran on, asked for or not: the guest's only
                 # way to check the depth it paid for against the depth it asked for.
                 served_effort=ran_effort,
+                # The calls the model made, already `tool_use` blocks, and the
+                # word its provider stopped on. Both empty on the prompt path,
+                # where no entry point reports either.
+                tool_calls=result.get("tool_calls"),
+                finish_reason=result.get("finish_reason"),
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)

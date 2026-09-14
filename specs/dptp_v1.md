@@ -279,7 +279,16 @@ Requests the peer to execute an AI inference query using their local compute res
         "mime_type": "image/png"
       }
     ],
-    "reasoning_effort": "low" // Optional: how deeply the guest wants the model to think (v1.7+)
+    "reasoning_effort": "low", // Optional: how deeply the guest wants the model to think (v1.7+)
+    "messages": [              // Optional: the conversation un-flattened (v1.7+)
+      {"role": "user", "content": "What is the capital of France?"}
+    ],
+    "system": "Answer in one sentence.", // Optional (v1.7+)
+    "tools": [                 // Optional: Anthropic tool definitions (v1.7+)
+      {"name": "get_weather", "description": "Current weather for a city",
+       "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}
+    ],
+    "stream": false            // Optional: ask for REMOTE_INFERENCE_CHUNK frames (v1.7+)
   }
 }
 ```
@@ -293,16 +302,53 @@ Requests the peer to execute an AI inference query using their local compute res
   - `base64` (string, required): Base64-encoded image data (data URL format)
   - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
 - `reasoning_effort` (string, optional, v1.7+): How deeply the guest wants the model to think, one word of the shared scale `off`, `low`, `medium`, `high`, `max`, or one of the words the host's own model named for that alias (`reasoning_words` in PROVIDERS_RESPONSE). A request, not an instruction: the host may lower it to what it is willing to spend, and answers with the word it served in `served_effort`. Absent means the guest did not choose, and the host answers at its own default — which is not the same as `off`, and which `served_effort` names. A word the alias has no rung for is not guessed at and not served silently: the host answers with the error response, listing the words that alias accepts, before it runs anything.
+- `messages` (array, optional, v1.7+): The conversation un-flattened, one object per turn: `role` (`user` or `assistant`) and `content`, a string or a list of content blocks in the Anthropic shape. This is what lets a guest have a conversation rather than a single prompt, and it is the only field a host can call tools from. **`prompt` stays required beside it** and carries the same turns flattened by the sender, so a host that has never heard of this field answers the guest anyway — the compatibility rule of the whole v1.7 request half. A sender therefore renders `prompt` from `messages` and `system` and from nothing else; the two must say the same thing.
+- `system` (string or array, optional, v1.7+): The system prompt that goes with `messages`; a string or a list of content blocks. Meaningless without `messages`, and already folded into `prompt` by the sender.
+- `tools` (array, optional, v1.7+): Anthropic tool definitions — `name`, `description`, `input_schema` — the model may call. Any calls it makes come back in the response's `tool_calls`; the guest runs them and sends the next request with the results in `messages`. A host whose serving alias has no native tool-calling path answers with the error response rather than answering without the tools: a text answer to a request that asked for tools breaks the caller's loop. `supports_tools` in PROVIDERS_RESPONSE (§3.5) lets a guest see that before it spends a round trip; the host's refusal here is the gate.
+- `stream` (boolean, optional, v1.7+, default false): Whether the host should send REMOTE_INFERENCE_CHUNK frames as the answer is made. A host that does not know the field sends none, and the guest receives the whole answer in the response, as it always did.
 
-**Response:** REMOTE_INFERENCE_RESPONSE message
+Fields a receiver does not recognise are ignored, never refused: a newer guest must still be answered by an older host.
+
+**Response:** REMOTE_INFERENCE_RESPONSE message, preceded by zero or more REMOTE_INFERENCE_CHUNK messages when `stream` was true
 
 **Security:** Peer may reject request based on firewall rules (`privacy_rules.json` → `compute.enabled`). Peer inference is served only over a connection whose key is proved — direct TLS; other tiers (WebRTC, relay, gossip) receive the error response (ADR-041 D2), because on those the requester's `node_id` is asserted by the signalling path rather than proved by the transport, and it is the name the firewall, the usage row and any quota key on.
 
 ---
 
+#### REMOTE_INFERENCE_CHUNK
+
+Carries one piece of an answer that is still being made (v1.7+). Sent only when the request asked for `stream: true`, and only after every gate the host applies to the request has passed — a refused call emits no chunk.
+
+**Format:**
+```json
+{
+  "command": "REMOTE_INFERENCE_CHUNK",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "seq": 0,
+    "delta": "The capital of France"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): Matches the request UUID, and the REMOTE_INFERENCE_RESPONSE that ends the stream
+- `seq` (integer, required): Zero-based index of this piece within this request's stream. There is no `total_chunks`: the host does not know how long the answer will be, and the response is what ends the stream
+- `delta` (string, required): The text made since the previous chunk
+
+**Invariants:**
+- **A chunk is transport; the record is the final frame.** No counter is born in a chunk and no usage row is built from deltas. The terminating REMOTE_INFERENCE_RESPONSE still carries the whole `response` and every count, so both nodes' rows are built exactly as they are without streaming
+- The deltas of one `request_id`, concatenated in `seq` order, equal that response's `response` field
+- A receiver that sees a `seq` out of order, or a `request_id` it is not waiting for, drops the chunk and says so in its log; it does not reorder, buffer or reconstruct
+- **On a broken stream the host's row is the record.** The host writes its usage row when the call finishes, whatever reached the guest; the guest's row is a mirror built from the response, so a stream cut before the response leaves the guest with no row at all. The two rows join on `request_id`, and a missing guest row is expected in that case rather than a lost call
+
+**Compatibility:** a host that does not know the field sends no chunks and the guest receives one whole answer, which is what every pre-v1.7 host does. A guest that never asks for `stream` is sent no chunks by a host that does.
+
+---
+
 #### REMOTE_INFERENCE_RESPONSE
 
-Returns the result of a remote inference request.
+Returns the result of a remote inference request. When the request asked for `stream: true`, this message terminates the stream of REMOTE_INFERENCE_CHUNK frames and still carries the whole answer and all of its counts.
 
 **Success Format:**
 ```json
@@ -328,7 +374,11 @@ Returns the result of a remote inference request.
     "tariff_at": "2026-09-01",
     "tariff_amount": 0.00346,
     "billing": "pay_per_use",
-    "served_effort": "low"
+    "served_effort": "low",
+    "tool_calls": [            // Optional: calls the model made (v1.7+)
+      {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Paris"}}
+    ],
+    "finish_reason": "tool_calls" // Optional: what the model stopped on (v1.7+)
   }
 }
 ```
@@ -369,6 +419,9 @@ Returns the result of a remote inference request.
 - `tariff_amount` (number, optional, v1.7+): What the tariff came to on this call's own counts, in `tariff_currency`, computed by the host at the moment of the call and never re-derived. Rides only with the group above. Absent beside a present group means the call could not be priced — `output_includes_thinking` is `unknown`, so nothing may be billed from the counts — and is not the same as `0`, which is a price.
 - `billing` (string, optional, v1.7+): The billing model the host priced the call under, `pay_per_use` or `subscription`, so the requester's own usage row copies the host's answer instead of guessing one from the model's name. Absent when the host did not say. Never sent on an error.
 - `served_effort` (string, optional, v1.7+): The reasoning effort the host actually ran the call at — the rung its provider reports having sent, where the provider reports one, and otherwise the guest's word clamped to the host's cap, or the word the host's own configuration runs that alias at. The provider's word wins because an entry point may run a rung the configuration does not name. This is the guest's only way to check the depth it paid for against the depth it asked for; the host's usage row and the guest's carry the same word under the same `request_id`. Present on every served call the host can name a rung for, whether or not the guest asked; absent means no word describes the call — the alias has no effort channel, or its host could not read its own configured word — and is not the same as `off`. Never sent on an error.
+
+- `tool_calls` (array, optional, v1.7+): The calls the model made, as Anthropic `tool_use` blocks — `type` (always `tool_use`), `id`, `name`, `input` (an object). Absent or empty means the model called nothing. The guest runs them and sends the results back in the next request's `messages`; nothing on this wire executes a tool.
+- `finish_reason` (string, optional, v1.7+): What the host's provider said the model stopped on, in the providers' own vocabulary — `stop`, `length`, `tool_calls`. Absent means the provider said nothing, which is not `stop`: a receiver rendering a shape that must print a word chooses its own constant and knows it is choosing one. A turn that returned a `tool_calls` array stopped on it, whatever else was reported.
 
 What the call cost the *host* is not on the wire. A `cost_usd` field was added here on 2026-09-10 and removed on 2026-09-14, while v1.7 is unreleased: the host's own cost is the host's economy and stays in the host's ledger, and what the guest is asked for is the tariff above (ADR-041 D3, amendment). A requester's usage row therefore carries `cost_usd = null` — it spent nothing of its own — and the tariff fields copied from this message.
 
@@ -512,6 +565,7 @@ Returns a list of AI providers available on the peer's system.
         "type": "llamacpp_server",
         "supports_vision": false,
         "supports_voice": false,
+        "supports_tools": true,
         "context_window": 131072,
         "reasoning_words": ["xhigh", "medium", "low"],
         "reasoning_default": "xhigh"
@@ -536,6 +590,10 @@ Returns a list of AI providers available on the peer's system.
   - `type` (string, required): Provider type (ollama, openai, anthropic, etc.)
   - `supports_vision` (boolean, required): Whether the provider accepts images (v0.12.0+)
   - `supports_voice` (boolean, required): Whether the provider can transcribe audio (v0.13.0+)
+  - `supports_tools` (boolean, optional, v1.7+): Whether this alias's provider has a native
+    tool-calling path, so a REMOTE_INFERENCE_REQUEST carrying `tools` can be served. Absent
+    reads as false. An optimisation, not a permission: it saves the guest a round trip it
+    would lose, and the host's refusal on the wire (§3.4) remains the gate
   - `context_window` (integer or null, required): Context window in tokens; `null` when
     the model is unknown to the sender, which a receiver must distinguish from a real size
   - `reasoning_words` (array of strings, optional): The reasoning-effort words this model
@@ -2369,6 +2427,24 @@ DPTP is designed to be extensible. New commands can be added by:
 ## 9. Changelog
 
 ### v1.7 (September 2026)
+- **§3.4 REMOTE_INFERENCE_REQUEST** — optional `messages`, `system`, `tools` and
+  `stream`: the conversation un-flattened in the Anthropic shape, its system
+  prompt, the tool definitions the model may call, and whether the host should
+  stream. `prompt` stays required and carries the same turns flattened, so an
+  older host answers a newer guest; all four absent is byte-identical to the
+  request every released client sends. Added 2026-09-14 while v1.7 is
+  unreleased
+- **§3.4 REMOTE_INFERENCE_CHUNK** — a new message: `request_id`, `seq`,
+  `delta`. One piece of an answer being made, sent only for a request that
+  asked `stream: true` and only after the host's gates have passed. Transport,
+  not record: the terminating REMOTE_INFERENCE_RESPONSE still carries the whole
+  answer and all counts, and both nodes' usage rows are built from it alone
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `tool_calls` (Anthropic
+  `tool_use` blocks) and `finish_reason` (the providers' own `stop`, `length`,
+  `tool_calls`). Absent from a host that ran no tools or reported no stop word
+- **§3.5 PROVIDERS_RESPONSE** — optional `supports_tools` beside
+  `supports_vision`: whether the alias's provider has a native tool-calling
+  path. Absent reads as false; the host's wire refusal stays the gate
 - **Conformance pass, 2026-09-14** — the sections below were rewritten to match what the
   implementation has sent and read all along; none of this is new wire behaviour, all of
   it is documentation catching up (`audit/dptp-conformance-2026-09-13.md`). Sections whose

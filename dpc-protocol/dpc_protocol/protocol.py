@@ -53,7 +53,18 @@ def _image_for_the_wire(img: Dict[str, Any]) -> Dict[str, Any]:
     return {"base64": img["base64"], "mime_type": img["mime_type"]}
 
 
-def create_remote_inference_request(request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None) -> Dict[str, Any]:
+def create_remote_inference_request(
+    request_id: str,
+    prompt: str,
+    model: str = None,
+    provider: str = None,
+    images: list = None,
+    reasoning_effort: str = None,
+    messages: list = None,
+    system: Any = None,
+    tools: list = None,
+    stream: bool = False,
+) -> Dict[str, Any]:
     """
     Creates a remote inference request message.
 
@@ -69,6 +80,16 @@ def create_remote_inference_request(request_id: str, prompt: str, model: str = N
                 A request, not an instruction: the host clamps it downwards to what
                 it is willing to spend. Absent means the caller did not choose, and
                 the host answers at its own default.
+        messages: The conversation un-flattened, Anthropic-shaped (DPTP v1.7).
+                `prompt` stays required beside it and carries the same turns
+                flattened, so a host that ignores this field still answers.
+        system: The system prompt beside `messages`; a string or a block list.
+        tools: Anthropic tool definitions `{name, description, input_schema}`.
+        stream: Whether to ask for REMOTE_INFERENCE_CHUNK frames; absent and
+                False alike mean the whole answer in the response, as before.
+
+    The four v1.7 fields ride only when they carry something, so a request
+    without them is byte-identical to the prompt-only one.
     """
     payload = {
         "request_id": request_id,
@@ -82,7 +103,30 @@ def create_remote_inference_request(request_id: str, prompt: str, model: str = N
         payload["images"] = [_image_for_the_wire(img) for img in images]
     if reasoning_effort:
         payload["reasoning_effort"] = reasoning_effort
+    if messages:
+        payload["messages"] = messages
+    if system:
+        payload["system"] = system
+    if tools:
+        payload["tools"] = tools
+    if stream:
+        payload["stream"] = True
     return {"command": "REMOTE_INFERENCE_REQUEST", "payload": payload}
+
+
+def create_remote_inference_chunk(request_id: str, seq: int, delta: str) -> Dict[str, Any]:
+    """One piece of an answer being made, on its way to the caller (DPTP v1.7).
+
+    Transport, not record: no count is born here and no usage row is built from
+    these. The REMOTE_INFERENCE_RESPONSE that ends the stream carries the whole
+    `response` and all the counts, and the deltas concatenated in `seq` order
+    equal that `response`. Sent only for a request that asked `stream: true`,
+    and only after the host's gates have passed.
+    """
+    return {
+        "command": "REMOTE_INFERENCE_CHUNK",
+        "payload": {"request_id": request_id, "seq": seq, "delta": delta},
+    }
 
 def create_remote_inference_response(
     request_id: str,
@@ -105,6 +149,8 @@ def create_remote_inference_response(
     output_includes_thinking: str = None,
     thinking_source: str = None,
     served_effort: str = None,
+    tool_calls: list = None,
+    finish_reason: str = None,
 ) -> Dict[str, Any]:
     """Creates a remote inference response message with optional token, model, and thinking metadata.
 
@@ -136,6 +182,13 @@ def create_remote_inference_response(
     reasoning text, which is what a host serving a build that reports no split
     sends. Optional; absent means the host said nothing about provenance, which
     is not a claim that an engine counted.
+
+    `tool_calls` are the calls the model made, as Anthropic `tool_use` blocks
+    `{type, id, name, input}` — the shape the provider layer already returns
+    them in. `finish_reason` is what the host's provider said it stopped on, in
+    the providers' own vocabulary (`stop`, `length`, `tool_calls`); a receiver
+    rendering the Messages form converts it. Both optional, both v1.7, and
+    neither is sent on an error.
     """
     payload = {"request_id": request_id}
     if response is not None:
@@ -176,6 +229,10 @@ def create_remote_inference_response(
             payload["thinking_source"] = thinking_source
         if served_effort is not None:
             payload["served_effort"] = served_effort
+        if tool_calls:
+            payload["tool_calls"] = tool_calls
+        if finish_reason is not None:
+            payload["finish_reason"] = finish_reason
     else:
         payload["error"] = error or "Unknown error"
         payload["status"] = "error"
