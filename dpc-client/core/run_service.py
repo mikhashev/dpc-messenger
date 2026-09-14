@@ -247,6 +247,13 @@ from dpc_client_core import single_instance
 
 logger = logging.getLogger(__name__)
 
+# Third-party loggers with no project signal at DEBUG, quieted to WARNING
+# regardless of the root level. numba's JIT pipeline (bytecode/SSA/type-
+# inference dumps, triggered via librosa) and urllib3's connection pool are
+# the confirmed offenders — see docs/LOGGING.md. Applied in setup_logging()
+# before the `[logging.modules]` overrides so an explicit override still wins.
+QUIET_THIRD_PARTY_LOGGERS = ("numba", "librosa", "urllib3")
+
 
 class Base64TruncatingFilter(logging.Filter):
     """
@@ -341,6 +348,11 @@ def setup_logging(settings):
         ))
         console_handler.addFilter(base64_filter)  # Add base64 truncating filter
         root_logger.addHandler(console_handler)
+
+    # Quiet noisy third-party loggers (see QUIET_THIRD_PARTY_LOGGERS above),
+    # before the per-module overrides below so an explicit override wins.
+    for noisy_logger in QUIET_THIRD_PARTY_LOGGERS:
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     # Per-module overrides
     for module_name, level in settings.get_module_log_levels().items():

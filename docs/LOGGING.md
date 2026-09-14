@@ -106,6 +106,21 @@ module_levels = dpc_client_core.webrtc_peer:DEBUG,dpc_client_core.p2p_manager:DE
 - `dpc_protocol.crypto` - Cryptographic operations
 - `dpc_protocol.protocol` - Message serialization
 
+## Quieted Third-Party Loggers
+
+`numba`, `librosa` and `urllib3` are held at WARNING by `run_service.py`'s
+`setup_logging()` regardless of the global `log_level` — confirmed cause,
+2026-09-14: a single voice transcription (`librosa.load()` in
+`whisper_provider.py`) triggers numba's JIT pipeline, and its
+bytecode/SSA/type-inference dumps at DEBUG took the owner's log from 21 900
+to 61 500 lines in about 40 minutes, rotating real entries out of the 10MB
+file. To re-enable one of them, add it to the `[logging.modules]` section of
+`~/.dpc/config.ini` with the level you want (this section is the actual
+per-module override mechanism this build reads — `numba = DEBUG`, not the
+`module_levels = a:DEBUG,b:INFO` single-line form shown above, which nothing
+in the code parses); overrides there are applied after the quiet list, so
+they win.
+
 ## Development vs Production
 
 ### Development Setup
