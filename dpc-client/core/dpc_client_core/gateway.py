@@ -10,6 +10,14 @@ therefore refused past its per-caller daily ceiling. Every completion is one
 call on `LLMManager` and one usage row with `caller_kind="gateway"` on this
 node's ledger (D3).
 
+Chat is the whole surface (D1), and what is outside it is said rather than
+left to a bare 404: `/v1/embeddings`, `/v1/completions` and Anthropic's legacy
+`/v1/complete` — what an IDE client calls when it is indexing a repository or
+completing a line rather than talking — are answered `404
+endpoint_not_served`, naming the route and the two that are served. An alias
+that transcribes and does not chat is left off `/v1/models` for the same
+reason: this list is a menu of what can be completed against.
+
 Two switches stand on this door and the table between them is AND (Mike's
 call, 2026-09-13): this node's own aliases are served only while
 `compute.enabled` in `privacy_rules.json` and `[gateway] enabled` in
@@ -278,6 +286,38 @@ REMOTE_PREFIX = "remote:"
 # in the OpenAI one; the guard chooses by path because it answers before any
 # handler runs.
 MESSAGES_PATH = "/v1/messages"
+# The Anthropic legacy Text Completions path. Named beside the Messages one
+# because the envelope a refusal wears is chosen by path before any handler
+# runs, and a client speaking that dialect must read an Anthropic error even
+# when what it asked for is not served at all.
+COMPLETE_PATH = "/v1/complete"
+ANTHROPIC_PATHS = (MESSAGES_PATH, COMPLETE_PATH)
+
+# What an IDE client calls when it is not chatting — indexing a repository,
+# completing a line — and what this door answers to each: a 404 naming the
+# route and pointing at the two it does serve, rather than aiohttp's bare one
+# with no body (ADR-041 D1, amendment 2026-09-14). `endpoint_not_served` is
+# this door's own HTTP code word, in the family of `model_not_found` and
+# `card_busy`; no DPTP command learns it, because nothing crosses the wire.
+UNSERVED_ROUTES = {
+    "/v1/embeddings": (
+        "/v1/embeddings is not served: this gateway serves chat — POST /v1/chat/completions "
+        "(the OpenAI form) and POST /v1/messages (the Anthropic one), with GET /v1/models for "
+        "the menu. The one embedding model on this node belongs to an agent's own memory index: "
+        "it is no provider alias, it stands in neither compute.serving_local nor "
+        "compute.serving_vendor, and what is shared is not shared onward (ADR-041 D1, D7)"
+    ),
+    "/v1/completions": (
+        "/v1/completions is not served: the legacy completions form has no route here. Send the "
+        "same prompt as one user turn to POST /v1/chat/completions, which this gateway serves; "
+        "GET /v1/models lists the aliases it answers for"
+    ),
+    COMPLETE_PATH: (
+        "/v1/complete is not served: the legacy Anthropic Text Completions form has no route "
+        "here. Send the same prompt as one user message to POST /v1/messages, which this gateway "
+        "serves; GET /v1/models lists the aliases it answers for"
+    ),
+}
 
 
 class GatewayError(Exception):
@@ -1724,6 +1764,10 @@ class GatewayServer:
         app.router.add_get("/v1/models", self._models)
         app.router.add_post("/v1/chat/completions", self._chat_completions)
         app.router.add_post(MESSAGES_PATH, self._messages)
+        # Any method, so a client that asks the wrong way still reads the
+        # sentence rather than a 405 that says nothing about this door.
+        for path in UNSERVED_ROUTES:
+            app.router.add_route("*", path, self._unserved)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.port)
@@ -1769,7 +1813,7 @@ class GatewayServer:
         Anthropic error object, elsewhere the OpenAI one, so a client of
         either shape parses what it expects even when no handler ran.
         """
-        error = _anthropic_error if request.path.startswith(MESSAGES_PATH) else _error
+        error = _anthropic_error if request.path.startswith(ANTHROPIC_PATHS) else _error
         host = request.headers.get("Host", "")
         if host not in self._accepted_hosts():
             accepted = " or ".join(self._accepted_hosts())
@@ -1788,6 +1832,16 @@ class GatewayServer:
             return error(e.status, e.message, e.code)
         except GatewayConfigError as e:
             return error(503, f"the gateway's serving lists are refused: {e}", "serving_lists_refused")
+
+    async def _unserved(self, request: web.Request) -> web.Response:
+        """A route this door does not serve, refused by name.
+
+        Behind the key like every other route: the door says what it is before
+        it says what it serves. The sentence is the one `UNSERVED_ROUTES` holds
+        for this path, and the guard wears it in whichever envelope the path
+        belongs to.
+        """
+        raise GatewayError(404, UNSERVED_ROUTES[request.path], "endpoint_not_served")
 
     async def _models(self, request: web.Request) -> web.Response:
         """The chat models this door serves, on both halves of the menu.

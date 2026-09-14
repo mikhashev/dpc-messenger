@@ -254,6 +254,28 @@ WebRTC challenge and no consumer-side install. What it does not give is the
 consumer's identity, roster place and transitive-compute future. Choosing
 against it is a product bet, not a derivation.
 
+*(**Amendment, 2026-09-14 — what the door serves, and what it answers by
+name.** Served: `GET /v1/models`, `POST /v1/chat/completions`,
+`POST /v1/messages`. Not served, and each answered `404` with the gateway-local
+code `endpoint_not_served`, naming the route and the two that are — rather than
+aiohttp's bare 404, which a client cannot tell from a wrong port or a client
+that is down: `/v1/embeddings`, `/v1/completions`, and Anthropic's legacy
+`/v1/complete`, which is refused in the Anthropic envelope because the guard
+now chooses the shape by either Anthropic path. **Embeddings are not
+implemented, and the reason is not timing.** The only embedding model on this
+node is the agent memory index's sentence-transformer
+(`dpc_agent/memory.py: get_embedding_provider`, a singleton on the GPU): it is
+no provider alias, `LLMManager` and every provider in `providers/` have no
+`embed` entry point at all, and neither serving list can name it — so there is
+nothing for `/v1/embeddings` to route to, and pointing it at an agent's own
+index would share what was never on the menu (D5, D7). D4's deferral of the two
+routes therefore stands; what changes is that the deferral is now said to the
+client instead of being left to a bare 404. The same principle removes from
+`/v1/models` any alias whose provider type transcribes and does not chat
+(`local_whisper`, on this node's lists or a peer's rows): the list is a menu of
+what can be completed against, and a completion on such an alias is `404
+model_not_found` saying it transcribes.)*
+
 ### D2 — Authorised on a connection whose peer key has been **proved**
 
 Replaces the earlier phrasing «authorised on the direct TLS path». Two reasons,

@@ -226,6 +226,16 @@ gateway carries two more things the peer wire under it already had (ADR-041 D4, 
 Sampling — `max_tokens`, `temperature`, `top_p`, `stop_sequences` — stays the alias
 owner's configuration on this node and is not read from the request.
 
+**What it does not serve, said out loud.** The three routes above are the whole surface.
+An IDE client also indexes a repository and completes a line, and those calls —
+`/v1/embeddings`, `/v1/completions`, and Anthropic's legacy `/v1/complete` — are answered
+`404` with `"code": "endpoint_not_served"` and a sentence naming the route and the two
+that are served (`/v1/complete` in the Anthropic envelope). Nothing is implemented behind
+them: this node's only embedding model belongs to an agent's memory index, is no provider
+alias, and stands in neither serving list, so there is nothing for an embeddings call to
+run on — the refusal says that rather than leaving the client to read a bare 404 as a
+wrong port (ADR-041 D1, amendment 2026-09-14).
+
 **Two switches, one door.** `[gateway] enabled` above is not the only one: `compute.enabled`
 in `privacy_rules.json` governs **both** of this node's doors — the peer door it has always
 governed, and this loopback gateway (Mike's call, 2026-09-13). The table between them is AND.
