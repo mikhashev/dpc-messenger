@@ -34,7 +34,7 @@ from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager, PROVIDER_MAP
 from . import provider_alias_refs
-from .providers.base import REASONING_EFFORTS, REASONING_OFF
+from .providers.base import REASONING_EFFORTS, REASONING_OFF, declared_reasoning_words
 from .local_api import LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
 from .gateway import GATEWAY_KEY_NAME, GatewayConfigError, GatewayServer
@@ -2279,12 +2279,10 @@ class CoreService:
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)
 
-            # The effort words this model's own chat template accepts, present
-            # only when they were read from the model — a fallback table must
-            # not reach the UI wearing the model's name.
-            if getattr(provider, "_template_efforts_source", None) == "model":
-                provider_dict["reasoning_words"] = list(provider._template_efforts)
-                provider_dict["reasoning_default"] = provider._template_default
+            words, default = declared_reasoning_words(provider)
+            if words is not None:
+                provider_dict["reasoning_words"] = words
+                provider_dict["reasoning_default"] = default
 
             # v0.18.1+: Add remote inference fields for dpc_agent provider
             if alias == "dpc_agent":
@@ -2318,9 +2316,10 @@ class CoreService:
             "context_window": self.llm_manager.lookup_context_window(provider.model),
         }
 
-        if getattr(provider, "_template_efforts_source", None) == "model":
-            info["reasoning_words"] = list(provider._template_efforts)
-            info["reasoning_default"] = provider._template_default
+        words, default = declared_reasoning_words(provider)
+        if words is not None:
+            info["reasoning_words"] = words
+            info["reasoning_default"] = default
 
         return info
 

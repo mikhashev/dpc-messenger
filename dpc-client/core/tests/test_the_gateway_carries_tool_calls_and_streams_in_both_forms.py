@@ -37,6 +37,7 @@ from tests.test_the_gateway_serves_only_the_two_lists_on_loopback import (
     BOTH_LISTS,
     INFERENCE_TIMEOUT_S,
     LOCAL,
+    MAX_IMAGE_MB,
     NODE_ID,
     VENDOR,
     _Provider,
@@ -118,7 +119,10 @@ def _tool_service(tmp_path, compute=BOTH_LISTS, *, text=ANSWER, tool_calls=(), c
         firewall=ContextFirewall(rules),
         llm_manager=types.SimpleNamespace(providers=providers, query=query, query_messages=query_messages),
         p2p_manager=types.SimpleNamespace(node_id=NODE_ID),
-        settings=types.SimpleNamespace(get_remote_inference_timeout=lambda: INFERENCE_TIMEOUT_S),
+        settings=types.SimpleNamespace(
+            get_remote_inference_timeout=lambda: INFERENCE_TIMEOUT_S,
+            get_vision_max_image_size_mb=lambda: MAX_IMAGE_MB,
+        ),
         calls=calls,
     )
 

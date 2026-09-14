@@ -79,6 +79,43 @@ def normalize_reasoning_effort(value: Optional[str]) -> Optional[str]:
     return word if word in REASONING_EFFORTS else None
 
 
+def declared_reasoning_words(provider: Any) -> Tuple[Optional[List[str]], Optional[str]]:
+    """`(words, default)` this model's own chat template named, or `(None, None)`.
+
+    Present only when the ladder was read from the model: a fallback table must
+    not reach the UI, a peer or a refusal wearing the model's name. One reader
+    of this fact for all three — the provider rows, the peer menu and the
+    gateway's door — so an alias cannot be told it knows one set of words while
+    it is offered another.
+    """
+    if getattr(provider, "_template_efforts_source", None) != "model":
+        return None, None
+    return list(provider._template_efforts), provider._template_default
+
+
+def reasoning_word_for(provider: Any, word: Optional[str]) -> Optional[str]:
+    """The word `provider` would actually send when asked for `word`, or None
+    when it would send nothing.
+
+    A provider whose ladder is its model's own answers for itself — the
+    llama-server one folds `high` and `max` onto the rung its template has —
+    and for the rest the shared scale is the ladder, so the answer is the
+    normalised word. Asked before a call, this says whether the request can be
+    served at all; asked after one, it says which rung it ran on, which is not
+    always the word the caller used.
+    """
+    if word is None:
+        return None
+    resolve = getattr(provider, "_template_effort", None)
+    if callable(resolve):
+        try:
+            return resolve(word)
+        except Exception as e:  # a provider that cannot answer has not refused
+            logger.debug("Provider %r could not resolve effort %r: %s", provider, word, e)
+            return normalize_reasoning_effort(word)
+    return normalize_reasoning_effort(word)
+
+
 # --- Shared thinking model constants ---
 
 OPENAI_THINKING_MODELS = [

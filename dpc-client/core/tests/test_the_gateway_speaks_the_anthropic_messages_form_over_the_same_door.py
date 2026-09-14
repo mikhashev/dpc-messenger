@@ -260,8 +260,9 @@ async def test_tools_and_a_tool_result_in_the_history_reach_the_door_as_sent_and
         "tools": [{"name": "read_file", "description": "read", "input_schema": {"type": "object", "properties": {}}}],
         "tool_choice": {"type": "auto"},
         "messages": [
-            {"role": "user", "content": [{"type": "text", "text": "read a.txt"},
-                                         {"type": "image", "source": {"type": "base64", "data": "AA=="}}]},
+            # No image block here any more: an image is lifted out of its turn
+            # and refused beside tools, which is its own test file's subject.
+            {"role": "user", "content": [{"type": "text", "text": "read a.txt"}]},
             {"role": "assistant", "content": [
                 {"type": "text", "text": "reading"},
                 {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "a.txt"}},

@@ -40,6 +40,29 @@ without them. What a tool field asks and no provider here can do
 (`tool_choice` forcing, one call at a time) is refused by name rather than
 dropped: every degradation is said on the wire.
 
+Two more things the peer wire under this door already carries now cross it
+(D4 amendment, 2026-09-14). **Reasoning effort**: OpenAI's `reasoning_effort`
+and the Messages form's `output_config.effort` and `thinking: {type:
+disabled}` become one word of this node's scale — `off, low, medium, high,
+max` — travelling to the provider on the local route and to the host on the
+peer route, where the host caps it and names what it served. The scale is per
+alias where the model named its own rungs (`reasoning_words` on the menu row,
+`declared_reasoning_words` here), and a word that reaches no rung of the alias
+asked for is a 400 listing that alias's words, never a guess; the row then
+names the rung the call ran on rather than the word that asked for it.
+`thinking` enabled or
+adaptive without an effort word asks for the alias's own default, which is
+not a degradation and is said nowhere. **Images**: a `data:` URL in an
+OpenAI `image_url` part, or an Anthropic `image` block whose source is
+base64, becomes the two fields DPTP §3.4 requires and travels *beside* the
+prompt — that is the shape of the peer wire, so an image's position among
+the turns is not preserved on either route. What this node will not do it
+refuses by name: fetching an `http(s)` URL, an image past
+`[vision] max_image_size_mb` (413, the same cap the P2P door enforces),
+tools beside an image on the local route, an alias or a peer that says it
+has no vision, and a peer alias whose menu row lists the effort words its
+model knows and not the one that was asked for.
+
 A third kind of name, `remote:<node_id>:<alias>`, is a connected peer's
 alias as that peer serves it to this node (D4 step 4): `/v1/models` lists
 one row per alias on each proved peer's menu, owned by the peer, and a
@@ -57,6 +80,8 @@ the proved sender, which is this node; nothing here declares anyone else (D7).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
@@ -74,9 +99,16 @@ from aiohttp import web
 from .dpc_agent.llm_adapter import DpcLlmAdapter
 from .dpc_agent.pricing import compute_cost_usd, get_billing_model
 from .firewall import ServingLists
-from .llm_manager import flatten_messages
+from .llm_manager import accepts_reasoning_effort, entry_point_for, flatten_messages
 from .node_ledger import TARIFF_FIELDS, NodeLedger, default_ledger, stated_output_includes_thinking, usage_row
 from .p2p_manager import PROVED_CONNECTION_TYPES
+from .providers.base import (
+    REASONING_EFFORTS,
+    REASONING_OFF,
+    declared_reasoning_words,
+    normalize_reasoning_effort,
+    reasoning_word_for,
+)
 
 if TYPE_CHECKING:
     from .service import CoreService
@@ -97,6 +129,7 @@ _ERROR_TYPES = {
     400: "invalid_request_error",
     401: "authentication_error",
     404: "invalid_request_error",
+    413: "invalid_request_error",
     429: "insufficient_quota",
     502: "server_error",
     503: "server_error",
@@ -108,6 +141,7 @@ _ANTHROPIC_ERROR_TYPES = {
     400: "invalid_request_error",
     401: "authentication_error",
     404: "not_found_error",
+    413: "request_too_large",
     429: "rate_limit_error",
     502: "api_error",
     503: "api_error",
@@ -280,6 +314,15 @@ class Gateway:
                 menu[peer_id] = rows
         return menu
 
+    def max_image_bytes(self) -> int:
+        """The most one image may weigh, decoded — `[vision] max_image_size_mb`.
+
+        The same setting the P2P door enforces on an image pasted into a chat,
+        read here rather than restated: a second number would be a second cap,
+        and the one that matters is the one the wire already holds the peer
+        route to."""
+        return int(self._core.settings.get_vision_max_image_size_mb()) * 1024 * 1024
+
     def _connection_type(self, peer_id: str) -> Optional[str]:
         """The connection's own claim about itself, or None when the peer is
         not connected; a wrapper without the attribute is `"unknown"`, which
@@ -298,6 +341,8 @@ class Gateway:
         messages: Optional[List[Dict[str, Any]]] = None,
         system: Any = "",
         tools: Optional[List[Dict[str, Any]]] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: Optional[str] = None,
         on_chunk: Optional[Callable[..., Any]] = None,
         request_id: Optional[str] = None,
     ) -> Completion:
@@ -308,7 +353,16 @@ class Gateway:
         The peer route takes `prompt` alone — REMOTE_INFERENCE_REQUEST carries
         a prompt, no message array and no tools (ADR-041 D4, M1) — so tools on
         it are refused here, and the answer comes back whole: `on_chunk` is
-        never called on that route and the shape layer sends what it got."""
+        never called on that route and the shape layer sends what it got.
+
+        `images` are the wire's image dicts (`base64`, `mime_type` — DPTP
+        §3.4), carried beside the prompt on both routes because that is the
+        only place the peer wire has for them; on the local route they take
+        `LLMManager.query`, whose vision entry point holds no tools, so tools
+        beside an image are refused here rather than dropped.
+        `reasoning_effort` is one word of this node's scale, normalised by the
+        shape layer: the local route hands it to the provider, the peer route
+        to the host, which caps it and returns what it served."""
         # The route first: `compute.enabled` is about what this node gives, so
         # it stands in front of this node's own aliases and not in front of a
         # peer's, which the peer's own flag guards.
@@ -322,7 +376,9 @@ class Gateway:
                     "be made as asked; send it without tools, or to a local alias",
                     "tools_unsupported",
                 )
-            return await self._complete_via_peer(alias, *remote, prompt)
+            return await self._complete_via_peer(
+                alias, *remote, prompt, images=images, reasoning_effort=reasoning_effort,
+            )
         self.refuse_unless_compute_sharing(alias)
         try:
             lists = self.serving_lists()
@@ -340,6 +396,13 @@ class Gateway:
         providers = getattr(self._core.llm_manager, "providers", None) or {}
         if alias not in providers:
             raise GatewayError(503, f"model '{alias}' is listed but its provider is not loaded", "provider_unavailable")
+        if images:
+            self._refuse_images_the_alias_cannot_take(alias, providers[alias], images, tools)
+        if reasoning_effort is not None:
+            self._refuse_effort_the_path_cannot_take(
+                alias, providers[alias], reasoning_effort,
+                tools=bool(tools), streaming=on_chunk is not None, images=bool(images),
+            )
         if tools and not hasattr(providers[alias], "generate_with_tools"):
             # Refused, not quietly answered without them: a text answer to a
             # request that asked for tools breaks the loop on the client's side.
@@ -366,7 +429,8 @@ class Gateway:
                 )
             # Money bounds a vendor alias, not the card: no queue.
             return await self._call(alias, owner, prompt, ledger, caller, request_id,
-                                    messages=messages, system=system, tools=tools, on_chunk=on_chunk)
+                                    messages=messages, system=system, tools=tools, on_chunk=on_chunk,
+                                    images=images, reasoning_effort=reasoning_effort)
 
         timeout = float(self._core.settings.get_remote_inference_timeout())
         try:
@@ -380,9 +444,89 @@ class Gateway:
             )
         try:
             return await self._call(alias, owner, prompt, ledger, caller, request_id,
-                                    messages=messages, system=system, tools=tools, on_chunk=on_chunk)
+                                    messages=messages, system=system, tools=tools, on_chunk=on_chunk,
+                                    images=images, reasoning_effort=reasoning_effort)
         finally:
             self._inference_lock.release()
+
+    def _refuse_images_the_alias_cannot_take(
+        self, alias: str, provider: Any, images: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        """An image on this node's own alias: the provider must say it does
+        vision, and nothing may ask for tools in the same breath."""
+        if tools:
+            raise GatewayError(
+                400,
+                f"the request carries {len(images)} image(s) and {len(tools)} tool(s): vision on this node "
+                "goes through generate_with_vision, which takes no tools, so the call cannot be made as "
+                "asked; send the images without tools, or the tools without images",
+                "tools_unsupported",
+            )
+        supports_vision = getattr(provider, "supports_vision", None)
+        if callable(supports_vision) and not supports_vision():
+            model = getattr(provider, "model", "unknown")
+            raise GatewayError(
+                400,
+                f"model '{alias}' ({model}) has no vision path, and the request carries {len(images)} "
+                "image(s); send it to a vision-capable alias, or without images",
+                "vision_unsupported",
+            )
+
+    def _refuse_effort_the_path_cannot_take(
+        self, alias: str, provider: Any, effort: str, *, tools: bool, streaming: bool, images: bool,
+    ) -> None:
+        """The effort word must be one this alias knows, and must reach the
+        provider entry point this request will actually take — the words are
+        the model's, and the three entry points did not grow the parameter
+        together."""
+        # The scale is per alias, not global: a model whose own template named
+        # its rungs is asked in those words, and the shared scale stands in
+        # only for an alias that named none (the shape layer checked it there).
+        # `off` is never checked against them — it is the foot of the scale and
+        # not a rung, and each provider has its own way of saying no.
+        words, _ = declared_reasoning_words(provider)
+        if words and effort != REASONING_OFF and reasoning_word_for(provider, effort) is None:
+            raise GatewayError(
+                400,
+                f"model '{alias}' knows the efforts {', '.join(words)} — the words its own model named — "
+                f"and reaches none of them from '{effort}'; ask for one of those, or send the request "
+                "without an effort",
+                "invalid_value",
+            )
+        if images:
+            path, entry_point = "generate_with_vision", getattr(provider, "generate_with_vision", None)
+        else:
+            path, entry_point = entry_point_for(provider, tools=tools, streaming=streaming)
+        if accepts_reasoning_effort(entry_point):
+            return
+        provider_type = (getattr(provider, "config", None) or {}).get("type") or "unknown"
+        raise GatewayError(
+            400,
+            f"model '{alias}' cannot be asked for reasoning effort '{effort}' on this request: its "
+            f"provider type '{provider_type}' takes no effort on the path this request needs ({path}); "
+            "send the request without an effort, or to an alias whose provider takes one there",
+            "reasoning_effort_unsupported",
+        )
+
+    def _served_effort(self, alias: str, door_word: Optional[str]) -> Optional[str]:
+        """The word the local row names: the rung the call actually ran on.
+
+        The door reports what it passed, in the words of the shared scale; the
+        alias may run that on a ladder of its own, and the row wants the rung,
+        not the request. Where the caller asked for nothing the alias still
+        thinks at something — its configured word, or the default its model's
+        template named — and the row says which when it is knowable. None is
+        «not knowable here», never `off`.
+        """
+        provider = (getattr(self._core.llm_manager, "providers", None) or {}).get(alias)
+        if provider is None:
+            return door_word
+        if door_word is not None:
+            return reasoning_word_for(provider, door_word) or door_word
+        configured = (getattr(provider, "config", None) or {}).get("reasoning_effort")
+        if isinstance(configured, str) and configured.strip():
+            return reasoning_word_for(provider, configured)
+        return declared_reasoning_words(provider)[1]
 
     async def _call(
         self,
@@ -396,18 +540,30 @@ class Gateway:
         messages: Optional[List[Dict[str, Any]]] = None,
         system: Any = "",
         tools: Optional[List[Dict[str, Any]]] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: Optional[str] = None,
         on_chunk: Optional[Callable[..., Any]] = None,
     ) -> Completion:
         # Clocked after any wait: the price depends on the hour the call is made (D3).
         started_at = datetime.now(timezone.utc)
         clock = time.monotonic()
+        effort_kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
         try:
-            if messages is None:
-                result = await self._core.llm_manager.query(prompt, provider_alias=alias, return_metadata=True)
+            if images:
+                # `query` is the only door with a vision entry point, and it
+                # answers whole: a stream over this route is the one chunk the
+                # shape layer writes from the finished text, as the peer route is.
+                result = await self._core.llm_manager.query(
+                    prompt, provider_alias=alias, return_metadata=True, images=images, **effort_kwargs,
+                )
+            elif messages is None:
+                result = await self._core.llm_manager.query(
+                    prompt, provider_alias=alias, return_metadata=True, **effort_kwargs,
+                )
             else:
                 result = await self._core.llm_manager.query_messages(
                     messages, system=system, tools=tools or None, on_chunk=on_chunk,
-                    provider_alias=alias, return_metadata=True,
+                    provider_alias=alias, return_metadata=True, reasoning_effort=reasoning_effort,
                 )
         except Exception as e:
             logger.warning("Gateway call on '%s' failed: %s", alias, e)
@@ -436,8 +592,9 @@ class Gateway:
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source="ours",
                 output_includes_thinking=result.get("output_includes_thinking", "unknown"),
-                # The word the door applied; no peer is in this row to prove.
-                served_effort=result.get("served_effort"),
+                # The rung this call ran on, not the word that asked for it;
+                # no peer is in this row to prove.
+                served_effort=self._served_effort(alias, result.get("served_effort")),
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,
@@ -459,13 +616,24 @@ class Gateway:
             tool_calls=tool_calls,
         )
 
-    async def _complete_via_peer(self, name: str, peer_id: str, remote_alias: str, prompt: str) -> Completion:
+    async def _complete_via_peer(
+        self,
+        name: str,
+        peer_id: str,
+        remote_alias: str,
+        prompt: str,
+        *,
+        images: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> Completion:
         """The peer route: connected, proved, on the menu, one call, one row.
 
         No local lock and no local quota on purpose: the card the call runs on
         and the key it may spend are the host's, and the host serialises and
         refuses on its own side. Every refusal here is named and none falls
-        back to a local alias (D2).
+        back to a local alias (D2). The menu row is the peer's own word about
+        what its alias can do, so what it denies is refused here rather than
+        sent to be dropped on the far side.
         """
         connection_type = self._connection_type(peer_id)
         if connection_type is None:
@@ -479,13 +647,35 @@ class Gateway:
                 "peer_unproved",
             )
         menu = self.peer_menu().get(peer_id) or []
-        if not any(row.get("alias") == remote_alias for row in menu):
-            served = ", ".join(row["alias"] for row in menu) or "nothing yet"
+        row = next((entry for entry in menu if entry.get("alias") == remote_alias), None)
+        if row is None:
+            served = ", ".join(entry["alias"] for entry in menu) or "nothing yet"
             raise GatewayError(
                 404,
                 f"peer {peer_id} does not serve alias '{remote_alias}' to this node; "
                 f"its menu lists: {served}",
                 "model_not_found",
+            )
+        if images and "supports_vision" in row and not row.get("supports_vision"):
+            raise GatewayError(
+                400,
+                f"peer {peer_id} serves '{remote_alias}' without vision — its menu row says "
+                f"supports_vision is false — and the request carries {len(images)} image(s); "
+                "ask that peer for a vision-capable alias, or send the request without images",
+                "vision_unsupported",
+            )
+        # `off` is the foot of the scale and not a rung of it: every provider
+        # has its own way of saying no, and `reasoning_words` lists the rungs
+        # this model's own template named.
+        words = row.get("reasoning_words")
+        if (reasoning_effort not in (None, REASONING_OFF) and isinstance(words, list) and words
+                and reasoning_effort not in words):
+            raise GatewayError(
+                400,
+                f"peer {peer_id} serves '{remote_alias}' at efforts {', '.join(str(w) for w in words)} "
+                f"— the words its own model named — and '{reasoning_effort}' is not one of them; "
+                "ask for one of those, or send the request without an effort",
+                "invalid_value",
             )
 
         timeout = float(self._core.settings.get_remote_inference_timeout())
@@ -494,7 +684,8 @@ class Gateway:
         clock = time.monotonic()
         try:
             result = await self._core.p2p_coordinator.request_inference_from_peer(
-                peer_id, prompt, provider=remote_alias, timeout=timeout,
+                peer_id, prompt, provider=remote_alias, images=images or None,
+                reasoning_effort=reasoning_effort, timeout=timeout,
             )
         except ConnectionError as e:
             raise GatewayError(503, f"peer {peer_id} is not connected: {e}", "peer_unavailable")
@@ -708,10 +899,156 @@ class _EventStream:
         return response
 
 
-def _text_of(content: Any, *, what: str) -> str:
-    """The text of an OpenAI `content`: a string, `null`, or an array of parts
-    of which only `text` is carried — an `image_url` part is refused, since no
-    image crosses the gateway (the door's `query_messages` carries none)."""
+# The whole scale this node knows, said in one place because every refusal
+# that lists it must list the same words.
+KNOWN_EFFORTS = (REASONING_OFF,) + REASONING_EFFORTS
+
+
+def _effort_word(value: Any, *, what: str) -> str:
+    """One word of `KNOWN_EFFORTS`, or a 400 naming them all.
+
+    `normalize_reasoning_effort` returns None for a word off the scale rather
+    than guessing at it, and a guess is what a client billed by the token
+    would pay for; so an unknown word stops here instead of reaching a
+    provider that would quietly ignore it.
+    """
+    if not isinstance(value, str):
+        raise GatewayError(400, f"'{what}' must be a string", "invalid_value")
+    word = normalize_reasoning_effort(value)
+    if word is None:
+        raise GatewayError(
+            400,
+            f"'{what}' is {value!r}, which this node does not know; the words it serves are "
+            f"{', '.join(KNOWN_EFFORTS)} (xhigh is read as high)",
+            "invalid_value",
+        )
+    return word
+
+
+def _openai_effort(body: Dict[str, Any]) -> Optional[str]:
+    """`reasoning_effort` as one word of this node's scale, or None when the
+    request named none — which asks for the alias's own default."""
+    value = body.get("reasoning_effort")
+    if value is None:
+        return None
+    return _effort_word(value, what="reasoning_effort")
+
+
+def _anthropic_effort(body: Dict[str, Any]) -> Optional[str]:
+    """The Messages form's two ways of asking, as one word or None.
+
+    `output_config.effort` is the word (platform.claude.com/docs/en/api/messages:
+    low, medium, high, xhigh, max), and `thinking: {type: disabled}` is `off`.
+    `enabled` and `adaptive` name no depth, so they ask for the alias's own
+    default and are read as None — `budget_tokens` is a quantity this node's
+    scale cannot express and is not folded into a word. Asking for both a
+    disabled `thinking` and an effort is a contradiction the client must
+    resolve, not one this door picks a side of.
+    """
+    thinking = body.get("thinking")
+    if thinking is not None:
+        if not isinstance(thinking, dict) or thinking.get("type") not in ("enabled", "disabled", "adaptive"):
+            raise GatewayError(
+                400, "'thinking' must be {type: enabled | disabled | adaptive}", "invalid_request_error",
+            )
+    config = body.get("output_config")
+    if config is not None and not isinstance(config, dict):
+        raise GatewayError(400, "'output_config' must be an object", "invalid_request_error")
+    asked = (config or {}).get("effort")
+    word = None if asked is None else _effort_word(asked, what="output_config.effort")
+    if thinking is not None and thinking["type"] == "disabled":
+        if word not in (None, REASONING_OFF):
+            raise GatewayError(
+                400,
+                f"'thinking' is disabled and 'output_config.effort' asks for {word!r}: the two contradict "
+                "each other, and this node will not choose between them; send one of them",
+                "invalid_request_error",
+            )
+        return REASONING_OFF
+    return word
+
+
+def _image_for_the_door(data: Any, mime_type: Any, *, what: str, max_bytes: int) -> Dict[str, Any]:
+    """One image as the two fields DPTP §3.4 requires, or a refusal naming what
+    is wrong with it. The cap is the wire's own, checked on the decoded bytes
+    before anything is sent anywhere."""
+    if not isinstance(mime_type, str) or not mime_type:
+        raise GatewayError(400, f"{what} carries no media type", "invalid_request_error")
+    if not isinstance(data, str) or not data:
+        raise GatewayError(400, f"{what} carries no base64 data", "invalid_request_error")
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise GatewayError(400, f"{what} is not base64: {e}", "invalid_request_error")
+    if len(raw) > max_bytes:
+        raise GatewayError(
+            413,
+            f"{what} is {len(raw) / (1024 * 1024):.2f} MB, past the "
+            f"{max_bytes / (1024 * 1024):.0f} MB this node carries ([vision] max_image_size_mb)",
+            "image_too_large",
+        )
+    return {"base64": data, "mime_type": mime_type}
+
+
+def _image_from_data_url(url: Any, *, what: str, max_bytes: int) -> Dict[str, Any]:
+    """An OpenAI `image_url` as the wire's image dict. Only a `data:` URL: this
+    node fetches nothing from the web on a client's behalf, and a link it
+    refuses to follow must not look like one it followed."""
+    if not isinstance(url, str) or not url:
+        raise GatewayError(400, f"{what} carries no 'url'", "invalid_request_error")
+    if url.startswith(("http://", "https://")):
+        raise GatewayError(
+            400,
+            f"{what} is a web URL: the gateway fetches nothing from the web, so send the image "
+            "as a data:<mime>;base64,<payload> URL",
+            "invalid_request_error",
+        )
+    if not url.startswith("data:") or "," not in url:
+        raise GatewayError(
+            400, f"{what} is not a data URL; the form is data:<mime>;base64,<payload>", "invalid_request_error",
+        )
+    header, _, payload = url[len("data:"):].partition(",")
+    if not header.endswith(";base64"):
+        raise GatewayError(
+            400, f"{what} is a data URL that is not base64-encoded; the form is data:<mime>;base64,<payload>",
+            "invalid_request_error",
+        )
+    return _image_for_the_door(payload, header[: -len(";base64")], what=what, max_bytes=max_bytes)
+
+
+def _image_from_anthropic_source(source: Any, *, what: str, max_bytes: int) -> Dict[str, Any]:
+    """An Anthropic `image` block's source as the wire's image dict. `url` and
+    `file` are refused for the same reason a web URL is on the other form."""
+    if not isinstance(source, dict):
+        raise GatewayError(400, f"{what} has no 'source' object", "invalid_request_error")
+    kind = source.get("type")
+    if kind == "url":
+        raise GatewayError(
+            400,
+            f"{what} has a url source: the gateway fetches nothing from the web, so send the image "
+            "as {type: base64, media_type, data}",
+            "invalid_request_error",
+        )
+    if kind != "base64":
+        raise GatewayError(
+            400,
+            f"{what} has a source of type {kind!r}; only {{type: base64, media_type, data}} crosses "
+            "the gateway",
+            "invalid_request_error",
+        )
+    return _image_for_the_door(source.get("data"), source.get("media_type"), what=what, max_bytes=max_bytes)
+
+
+def _text_of(content: Any, *, what: str, images: Optional[List[Dict[str, Any]]] = None,
+             max_image_bytes: int = 0) -> str:
+    """The text of an OpenAI `content`: a string, `null`, or an array of parts.
+
+    `text` parts make the text. An `image_url` part is taken out of the turn
+    and appended to `images`, to travel beside the prompt as the peer wire
+    carries it; where `images` is None no image may stand — a system turn and
+    a tool result have nowhere to put one — and the refusal says so. Every
+    other part type is refused by name.
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -719,16 +1056,29 @@ def _text_of(content: Any, *, what: str) -> str:
     if not isinstance(content, list):
         raise GatewayError(400, f"{what} 'content' must be a string, null or an array of parts", "invalid_request_error")
     parts: List[str] = []
-    for part in content:
+    for position, part in enumerate(content):
         if not isinstance(part, dict):
             raise GatewayError(400, f"{what} 'content' parts must be objects", "invalid_request_error")
         kind = part.get("type")
-        if kind != "text":
+        if kind == "text":
+            parts.append(str(part.get("text") or ""))
+        elif kind == "image_url":
+            if images is None:
+                raise GatewayError(
+                    400, f"{what} 'content' carries an image; an image crosses the gateway in a user turn only",
+                    "invalid_request_error",
+                )
+            url = (part.get("image_url") or {}).get("url") if isinstance(part.get("image_url"), dict) else None
+            images.append(_image_from_data_url(
+                url, what=f"{what} content[{position}]", max_bytes=max_image_bytes,
+            ))
+        else:
             raise GatewayError(
-                400, f"{what} 'content' carries a part of type {kind!r}; only 'text' parts cross the gateway",
+                400,
+                f"{what} 'content' carries a part of type {kind!r}; only 'text' and 'image_url' parts "
+                "cross the gateway",
                 "invalid_request_error",
             )
-        parts.append(str(part.get("text") or ""))
     return "\n\n".join(p for p in parts if p)
 
 
@@ -759,9 +1109,10 @@ def _tool_use_from_openai(call: Any, position: int) -> Dict[str, Any]:
     return {"type": "tool_use", "id": call.get("id") or f"call_{position}", "name": function["name"], "input": input_data}
 
 
-def _openai_messages(messages: Any) -> Tuple[str, List[Dict[str, Any]]]:
-    """The request's `messages` as `(system, turns)` in the Anthropic shape the
-    door takes, or a 400 saying what is wrong with them.
+def _openai_messages(messages: Any, *, max_image_bytes: int = 0
+                     ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """The request's `messages` as `(system, turns, images)` in the Anthropic
+    shape the door takes, or a 400 saying what is wrong with them.
 
     Mirrors `DpcLlmAdapter._convert_messages_to_anthropic`, the in-house
     consumer of the same shapes: `system` and `developer` turns become the
@@ -774,6 +1125,7 @@ def _openai_messages(messages: Any) -> Tuple[str, List[Dict[str, Any]]]:
         raise GatewayError(400, "'messages' must be a non-empty array", "invalid_request_error")
     system_parts: List[str] = []
     turns: List[Dict[str, Any]] = []
+    images: List[Dict[str, Any]] = []
     for position, message in enumerate(messages):
         if not isinstance(message, dict):
             raise GatewayError(400, "each message must be an object with 'role' and 'content'", "invalid_request_error")
@@ -787,7 +1139,8 @@ def _openai_messages(messages: Any) -> Tuple[str, List[Dict[str, Any]]]:
             if isinstance(content, str):
                 turns.append({"role": "user", "content": content})
             else:
-                turns.append({"role": "user", "content": [{"type": "text", "text": _text_of(content, what=what)}]})
+                text = _text_of(content, what=what, images=images, max_image_bytes=max_image_bytes)
+                turns.append({"role": "user", "content": [{"type": "text", "text": text}]})
         elif role == "assistant":
             if "function_call" in message:
                 raise GatewayError(
@@ -819,7 +1172,7 @@ def _openai_messages(messages: Any) -> Tuple[str, List[Dict[str, Any]]]:
                 400, f"{what} has role {role!r}; the roles are system, developer, user, assistant and tool",
                 "invalid_request_error",
             )
-    return "\n\n".join(p for p in system_parts if p), turns
+    return "\n\n".join(p for p in system_parts if p), turns, images
 
 
 # What no provider on this node can do with a tool field, said once for both shapes.
@@ -952,7 +1305,14 @@ class GatewayServer:
         self.gateway.serving_lists()
         self._key = self._load_or_create_key()
 
-        app = web.Application(middlewares=[self._guard])
+        # aiohttp's own default body cap is 1 MiB, which would refuse most of
+        # the images this door now carries before any handler saw them. Four
+        # times the image cap leaves room for base64's extra third and for the
+        # conversation beside it; the image itself is still bounded by
+        # `[vision] max_image_size_mb`, checked on the decoded bytes.
+        app = web.Application(
+            middlewares=[self._guard], client_max_size=4 * self.gateway.max_image_bytes(),
+        )
         # One models list for both shapes: Claude Code does not need a models route.
         app.router.add_get("/v1/models", self._models)
         app.router.add_post("/v1/chat/completions", self._chat_completions)
@@ -1046,20 +1406,25 @@ class GatewayServer:
     async def _chat_completions(self, request: web.Request) -> web.StreamResponse:
         body = await _json_body(request)
         alias = _alias_of(body)
-        system, messages = _openai_messages(body.get("messages"))
+        system, messages, images = _openai_messages(
+            body.get("messages"), max_image_bytes=self.gateway.max_image_bytes(),
+        )
         tools = _openai_tools(body)
+        effort = _openai_effort(body)
         # Rendered here only for the peer route, which sends a prompt, and for
         # the emptiness test below; the local route is handed the turns.
         prompt = flatten_messages(messages, system)
-        if not prompt:
+        if not prompt and not images:
             raise GatewayError(400, "no message carries text", "invalid_request_error")
         # Sampling parameters (temperature, max_tokens, ...) are the alias's own
         # configuration on this node and are not read from the request.
         if body.get("stream"):
             options = body.get("stream_options") if isinstance(body.get("stream_options"), dict) else {}
             return await self._stream(request, alias, prompt, messages, system, tools,
+                                      images=images, reasoning_effort=effort,
                                       include_usage=bool(options.get("include_usage")))
-        completion = await self.gateway.complete(alias, prompt, messages=messages, system=system, tools=tools)
+        completion = await self.gateway.complete(alias, prompt, messages=messages, system=system, tools=tools,
+                                                 images=images, reasoning_effort=effort)
         return web.json_response(_chat_completion_json(completion))
 
     async def _stream(
@@ -1071,6 +1436,8 @@ class GatewayServer:
         system: Any,
         tools: Optional[List[Dict[str, Any]]],
         *,
+        images: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: Optional[str] = None,
         include_usage: bool,
     ) -> web.StreamResponse:
         """One `chat.completion.chunk` per chunk the door hands back, then the
@@ -1097,7 +1464,8 @@ class GatewayServer:
 
         try:
             completion = await self.gateway.complete(
-                alias, prompt, messages=messages, system=system, tools=tools, on_chunk=on_chunk, request_id=request_id,
+                alias, prompt, messages=messages, system=system, tools=tools, on_chunk=on_chunk,
+                images=images, reasoning_effort=reasoning_effort, request_id=request_id,
             )
         except GatewayError as e:
             if not stream.opened:
@@ -1134,19 +1502,25 @@ class GatewayServer:
     async def _messages(self, request: web.Request) -> web.StreamResponse:
         body = await _json_body(request)
         alias = _alias_of(body)
-        system, messages = _anthropic_request(body)
+        system, messages, images = _anthropic_request(
+            body, max_image_bytes=self.gateway.max_image_bytes(),
+        )
         tools = _anthropic_tools(body)
+        effort = _anthropic_effort(body)
         # Rendered here only for the peer route, which sends a prompt, and for
         # the emptiness test below; the local route is handed the turns.
         prompt = flatten_messages(messages, system)
-        if not prompt:
+        if not prompt and not images:
             raise GatewayError(400, "no message carries text", "invalid_request_error")
         # `max_tokens` is required by the Messages API and read by nobody here:
-        # sampling (max_tokens, temperature, top_p, stop_sequences, thinking) is
-        # the alias's own configuration on this node, as on the OpenAI route.
+        # sampling (max_tokens, temperature, top_p, stop_sequences) is the
+        # alias's own configuration on this node, as on the OpenAI route —
+        # `thinking` excepted, whose `type` is now read as an effort word.
         if body.get("stream"):
-            return await self._stream_messages(request, alias, prompt, messages, system, tools)
-        completion = await self.gateway.complete(alias, prompt, messages=messages, system=system, tools=tools)
+            return await self._stream_messages(request, alias, prompt, messages, system, tools,
+                                               images=images, reasoning_effort=effort)
+        completion = await self.gateway.complete(alias, prompt, messages=messages, system=system, tools=tools,
+                                                 images=images, reasoning_effort=effort)
         return web.json_response(_message_json(completion))
 
     async def _stream_messages(
@@ -1157,6 +1531,9 @@ class GatewayServer:
         messages: List[Dict[str, Any]],
         system: Any,
         tools: Optional[List[Dict[str, Any]]],
+        *,
+        images: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> web.StreamResponse:
         """`message_start`, a text block fed by the door's chunks, one `tool_use`
         block per call with its whole input in one `input_json_delta` (the door
@@ -1179,7 +1556,8 @@ class GatewayServer:
 
         try:
             completion = await self.gateway.complete(
-                alias, prompt, messages=messages, system=system, tools=tools, on_chunk=on_chunk, request_id=minted,
+                alias, prompt, messages=messages, system=system, tools=tools, on_chunk=on_chunk,
+                images=images, reasoning_effort=reasoning_effort, request_id=minted,
             )
         except GatewayError as e:
             if not stream.opened:
@@ -1332,29 +1710,57 @@ def _sse_event(event: Dict[str, Any]) -> bytes:
     return f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode("utf-8")
 
 
-def _anthropic_request(body: Dict[str, Any]) -> Tuple[Any, List[Dict[str, Any]]]:
-    """The request's `system` and `messages` as they stand, or a 400 saying
-    what is wrong with them. Shape only: the turns travel to the provider
-    un-flattened, and whoever cannot take them that way renders them."""
+def _anthropic_request(body: Dict[str, Any], *, max_image_bytes: int = 0
+                       ) -> Tuple[Any, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """The request's `system`, `messages` and images, or a 400 saying what is
+    wrong with them. Shape only, with one exception: the turns travel to the
+    provider un-flattened and whoever cannot take them that way renders them,
+    but an `image` block is lifted out of its turn here — every renderer under
+    this door drops it, and the wire carries images beside the prompt."""
     system = body.get("system")
     if system is not None and not isinstance(system, (str, list)):
         raise GatewayError(400, "'system' must be a string or an array of text blocks", "invalid_request_error")
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         raise GatewayError(400, "'messages' must be a non-empty array", "invalid_request_error")
-    for message in messages:
+    images: List[Dict[str, Any]] = []
+    turns: List[Dict[str, Any]] = []
+    for position, message in enumerate(messages):
         if not isinstance(message, dict):
             raise GatewayError(400, "each message must be an object with 'role' and 'content'", "invalid_request_error")
-        if message.get("role") not in ("user", "assistant"):
+        role = message.get("role")
+        if role not in ("user", "assistant"):
             raise GatewayError(
                 400, "each message's 'role' must be 'user' or 'assistant'; the system prompt goes in 'system'",
                 "invalid_request_error",
             )
-        if not isinstance(message.get("content"), (str, list)):
+        content = message.get("content")
+        if not isinstance(content, (str, list)):
             raise GatewayError(
                 400, "each message's 'content' must be a string or an array of blocks", "invalid_request_error",
             )
-    return system, messages
+        if isinstance(content, str) or not any(
+            isinstance(block, dict) and block.get("type") == "image" for block in content
+        ):
+            turns.append(message)
+            continue
+        if role != "user":
+            raise GatewayError(
+                400, f"messages[{position}] is an assistant turn carrying an image; an image crosses the "
+                "gateway in a user turn only",
+                "invalid_request_error",
+            )
+        kept: List[Any] = []
+        for index, block in enumerate(content):
+            if isinstance(block, dict) and block.get("type") == "image":
+                images.append(_image_from_anthropic_source(
+                    block.get("source"), what=f"messages[{position}] content[{index}]",
+                    max_bytes=max_image_bytes,
+                ))
+            else:
+                kept.append(block)
+        turns.append(dict(message, content=kept))
+    return system, turns, images
 
 
 def _anthropic_tools(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:

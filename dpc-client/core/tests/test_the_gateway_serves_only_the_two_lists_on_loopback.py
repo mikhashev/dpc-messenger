@@ -42,6 +42,9 @@ VENDOR = "ds_flash"
 UNLISTED = "paid_default"
 ANSWER = "hello from the card"
 INFERENCE_TIMEOUT_S = 0.2
+# What `[vision] max_image_size_mb` ships as, which is the cap the gateway
+# reads off the settings for an image at either door.
+MAX_IMAGE_MB = 5
 
 
 class _Provider:
@@ -54,6 +57,17 @@ class _Provider:
 
     async def generate_with_tools(self, *args, **kwargs):
         raise AssertionError("the gateway speaks to the manager, never to the provider")
+
+    async def generate_response(self, *args, **kwargs):
+        raise AssertionError("the gateway speaks to the manager, never to the provider")
+
+    async def generate_with_vision(self, *args, **kwargs):
+        raise AssertionError("the gateway speaks to the manager, never to the provider")
+
+    def supports_vision(self):
+        """What the door asks before letting an image through; the stand-in
+        says yes, and the test that means «no» builds a provider that says so."""
+        return True
 
 
 def _providers():
@@ -117,7 +131,10 @@ def _service(tmp_path: Path, compute: dict, *, providers=None, fail=None, finish
         llm_manager=types.SimpleNamespace(providers=providers, query=query,
                                           query_messages=query_messages),
         p2p_manager=types.SimpleNamespace(node_id=NODE_ID),
-        settings=types.SimpleNamespace(get_remote_inference_timeout=lambda: INFERENCE_TIMEOUT_S),
+        settings=types.SimpleNamespace(
+            get_remote_inference_timeout=lambda: INFERENCE_TIMEOUT_S,
+            get_vision_max_image_size_mb=lambda: MAX_IMAGE_MB,
+        ),
         calls=calls,
     )
 

@@ -48,10 +48,13 @@ class _Plain(AIProvider):
     def __init__(self, answer=ANSWER, alias=ALIAS):
         super().__init__(alias, {"type": "ollama", "model": MODEL})
         self.prompts = []
+        self.efforts = []
         self.answer = answer
 
     async def generate_response(self, prompt, **kwargs):
         self.prompts.append(prompt)
+        if "reasoning_effort" in kwargs:
+            self.efforts.append(kwargs["reasoning_effort"])
         return self.answer
 
 

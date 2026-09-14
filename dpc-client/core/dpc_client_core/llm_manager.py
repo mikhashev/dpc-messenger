@@ -3,9 +3,10 @@
 import os
 import json
 import asyncio
+import inspect
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Tuple
 
 from .providers import (
     AIProvider, ModelNotCachedError, parse_thinking_tags,
@@ -146,6 +147,45 @@ def flatten_messages(messages: List[Dict[str, Any]], system: Any = "") -> str:
     from .providers.ollama_provider import OllamaProvider
 
     return messages_to_prompt(OllamaProvider._anthropic_to_openai_messages(system, messages))
+
+
+def entry_point_for(provider: Any, *, tools: bool, streaming: bool) -> Tuple[str, Any]:
+    """`(name, bound method or None)`: the one provider entry point
+    `query_messages` calls for a request shaped like this.
+
+    The three-way choice lives here rather than in the `if` below so that a
+    caller standing in front of the door — the gateway, which refuses by name
+    what it cannot carry — asks about the same path that will actually run.
+    None is «this provider has no such entry point»: for tools that is the
+    refusal `query_messages` already raised, and the other two exist on
+    `AIProvider` itself.
+    """
+    if tools:
+        return "generate_with_tools", getattr(provider, "generate_with_tools", None)
+    if streaming and hasattr(provider, "generate_response_stream"):
+        return "generate_response_stream", provider.generate_response_stream
+    return "generate_response", getattr(provider, "generate_response", None)
+
+
+def accepts_reasoning_effort(entry_point: Any) -> bool:
+    """Whether one provider entry point takes the shared effort word.
+
+    Asked of the signature, not of a table of provider names: the three entry
+    points were written at different times and only some of them grew the
+    parameter — `ZaiProvider.generate_with_tools` has neither it nor `**kwargs`,
+    so handing it the word raises `TypeError` deep inside the call. A path that
+    cannot take the word must be refused by name before the call, never sent
+    the request with the word dropped (ADR-041 D4).
+    """
+    if entry_point is None:
+        return False
+    try:
+        parameters = inspect.signature(entry_point).parameters
+    except (TypeError, ValueError):  # a builtin or a C callable: assume not
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return True
+    return "reasoning_effort" in parameters
 
 
 def _tool_use_block(call: Any) -> Dict[str, Any]:
@@ -754,6 +794,7 @@ class LLMManager:
         conversation_id: Optional[str] = None,
         provider_alias: str | None = None,
         return_metadata: bool = False,
+        reasoning_effort: Optional[str] = None,
     ):
         """A conversation, optional tools and an optional chunk callback in;
         `query(return_metadata=True)`'s dict plus five keys out.
@@ -764,6 +805,15 @@ class LLMManager:
         Anthropic Messages shape `generate_with_tools` already accepts, which
         is also the only provider entry point taking the list un-flattened.
         `finish_reason` stays in the vocabulary the providers report it in.
+
+        `reasoning_effort` is the word from `REASONING_EFFORTS` (or `off`) the
+        caller asks the model to think at: it travels to whichever of the three
+        entry points this request takes and comes back as `served_effort`,
+        exactly as the same kwarg does through `query`. A path whose signature
+        cannot take the word raises rather than dropping it — an answer that
+        thought less than it was asked to must not come back looking like one
+        that did. `None` asks for nothing and reaches no provider, which is
+        what every caller written before this parameter existed keeps doing.
         """
         if not isinstance(messages, list) or not messages:
             raise ValueError("query_messages needs a non-empty list of messages.")
@@ -782,30 +832,44 @@ class LLMManager:
 
         tool_calls: List[Dict[str, Any]] = []
         path_usage: Dict[str, Any] = {}
-        if tools:
-            if not hasattr(provider, "generate_with_tools"):
+        path, entry_point = entry_point_for(
+            provider, tools=bool(tools), streaming=on_chunk is not None,
+        )
+        if tools and entry_point is None:
+            raise ValueError(
+                f"Provider '{alias_to_use}' (model: {provider.model}) has no native "
+                f"tool-calling path, and {len(tools)} tool(s) were asked for. Use an "
+                "alias whose provider implements generate_with_tools."
+            )
+        effort_kwargs: Dict[str, Any] = {}
+        if reasoning_effort is not None:
+            if not accepts_reasoning_effort(entry_point):
                 raise ValueError(
-                    f"Provider '{alias_to_use}' (model: {provider.model}) has no native "
-                    f"tool-calling path, and {len(tools)} tool(s) were asked for. Use an "
-                    "alias whose provider implements generate_with_tools."
+                    f"Provider '{alias_to_use}' (model: {provider.model}) takes no reasoning "
+                    f"effort on its {path} path, and '{reasoning_effort}' was asked for. Send "
+                    "the request without an effort, or to an alias whose provider takes one "
+                    "on this path."
                 )
+            effort_kwargs["reasoning_effort"] = reasoning_effort
+        if path == "generate_with_tools":
             logger.info("Routing tool query to provider '%s' with model '%s' (%d tools)",
                         alias_to_use, provider.model, len(tools))
-            raw = await provider.generate_with_tools(
+            raw = await entry_point(
                 messages, tools, system=system, on_chunk=on_chunk, conversation_id=conversation_id,
+                **effort_kwargs,
             ) or {}
             response = raw.get("content") or ""
             tool_calls = [_tool_use_block(call) for call in raw.get("tool_calls_raw") or []]
             path_usage = raw.get("usage") or {}
             streamed, flattened, tools_used = False, False, True
-        elif on_chunk is not None and hasattr(provider, "generate_response_stream"):
+        elif path == "generate_response_stream":
             logger.info("Routing streaming query to provider '%s' with model '%s'",
                         alias_to_use, provider.model)
-            response = await provider.generate_response_stream(prompt_text, on_chunk, conversation_id)
+            response = await entry_point(prompt_text, on_chunk, conversation_id, **effort_kwargs)
             streamed, flattened, tools_used = True, True, False
         else:
             logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
-            response = await provider.generate_response(prompt_text)
+            response = await entry_point(prompt_text, **effort_kwargs)
             streamed, flattened, tools_used = False, True, False
             if on_chunk is not None:
                 logger.info("Provider '%s' has no generate_response_stream: the answer is "
@@ -852,9 +916,11 @@ class LLMManager:
                 "thinking": thinking_content,
                 "thinking_tokens": thinking_tokens,
                 "output_includes_thinking": "excludes",  # same rule as `query`
-                # This door takes no effort and passes none to any of its three
-                # paths, so the word it applied is None until it does.
-                "served_effort": None,
+                # The effort word this door passed to the provider, normalised
+                # as the provider will read it — `query`'s rule, and the two
+                # copies must move together. None is «no effort control was
+                # applied», which is not `off`.
+                "served_effort": normalize_reasoning_effort(reasoning_effort),
                 # ... and what the provider was given, did, and stopped on.
                 "streamed": streamed,
                 "flattened": flattened,

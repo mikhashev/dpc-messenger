@@ -115,7 +115,8 @@ def _peer_service(tmp_path, compute=BOTH_LISTS, *, result=None, fail=None,
     async def request_inference_from_peer(peer_id, prompt, model=None, provider=None,
                                           images=None, reasoning_effort=None, timeout=1200.0):
         peer_calls.append({"peer_id": peer_id, "prompt": prompt, "model": model,
-                           "provider": provider, "timeout": timeout})
+                           "provider": provider, "images": images,
+                           "reasoning_effort": reasoning_effort, "timeout": timeout})
         if fail is not None:
             raise fail
         return _priced_result() if result is None else result
