@@ -65,7 +65,9 @@ def _host(tmp_path, compute=COMPUTE, answer=ANSWER):
     rules.write_text(json.dumps({"compute": compute}), encoding="utf-8")
     coord, svc = make_coordinator({GUEST: _Connection(GUEST), FRIEND: _Connection(FRIEND)})
     svc.firewall = ContextFirewall(rules)
-    svc.llm_manager.providers = {ALIAS: SimpleNamespace(config={})}
+    # The type is what the serving lists are classified by, and an alias whose
+    # class cannot be established is refused at the door.
+    svc.llm_manager.providers = {ALIAS: SimpleNamespace(config={"type": "ollama"})}
     svc.llm_manager.query = AsyncMock(return_value=dict(answer))
     coord._ledger = NodeLedger(tmp_path / "ledger")
     return coord, svc
