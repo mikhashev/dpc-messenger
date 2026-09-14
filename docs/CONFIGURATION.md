@@ -403,12 +403,14 @@ accepted and ignored: sampling is the alias's own configuration on this node.
 **Example** (Claude Code, environment):
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:9997
-export ANTHROPIC_API_KEY=<contents of ~/.dpc/.gateway_key>
+export ANTHROPIC_API_KEY='<contents of ~/.dpc/.gateway_key>'
 export ANTHROPIC_MODEL=ollama_local        # the alias name, as in /v1/models
 ```
 `ANTHROPIC_AUTH_TOKEN=<key>` (sent as `Authorization: Bearer`) works in place of
-`ANTHROPIC_API_KEY`. Not verified against a live Claude Code run at the time of writing;
-the shape is verified by the test suite.
+`ANTHROPIC_API_KEY`. Every value in this block is rendered through `shlex.quote`,
+so an alias with a space in it (`qwen3.8 27b Mythos`) arrives as one word.
+Not verified against a live Claude Code run at the time of writing; the shape is
+verified by the test suite.
 
 **A peer's model, through your own gateway.** After the two local lists, `/v1/models`
 shows one row per alias each connected peer serves to this node, named

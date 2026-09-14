@@ -101,6 +101,7 @@ import json
 import logging
 import os
 import secrets
+import shlex
 import stat
 import tempfile
 import time
@@ -214,11 +215,24 @@ def rotate_gateway_key(key_path: Path) -> str:
 
 
 def mask_gateway_key(key: Optional[str]) -> Optional[str]:
-    """`sk-…abcd`: enough to tell two keys apart, never enough to use one.
-    None where there is no key, so a card can say which of the two it is."""
+    """`wtHZ…opY4`: the key's own first four characters and its own last
+    four, enough to tell two keys apart and to recognise the one in the file,
+    never enough to use one.
+
+    No prefix is invented. This door's key is `secrets.token_urlsafe(32)` and
+    begins with no vendor marking, so the older `sk-…abcd` made the mask and
+    the clear key on one screen read as two different keys
+    (THE-MASKED-GATEWAY-KEY-INVENTS-AN-SK-PREFIX-THE-REAL-KEY-DOES-NOT-HAVE).
+
+    A key of eight characters or fewer is `…` alone: its first four and its
+    last four would be the whole of it. None where there is no key, so a card
+    can say which of the two it is.
+    """
     if not key:
         return None
-    return f"sk-\u2026{key[-4:]}" if len(key) > 4 else "sk-\u2026"
+    if len(key) <= 8:
+        return "\u2026"
+    return f"{key[:4]}\u2026{key[-4:]}"
 
 
 def client_config_lines(port: int, key: str, aliases: Sequence[str]) -> List[Dict[str, str]]:
@@ -232,6 +246,16 @@ def client_config_lines(port: int, key: str, aliases: Sequence[str]) -> List[Dic
     `aliases` are the ones the door serves, one Continue entry each and the
     first standing where a form names a single model; with none served the
     lines render `<alias>`, a configuration to fix rather than a blank card.
+
+    Every value in the shell block goes through `shlex.quote`, because an
+    alias may carry a space: this node's own is `qwen3.8 27b Mythos`, and
+    bare, `export ANTHROPIC_MODEL=qwen3.8 27b Mythos` sets the variable to
+    the first word and answers `export: '27b': not a valid identifier`
+    (measured 2026-09-14). A value that needs no quoting keeps none, so an
+    ordinary alias renders the line that was there before. The Continue
+    block is JSON and the Cursor block is prose, each quoted by its own
+    syntax; the curl line names no alias and holds its key inside double
+    quotes already.
     """
     base = f"http://{GATEWAY_HOST}:{port}"
     names = [alias for alias in aliases if alias] or ["<alias>"]
@@ -254,9 +278,10 @@ def client_config_lines(port: int, key: str, aliases: Sequence[str]) -> List[Dic
             f"Model: {first}"
         )},
         {"client": "claude_code", "text": (
-            f"export ANTHROPIC_BASE_URL={base}\n"
-            f"export ANTHROPIC_API_KEY={key}\n"
-            f"export ANTHROPIC_MODEL={first}        # the alias name, as in /v1/models"
+            f"export ANTHROPIC_BASE_URL={shlex.quote(base)}\n"
+            f"export ANTHROPIC_API_KEY={shlex.quote(key)}\n"
+            f"export ANTHROPIC_MODEL={shlex.quote(first)}"
+            "        # the alias name, as in /v1/models"
         )},
         {"client": "curl", "text": (
             f'curl {base}/v1/models -H "Authorization: Bearer {key}"'
@@ -931,7 +956,14 @@ class Gateway:
         menu = self.peer_menu().get(peer_id) or []
         row = next((entry for entry in menu if entry.get("alias") == remote_alias), None)
         if row is None:
-            served = ", ".join(entry["alias"] for entry in menu) or "nothing yet"
+            # The hint names what a chat call may name: the same `serves_chat`
+            # predicate that keeps a transcription-only row off `/v1/models`
+            # and refuses it below. Built from the peer's raw rows, the hint
+            # sent a guest that followed it to a second 404
+            # (THE-404-FOR-AN-UNSERVED-ALIAS-LISTS-THE-HOSTS-RAW-MENU).
+            served = ", ".join(
+                entry["alias"] for entry in menu if serves_chat(entry.get("type"))
+            ) or "nothing yet"
             raise GatewayError(
                 404,
                 f"peer {peer_id} does not serve alias '{remote_alias}' to this node; "

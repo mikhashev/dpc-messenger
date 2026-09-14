@@ -29,6 +29,7 @@ from dpc_client_core.gateway import serves_chat
 from tests.test_the_gateway_routes_a_peer_alias_over_a_proved_connection_and_writes_the_requester_row import (
     PEER,
     REMOTE_ALIAS,
+    REMOTE_VISION_ALIAS,
     _peer_service,
 )
 from tests.test_the_gateway_serves_only_the_two_lists_on_loopback import (
@@ -141,6 +142,50 @@ async def test_a_completion_on_a_peers_transcription_alias_is_404_in_both_shapes
 
         assert service.peer_calls == [], "a refused alias must not reach the host"
         assert list(ledger.rows()) == []
+
+
+def _menu_hint(message: str) -> str:
+    """What the 404 for an unknown peer alias offers instead."""
+    assert "does not serve alias" in message, message
+    return message.split("its menu lists: ")[1]
+
+
+@pytest.mark.asyncio
+async def test_the_hint_for_an_unserved_alias_lists_the_chat_rows_and_not_the_transcription_one(tmp_path):
+    """The hint is a menu to choose from, so it is the menu this door serves:
+    built from the peer's raw rows it named a Whisper alias the same door
+    refuses, and a guest that followed it got a second 404
+    (THE-404-FOR-AN-UNSERVED-ALIAS-LISTS-THE-HOSTS-RAW-MENU-WHISPER-INCLUDED)."""
+    service = _peer_with_whisper(tmp_path)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _request(
+            server, "POST", "/v1/chat/completions",
+            key=_key(tmp_path), body=_chat(f"remote:{PEER}:no-such-alias"),
+        )
+
+        assert status == 404
+        error = json.loads(text)["error"]
+        assert error["code"] == "model_not_found"
+        hint = _menu_hint(error["message"])
+        assert REMOTE_ALIAS in hint and REMOTE_VISION_ALIAS in hint
+        assert PEER_WHISPER_ROW["alias"] not in hint, "the hint offered what this door refuses"
+        assert service.peer_calls == [] and list(ledger.rows()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_whose_only_row_transcribes_offers_nothing_yet(tmp_path):
+    """With every row filtered out the hint says the same thing it says to a
+    peer that sent no menu at all: there is nothing here to chat with."""
+    service = _peer_service(tmp_path)
+    service.peer_metadata[PEER]["providers"] = [dict(PEER_WHISPER_ROW)]
+    async with _running(tmp_path, service) as (server, _):
+        status, text = await _request(
+            server, "POST", "/v1/chat/completions",
+            key=_key(tmp_path), body=_chat(f"remote:{PEER}:no-such-alias"),
+        )
+
+        assert status == 404
+        assert _menu_hint(json.loads(text)["error"]["message"]) == "nothing yet"
 
 
 # --- (3) the choice this filter makes on a type it cannot name ---------------------

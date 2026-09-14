@@ -775,16 +775,29 @@ def _fold_role(
     return entry
 
 
+#: The host of a consumed row written before `served_by` existed. A node id
+#: is `dpc-node-<32 hex>`, so `?` is a name no host can have, and the bucket
+#: it keys can collide with no other: the reader says "host not recorded"
+#: rather than naming one.
+UNKNOWN_HOST = "?"
+
+
 def consumed_key(row: Dict[str, Any]) -> str:
-    """`remote:<served_by>:<alias>` where the host is known, the bare alias
-    where it is not: an alias is the name one host answers to, so two hosts
-    serving `ollama_local` are one line only to a reader that ignores whose
-    alias it is."""
+    """`remote:<served_by>:<alias>`, and `remote:?:<alias>` where the row names
+    no host: an alias is the name one host answers to, so two hosts serving
+    `ollama_local` are one line only to a reader that ignores whose alias it is.
+
+    The unknown host wears the same form on purpose. Keyed by the bare alias,
+    as it was until 2026-09-15, a row written before the column carried the
+    very string a local alias of that name uses, so on a node that both serves
+    and consumes one alias name any reader holding one map of keys merged the
+    two into one line
+    (A-CONSUMED-ROW-WITH-NO-SERVED-BY-IS-KEYED-BY-THE-BARE-ALIAS). The group
+    still echoes `node_id` and `alias`, so no reader parses this key apart.
+    """
     alias = row.get("alias")
-    host = row.get("served_by")
-    if host:
-        return f"remote:{host}:{alias}"
-    return str(alias) if alias is not None else "none"
+    host = row.get("served_by") or UNKNOWN_HOST
+    return f"remote:{host}:{alias}"
 
 
 def usage_by_role(
@@ -797,8 +810,9 @@ def usage_by_role(
     * `served` — what this node ran for peers, by the peer that asked
       (`by_caller`, each carrying its own `by_alias`) and by the alias that
       answered. `cost_usd` is what this node spent, `tariff` what it is owed.
-    * `consumed` — what peers ran for this node, by `consumed_key`, each group
-      echoing `node_id` and `alias` so no reader parses the key. `cost_usd` is
+    * `consumed` — what peers ran for this node, by `consumed_key`
+      (`remote:<host>:<alias>`, the host `?` where the row names none), each
+      group echoing `node_id` and `alias` so no reader parses the key. `cost_usd` is
       null on every such row by construction, so the money here is `tariff`:
       what this node owes, per currency.
     * `own` — this node's own calls on its own key, by alias: no peer asked,

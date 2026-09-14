@@ -241,20 +241,39 @@ def test_an_empty_ledger_reads_as_three_empty_series():
     }
 
 
-def test_a_consumed_row_with_no_host_lands_under_the_bare_alias():
-    """What every consumed row written before the column looks like: the alias
-    alone, because the ledger does not know whose alias it was."""
-    old = usage_row(
-        started_at=SEPT_1,
-        **{k: v for k, v in CONSUMED_FIELDS.items() if k != "served_by"},
-        tariff_amount=_amount(CONSUMED_FIELDS),
-    )
+def _legacy_consumed(**extra):
+    """A consumed row as every one written before the `served_by` column looks:
+    the alias, and nothing saying whose alias it was."""
+    fields = {k: v for k, v in CONSUMED_FIELDS.items() if k != "served_by"}
+    fields.update(extra)
+    return usage_row(started_at=SEPT_1, **fields, tariff_amount=_amount(CONSUMED_FIELDS))
 
-    result = usage_by_role([old])
 
-    assert list(result["consumed"]["by_source"]) == ["bob_glm"]
-    assert result["consumed"]["by_source"]["bob_glm"]["node_id"] is None
-    assert result["consumed"]["by_source"]["bob_glm"]["alias"] == "bob_glm"
+def test_a_consumed_row_with_no_host_lands_under_an_unknown_host():
+    """The key keeps the form every consumed key has and names the host `?`,
+    which no node id can be; the group still echoes `node_id: None`, so the
+    reader says «host not recorded» from the field, not from the key."""
+    result = usage_by_role([_legacy_consumed()])
+
+    assert list(result["consumed"]["by_source"]) == ["remote:?:bob_glm"]
+    group = result["consumed"]["by_source"]["remote:?:bob_glm"]
+    assert group["node_id"] is None and group["alias"] == "bob_glm"
+
+
+def test_a_local_alias_and_a_legacy_peer_row_of_one_name_are_two_keys():
+    """The collision this key was changed for: keyed by the bare alias, a row
+    written before the column carried the very string an own row of that name
+    uses, so a node that both serves and consumes `bob_glm` had one line for
+    two things in any reader that holds one map of keys
+    (A-CONSUMED-ROW-WITH-NO-SERVED-BY-IS-KEYED-BY-THE-BARE-ALIAS)."""
+    mine = _row(SEPT_1, request_id="own-1", alias="bob_glm")
+
+    result = usage_by_role([_legacy_consumed(), mine])
+
+    consumed, own = result["consumed"]["by_source"], result["own"]["by_alias"]
+    assert list(consumed) == ["remote:?:bob_glm"] and list(own) == ["bob_glm"]
+    assert set(consumed).isdisjoint(own), "no key of one list can be a key of the other"
+    assert consumed["remote:?:bob_glm"]["row_count"] == own["bob_glm"]["row_count"] == 1
 
 
 def test_two_hosts_serving_the_same_alias_are_two_lines():

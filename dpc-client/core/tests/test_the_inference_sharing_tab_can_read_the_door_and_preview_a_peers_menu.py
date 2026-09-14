@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -35,6 +38,7 @@ from dpc_client_core.gateway import (
     GatewayServer,
     client_config_lines,
     mask_gateway_key,
+    new_gateway_key,
 )
 from dpc_client_core.local_api import ALLOWED_COMMANDS
 from dpc_client_core.service import CoreService
@@ -139,7 +143,7 @@ async def test_the_state_carries_a_masked_key_and_never_the_key(tmp_path):
 
     state = await service.get_gateway_state()
 
-    assert state["key_masked"] == mask_gateway_key("sekrit-key-1234") == "sk-…1234"
+    assert state["key_masked"] == mask_gateway_key("sekrit-key-1234") == "sekr…1234"
     assert "sekrit-key-1234" not in json.dumps(state)
 
 
@@ -247,7 +251,7 @@ async def test_the_client_lines_carry_the_key_and_the_served_aliases(tmp_path):
     for text in clients.values():
         assert "sekrit-key-1234" in text, "these lines exist to be pasted (Mike's call)"
     assert LOCAL in clients["continue"] and LOCAL in clients["claude_code"]
-    assert answer["key_masked"] == "sk-…1234"
+    assert answer["key_masked"] == "sekr…1234"
     json.loads(clients["continue"])
 
 
@@ -266,6 +270,66 @@ def test_a_door_that_has_never_started_says_so_where_the_key_would_be():
     (line,) = [row for row in client_config_lines(9997, "", []) if row["client"] == "curl"]
     assert "<alias>" in client_config_lines(9997, "k", [])[0]["text"]
     assert line["text"].endswith('Bearer "')
+
+
+SPACED = "qwen3.8 27b Mythos"  # this node's own alias, as in the card
+QUOTED = "it's mine"  # the other character a shell reads inside a bare word
+
+
+@pytest.mark.parametrize("alias", [SPACED, QUOTED])
+def test_the_shell_block_quotes_an_alias_the_shell_would_otherwise_break_on(alias):
+    """`export ANTHROPIC_MODEL=qwen3.8 27b Mythos` sets the variable to
+    `qwen3.8` and answers `export: '27b': not a valid identifier` (measured
+    2026-09-14). The value is one word to the shell or the block is not
+    paste-ready, which is the only thing it is for."""
+    (block,) = [row for row in client_config_lines(9997, "k3y", [alias])
+                if row["client"] == "claude_code"]
+
+    assert f"export ANTHROPIC_MODEL={shlex.quote(alias)}" in block["text"]
+    # A value that needs no quoting keeps none: the ordinary line is unchanged.
+    assert "export ANTHROPIC_BASE_URL=http://127.0.0.1:9997\n" in block["text"]
+    assert "export ANTHROPIC_API_KEY=k3y\n" in block["text"]
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX shell on this machine")
+@pytest.mark.parametrize("alias", [SPACED, QUOTED])
+def test_the_shell_block_round_trips_through_a_real_shell(alias):
+    """Pasted, not parsed: the block is run by `sh` and the variable read back."""
+    (block,) = [row for row in client_config_lines(9997, "k3y", [alias])
+                if row["client"] == "claude_code"]
+
+    done = subprocess.run(
+        ["sh", "-c", block["text"] + '\nprintf %s "$ANTHROPIC_MODEL:$ANTHROPIC_API_KEY"'],
+        capture_output=True, text=True,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == f"{alias}:k3y"
+    assert done.stderr == "", "a shell that set the variables says nothing"
+
+
+def test_the_mask_shows_the_keys_own_head_and_tail_and_invents_no_prefix():
+    """The mask stands beside the clear key in the same tab: a head this key
+    does not have made the two read as two different keys
+    (THE-MASKED-GATEWAY-KEY-INVENTS-AN-SK-PREFIX-THE-REAL-KEY-DOES-NOT-HAVE)."""
+    key = new_gateway_key()
+
+    masked = mask_gateway_key(key)
+
+    assert masked == f"{key[:4]}\u2026{key[-4:]}"
+    assert not masked.startswith("sk-"), "no vendor prefix is invented"
+    assert key.startswith(masked[:4]) and key.endswith(masked[-4:])
+    assert key not in masked and len(key) == 43, "enough to recognise, never enough to use"
+
+
+@pytest.mark.parametrize("key,masked", [
+    (None, None), ("", None), ("12345678", "\u2026"), ("123456789", "1234\u20266789"),
+])
+def test_what_the_mask_says_where_there_is_too_little_key_to_show(key, masked):
+    """Eight characters or fewer would be shown whole by a head and a tail of
+    four, so nothing is shown; no key at all stays None, which is the state the
+    card reads as 'the door has never started'."""
+    assert mask_gateway_key(key) == masked
 
 
 # --- (4) get_peer_provider_menu ----------------------------------------------

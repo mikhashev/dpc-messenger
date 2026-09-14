@@ -477,9 +477,13 @@ into one table with a role column — Mike's call: three separate lists.
 `served` is what this node ran for peers (`route=local`, `caller_kind=peer`),
 by the peer that asked and by the alias that answered; `consumed` is what peers
 ran for this node (`route=peer`), keyed by `consumed_key` as
-`remote:<served_by>:<alias>` and by the bare alias on a row written before the
-column, each group echoing `node_id` and `alias` so no reader parses the key
-back apart; `own` is this node's own calls on its own key. The money is per
+`remote:<served_by>:<alias>`, and as `remote:?:<alias>` on a row written before
+the column (amended 2026-09-15: the key was the bare alias until then, which is
+the very string an own row of that name uses, so on a node that both serves and
+consumes one alias name a reader holding one map of keys merged the two into one
+line; `?` is no node id and can key no other bucket), each group echoing
+`node_id` and `alias` so no reader parses the key back apart; `own` is this
+node's own calls on its own key. The money is per
 side: `cost_usd` sums only where this node ran the call, and `tariff_amount`
 sums per `tariff_currency`, because two currencies do not add. The two states
 that are not an amount are counted and never summed as zero — `untariffed` is a
