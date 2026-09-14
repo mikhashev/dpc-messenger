@@ -412,7 +412,7 @@ class P2PCoordinator:
                 prompt_tokens=result.get("prompt_tokens"),
                 completion_tokens=result.get("response_tokens"),
                 thinking_tokens=result.get("thinking_tokens"),
-                counts_source="ours",
+                counts_source=result.get("counts_source", "ours"),
                 output_includes_thinking=output_includes_thinking,
                 served_effort=served_effort,
                 peer_proved=proved,
@@ -577,18 +577,15 @@ class P2PCoordinator:
             # peer's request belongs to no agent, so no events.jsonl carries it,
             # and on a paid alias the vendor's own usage line lands in the
             # owner's burn series wearing nobody's name. This line is a log line.
-            # The counts are named `_est` because they are ours: llm_manager
-            # fills them with its own count_tokens over the prompt and the
-            # answer, not with what the engine reported. On an Ollama alias the
-            # daemon's own figures for the same call are on the neighbouring
-            # "Ollama usage:" line; whoever compares the two will find them
-            # close and different, and should not have to discover that from
-            # the numbers.
+            # `counts` says whose numbers these are, because the two differ by
+            # more than rounding: an engine counts the template and the image,
+            # our own recount sees the visible text alone.
             logger.info(
                 "Peer inference served: peer=%s alias=%s model=%s effort=%s "
-                "prompt_tokens_est=%s response_tokens_est=%s",
+                "prompt_tokens=%s response_tokens=%s counts=%s",
                 peer_id, serving_alias, actual_model, ran_effort or "unnamed",
                 result.get("prompt_tokens"), result.get("response_tokens"),
+                result.get("counts_source", "ours"),
             )
             success_response = create_remote_inference_response(
                 request_id=request_id,

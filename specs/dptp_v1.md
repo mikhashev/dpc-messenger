@@ -355,8 +355,8 @@ Returns the result of a remote inference request.
   v0.12.0, listed here for the first time; the requester's own usage row copies `model`
   from this field
 - `tokens_used` (integer, optional): Total tokens consumed
-- `prompt_tokens` (integer, optional): Tokens in prompt
-- `response_tokens` (integer, optional): Tokens in response
+- `prompt_tokens` (integer, optional): Tokens in prompt, as the host's engine reported them where it reported any — its count is the one the host is billed on and the one that sees the chat template and an image's tokens — and as the host's own count over the prompt text otherwise
+- `response_tokens` (integer, optional): Tokens in response, from the same source as `prompt_tokens`; `output_includes_thinking` says what is inside it
 - `model_max_tokens` (integer, optional): Model's context window size
 - `thinking` (string, optional): Thinking/reasoning content from models with extended reasoning (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
 - `thinking_tokens` (integer, optional): Tokens used for thinking/reasoning
@@ -2448,6 +2448,11 @@ DPTP is designed to be extensible. New commands can be added by:
   instead of being served at the model's default. The request may also carry
   one of the alias's own words, which its menu row advertises. Changed
   2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — `prompt_tokens` and `response_tokens` are the
+  host engine's own counts where it reported any, and the host's count over the text
+  only where it did not. The recount used to replace them: an image call the engine
+  counted at 38/2 travelled as 13/0 on 2026-09-14, which is what a tariff would have
+  been charged on. Changed 2026-09-14 while v1.7 is unreleased
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — `served_effort` is the rung the host's
   provider reports having sent, where it reports one, and only otherwise the word
   the door derived from the request or the configuration. The two disagreed on

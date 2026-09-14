@@ -18,6 +18,7 @@ from .providers import (
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
+from .node_ledger import OUTPUT_INCLUDES_THINKING
 from .providers.base import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
@@ -202,6 +203,25 @@ def reported_served_effort(provider: Any) -> Optional[str]:
     """
     word = (provider.get_last_usage() or {}).get("served_effort")
     return word if isinstance(word, str) and word else None
+
+
+def reported_counts(provider: Any) -> Optional[Tuple[int, int, str]]:
+    """`(prompt, completion, output_includes_thinking)` as the engine reported
+    them, or None where it reported nothing countable.
+
+    The recount this stands in front of is an estimate over the visible text: it
+    never sees the system prompt, the chat template or an image's tokens, and it
+    counts an answer the thinking was already taken out of — the numbers a
+    tariff would be charged on. The convention travels with the counts, because
+    a number made under `includes` and billed as `excludes` pays for the
+    reasoning twice.
+    """
+    usage = provider.get_last_usage() or {}
+    prompt, completion = usage.get("prompt_tokens"), usage.get("completion_tokens")
+    if not isinstance(prompt, int) or not isinstance(completion, int):
+        return None
+    convention = usage.get("output_includes_thinking")
+    return prompt, completion, convention if convention in OUTPUT_INCLUDES_THINKING else "unknown"
 
 
 def _tool_use_block(call: Any) -> Dict[str, Any]:
@@ -771,9 +791,14 @@ class LLMManager:
             logger.debug("Provider '%s' does not support thinking mode", provider.model)
 
         if return_metadata:
-            # Count tokens in prompt and response
-            prompt_tokens = self.count_tokens(prompt, provider.model)
-            response_tokens = self.count_tokens(response, provider.model)
+            counted = reported_counts(provider)
+            if counted is None:
+                prompt_tokens = self.count_tokens(prompt, provider.model)
+                response_tokens = self.count_tokens(response, provider.model)
+                counts_source, output_includes_thinking = "ours", "excludes"
+            else:
+                prompt_tokens, response_tokens, output_includes_thinking = counted
+                counts_source = "engine"
             total_tokens = prompt_tokens + response_tokens
 
             # Get model's context window
@@ -790,8 +815,11 @@ class LLMManager:
                 "vision_used": bool(images),  # Indicate if vision API was used
                 "thinking": thinking_content,  # Thinking/reasoning content (if any)
                 "thinking_tokens": thinking_tokens,  # Tokens used for thinking
-                # `response_tokens` counts `response` after the thinking was taken out of it.
-                "output_includes_thinking": "excludes",
+                # Whose numbers those are, and what is inside them: the engine's
+                # where it reported any, and the recount over the visible text —
+                # which the thinking is already out of — only where it did not.
+                "counts_source": counts_source,
+                "output_includes_thinking": output_includes_thinking,
                 # The effort word this door passed to the provider, normalised
                 # as the provider will read it; None is «none was applied»,
                 # which is not `off`. What the provider's own configuration
@@ -920,8 +948,14 @@ class LLMManager:
                     thinking_tokens = self.count_tokens(thinking_content, provider.model)
 
         if return_metadata:
-            prompt_tokens = self.count_tokens(prompt_text, provider.model)
-            response_tokens = self.count_tokens(response, provider.model)
+            counted = reported_counts(provider)
+            if counted is None:
+                prompt_tokens = self.count_tokens(prompt_text, provider.model)
+                response_tokens = self.count_tokens(response, provider.model)
+                counts_source, output_includes_thinking = "ours", "excludes"
+            else:
+                prompt_tokens, response_tokens, output_includes_thinking = counted
+                counts_source = "engine"
             return {
                 # `query`'s ten keys, because a usage row is built from them.
                 "response": response,
@@ -934,7 +968,8 @@ class LLMManager:
                 "vision_used": False,  # images stay on `query`; this door carries none
                 "thinking": thinking_content,
                 "thinking_tokens": thinking_tokens,
-                "output_includes_thinking": "excludes",  # same rule as `query`
+                "counts_source": counts_source,  # same rule as `query`
+                "output_includes_thinking": output_includes_thinking,
                 # The effort word this door passed to the provider, normalised
                 # as the provider will read it — `query`'s rule, and the two
                 # copies must move together. None is «no effort control was

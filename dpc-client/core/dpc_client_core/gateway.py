@@ -598,7 +598,10 @@ class Gateway:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 thinking_tokens=result.get("thinking_tokens"),
-                counts_source="ours",
+                # The engine's counts where the provider reported any; the
+                # door's recount, which never saw the template or an image,
+                # only where it did not.
+                counts_source=result.get("counts_source", "ours"),
                 output_includes_thinking=result.get("output_includes_thinking", "unknown"),
                 # The rung this call ran on, not the word that asked for it;
                 # no peer is in this row to prove.
