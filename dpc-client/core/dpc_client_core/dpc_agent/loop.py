@@ -78,6 +78,35 @@ def merge_optional_usage(accumulated: Dict[str, Any], usage: Dict[str, Any]) -> 
         accumulated[field] = accumulated.get(field, 0) + int(value)
 
 
+def accumulate_call_usage(
+    accumulated: Dict[str, Any],
+    usage: Dict[str, Any],
+    *,
+    counts_as_round: bool = True,
+) -> None:
+    """Add one model call's usage to the task's running total.
+
+    Every call a task makes goes through here, the rounds and the finalising
+    call after a guard stop alike: `chat()` writes a ledger row for each, and
+    ADR-041 D3 reads a task's totals as the sum of its rows.
+
+    `counts_as_round` is False for the finalising call — it spends tokens but
+    is not a round, and `rounds` is read against the round limit.
+    """
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    first_call = accumulated.get("rounds", 0) == 0
+    accumulated["prompt_tokens"] = accumulated.get("prompt_tokens", 0) + prompt_tokens
+    if first_call:
+        accumulated["first_prompt_tokens"] = prompt_tokens
+    accumulated["last_prompt_tokens"] = prompt_tokens  # replace — tracks peak context
+    accumulated["completion_tokens"] = accumulated.get("completion_tokens", 0) + usage.get("completion_tokens", 0)
+    accumulated["total_tokens"] = accumulated.get("total_tokens", 0) + usage.get("total_tokens", 0)
+    accumulated["cost"] = accumulated.get("cost", 0) + usage.get("cost", 0)
+    if counts_as_round:
+        accumulated["rounds"] = accumulated.get("rounds", 0) + 1
+    merge_optional_usage(accumulated, usage)
+
+
 def round_progress_payload(
     speed: Optional[Dict[str, Any]],
     *,
@@ -809,13 +838,14 @@ async def _finalize_after_guard_stop(
         log.warning("Guard %s stopped loop: %s", mw.__class__.__name__, stop_msg)
         messages.append({"role": "system", "content": stop_msg})
     try:
-        final_msg, _ = await llm.chat(
+        final_msg, final_usage = await llm.chat(
             messages,
             tools=None,
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
             task_id=task_id or None,
         )
+        accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
         if final_msg and final_msg.get("content"):
             return final_msg["content"], accumulated_usage, llm_trace
     except Exception:
@@ -991,16 +1021,8 @@ async def run_llm_loop(
                     reasoning_effort=reasoning_effort,
                     task_id=task_id or None,
                 )
-                round_prompt_tokens = usage.get("prompt_tokens", 0)
-                accumulated_usage["prompt_tokens"] += round_prompt_tokens
-                if accumulated_usage["rounds"] == 0:  # first round, before increment
-                    accumulated_usage["first_prompt_tokens"] = round_prompt_tokens
-                accumulated_usage["last_prompt_tokens"] = round_prompt_tokens  # replace — tracks peak context
-                accumulated_usage["completion_tokens"] += usage.get("completion_tokens", 0)
-                accumulated_usage["total_tokens"] += usage.get("total_tokens", 0)
-                accumulated_usage["cost"] += usage.get("cost", 0)
-                accumulated_usage["rounds"] += 1
-                merge_optional_usage(accumulated_usage, usage)
+                accumulate_call_usage(accumulated_usage, usage)
+                round_prompt_tokens = accumulated_usage["last_prompt_tokens"]
                 if reasoning_effort:
                     # Recorded, not summed: it is the word this task was run
                     # with, and it is what joins a cost to a decision.
