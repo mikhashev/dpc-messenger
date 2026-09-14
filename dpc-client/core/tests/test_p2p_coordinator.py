@@ -18,6 +18,7 @@ import pytest
 
 from dpc_client_core.node_ledger import NodeLedger
 from dpc_client_core.p2p_coordinator import P2PCoordinator
+from dpc_client_core.service import CoreService
 
 
 class ProvedConnection:
@@ -64,6 +65,9 @@ def make_coordinator(peers=None):
     service._pending_providers_requests = {}
     service.file_transfer_manager = MagicMock()
     service._provider_supports_voice = MagicMock(return_value=False)
+    # The menu selection is CoreService's own, bound to this stand-in: a copy
+    # of the rule here would answer for a builder nobody ships.
+    service.menu_for_peer = lambda peer_id: CoreService.menu_for_peer(service, peer_id)
 
     coord = P2PCoordinator(service)
     return coord, service

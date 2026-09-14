@@ -103,6 +103,12 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_usage_summary",
     "get_inference_usage",
     "save_firewall_rules",
+    "validate_firewall_rules",
+    # The IDE door and the guest preview (ADR-041 D1, D5)
+    "get_gateway_state",
+    "rotate_gateway_key",
+    "get_gateway_client_lines",
+    "get_peer_provider_menu",
     "list_all_tools",
     "get_cc_config",
     "set_cc_display_name",

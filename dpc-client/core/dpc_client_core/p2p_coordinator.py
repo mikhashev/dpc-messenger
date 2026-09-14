@@ -893,55 +893,14 @@ class P2PCoordinator:
 
         logger.debug("Handling GET_PROVIDERS request from %s", peer_id)
 
-        has_compute_access = self.service.firewall.can_request_inference(peer_id)
-        has_transcription_access = self.service.firewall.can_request_transcription(peer_id)
+        # The selection lives in `CoreService.menu_for_peer`, which the
+        # save-triggered notify path calls too: one builder, so a peer is told
+        # the same thing whether it asked or was notified.
+        filtered_providers, reason = self.service.menu_for_peer(peer_id)
 
-        if not has_compute_access and not has_transcription_access:
-            logger.warning("Access denied: %s cannot access compute or transcription resources", peer_id)
-            response = create_providers_response([])
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, response)
-            except Exception as e:
-                logger.error("Error sending providers response to %s: %s", peer_id, e, exc_info=True)
-            return
-
-        all_providers = [
-            self.service.build_p2p_provider_info(alias, provider, peer_id=peer_id)
-            for alias, provider in self.service.llm_manager.providers.items()
-        ]
-
-        filtered_providers = []
-        for provider_info in all_providers:
-            provider_type = provider_info["type"]
-            model = provider_info["model"]
-            if provider_type == "local_whisper":
-                if has_transcription_access and self.service.firewall.can_request_transcription(peer_id, model):
-                    filtered_providers.append(provider_info)
-            else:
-                # Offer only what we will actually serve (ADR-040 D4-0). Offering
-                # the rest both invites a request the gate now refuses and tells a
-                # peer which paid accounts this node holds.
-                if (has_compute_access
-                        and provider_info["alias"] == self.service.firewall.compute_serving_alias
-                        and self.service.firewall.can_request_inference(peer_id, model)):
-                    filtered_providers.append(provider_info)
-
-        logger.debug("Sending %d providers to %s (filtered from %d total)",
-                    len(filtered_providers), peer_id[:20], len(all_providers))
-
-        # Say the quiet part once. Compute sharing on, the peer allowed, and the
-        # answer still carries no inference provider — because `serving_alias`
-        # is what designates one and it is empty by default (D4-0: the host
-        # allocates, not the caller). Until this line the only trace was the
-        # DEBUG count above, so a person who had switched sharing on and added
-        # the peer to a group saw a peer offering nothing and no reason for it.
-        if has_compute_access and not self.service.firewall.compute_serving_alias:
-            logger.info(
-                "Compute sharing is enabled and %s is allowed, but no compute.serving_alias "
-                "is designated — no inference provider is offered. Set it in the firewall "
-                "rules (Compute Sharing) to name the one alias peers are served from.",
-                peer_id[:20],
-            )
+        logger.debug("Sending %d providers to %s", len(filtered_providers), peer_id[:20])
+        if not filtered_providers and reason:
+            logger.info("Answering %s with an empty menu: %s", peer_id[:20], reason)
 
         response = create_providers_response(filtered_providers)
         try:

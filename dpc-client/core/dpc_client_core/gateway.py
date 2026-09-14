@@ -94,12 +94,13 @@ import logging
 import os
 import secrets
 import stat
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from aiohttp import web
 from dpc_protocol.protocol import PeerRefused
@@ -135,7 +136,7 @@ logger = logging.getLogger(__name__)
 # different value can be refused by name, never so it can be honoured.
 GATEWAY_HOST = "127.0.0.1"
 # Static, generated once, never regenerated on restart: Continue and its kind
-# keep the key in their config. Rotation is deleting the file.
+# keep the key in their config. Rotation is `rotate_gateway_key`.
 GATEWAY_KEY_NAME = ".gateway_key"
 CALLER_KIND = "gateway"
 # The two names a loopback client may put in Host; anything else is not us.
@@ -165,6 +166,96 @@ _ANTHROPIC_ERROR_TYPES = {
     503: "api_error",
     504: "api_error",
 }
+def write_gateway_key(key_path: Path, key: str) -> None:
+    """Write the key so nothing can read a half-written one: temp file, mode
+    set before it has the real name, then an atomic `os.replace`. The mode
+    call is advisory on Windows, as it is for `.ws_token`."""
+    key_path = Path(key_path)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(dir=str(key_path.parent), prefix=".gateway_key.")
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(key)
+        try:
+            os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+        except OSError as chmod_err:
+            logger.debug("chmod 0o600 on %s skipped: %s", key_path, chmod_err)
+        os.replace(temp_path, key_path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def new_gateway_key() -> str:
+    """The one generator: first start and rotation mint the same kind of secret."""
+    return secrets.token_urlsafe(32)
+
+
+def rotate_gateway_key(key_path: Path) -> str:
+    """Write a new key over `key_path` and return it. A listener holding the
+    old key in memory is the caller's to update — `GatewayServer.rotate_key`
+    does both."""
+    key = new_gateway_key()
+    write_gateway_key(key_path, key)
+    logger.info(
+        "Gateway key rotated at %s; a client still configured with the old key is answered 401",
+        key_path,
+    )
+    return key
+
+
+def mask_gateway_key(key: Optional[str]) -> Optional[str]:
+    """`sk-…abcd`: enough to tell two keys apart, never enough to use one.
+    None where there is no key, so a card can say which of the two it is."""
+    if not key:
+        return None
+    return f"sk-\u2026{key[-4:]}" if len(key) > 4 else "sk-\u2026"
+
+
+def client_config_lines(port: int, key: str, aliases: Sequence[str]) -> List[Dict[str, str]]:
+    """The paste-ready configuration for the clients this door is for.
+
+    `docs/CONFIGURATION.md` carries this function's output verbatim for the
+    two clients it documents, and a test compares them, so the page and the
+    button cannot drift. The key is in clear because these lines are pasted
+    into another tool's config; `get_gateway_state` is the masked answer.
+
+    `aliases` are the ones the door serves, one Continue entry each and the
+    first standing where a form names a single model; with none served the
+    lines render `<alias>`, a configuration to fix rather than a blank card.
+    """
+    base = f"http://{GATEWAY_HOST}:{port}"
+    names = [alias for alias in aliases if alias] or ["<alias>"]
+    first = names[0]
+    entries = [
+        f'    "title": "DPC {alias}",\n'
+        f'    "provider": "openai",\n'
+        f'    "apiBase": "{base}/v1",\n'
+        f'    "apiKey": "{key}",\n'
+        f'    "model": "{alias}"'
+        for alias in names
+    ]
+    continue_text = '{\n  "models": [{\n' + "\n  }, {\n".join(entries) + "\n  }]\n}"
+    return [
+        {"client": "continue", "text": continue_text},
+        {"client": "cursor", "text": (
+            "Settings > Models > OpenAI API Key > Override base URL\n"
+            f"Base URL: {base}/v1\n"
+            f"API key: {key}\n"
+            f"Model: {first}"
+        )},
+        {"client": "claude_code", "text": (
+            f"export ANTHROPIC_BASE_URL={base}\n"
+            f"export ANTHROPIC_API_KEY={key}\n"
+            f"export ANTHROPIC_MODEL={first}        # the alias name, as in /v1/models"
+        )},
+        {"client": "curl", "text": (
+            f'curl {base}/v1/models -H "Authorization: Bearer {key}"'
+        )},
+    ]
+
+
 def vendor_alias_is_priced(alias: str, model: Optional[str]) -> bool:
     """Whether a call on this vendor alias would be written down with a price.
 
@@ -1515,15 +1606,32 @@ class GatewayServer:
             key = ""
         if key:
             return key
-        key = secrets.token_urlsafe(32)
-        self.key_path.parent.mkdir(parents=True, exist_ok=True)
-        self.key_path.write_text(key, encoding="utf-8")
-        try:
-            os.chmod(self.key_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
-        except OSError as chmod_err:
-            logger.debug("chmod 0o600 on %s skipped: %s", self.key_path, chmod_err)
-        logger.info("Gateway key written to %s; delete the file to rotate it", self.key_path)
+        key = new_gateway_key()
+        write_gateway_key(self.key_path, key)
+        logger.info(
+            "Gateway key written to %s; rotate it with the rotate_gateway_key command",
+            self.key_path,
+        )
         return key
+
+    def rotate_key(self) -> str:
+        """A new key on disk, then in the running listener: `_guard` compares
+        every request against `self._key`, so the old one is 401 on the next
+        request with no restart. Returned once, in clear, to be pasted."""
+        key = rotate_gateway_key(self.key_path)
+        self._key = key
+        return key
+
+    @property
+    def key_masked(self) -> Optional[str]:
+        """The running key masked, or the file's when the listener is down."""
+        key = self._key
+        if not key:
+            try:
+                key = self.key_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                key = ""
+        return mask_gateway_key(key)
 
     async def start(self) -> None:
         # Refused before the port opens: a bad list is a named error at start,

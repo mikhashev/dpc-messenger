@@ -109,6 +109,9 @@ def _menu_service(firewall, providers):
         lambda alias, provider, **kwargs:
         CoreService.build_p2p_provider_info(service, alias, provider, **kwargs)
     )
+    # The row builder is only half the menu; the selection is CoreService's too,
+    # and both senders reach it through this one name.
+    service.menu_for_peer = lambda peer_id: CoreService.menu_for_peer(service, peer_id)
     return service
 
 

@@ -193,10 +193,15 @@ default: a new open port is opt-in.
 and never rewrites it: a tool keeps the key in its own config, so a key that changed on
 every restart would break it on every restart. Every request carries it as
 `Authorization: Bearer <key>`; a request without it, or with a different one, is
-answered `401`. **Rotation is manual:** stop the client, delete `~/.dpc/.gateway_key`,
-start the client — a new key is written — and paste the new value into the tool's
-config. On Linux/macOS the file is written with mode `0600`; on Windows the mode bits
-are advisory and the file inherits the ACL of your home directory, as `.ws_token` does.
+answered `401`. **Rotation is the `rotate_gateway_key` command** (the Rotate button on
+the Inference Sharing tab, or the local API directly): a new key is written over the
+file and swapped into the running listener, so the old key is answered `401` from the
+next request on with no restart, and the new one is returned once in clear to paste into
+the tool's config. With the listener off the file is still rewritten. The file is
+written to a temporary name in the same directory and moved into place, so a client
+reading it mid-rotation gets one key or the other and never an empty string. On
+Linux/macOS the mode is `0600`; on Windows the mode bits are advisory and the file
+inherits the ACL of your home directory, as `.ws_token` does.
 The Anthropic form's clients send the same key as `x-api-key: <key>` instead; both
 header forms open every route.
 
@@ -298,6 +303,21 @@ charge its own machine:
   `tariff_at`, `tariff_amount`) and sends the same group to the guest, whose row copies it
   and keeps `cost_usd` null. `cost_usd` is only ever what a call cost the node that ran it.
   Resetting the rules to defaults rewrites the block and drops the tariff with it.
+
+**Reading the door from the UI.** Four commands on the local API answer for the gateway
+itself. `get_gateway_state` says whether it is enabled in `config.ini` and whether a
+listener is actually holding the port — the two differ whenever the door refused to open
+— with the port, the bind, the key masked (`sk-…abcd`), the key file, the two serving
+lists, the refusal that stopped them being classified where there is one, and
+`compute.enabled`. `rotate_gateway_key` is the rotation described above.
+`get_gateway_client_lines` returns the paste-ready configuration for Continue, Cursor,
+Claude Code and curl with the key in clear — the two examples on this page are that
+command's own output, compared by a test so the page and the button cannot drift.
+`get_peer_provider_menu(peer_id)` returns the rows a named peer would be sent in
+`PROVIDERS_RESPONSE`, from the same function that sends them, with `known`, `connected`,
+`allowed` and, where the list is empty, the reason in words. Beside them,
+`validate_firewall_rules(rules)` checks a rules object and names what is wrong without
+saving anything.
 
 **Reading the rows back.** Two commands on the local API read the node ledger.
 `get_usage_summary` is the owner's burn — every row this node ran itself, folded by

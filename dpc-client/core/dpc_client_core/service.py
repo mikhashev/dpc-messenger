@@ -42,7 +42,19 @@ from .providers.base import (
 )
 from .local_api import LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
-from .gateway import GATEWAY_KEY_NAME, GatewayConfigError, GatewayServer
+from .gateway import (
+    GATEWAY_HOST,
+    GATEWAY_KEY_NAME,
+    GatewayConfigError,
+    GatewayServer,
+    client_config_lines,
+    mask_gateway_key,
+    rotate_gateway_key,
+)
+
+#: What the client lines carry where the key would be when no gateway has
+#: ever started: a sentence, so a pasted config fails loudly at the door.
+NO_GATEWAY_KEY_YET = "<no key yet: start the gateway once>"
 from .context_cache import ContextCache
 from .settings import Settings
 from .token_cache import TokenCache
@@ -2435,6 +2447,50 @@ class CoreService:
             info["settings"] = settings
 
         return info
+
+    def menu_for_peer(self, peer_id: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """The rows `peer_id` is served in PROVIDERS_RESPONSE, and why.
+
+        One selection for both paths that send that message: the peer's own
+        GET_PROVIDERS and the notify after a firewall save. A `local_whisper`
+        row needs transcription permission on its own model; any other row
+        needs inference permission on its model and must be the one alias this
+        node designates. The second element is the sentence a log line or a
+        preview card says when the list is shorter than the owner expects.
+        """
+        firewall = self.firewall
+        has_compute = firewall.can_request_inference(peer_id)
+        has_transcription = firewall.can_request_transcription(peer_id)
+        if not has_compute and not has_transcription:
+            return [], (
+                f"{peer_id} may ask this node for neither inference "
+                "(compute.allow_nodes / allow_groups) nor transcription "
+                "(transcription.allow_nodes / allow_groups)"
+            )
+
+        rows: List[Dict[str, Any]] = []
+        for alias, provider in self.llm_manager.providers.items():
+            info = self.build_p2p_provider_info(alias, provider, peer_id=peer_id)
+            if info["type"] == "local_whisper":
+                if has_transcription and firewall.can_request_transcription(peer_id, info["model"]):
+                    rows.append(info)
+            elif (has_compute
+                    and alias == firewall.compute_serving_alias
+                    and firewall.can_request_inference(peer_id, info["model"])):
+                rows.append(info)
+
+        if rows:
+            return rows, None
+        if has_compute and not firewall.compute_serving_alias:
+            return rows, (
+                "inference sharing is on and this peer is allowed, but no alias is designated "
+                "in compute.serving_local, so there is nothing to offer"
+            )
+        return rows, (
+            "no configured provider passes this peer's permissions: the designated alias "
+            "(compute.serving_local) and compute.allowed_models decide the inference row, "
+            "and the transcription permissions decide a transcription one"
+        )
 
     async def set_voice_provider(self, provider_alias: str) -> Dict[str, Any]:
         """Delegated to VoiceService."""
@@ -4976,14 +5032,134 @@ class CoreService:
         """Delegated to AgentService."""
         return await self.agent_service.clear_session_archives(conversation_id, keep_latest)
 
-    async def validate_firewall_rules(self, rules_text: str) -> Dict[str, Any]:
-        """Validate firewall rules without saving."""
+    async def validate_firewall_rules(self, rules: Dict[str, Any]) -> Dict[str, Any]:
+        """Say what is wrong with a rules object without writing it anywhere.
+
+        `ContextFirewall.validate_config` reads a dict; this took a string, so
+        wired as it stood it answered «invalid» to every input.
+        """
+        if not isinstance(rules, dict):
+            return {
+                "status": "error",
+                "message": f"firewall rules must be an object, got {type(rules).__name__}",
+            }
         try:
-            is_valid, errors = self.firewall.validate_config(rules_text)
-            return {"status": "success", "is_valid": is_valid, "errors": errors}
+            valid, errors = self.firewall.validate_config(rules)
+            return {"status": "success", "valid": valid, "errors": errors}
         except Exception as e:
             logger.error("Error validating firewall rules: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    async def get_gateway_state(self) -> Dict[str, Any]:
+        """What the IDE door is right now: configured, listening, and on what.
+
+        `enabled` is `[gateway] enabled`, which only a restart re-reads;
+        `running` is whether a listener holds the port, and the two differ
+        whenever the door refused to open. The key is masked here —
+        `get_gateway_client_lines` is the command that hands it over.
+        """
+        server = self.gateway
+        enabled = self.settings.get_gateway_enabled()
+        port = server.port if server is not None else self.settings.get_gateway_port()
+        serving_local, serving_vendor, serving_error = [], [], None
+        try:
+            providers = self.llm_manager.providers or {}
+            lists = self.firewall.classify_serving_lists({
+                alias: (getattr(provider, "config", None) or {}).get("type")
+                for alias, provider in providers.items()
+            })
+            serving_local, serving_vendor = list(lists.local), list(lists.vendor)
+        except ValueError as e:
+            serving_error = str(e)
+        key_path = server.key_path if server is not None else DPC_HOME_DIR / GATEWAY_KEY_NAME
+        if server is not None:
+            key_masked = server.key_masked
+        else:
+            try:
+                key_masked = mask_gateway_key(Path(key_path).read_text(encoding="utf-8").strip())
+            except OSError:
+                key_masked = None
+        return {
+            "status": "success",
+            "enabled": enabled,
+            "running": bool(server is not None and server.is_running),
+            "port": port,
+            "bind": GATEWAY_HOST,
+            "key_masked": key_masked,
+            "key_file": str(key_path),
+            "serving_local": serving_local,
+            "serving_vendor": serving_vendor,
+            "serving_error": serving_error,
+            "compute_enabled": bool(getattr(self.firewall, "compute_enabled", False)),
+        }
+
+    async def rotate_gateway_key(self) -> Dict[str, Any]:
+        """A new key, returned once in clear; the old one is 401 from the next
+        request on, with no restart. With no listener the file is still
+        rewritten, so the key an IDE meets after a start is the new one."""
+        try:
+            server = self.gateway
+            if server is not None:
+                key = server.rotate_key()
+                key_file = str(server.key_path)
+            else:
+                key_file = str(DPC_HOME_DIR / GATEWAY_KEY_NAME)
+                key = rotate_gateway_key(Path(key_file))
+        except OSError as e:
+            logger.error("Gateway key rotation failed: %s", e, exc_info=True)
+            return {"status": "error", "message": f"the gateway key file could not be written: {e}"}
+        return {
+            "status": "success",
+            "key": key,
+            "key_masked": mask_gateway_key(key),
+            "key_file": key_file,
+        }
+
+    async def get_gateway_client_lines(self) -> Dict[str, Any]:
+        """The paste-ready lines for Continue, Cursor, Claude Code and curl,
+        with the key in clear (Mike's call, 2026-09-14): they are pasted into
+        another tool's config, and this socket already carries `.ws_token`."""
+        server = self.gateway
+        port = server.port if server is not None else self.settings.get_gateway_port()
+        key_path = server.key_path if server is not None else DPC_HOME_DIR / GATEWAY_KEY_NAME
+        key = getattr(server, "_key", "") if server is not None else ""
+        if not key:
+            try:
+                key = Path(key_path).read_text(encoding="utf-8").strip()
+            except OSError:
+                key = ""
+        try:
+            aliases = list(self.firewall.compute_serving_local or [])
+        except Exception:
+            aliases = []
+        return {
+            "status": "success",
+            "lines": client_config_lines(port, key or NO_GATEWAY_KEY_YET, aliases),
+            "key_masked": mask_gateway_key(key),
+        }
+
+    async def get_peer_provider_menu(self, peer_id: str) -> Dict[str, Any]:
+        """The rows this peer would be sent today, from the one builder that
+        sends them: a difference between the preview and the wire would have
+        to be a difference inside one function."""
+        if not isinstance(peer_id, str) or not peer_id:
+            return {"status": "error", "message": "peer_id is required"}
+        known = peer_id in (self.p2p_manager.peer_cache.get_all_peers() or {})
+        connected = peer_id in self.p2p_manager.peers
+        rows, reason = self.menu_for_peer(peer_id)
+        return {
+            "status": "success",
+            "peer_id": peer_id,
+            "known": bool(known or connected),
+            "connected": bool(connected),
+            # Whether a door is open to this peer at all, which is not whether
+            # anything stands behind it: allowed and served nothing is the
+            # owner's own configuration, and `reason` says which.
+            "allowed": bool(self.firewall.can_request_inference(peer_id)
+                            or self.firewall.can_request_transcription(peer_id)),
+            "reason": reason,
+            "rows": rows,
+        }
 
     async def get_voice_transcription_config(self) -> dict:
         """Delegated to VoiceService."""
@@ -7483,43 +7659,11 @@ class CoreService:
         for peer_id in connected_peers:
             logger.debug("Processing notification for %s", peer_id)
             try:
-                # Check if compute sharing is enabled and peer is authorized
-                can_access = self.firewall.can_request_inference(peer_id)
-                logger.debug("Firewall check for %s: can_access=%s", peer_id, can_access)
-
-                if not can_access:
-                    # Send empty provider list (access was revoked or never granted)
-                    response = create_providers_response([])
-                    logger.debug("Notifying %s: access denied, sending empty providers list", peer_id)
-                else:
-                    # Build provider list (same as _handle_get_providers_request)
-                    all_providers = []
-                    all_models = []
-
-                    for alias, provider in self.llm_manager.providers.items():
-                        all_providers.append(
-                            self.build_p2p_provider_info(alias, provider, peer_id=peer_id)
-                        )
-                        all_models.append(provider.model)
-
-                    logger.debug("Found %d total providers", len(all_providers))
-
-                    # Filter providers based on firewall allowed_models setting
-                    allowed_models = self.firewall.get_available_models_for_peer(peer_id, all_models)
-
-                    # Only include providers with allowed models, and only the one
-                    # alias this node designates for peers (ADR-040 D4-0) — the
-                    # same rule the GET_PROVIDERS path applies, so a peer is told
-                    # the same thing whether it asked or was notified.
-                    filtered_providers = [
-                        p for p in all_providers
-                        if p["model"] in allowed_models
-                        and p["alias"] == self.firewall.compute_serving_alias
-                    ]
-
-                    logger.debug("Filtered to %d providers (from %d total)", len(filtered_providers), len(all_providers))
-                    response = create_providers_response(filtered_providers)
-                    logger.debug("Notifying %s: sending %d providers", peer_id, len(filtered_providers))
+                rows, reason = self.menu_for_peer(peer_id)
+                if not rows and reason:
+                    logger.info("Notifying %s with an empty menu: %s", peer_id[:20], reason)
+                response = create_providers_response(rows)
+                logger.debug("Notifying %s: sending %d providers", peer_id, len(rows))
 
                 # Send the updated providers response
                 logger.debug("Sending PROVIDERS_RESPONSE to %s", peer_id)

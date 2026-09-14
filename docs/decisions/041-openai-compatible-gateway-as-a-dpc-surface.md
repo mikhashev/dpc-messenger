@@ -627,6 +627,45 @@ that does not fit one 64 MiB DPTP frame is `413` by name, raised by
 `write_message` at the origin before a byte leaves this node; tools plus a long
 conversation can reach it. Not started: `/v1/embeddings`, `/v1/completions`.)*
 
+*(**Amendment, 2026-09-14 — the door and the menu can be read from the UI, and
+one builder answers for the menu.** Five commands on the local API, the half of
+the Inference Sharing tab the backend could not fill:
+
+* `get_gateway_state` — `enabled` (`[gateway] enabled`, which only a restart
+  re-reads) apart from `running` (a listener actually holding the port), the
+  port, the bind, the key **masked**, the key file, the two serving lists or
+  the refusal that stopped them being classified, and `compute.enabled`.
+* `rotate_gateway_key` — a new key written over `~/.dpc/.gateway_key` (temp
+  file, `0600`, `os.replace`) and swapped into the running listener, so the old
+  key is `401` on the next request with no restart; returned once, in clear.
+  This replaces rotation-by-deletion, which `docs/CONFIGURATION.md` documented.
+* `get_gateway_client_lines` — the paste-ready configuration for Continue,
+  Cursor, Claude Code and curl, rendered by `gateway.client_config_lines`; the
+  two snippets in `docs/CONFIGURATION.md` are that function's own output and a
+  test compares them, so the page and the button cannot drift.
+* `get_peer_provider_menu(peer_id)` — the rows that peer would be sent, from
+  the function that sends them.
+* `validate_firewall_rules(rules)` — retyped from `str` to the dict
+  `ContextFirewall.validate_config` reads; it had no caller and would have
+  answered «invalid» to every input.
+
+**One builder for the menu.** `CoreService.menu_for_peer` is now the single
+selection behind both senders of `PROVIDERS_RESPONSE` — the peer's own
+`GET_PROVIDERS` and the notify after a firewall save. They disagreed: the
+notify path had no type branch, so it could never send a transcription row and
+every save silently narrowed a connected peer's menu
+([[THE-MENU-A-PEER-SEES-IS-BUILT-BY-TWO-BUILDERS-THAT-DISAGREE]]). The rule
+kept is the request path's, and the notify path now logs what it dropped and
+why, as the request path already did. A preview that disagreed with the wire
+would be one function disagreeing with itself.
+
+**Three questions, and how they were settled.** Rotation as a button behind a
+typed confirm; the peer picker offering any known node with the connected ones
+first; the paste lines carrying the key in clear inside a collapsed block —
+because they exist to be pasted into another tool's config and this socket
+already carries `.ws_token`. Recommended by CC, put to Mike on 2026-09-14 and
+not overridden by 13:00Z; implemented on that basis, and his to reverse.)*
+
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
 Sharing a vendor-backed alias is a different act: **the node holding the key
