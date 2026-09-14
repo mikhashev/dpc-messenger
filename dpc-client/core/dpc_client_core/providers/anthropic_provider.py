@@ -12,6 +12,25 @@ logger = logging.getLogger(__name__)
 
 
 class AnthropicProvider(AIProvider):
+    """Claude over the Messages API.
+
+    Output count convention (`includes`), from
+    https://platform.claude.com/docs/en/build-with-claude/extended-thinking:
+    "monitor the `usage.output_tokens_details.thinking_tokens` field in the
+    response, which reports how many of the billed output tokens were internal
+    reasoning." Thinking is a share of `output_tokens`, not a number beside it,
+    so a tariff bills `output_tokens` once and never adds the share again.
+
+    The prompt side is three fields, not one, from
+    https://platform.claude.com/docs/en/build-with-claude/prompt-caching:
+    `input_tokens` is "Number of input tokens which were not read from or used
+    to create a cache", and the page gives the sum this adapter reports as
+    `prompt_tokens`: "total_input_tokens = cache_read_input_tokens +
+    cache_creation_input_tokens + input_tokens".
+    """
+
+    DECLARED_OUTPUT_INCLUDES_THINKING = "includes"
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         api_key_env = config.get("api_key_env")
@@ -33,6 +52,52 @@ class AnthropicProvider(AIProvider):
 
         # Store last thinking content for retrieval by LLMManager
         self._last_thinking: Optional[str] = None
+
+    def _usage_from(self, message: Any) -> Dict[str, Any]:
+        """The vendor's token accounting for one message, in this project's shape.
+
+        `reasoning_tokens` is the vendor's own split where the response carries
+        `output_tokens_details`; where it does not, the zero is «not reported»
+        and `content_tokens` falls back to the whole output. Neither reading
+        changes the convention: thinking is inside `completion_tokens` either way.
+        """
+        u = getattr(message, "usage", None)
+        if u is None:
+            return {}
+        after_last_breakpoint = getattr(u, "input_tokens", 0) or 0
+        cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
+        cache_creation = getattr(u, "cache_creation_input_tokens", 0) or 0
+        prompt_tokens = after_last_breakpoint + cache_read + cache_creation
+        completion = getattr(u, "output_tokens", 0) or 0
+        details = getattr(u, "output_tokens_details", None)
+        thinking = (getattr(details, "thinking_tokens", 0) or 0) if details else 0
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion,
+            "reasoning_tokens": thinking,
+            "content_tokens": max(0, completion - thinking),
+            "total_tokens": prompt_tokens + completion,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
+            "output_includes_thinking": self.DECLARED_OUTPUT_INCLUDES_THINKING,
+        }
+        if thinking:
+            usage["thinking_source"] = "engine"
+        return usage
+
+    def _log_usage(self, message: Any, path: str) -> Dict[str, Any]:
+        """Record and announce what the call just cost, and hand the dict back."""
+        usage = self._usage_from(message)
+        self._record_last_usage(usage)
+        if usage:
+            logger.info(
+                "Anthropic usage: alias=%s model=%s prompt=%d (cache_read=%d), "
+                "completion=%d (thinking=%d), path=%s",
+                self.alias, self.model, usage["prompt_tokens"],
+                usage["cache_read_input_tokens"], usage["completion_tokens"],
+                usage["reasoning_tokens"], path,
+            )
+        return usage
 
     def supports_vision(self) -> bool:
         """Claude 3+ models support vision"""
@@ -56,6 +121,9 @@ class AnthropicProvider(AIProvider):
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
         self._last_thinking = None
+        # Cleared before the call, so a failure leaves no previous call's counts
+        # for `get_last_usage()` to hand out as this one's.
+        self._record_last_usage(None)
         try:
             # Determine max_tokens value
             # When thinking is enabled, max_tokens must be > budget_tokens
@@ -89,6 +157,7 @@ class AnthropicProvider(AIProvider):
                 logger.debug(f"Claude model {self.model} does not support extended thinking")
 
             message = await self.client.messages.create(**api_params)
+            self._log_usage(message, "plain")
 
             # Parse content blocks - handle both thinking and text blocks
             thinking_text = None
@@ -133,6 +202,7 @@ class AnthropicProvider(AIProvider):
         Anthropic vision API using multimodal content blocks.
         Docs: https://docs.anthropic.com/claude/docs/vision
         """
+        self._record_last_usage(None)
         # Built before the try: a refusal here is about the request, not about
         # the API, and must not be reported as the API having failed.
         content = []
@@ -154,6 +224,7 @@ class AnthropicProvider(AIProvider):
                 temperature=kwargs.get("temperature", self.temperature),
                 max_tokens=kwargs.get("max_tokens", self.max_tokens or 4096)
             )
+            self._log_usage(response, "vision")
             return response.content[0].text
         except Exception as e:
             raise RuntimeError(f"Anthropic vision API failed for '{self.alias}': {e}") from e

@@ -151,6 +151,9 @@ async def test_generate_with_tools_maps_response_to_contract():
     assert result["usage"] == {
         "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
         "cache_read_input_tokens": 0,
+        # Read and not found: the vendor's usage object has no reasoning counter
+        # and its page never says where the reasoning is counted.
+        "output_includes_thinking": "unknown",
     }
 
     assert len(result["tool_calls_raw"]) == 1

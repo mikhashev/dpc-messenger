@@ -78,6 +78,15 @@ class ZaiProvider(AIProvider):
     changed is the endpoint it points at and the fact that every path now records
     what it spent, because a prepaid route whose spend is invisible is worse than
     no route at all.
+
+    The output count convention stays `unknown`, and that is the reading rather
+    than an omission: the usage object at
+    https://docs.z.ai/api-reference/llm/chat-completion is three fields —
+    `prompt_tokens` "Number of tokens in user input", `completion_tokens`
+    "Number of output tokens", `total_tokens` "Total number of tokens" — with no
+    reasoning counter beside them and no sentence saying whether the reasoning a
+    GLM model emits is inside `completion_tokens`. A row this adapter writes is
+    therefore analytics and not a bill until the vendor documents it.
     """
 
     RETRY_LABEL = "Z.AI"
@@ -203,7 +212,7 @@ class ZaiProvider(AIProvider):
             return self._temperature_explicit
         return 1.0
 
-    def _usage_from(self, resp) -> Dict[str, int]:
+    def _usage_from(self, resp) -> Dict[str, Any]:
         """Normalise the SDK's usage object into the shape the cost meter reads.
 
         Every path calls this, not only the tool path. This is a prepaid provider:
@@ -221,9 +230,10 @@ class ZaiProvider(AIProvider):
             "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
             "total_tokens": getattr(u, "total_tokens", 0) or 0,
             "cache_read_input_tokens": cached or 0,
+            "output_includes_thinking": self.DECLARED_OUTPUT_INCLUDES_THINKING,
         }
 
-    def _log_usage(self, usage: Dict[str, int], path: str, tool_calls: int = 0) -> None:
+    def _log_usage(self, usage: Dict[str, Any], path: str, tool_calls: int = 0) -> None:
         if not usage:
             return
         self._record_last_usage(usage)
@@ -300,7 +310,7 @@ class ZaiProvider(AIProvider):
 
             full_text = ""
             thinking_text = ""
-            usage: Dict[str, int] = {}
+            usage: Dict[str, Any] = {}
             stream = await self.client.chat.completions.create(**params)
             async for chunk in stream:
                 chunk_usage = self._usage_from(chunk)

@@ -27,6 +27,14 @@ class GigaChatProvider(AIProvider):
         GIGACHAT_API_PERS  — personal/individual (free tier, default)
         GIGACHAT_API_B2B   — business
         GIGACHAT_API_CORP  — corporate
+
+    The output count convention stays `unknown`. Neither the REST reference for
+    the chat endpoint
+    (https://developers.sber.ru/docs/ru/gigachat/api/reference/rest/post-chat)
+    nor the reasoning-mode guide
+    (https://developers.sber.ru/docs/ru/gigachat/guides/reasoning) states where
+    the tokens of a reasoning turn are counted, and this adapter reports no usage
+    of its own, so the counts behind it are the recount in `LLMManager`.
     """
 
     def __init__(self, alias: str, config: Dict[str, Any]):

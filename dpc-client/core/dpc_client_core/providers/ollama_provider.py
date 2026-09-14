@@ -162,6 +162,17 @@ def _model_default(model: str, host: Optional[str], key: str) -> Optional[str]:
 
 
 class OllamaProvider(AIProvider):
+    """Models served by a local Ollama daemon.
+
+    The output count convention stays `unknown` because the daemon's own API
+    reference (https://github.com/ollama/ollama/blob/main/docs/api.md) defines
+    `eval_count` as "number of tokens in the response" and says nothing about
+    where the tokens a model emits under `think` are counted — the parameter is
+    documented as "should the model think before responding? Can be a boolean or
+    a thinking level" and never again in the response fields. What the daemon
+    does is very likely one of the two, and likely is not a convention.
+    """
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         self.client = ollama.AsyncClient(host=config.get("host"))
@@ -419,6 +430,22 @@ class OllamaProvider(AIProvider):
             )
         return options or None
 
+    def _usage_from(self, response: Any) -> Dict[str, Any]:
+        """What the daemon reported for one call, in this project's shape.
+
+        One builder for all three paths: the tools path used to build the same
+        dict a second time, which is where a field added to one of them goes
+        missing from the other.
+        """
+        prompt_tokens = getattr(response, "prompt_eval_count", 0) or 0
+        completion_tokens = getattr(response, "eval_count", 0) or 0
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "output_includes_thinking": self.DECLARED_OUTPUT_INCLUDES_THINKING,
+        }
+
     def _log_usage(self, response: Any, path: str) -> None:
         """One line per call carrying what the daemon reported, not what we guessed.
 
@@ -437,17 +464,11 @@ class OllamaProvider(AIProvider):
         This is the whole of D4-T on the Ollama side; queue wait, swap counts and
         VRAM headroom are not in this response and need their own reader.
         """
-        prompt_tokens = getattr(response, "prompt_eval_count", 0) or 0
-        completion_tokens = getattr(response, "eval_count", 0) or 0
         # The same numbers the line below prints, kept where a caller can ask for
         # them. Until this existed the tools path built this dict privately and
         # the text path priced a count it made itself (ADR-040, the usage
         # contract on `providers/base.py`).
-        self._record_last_usage({
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        })
+        self._record_last_usage(self._usage_from(response))
         logger.info(
             "Ollama usage: alias=%s model=%s prompt=%s completion=%s "
             "thinking_chars=%d done=%s prompt_tps=%s eval_tps=%s load_ms=%s path=%s",
@@ -763,13 +784,7 @@ class OllamaProvider(AIProvider):
             await on_chunk(content, conversation_id)
 
         self._log_usage(response, "tools")
-        prompt_tokens = getattr(response, 'prompt_eval_count', 0) or 0
-        completion_tokens = getattr(response, 'eval_count', 0) or 0
-        usage = {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        }
+        usage = self._usage_from(response)
         return {
             "content": content,
             "tool_calls_raw": tool_calls_raw,

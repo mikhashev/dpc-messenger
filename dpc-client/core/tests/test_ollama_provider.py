@@ -254,7 +254,12 @@ async def test_generate_with_tools_maps_response_to_contract():
 
     assert result["content"] == "working on it"
     assert result["thinking"] == "thinking about dirs"
-    assert result["usage"] == {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+    assert result["usage"] == {
+        "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+        # The daemon documents `eval_count` as "number of tokens in the response"
+        # and never says where a `think` turn is counted.
+        "output_includes_thinking": "unknown",
+    }
     assert len(result["tool_calls_raw"]) == 1
     tc = result["tool_calls_raw"][0]
     assert tc.id == "call_42"

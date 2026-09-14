@@ -449,6 +449,14 @@ class AIProvider:
     # What the retry log calls this provider. One word, because it is read in a
     # log line beside the alias.
     RETRY_LABEL = "Provider"
+    # Whether this vendor's own output counter already holds the reasoning
+    # tokens, in the ledger's three words (`node_ledger.OUTPUT_INCLUDES_THINKING`).
+    # It rides every usage dict recorded here: the tariff bills `includes` on
+    # `completion_tokens`, `excludes` on `completion_tokens + thinking_tokens`,
+    # and `unknown` on nothing. A subclass overrides it from the vendor's own
+    # documentation, quoting the URL and the sentence in its docstring; where
+    # the documentation does not settle it the answer stays `unknown`.
+    DECLARED_OUTPUT_INCLUDES_THINKING: str = "unknown"
     # Wall-clock budget for `_retry_with_backoff`, overridden per instance from
     # config by the providers that retry.
     max_retry_seconds: float = 600
@@ -658,8 +666,18 @@ class AIProvider:
 
         Copied on the way in and on the way out, so a caller that edits the dict
         it was handed does not edit the provider's record of the call.
+
+        The copy carries `DECLARED_OUTPUT_INCLUDES_THINKING` where the dict did
+        not name a convention itself, so no path can record counts whose meaning
+        the reader has to guess. A dict that names one keeps it: a provider that
+        reads the convention off the response knows more than its class does.
         """
-        self._last_usage = dict(usage) if usage else None
+        if not usage:
+            self._last_usage = None
+            return
+        stored = dict(usage)
+        stored.setdefault("output_includes_thinking", self.DECLARED_OUTPUT_INCLUDES_THINKING)
+        self._last_usage = stored
 
     def supports_balance(self) -> bool:
         """Returns True if this provider can report account balance (pay-per-use APIs)."""
