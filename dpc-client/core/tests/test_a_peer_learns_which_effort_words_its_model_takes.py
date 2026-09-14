@@ -32,19 +32,38 @@ class TemplateAwareProvider(FakeProvider):
     were read out of the GGUF, "fallback" when the constant table answered.
     """
 
-    def __init__(self, efforts, default, source, **kwargs):
+    def __init__(self, efforts, default, source, configured=None, **kwargs):
         super().__init__("gpt-oss-120b", ptype="llamacpp_server", **kwargs)
         self._template_efforts = efforts
         self._template_default = default
         self._template_efforts_source = source
+        if configured is not None:
+            self.config["reasoning_effort"] = configured
+
+    def _template_effort(self, requested):
+        """What llamacpp_server does with a word: its own rungs as written, and
+        the shared scale's top two folded onto the highest rung it has."""
+        word = (requested or "").strip().lower()
+        if word == "off" or word in self._template_efforts:
+            return word
+        return {"high": "xhigh", "max": "xhigh"}.get(word)
 
 
-def _info_for(provider):
-    stub = SimpleNamespace(
+def _stub_for(provider):
+    return SimpleNamespace(
         llm_manager=_llm_manager_with({"local_llama": provider}),
         _provider_supports_voice=lambda p: False,
     )
-    return CoreService.build_p2p_provider_info(stub, "local_llama", provider)
+
+
+def _info_for(provider):
+    return CoreService.build_p2p_provider_info(_stub_for(provider), "local_llama", provider)
+
+
+def _row_for(provider):
+    """The other builder: the rows the local UI reads."""
+    (row,) = CoreService._provider_rows(_stub_for(provider), [("local_llama", provider)])
+    return row
 
 
 def test_the_words_read_from_the_model_travel_to_the_peer():
@@ -93,3 +112,44 @@ def test_a_provider_that_knows_nothing_of_templates_says_nothing():
     assert "reasoning_words" not in info
     assert "reasoning_default" not in info
     assert info["model"] == "glm-5.1"
+
+
+# --- the default a row promises is the one the door serves ------------------------
+
+# `reasoning_default` was the template's own default and nothing else, while the
+# peer door served the alias's *configured* word when a guest asked for nothing.
+# A guest choosing on the row was promised `xhigh` and served `low` (live,
+# 2026-09-14). Both builders now read `effective_reasoning_default`, the helper
+# the door reads.
+
+
+def _both_builders(provider):
+    return _info_for(provider)["reasoning_default"], _row_for(provider)["reasoning_default"]
+
+
+def test_a_configured_word_is_what_both_builders_promise():
+    provider = TemplateAwareProvider(["xhigh", "medium", "low"], "xhigh", "model", configured="low")
+
+    assert _both_builders(provider) == ("low", "low")
+
+
+def test_a_configured_word_is_promised_on_the_rung_the_alias_has():
+    """`max` is not a rung of this model; the alias runs it at `xhigh`, and the
+    row says the rung rather than the configuration's spelling."""
+    provider = TemplateAwareProvider(["xhigh", "medium", "low"], "xhigh", "model", configured="max")
+
+    assert _both_builders(provider) == ("xhigh", "xhigh")
+
+
+def test_with_nothing_configured_the_templates_default_is_still_the_promise():
+    provider = TemplateAwareProvider(["xhigh", "medium", "low"], "xhigh", "model")
+
+    assert _both_builders(provider) == ("xhigh", "xhigh")
+
+
+def test_a_configured_word_the_alias_has_no_rung_for_promises_nothing():
+    """The door serves this node's default under no name; the row must not name
+    one either."""
+    provider = TemplateAwareProvider(["thorough"], "thorough", "model", configured="low")
+
+    assert _both_builders(provider) == (None, None)

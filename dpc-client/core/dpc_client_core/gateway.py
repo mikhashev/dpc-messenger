@@ -54,8 +54,9 @@ high, max` stands in only for an alias whose model named no words, and folds
 `xhigh` to `high` there alone. A word that reaches no rung is a 400 listing
 that alias's words — one door, one dictionary — and the row then names the rung
 the call ran on rather than the word that asked for it. `thinking` enabled or
-adaptive without an effort word asks for the alias's own default, which is
-not a degradation and is said nowhere. **Images**: a `data:` URL in an
+adaptive without an effort word asks for the alias's effective default — the
+rung its menu row advertises (`effective_reasoning_default`) — which is not a
+degradation and is said nowhere. **Images**: a `data:` URL in an
 OpenAI `image_url` part, or an Anthropic `image` block whose source is
 base64, becomes the two fields DPTP §3.4 requires and travels *beside* the
 prompt — that is the shape of the peer wire, so an image's position among
@@ -109,6 +110,7 @@ from .providers.base import (
     REASONING_EFFORTS,
     REASONING_OFF,
     declared_reasoning_words,
+    effective_reasoning_default,
     normalize_reasoning_effort,
     reasoning_word_for,
 )
@@ -518,19 +520,16 @@ class Gateway:
         The door reports what it passed — a word of the alias's own vocabulary,
         or of the shared scale where it has none — and the alias may still run
         that on a rung of another name, which is what the row wants. Where the
-        caller asked for nothing the alias still thinks at something — its
-        configured word, or the default its model's template named — and the row
-        says which when it is knowable. None is «not knowable here», never `off`.
+        caller asked for nothing, `effective_reasoning_default` answers, the same
+        helper the alias's menu row quotes and the peer door serves, so all three
+        name one rung. None is «not knowable here», never `off`.
         """
         provider = (getattr(self._core.llm_manager, "providers", None) or {}).get(alias)
         if provider is None:
             return door_word
         if door_word is not None:
             return reasoning_word_for(provider, door_word) or door_word
-        configured = (getattr(provider, "config", None) or {}).get("reasoning_effort")
-        if isinstance(configured, str) and configured.strip():
-            return reasoning_word_for(provider, configured)
-        return declared_reasoning_words(provider)[1]
+        return effective_reasoning_default(provider)
 
     async def _call(
         self,

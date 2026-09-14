@@ -34,7 +34,12 @@ from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager, PROVIDER_MAP
 from . import provider_alias_refs
-from .providers.base import REASONING_EFFORTS, REASONING_OFF, declared_reasoning_words
+from .providers.base import (
+    REASONING_EFFORTS,
+    REASONING_OFF,
+    declared_reasoning_words,
+    effective_reasoning_default,
+)
 from .local_api import LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
 from .gateway import GATEWAY_KEY_NAME, GatewayConfigError, GatewayServer
@@ -2279,10 +2284,12 @@ class CoreService:
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)
 
-            words, default = declared_reasoning_words(provider)
+            words, _ = declared_reasoning_words(provider)
             if words is not None:
                 provider_dict["reasoning_words"] = words
-                provider_dict["reasoning_default"] = default
+                # The rung this alias runs at when nobody asks, not the one the
+                # template would: the reader chooses on this field.
+                provider_dict["reasoning_default"] = effective_reasoning_default(provider)
 
             # v0.18.1+: Add remote inference fields for dpc_agent provider
             if alias == "dpc_agent":
@@ -2306,6 +2313,13 @@ class CoreService:
         reasoning_words/reasoning_default are absent unless this model's own
         template named them — same guard as _provider_rows, so that a fallback
         table never reaches a peer wearing the model's name.
+
+        `reasoning_default` is this node's *effective* default for the alias —
+        the configured word resolved onto its ladder, the template's default
+        where nothing is configured — because that is the rung a guest asking
+        for nothing is served (`P2PCoordinator._effort_for_peer`, one helper
+        for both). The template's own default alone would promise `xhigh` and
+        serve `low` (live, 2026-09-14).
         """
         info = {
             "alias": alias,
@@ -2316,10 +2330,10 @@ class CoreService:
             "context_window": self.llm_manager.lookup_context_window(provider.model),
         }
 
-        words, default = declared_reasoning_words(provider)
+        words, _ = declared_reasoning_words(provider)
         if words is not None:
             info["reasoning_words"] = words
-            info["reasoning_default"] = default
+            info["reasoning_default"] = effective_reasoning_default(provider)
 
         return info
 

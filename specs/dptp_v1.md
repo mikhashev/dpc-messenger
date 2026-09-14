@@ -540,8 +540,13 @@ Returns a list of AI providers available on the peer's system.
     accepts. Present only when the sender read them from the model's own chat template;
     absent when the sender fell back to a general scale, so a receiver may quote them as
     the model's own whenever they are present
-  - `reasoning_default` (string or null, optional): The effort the model's template applies
-    when none is sent; `null` when the template names no default. Sent with
+  - `reasoning_default` (string or null, optional): The effort the host serves when none
+    is sent — the sender's *effective* default for that alias: the word its own
+    configuration runs the alias at, resolved onto the alias's ladder, and the default the
+    model's template names where nothing is configured. One word of `reasoning_words`, or
+    `null` when neither names a rung. The receiver chooses on this field, so it is the same
+    resolution the host applies to a REMOTE_INFERENCE_REQUEST that carries no
+    `reasoning_effort`, and the same word that comes back in `served_effort`. Sent with
     `reasoning_words` and under the same condition
 
 ---
@@ -2443,6 +2448,12 @@ DPTP is designed to be extensible. New commands can be added by:
   instead of being served at the model's default. The request may also carry
   one of the alias's own words, which its menu row advertises. Changed
   2026-09-14 while v1.7 is unreleased
+- **§3.5 PROVIDERS_RESPONSE** — `reasoning_default` is the effort the host serves
+  when none is sent, not the one its model's template names: the configured word
+  resolved onto the alias's ladder where one is configured. The two were separate
+  sentences and disagreed — a row promising `xhigh` beside a door serving the
+  configured `low`, which the guest had no way to see. Changed 2026-09-14 while
+  v1.7 is unreleased
 - **§3.4 REMOTE_INFERENCE_REQUEST** — the tier the host requires is stated:
   served only over a connection whose key is proved — direct TLS; other tiers
   receive the error response (ADR-041 D2). Added 2026-09-14 with the host-side

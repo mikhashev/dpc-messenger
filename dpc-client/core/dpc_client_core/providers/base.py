@@ -116,6 +116,27 @@ def reasoning_word_for(provider: Any, word: Optional[str]) -> Optional[str]:
     return normalize_reasoning_effort(word)
 
 
+def effective_reasoning_default(provider: Any) -> Optional[str]:
+    """The rung this alias runs at when nobody asks for one, or None.
+
+    The configured word resolved onto the alias's own ladder, and the default
+    its model's template named where nothing is configured — the same
+    resolution the peer door applies to a request that carries no effort. One
+    reader for both, so the `reasoning_default` a menu row promises is the rung
+    a guest that asks for nothing is actually served: on 2026-09-14 the row
+    said `xhigh` (the template's default) while the host served `low` (its
+    configured word) and the guest chose on the row.
+
+    None is «no word describes it»: an alias whose template named no default
+    and whose configuration names nothing, or a configured word the alias has
+    no rung for — never `off`, which is a rung.
+    """
+    configured = (getattr(provider, "config", None) or {}).get("reasoning_effort")
+    if isinstance(configured, str) and configured.strip():
+        return reasoning_word_for(provider, configured)
+    return declared_reasoning_words(provider)[1]
+
+
 # --- Shared thinking model constants ---
 
 OPENAI_THINKING_MODELS = [

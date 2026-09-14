@@ -86,9 +86,15 @@ class _ModelWithItsOwnLadder:
     _template_efforts = ("low", "medium", "xhigh")
     _template_efforts_source = "model"
     _template_default = "xhigh"
+    model = "qwen3.8-27b-mythos"
 
     def __init__(self, configured=None):
-        self.config = {"reasoning_effort": configured} if configured else {}
+        self.config = {"type": "llamacpp_server"}
+        if configured:
+            self.config["reasoning_effort"] = configured
+
+    def supports_vision(self):
+        return False
 
     def _template_effort(self, requested):
         word = (requested or "").strip().lower()
@@ -329,3 +335,32 @@ def test_xhigh_configured_still_caps_because_the_scale_folds_it():
 
     assert coord._effort_for_peer("peer", "max", "qwen") == "high"
     assert coord._effort_for_peer("peer", "low", "qwen") == "low"
+
+
+# --- the row the guest chooses on names the rung the door serves -------------
+
+# The menu said `reasoning_default: xhigh` — the word this model's template
+# names — while the door served the alias's configured `low` to a guest that
+# asked for nothing (live, 2026-09-14). The guest decides on the row.
+
+
+def _menu_row(provider, alias="qwen"):
+    from dpc_client_core.service import CoreService
+
+    stub = SimpleNamespace(
+        llm_manager=SimpleNamespace(lookup_context_window=lambda _model: None),
+        _provider_supports_voice=lambda _p: False,
+    )
+    return CoreService.build_p2p_provider_info(stub, alias, provider)
+
+
+@pytest.mark.parametrize("configured, promised", [(None, "xhigh"), ("low", "low"), ("max", "xhigh")],
+                         ids=["the template's default", "a configured word",
+                              "a configured word on the rung the alias has"])
+def test_the_menu_promises_what_a_guest_that_asks_for_nothing_is_served(configured, promised):
+    provider = _ModelWithItsOwnLadder(configured=configured)
+    coord = _coordinator(provider=provider)
+
+    row = _menu_row(provider)
+    assert row["reasoning_default"] == promised
+    assert coord._effort_for_peer("peer", None, "qwen") == row["reasoning_default"]

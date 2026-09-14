@@ -201,19 +201,29 @@ class P2PCoordinator:
         effort channel, or a configured ceiling this node cannot read, where the
         call runs at the host's default and nothing here knows its name.
         `GatewayServer._served_effort` is the same rule at the other door.
+
+        What a guest that asks for nothing is served is
+        `effective_reasoning_default`, the same helper the alias's menu row quotes
+        as `reasoning_default` — so the rung the row promises is the rung the door
+        serves. Until 2026-09-14 the two were separate sentences and disagreed:
+        the row said `xhigh`, the template's default, while the door served the
+        configured `low`.
         """
-        from .providers.base import REASONING_EFFORTS, REASONING_OFF, declared_reasoning_words
+        from .providers.base import (
+            REASONING_EFFORTS,
+            REASONING_OFF,
+            declared_reasoning_words,
+            effective_reasoning_default,
+        )
 
         provider = self._provider_for_alias(serving_alias)
-        words, template_default = declared_reasoning_words(provider)
+        words, _template_default = declared_reasoning_words(provider)
         configured = self._configured_effort_for_alias(serving_alias)
         asked = (requested or "").strip()
 
         if not asked:
-            if not configured:
-                return template_default
-            rung = self._rung_of(provider, configured)
-            if rung is None:
+            rung = effective_reasoning_default(provider)
+            if rung is None and configured:
                 logger.info(
                     "Peer %s chose no reasoning effort; %s is configured as %r, which is not "
                     "a word this alias knows — serving this node's default, under no name",
