@@ -371,7 +371,7 @@ class P2PCoordinator:
         restart changes nothing and one peer's spending never counts against
         another's. A local alias is bounded by the card, which is the queue
         below, and passes untouched. Lists that cannot be classified are
-        refused: with the class unknown, Â«not a vendor aliasÂ» is a guess, and
+        refused: with the class unknown, «not a vendor alias» is a guess, and
         the wrong guess spends the host's money.
 
         Returns `(error text, refusal code)` or None.
