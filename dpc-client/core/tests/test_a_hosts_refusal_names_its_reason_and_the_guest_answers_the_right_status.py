@@ -19,6 +19,11 @@ This file checks the three hops of the fix:
 * the **guest's gateway** answers each code with the status its cause
   deserves, in both HTTP shapes, and keeps the 502 for a code it cannot place
   — and a refusal still writes no usage row.
+
+Since 2026-09-15 the money-shaped gates are three words rather than one, and
+the statuses part on whether time repairs the cause: a spent daily ceiling is
+429, while `unrated` and `misconfigured` are 503 without `Retry-After`, because
+only the host's owner can clear either.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
 
 from dpc_protocol.protocol import (
@@ -430,13 +436,18 @@ STATUS_FOR = {
     # The host's daily ceiling for this guest, spent (ADR-041 D5): not a
     # forbidden door but a full one, and tomorrow it is empty again.
     "insufficient_quota": 429,
+    # The host's own configuration, which time does not repair: no rate for the
+    # alias, or serving lists it cannot read. 503, because 429 would tell an
+    # auto-retrying client to come back to a state that never changes.
+    "unrated": 503,
+    "misconfigured": 503,
 }
 OPENAI_TYPE_FOR = {400: "invalid_request_error", 403: "permission_error",
                    404: "invalid_request_error", 429: "insufficient_quota",
-                   502: "server_error"}
+                   502: "server_error", 503: "server_error"}
 ANTHROPIC_TYPE_FOR = {400: "invalid_request_error", 403: "permission_error",
                       404: "not_found_error", 429: "rate_limit_error",
-                      502: "api_error"}
+                      502: "api_error", 503: "api_error"}
 
 
 #: Every word the protocol defines now has a status; the set is kept so the
@@ -465,6 +476,37 @@ async def test_a_spent_ceiling_is_the_429_a_client_can_come_back_from(tmp_path):
         error = json.loads(text)["error"]
         assert error["code"] == "insufficient_quota"
         assert "your ceiling is spent" in error["message"]
+        assert _rows(ledger) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code,word", [
+    ("unrated", "no rate for this alias"),
+    ("misconfigured", "its serving lists cannot be read"),
+])
+async def test_a_host_only_its_owner_can_repair_is_a_503_and_not_a_429(tmp_path, code, word):
+    """The other half of the split (2026-09-15): a ceiling refills at midnight
+    and is 429, while a missing rate and unreadable serving lists are repaired
+    by the host's owner and by nothing else. 429 on these would set an
+    auto-retrying IDE client looping, so they are 503 — and carry no
+    `Retry-After`, because no time is the right time."""
+    service = _peer_service(tmp_path, fail=PeerRefused(word, code=code))
+    async with _running(tmp_path, service) as (server, ledger):
+        # Sent here rather than through `_request`, which drops the headers,
+        # and the absence of `Retry-After` is half of what this checks.
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{server.port}/v1/chat/completions",
+                json=_chat(REMOTE_MODEL),
+                headers={"Authorization": f"Bearer {_key(tmp_path)}"},
+            ) as resp:
+                status, text, headers = resp.status, await resp.text(), dict(resp.headers)
+
+        assert status == 503
+        error = json.loads(text)["error"]
+        assert error["code"] == code
+        assert word in error["message"]
+        assert "Retry-After" not in headers, "no time repairs either of these"
         assert _rows(ledger) == []
 
 

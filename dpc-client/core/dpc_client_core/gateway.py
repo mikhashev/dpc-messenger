@@ -723,10 +723,9 @@ class Gateway:
 
         The ceiling is money, and money is counted from the rows; an alias no
         rate table knows writes $0.00 on every row, so its ceiling can never
-        be reached and `vendor_quotas` guards nothing. Refused with the word
-        the spent ceiling already uses — the cause is the same one, the guest
-        may not have this alias's tokens today — and the reason in the text,
-        because the wire vocabulary is not extended from here.
+        be reached and `vendor_quotas` guards nothing. `unrated`, not the spent
+        ceiling's word: waiting adds no rate, so this is a 503 the owner clears
+        and not a 429 the client retries.
         """
         model = getattr(provider, "model", None)
         if vendor_alias_is_priced(alias, model):
@@ -737,12 +736,12 @@ class Gateway:
             "served without a meter", alias, model,
         )
         raise GatewayError(
-            429,
+            503,
             f"model '{alias}' is refused: it is a vendor alias in compute.serving_vendor, and "
             f"this node has no rate for it (model {model!r}), so what it spends cannot be "
             "counted against its daily ceiling in compute.vendor_quotas — an unpriced alias is "
             "refused rather than served against a ceiling that would read $0.00 for ever",
-            "insufficient_quota",
+            "unrated",
         )
 
     def _refuse_images_the_alias_cannot_take(
@@ -1049,8 +1048,9 @@ class Gateway:
             # answered with the status the cause deserves, so that a client can
             # act: its own bad request is a 400 it must fix, a model it cannot
             # have is a 404, a door shut against it is a 403 it must ask a
-            # person about, and only a refusal nobody here can place stays the
-            # 502 every refusal used to be. The host's own text travels
+            # person about, a host that cannot serve the alias at all until its
+            # owner acts is a 503, and only a refusal nobody here can place
+            # stays the 502 every refusal used to be. The host's own text travels
             # whichever status it lands on, and the code the client reads is
             # the host's own word — one vocabulary across the hop, not two.
             status = {
@@ -1066,6 +1066,12 @@ class Gateway:
                 # The host's money, spent for today: the guest may come back
                 # tomorrow, which is what 429 says and 502 does not.
                 "insufficient_quota": 429,
+                # The host's own configuration, and waiting does not change it:
+                # no rate for the alias, or serving lists that cannot be read.
+                # 503 without `Retry-After`, because 429 would put an
+                # auto-retrying client in a loop nobody here can end.
+                "unrated": 503,
+                "misconfigured": 503,
             }.get(e.code)
             if status is None:
                 raise GatewayError(502, f"peer {peer_id} refused: {e}", "peer_refused")

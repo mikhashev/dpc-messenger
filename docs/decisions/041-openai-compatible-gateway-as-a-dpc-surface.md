@@ -809,6 +809,30 @@ host's refusal code to an HTTP status, and `insufficient_quota` landed there as
 tomorrow rather than that something broke, and the 502 is left to the codes
 nobody here can place.)*
 
+*(**Amendment, 2026-09-15 — one word was carrying three states, and they are
+now three words.** Mike's decision 01:36Z on Ark's and Zcode's reviews of
+`11b1de5c` and `91c5a073..da2be784`. `insufficient_quota` had been put on all
+three of the door's money-shaped refusals: a spent daily ceiling, a vendor
+alias this node has no rate for, and — with no code at all — serving lists that
+cannot be classified. Ark's argument is the whole of it: **429 means «come back
+tomorrow», which is true of a ceiling and false of a missing rate.** A ceiling
+refills at midnight; a rate appears only when the host's owner writes one, and
+lists are repaired only when the host's owner edits them, so a client
+auto-retrying on 429 would loop for ever against a state nothing in time
+changes. The wire therefore gains `unrated` and `misconfigured` beside
+`insufficient_quota` (DPTP §3.4, nine words), the peer door sends each at its
+own gate, and a guest's gateway answers both new words **503 without
+`Retry-After`** while `insufficient_quota` keeps its 429. The gateway's own
+local route answers its unpriced-alias check `unrated` 503 too, so one cause
+has one word and one status on both doors. Zcode's wider point stands and is
+not closed here: for `anthropic`, `gemini`, `gigachat` and `github_models`
+aliases `unrated` is the standing state rather than an edge, because
+`dpc_agent/pricing.py` rates only the DeepSeek and GLM families — whether to
+add rate tables or to say so on the tab is the open card
+`THE-UNPRICED-REFUSAL-CLOSES-EVERY-VENDOR-ALIAS-WHOSE-TYPE-PRICING-PY-DOES-NOT-RATE`.
+503 rather than 429 on the two new words was put to Mike as this session's own
+choice and is his to overturn.)*
+
 ### D6 — `aiohttp.web`, declared explicitly
 
 **Re-decided.** The first writing offered two options — hand-written asyncio
@@ -919,7 +943,10 @@ together with M6's table above and D2's proof gate:
    logged**; that limit is stated, not engineered around. Two-sided, so it reads the
    same from both chairs: the node whose model you call sees your prompt in full; if
    you serve peers, their prompts arrive on your machine and you could read them.
-2. **A host's own model settings are what a guest gets.** Weights, quantization,
+2. **A host's own model settings are what a guest gets.** Weights and the build
+   behind them (`variant` on the menu row, DPTP §3.5 — a file name where the host
+   can read one, and a quantization only where that is what the host knows; reworded
+   2026-09-15, the field has never been called `quantization`),
    chat template, context window, sampling (`max_tokens`, `temperature`, `top_p`,
    stop sequences) and the output ceiling are the host's configuration on this node,
    not a per-guest choice — the wire carries no `max_tokens` at all. The one

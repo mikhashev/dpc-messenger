@@ -359,12 +359,14 @@ async def test_a_vendor_alias_over_its_daily_quota_is_429_and_under_it_the_row_a
 
 
 @pytest.mark.asyncio
-async def test_a_vendor_alias_this_node_cannot_price_is_429_before_anything_runs(tmp_path, caplog):
+async def test_a_vendor_alias_this_node_cannot_price_is_503_unrated_before_anything_runs(
+    tmp_path, caplog,
+):
     """The ceiling is counted from the rows, and a row for an alias no rate
     table knows carries $0.00 — so `vendor_quotas` on it guards nothing at all
-    and the meter is absent rather than slow (Ark, 2026-09-14). Refused with
-    the word a spent ceiling already uses, the reason in the text: the wire
-    vocabulary is not extended from here."""
+    and the meter is absent rather than slow (Ark, 2026-09-14). `unrated` and
+    503, not the ceiling's 429: a client that retries a 429 tomorrow finds the
+    same missing rate, and only this node's owner can write one."""
     providers = dict(_providers(), unpriced=_Provider("anthropic", "claude-sonnet-4-5"))
     compute = {"serving_vendor": ["unpriced"], "vendor_quotas": {"unpriced": 5.0}}
     service = _service(tmp_path, compute, providers=providers)
@@ -374,9 +376,9 @@ async def test_a_vendor_alias_this_node_cannot_price_is_429_before_anything_runs
             status, text = await _request(server, "POST", "/v1/chat/completions",
                                           key=_key(tmp_path), body=_chat("unpriced"))
 
-        assert status == 429
+        assert status == 503
         error = json.loads(text)["error"]
-        assert error["code"] == "insufficient_quota"
+        assert error["code"] == "unrated"
         assert "unpriced" in error["message"] and "no rate" in error["message"]
         assert "vendor_quotas" in error["message"]
         assert service.calls == [], "the refused call must not reach the provider"

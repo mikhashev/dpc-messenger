@@ -446,10 +446,29 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
   - `invalid_value` — the request asked for something the host cannot take, refused at a gate before anything ran: a reasoning effort word the alias has no rung for (the text lists the words it accepts), or a `request_id` already in flight from this peer. A failure raised inside the host's own call carries no code, whatever its type: only a gate that names the guest's request sends a word that blames it
   - `tools_unsupported` — the request carried tools and the host's serving alias has no native tool-calling path, which is refused rather than answered without them
   - `insufficient_quota` — the alias the host serves is a vendor alias, bounded by money rather than by the card, and this guest has spent its daily ceiling on it (ADR-041 D5). The ceiling is per caller and counted from the host's own usage rows, so it is the guest's own spending and not the host's total; the text names what was spent and what the ceiling is, and the call is served again after midnight UTC
+  - `unrated` — the alias the host serves is a vendor alias, and the host has no rate for its model, so what a call spends cannot be counted against the ceiling in `compute.vendor_quotas`: the meter is absent rather than slow, and the alias is refused rather than served against a ceiling that would read zero for ever. The repair is on the host and is a rate, not time — nothing about waiting makes this call succeed
+  - `misconfigured` — the host cannot classify its own serving lists, so the class of the alias it would serve is unknown, and an alias whose class is unknown is not served (a paying alias filed under `compute.serving_local` is the state that reaches this gate). The host's own configuration, repaired by editing it; this names no fault of the guest's and nothing the guest can do
+
+  The last three are one cause split into three words on 2026-09-15, while v1.7 is unreleased, because a code is read as an instruction: only `insufficient_quota` refills by itself, and answering the other two with the same word tells a client to retry a state that never changes on its own.
 
   Absent means the host has no word for this refusal — a failure mid-call rather than a gate, or a host that predates the field — and is never itself a reason. A receiver reads an unknown word exactly as it reads an absent one, because a newer host may name a cause this one has no word for; no receiver refuses a message over its code. Sent on the error form only: a served call carries no code.
 
-  What a receiver does with the word is the receiver's own. The guest in this tree answers its own HTTP clients with the status the cause deserves — `invalid_value` and `tools_unsupported` are the client's own 400, `model_not_found` a 404, `identity_unproved`, `not_allowed` and `onward_sharing_refused` a 403, and `insufficient_quota` a 429 since 2026-09-14, because a spent ceiling means the guest may come back tomorrow and 502 does not say so — and keeps the 502 it always gave for an unknown or absent code, which is now the only cause that lands there. Before the code every one of those was the same 502, and an IDE could not tell a request it should fix from a door it should ask a person about.
+  What a receiver does with the word is the receiver's own. The guest in this tree runs an OpenAI-compatible gateway (ADR-041) and answers its own HTTP clients with the status the cause deserves:
+
+  | code | status | what the client is being told |
+  |---|---|---|
+  | `invalid_value` | 400 | your request; fix it and send it again |
+  | `tools_unsupported` | 400 | your request; this alias takes no tools |
+  | `model_not_found` | 404 | not on that host's menu |
+  | `not_allowed` | 403 | that host's door; ask a person |
+  | `identity_unproved` | 403 | that host's door; ask a person |
+  | `onward_sharing_refused` | 403 | that host's door; ask a person |
+  | `insufficient_quota` | 429 | your ceiling on that host, spent for today; come back tomorrow |
+  | `unrated` | 503 | that host cannot price this alias; its owner must add a rate |
+  | `misconfigured` | 503 | that host cannot read its own serving lists; its owner must fix them |
+  | unknown or absent | 502 | refused, and nothing here can say why |
+
+  The two 503s carry no `Retry-After`: neither state ends with time, and a 429 there would set an auto-retrying client looping against a host only its owner can repair. Before the code every row above was the same 502, and an IDE could not tell a request it should fix from a door it should ask a person about.
 
 ---
 
@@ -2645,6 +2664,16 @@ DPTP is designed to be extensible. New commands can be added by:
   in this tree answers it with 429 — "come back tomorrow" rather than "something
   broke" — since 2026-09-14, the same day the word was added. Added 2026-09-14
   while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — `unrated` and `misconfigured` join the
+  code list, splitting off `insufficient_quota` what that word was carrying but
+  does not mean: a vendor alias the host has no rate for, and serving lists the
+  host cannot classify. A code is read as an instruction, and only a spent
+  ceiling refills by itself — under one word an auto-retrying client was told to
+  come back tomorrow to a host whose state only its owner can change. A guest in
+  this tree answers both with 503 and no `Retry-After`; the status table for
+  every word is in §3.4. The unclassifiable-lists gate sent no code at all until
+  now, so that refusal reached a guest's gateway as the 502 the code was added
+  to remove. Added 2026-09-15 while v1.7 is unreleased
 - **§3.4 REMOTE_INFERENCE_REQUEST** — the tier the host requires is stated:
   served only over a connection whose key is proved — direct TLS; other tiers
   receive the error response (ADR-041 D2). Added 2026-09-14 with the host-side

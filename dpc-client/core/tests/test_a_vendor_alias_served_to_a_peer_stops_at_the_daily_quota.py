@@ -11,11 +11,14 @@ what makes it survive a restart: the sum is over the rows
 `caller_kind=peer`, and a second `NodeLedger` over the same directory sums the
 same rows.
 
-Two states are told apart here. With the lists classified, a vendor serving
-alias is weighed against its ceiling; with the lists refused as a
-configuration error — which is what a paying alias sitting in
-`compute.serving_local` is — the door refuses rather than guess the class, and
-guessing wrong spends the host's money.
+Three states are told apart here, under three wire words since 2026-09-15.
+With the lists classified, a vendor serving alias is weighed against its
+ceiling (`insufficient_quota`, and midnight clears it); an alias no rate table
+knows is refused before that (`unrated`, and only a rate clears it); with the
+lists refused as a configuration error — which is what a paying alias sitting
+in `compute.serving_local` is — the door refuses rather than guess the class
+(`misconfigured`, and only an edit clears it), because guessing wrong spends
+the host's money.
 """
 
 from __future__ import annotations
@@ -248,8 +251,10 @@ async def test_a_local_alias_is_never_refused_by_this_gate(tmp_path):
 async def test_a_paying_alias_misfiled_under_serving_local_is_refused_not_served(tmp_path):
     """The state the load path can reach today, and the one that costs money:
     `serving_local` naming a vendor-typed alias is a configuration error the
-    gateway refuses, and this door served it. Refused now, with the reason and
-    with no word for the guest to act on — it is the host's own configuration."""
+    gateway refuses, and this door served it. Refused now under `misconfigured`
+    — the host's own configuration, which the guest can neither fix nor wait
+    out, and which reached the guest's door as a bare 502 while this gate sent
+    no word at all."""
     coord, svc = _real_firewall_host(
         tmp_path,
         {"allow_nodes": [GUEST], "serving_local": [VENDOR]},
@@ -260,7 +265,7 @@ async def test_a_paying_alias_misfiled_under_serving_local_is_refused_not_served
 
     svc.llm_manager.query.assert_not_awaited()
     payload = _refusal(svc)
-    assert payload.get("code") in (None, "")
+    assert payload["code"] == "misconfigured"
     assert VENDOR in payload["error"] and "serving_vendor" in payload["error"]
     assert _requests(coord._ledger) == []
 
@@ -273,9 +278,8 @@ async def test_a_vendor_alias_this_node_cannot_price_is_refused_before_it_runs(t
     """A ceiling is money, and money is counted from the rows. An alias no rate
     table knows writes $0.00 on every row, so `spent_today` never moves and
     `vendor_quotas` guards nothing — the meter is absent, not slow (Ark's
-    review of `11b1de5c`, 2026-09-14). Refused with the word a spent ceiling
-    already uses; the reason is in the text, because the wire vocabulary is
-    Mike's to extend."""
+    review of `11b1de5c`, 2026-09-14). `unrated` and not the ceiling's word:
+    no amount of waiting writes a rate."""
     coord, svc = _vendor_host(tmp_path)
     svc.llm_manager.providers = {
         VENDOR: SimpleNamespace(config={"type": "anthropic", "model": "claude-sonnet-4-5"}),
@@ -286,7 +290,7 @@ async def test_a_vendor_alias_this_node_cannot_price_is_refused_before_it_runs(t
 
     svc.llm_manager.query.assert_not_awaited()
     payload = _refusal(svc)
-    assert payload["code"] == "insufficient_quota"
+    assert payload["code"] == "unrated"
     assert VENDOR in payload["error"] and "no rate" in payload["error"]
     assert "vendor_quotas" in payload["error"]
     assert _requests(coord._ledger) == [], "a refused call is not a call"
@@ -305,3 +309,38 @@ async def test_a_priced_vendor_alias_under_its_ceiling_is_still_served(tmp_path)
 
     svc.llm_manager.query.assert_awaited_once()
     assert "req-1" in _requests(coord._ledger)
+
+
+# --- three states, three words ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_three_money_gates_send_three_different_words(tmp_path):
+    """The split of 2026-09-15, in one assertion: a spent ceiling, an alias
+    with no rate and lists that cannot be read are three refusals under three
+    words. They shared one before, and the guest's door then answered all three
+    429 — «come back tomorrow» — which is true only of the first."""
+    ceiling, svc_ceiling = _vendor_host(tmp_path / "a")
+    _spend(ceiling._ledger, GUEST, QUOTA)
+    await ceiling.handle_inference_request(GUEST, "req-1", "ping")
+
+    rateless, svc_rateless = _vendor_host(tmp_path / "b")
+    svc_rateless.llm_manager.providers = {
+        VENDOR: SimpleNamespace(config={"type": "anthropic", "model": "claude-sonnet-4-5"}),
+    }
+    await rateless.handle_inference_request(GUEST, "req-1", "ping")
+
+    lists_dir = tmp_path / "c"
+    lists_dir.mkdir()
+    unreadable, svc_unreadable = _real_firewall_host(
+        lists_dir,
+        {"allow_nodes": [GUEST], "serving_local": [VENDOR]},
+        {VENDOR: SimpleNamespace(config={"type": "deepseek"})},
+    )
+    await unreadable.handle_inference_request(GUEST, "req-1", "ping")
+
+    words = [_refusal(svc)["code"] for svc in (svc_ceiling, svc_rateless, svc_unreadable)]
+    assert words == ["insufficient_quota", "unrated", "misconfigured"]
+    assert len(set(words)) == 3, "one word for three repairs is what was wrong"
+    for svc in (svc_ceiling, svc_rateless, svc_unreadable):
+        svc.llm_manager.query.assert_not_awaited()

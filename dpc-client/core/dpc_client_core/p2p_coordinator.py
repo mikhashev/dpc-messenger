@@ -390,9 +390,14 @@ class P2PCoordinator:
         refused: with the class unknown, «not a vendor alias» is a guess, and
         the wrong guess spends the host's money.
 
-        Returns `(error text, refusal code)` or None.
+        Returns `(error text, refusal code)` or None — three refusals under
+        three words, because only the ceiling refills by itself.
         """
-        from dpc_protocol.protocol import REFUSAL_INSUFFICIENT_QUOTA
+        from dpc_protocol.protocol import (
+            REFUSAL_INSUFFICIENT_QUOTA,
+            REFUSAL_MISCONFIGURED,
+            REFUSAL_UNRATED,
+        )
         from .gateway import vendor_alias_is_priced
 
         try:
@@ -402,7 +407,7 @@ class P2PCoordinator:
                 f"This node cannot serve '{serving_alias}': its compute serving lists are "
                 f"refused as a configuration error ({e}), and an alias whose class is unknown "
                 "is not served",
-                "",
+                REFUSAL_MISCONFIGURED,
             )
         if not isinstance(lists, ServingLists) or lists.owner_of(serving_alias) != "vendor":
             return None
@@ -415,7 +420,7 @@ class P2PCoordinator:
                 f"has no rate for it (model {model!r}), so what a call spends cannot be counted "
                 "against the daily ceiling in compute.vendor_quotas — an unpriced alias is "
                 "refused rather than served against a ceiling that would read $0.00 for ever",
-                REFUSAL_INSUFFICIENT_QUOTA,
+                REFUSAL_UNRATED,
             )
         # A vendor alias with no ceiling is refused when the rules are read, so
         # a missing one here is absent rather than unlimited.
