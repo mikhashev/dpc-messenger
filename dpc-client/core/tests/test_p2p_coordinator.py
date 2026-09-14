@@ -412,7 +412,7 @@ async def test_only_the_designated_alias_is_offered_to_a_peer():
         "deepseek_pro": {"alias": "deepseek_pro", "model": "deepseek-v4-pro", "type": "deepseek"},
     }
     svc.llm_manager.providers = {k: MagicMock() for k in infos}
-    svc.build_p2p_provider_info = MagicMock(side_effect=lambda alias, provider: infos[alias])
+    svc.build_p2p_provider_info = MagicMock(side_effect=lambda alias, provider, **_: infos[alias])
 
     await coord.handle_get_providers_request("peer-1")
 

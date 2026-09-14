@@ -106,6 +106,12 @@ class GeminiProvider(AIProvider):
             )
         return usage
 
+    def effective_settings(self) -> Dict[str, Any]:
+        """Nothing: this adapter sends no sampling and no ceiling, so a
+        temperature in the alias's configuration reaches no request and must
+        not reach a menu row either."""
+        return {}
+
     def supports_vision(self) -> bool:
         return True  # All Gemini models are natively multimodal
 

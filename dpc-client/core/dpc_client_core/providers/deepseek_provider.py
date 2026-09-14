@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, List, Union
 from openai import AsyncOpenAI
 
 from .base import (AIProvider, REASONING_OFF, image_base64, network_client_bounds,
-                   normalize_reasoning_effort)
+                   normalize_reasoning_effort, positive_ceiling)
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +380,23 @@ class DeepSeekProvider(AIProvider):
         if self._temperature_explicit is not None:
             return self._temperature_explicit
         return 1.0
+
+    def effective_settings(self) -> Dict[str, Any]:
+        """The ceiling always, the sampling only where this API honours it.
+
+        `_sampling_params` withholds temperature and `top_p` while thinking is
+        on, so a row quoting the configured number there would advertise a dial
+        wired to nothing — the same reason the field is not sent.
+        """
+        settings: Dict[str, Any] = {}
+        ceiling = positive_ceiling(self.max_tokens)
+        if ceiling is not None:
+            settings["max_output_tokens"] = ceiling
+        if not self._thinking_for_call():
+            settings["temperature"] = self._effective_temperature()
+            if self.top_p is not None:
+                settings["top_p"] = self.top_p
+        return settings
 
     # --- plain text generation ---
 

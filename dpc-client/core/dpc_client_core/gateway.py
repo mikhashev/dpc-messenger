@@ -332,6 +332,26 @@ class Gateway:
                 menu[peer_id] = rows
         return menu
 
+    def local_row_extras(self, alias: str) -> Dict[str, Any]:
+        """`tariff` and `settings` for one of this node's own aliases.
+
+        The same two keys a peer's row carries (DPTP §3.5), so an IDE client
+        reads one shape for both kinds of row. The loopback caller is this node
+        (`caller`), so the tariff resolved for it is what this node declares for
+        the alias — what it would quote a peer, not a bill for a call made here.
+        """
+        core = self._core
+        node_id = getattr(getattr(core, "p2p_manager", None), "node_id", None)
+        providers = getattr(getattr(core, "llm_manager", None), "providers", None) or {}
+        extras: Dict[str, Any] = {}
+        tariff = core.menu_tariff(alias, node_id)
+        if tariff is not None:
+            extras["tariff"] = tariff
+        settings = core.menu_settings(providers.get(alias))
+        if settings:
+            extras["settings"] = settings
+        return extras
+
     def max_image_bytes(self) -> int:
         """The most one image may weigh, decoded — `[vision] max_image_size_mb`.
 
@@ -1389,6 +1409,16 @@ def _alias_of(body: Dict[str, Any]) -> str:
     return alias
 
 
+def _peer_row_extras(row: Dict[str, Any]) -> Dict[str, Any]:
+    """A host's `tariff` and `settings` (DPTP §3.5) carried onto its model row.
+
+    Copied, never recomputed: on a `remote:` row these are the host's own
+    statements about its own alias, and an OpenAI client ignores the keys it
+    does not know.
+    """
+    return {key: row[key] for key in ("tariff", "settings") if isinstance(row.get(key), dict)}
+
+
 class GatewayServer:
     """The OpenAI-compatible HTTP surface over one `Gateway`."""
 
@@ -1540,7 +1570,8 @@ class GatewayServer:
         if self.gateway.compute_sharing_on():
             lists = self.gateway.serving_lists()
             data = [
-                {"id": alias, "object": "model", "created": 0, "owned_by": owner}
+                {"id": alias, "object": "model", "created": 0, "owned_by": owner,
+                 **self.gateway.local_row_extras(alias)}
                 for owner, aliases in (("local", lists.local), ("vendor", lists.vendor))
                 for alias in aliases
             ]
@@ -1548,7 +1579,8 @@ class GatewayServer:
         # name — listed whatever this node's flag says, since the door those
         # rows stand in is the peer's.
         data.extend(
-            {"id": f"{REMOTE_PREFIX}{peer_id}:{row['alias']}", "object": "model", "created": 0, "owned_by": peer_id}
+            {"id": f"{REMOTE_PREFIX}{peer_id}:{row['alias']}", "object": "model", "created": 0,
+             "owned_by": peer_id, **_peer_row_extras(row)}
             for peer_id, rows in self.gateway.peer_menu().items()
             for row in rows
         )

@@ -584,7 +584,22 @@ Returns a list of AI providers available on the peer's system.
         "supports_tools": true,
         "context_window": 131072,
         "reasoning_words": ["xhigh", "medium", "low"],
-        "reasoning_default": "xhigh"
+        "reasoning_default": "xhigh",
+        "tariff": {
+          "in": 20.0,
+          "out": 60.0,
+          "currency": "RUB",
+          "from": "2026-09-01",
+          "unit": "per_1m_tokens",
+          "free": false
+        },
+        "settings": {
+          "temperature": 1.0,
+          "top_p": 0.95,
+          "top_k": 20,
+          "max_output_tokens": 8192,
+          "variant": "gpt-oss-120b-Q5_K_M.gguf"
+        }
       },
       {
         "alias": "GPT-4 Turbo",
@@ -624,6 +639,35 @@ Returns a list of AI providers available on the peer's system.
     resolution the host applies to a REMOTE_INFERENCE_REQUEST that carries no
     `reasoning_effort`, and the same word that comes back in `served_effort`. Sent with
     `reasoning_words` and under the same condition
+  - `tariff` (object, optional, v1.7+): What **this recipient** is charged for a call on
+    this alias, resolved by the sender the way it prices the call itself, so the menu
+    quotes the rate the receipt will carry (§3.4 `tariff_in` / `tariff_out`). Its absence
+    means the sender declared no tariff — the call is a gift — and is **not** the same as
+    free: a declared zero is a price somebody chose, and a receiver must not read a
+    missing object as one. Fields:
+    - `in`, `out` (number, required): the rates, in `unit`, for prompt and for output
+      tokens. Reasoning is billable output at `out`, on the convention §3.4's
+      `output_includes_thinking` states
+    - `currency` (string, required): ISO 4217, the sender's own `compute.currency`. The
+      protocol picks no currency, and parity between two nodes' units is their agreement
+    - `from` (string, required): the `YYYY-MM-DD` day the dated entry that applied begins,
+      so a receiver can see which line of the declaration it was quoted
+    - `unit` (string, required): the unit of `in` and `out`. `per_1m_tokens` is the only
+      value v1.7 defines; a receiver that does not know the word **must not price the row**
+      rather than guess a scale
+    - `free` (boolean, required): whether this recipient pays nothing — `in` and `out` both
+      zero, whether because the sender declared the alias free or because this peer is on
+      its free list. Zero rates and `false` cannot occur together
+  - `settings` (object, optional, v1.7+): The dials a call on this alias will actually run
+    at, so a guest sees what it is choosing before it calls, the settings it cannot change
+    included. **Fail-closed**: a key the sender cannot vouch for is absent, and absent means
+    «not stated», never «none applies» — a vendor default the sender never chose still
+    applies at the vendor. The whole object is absent when the sender states nothing. Keys,
+    all optional: `temperature`, `top_p`, `top_k` (number); `max_output_tokens` (integer) —
+    the ceiling on one answer, whatever the provider's own name for it is; `variant`
+    (string) — the build behind `model` where the sender can read one, such as a GGUF file
+    name. `context_window` and `reasoning_default` stay where they are, at the top of the
+    row, and are not repeated here
 
 ---
 
@@ -2597,6 +2641,14 @@ DPTP is designed to be extensible. New commands can be added by:
   before it is read rather than allocated, and refused at the sender too
   (ADR-041 D8). Was «Unlimited (implementation may impose limits)»; the
   implementation now does, and says so
+- **§3.5 PROVIDERS_RESPONSE** — optional `tariff` and `settings` on a provider
+  row: what this recipient is charged for the alias, in rates per 1M tokens
+  whose `unit` the row states, and the dials the call will run at. A guest could
+  learn a price only from the answer that had already cost it, and could not
+  learn the temperature, the output ceiling or the quantisation at all. Both are
+  fail-closed — an absent tariff means none is declared, which is not free, and
+  an absent setting means the host does not state it, not that none applies.
+  Added 2026-09-14 while v1.7 is unreleased
 
 ### v1.6 (August 2026)
 - **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v2`; `v1` still read), added with

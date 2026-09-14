@@ -32,7 +32,8 @@ from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, REASONING_OFF, declared_reasoning_words, image_base64
+from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_base64,
+                   positive_ceiling)
 from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
@@ -496,6 +497,27 @@ class LlamaServerProvider(DeepSeekProvider):
         if self._temperature_explicit is not None:
             return self._temperature_explicit
         return 1.0
+
+    def effective_settings(self) -> Dict[str, Any]:
+        """Every dial this server is actually sent, and the file behind the name.
+
+        A temperature always: `_sampling_params` sends one on every call, the
+        1.0 nobody configured included. `variant` is the GGUF's file name — the
+        quantisation a guest is choosing between lives in it, and the directory
+        it sits in is this machine's business and stays off the row.
+        """
+        settings: Dict[str, Any] = {"temperature": self._effective_temperature()}
+        if self.top_p is not None:
+            settings["top_p"] = self.top_p
+        if self.top_k is not None:
+            settings["top_k"] = self.top_k
+        ceiling = positive_ceiling(self.max_tokens)
+        if ceiling is not None:
+            settings["max_output_tokens"] = ceiling
+        variant = Path(self.config.get("gguf_path") or "").name
+        if variant:
+            settings["variant"] = variant
+        return settings
 
     @staticmethod
     def _is_retryable(error: Exception) -> bool:

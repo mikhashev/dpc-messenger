@@ -155,7 +155,64 @@ EXTERNAL_AGENT_PREFIX = "ext:"
 # mention can name — an external agent's tag and an embedded agent's display name
 # alike, which is why the rule is here rather than beside either one.
 MENTIONABLE_NAME_RE = re.compile(r"\w+")
+
 _EXTERNAL_TAG_RE = MENTIONABLE_NAME_RE
+
+
+# The unit a menu row's tariff numbers are in (DPTP §3.5), stated on the row
+# itself: `compute.serving_tariff` declares rates per 1M tokens, and a guest
+# that does not know this word must not price the row at all.
+MENU_TARIFF_UNIT = "per_1m_tokens"
+
+
+def menu_tariff_row(firewall: Any, alias: str, peer_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """What `peer_id` is charged for a call on `alias` today, or None.
+
+    The same resolution the call itself is priced by
+    (`P2PCoordinator._tariff_for_call` → `ContextFirewall.tariff_for`), so the
+    menu quotes the rate the receipt will carry rather than a second reading of
+    the rules. None is «nothing declared» — the v1 gift — and is not «free»: a
+    declared tariff of zero is a price, and `free` is what says so. `in` and
+    `out` are per 1M tokens, stated in `unit`, because a guest may not price a
+    row whose unit it does not know.
+    """
+    tariff_for = getattr(firewall, "tariff_for", None)
+    if not peer_id or not callable(tariff_for):
+        return None
+    try:
+        applied = tariff_for(alias, peer_id=peer_id, at=datetime.now(timezone.utc))
+    except Exception:
+        logger.warning(
+            "The tariff for %s could not be resolved for the menu sent to %s; the row "
+            "carries none", alias, peer_id, exc_info=True,
+        )
+        return None
+    if applied is None:
+        return None
+    return {
+        "in": applied.in_per_1m,
+        "out": applied.out_per_1m,
+        "currency": applied.currency,
+        "from": applied.at.isoformat(),
+        "unit": MENU_TARIFF_UNIT,
+        "free": applied.in_per_1m == 0 and applied.out_per_1m == 0,
+    }
+
+
+def menu_settings_row(provider: Any) -> Dict[str, Any]:
+    """The dials the alias runs at, for a menu row — `{}` where the provider
+    vouches for none (`AIProvider.effective_settings`, fail-closed)."""
+    effective = getattr(provider, "effective_settings", None)
+    if not callable(effective):
+        return {}
+    try:
+        settings = effective()
+    except Exception:
+        logger.warning("Provider %r could not state its settings", provider, exc_info=True)
+        return {}
+    if not isinstance(settings, dict):
+        return {}
+    return {key: value for key, value in settings.items() if value is not None}
 
 
 def external_agents_to_wake(allowed_agents, mention_names, cc_display_name,
@@ -2310,7 +2367,18 @@ class CoreService:
         """Delegated to VoiceService."""
         return self.voice_service._provider_supports_voice(provider)
 
-    def build_p2p_provider_info(self, alias: str, provider: Any) -> Dict[str, Any]:
+    def menu_tariff(self, alias: str, peer_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """This node's tariff row for `alias` as `peer_id` is charged it."""
+        return menu_tariff_row(getattr(self, "firewall", None), alias, peer_id)
+
+    @staticmethod
+    def menu_settings(provider: Any) -> Dict[str, Any]:
+        """The dials `provider` will run a call at, for a menu row."""
+        return menu_settings_row(provider)
+
+    def build_p2p_provider_info(
+        self, alias: str, provider: Any, *, peer_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Single source for the provider dict sent to peers in PROVIDERS_RESPONSE.
 
         context_window is None when the model is unknown locally, so peers can
@@ -2331,6 +2399,14 @@ class CoreService:
         route: a provider with a native `generate_with_tools` path. It saves a
         guest a round trip it would lose; the host's refusal on the wire is
         still the gate.
+
+        `tariff` and `settings` are what the guest decides on: the price this
+        peer is charged and the dials the call will run at, even the ones it
+        cannot change (Mike's rule, 2026-09-14). Both are fail-closed — a
+        tariff nobody declared and a setting the provider cannot vouch for are
+        absent, and absent means «not stated», not «free» or «none applies».
+        `peer_id` is who the row is for: without one there is no free list to
+        resolve and the row carries no tariff.
         """
         info = {
             "alias": alias,
@@ -2346,6 +2422,13 @@ class CoreService:
         if words is not None:
             info["reasoning_words"] = words
             info["reasoning_default"] = effective_reasoning_default(provider)
+
+        tariff = menu_tariff_row(getattr(self, "firewall", None), alias, peer_id)
+        if tariff is not None:
+            info["tariff"] = tariff
+        settings = menu_settings_row(provider)
+        if settings:
+            info["settings"] = settings
 
         return info
 
@@ -7410,7 +7493,9 @@ class CoreService:
                     all_models = []
 
                     for alias, provider in self.llm_manager.providers.items():
-                        all_providers.append(self.build_p2p_provider_info(alias, provider))
+                        all_providers.append(
+                            self.build_p2p_provider_info(alias, provider, peer_id=peer_id)
+                        )
                         all_models.append(provider.model)
 
                     logger.debug("Found %d total providers", len(all_providers))

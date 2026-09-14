@@ -33,6 +33,7 @@ from dpc_client_core.gateway import (
 )
 from dpc_client_core.llm_manager import flatten_messages
 from dpc_client_core.node_ledger import NodeLedger, usage_row
+from dpc_client_core.service import CoreService
 from dpc_client_core.settings import Settings
 
 NODE_ID = "dpc-node-" + "a" * 32
@@ -126,7 +127,7 @@ def _service(tmp_path: Path, compute: dict, *, providers=None, fail=None, finish
         return dict(_metadata(provider_alias), streamed=False, flattened=False,
                     tools_used=False, tool_calls=[], finish_reason=finish_reason)
 
-    return types.SimpleNamespace(
+    service = types.SimpleNamespace(
         firewall=ContextFirewall(rules),
         llm_manager=types.SimpleNamespace(providers=providers, query=query,
                                           query_messages=query_messages),
@@ -137,6 +138,11 @@ def _service(tmp_path: Path, compute: dict, *, providers=None, fail=None, finish
         ),
         calls=calls,
     )
+    # The menu helpers the model list reads are CoreService's own, bound to
+    # this stand-in: a copy of them here would answer for a builder nobody ships.
+    service.menu_tariff = lambda alias, peer_id: CoreService.menu_tariff(service, alias, peer_id)
+    service.menu_settings = CoreService.menu_settings
+    return service
 
 
 @contextlib.asynccontextmanager

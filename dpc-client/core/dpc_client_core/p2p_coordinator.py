@@ -889,7 +889,7 @@ class P2PCoordinator:
             return
 
         all_providers = [
-            self.service.build_p2p_provider_info(alias, provider)
+            self.service.build_p2p_provider_info(alias, provider, peer_id=peer_id)
             for alias, provider in self.service.llm_manager.providers.items()
         ]
 

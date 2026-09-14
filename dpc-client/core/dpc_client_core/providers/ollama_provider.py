@@ -12,7 +12,8 @@ from typing import Dict, Any, Optional, List, Union
 import httpx
 import ollama
 
-from .base import AIProvider, REASONING_OFF, image_base64, normalize_reasoning_effort
+from .base import (AIProvider, REASONING_OFF, image_base64, normalize_reasoning_effort,
+                   numeric_setting, positive_ceiling)
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +403,22 @@ class OllamaProvider(AIProvider):
             "the model's default.",
             self.alias, sent, self.model, default,
         )
+
+    def effective_settings(self) -> Dict[str, Any]:
+        """What `_build_options` forwards to the daemon, under the row's names.
+
+        The ceiling is `num_predict`, one of `OLLAMA_SAMPLING_PARAMS`; an alias
+        that names none runs to the model's own end and the row says nothing.
+        """
+        settings = super().effective_settings()
+        for key in ("top_p", "top_k"):
+            value = numeric_setting(self.config.get(key))
+            if value is not None:
+                settings[key] = value
+        ceiling = positive_ceiling(self.config.get("num_predict"))
+        if ceiling is not None:
+            settings["max_output_tokens"] = ceiling
+        return settings
 
     def _build_options(self, **kwargs) -> Optional[Dict[str, Any]]:
         options: Dict[str, Any] = {}

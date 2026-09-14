@@ -2,6 +2,7 @@
 # Base class, shared exceptions, shared constants, and shared utilities for all AI providers.
 
 import itertools
+import math
 import logging
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -114,6 +115,28 @@ def reasoning_word_for(provider: Any, word: Optional[str]) -> Optional[str]:
             logger.debug("Provider %r could not resolve effort %r: %s", provider, word, e)
             return normalize_reasoning_effort(word)
     return normalize_reasoning_effort(word)
+
+
+def numeric_setting(value: Any) -> Optional[Any]:
+    """`value` as a number a menu row may quote, or None.
+
+    A finite int or float and not a bool: `True` is an int here and NaN is a
+    float, and either one on a row is a dial nobody set.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def positive_ceiling(value: Any) -> Optional[int]:
+    """`value` as an output ceiling, or None.
+
+    A ceiling is a positive whole number of tokens; Ollama's `num_predict` also
+    takes -1 and -2, which mean «no ceiling», and those are absent rather than
+    reported as a limit.
+    """
+    number = numeric_setting(value)
+    return int(number) if number is not None and number > 0 else None
 
 
 def effective_reasoning_default(provider: Any) -> Optional[str]:
@@ -694,6 +717,26 @@ class AIProvider:
             NotImplementedError: If the provider has no balance API (subscription/local).
         """
         raise NotImplementedError(f"Balance API not implemented for {self.__class__.__name__}")
+
+    def effective_settings(self) -> Dict[str, Any]:
+        """The dials a call on this alias will actually run at, fail-closed.
+
+        What a menu row carries under `settings` (DPTP §3.5): `temperature`,
+        `top_p`, `top_k`, `max_output_tokens` — the ceiling on one answer,
+        whatever the provider's own field for it is called — and `variant`, the
+        build behind the model name where the host can read one.
+
+        A key the provider cannot vouch for is absent, and absent reads as «not
+        stated», never «none applies». The base therefore reports only the
+        temperature its own scaffolding sends, and only when the configuration
+        states one: `max_tokens` is read by three of the classes here and
+        ignored by the rest, so a base reporting it would promise a ceiling
+        that aliases of the other types never send. A provider that always
+        sends a value of its own overrides this; one that sends no sampling at
+        all overrides it with nothing.
+        """
+        value = numeric_setting((self.config or {}).get("temperature"))
+        return {} if value is None else {"temperature": value}
 
     def get_state(self) -> dict:
         return {"alias": self.alias, "model": self.model, "type": self.config.get("type")}

@@ -70,6 +70,12 @@ class GigaChatProvider(AIProvider):
             f"scope={self._client_kwargs['scope']}"
         )
 
+    def effective_settings(self) -> Dict[str, Any]:
+        """Nothing: `achat` is called with the prompt alone, so a temperature in
+        the alias's configuration reaches no request and must not reach a menu
+        row either."""
+        return {}
+
     def supports_vision(self) -> bool:
         return "Max" in self.model  # Only GigaChat-2-Max supports vision
 
