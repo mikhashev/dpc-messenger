@@ -991,7 +991,7 @@ The `special_instructions` block (added in schema v1.1) provides comprehensive g
 auto_collect_device_info = true   # Master toggle
 collect_hardware_specs = true     # CPU/RAM/disk/GPU details
 collect_dev_tools = true          # Git, Docker, Node, etc.
-collect_ai_models = false         # Ollama models (opt-in for compute-sharing)
+collect_ai_models = false         # Ollama models (opt-in for inference-sharing)
 ```
 
 **Example AI Assistance** (powered by special_instructions):
@@ -999,7 +999,7 @@ collect_ai_models = false         # Ollama models (opt-in for compute-sharing)
 - **Driver-aware**: "CUDA 12.8 detected - use PyTorch 2.5+ for compatibility"
 - **Resource-aware**: "You have 24GB RAM - can run 2 models simultaneously"
 - **Platform-specific**: "Windows 10 detected - use WSL2 for better Linux compatibility"
-- **Compute-sharing**: "Alice has RTX 4090 (24GB) - offload training to her GPU"
+- **Inference-sharing**: "Alice has RTX 4090 (24GB) - offload training to her GPU"
 - **Privacy-aware**: "Sharing only OS version and dev tools, hardware specs require explicit allow rules"
 
 ### In-App Configuration Editors
@@ -1029,7 +1029,7 @@ The client provides in-app editors for key configuration files, eliminating the 
 - **Format**: JSON (stored as `~/.dpc/privacy_rules.json`)
 - **UI Style**: Form-based interface matching Personal Context editor (DRY principle)
 - **Features**:
-  - Tab-based navigation (Hub Sharing, Node Groups, Compute Sharing, Peer Permissions)
+  - Tab-based navigation (Hub Sharing, Node Groups, Inference Sharing, Peer Permissions)
   - Native HTML form elements (no Monaco editor)
   - Edit/Save/Cancel workflow with unsaved changes detection
   - Real-time validation on save
@@ -1037,7 +1037,7 @@ The client provides in-app editors for key configuration files, eliminating the 
 - **Tabs**:
   - **Hub Sharing**: Control what the Hub can see for discovery
   - **Node Groups**: Define groups of nodes with add/remove functionality
-  - **Compute Sharing**: Enable/configure remote inference with checkboxes and textareas
+  - **Inference Sharing**: Enable/configure remote inference with checkboxes and textareas
   - **Peer Permissions**: View per-node and per-group access rules (read-only for now)
 - **Validation**:
   - Checks JSON structure

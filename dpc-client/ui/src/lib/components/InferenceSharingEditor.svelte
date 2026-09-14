@@ -1,5 +1,5 @@
-<!-- ComputeSharingEditor.svelte -->
-<!-- The Compute Sharing section of the firewall dialog: what this node
+<!-- InferenceSharingEditor.svelte -->
+<!-- The Inference Sharing section of the firewall dialog: what this node
      serves, who may call, who calls for free, and at what tariff. Blocks
      (1)-(4) of the board entry THE-COMPUTE-SHARING-TAB-DESIGNATES-ONE-ALIAS…;
      the IDE door (5) and the guest preview (6) are not here yet.
@@ -36,7 +36,7 @@
     type ComputeRules,
     type ServingList,
     type TariffEntry,
-  } from './computeSharing';
+  } from './inferenceSharing';
   import InferenceUsage from './InferenceUsage.svelte';
 
   export let displayCompute: ComputeRules | null = null;
@@ -169,7 +169,7 @@
 </script>
 
 <div class="section">
-  <h3>Compute Sharing (Remote Inference)</h3>
+  <h3>Inference Sharing (Remote Inference)</h3>
   <p class="help-text">
     What this node serves to peers, who may call it, who calls for free, and what a call costs.
     Every choice below is picked from data the application already holds.
@@ -531,7 +531,7 @@
       <InferenceUsage nodes={usageNodes} />
     </div>
   {:else}
-    <p class="empty">Compute sharing not configured.</p>
+    <p class="empty">Inference sharing not configured.</p>
   {/if}
 </div>
 

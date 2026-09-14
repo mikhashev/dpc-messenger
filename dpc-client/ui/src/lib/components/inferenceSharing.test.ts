@@ -24,7 +24,7 @@ import {
   tariffHistory,
   tariffState,
   type ComputeRules,
-} from './computeSharing';
+} from './inferenceSharing';
 
 const provider = (alias: string, type: string): ProviderInfo => ({ alias, model: `${alias}-model`, type, supports_vision: false });
 

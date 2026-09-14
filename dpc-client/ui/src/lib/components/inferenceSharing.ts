@@ -1,4 +1,4 @@
-// computeSharing.ts — the pure half of the Compute Sharing tab.
+// inferenceSharing.ts — the pure half of the Inference Sharing tab.
 //
 // Everything here mirrors a rule the backend already enforces in
 // dpc_client_core/firewall.py, so the tab emits exactly the `compute` block
@@ -46,7 +46,7 @@ export interface ComputeRules {
 
 /** A local type spends the card. firewall.py's LOCAL_PROVIDER_TYPES also
  *  holds `local_whisper`; the board (2026-09-10) and the tab before this one
- *  keep Whisper out of compute sharing — it is reached through Transcription
+ *  keep Whisper out of inference sharing — it is reached through Transcription
  *  Sharing, which has a gate of its own — so it is classified apart. */
 export const LOCAL_SERVING_TYPES: ReadonlySet<string> = new Set(['ollama', 'llamacpp_server']);
 /** A vendor type spends money and needs a ceiling (VENDOR_PROVIDER_TYPES). */

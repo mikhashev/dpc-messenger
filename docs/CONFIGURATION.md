@@ -310,7 +310,7 @@ its own calls on its own key, neither side of a sharing. Both take optional `sin
 `until` ISO datetime bounds, and `get_inference_usage` a `month` of `YYYY-MM` to read one
 partition. A tariff that applied over counts nobody could price (`tariff_unpriceable`) and
 a call with no tariff declared at all (`untariffed`) are counted apart from the money and
-never added into it as a zero. The Compute Sharing tab of the firewall dialog reads
+never added into it as a zero. The Inference Sharing tab of the firewall dialog reads
 `get_inference_usage` for the current month and shows the three series as three lists.
 
 **Shape and limits.** `model` in a request is the alias; `/v1/models` lists the aliases
@@ -698,7 +698,7 @@ The gateway has no image cap of its own: an image at either door is bounded by
 | `auto_collect_device_info` | `true` | Automatically collect device/system info for AI context |
 | `collect_hardware_specs` | `true` | Collect hardware tiers (RAM, CPU, disk, GPU) |
 | `collect_dev_tools` | `true` | Collect installed dev tools and versions |
-| `collect_ai_models` | `false` | Collect locally available AI models (opt-in for compute-sharing) |
+| `collect_ai_models` | `false` | Collect locally available AI models (opt-in for inference-sharing) |
 
 #### `[telegram]`
 

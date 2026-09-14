@@ -1412,7 +1412,7 @@ class ContextFirewall:
                     "personal": ["personal.json", "hobbies.json"]
                 },
                 "compute": {
-                    "_comment": "Compute sharing settings - Share this node's models with peers (its peer door and its own aliases on the loopback gateway). Asking a peer for inference does not need it. With enabled false neither door serves this node's own aliases, whatever serving_local and serving_vendor name, while a peer's remote:<node_id>:<alias> stays callable on the gateway; the gateway also needs [gateway] enabled = true in config.ini, so this node's own aliases are served only when both are on. Peers' prompts arrive on this machine in plaintext when served, and this application shows, stores and logs none of them (ADR-041 D7, amendment 2026-09-14).",
+                    "_comment": "Inference sharing settings - Share this node's models with peers (its peer door and its own aliases on the loopback gateway). Asking a peer for inference does not need it. With enabled false neither door serves this node's own aliases, whatever serving_local and serving_vendor name, while a peer's remote:<node_id>:<alias> stays callable on the gateway; the gateway also needs [gateway] enabled = true in config.ini, so this node's own aliases are served only when both are on. Peers' prompts arrive on this machine in plaintext when served, and this application shows, stores and logs none of them (ADR-041 D7, amendment 2026-09-14).",
                     "enabled": False,
                     "allow_groups": [],
                     "allow_nodes": [],

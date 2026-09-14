@@ -5,8 +5,8 @@
   import { createEventDispatcher } from 'svelte';
   import { sendCommand } from '$lib/coreService';
   import AgentPermissionsPanel from './AgentPermissionsPanel.svelte';
-  import ComputeSharingEditor from './ComputeSharingEditor.svelte';
-  import type { ComputeRules } from './computeSharing';
+  import InferenceSharingEditor from './InferenceSharingEditor.svelte';
+  import type { ComputeRules } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
 
   export let open: boolean = false;
@@ -18,7 +18,7 @@
     hub?: Record<string, string>;
     node_groups?: Record<string, string[]>;
     file_groups?: Record<string, string[]>;
-    // The block's shape is owned by computeSharing.ts, beside the component
+    // The block's shape is owned by inferenceSharing.ts, beside the component
     // that edits it, and mirrors firewall.py's `_parse_compute_settings`.
     compute?: ComputeRules;
     transcription?: {
@@ -1043,7 +1043,7 @@
           class:active={selectedTab === 'compute'}
           on:click={() => selectedTab = 'compute'}
         >
-          Compute Sharing
+          Inference Sharing
         </button>
         <button
           class="tab"
@@ -1272,7 +1272,7 @@
         {:else if selectedTab === 'compute'}
           <!-- Blocks (1)-(4) of the compute tab live in their own component;
                the edit object is mutated in place, so saveChanges posts it as is. -->
-          <ComputeSharingEditor
+          <InferenceSharingEditor
             displayCompute={displayRules?.compute ?? null}
             editCompute={editMode && editedRules ? (editedRules.compute ?? null) : null}
             {editMode}

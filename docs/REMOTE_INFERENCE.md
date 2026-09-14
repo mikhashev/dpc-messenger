@@ -19,7 +19,7 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 
 **With Remote Inference:**
 1. Bob connects to Anna via P2P (Direct TLS or WebRTC)
-2. Bob enables compute sharing for Anna in his firewall config
+2. Bob enables inference sharing for Anna in his firewall config
 3. Bob asks a complex question about game mechanics
 4. Bob selects "Anna" as the compute host in the UI
 5. The query runs on Anna's powerful model
@@ -65,7 +65,7 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 
 ### Firewall Integration
 
-**Compute Sharing Permissions** (`~/.dpc/privacy_rules.json`):
+**Inference Sharing Permissions** (`~/.dpc/privacy_rules.json`):
 ```json
 {
   "compute": {
@@ -109,15 +109,15 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 
 ## Configuration
 
-### Enabling Compute Sharing
+### Enabling Inference Sharing
 
-Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
+Edit `~/.dpc/privacy_rules.json` to enable inference sharing:
 
 ```json
 {
   "_comment": "Firewall access control configuration",
   "compute": {
-    "_comment": "Compute sharing settings (Remote Inference)",
+    "_comment": "Inference sharing settings (Remote Inference)",
     "enabled": true,
     "allow_groups": ["friends", "colleagues"],
     "allow_nodes": ["dpc-node-alice-abc123"],
@@ -135,7 +135,7 @@ Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
 ### Security Considerations
 
 **Access Control:**
-- Compute sharing is **disabled by default**
+- Inference sharing is **disabled by default**
 - Must explicitly enable and specify allowed peers
 - Can restrict which models peers can use
 - All requests go through firewall permission checks
@@ -161,7 +161,7 @@ Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
 
 ### From the UI
 
-1. **Enable Compute Sharing** (Host Side):
+1. **Enable Inference Sharing** (Host Side):
    - Edit `~/.dpc/privacy_rules.json`
    - Add `"compute"` section with permissions
    - Restart the client
@@ -290,7 +290,7 @@ overhead; a shorter one can still be set per alias via `timeout`. (The former ad
 ```bash
 # Terminal 1: Start Host (powerful PC)
 cd dpc-client/core
-# Edit ~/.dpc/privacy_rules.json to enable compute sharing
+# Edit ~/.dpc/privacy_rules.json to enable inference sharing
 uv run python run_service.py
 
 # Terminal 2: Start Requestor (weak laptop)
@@ -305,7 +305,7 @@ uv run python run_service.py
 
 **Test 2: Access Denied**
 ```json
-// Host: Disable compute sharing in ~/.dpc/privacy_rules.json
+// Host: Disable inference sharing in ~/.dpc/privacy_rules.json
 {
   "compute": {
     "enabled": false
@@ -364,7 +364,7 @@ ollama serve  # Ensure service is running
 
 ## Security Best Practices
 
-1. **Only enable compute sharing for trusted peers**
+1. **Only enable inference sharing for trusted peers**
    - Remote inference exposes your GPU/CPU to peer's prompts
    - Use `allow_nodes` or tight `allow_groups` restrictions
 

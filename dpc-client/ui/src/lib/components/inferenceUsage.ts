@@ -1,4 +1,4 @@
-// inferenceUsage.ts — the pure half of the Usage block of the Compute Sharing tab.
+// inferenceUsage.ts — the pure half of the Usage block of the Inference Sharing tab.
 //
 // The backend already reads the node ledger by role: `node_ledger.usage_by_role`
 // folds the same rows three ways and `CoreService.get_inference_usage` answers
@@ -54,7 +54,7 @@ export interface UsageResponse {
 export type UsageRole = 'served' | 'consumed' | 'own';
 
 /** A node the application already holds a name for — `knownNodes` in
- *  computeSharing.ts, which is the tab's own source for peer names. */
+ *  inferenceSharing.ts, which is the tab's own source for peer names. */
 export interface NamedNode {
   node_id: string;
   label: string;

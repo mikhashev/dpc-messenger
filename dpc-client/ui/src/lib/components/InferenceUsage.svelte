@@ -1,5 +1,5 @@
 <!-- InferenceUsage.svelte -->
-<!-- The Usage block of the Compute Sharing tab: what this node served to
+<!-- The Usage block of the Inference Sharing tab: what this node served to
      peers, what it consumed from them, and what it ran for itself, each on
      its own list so a person sees plainly who spent what, how much and on
      what (Mike's call, 2026-09-14; board entry THE-LEDGER-COUNTS-EVERY-
@@ -177,7 +177,7 @@
 
 <style>
   /* Scoped copies of the tab's own classes: a child component does not see
-     ComputeSharingEditor's styles, and the block must read as one dialog.
+     InferenceSharingEditor's styles, and the block must read as one dialog.
      Same declarations as there — this block adds no look of its own. */
   .subsection { margin-top: 1rem; padding-left: 1rem; border-left: 3px solid #e0e0e0; }
   .subsection h4 { margin: 0 0 0.5rem 0; font-size: 1rem; color: #555; }
