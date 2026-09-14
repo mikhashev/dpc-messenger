@@ -74,6 +74,11 @@ SSE is a *re-chunked buffer* — the consumer's editor renders token by token
 what arrived seconds earlier all at once. That is a support ticket forever, and
 it belongs in the shipping order rather than in a footnote.
 
+*Closed 2026-09-14* by the D4 amendment of that date: `REMOTE_INFERENCE_CHUNK`
+carries the deltas on their own frames while the future below still awaits the
+answer, so the re-chunked buffer this measurement predicted is gone. What the
+measurement observed on its own date is unchanged.
+
 *Also observed:* the peer wait carries a timeout that reaches the await —
 `asyncio.wait_for(response_future, timeout=timeout)`, 1200 s by default,
 180 s as `llm_adapter` passes it. The peer path is not among the places that
@@ -445,7 +450,9 @@ request that caused this ADR to exist**.
 4. **Peer-routed gateway — the colleague is served here.** Non-streaming (M1),
    over a proved connection only (D2), attribution keyed to the proved sender
    (D7). The re-chunked-SSE caveat (M1) is stated to the user, not discovered by
-   him.
+   him. *(Both halves of this step's narrowing are closed by the amendment of
+   2026-09-14 below: the wire streams, and it carries tools and the
+   conversation. D2 and D7 stand unchanged.)*
 5. **API-backed sharing** (D5), which does not start before its quota exists.
 
 Deferred beyond this list, explicitly: `/v1/embeddings`, which Continue wants
@@ -478,7 +485,9 @@ narrow, and is refused rather than dropped: forcing a tool (`tool_choice`
 here runs `auto`; tools on the peer route, because `REMOTE_INFERENCE_REQUEST`
 carries none; and token-level deltas under a tool call, because no provider on
 this node streams while holding tools. Step 4 — the peer route — still answers
-whole. Mike's ask, 2026-09-13.)*
+whole. Mike's ask, 2026-09-13. *(The two peer narrowings — tools, and answering
+whole — are closed by the amendment of 2026-09-14 below; tool forcing and
+token-level deltas under a tool call stay narrow.)*)*
 
 *(**Amendment, 2026-09-14 — reasoning effort and images cross both doors.** The
 peer wire has carried both since before this gateway existed —
@@ -527,6 +536,62 @@ holds none; an alias whose provider says it has no vision, and a peer whose
 menu row says `supports_vision: false`. `aiohttp`'s own 1 MiB body cap is
 raised to four times the image cap, or most images would have been refused
 before any handler saw them. Mike's ask, 2026-09-14.)*
+
+*(**Amendment, 2026-09-14 — the peer route is no narrower than the local one.**
+The wire was the reason for every narrowing above, so the wire changed. DPTP
+v1.7 puts four optional fields on `REMOTE_INFERENCE_REQUEST` — `messages`
+(the conversation un-flattened, Anthropic-shaped), `system`, `tools` and
+`stream` — two on the response — `tool_calls` as `tool_use` blocks and
+`finish_reason` in the providers' own vocabulary — and adds one message,
+`REMOTE_INFERENCE_CHUNK` (`request_id`, `seq`, `delta`). Board entry
+THE-PEER-WIRE-CARRIES-ONE-PROMPT-SO-A-GUEST-GETS-NO-TOOLS-NO-STREAM-AND-NO-CONVERSATION;
+Mike's verb, 2026-09-14.
+
+**What this closes.** M1's «there is no streaming over the peer path» is closed
+as a constraint: `request_inference_from_peer` still awaits one future for the
+answer, and the chunks arrive beside it on their own frames. D4 step 4's
+«non-streaming (M1)», its one-chunk shape and its re-chunked-SSE caveat are
+closed with it — a guest's editor now renders what the host is making, not what
+it made seconds ago. The 2026-09-14 amendment's two peer narrowings are closed:
+tools cross the wire, and the conversation reaches the host un-flattened.
+
+**Three invariants, adopted from Ark's reading.** A chunk is transport and the
+record is the final frame: no counter is born in a chunk, no usage row is built
+from deltas, and the terminating `REMOTE_INFERENCE_RESPONSE` still carries the
+whole answer and every count, so both nodes' rows are built exactly as they were
+(D3, unchanged). Chunks are not billed. On a broken stream the host's row is the
+record and the guest's is a mirror that may simply be missing — the two join on
+`request_id`, and the absence is expected rather than a lost call.
+
+**Compatibility is the design, not a fallback.** `prompt` stays required and
+carries the same turns flattened, from the same source, so an older host answers
+a newer guest and the four fields are absent — byte for byte — when nobody asks
+for them. An older host ignores `stream`, sends no chunk, and the guest's SSE is
+the one chunk this route always wrote. An older guest never sets `stream`, and a
+new host sends it none.
+
+**One new menu field.** `supports_tools` on the `PROVIDERS_RESPONSE` row (DPTP
+§3.5), true when the alias's provider has a native `generate_with_tools` path —
+the same predicate the local route already reads. It is an optimisation: the
+guest refuses tools by name off the menu before spending a round trip, and the
+host's refusal on the wire remains the gate. Absent reads as no.
+
+**Gates unchanged, and all of them in front of every new field.** D2's proof of
+the connection, `can_request_inference`, the serving alias, D7's onward-sharing
+refusal, `_effort_for_peer` and the peer inference lock run before a single new
+field is read, and **a refused call emits no chunk**. The host's own settings
+are still what a guest gets, the effort excepted.
+
+**What stays narrow, by name.** Forcing a tool (`tool_choice` `any`/`tool`/
+`required`, `parallel_tool_calls: false`) — unchanged, because every provider
+here runs `auto`. Token-level deltas under a tool call, on either route, because
+no provider on this node streams while holding tools. Images and tools together
+on the peer route, refused now as they already were locally, because the host's
+vision entry point is `query` and holds no tools — and for the same reason a
+request carrying both images and `messages` is served from the prompt. A request
+that does not fit one 64 MiB DPTP frame is `413` by name, raised by
+`write_message` at the origin before a byte leaves this node; tools plus a long
+conversation can reach it. Not started: `/v1/embeddings`, `/v1/completions`.)*
 
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
@@ -764,7 +829,9 @@ dependencies.
 ## Falsifiers
 
 - **M1:** grep the peer path for a chunk callback or an `AsyncIterator`. One
-  exists ⇒ D4 step 4 is bigger than written.
+  exists ⇒ D4 step 4 is bigger than written. *(Fired, 2026-09-14, deliberately:
+  `request_inference_from_peer` takes an `on_chunk`, and step 4 was made bigger
+  by the amendment of that date.)*
 - **M2:** run one peer inference on a DeepSeek serving alias, then grep the log
   for `DeepSeek usage:` — the line must be there with `conv=-`. Absent ⇒ F5 is
   wrong and the code comment stands.

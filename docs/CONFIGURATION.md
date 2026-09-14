@@ -300,9 +300,10 @@ charge its own machine:
   Resetting the rules to defaults rewrites the block and drops the tariff with it.
 
 **Shape and limits.** `model` in a request is the alias; `/v1/models` lists the aliases
-with `owned_by` `local` or `vendor`. `stream: true` is honoured on the wire as one
-`data:` chunk carrying the whole answer followed by `data: [DONE]` — the provider layer
-has no streaming entry point yet (ADR-041 M1), so nothing arrives token by token. Every
+with `owned_by` `local` or `vendor`. `stream: true` yields the text as it is made,
+followed by `data: [DONE]`; where the answer arrives whole — an image on either route, a
+provider or a peer host with no streaming path — it is one chunk, as this door wrote for
+everything before 2026-09-14. Every
 completion leaves one usage row with `caller_kind = gateway` in the node ledger. A
 request whose `Host` header is neither `127.0.0.1:<port>` nor `localhost:<port>` is
 answered `400`.
@@ -331,13 +332,14 @@ either form reach the model, a call comes back as a `tool_use` block with
 and the next request carrying `tool_result` (OpenAI: `role: "tool"`) completes the round
 trip. Forcing is not available — `tool_choice` `any` / `tool` / `required` and
 `parallel_tool_calls: false` are refused with 400, because every provider here runs
-`auto`; a peer alias (`remote:<node>:<alias>`) refuses tools with 400 too, since
-`REMOTE_INFERENCE_REQUEST` carries no tools. **The stream is real** on a local alias:
-`stream: true` yields text deltas as the provider produces them, with the cumulative
+`auto`. A peer alias (`remote:<node>:<alias>`) carries tools too since 2026-09-14
+(DPTP v1.7), and is refused with 400 only when the peer's own menu row does not say
+`supports_tools` — its host refuses the same request on the wire, so the refusal here
+merely saves the round trip. **The stream is real** on either route:
+`stream: true` yields text deltas as they are produced, with the cumulative
 usage in `message_delta` (OpenAI: the usage-only chunk under `stream_options.include_usage`)
 equal to the usage row of the same request; a tool call arrives as one block at the end,
-and a provider that hands the answer back whole still yields one delta. A peer alias
-streams one delta, as before. `max_tokens`, `temperature`, `thinking` and the rest are
+and a provider or a host that hands the answer back whole still yields one delta. `max_tokens`, `temperature`, `thinking` and the rest are
 accepted and ignored: sampling is the alias's own configuration on this node.
 
 **Example** (Claude Code, environment):
@@ -363,12 +365,17 @@ the call — this node's card lock and `vendor_quotas` are not consulted — and
 that does not answer within `[connection] remote_inference_timeout` is `504`. The row
 this node writes says `route = peer` under the request id both nodes share, with the
 peer's token counts and its price copied when it sent them and `cost_usd` left null
-when it did not: this node did not run the call and does not price it. **One caveat to
-know before you file it (ADR-041 M1): a peer-routed answer arrives whole.** The P2P
-path has no streaming, so with `stream: true` the entire reply is emitted as one chunk
-(or one `text_delta`) the moment it lands — your editor shows seconds-old text all at
-once rather than token by token. That is the shape of the path today, not a fault in
-the peer or the plugin.
+when it did not: this node did not run the call and does not price it. **The
+conversation, its tools and the stream all cross** since 2026-09-14 (DPTP v1.7): the
+turns travel un-flattened, `tools` reach the host's model, and `stream: true` brings
+REMOTE_INFERENCE_CHUNK frames back as the host makes the answer. The counts and the
+usage row are still built from the response that ends the stream — nothing is counted
+off a delta — so a stream cut before that response leaves this node no row at all while
+the host keeps its own. A host too old to know these fields ignores them and answers
+whole, and your editor then shows the whole reply as one chunk the moment it lands,
+which is what every peer-routed answer did before that date. A request too large for one
+64 MiB DPTP frame — tools plus a long conversation can reach it — is `413` before a byte
+leaves this node.
 
 **What a host sees, what a guest gets.** Sharing compute is trusting the host as a
 person, not only as a machine (Mike's call, 2026-09-14; ADR-041 D7, amendment
