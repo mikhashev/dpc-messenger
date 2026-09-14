@@ -578,16 +578,21 @@ class NodeLedger:
         return total
 
 
-def owner_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
-    """This node's own vendor spend — what a burn reader wants in place of the
-    provider's own usage log line (ADR-041 D3, 2026-09-13: the ledger is the
-    record). One predicate, `route == "local"`: this node made the vendor call
-    itself, whoever asked — its own agent, its own gateway client, or a guest
-    this node served on its own key (the guest's tokens, this node's dollars;
-    what the guest is charged is `tariff_amount`, not `cost_usd`). `route=peer`
-    is excluded regardless of `caller_kind`: the money stayed with the node
-    that ran the call. Filtered on `route`, not on `cost_usd is not None`,
-    because `route` is the row's own answer to who ran the call.
+def burn_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+    """Every `route == "local"` row, the calls served to peers included: the
+    burn reader's set, and what it wants in place of the provider's own usage
+    log line (ADR-041 D3: the ledger is the record).
+
+    One predicate, `route == "local"`: this node made the vendor call itself,
+    whoever asked — its own agent, its own gateway client, or a guest this node
+    served on its own key (the guest's tokens, this node's dollars; what the
+    guest is charged is `tariff_amount`, not `cost_usd`). `route=peer` is
+    excluded regardless of `caller_kind`: the money stayed with the node that
+    ran the call. Filtered on `route`, not on `cost_usd is not None`, because
+    `route` is the row's own answer to who ran the call.
+
+    Distinct from `own_rows`, which is this set minus the rows served to peers:
+    two right answers to two questions, and they differ by exactly those rows.
     """
     for row in rows:
         if row.get("route") == "local":
@@ -622,7 +627,7 @@ def consumed_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
 def own_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
     """This node's own consumption on its own hardware and its own key:
     `route == "local"` with a caller that is not a peer. The complement of
-    `served_rows` inside `owner_rows`, which stays what the burn reader wants —
+    `served_rows` inside `burn_rows`, which stays what the burn reader wants —
     every local row, this node's dollars whoever asked.
     """
     for row in rows:

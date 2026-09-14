@@ -3,8 +3,8 @@
 Decided (Mike's call, 2026-09-13, DPC Project group): the ledger is the
 record. `CoreService.get_usage_summary` — the one instrument the ledger has
 beyond `spent_today` (A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-INSTRUMENT) — folds
-`node_ledger.owner_rows`: this node's own vendor spend, `route == "local"`,
-instead of every row the ledger holds. The `DeepSeek usage:` line
+`node_ledger.burn_rows`: every `route == "local"` row, the calls served to
+peers included, instead of every row the ledger holds. The `DeepSeek usage:` line
 `_record_usage` writes (`providers/deepseek_provider.py`) stays a log line:
 nothing here parses it, and nothing should have to.
 """
@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import pytest
 
 from dpc_client_core import node_ledger
-from dpc_client_core.node_ledger import owner_rows, usage_row
+from dpc_client_core.node_ledger import burn_rows, own_rows, served_rows, usage_row
 from dpc_client_core.service import CoreService
 
 pytestmark = pytest.mark.asyncio
@@ -43,10 +43,10 @@ async def _summary(**kwargs):
     return await FakeCore().get_usage_summary(**kwargs)
 
 
-# --- owner_rows: the single predicate, route == "local" ---
+# --- burn_rows: the single predicate, route == "local" ---
 
 
-def test_owner_rows_keeps_the_three_local_shapes():
+def test_burn_rows_keeps_the_three_local_shapes():
     """The owner's own agent, an owner's own gateway client, and this node
     serving a peer on its own key — all three write `route="local"` and all
     three are this node's own spend."""
@@ -55,11 +55,11 @@ def test_owner_rows_keeps_the_three_local_shapes():
         _row(request_id="g", caller="ide_key", caller_kind="gateway", route="local"),
         _row(request_id="p", caller="dpc-node-alice", caller_kind="peer", route="local", cost_usd=0.02),
     ]
-    kept = list(owner_rows(rows))
+    kept = list(burn_rows(rows))
     assert {r["request_id"] for r in kept} == {"a", "g", "p"}
 
 
-def test_owner_rows_drops_a_call_routed_to_a_peer():
+def test_burn_rows_drops_a_call_routed_to_a_peer():
     """An agent asking a peer to run the call spends the peer's money, not
     this node's — `route == "peer"` is excluded regardless of `caller_kind`."""
     rows = [
@@ -67,11 +67,36 @@ def test_owner_rows_drops_a_call_routed_to_a_peer():
         _row(request_id="p", caller="agent_001", caller_kind="agent", route="peer", cost_usd=None,
              billing="subscription"),
     ]
-    kept = list(owner_rows(rows))
+    kept = list(burn_rows(rows))
     assert [r["request_id"] for r in kept] == ["a"]
 
 
-# --- the burn reader: get_usage_summary folds only the owner's rows ---
+def test_burn_rows_and_own_rows_differ_by_exactly_the_rows_served_to_peers():
+    """The card the rename answers (TWO-LEDGER-READERS-CALL-A-DIFFERENT-SET-OF-
+    ROWS-OWN): the burn reader's set and the tab's "Own" list are two right
+    answers, and the difference between them is the peer-served rows and
+    nothing else. Under one word — `owner_rows` beside `own_rows` — the next
+    reader files «the numbers disagree»."""
+    rows = [
+        _row(request_id="a", caller="agent_001", caller_kind="agent", route="local"),
+        _row(request_id="g", caller="ide_key", caller_kind="gateway", route="local"),
+        _row(request_id="p1", caller="dpc-node-alice", caller_kind="peer", route="local"),
+        _row(request_id="p2", caller="dpc-node-bob", caller_kind="peer", route="local"),
+        _row(request_id="r", caller="agent_001", caller_kind="agent", route="peer",
+             cost_usd=None, billing="subscription"),
+    ]
+
+    burn = {r["request_id"] for r in burn_rows(rows)}
+    own = {r["request_id"] for r in own_rows(rows)}
+    served = {r["request_id"] for r in served_rows(rows)}
+
+    assert burn == {"a", "g", "p1", "p2"}
+    assert own == {"a", "g"}
+    assert burn - own == served == {"p1", "p2"}
+    assert own <= burn, "the tab's list is a subset, never a separate reading"
+
+
+# --- the burn reader: get_usage_summary folds only the burn rows ---
 
 
 async def test_a_peer_served_call_counts_in_the_owner_figure():
@@ -135,7 +160,7 @@ async def test_a_peer_call_and_an_own_call_do_not_mix():
 # --- the log line is no longer a source of figures ---
 
 
-async def test_the_figure_comes_from_owner_rows_and_nothing_else(monkeypatch, caplog):
+async def test_the_figure_comes_from_burn_rows_and_nothing_else(monkeypatch, caplog):
     """If the ledger's own filter answered zero, the burn figure must drop to
     zero even though a `DeepSeek usage:` line and a real ledger row both
     exist — proving `get_usage_summary` has no second, independent path back
@@ -152,7 +177,7 @@ async def test_the_figure_comes_from_owner_rows_and_nothing_else(monkeypatch, ca
     ledger.append(_row(request_id="real", caller="agent_001", caller_kind="agent",
                         route="local", cost_usd=0.01))
 
-    monkeypatch.setattr(node_ledger, "owner_rows", lambda rows: iter([]))
+    monkeypatch.setattr(node_ledger, "burn_rows", lambda rows: iter([]))
 
     result = await _summary()
 

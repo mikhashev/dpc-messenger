@@ -4320,8 +4320,8 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def get_usage_summary(self, since: str = None, until: str = None) -> Dict[str, Any]:
-        """This node's own burn: `node_ledger.owner_rows` filtered to this
-        node's own vendor spend, folded by caller, alias and month
+        """This node's own burn: `node_ledger.burn_rows` — every `route=local`
+        row, the calls served to peers included — folded by caller, alias and month
         (`node_ledger.summarize`) — the ledger's first reader beyond
         `spent_today`, board entry A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-
         INSTRUMENT, re-pointed at the ledger 2026-09-14 per board entry
@@ -4332,7 +4332,7 @@ class CoreService:
         try:
             ledger = node_ledger.default_ledger()
             summary = node_ledger.summarize(
-                node_ledger.owner_rows(ledger.rows()), since=since, until=until
+                node_ledger.burn_rows(ledger.rows()), since=since, until=until
             )
             return {"status": "success", **summary}
         except ValueError as e:

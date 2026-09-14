@@ -329,11 +329,11 @@ def test_a_malformed_bound_is_refused_not_silently_ignored():
 
 
 def test_the_burn_summary_still_answers_exactly_what_it_did():
-    """`get_usage_summary` folds `owner_rows` — every local row, this node's
+    """`get_usage_summary` folds `burn_rows` — every local row, this node's
     dollars whoever asked — and the role reader adds no column to it."""
     rows = _four_rows()
 
-    summary = summarize(node_ledger.owner_rows(rows))
+    summary = summarize(node_ledger.burn_rows(rows))
 
     assert set(summary) == {"row_count", "since", "until", "by_caller", "by_alias", "by_month"}
     assert summary["row_count"] == 2
