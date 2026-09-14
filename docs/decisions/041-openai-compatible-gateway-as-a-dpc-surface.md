@@ -480,6 +480,54 @@ carries none; and token-level deltas under a tool call, because no provider on
 this node streams while holding tools. Step 4 — the peer route — still answers
 whole. Mike's ask, 2026-09-13.)*
 
+*(**Amendment, 2026-09-14 — reasoning effort and images cross both doors.** The
+peer wire has carried both since before this gateway existed —
+`create_remote_inference_request(request_id, prompt, model, provider, images,
+reasoning_effort)` — and the door dropped them silently: a probe sending
+`"reasoning_effort": "banana"` was answered `200` with the model's text. Both
+now cross, and what cannot is refused by name, as tools already were.
+
+**Effort.** The OpenAI form reads top-level `reasoning_effort`. The Messages
+form reads `output_config.effort` — verified against
+[platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages)
+on 2026-09-14, which documents the optional `output_config.effort` with values
+`low | medium | high | xhigh | max`, and `thinking` as one of
+`{type: enabled, budget_tokens, display}`, `{type: disabled}` or
+`{type: adaptive, display}` — and reads `thinking: {type: disabled}` as this
+project's `REASONING_OFF`. `xhigh` folds to `high`, as
+`normalize_reasoning_effort` already folds it everywhere. `enabled` and
+`adaptive` name no depth, so they ask for the alias's own default and are
+carried as nothing; `budget_tokens` is a quantity this scale cannot express and
+is not folded into a word, as `max_tokens` and the rest of sampling stay the
+alias owner's. The vocabulary is **per alias**: where a model's own template
+named its rungs — the same `declared_reasoning_words` that puts
+`reasoning_words` / `reasoning_default` on a provider row and on a peer's menu
+— a word that reaches none of them is a `400` listing that alias's words, and
+the shared scale stands in only for an alias that named none. On the peer route
+the menu row's `reasoning_words` bound the request the same way when the row
+carries them, and where it does not the word travels and the host caps it
+(`_effort_for_peer`, unchanged: the host's own settings remain the guest's,
+the effort excepted — Mike's call, 2026-09-14). The local usage row's
+`served_effort` names the rung the call ran on, not the word that asked for it,
+and where nothing was asked it names what the alias runs at by itself — its
+configured word, or its template's default — with `null` reserved for «not
+knowable here», never for `off`.
+
+**Images.** An OpenAI `image_url` part whose URL is `data:<mime>;base64,<payload>`,
+and an Anthropic `image` block whose source is `{type: base64, media_type,
+data}`, become the two fields DPTP §3.4 requires and travel **beside** the
+prompt on both routes — the shape the peer wire has, so an image's position
+among the turns is not preserved, and the wire is unchanged by this amendment.
+Refused by name: an `http(s)` URL or a `url`/`file` source, because this node
+fetches nothing from the web on a client's behalf; an image past
+`[vision] max_image_size_mb`, `413`, on the decoded bytes, which is the cap the
+P2P door already enforces rather than a second one; tools beside an image on
+the local route, because vision goes through `generate_with_vision`, which
+holds none; an alias whose provider says it has no vision, and a peer whose
+menu row says `supports_vision: false`. `aiohttp`'s own 1 MiB body cap is
+raised to four times the image cap, or most images would have been refused
+before any handler saw them. Mike's ask, 2026-09-14.)*
+
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
 Sharing a vendor-backed alias is a different act: **the node holding the key

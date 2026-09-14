@@ -200,6 +200,27 @@ are advisory and the file inherits the ACL of your home directory, as `.ws_token
 The Anthropic form's clients send the same key as `x-api-key: <key>` instead; both
 header forms open every route.
 
+**What crosses, and what is refused by name.** Besides the conversation and `tools`, the
+gateway carries two more things the peer wire under it already had (ADR-041 D4, amendment
+2026-09-14):
+
+- **Reasoning effort.** OpenAI form: `reasoning_effort`. Messages form:
+  `output_config.effort`, and `thinking: {"type": "disabled"}`, which is `off`; `enabled`
+  and `adaptive` name no depth and ask for the alias's own default, and `budget_tokens` is
+  not read. The words are `off, low, medium, high, max` (`xhigh` is read as `high`), and
+  where a model's own template named its rungs those are the words that alias knows — a
+  word reaching none of them is `400` listing them. The usage row's `served_effort` names
+  the rung the call ran on.
+- **Images.** An OpenAI `image_url` part carrying a `data:<mime>;base64,<payload>` URL, or
+  an Anthropic `image` block with a `{"type": "base64", "media_type", "data"}` source.
+  They travel beside the prompt, so their position among the turns is not kept. Refused by
+  name: an `http(s)` URL or a `url` source (the gateway fetches nothing from the web); an
+  image past `[vision] max_image_size_mb`, answered `413`; tools sent beside an image; an
+  alias or a peer that says it has no vision path.
+
+Sampling — `max_tokens`, `temperature`, `top_p`, `stop_sequences` — stays the alias
+owner's configuration on this node and is not read from the request.
+
 **Two switches, one door.** `[gateway] enabled` above is not the only one: `compute.enabled`
 in `privacy_rules.json` governs **both** of this node's doors — the peer door it has always
 governed, and this loopback gateway (Mike's call, 2026-09-13). The table between them is AND.
@@ -505,6 +526,9 @@ An empty default means the key is written blank and the feature stays off until 
 | `enabled` | `false` | Serve /v1/models and /v1/chat/completions to local tools (ADR-041). This node's own aliases need `compute.enabled` in `privacy_rules.json` too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone |
 | `port` | `9997` | 9998 is the file server, 9999 the local API |
 | `host` | `127.0.0.1` | Not configurable: any other value is refused at start (ADR-041 D1) |
+
+The gateway has no image cap of its own: an image at either door is bounded by
+`[vision] max_image_size_mb`, the same setting the P2P door enforces.
 
 #### `[gossip]`
 
