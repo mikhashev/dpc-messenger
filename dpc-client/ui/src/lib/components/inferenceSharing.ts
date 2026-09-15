@@ -675,16 +675,25 @@ export interface ClientLinesResult {
 }
 
 /** One group of the client-lines selector: this node's own rows, or one
- *  peer's, in the order `groupGatewayMenu` decides. */
+ *  peer's, in the order `groupGatewayMenu` decides. `key` is what the
+ *  `{#each}` keys on — `title` carries a peer's free-text name and is not
+ *  safe as a Svelte key. */
 export interface GatewayMenuGroup {
+  key: string;
   title: string;
   entries: GatewayMenuEntry[];
 }
 
 /** The group title for this node's own rows (`owner` `'local'` or
  *  `'vendor'`) — one group, not two, since the selector picks a model to
- *  paste, not a spend class. */
+ *  paste, not a spend class. Doubles as that group's `key`. */
 export const THIS_MACHINE_GROUP = 'this machine';
+
+/** Every peer group's title starts with this, so a peer cannot forge
+ *  `THIS_MACHINE_GROUP` by naming itself "this machine" — its group reads
+ *  "Peer — this machine", never "this machine" (the key is proved, the name
+ *  is not). */
+export const PEER_GROUP_PREFIX = 'Peer — ';
 
 /** A peer row with no `peer_name` still needs a group title that is not the
  *  raw 40-character node id (constraint: never show the id where a label
@@ -696,14 +705,22 @@ export function shortenPeerId(peerId: string | null | undefined): string {
   return bare.length > 12 ? `dpc-node-${bare.slice(0, 12)}…` : id;
 }
 
+/** A peer group's title: `PEER_GROUP_PREFIX` wrapping `peer_name` (falling
+ *  back to `shortenPeerId(peer_id)`). */
+export function peerGroupTitle(peerName: string | null | undefined, peerId: string | null | undefined): string {
+  const name = typeof peerName === 'string' && peerName.length > 0 ? peerName : shortenPeerId(peerId);
+  return `${PEER_GROUP_PREFIX}${name}`;
+}
+
 /**
  * The selector's groups, in the order they are shown: this node's own rows
- * first (title `THIS_MACHINE_GROUP`), then one group per peer, titled by
- * `peer_name` (falling back to `shortenPeerId(peer_id)`), each peer's group
- * appearing where its first row does. A malformed row (`id` missing or
- * empty) is dropped rather than shown with nothing to select. An empty or
- * absent `menu` yields no groups — the placeholder-block path this leaves
- * alone.
+ * first (title and key `THIS_MACHINE_GROUP`), then one group per peer, keyed
+ * by `peer_id` (falling back to the row's own `id`, not `label`, so two rows
+ * from different unnamed peers never collapse into one group by coincidence
+ * of label text) and titled by `peerGroupTitle`. A malformed row (`id`
+ * missing or empty) is dropped rather than shown with nothing to select. An
+ * empty or absent `menu` yields no groups — the placeholder-block path this
+ * leaves alone.
  */
 export function groupGatewayMenu(menu: readonly GatewayMenuEntry[] | null | undefined): GatewayMenuGroup[] {
   const rows = (menu ?? []).filter(
@@ -711,18 +728,15 @@ export function groupGatewayMenu(menu: readonly GatewayMenuEntry[] | null | unde
   );
   const groups: GatewayMenuGroup[] = [];
   const own = rows.filter((e) => e.owner !== 'peer');
-  if (own.length > 0) groups.push({ title: THIS_MACHINE_GROUP, entries: own });
+  if (own.length > 0) groups.push({ key: THIS_MACHINE_GROUP, title: THIS_MACHINE_GROUP, entries: own });
 
   const byPeer = new Map<string, GatewayMenuGroup>();
   for (const row of rows) {
     if (row.owner !== 'peer') continue;
-    const key = row.peer_id ?? row.label;
+    const key = row.peer_id ?? row.id;
     let group = byPeer.get(key);
     if (!group) {
-      const title = typeof row.peer_name === 'string' && row.peer_name.length > 0
-        ? row.peer_name
-        : shortenPeerId(row.peer_id);
-      group = { title, entries: [] };
+      group = { key, title: peerGroupTitle(row.peer_name, row.peer_id), entries: [] };
       byPeer.set(key, group);
       groups.push(group);
     }

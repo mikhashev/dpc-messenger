@@ -927,7 +927,7 @@
                 bind:value={selectedMenuId}
                 on:change={() => selectMenu(selectedMenuId)}
               >
-                {#each menuGroups as group (group.title)}
+                {#each menuGroups as group (group.key)}
                   <optgroup label={group.title}>
                     {#each group.entries as entry (entry.id)}
                       <option value={entry.id}>{entry.label}</option>

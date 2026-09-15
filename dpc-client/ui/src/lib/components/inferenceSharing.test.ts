@@ -20,6 +20,8 @@ import {
   knownGroups,
   knownNodes,
   offeredProviders,
+  PEER_GROUP_PREFIX,
+  peerGroupTitle,
   removeAllowed,
   removeAllowedModel,
   removeServing,
@@ -449,14 +451,15 @@ describe('the client-lines selector groups menu rows by owner', () => {
     const groups = groupGatewayMenu([local(), vendor()]);
     expect(groups).toHaveLength(1);
     expect(groups[0].title).toBe(THIS_MACHINE_GROUP);
+    expect(groups[0].key).toBe(THIS_MACHINE_GROUP);
     expect(groups[0].entries.map((e) => e.id)).toEqual(['llama', 'ds']);
   });
 
-  it('a menu with only peer rows — the guest-node shape, the case that was broken — has no "this machine" group, one group per peer', () => {
+  it('a menu with only peer rows — the guest-node shape, the case that was broken — has no "this machine" group, one group per peer, titled with the Peer — prefix', () => {
     const alice = peerRow('dpc-node-alice000000000000000000000000000', 'Alice');
     const bob = peerRow('dpc-node-bob0000000000000000000000000000', 'Bob', 'mistral');
     const groups = groupGatewayMenu([alice, bob]);
-    expect(groups.map((g) => g.title)).toEqual(['Alice', 'Bob']);
+    expect(groups.map((g) => g.title)).toEqual([`${PEER_GROUP_PREFIX}Alice`, `${PEER_GROUP_PREFIX}Bob`]);
     expect(groups.every((g) => g.title !== THIS_MACHINE_GROUP)).toBe(true);
     expect(groups[0].entries).toEqual([alice]);
     expect(groups[1].entries).toEqual([bob]);
@@ -466,23 +469,63 @@ describe('the client-lines selector groups menu rows by owner', () => {
     const alice1 = peerRow('dpc-node-alice000000000000000000000000000', 'Alice', 'llama');
     const alice2 = peerRow('dpc-node-alice000000000000000000000000000', 'Alice', 'qwen');
     const groups = groupGatewayMenu([local(), alice1, vendor(), alice2]);
-    expect(groups.map((g) => g.title)).toEqual([THIS_MACHINE_GROUP, 'Alice']);
+    expect(groups.map((g) => g.title)).toEqual([THIS_MACHINE_GROUP, `${PEER_GROUP_PREFIX}Alice`]);
     expect(groups[0].entries.map((e) => e.id)).toEqual(['llama', 'ds']);
     expect(groups[1].entries).toEqual([alice1, alice2]);
   });
 
-  it('a peer with no name gets a shortened id, never the raw node_id, as its group title', () => {
+  it('a peer with no name gets a shortened id, never the raw node_id, inside its group title', () => {
     const longId = 'dpc-node-' + 'f'.repeat(64);
     const row = peerRow(longId, null);
     const groups = groupGatewayMenu([row]);
     expect(groups[0].title).not.toBe(longId);
     expect(groups[0].title.length).toBeLessThan(longId.length);
-    expect(shortenPeerId(longId)).toBe(groups[0].title);
+    expect(groups[0].title).toBe(peerGroupTitle(null, longId));
+    expect(groups[0].title).toBe(`${PEER_GROUP_PREFIX}${shortenPeerId(longId)}`);
   });
 
   it('a malformed row with no id is dropped rather than shown with nothing to select', () => {
     const bad = { owner: 'local', alias: 'x', label: 'x' } as unknown as GatewayMenuEntry;
-    expect(groupGatewayMenu([bad, local()])).toEqual([{ title: THIS_MACHINE_GROUP, entries: [local()] }]);
+    expect(groupGatewayMenu([bad, local()])).toEqual([{ key: THIS_MACHINE_GROUP, title: THIS_MACHINE_GROUP, entries: [local()] }]);
+  });
+
+  // The defect found in review, 2026-09-16: a peer's title is free text
+  // (chosen in its HELLO), so it could forge the "this machine" heading, key
+  // two distinct groups under one `{#each}` key, or merge into another
+  // peer's group. Each case is falsified below by breaking the guard it
+  // proves and watching the assertion turn red before restoring it.
+
+  it('a peer named exactly "this machine" gets a title distinct from the this-machine group, not equal to it', () => {
+    const impostor = peerRow('dpc-node-impostor00000000000000000000000', 'this machine');
+    const bob = peerRow('dpc-node-bob0000000000000000000000000000', 'Bob');
+    const groups = groupGatewayMenu([local(), impostor, bob]);
+    const titles = groups.map((g) => g.title);
+    expect(titles).toEqual([THIS_MACHINE_GROUP, `${PEER_GROUP_PREFIX}this machine`, `${PEER_GROUP_PREFIX}Bob`]);
+    expect(new Set(titles).size).toBe(titles.length);
+    // The own group and the impostor's group must read as different strings,
+    // not merely be different objects — the human picks by the title text.
+    expect(groups[1].title).not.toBe(THIS_MACHINE_GROUP);
+  });
+
+  it('two peers who share a display name get two distinct groups, not one merged group', () => {
+    const bobA = peerRow('dpc-node-bob0000000000000000000000000000', 'Bob');
+    const bobB = peerRow('dpc-node-bob2222222222222222222222222222', 'Bob', 'mistral');
+    const groups = groupGatewayMenu([bobA, bobB]);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].title).toBe(groups[1].title);
+    expect(groups[0].key).not.toBe(groups[1].key);
+    expect(groups[0].entries).toEqual([bobA]);
+    expect(groups[1].entries).toEqual([bobB]);
+  });
+
+  it('a peer row with no peer_id does not merge into another peer\'s group, even by a coincidence of label text', () => {
+    const anon1: GatewayMenuEntry = { id: 'remote:unknown-1:llama', owner: 'peer', alias: 'llama', label: 'llama (an unnamed peer)', peer_id: null, peer_name: null };
+    const anon2: GatewayMenuEntry = { id: 'remote:unknown-2:llama', owner: 'peer', alias: 'llama', label: 'llama (an unnamed peer)', peer_id: null, peer_name: null };
+    const groups = groupGatewayMenu([anon1, anon2]);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].entries).toEqual([anon1]);
+    expect(groups[1].entries).toEqual([anon2]);
+    expect(groups[0].key).not.toBe(groups[1].key);
   });
 });
 
