@@ -12,9 +12,11 @@ import {
   doorAddress,
   foldServingAlias,
   gatewayVerdict,
+  groupGatewayMenu,
   isFree,
   maskedHeader,
   menuVerdict,
+  MENU_IS_LIVE_NOTE,
   knownGroups,
   knownNodes,
   offeredProviders,
@@ -26,14 +28,18 @@ import {
   setCurrency,
   setFree,
   setVendorQuota,
+  shortenPeerId,
+  soleMenuChoiceLine,
   splitCallerIds,
   tariffAliases,
   tariffEntryErrors,
   tariffHistory,
   tariffState,
+  THIS_MACHINE_GROUP,
   unmatchedModels,
   validationDraft,
   type ComputeRules,
+  type GatewayMenuEntry,
   type GatewayState,
 } from './inferenceSharing';
 import type { MenuRow } from './peerMenu';
@@ -418,6 +424,102 @@ describe('the header of the client blocks carries the masked key only', () => {
       .toBe('zed — no key has been written yet; start the gateway once');
     expect(maskedHeader({ lines: [], key_masked: 'wtHZ…opY4' })).toBe('nothing to paste yet; the key is wtHZ…opY4');
     expect(maskedHeader(null)).toBe('nothing to paste yet, and no key has been written');
+  });
+});
+
+describe('the client-lines selector groups menu rows by owner', () => {
+  const local = (): GatewayMenuEntry => ({ id: 'llama', owner: 'local', alias: 'llama', label: 'llama' });
+  const vendor = (): GatewayMenuEntry => ({ id: 'ds', owner: 'vendor', alias: 'ds', label: 'ds' });
+  const peerRow = (peerId: string, peerName: string | null, alias = 'llama'): GatewayMenuEntry => ({
+    id: `remote:${peerId}:${alias}`,
+    owner: 'peer',
+    alias,
+    label: peerName ? `${alias} (${peerName})` : `${alias} (${peerId})`,
+    peer_id: peerId,
+    peer_name: peerName,
+  });
+
+  it('an empty menu yields no groups — the placeholder-block path is untouched', () => {
+    expect(groupGatewayMenu([])).toEqual([]);
+    expect(groupGatewayMenu(null)).toEqual([]);
+    expect(groupGatewayMenu(undefined)).toEqual([]);
+  });
+
+  it('a menu with only this node\'s own rows is one group, titled "this machine"', () => {
+    const groups = groupGatewayMenu([local(), vendor()]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].title).toBe(THIS_MACHINE_GROUP);
+    expect(groups[0].entries.map((e) => e.id)).toEqual(['llama', 'ds']);
+  });
+
+  it('a menu with only peer rows — the guest-node shape, the case that was broken — has no "this machine" group, one group per peer', () => {
+    const alice = peerRow('dpc-node-alice000000000000000000000000000', 'Alice');
+    const bob = peerRow('dpc-node-bob0000000000000000000000000000', 'Bob', 'mistral');
+    const groups = groupGatewayMenu([alice, bob]);
+    expect(groups.map((g) => g.title)).toEqual(['Alice', 'Bob']);
+    expect(groups.every((g) => g.title !== THIS_MACHINE_GROUP)).toBe(true);
+    expect(groups[0].entries).toEqual([alice]);
+    expect(groups[1].entries).toEqual([bob]);
+  });
+
+  it('a mixed menu puts this machine first, then one group per peer, a peer\'s rows staying together', () => {
+    const alice1 = peerRow('dpc-node-alice000000000000000000000000000', 'Alice', 'llama');
+    const alice2 = peerRow('dpc-node-alice000000000000000000000000000', 'Alice', 'qwen');
+    const groups = groupGatewayMenu([local(), alice1, vendor(), alice2]);
+    expect(groups.map((g) => g.title)).toEqual([THIS_MACHINE_GROUP, 'Alice']);
+    expect(groups[0].entries.map((e) => e.id)).toEqual(['llama', 'ds']);
+    expect(groups[1].entries).toEqual([alice1, alice2]);
+  });
+
+  it('a peer with no name gets a shortened id, never the raw node_id, as its group title', () => {
+    const longId = 'dpc-node-' + 'f'.repeat(64);
+    const row = peerRow(longId, null);
+    const groups = groupGatewayMenu([row]);
+    expect(groups[0].title).not.toBe(longId);
+    expect(groups[0].title.length).toBeLessThan(longId.length);
+    expect(shortenPeerId(longId)).toBe(groups[0].title);
+  });
+
+  it('a malformed row with no id is dropped rather than shown with nothing to select', () => {
+    const bad = { owner: 'local', alias: 'x', label: 'x' } as unknown as GatewayMenuEntry;
+    expect(groupGatewayMenu([bad, local()])).toEqual([{ title: THIS_MACHINE_GROUP, entries: [local()] }]);
+  });
+});
+
+describe('the sole-entry line and the live-list note', () => {
+  it('names the one entry outright rather than leaving a one-item dropdown to speak for itself', () => {
+    const entry: GatewayMenuEntry = { id: 'llama', owner: 'local', alias: 'llama', label: 'llama' };
+    expect(soleMenuChoiceLine(entry)).toContain('llama');
+    expect(soleMenuChoiceLine(entry)).toContain('Only one model');
+    expect(soleMenuChoiceLine(null)).toBe('');
+  });
+
+  it('says the list is proved-and-connected-now, from GET /v1/models, and that a drop makes a paste start failing', () => {
+    expect(MENU_IS_LIVE_NOTE).toContain('GET /v1/models');
+    expect(MENU_IS_LIVE_NOTE).toContain('proved and connected right now');
+    expect(MENU_IS_LIVE_NOTE.toLowerCase()).toContain('drop');
+  });
+});
+
+describe('the client-lines selector re-requests the blocks for the newly picked id', () => {
+  // No DOM harness (see the "empty list" test above for the same bargain):
+  // this reads the component source to prove the dropdown's change handler
+  // asks the backend again with the new id, rather than relabeling old blocks.
+  it('is bound to selectedMenuId and re-asks get_gateway_client_lines with { selected_id: id } on change', () => {
+    const sources = import.meta.glob('./InferenceSharingEditor.svelte', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+    const tab = Object.values(sources)[0];
+    expect(tab).toBeTruthy();
+    expect(tab).toMatch(/bind:value=\{selectedMenuId\}/);
+    expect(tab).toMatch(/on:change=\{\(\) => selectMenu\(selectedMenuId\)\}/);
+    expect(tab).toMatch(/get_gateway_client_lines',\s*\{\s*selected_id:\s*id\s*\}/);
+    // Grouped: this node's own rows first, then one group per peer — never
+    // the raw node_id shown where a label belongs.
+    expect(tab).toContain('<optgroup label={group.title}>');
+    expect(tab).toContain('<option value={entry.id}>{entry.label}</option>');
   });
 });
 

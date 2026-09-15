@@ -22,6 +22,7 @@
     doorAddress,
     foldServingAlias,
     gatewayVerdict,
+    groupGatewayMenu,
     isFree,
     isIso4217,
     ISO_4217_CODES,
@@ -29,6 +30,7 @@
     knownNodes,
     maskedHeader,
     menuVerdict,
+    MENU_IS_LIVE_NOTE,
     offeredProviders,
     removeAllowed,
     removeAllowedModel,
@@ -38,6 +40,7 @@
     setCurrency,
     setFree,
     setVendorQuota,
+    soleMenuChoiceLine,
     tariffAliases,
     tariffEntryErrors,
     tariffHistory,
@@ -48,6 +51,7 @@
     type CallerKind,
     type ClientLinesResult,
     type ComputeRules,
+    type GatewayMenuEntry,
     type GatewayState,
     type PeerMenuResult,
     type ServingList,
@@ -265,12 +269,38 @@
   // what the tab can say before the door has answered.
   $: doorVerdict = gatewayVerdict(gateway, gateway ? !!gateway.compute_enabled : !!displayCompute?.enabled);
 
+  // The client-lines selector: which id the blocks below are rendered for,
+  // and the groups the dropdown offers. Grouping and the "which one" line are
+  // both pure functions of `clientLines.menu`, so the dropdown's value and
+  // the pasted block can never name two different rows.
+  $: menuGroups = groupGatewayMenu(clientLines?.menu);
+  $: soleMenuEntry = ((clientLines?.menu ?? []).length === 1 ? (clientLines?.menu ?? [])[0] : null) as GatewayMenuEntry | null;
+  let selectedMenuId = '';
+  let clientMenuLoading = false;
+  let clientMenuError: string | null = null;
+
   async function loadDoor() {
     const state = await ask<GatewayState>('get_gateway_state');
     gateway = state.value;
     gatewayError = state.error;
     const lines = await ask<ClientLinesResult>('get_gateway_client_lines');
     clientLines = lines.value;
+    clientMenuError = lines.error;
+    selectedMenuId = lines.value?.selected_id ?? '';
+  }
+
+  /** Re-asks the backend for the blocks of one menu entry and re-renders in
+   *  place. The blocks themselves are never touched here — only requested and
+   *  displayed — so they stay byte-for-byte the backend's own rendering. */
+  async function selectMenu(id: string) {
+    if (!id) return;
+    clientMenuLoading = true;
+    clientMenuError = null;
+    const answer = await ask<ClientLinesResult>('get_gateway_client_lines', { selected_id: id });
+    clientMenuLoading = false;
+    if (answer.error) { clientMenuError = answer.error; return; }
+    clientLines = answer.value;
+    selectedMenuId = answer.value?.selected_id ?? id;
   }
 
   async function rotate() {
@@ -886,6 +916,36 @@
 
         <details class="client-lines">
           <summary>Client configuration &mdash; {maskedHeader(clientLines)}</summary>
+
+          {#if menuGroups.length > 0}
+            <div class="inline-input-row menu-select-row">
+              <label for="compute-client-menu">Model</label>
+              <select
+                id="compute-client-menu"
+                name="compute-client-menu"
+                class="inline-input"
+                bind:value={selectedMenuId}
+                on:change={() => selectMenu(selectedMenuId)}
+              >
+                {#each menuGroups as group (group.title)}
+                  <optgroup label={group.title}>
+                    {#each group.entries as entry (entry.id)}
+                      <option value={entry.id}>{entry.label}</option>
+                    {/each}
+                  </optgroup>
+                {/each}
+              </select>
+              {#if clientMenuLoading}<span class="muted">Asking the gateway&hellip;</span>{/if}
+            </div>
+            {#if soleMenuEntry}
+              <p class="help-text-small">{soleMenuChoiceLine(soleMenuEntry)}</p>
+            {/if}
+            {#if clientMenuError}
+              <div class="refusal" role="alert">The blocks could not be re-rendered: {clientMenuError}</div>
+            {/if}
+            <p class="help-text-small">{MENU_IS_LIVE_NOTE}</p>
+          {/if}
+
           <p class="help-text-small">
             Paste-ready, with the key in clear: these go into another tool's configuration file.
           </p>

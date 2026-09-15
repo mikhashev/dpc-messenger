@@ -645,11 +645,110 @@ export interface ClientLine {
   text: string;
 }
 
+/**
+ * One entry of `get_gateway_client_lines`'s `menu` (v0.22.1+): what a client's
+ * model field would hold for one servable row — a bare alias for this node's
+ * own (`owner: 'local' | 'vendor'`), `remote:<node_id>:<alias>` for a peer's
+ * (`owner: 'peer'`). `label` is the short human string a dropdown shows;
+ * `peer_id` / `peer_name` are null on this node's own rows. The menu is empty
+ * on a node with no peer proved and connected, in which case the blocks still
+ * carry the `<alias>` placeholder and there is nothing here to select.
+ */
+export interface GatewayMenuEntry {
+  id: string;
+  owner: 'local' | 'vendor' | 'peer';
+  alias: string;
+  label: string;
+  peer_id?: string | null;
+  peer_name?: string | null;
+}
+
 /** `get_gateway_client_lines`: the blocks, and the masked form of the key that
- *  stands in clear inside them. */
+ *  stands in clear inside them. `menu` and `selected_id` are additive
+ *  (v0.22.1+): a node whose menu is empty keeps the placeholder-block
+ *  behaviour from before this field existed. */
 export interface ClientLinesResult {
   lines?: ClientLine[] | null;
   key_masked?: string | null;
+  menu?: GatewayMenuEntry[] | null;
+  selected_id?: string | null;
+}
+
+/** One group of the client-lines selector: this node's own rows, or one
+ *  peer's, in the order `groupGatewayMenu` decides. */
+export interface GatewayMenuGroup {
+  title: string;
+  entries: GatewayMenuEntry[];
+}
+
+/** The group title for this node's own rows (`owner` `'local'` or
+ *  `'vendor'`) — one group, not two, since the selector picks a model to
+ *  paste, not a spend class. */
+export const THIS_MACHINE_GROUP = 'this machine';
+
+/** A peer row with no `peer_name` still needs a group title that is not the
+ *  raw 40-character node id (constraint: never show the id where a label
+ *  belongs) — the first 12 hex chars after the `dpc-node-` prefix, ellipsised. */
+export function shortenPeerId(peerId: string | null | undefined): string {
+  const id = (peerId ?? '').trim();
+  if (!id) return 'an unnamed peer';
+  const bare = id.startsWith('dpc-node-') ? id.slice('dpc-node-'.length) : id;
+  return bare.length > 12 ? `dpc-node-${bare.slice(0, 12)}…` : id;
+}
+
+/**
+ * The selector's groups, in the order they are shown: this node's own rows
+ * first (title `THIS_MACHINE_GROUP`), then one group per peer, titled by
+ * `peer_name` (falling back to `shortenPeerId(peer_id)`), each peer's group
+ * appearing where its first row does. A malformed row (`id` missing or
+ * empty) is dropped rather than shown with nothing to select. An empty or
+ * absent `menu` yields no groups — the placeholder-block path this leaves
+ * alone.
+ */
+export function groupGatewayMenu(menu: readonly GatewayMenuEntry[] | null | undefined): GatewayMenuGroup[] {
+  const rows = (menu ?? []).filter(
+    (e): e is GatewayMenuEntry => !!e && typeof e.id === 'string' && e.id.length > 0,
+  );
+  const groups: GatewayMenuGroup[] = [];
+  const own = rows.filter((e) => e.owner !== 'peer');
+  if (own.length > 0) groups.push({ title: THIS_MACHINE_GROUP, entries: own });
+
+  const byPeer = new Map<string, GatewayMenuGroup>();
+  for (const row of rows) {
+    if (row.owner !== 'peer') continue;
+    const key = row.peer_id ?? row.label;
+    let group = byPeer.get(key);
+    if (!group) {
+      const title = typeof row.peer_name === 'string' && row.peer_name.length > 0
+        ? row.peer_name
+        : shortenPeerId(row.peer_id);
+      group = { title, entries: [] };
+      byPeer.set(key, group);
+      groups.push(group);
+    }
+    group.entries.push(row);
+  }
+  return groups;
+}
+
+/**
+ * What the tab says under the four blocks about where the menu came from:
+ * `GET /v1/models`, proved and connected right now — so it is not a
+ * snapshot, and a peer that drops between the menu being read and a pasted
+ * config being used makes that config start getting refused.
+ */
+export const MENU_IS_LIVE_NOTE =
+  'This list is live: it is peers proved and connected right now, read from GET /v1/models. ' +
+  'If a peer drops after you paste its block, that block starts getting refused.';
+
+/**
+ * The line shown when the menu has exactly one entry: the selector would add
+ * a dropdown with nothing to choose, so the choice is said outright instead
+ * — the point being that no value is ever shown chosen without saying which.
+ */
+export function soleMenuChoiceLine(entry: GatewayMenuEntry | null | undefined): string {
+  if (!entry) return '';
+  return `Only one model is on offer right now, and it is the one below: ${entry.label}.`;
 }
 
 const CLIENT_LABELS: Record<string, string> = {
