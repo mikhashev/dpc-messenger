@@ -552,3 +552,28 @@ async def test_with_the_gateway_off_the_service_starts_and_stops_without_it(tmp_
     await svc._start_gateway()
     await svc._stop_gateway()
     assert svc.gateway is None
+
+
+@pytest.mark.asyncio
+async def test_a_serving_list_refused_after_the_port_opened_is_503_and_leaves_a_line(tmp_path, caplog):
+    """`GatewayConfigError` is a `ValueError`, so it misses the `GatewayError`
+    arm of the guard and has one of its own. It must still write the refusal
+    line: a 503 reaches the client and leaves nothing here otherwise."""
+    service = _service(tmp_path, BOTH_LISTS)
+    async with _running(tmp_path, service) as (server, _):
+        key = _key(tmp_path)
+        assert (await _request(server, "GET", "/v1/models", key=key))[0] == 200
+
+        # The registry loses an alias the serving list still names, which is
+        # what `classify_serving_lists` refuses — after the port is open.
+        service.llm_manager.providers.pop(LOCAL)
+        with caplog.at_level(logging.ERROR, logger="dpc_client_core.gateway"):
+            status, text = await _request(server, "GET", "/v1/models", key=key)
+
+    assert status == 503
+    error = json.loads(text)["error"]
+    assert error["code"] == "serving_lists_refused" and LOCAL in error["message"]
+    lines = [r.getMessage() for r in caplog.records
+             if r.levelno == logging.ERROR and "serving_lists_refused" in r.getMessage()]
+    assert len(lines) == 1, "the 503 left no line on this machine"
+    assert "/v1/models" in lines[0] and "503" in lines[0] and LOCAL in lines[0]

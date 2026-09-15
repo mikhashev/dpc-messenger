@@ -2021,7 +2021,11 @@ class GatewayServer:
             _log_refusal(request, e)
             return error(e.status, e.message, e.code)
         except GatewayConfigError as e:
-            return error(503, f"the gateway's serving lists are refused: {e}", "serving_lists_refused")
+            # Its own arm because it is a `ValueError` and not a `GatewayError`,
+            # and through the same helper so it leaves the same line.
+            refused = GatewayError(503, f"the gateway's serving lists are refused: {e}", "serving_lists_refused")
+            _log_refusal(request, refused)
+            return error(refused.status, refused.message, refused.code)
 
     async def _unserved(self, request: web.Request) -> web.Response:
         """A route this door does not serve, refused by name.
@@ -2158,7 +2162,7 @@ class GatewayServer:
         body = await _json_body(request)
         alias = _alias_of(body)
         system, messages, images = _anthropic_request(
-            body, max_image_bytes=self.gateway.max_image_bytes(),
+            body, max_image_bytes=self.gateway.max_image_bytes(), path=request.path,
         )
         tools = _anthropic_tools(body)
         effort = _anthropic_effort(body)
@@ -2367,13 +2371,51 @@ def _sse_event(event: Dict[str, Any]) -> bytes:
     return f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode("utf-8")
 
 
-def _anthropic_request(body: Dict[str, Any], *, max_image_bytes: int = 0
+def _system_blocks(content: Any) -> List[Any]:
+    """`system`-shaped content as the blocks a fold concatenates: a string
+    becomes one text block, a list travels block by block as the client wrote
+    it, so `cache_control` and every other field of a block survives."""
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    return list(content)
+
+
+def _folded_system(system: Any, lifted: List[Any]) -> Any:
+    """The top-level `system` with the contents of the `role: "system"`
+    messages after it, in the order they stood in `messages`.
+
+    Strings all the way through stay a string, joined as `_openai_messages`
+    joins its system turns — both halves of the door answer the same shape
+    the same way. The moment either side carries blocks the fold is a block
+    list instead, because a block holds fields a string cannot.
+    """
+    if not lifted:
+        return system
+    parts = [system, *lifted]
+    if all(part is None or isinstance(part, str) for part in parts):
+        return "\n\n".join(part for part in parts if part)
+    blocks: List[Any] = []
+    for part in parts:
+        blocks.extend(_system_blocks(part))
+    return blocks
+
+
+def _anthropic_request(body: Dict[str, Any], *, max_image_bytes: int = 0, path: str = ""
                        ) -> Tuple[Any, List[Dict[str, Any]], List[Dict[str, Any]]]:
     """The request's `system`, `messages` and images, or a 400 saying what is
     wrong with them. Shape only, with one exception: the turns travel to the
     provider un-flattened and whoever cannot take them that way renders them,
     but an `image` block is lifted out of its turn here — every renderer under
-    this door drops it, and the wire carries images beside the prompt."""
+    this door drops it, and the wire carries images beside the prompt.
+
+    A `role: "system"` message is lifted the same way, into the top-level
+    `system`, rather than refused: the Claude Code VS Code extension sends its
+    environment block there and the CLI sends none, and one door serves both.
+    Only `system` is lifted — any other role outside {user, assistant} keeps
+    its refusal.
+    """
     system = body.get("system")
     if system is not None and not isinstance(system, (str, list)):
         raise GatewayError(400, "'system' must be a string or an array of text blocks", "invalid_request_error")
@@ -2382,11 +2424,12 @@ def _anthropic_request(body: Dict[str, Any], *, max_image_bytes: int = 0
         raise GatewayError(400, "'messages' must be a non-empty array", "invalid_request_error")
     images: List[Dict[str, Any]] = []
     turns: List[Dict[str, Any]] = []
+    lifted: List[Any] = []
     for position, message in enumerate(messages):
         if not isinstance(message, dict):
             raise GatewayError(400, "each message must be an object with 'role' and 'content'", "invalid_request_error")
         role = message.get("role")
-        if role not in ("user", "assistant"):
+        if role not in ("user", "assistant", "system"):
             raise GatewayError(
                 400, "each message's 'role' must be 'user' or 'assistant'; the system prompt goes in 'system'",
                 "invalid_request_error",
@@ -2396,6 +2439,17 @@ def _anthropic_request(body: Dict[str, Any], *, max_image_bytes: int = 0
             raise GatewayError(
                 400, "each message's 'content' must be a string or an array of blocks", "invalid_request_error",
             )
+        if role == "system":
+            if not isinstance(content, str) and any(
+                isinstance(block, dict) and block.get("type") == "image" for block in content
+            ):
+                raise GatewayError(
+                    400, f"messages[{position}] is a system turn carrying an image; an image crosses the "
+                    "gateway in a user turn only",
+                    "invalid_request_error",
+                )
+            lifted.append(content)
+            continue
         if isinstance(content, str) or not any(
             isinstance(block, dict) and block.get("type") == "image" for block in content
         ):
@@ -2417,6 +2471,15 @@ def _anthropic_request(body: Dict[str, Any], *, max_image_bytes: int = 0
             else:
                 kept.append(block)
         turns.append(dict(message, content=kept))
+    if lifted:
+        folded = _folded_system(system, lifted)
+        # Counted, never quoted: a diagnostic line and not a transcript.
+        logger.debug(
+            "gateway %s: folded %d 'system' message(s), %d block(s), into 'system'",
+            path or MESSAGES_PATH, len(lifted),
+            sum(len(_system_blocks(content)) for content in lifted),
+        )
+        return folded, turns, images
     return system, turns, images
 
 
