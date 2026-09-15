@@ -235,7 +235,82 @@ def mask_gateway_key(key: Optional[str]) -> Optional[str]:
     return f"{key[:4]}\u2026{key[-4:]}"
 
 
-def client_config_lines(port: int, key: str, aliases: Sequence[str]) -> List[Dict[str, str]]:
+@dataclass(frozen=True)
+class MenuEntry:
+    """One row of the chat menu, in the form both readers of it need.
+
+    `/v1/models` and the paste-ready client blocks are one list seen twice,
+    built by `Gateway.chat_menu`. `id` is what goes in a client's model field
+    — a bare alias for this node's own, `remote:<node_id>:<alias>` for a
+    peer's; `label` is the short string a dropdown shows, never the id, which
+    for a peer's row is some sixty characters. `row` is the peer's own
+    `PROVIDERS_RESPONSE` row, kept so `/v1/models` can carry the host's
+    `tariff` and `settings` off the same pass; `as_dict` is what leaves the
+    backend and it stays behind.
+    """
+
+    id: str
+    owner: str  # "local" | "vendor" | "peer"
+    alias: str
+    label: str
+    peer_id: Optional[str] = None
+    peer_name: Optional[str] = None
+    row: Optional[Dict[str, Any]] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "owner": self.owner,
+            "alias": self.alias,
+            "label": self.label,
+            "peer_id": self.peer_id,
+            "peer_name": self.peer_name,
+        }
+
+
+# What the blocks name where the menu is empty: a configuration to fix rather
+# than a blank card.
+EMPTY_MENU_ID = "<alias>"
+
+
+def default_menu_id(entries: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """Which entry a client is configured for when nobody has chosen: this
+    node's first local row, else the menu's first row, else none. Local first
+    because it is the one this machine answers with no peer connected."""
+    local = next((entry for entry in entries if entry.get("owner") == "local"), None)
+    chosen = local or (entries[0] if entries else None)
+    return chosen.get("id") if chosen else None
+
+
+def resolve_menu_id(entries: Sequence[Dict[str, Any]],
+                    selected_id: Optional[str] = None) -> Optional[str]:
+    """The id the single-model blocks are rendered for: the owner's choice
+    while the menu still carries it, the default otherwise. One function for
+    both the id `get_gateway_client_lines` echoes and the id inside the
+    blocks, so the two cannot be two ids."""
+    if selected_id and any(entry.get("id") == selected_id for entry in entries):
+        return selected_id
+    return default_menu_id(entries)
+
+
+def _menu_choice_note(entries: Sequence[Dict[str, Any]], chosen: Dict[str, Any]) -> str:
+    """What a single-model block says about the model it names: which entry of
+    the menu it is, and how many others `/v1/models` carries beside it."""
+    if chosen.get("id") == EMPTY_MENU_ID:
+        return "the alias name, as in /v1/models, which is empty on this node right now"
+    if len(entries) == 1:
+        return "the one model /v1/models lists"
+    label = chosen.get("label") or chosen.get("id")
+    return (f"{label}, one of the {len(entries)} models /v1/models lists"
+            " — any other id on that list goes here too")
+
+
+def client_config_lines(
+    port: int,
+    key: str,
+    entries: Sequence[Dict[str, Any]],
+    selected_id: Optional[str] = None,
+) -> List[Dict[str, str]]:
     """The paste-ready configuration for the clients this door is for.
 
     `docs/CONFIGURATION.md` carries this function's output verbatim for the
@@ -243,9 +318,11 @@ def client_config_lines(port: int, key: str, aliases: Sequence[str]) -> List[Dic
     button cannot drift. The key is in clear because these lines are pasted
     into another tool's config; `get_gateway_state` is the masked answer.
 
-    `aliases` are the ones the door serves, one Continue entry each and the
-    first standing where a form names a single model; with none served the
-    lines render `<alias>`, a configuration to fix rather than a blank card.
+    `entries` are `MenuEntry.as_dict()` rows — the menu `/v1/models` renders,
+    a proved peer's models included, and not this node's serving lists, which
+    are narrower. Continue gets one array element per entry, titled by the
+    short label. Cursor and Claude Code name one entry, and say which of the
+    menu it is.
 
     Every value in the shell block goes through `shlex.quote`, because an
     alias may carry a space: this node's own is `qwen3.8 27b Mythos`, and
@@ -258,30 +335,35 @@ def client_config_lines(port: int, key: str, aliases: Sequence[str]) -> List[Dic
     quotes already.
     """
     base = f"http://{GATEWAY_HOST}:{port}"
-    names = [alias for alias in aliases if alias] or ["<alias>"]
-    first = names[0]
-    entries = [
-        f'    "title": "DPC {alias}",\n'
+    rows = [entry for entry in entries if entry.get("id")] or [
+        {"id": EMPTY_MENU_ID, "owner": "local", "alias": EMPTY_MENU_ID, "label": EMPTY_MENU_ID}
+    ]
+    chosen_id = resolve_menu_id(rows, selected_id) or EMPTY_MENU_ID
+    chosen = next(entry for entry in rows if entry.get("id") == chosen_id)
+    note = _menu_choice_note(rows, chosen)
+    blocks = [
+        f'    "title": "DPC {entry.get("label") or entry["id"]}",\n'
         f'    "provider": "openai",\n'
         f'    "apiBase": "{base}/v1",\n'
         f'    "apiKey": "{key}",\n'
-        f'    "model": "{alias}"'
-        for alias in names
+        f'    "model": "{entry["id"]}"'
+        for entry in rows
     ]
-    continue_text = '{\n  "models": [{\n' + "\n  }, {\n".join(entries) + "\n  }]\n}"
+    continue_text = '{\n  "models": [{\n' + "\n  }, {\n".join(blocks) + "\n  }]\n}"
     return [
         {"client": "continue", "text": continue_text},
         {"client": "cursor", "text": (
             "Settings > Models > OpenAI API Key > Override base URL\n"
             f"Base URL: {base}/v1\n"
             f"API key: {key}\n"
-            f"Model: {first}"
+            f"Model: {chosen_id}\n"
+            f"       # {note}"
         )},
         {"client": "claude_code", "text": (
             f"export ANTHROPIC_BASE_URL={shlex.quote(base)}\n"
             f"export ANTHROPIC_API_KEY={shlex.quote(key)}\n"
-            f"export ANTHROPIC_MODEL={shlex.quote(first)}"
-            "        # the alias name, as in /v1/models"
+            f"export ANTHROPIC_MODEL={shlex.quote(chosen_id)}"
+            f"        # {note}"
         )},
         {"client": "curl", "text": (
             f'curl {base}/v1/models -H "Authorization: Bearer {key}"'
@@ -547,6 +629,47 @@ class Gateway:
             if rows and self._connection_type(peer_id) in PROVED_CONNECTION_TYPES:
                 menu[peer_id] = rows
         return menu
+
+    def peer_display_name(self, peer_id: str) -> Optional[str]:
+        """The name the peer gave in its HELLO, or None where it gave none."""
+        metadata = getattr(self._core, "peer_metadata", None) or {}
+        return ((metadata.get(peer_id) or {}).get("name") or "").strip() or None
+
+    def chat_menu(self) -> List[MenuEntry]:
+        """Every chat model this door offers, in the order `/v1/models` lists
+        them: this node's own while both switches are on, then each proved
+        peer's under its own name.
+
+        The one builder. `/v1/models` renders these entries and
+        `get_gateway_client_lines` renders the same ones into the paste-ready
+        blocks, so a client cannot be handed an id the menu would refuse.
+        """
+        entries: List[MenuEntry] = []
+        if self.compute_sharing_on():
+            lists = self.serving_lists()
+            types = self.provider_types()
+            entries = [
+                MenuEntry(id=alias, owner=owner, alias=alias, label=alias)
+                for owner, aliases in (("local", lists.local), ("vendor", lists.vendor))
+                for alias in aliases
+                if serves_chat(types.get(alias))
+            ]
+        for peer_id, rows in self.peer_menu().items():
+            name = self.peer_display_name(peer_id)
+            entries.extend(
+                MenuEntry(
+                    id=f"{REMOTE_PREFIX}{peer_id}:{row['alias']}",
+                    owner="peer",
+                    alias=row["alias"],
+                    label=f"{row['alias']} ({name or peer_id[:20] + '…'})",
+                    peer_id=peer_id,
+                    peer_name=name,
+                    row=row,
+                )
+                for row in rows
+                if serves_chat(row.get("type"))
+            )
+        return entries
 
     def local_row_extras(self, alias: str) -> Dict[str, Any]:
         """`tariff` and `settings` for one of this node's own aliases.
@@ -1885,30 +2008,20 @@ class GatewayServer:
         this node's serving lists and on a peer's rows alike, because a client
         reads this list as the menu it may complete against and a row it cannot
         call is a refusal moved from the door to after the choice.
+
+        The membership rule is `Gateway.chat_menu`'s — this node's own while
+        both switches are on, then each proved peer's, whatever this node's
+        own flag says, since the door those rows stand in is the peer's. What
+        this route adds is the OpenAI envelope: `owned_by`, and the `tariff`
+        and `settings` each half of the menu carries.
         """
-        data = []
-        # The same flag that refuses a completion on this node's own alias
-        # keeps it off the menu: a shut door lists nothing it would refuse.
-        if self.gateway.compute_sharing_on():
-            lists = self.gateway.serving_lists()
-            types = self.gateway.provider_types()
-            data = [
-                {"id": alias, "object": "model", "created": 0, "owned_by": owner,
-                 **self.gateway.local_row_extras(alias)}
-                for owner, aliases in (("local", lists.local), ("vendor", lists.vendor))
-                for alias in aliases
-                if serves_chat(types.get(alias))
-            ]
-        # After the two local lists, each proved peer's menu under the peer's
-        # name — listed whatever this node's flag says, since the door those
-        # rows stand in is the peer's.
-        data.extend(
-            {"id": f"{REMOTE_PREFIX}{peer_id}:{row['alias']}", "object": "model", "created": 0,
-             "owned_by": peer_id, **_peer_row_extras(row)}
-            for peer_id, rows in self.gateway.peer_menu().items()
-            for row in rows
-            if serves_chat(row.get("type"))
-        )
+        data = [
+            {"id": entry.id, "object": "model", "created": 0,
+             "owned_by": entry.peer_id or entry.owner,
+             **(_peer_row_extras(entry.row) if entry.row is not None
+                else self.gateway.local_row_extras(entry.alias))}
+            for entry in self.gateway.chat_menu()
+        ]
         return web.json_response({"object": "list", "data": data})
 
     async def _chat_completions(self, request: web.Request) -> web.StreamResponse:

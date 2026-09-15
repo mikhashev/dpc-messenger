@@ -45,10 +45,12 @@ from .file_server import FileServer
 from .gateway import (
     GATEWAY_HOST,
     GATEWAY_KEY_NAME,
+    Gateway,
     GatewayConfigError,
     GatewayServer,
     client_config_lines,
     mask_gateway_key,
+    resolve_menu_id,
     rotate_gateway_key,
 )
 
@@ -5115,10 +5117,17 @@ class CoreService:
             "key_file": key_file,
         }
 
-    async def get_gateway_client_lines(self) -> Dict[str, Any]:
+    async def get_gateway_client_lines(self, selected_id: Optional[str] = None) -> Dict[str, Any]:
         """The paste-ready lines for Continue, Cursor, Claude Code and curl,
         with the key in clear (Mike's call, 2026-09-14): they are pasted into
-        another tool's config, and this socket already carries `.ws_token`."""
+        another tool's config, and this socket already carries `.ws_token`.
+
+        `menu` is `Gateway.chat_menu`, the list `/v1/models` answers with, and
+        the lines are rendered from it: every id offered here is an id that
+        door would serve. `selected_id` names the entry the single-model
+        blocks are written for and is echoed back resolved, so the UI's
+        dropdown and the blocks below it show one choice.
+        """
         server = self.gateway
         port = server.port if server is not None else self.settings.get_gateway_port()
         key_path = server.key_path if server is not None else DPC_HOME_DIR / GATEWAY_KEY_NAME
@@ -5128,13 +5137,22 @@ class CoreService:
                 key = Path(key_path).read_text(encoding="utf-8").strip()
             except OSError:
                 key = ""
+        # The same builder the route uses, over the same core, whether or not a
+        # listener holds the port: `chat_menu` reads the firewall, the registry
+        # and the peers live, so a `Gateway` made here answers what the running
+        # one would. A refused serving list is `get_gateway_state`'s sentence,
+        # and leaves the card an empty menu rather than an error.
         try:
-            aliases = list(self.firewall.compute_serving_local or [])
-        except Exception:
-            aliases = []
+            menu = [entry.as_dict() for entry in Gateway(self).chat_menu()]
+        except Exception as e:
+            logger.warning("The gateway menu could not be built for the client lines: %s", e)
+            menu = []
+        chosen = resolve_menu_id(menu, selected_id if isinstance(selected_id, str) else None)
         return {
             "status": "success",
-            "lines": client_config_lines(port, key or NO_GATEWAY_KEY_YET, aliases),
+            "menu": menu,
+            "selected_id": chosen,
+            "lines": client_config_lines(port, key or NO_GATEWAY_KEY_YET, menu, chosen),
             "key_masked": mask_gateway_key(key),
         }
 

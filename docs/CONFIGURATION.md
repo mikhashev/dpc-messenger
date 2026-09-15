@@ -326,7 +326,14 @@ lists, the refusal that stopped them being classified where there is one, and
 `compute.enabled`. `rotate_gateway_key` is the rotation described above.
 `get_gateway_client_lines` returns the paste-ready configuration for Continue, Cursor,
 Claude Code and curl with the key in clear — the two examples on this page are that
-command's own output, compared by a test so the page and the button cannot drift.
+command's own output, compared by a test so the page and the button cannot drift. It
+answers with the same menu `/v1/models` lists, a proved peer's `remote:<node id>:<alias>`
+models included and not this node's serving lists alone, as `menu` — one entry per model,
+with the `id` a client is configured with and the short `label` a dropdown shows — and
+renders the blocks from it: every model these blocks offer is one this door serves.
+Continue takes one entry per model; Cursor and Claude Code name a single one, the optional
+`selected_id` where the menu carries it and this node's first local model otherwise, echoed
+back as `selected_id` and named inside the block itself.
 `get_peer_provider_menu(peer_id)` returns the rows a named peer would be sent in
 `PROVIDERS_RESPONSE`, from the same function that sends them, with `known`, `connected`,
 `allowed` and, where the list is empty, the reason in words. Beside them,
@@ -404,7 +411,7 @@ accepted and ignored: sampling is the alias's own configuration on this node.
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:9997
 export ANTHROPIC_API_KEY='<contents of ~/.dpc/.gateway_key>'
-export ANTHROPIC_MODEL=ollama_local        # the alias name, as in /v1/models
+export ANTHROPIC_MODEL=ollama_local        # the one model /v1/models lists
 ```
 `ANTHROPIC_AUTH_TOKEN=<key>` (sent as `Authorization: Bearer`) works in place of
 `ANTHROPIC_API_KEY`. Every value in this block is rendered through `shlex.quote`,

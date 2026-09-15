@@ -36,6 +36,7 @@ from dpc_client_core.gateway import (
     GATEWAY_HOST,
     GATEWAY_KEY_NAME,
     GatewayServer,
+    MenuEntry,
     client_config_lines,
     mask_gateway_key,
     new_gateway_key,
@@ -59,6 +60,13 @@ class _Provider:
 
     def supports_vision(self):
         return False
+
+
+def _entry(alias: str, **overrides) -> dict:
+    """One menu entry as the gateway builds it, for the tests that call the
+    renderer directly."""
+    entry = MenuEntry(id=alias, owner="local", alias=alias, label=alias)
+    return {**entry.as_dict(), **overrides}
 
 
 def _rules(tmp_path: Path, **blocks) -> ContextFirewall:
@@ -252,6 +260,8 @@ async def test_the_client_lines_carry_the_key_and_the_served_aliases(tmp_path):
         assert "sekrit-key-1234" in text, "these lines exist to be pasted (Mike's call)"
     assert LOCAL in clients["continue"] and LOCAL in clients["claude_code"]
     assert answer["key_masked"] == "sekr…1234"
+    assert [entry["id"] for entry in answer["menu"]] == [LOCAL]
+    assert answer["selected_id"] == LOCAL
     json.loads(clients["continue"])
 
 
@@ -260,7 +270,7 @@ def test_the_documented_snippets_are_this_functions_own_output():
     blocks `docs/CONFIGURATION.md` shows are compared byte for byte."""
     doc = io.open(DOCS, encoding="utf-8").read()
     rendered = {row["client"]: row["text"] for row in
-                client_config_lines(9997, "<contents of ~/.dpc/.gateway_key>", [LOCAL])}
+                client_config_lines(9997, "<contents of ~/.dpc/.gateway_key>", [_entry(LOCAL)])}
 
     assert rendered["continue"] in doc, "the Continue example is no longer what the command renders"
     assert rendered["claude_code"] in doc, "the Claude Code example has drifted from the command"
@@ -282,7 +292,7 @@ def test_the_shell_block_quotes_an_alias_the_shell_would_otherwise_break_on(alia
     `qwen3.8` and answers `export: '27b': not a valid identifier` (measured
     2026-09-14). The value is one word to the shell or the block is not
     paste-ready, which is the only thing it is for."""
-    (block,) = [row for row in client_config_lines(9997, "k3y", [alias])
+    (block,) = [row for row in client_config_lines(9997, "k3y", [_entry(alias)])
                 if row["client"] == "claude_code"]
 
     assert f"export ANTHROPIC_MODEL={shlex.quote(alias)}" in block["text"]
@@ -295,7 +305,7 @@ def test_the_shell_block_quotes_an_alias_the_shell_would_otherwise_break_on(alia
 @pytest.mark.parametrize("alias", [SPACED, QUOTED])
 def test_the_shell_block_round_trips_through_a_real_shell(alias):
     """Pasted, not parsed: the block is run by `sh` and the variable read back."""
-    (block,) = [row for row in client_config_lines(9997, "k3y", [alias])
+    (block,) = [row for row in client_config_lines(9997, "k3y", [_entry(alias)])
                 if row["client"] == "claude_code"]
 
     done = subprocess.run(
@@ -306,6 +316,131 @@ def test_the_shell_block_round_trips_through_a_real_shell(alias):
     assert done.returncode == 0, done.stderr
     assert done.stdout == f"{alias}:k3y"
     assert done.stderr == "", "a shell that set the variables says nothing"
+
+
+PEER_ROWS = [
+    {"alias": "mythos", "model": "qwen3.8-27b-mythos", "type": "llamacpp_server"},
+    {"alias": "ears", "model": "whisper-large-v3-turbo", "type": "local_whisper"},
+]
+PEER_ID = f"remote:{PEER}:mythos"
+
+
+def _with_a_proved_peer(tmp_path, *, serving_local=(LOCAL,), compute_enabled=True):
+    """This node's own aliases, and one peer connected over direct TLS whose
+    `PROVIDERS_RESPONSE` rows are in `peer_metadata` — the two halves of the
+    menu."""
+    firewall = _rules(tmp_path, compute={"enabled": compute_enabled,
+                                         "serving_local": list(serving_local)})
+    service = _service(tmp_path, firewall,
+                       peers={PEER: SimpleNamespace(connection_type="direct_tls")})
+    service.peer_metadata = {PEER: {"name": "the Linux node", "providers": PEER_ROWS}}
+    return service
+
+
+def _offered(lines):
+    """The model ids the three configurable blocks would put in a client's
+    model field, read back out of the rendered text."""
+    blocks = {row["client"]: row["text"] for row in lines}
+    continued = [model["model"] for model in json.loads(blocks["continue"])["models"]]
+    (cursor,) = [line[len("Model: "):] for line in blocks["cursor"].splitlines()
+                 if line.startswith("Model: ")]
+    (export,) = [line for line in blocks["claude_code"].splitlines()
+                 if line.startswith("export ANTHROPIC_MODEL=")]
+    claude_code = shlex.split(export.split("        #")[0])[1].split("=", 1)[1]
+    return continued, cursor, claude_code
+
+
+@pytest.mark.asyncio
+async def test_every_id_the_blocks_offer_is_an_id_v1_models_would_list(tmp_path):
+    """The invariant, asserted against the running door rather than assumed:
+    the blocks and `/v1/models` are one menu, so a pasted configuration cannot
+    name a model this gateway would refuse."""
+    import aiohttp
+
+    service = _with_a_proved_peer(tmp_path)
+    server = GatewayServer(service, host=GATEWAY_HOST, port=0, key_path=tmp_path / GATEWAY_KEY_NAME)
+    service.gateway = server
+    await server.start()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"http://{GATEWAY_HOST}:{server.port}/v1/models",
+                headers={"Authorization": f"Bearer {server._key}"},
+            ) as response:
+                served = [row["id"] for row in (await response.json())["data"]]
+        answer = await service.get_gateway_client_lines()
+    finally:
+        await server.stop()
+
+    continued, cursor, claude_code = _offered(answer["lines"])
+    assert served == [LOCAL, PEER_ID], "the peer's chat alias is on the menu, its whisper row is not"
+    assert continued == served, "Continue offers the menu, in the menu's order"
+    assert cursor in served and claude_code in served
+    assert [entry["id"] for entry in answer["menu"]] == served
+
+
+@pytest.mark.asyncio
+async def test_a_node_serving_nothing_of_its_own_offers_its_peers_models(tmp_path):
+    """The card this closes: with `compute.enabled` false the door still
+    carries the peer's models — that flag is about what this node gives — and
+    the blocks used to read `<alias>` while `/v1/models` answered with them."""
+    service = _with_a_proved_peer(tmp_path, serving_local=(), compute_enabled=False)
+
+    answer = await service.get_gateway_client_lines()
+
+    continued, cursor, claude_code = _offered(answer["lines"])
+    assert continued == [PEER_ID] and cursor == claude_code == PEER_ID
+    assert answer["selected_id"] == PEER_ID
+    assert "<alias>" not in json.dumps(answer["lines"])
+    assert "DPC mythos (the Linux node)" in answer["lines"][0]["text"], (
+        "a dropdown and a title take the label, not the sixty-character id"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asked,expected", [
+    (None, LOCAL),
+    (PEER_ID, PEER_ID),
+    ("remote:" + STRANGER + ":gone", LOCAL),
+])
+async def test_the_blocks_are_rendered_for_the_entry_the_owner_chose(tmp_path, asked, expected):
+    """One value stands where a client names a single model, and which one is
+    a choice: the owner's while the menu still carries it, this node's first
+    local row otherwise."""
+    service = _with_a_proved_peer(tmp_path)
+
+    answer = await service.get_gateway_client_lines(selected_id=asked)
+
+    _, cursor, claude_code = _offered(answer["lines"])
+    assert answer["selected_id"] == cursor == claude_code == expected
+
+
+@pytest.mark.asyncio
+async def test_the_single_model_blocks_say_which_entry_they_named(tmp_path):
+    """`names[0]` was an iteration order and the block said nothing about it;
+    a guest reading the paste now learns what it got and that there is more."""
+    service = _with_a_proved_peer(tmp_path)
+
+    answer = await service.get_gateway_client_lines(selected_id=PEER_ID)
+
+    blocks = {row["client"]: row["text"] for row in answer["lines"]}
+    for text in (blocks["cursor"], blocks["claude_code"]):
+        assert "mythos (the Linux node), one of the 2 models /v1/models lists" in text
+
+
+def test_the_menu_carries_what_a_dropdown_needs_of_each_half(tmp_path):
+    """`label` is short, `id` is what a client is configured with, and a
+    peer's row says whose it is."""
+    from dpc_client_core.gateway import Gateway
+
+    menu = [entry.as_dict() for entry in Gateway(_with_a_proved_peer(tmp_path)).chat_menu()]
+
+    assert menu == [
+        {"id": LOCAL, "owner": "local", "alias": LOCAL, "label": LOCAL,
+         "peer_id": None, "peer_name": None},
+        {"id": PEER_ID, "owner": "peer", "alias": "mythos",
+         "label": "mythos (the Linux node)", "peer_id": PEER, "peer_name": "the Linux node"},
+    ]
 
 
 def test_the_mask_shows_the_keys_own_head_and_tail_and_invents_no_prefix():
