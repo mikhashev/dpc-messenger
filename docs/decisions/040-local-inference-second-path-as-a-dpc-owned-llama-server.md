@@ -339,6 +339,67 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   number from `b10809` exists**, and every figure in this document stays what it was — a dated
   observation on the build it was taken on.)*
 
+  *(**Amendment, 2026-09-15 — the pin moves to `b10964`, read the same way, and this time the
+  argument is not the channel rule but a numerical fix in our own architecture.** Upstream's newest
+  non-prerelease is **`v0.4.1`** (published 2026-09-14T18:27:29Z); its sole asset `nightly-tag.txt`
+  is 7 bytes holding exactly `b10964`. The range `b10809...b10964` is **155 commits**, and unlike
+  last time it was taken by three independent instruments that agree: the paged compare endpoint
+  (`total_commits` and `ahead_by` both 155, 100+55 commit objects actually received), a walk of the
+  commit list from `b29c606e` finding `5266f24d` at position 155, and a line count of the release
+  body's own "Changelog since v0.4.0" section. `b10809` itself is the commit `llama.cpp : bump
+  version to 0.4.0 (#28386)`, so the previous pin was v0.4.0 entire (`Observed`, Ark).
+
+  The asset rows were re-digested from the release API. **The `cudart` asset is byte-identical again
+  — digest and size both — and this time that is measured rather than carried over**, because ggml
+  went 0.23.0 → 0.24.0 in this range and "it did not change last time" would have been the wrong
+  kind of argument. A guard went into the suite with the rows
+  (`test_every_asset_name_carries_the_pinned_tag`): the download URL is built from the tag and the
+  asset name and **nothing compared the two**, so a table where one platform kept the old name is a
+  404 on that platform alone with a green suite everywhere else (Ark's finding; the guard was
+  falsified against a deliberately stale row before it was trusted).
+
+  What arrives, each narrower than its changelog line.
+  **(i) `#28334` removes `--mmap`, `--mlock` and `--direct-io` from the arg parser** — not
+  deprecates, removes; the PR is titled so. We emit none of them, and `extra_args` is empty on both
+  nodes (`Observed`: the Windows `providers.json` has no such key in the `llamacpp_server` entry, and
+  the Linux node has no `llamacpp_server` entry at all — read whole, not grepped).
+  **(ii) `#28068` changes the GDN q/k normalisation from a clamped `max` to `rsqrt`, and it lands in
+  our architecture.** The PR names `qwen35` among the seven it affects and its diff patches
+  `src/models/qwen35.cpp`'s `build_layer_attn_linear`; our GGUF's own `general.architecture` is
+  `qwen35`, with `qwen35.ssm.*` hparams and per-block `ssm_conv1d`/`ssm_a`/`ssm_alpha`/`ssm_beta`/
+  `ssm_dt.bias`/`ssm_norm`/`ssm_out` tensors and `full_attention_interval = 4` — read from the file's
+  own KV block, not from its name. **No figure from `b10809` or `b10566` transfers across this
+  change, and neither does output quality.** The PR's own KLD table is measured on a *Q4_K_M* build;
+  ours is `general.file_type = 7` with 448 NVFP4 / 664 F32 / 10 Q8_0 tensors and no k-quant at all,
+  so **the magnitude of the defect for our file is unknown** — the shape of it (a divergence only
+  where the q/k norm approaches `eps`, i.e. in the tail) is what carries over, not the numbers.
+  **(iii) `#28079` removes the `K->type != V->type → BEST_FATTN_KERNEL_NONE` guard in `fattn.cu`.**
+  This does not fix what we run: our pair is matched `q4_0/q4_0`. It makes the mixed pair an option
+  on prefill only — `q8_0-q4_0` is still absent from the default `GGML_CUDA_FA_QUANTS`
+  (`ggml/CMakeLists.txt:207` at `b10964`), and the release CI passes no FA flag at all: the
+  `windows-cuda` job is byte-identical between the two tags. PR **#27269**, which this document's
+  neighbours cite as the pending fix for that pair, was **closed unmerged on 2026-09-13**.
+  **(iv) `#28587` and `#28715` fix the drafter beside the projector** — `#28587`'s body quotes our
+  own error strings (`llama_decode(ctx_dft) failed`, `failed to decode mtmd chunk`, `failed to
+  process mtmd chunk`) and its repro condition is an image larger than `-ub`, which our alias sets to
+  1024. This is the strongest single argument in the range, and it is for an open HIGH on the board,
+  not for this ADR.
+  **(v) `#27870`** fixes a divergent barrier in the CUDA f16 flash-attention tile kernel
+  (`compute-sanitizer`: 3232 errors before, 0 after) — the only genuine FA fix in the range.
+
+  What did **not** change, checked rather than assumed: `cache_reuse` is still zeroed under
+  `--mmproj` at `server-context.cpp:1179` and `:1191`, same addresses, with the per-slot predicate
+  moved `:3211 → :3227` and textually identical; and the flash-attention logic in `tools/mtmd/
+  clip.cpp` is byte-identical between the two tags apart from one API rename.
+
+  **Nothing here was measured on `b10964`.** The pin was moved on Mike's verb of 2026-09-15 after the
+  rollback was shown to cost nothing — installs are per-tag, `b10809` stays on disk, and
+  `resolve_binary` accepts it again from the marker without a network call. Every figure in this
+  document remains a dated observation on the build it was taken on, and **no speed number from
+  either `b10809` or `b10964` exists**. When the two-node ADR-041 observations are taken, each must
+  record which build it ran on: three of them go through this llama-server, and the pin moved
+  between them and the ones already recorded (Ark, 2026-09-15).)*
+
   *(Post-acceptance, 2026-08-19: the pin was fetched and verified, gates G1/G2 closed, steps 1–4
   of the implementation plan shipped, and the provider answered its first live calls. The
   chronicle of that day — every measurement, error and fix — lives in
