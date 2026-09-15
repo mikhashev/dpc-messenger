@@ -245,8 +245,8 @@ class MenuEntry:
     peer's; `label` is the short string a dropdown shows, never the id, which
     for a peer's row is some sixty characters. `row` is the peer's own
     `PROVIDERS_RESPONSE` row, kept so `/v1/models` can carry the host's
-    `tariff` and `settings` off the same pass; `as_dict` is what leaves the
-    backend and it stays behind.
+    `tariff`, `settings` and `context_window` off the same pass; `as_dict` is
+    what leaves the backend and it stays behind.
     """
 
     id: str
@@ -672,23 +672,31 @@ class Gateway:
         return entries
 
     def local_row_extras(self, alias: str) -> Dict[str, Any]:
-        """`tariff` and `settings` for one of this node's own aliases.
+        """`tariff`, `settings` and `context_window` for one of this node's aliases.
 
-        The same two keys a peer's row carries (DPTP §3.5), so an IDE client
-        reads one shape for both kinds of row. The loopback caller is this node
+        The same keys a peer's row carries (DPTP §3.5), so an IDE client reads
+        one shape for both kinds of row. The loopback caller is this node
         (`caller`), so the tariff resolved for it is what this node declares for
         the alias — what it would quote a peer, not a bill for a call made here.
+        The window is `lookup_context_window`'s answer, the same resolution the
+        peer row is built from, and absent when it answers None.
         """
         core = self._core
         node_id = getattr(getattr(core, "p2p_manager", None), "node_id", None)
-        providers = getattr(getattr(core, "llm_manager", None), "providers", None) or {}
+        llm_manager = getattr(core, "llm_manager", None)
+        providers = getattr(llm_manager, "providers", None) or {}
         extras: Dict[str, Any] = {}
         tariff = core.menu_tariff(alias, node_id)
         if tariff is not None:
             extras["tariff"] = tariff
-        settings = core.menu_settings(providers.get(alias))
+        provider = providers.get(alias)
+        settings = core.menu_settings(provider)
         if settings:
             extras["settings"] = settings
+        if provider is not None:
+            window = llm_manager.lookup_context_window(provider.model)
+            if window is not None:
+                extras["context_window"] = window
         return extras
 
     def max_image_bytes(self) -> int:
@@ -1817,13 +1825,36 @@ def _alias_of(body: Dict[str, Any]) -> str:
 
 
 def _peer_row_extras(row: Dict[str, Any]) -> Dict[str, Any]:
-    """A host's `tariff` and `settings` (DPTP §3.5) carried onto its model row.
+    """A host's `tariff`, `settings` and `context_window` carried onto its row.
 
     Copied, never recomputed: on a `remote:` row these are the host's own
-    statements about its own alias, and an OpenAI client ignores the keys it
-    does not know.
+    statements about its own alias (DPTP §3.5), and an OpenAI client ignores
+    the keys it does not know. `context_window` is what one conversation may
+    occupy — not `n_ctx`, the pool every slot shares, which does not derive
+    from it (`window_outgrows_pool`). A host that does not know states None,
+    and the key is then absent rather than guessed.
     """
-    return {key: row[key] for key in ("tariff", "settings") if isinstance(row.get(key), dict)}
+    extras = {key: row[key] for key in ("tariff", "settings") if isinstance(row.get(key), dict)}
+    window = row.get("context_window")
+    if isinstance(window, int) and not isinstance(window, bool):
+        extras["context_window"] = window
+    return extras
+
+
+def _log_refusal(request: web.Request, e: GatewayError, request_id: Optional[str] = None) -> None:
+    """One line per refusal, so the next one is diagnosable from this machine.
+
+    A refusal reaches the client and left nothing here; the line carries what
+    tells one apart — status, code, path and the sentence `GatewayError`
+    already words — and never the key, the prompt, a message or the system
+    prompt, because this is a diagnostic line and not a transcript.
+    """
+    logger.log(
+        logging.ERROR if e.status >= 500 else logging.WARNING,
+        "gateway refused %s %s: %s %s: %s%s",
+        request.method, request.path, e.status, e.code or "no_code", e.message,
+        f" [request_id={request_id}]" if request_id else "",
+    )
 
 
 class GatewayServer:
@@ -1987,6 +2018,7 @@ class GatewayServer:
         try:
             return await handler(request)
         except GatewayError as e:
+            _log_refusal(request, e)
             return error(e.status, e.message, e.code)
         except GatewayConfigError as e:
             return error(503, f"the gateway's serving lists are refused: {e}", "serving_lists_refused")
@@ -2094,6 +2126,7 @@ class GatewayServer:
         except GatewayError as e:
             if not stream.opened:
                 raise
+            _log_refusal(request, e, request_id)
             # OpenAI has no error event; its clients surface an `error` object on a data line.
             await stream.write(_sse_data({"error": {
                 "message": e.message, "type": _ERROR_TYPES.get(e.status, "server_error"), "code": e.code or None,
@@ -2188,6 +2221,7 @@ class GatewayServer:
         except GatewayError as e:
             if not stream.opened:
                 raise
+            _log_refusal(request, e, minted)
             await stream.write(_sse_event({"type": "error", "error": {
                 "type": _ANTHROPIC_ERROR_TYPES.get(e.status, "api_error"), "message": e.message,
             }}))
