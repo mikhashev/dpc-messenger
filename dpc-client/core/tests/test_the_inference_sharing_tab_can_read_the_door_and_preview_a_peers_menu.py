@@ -269,11 +269,19 @@ def test_the_documented_snippets_are_this_functions_own_output():
     """The page and the button render from one place, or they drift: the two
     blocks `docs/CONFIGURATION.md` shows are compared byte for byte."""
     doc = io.open(DOCS, encoding="utf-8").read()
+    key = "<contents of ~/.dpc/.gateway_key>"
     rendered = {row["client"]: row["text"] for row in
-                client_config_lines(9997, "<contents of ~/.dpc/.gateway_key>", [_entry(LOCAL)])}
+                client_config_lines(9997, key, [_entry(LOCAL)])}
+    # The page shows the window exported too, so the block it documents is one
+    # rendered for an entry that states one.
+    with_window = {row["client"]: row["text"] for row in
+                   client_config_lines(9997, key, [_entry(LOCAL, context_window=LOCAL_WINDOW)])}
 
     assert rendered["continue"] in doc, "the Continue example is no longer what the command renders"
-    assert rendered["claude_code"] in doc, "the Claude Code example has drifted from the command"
+    assert with_window["claude_code"] in doc, "the Claude Code example has drifted from the command"
+    assert with_window["claude_code"] != rendered["claude_code"], (
+        "the documented block is the one that carries the window"
+    )
 
 
 def test_a_door_that_has_never_started_says_so_where_the_key_would_be():
@@ -437,10 +445,90 @@ def test_the_menu_carries_what_a_dropdown_needs_of_each_half(tmp_path):
 
     assert menu == [
         {"id": LOCAL, "owner": "local", "alias": LOCAL, "label": LOCAL,
-         "peer_id": None, "peer_name": None},
+         "peer_id": None, "peer_name": None, "context_window": None},
         {"id": PEER_ID, "owner": "peer", "alias": "mythos",
-         "label": "mythos (the Linux node)", "peer_id": PEER, "peer_name": "the Linux node"},
+         "label": "mythos (the Linux node)", "peer_id": PEER, "peer_name": "the Linux node",
+         "context_window": None},
     ]
+
+
+# --- the window the menu and the Claude Code block carry ----------------------
+
+LOCAL_WINDOW = 215040  # this node's own alias, as configured
+PEER_WINDOW = 131072
+
+
+def _with_windows(tmp_path, *, local=LOCAL_WINDOW, peer=PEER_WINDOW):
+    """The two halves of the menu with a window stated on each: this node
+    resolves its own through `lookup_context_window`, the peer states its own
+    on the row it sent."""
+    service = _with_a_proved_peer(tmp_path)
+    service.llm_manager.lookup_context_window = lambda model: local
+    service.peer_metadata = {PEER: {"name": "the Linux node", "providers": [
+        {**row, **({"context_window": peer} if peer is not None else {})}
+        for row in PEER_ROWS
+    ]}}
+    return service
+
+
+def _exported_window(lines):
+    """`CLAUDE_CODE_MAX_CONTEXT_TOKENS` as the block exports it, or None when
+    the block carries no such line at all."""
+    (block,) = [row["text"] for row in lines if row["client"] == "claude_code"]
+    exported = [line for line in block.splitlines()
+                if line.startswith("export CLAUDE_CODE_MAX_CONTEXT_TOKENS")]
+    if not exported:
+        return None
+    (name, value), = [shlex.split(line)[1].split("=", 1) for line in exported]
+    assert name == "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+    return value
+
+
+@pytest.mark.asyncio
+async def test_the_menu_says_how_wide_each_entry_is_and_says_null_for_what_it_cannot_say(tmp_path):
+    """A client that is not told the window guesses it: Claude Code announces
+    it keeps the session within 200k for a model name it does not know, while
+    this node's alias is 215040. Both halves of the menu carry the number, and
+    the key is present and null where nobody knows it, so the UI can tell that
+    apart from a backend too old to send it."""
+    known = await _with_windows(tmp_path).get_gateway_client_lines()
+    unknown = await _with_windows(tmp_path, local=None, peer=None).get_gateway_client_lines()
+
+    assert [(entry["id"], entry["context_window"]) for entry in known["menu"]] == [
+        (LOCAL, LOCAL_WINDOW), (PEER_ID, PEER_WINDOW),
+    ]
+    for entry in unknown["menu"]:
+        assert "context_window" in entry, "absent reads as «too old to send it»"
+        assert entry["context_window"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_claude_code_block_exports_the_window_and_never_guesses_one(tmp_path):
+    """The knob that binary reads, beside the exports it already reads — and
+    no line at all where the window is unknown, because the guess it would
+    otherwise make is its own and not ours."""
+    service = _with_windows(tmp_path)
+
+    answer = await service.get_gateway_client_lines()
+    silent = await _with_windows(tmp_path, local=None, peer=None).get_gateway_client_lines()
+
+    assert _exported_window(answer["lines"]) == str(LOCAL_WINDOW)
+    assert _exported_window(silent["lines"]) is None
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in json.dumps(silent["lines"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asked,expected", [(LOCAL, LOCAL_WINDOW), (PEER_ID, PEER_WINDOW)])
+async def test_the_exported_window_moves_with_the_selection(tmp_path, asked, expected):
+    """One entry is named in that block and the window exported under it is
+    that entry's, not the menu's first — a number belonging to another model
+    is worse than none."""
+    service = _with_windows(tmp_path)
+
+    answer = await service.get_gateway_client_lines(selected_id=asked)
+
+    assert answer["selected_id"] == asked
+    assert _exported_window(answer["lines"]) == str(expected)
 
 
 def test_the_mask_shows_the_keys_own_head_and_tail_and_invents_no_prefix():

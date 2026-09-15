@@ -9,7 +9,9 @@ import {
   classifyProviderType,
   computeBlockErrors,
   computeErrorsOf,
+  contextWindowLine,
   doorAddress,
+  formatContextWindow,
   foldServingAlias,
   gatewayVerdict,
   groupGatewayMenu,
@@ -26,6 +28,7 @@ import {
   removeAllowedModel,
   removeServing,
   removeTariffEntry,
+  selectedMenuEntry,
   SERVES_NO_LOCAL_ALIAS,
   setCurrency,
   setFree,
@@ -541,6 +544,78 @@ describe('the sole-entry line and the live-list note', () => {
     expect(MENU_IS_LIVE_NOTE).toContain('GET /v1/models');
     expect(MENU_IS_LIVE_NOTE).toContain('proved and connected right now');
     expect(MENU_IS_LIVE_NOTE.toLowerCase()).toContain('drop');
+  });
+});
+
+describe('the context-window line under the client-menu selector', () => {
+  const entry = (id: string, context_window?: number | null): GatewayMenuEntry => ({
+    id, owner: 'local', alias: id, label: id, context_window,
+  });
+
+  it('formats a known window for a human at a glance, thousands separated', () => {
+    expect(formatContextWindow(128000, 'en-US')).toBe('128,000');
+    expect(formatContextWindow(128000)).toBe((128000).toLocaleString());
+  });
+
+  it('says "unknown" in words for null or a missing key, never a blank or a zero', () => {
+    expect(formatContextWindow(null)).toBe('unknown');
+    expect(formatContextWindow(undefined)).toBe('unknown');
+    expect(formatContextWindow(null)).not.toBe('0');
+    expect(formatContextWindow(null)).not.toBe('');
+  });
+
+  it('a known window is named in the host\'s own voice, and carries no "unknown" wording anywhere', () => {
+    const line = contextWindowLine(entry('llama', 128000), 'en-US');
+    expect(line).toBe('Context window: 128,000 tokens — the window one conversation may take, as the host states it.');
+    expect(line.toLowerCase()).not.toContain('unknown');
+  });
+
+  it('a null window says unknown outright, not a blank or a zero', () => {
+    const line = contextWindowLine(entry('ds', null));
+    expect(line).toBe('Context window: unknown — the host did not state one for this model.');
+    expect(line).not.toBe('');
+    expect(line).not.toContain('0 tokens');
+  });
+
+  it('a missing key reads exactly like null — the two are never told apart', () => {
+    const withKeyMissing: GatewayMenuEntry = { id: 'ds', owner: 'local', alias: 'ds', label: 'ds' };
+    expect(contextWindowLine(withKeyMissing)).toBe(contextWindowLine(entry('ds', null)));
+  });
+
+  it('no entry selected renders no line at all', () => {
+    expect(contextWindowLine(null)).toBe('');
+    expect(contextWindowLine(undefined)).toBe('');
+  });
+
+  it('the entry the line describes is the one the selection names, and moves with the selection', () => {
+    const menu = [entry('llama', 128000), entry('ds', null), entry('mistral', 32000)];
+    expect(selectedMenuEntry(menu, 'llama')?.context_window).toBe(128000);
+    expect(selectedMenuEntry(menu, 'ds')?.context_window).toBeNull();
+    expect(selectedMenuEntry(menu, 'mistral')?.context_window).toBe(32000);
+    expect(contextWindowLine(selectedMenuEntry(menu, 'llama'), 'en-US')).toContain('128,000');
+    expect(contextWindowLine(selectedMenuEntry(menu, 'mistral'), 'en-US')).toContain('32,000');
+  });
+
+  it('a stale id that names no row in the current menu selects nothing, rather than showing a different model\'s window under the old id', () => {
+    const menu = [entry('llama', 128000)];
+    expect(selectedMenuEntry(menu, 'gone')).toBeNull();
+    expect(selectedMenuEntry(menu, '')).toBeNull();
+    expect(selectedMenuEntry([], 'llama')).toBeNull();
+    expect(selectedMenuEntry(null, 'llama')).toBeNull();
+  });
+});
+
+describe('the tab wires the context-window line to the live selection', () => {
+  it('reads selectedEntry off selectedMenuId and renders contextWindowLine(selectedEntry) beside the selector', () => {
+    const sources = import.meta.glob('./InferenceSharingEditor.svelte', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+    const tab = Object.values(sources)[0];
+    expect(tab).toBeTruthy();
+    expect(tab).toMatch(/selectedEntry = selectedMenuEntry\(clientLines\?\.menu, selectedMenuId\)/);
+    expect(tab).toContain('{contextWindowLine(selectedEntry)}');
   });
 });
 

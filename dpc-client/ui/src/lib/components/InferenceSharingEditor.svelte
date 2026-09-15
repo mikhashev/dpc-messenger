@@ -19,6 +19,7 @@
     clientLabel,
     computeBlockErrors,
     computeErrorsOf,
+    contextWindowLine,
     doorAddress,
     foldServingAlias,
     gatewayVerdict,
@@ -36,6 +37,7 @@
     removeAllowedModel,
     removeServing,
     removeTariffEntry,
+    selectedMenuEntry,
     SERVES_NO_LOCAL_ALIAS,
     setCurrency,
     setFree,
@@ -275,6 +277,10 @@
   // the pasted block can never name two different rows.
   $: menuGroups = groupGatewayMenu(clientLines?.menu);
   $: soleMenuEntry = ((clientLines?.menu ?? []).length === 1 ? (clientLines?.menu ?? [])[0] : null) as GatewayMenuEntry | null;
+  // The row the dropdown is showing right now — re-read every time the
+  // selection or the menu itself changes, so the context-window line below
+  // can never lag one step behind the model it is describing.
+  $: selectedEntry = selectedMenuEntry(clientLines?.menu, selectedMenuId);
   let selectedMenuId = '';
   let clientMenuLoading = false;
   let clientMenuError: string | null = null;
@@ -937,6 +943,9 @@
               </select>
               {#if clientMenuLoading}<span class="muted">Asking the gateway&hellip;</span>{/if}
             </div>
+            {#if selectedEntry}
+              <p class="help-text-small context-window-line">{contextWindowLine(selectedEntry)}</p>
+            {/if}
             {#if soleMenuEntry}
               <p class="help-text-small">{soleMenuChoiceLine(soleMenuEntry)}</p>
             {/if}

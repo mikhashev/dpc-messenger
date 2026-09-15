@@ -329,8 +329,10 @@ Claude Code and curl with the key in clear — the two examples on this page are
 command's own output, compared by a test so the page and the button cannot drift. It
 answers with the same menu `/v1/models` lists, a proved peer's `remote:<node id>:<alias>`
 models included and not this node's serving lists alone, as `menu` — one entry per model,
-with the `id` a client is configured with and the short `label` a dropdown shows — and
-renders the blocks from it: every model these blocks offer is one this door serves.
+with the `id` a client is configured with, the short `label` a dropdown shows and the
+`context_window` that model states, `null` where nobody knows it and never missing, so a
+reader can tell the two apart — and renders the blocks from it: every model these blocks
+offer is one this door serves.
 Continue takes one entry per model; Cursor and Claude Code name a single one, the optional
 `selected_id` where the menu carries it and this node's first local model otherwise, echoed
 back as `selected_id` and named inside the block itself.
@@ -412,10 +414,16 @@ accepted and ignored: sampling is the alias's own configuration on this node.
 export ANTHROPIC_BASE_URL=http://127.0.0.1:9997
 export ANTHROPIC_API_KEY='<contents of ~/.dpc/.gateway_key>'
 export ANTHROPIC_MODEL=ollama_local        # the one model /v1/models lists
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=215040
 ```
 `ANTHROPIC_AUTH_TOKEN=<key>` (sent as `Authorization: Bearer`) works in place of
 `ANTHROPIC_API_KEY`. Every value in this block is rendered through `shlex.quote`,
 so an alias with a space in it (`qwen3.8 27b Mythos`) arrives as one word.
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` is the window of the model the block names, taken
+from the same `context_window` `/v1/models` carries for that row; without it that
+client assumes 200k for a model name it does not recognise, which is below this
+node's own alias. Where nobody states a window the line is **absent** rather than
+guessed, and the client keeps its own assumption.
 Not verified against a live Claude Code run at the time of writing; the shape is
 verified by the test suite.
 

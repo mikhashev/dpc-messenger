@@ -247,6 +247,11 @@ class MenuEntry:
     `PROVIDERS_RESPONSE` row, kept so `/v1/models` can carry the host's
     `tariff`, `settings` and `context_window` off the same pass; `as_dict` is
     what leaves the backend and it stays behind.
+
+    `context_window` is what one conversation may occupy, resolved by the half
+    that owns the number — `stated_context_window` off a peer's row,
+    `Gateway.local_context_window` for this node's own — and None where
+    nobody knows.
     """
 
     id: str
@@ -256,8 +261,16 @@ class MenuEntry:
     peer_id: Optional[str] = None
     peer_name: Optional[str] = None
     row: Optional[Dict[str, Any]] = None
+    context_window: Optional[int] = None
 
     def as_dict(self) -> Dict[str, Any]:
+        """The row that leaves the backend.
+
+        `context_window` is **present and null** where the window is unknown,
+        deliberately unlike the `/v1/models` row, which omits the key: the UI
+        reading this list has to tell «nobody knows the window» from «this
+        backend is too old to send it».
+        """
         return {
             "id": self.id,
             "owner": self.owner,
@@ -265,7 +278,23 @@ class MenuEntry:
             "label": self.label,
             "peer_id": self.peer_id,
             "peer_name": self.peer_name,
+            "context_window": self.context_window,
         }
+
+
+def stated_context_window(row: Dict[str, Any]) -> Optional[int]:
+    """The `context_window` a row states, or None where it states nothing.
+
+    Read, never recomputed: on a peer's `PROVIDERS_RESPONSE` row the number is
+    the host's own statement about its own alias (DPTP §3.5); on a menu row it
+    is what `chat_menu` already resolved. A host that does not know states
+    None, as does one too old to carry the key; `True` is not a window, which
+    is why `bool` is excluded by name.
+    """
+    window = row.get("context_window")
+    if isinstance(window, int) and not isinstance(window, bool):
+        return window
+    return None
 
 
 # What the blocks name where the menu is empty: a configuration to fix rather
@@ -333,6 +362,23 @@ def client_config_lines(
     block is JSON and the Cursor block is prose, each quoted by its own
     syntax; the curl line names no alias and holds its key inside double
     quotes already.
+
+    The Claude Code block exports `CLAUDE_CODE_MAX_CONTEXT_TOKENS` when the
+    chosen entry states a window, and no such line at all when it does not:
+    that binary, given a model name it does not know, announces it keeps the
+    session within 200k — a guess, and below this node's own 215040 — so a
+    number we do not have must not be invented here either.
+
+    Publishing the window is what makes a client fill to it, and the guard
+    that would catch the consequence cannot see it: `window_outgrows_pool`
+    (`llama_server_supervisor.py`) tests one conversation against the whole
+    pool, `window > n_ctx`, while `n_ctx` is one pool every slot shares
+    (`kv_unified`) and `n_parallel` slots may each fill to the published
+    window. `n_parallel × window` against `n_ctx` is the comparison that would
+    catch it, and no `window > n_ctx` test can by construction. The owner
+    decided to publish anyway, informed; this is the cost it was weighed
+    against, and neither a runtime warning nor a smaller `n_parallel` was part
+    of that decision.
     """
     base = f"http://{GATEWAY_HOST}:{port}"
     rows = [entry for entry in entries if entry.get("id")] or [
@@ -341,6 +387,16 @@ def client_config_lines(
     chosen_id = resolve_menu_id(rows, selected_id) or EMPTY_MENU_ID
     chosen = next(entry for entry in rows if entry.get("id") == chosen_id)
     note = _menu_choice_note(rows, chosen)
+    claude_code = [
+        f"export ANTHROPIC_BASE_URL={shlex.quote(base)}",
+        f"export ANTHROPIC_API_KEY={shlex.quote(key)}",
+        f"export ANTHROPIC_MODEL={shlex.quote(chosen_id)}        # {note}",
+    ]
+    window = stated_context_window(chosen)
+    if window is not None:
+        claude_code.append(
+            f"export CLAUDE_CODE_MAX_CONTEXT_TOKENS={shlex.quote(str(window))}"
+        )
     blocks = [
         f'    "title": "DPC {entry.get("label") or entry["id"]}",\n'
         f'    "provider": "openai",\n'
@@ -359,12 +415,7 @@ def client_config_lines(
             f"Model: {chosen_id}\n"
             f"       # {note}"
         )},
-        {"client": "claude_code", "text": (
-            f"export ANTHROPIC_BASE_URL={shlex.quote(base)}\n"
-            f"export ANTHROPIC_API_KEY={shlex.quote(key)}\n"
-            f"export ANTHROPIC_MODEL={shlex.quote(chosen_id)}"
-            f"        # {note}"
-        )},
+        {"client": "claude_code", "text": "\n".join(claude_code)},
         {"client": "curl", "text": (
             f'curl {base}/v1/models -H "Authorization: Bearer {key}"'
         )},
@@ -649,7 +700,8 @@ class Gateway:
             lists = self.serving_lists()
             types = self.provider_types()
             entries = [
-                MenuEntry(id=alias, owner=owner, alias=alias, label=alias)
+                MenuEntry(id=alias, owner=owner, alias=alias, label=alias,
+                          context_window=self.local_context_window(alias))
                 for owner, aliases in (("local", lists.local), ("vendor", lists.vendor))
                 for alias in aliases
                 if serves_chat(types.get(alias))
@@ -665,6 +717,7 @@ class Gateway:
                     peer_id=peer_id,
                     peer_name=name,
                     row=row,
+                    context_window=stated_context_window(row),
                 )
                 for row in rows
                 if serves_chat(row.get("type"))
@@ -678,8 +731,8 @@ class Gateway:
         one shape for both kinds of row. The loopback caller is this node
         (`caller`), so the tariff resolved for it is what this node declares for
         the alias — what it would quote a peer, not a bill for a call made here.
-        The window is `lookup_context_window`'s answer, the same resolution the
-        peer row is built from, and absent when it answers None.
+        The window is `local_context_window`'s answer, the one reader the menu
+        entry uses too, and absent when it answers None.
         """
         core = self._core
         node_id = getattr(getattr(core, "p2p_manager", None), "node_id", None)
@@ -693,11 +746,24 @@ class Gateway:
         settings = core.menu_settings(provider)
         if settings:
             extras["settings"] = settings
-        if provider is not None:
-            window = llm_manager.lookup_context_window(provider.model)
-            if window is not None:
-                extras["context_window"] = window
+        window = self.local_context_window(alias)
+        if window is not None:
+            extras["context_window"] = window
         return extras
+
+    def local_context_window(self, alias: str) -> Optional[int]:
+        """What one conversation may occupy on one of this node's aliases.
+
+        `lookup_context_window(provider.model)`, the same resolution a
+        `PROVIDERS_RESPONSE` row is built from, so the menu row, the
+        `/v1/models` row and the peer's row cannot state three numbers. None
+        for an alias no provider answers for and for a model nothing knows.
+        """
+        llm_manager = getattr(self._core, "llm_manager", None)
+        provider = (getattr(llm_manager, "providers", None) or {}).get(alias)
+        if provider is None:
+            return None
+        return llm_manager.lookup_context_window(provider.model)
 
     def max_image_bytes(self) -> int:
         """The most one image may weigh, decoded — `[vision] max_image_size_mb`.
@@ -1831,12 +1897,13 @@ def _peer_row_extras(row: Dict[str, Any]) -> Dict[str, Any]:
     statements about its own alias (DPTP §3.5), and an OpenAI client ignores
     the keys it does not know. `context_window` is what one conversation may
     occupy — not `n_ctx`, the pool every slot shares, which does not derive
-    from it (`window_outgrows_pool`). A host that does not know states None,
-    and the key is then absent rather than guessed.
+    from it (`window_outgrows_pool`) — read by `stated_context_window`, the one
+    reader the menu entry uses too. A host that does not know states None, and
+    the key is then absent rather than guessed.
     """
     extras = {key: row[key] for key in ("tariff", "settings") if isinstance(row.get(key), dict)}
-    window = row.get("context_window")
-    if isinstance(window, int) and not isinstance(window, bool):
+    window = stated_context_window(row)
+    if window is not None:
         extras["context_window"] = window
     return extras
 

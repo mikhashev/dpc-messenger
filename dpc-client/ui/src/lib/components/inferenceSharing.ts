@@ -661,6 +661,14 @@ export interface GatewayMenuEntry {
   label: string;
   peer_id?: string | null;
   peer_name?: string | null;
+  /** What one conversation on this alias may occupy, the host's own word
+   *  about itself — the same field `PROVIDERS_RESPONSE` rows carry (§3.5),
+   *  never something this node measured. The key is always present on this
+   *  menu; `null` is "the host did not state one", read exactly like a
+   *  missing key — this build never guesses one from another field. Optional
+   *  here only so a fixture or an older answer that predates the field still
+   *  type-checks; `formatContextWindow` reads both the same way. */
+  context_window?: number | null;
 }
 
 /** `get_gateway_client_lines`: the blocks, and the masked form of the key that
@@ -763,6 +771,46 @@ export const MENU_IS_LIVE_NOTE =
 export function soleMenuChoiceLine(entry: GatewayMenuEntry | null | undefined): string {
   if (!entry) return '';
   return `Only one model is on offer right now, and it is the one below: ${entry.label}.`;
+}
+
+/** The menu row the selector is showing right now: the entry whose `id`
+ *  matches `selectedId`, or none — never the first row by default, because a
+ *  stale id (the peer behind it dropped, the menu changed shape) must read as
+ *  "nothing selected", not silently show a different model's window under
+ *  the old one's name. */
+export function selectedMenuEntry(
+  menu: readonly GatewayMenuEntry[] | null | undefined,
+  selectedId: string | null | undefined,
+): GatewayMenuEntry | null {
+  if (!selectedId) return null;
+  return (menu ?? []).find((entry) => entry && entry.id === selectedId) ?? null;
+}
+
+/** Said in words, never a blank or a zero: a client that guesses this number
+ *  is the reason the field exists on the wire at all (see the type above), so
+ *  a UI that fell back to "0" or an empty cell would recreate the exact
+ *  failure this closes. A missing key reads the same as `null` — the one
+ *  caller of this (`contextWindowLine`) never has to ask which. `locale` is a
+ *  parameter only so a test can pin one; the tab passes none and gets the
+ *  reader's own, the same bargain `peerMenu.ts`'s `formatRate` strikes. */
+export function formatContextWindow(tokens: number | null | undefined, locale?: string): string {
+  return typeof tokens === 'number' && Number.isFinite(tokens) ? tokens.toLocaleString(locale) : 'unknown';
+}
+
+/** The line under the client-menu selector, in the tab's own voice: what the
+ *  chosen model's context window is, and whose word it is. It is the host's
+ *  statement about itself, not a measurement this node took, so a known
+ *  number is said as something the host *states*; an unknown one says so
+ *  outright rather than leaving the reader to guess, which is the whole
+ *  reason this line exists (per the field's own doc, above). Empty string
+ *  when nothing is selected — the caller decides whether to render a line at
+ *  all. */
+export function contextWindowLine(entry: GatewayMenuEntry | null | undefined, locale?: string): string {
+  if (!entry) return '';
+  const known = typeof entry.context_window === 'number' && Number.isFinite(entry.context_window);
+  return known
+    ? `Context window: ${formatContextWindow(entry.context_window, locale)} tokens — the window one conversation may take, as the host states it.`
+    : 'Context window: unknown — the host did not state one for this model.';
 }
 
 const CLIENT_LABELS: Record<string, string> = {
