@@ -2161,6 +2161,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self.message_buffer = [
             m for m in self.message_buffer if m.message_id in kept_ids
         ]
+        self.rebuild_message_ids()
         self._history_dirty = True
         self.save_history()
         logger.info(
@@ -2741,6 +2742,14 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             self.full_conversation.append(message_obj)
 
         logger.info(f"Imported {len(accepted)} messages into all conversation buffers")
+
+        # The dedup set is a derivative of the history, not a parallel store:
+        # this path replaces the history wholesale, so without the rebuild the
+        # set keeps the ids of the history it replaced — the next merge_history
+        # then stores every imported record a second time, or refuses a
+        # legitimate one the set still remembers (backlog: AN-IMPORTED-
+        # HISTORY-IS-MISSING-FROM-THE-DEDUP-SET-SO-THE-NEXT-MERGE-STORES-IT-TWICE).
+        self.rebuild_message_ids()
 
         # Written now, as merge_history does, not at the next add_message: a
         # restart in between lost every restored record (41, 2026-09-06).
@@ -3521,6 +3530,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # a denial of service against ourselves. reverify_author() revisits.
             return dict(message, verification="unverified"), "unverified"
         return dict(message, verification="verified"), "verified"
+
+    def rebuild_message_ids(self):
+        self.message_ids = {m.get("id") for m in self.message_history if m.get("id")}
 
     def add_message_with_id(self, message: Dict[str, Any]) -> bool:
         """Add a message to history with duplicate detection

@@ -133,6 +133,7 @@ class DiscordCoordinator:
             if conv_id:
                 monitor = self.service._get_or_create_conversation_monitor(conv_id)
                 monitor.message_history.clear()
+                monitor.rebuild_message_ids()
                 monitor.save_history()
                 logger.info("TTL expired for Discord user %s (%.0f min idle), conversation reset",
                             discord_user_id, (now - last_ts) / 60)
@@ -150,6 +151,7 @@ class DiscordCoordinator:
         if len(monitor.message_history) > cfg["max_messages"]:
             excess = len(monitor.message_history) - cfg["max_messages"]
             monitor.message_history = monitor.message_history[excess:]
+            monitor.rebuild_message_ids()
             monitor.save_history()
             logger.info("Trimmed %d oldest messages for Discord user %s", excess, discord_user_id)
 

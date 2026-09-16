@@ -208,3 +208,39 @@ def test_a_history_broken_by_the_old_merge_is_repaired_once(tmp_path, caplog):
 
     assert "Chain broken" not in caplog.text, "the repair must be persisted, not repeated"
     assert "rebuilding locally" not in caplog.text
+
+
+def test_an_import_followed_by_the_same_merge_adds_nothing(tmp_path):
+    """The narrow acceptance criterion, measured on a live monitor.
+
+    Before the fix this returned 17: the import replaced the history without
+    touching the dedup set, so the merge stored every record a second time.
+    """
+    exported = _sender(tmp_path).export_history()
+
+    # Same conversation id as the sender: the hash is bound to the room.
+    receiver = _monitor(tmp_path, "group-src")
+    receiver.import_history(exported)
+
+    assert receiver.merge_history(exported) == 0
+    assert len(receiver.message_history) == len(exported)
+
+
+def test_the_dedup_set_tracks_the_history_after_every_shape_change(tmp_path):
+    """The wide invariant: the set equals the history's ids, or dedup lies.
+
+    Every path that reshapes message_history must leave the set in step; this
+    asserts it at the sites that used to forget.
+    """
+    receiver = _monitor(tmp_path, "group-invariant")
+
+    for text in ("one", "two", "three"):
+        receiver.add_message(role="user", content=text, sender_node_id="n1", sender_name="Mike")
+    receiver.clear_history(preserve=False)
+    for text in ("fresh", "and new"):
+        receiver.add_message(role="user", content=text, sender_node_id="n1", sender_name="Mike")
+
+    exported = _sender(tmp_path).export_history()
+    receiver.import_history(exported)
+
+    assert receiver.message_ids == {m.get("id") for m in receiver.message_history if m.get("id")}
