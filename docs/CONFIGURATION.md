@@ -1,6 +1,6 @@
 # DPC-Client Configuration Guide
 
-> **Version:** 0.29.0
+> **Version:** 0.30.0
 > **Last Updated:** 2026-09-18 — reconciled against `settings.py`; the key
 > reference below that date line is generated, not hand-maintained
 
