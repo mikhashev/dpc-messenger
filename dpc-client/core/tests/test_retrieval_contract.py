@@ -50,13 +50,37 @@ def _make_grafeo_text(tmp_path):
     return GrafeoTextIndex(tmp_path / "txt_grafeo")
 
 
-@pytest.fixture(params=["native", "grafeo"])
+# Grafeo is no longer installed by any extra (`graph-grafeo` left pyproject.toml on
+# 2026-09-18), so its half of every parametrised pair skips where the package is
+# absent rather than failing on the ImportError the backend raises. The native half
+# still runs, which is the point: the contract is what both must satisfy, and one
+# backend being uninstallable must not take the assertions with it.
+def _grafeo_importable() -> bool:
+    # Tried rather than looked up: a package can be findable and still fail to
+    # import, and that failure would land as an error in every parametrised pair
+    # instead of a skip. This is what `pytest.importorskip` does in the parity
+    # suite next door, spelled out because a mark needs a boolean.
+    try:
+        import grafeo  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+needs_grafeo = pytest.mark.skipif(
+    not _grafeo_importable(),
+    reason="grafeo is not installed; no extra installs it since 2026-09-18",
+)
+GRAFEO_PARAM = pytest.param("grafeo", marks=needs_grafeo)
+
+
+@pytest.fixture(params=["native", GRAFEO_PARAM])
 def vector_factory(request):
     """Returns a callable (tmp_path, dimensions=...) -> VectorIndex."""
     return _make_native_vector if request.param == "native" else _make_grafeo_vector
 
 
-@pytest.fixture(params=["native", "grafeo"])
+@pytest.fixture(params=["native", GRAFEO_PARAM])
 def text_factory(request):
     return _make_native_text if request.param == "native" else _make_grafeo_text
 
@@ -173,12 +197,14 @@ def test_native_vector_needs_rebuild_detects_model_change(tmp_path):
     assert idx.needs_rebuild("model-a") is False
 
 
+@needs_grafeo
 def test_grafeo_vector_needs_rebuild_no_schema_yet(tmp_path):
     """Fresh Grafeo DB has no _RetrievalSchema node — nothing to compare against."""
     idx = GrafeoVectorIndex(tmp_path / "vec", dimensions=4)
     assert idx.needs_rebuild("any-model") is False
 
 
+@needs_grafeo
 def test_grafeo_vector_needs_rebuild_detects_model_change(tmp_path):
     """After add() with model_name set, Schema node persists model identifier."""
     idx = GrafeoVectorIndex(tmp_path / "vec", model_name="model-a", dimensions=4)
@@ -192,6 +218,7 @@ def test_grafeo_vector_needs_rebuild_detects_model_change(tmp_path):
     assert idx.needs_rebuild("model-b") is True
 
 
+@needs_grafeo
 def test_grafeo_vector_needs_rebuild_empty_model_name_arg(tmp_path):
     """Empty model_name arg means caller doesn't know — return False."""
     idx = GrafeoVectorIndex(tmp_path / "vec", model_name="model-a", dimensions=4)
@@ -381,6 +408,7 @@ def test_factory_explicit_native(tmp_path):
     assert isinstance(backend.vector, NativeVectorIndex)
 
 
+@needs_grafeo
 def test_factory_explicit_grafeo(tmp_path):
     """Phase 1.6b.2: grafeo branches are wired, no fallback."""
     config = {
