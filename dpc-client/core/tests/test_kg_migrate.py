@@ -48,12 +48,29 @@ def _dump(kg, path):
     return path
 
 
+def _grafeo_importable() -> bool:
+    # Tried rather than looked up: a package can be findable and still fail to import,
+    # and that failure lands as an error in every parametrised case instead of a skip.
+    try:
+        import grafeo  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+needs_grafeo = pytest.mark.skipif(
+    not _grafeo_importable(),
+    reason="grafeo is not installed; no extra installs it since 2026-09-18",
+)
+
+
 def _verify(before, after, expect_dropped=0, capsys=None):
     args = kg_migrate.argparse.Namespace(before=str(before), after=str(after),
                                          expect_dropped=expect_dropped)
     return kg_migrate.verify(args)
 
 
+@needs_grafeo
 def test_the_gate_passes_when_the_irreplaceable_class_arrives_whole(tmp_path, capsys):
     src = _graph(tmp_path / "src")
     before = _dump(src, tmp_path / "before.jsonl")

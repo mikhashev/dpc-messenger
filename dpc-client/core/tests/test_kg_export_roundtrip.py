@@ -22,7 +22,25 @@ from dpc_client_core.dpc_agent.knowledge_graph import (
     NodeType,
 )
 
-BACKENDS = ["sqlite", "grafeo"]
+def _grafeo_importable() -> bool:
+    # Tried rather than looked up: a package can be findable and still fail to import,
+    # and that failure lands as an error in every parametrised case instead of a skip.
+    try:
+        import grafeo  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+needs_grafeo = pytest.mark.skipif(
+    not _grafeo_importable(),
+    reason="grafeo is not installed; no extra installs it since 2026-09-18",
+)
+
+
+# The grafeo half of every pair skips where the package is absent; the sqlite half
+# still runs, so the round-trip assertions keep their coverage.
+BACKENDS = ["sqlite", pytest.param("grafeo", marks=needs_grafeo)]
 
 
 def _populate(kg: KnowledgeGraph) -> None:
@@ -194,6 +212,7 @@ def test_a_record_this_version_does_not_understand_is_skipped_not_fatal(tmp_path
     assert target.backend.node_count() == 3 and target.backend.edge_count() == 0
 
 
+@needs_grafeo
 def test_two_facades_on_one_root_share_the_live_handle():
     """The property the nightly backup rests on, pinned rather than inherited.
 
