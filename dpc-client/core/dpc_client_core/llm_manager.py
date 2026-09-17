@@ -3,9 +3,10 @@
 import os
 import json
 import asyncio
+import inspect
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Tuple
 
 from .providers import (
     AIProvider, ModelNotCachedError, parse_thinking_tags,
@@ -17,6 +18,8 @@ from .providers import (
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
+from .node_ledger import OUTPUT_INCLUDES_THINKING, THINKING_SOURCES
+from .providers.base import image_blocks_in_turns, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +134,117 @@ MODEL_CONTEXT_WINDOWS = {
     # Default fallback
     "default": 4096
 }
+
+def flatten_messages(messages: List[Dict[str, Any]], system: Any = "") -> str:
+    """The Anthropic-shaped conversation as the one prompt string a provider
+    whose only entry point is a prompt can be given.
+
+    The two existing pieces, composed rather than reimplemented: the
+    providers' `system`-and-blocks converter, then the agent adapter's
+    role-marker rendering. The imports are deferred because
+    `dpc_agent.llm_adapter` names `LLMManager`.
+    """
+    from .dpc_agent.llm_adapter import messages_to_prompt
+    from .providers.ollama_provider import OllamaProvider
+
+    return messages_to_prompt(OllamaProvider._anthropic_to_openai_messages(system, messages))
+
+
+def entry_point_for(provider: Any, *, tools: bool, streaming: bool, images: bool = False) -> Tuple[str, Any]:
+    """`(name, bound method or None)`: the one provider entry point
+    `query_messages` calls for a request shaped like this.
+
+    The three-way choice lives here rather than in the `if` below so that a
+    caller standing in front of the door — the gateway, which refuses by name
+    what it cannot carry — asks about the same path that will actually run.
+    None is «this provider has no entry point for this request»: for tools that
+    is the refusal `query_messages` already raised.
+
+    `images` is image blocks inside the turns. Only `generate_with_tools` takes
+    the turns un-flattened, so only it can carry them, and only for a provider
+    whose `supports_vision()` says yes; the two prompt paths render text and
+    would lose the picture, so with images they answer None as well.
+    """
+    if tools:
+        method = getattr(provider, "generate_with_tools", None)
+        if images and method is not None and not provider.supports_vision():
+            method = None
+        return "generate_with_tools", method
+    if streaming and hasattr(provider, "generate_response_stream"):
+        return "generate_response_stream", None if images else provider.generate_response_stream
+    return "generate_response", None if images else getattr(provider, "generate_response", None)
+
+
+def accepts_reasoning_effort(entry_point: Any) -> bool:
+    """Whether one provider entry point takes the shared effort word.
+
+    Asked of the signature, not of a table of provider names: the three entry
+    points were written at different times and only some of them grew the
+    parameter — `ZaiProvider.generate_with_tools` has neither it nor `**kwargs`,
+    so handing it the word raises `TypeError` deep inside the call. A path that
+    cannot take the word must be refused by name before the call, never sent
+    the request with the word dropped (ADR-041 D4).
+    """
+    if entry_point is None:
+        return False
+    try:
+        parameters = inspect.signature(entry_point).parameters
+    except (TypeError, ValueError):  # a builtin or a C callable: assume not
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return True
+    return "reasoning_effort" in parameters
+
+
+def reported_served_effort(provider: Any) -> Optional[str]:
+    """The rung the provider says its last call ran on, or None.
+
+    The provider is the only party that knows: a door derives the word from
+    what it passed or from the alias's configuration, and an entry point may
+    run another rung — llama-server's vision path runs with thinking off where
+    no rung was named, whatever the alias configures for its text turns.
+
+    None is «no word came back», which is every provider with no effort channel
+    and every call whose usage the vendor did not report. The door's own
+    derivation stands there, unchanged.
+    """
+    word = (provider.get_last_usage() or {}).get("served_effort")
+    return word if isinstance(word, str) and word else None
+
+
+def reported_thinking_source(usage: Dict[str, Any]) -> Optional[str]:
+    """The provenance word from a provider's usage dict, or None where it has
+    none: a reasoning count with no word behind it is left unattributed rather
+    than credited to the engine that may not have made it."""
+    word = usage.get("thinking_source")
+    return word if word in THINKING_SOURCES else None
+
+
+def reported_counts(provider: Any) -> Optional[Tuple[int, int, str]]:
+    """`(prompt, completion, output_includes_thinking)` as the engine reported
+    them, or None where it reported nothing countable.
+
+    The recount this stands in front of is an estimate over the visible text: it
+    never sees the system prompt, the chat template or an image's tokens, and it
+    counts an answer the thinking was already taken out of — the numbers a
+    tariff would be charged on. The convention travels with the counts, because
+    a number made under `includes` and billed as `excludes` pays for the
+    reasoning twice.
+    """
+    usage = provider.get_last_usage() or {}
+    prompt, completion = usage.get("prompt_tokens"), usage.get("completion_tokens")
+    if not isinstance(prompt, int) or not isinstance(completion, int):
+        return None
+    convention = usage.get("output_includes_thinking")
+    return prompt, completion, convention if convention in OUTPUT_INCLUDES_THINKING else "unknown"
+
+
+def _tool_use_block(call: Any) -> Dict[str, Any]:
+    """One returned tool call as an Anthropic `tool_use` block. Providers hand
+    these back as `SimpleNamespace(id, name, input)`; a mapping is read too."""
+    read = (lambda key: call.get(key)) if isinstance(call, dict) else (lambda key: getattr(call, key, None))
+    return {"type": "tool_use", "id": read("id"), "name": read("name"), "input": read("input") or {}}
+
 
 class LLMManager:
     """
@@ -653,6 +767,7 @@ class LLMManager:
         # Check if this is a thinking model and extract thinking content
         thinking_content = None
         thinking_tokens = None
+        thinking_source = None
         if provider.supports_thinking():
             logger.info("Provider '%s' supports thinking mode", provider.model)
 
@@ -683,18 +798,26 @@ class LLMManager:
                 # the split themselves (llama-server, when the server reports none)
                 # put their estimate in the same field — still their own number over
                 # the same text, and better than a second opinion computed here.
-                reported = (provider.get_last_usage() or {}).get("reasoning_tokens")
+                usage = provider.get_last_usage() or {}
+                reported = usage.get("reasoning_tokens")
                 if isinstance(reported, int) and reported > 0:
                     thinking_tokens = reported
+                    thinking_source = reported_thinking_source(usage)
                 else:
                     thinking_tokens = self.count_tokens(thinking_content, provider.model)
+                    thinking_source = "estimated"
         else:
             logger.debug("Provider '%s' does not support thinking mode", provider.model)
 
         if return_metadata:
-            # Count tokens in prompt and response
-            prompt_tokens = self.count_tokens(prompt, provider.model)
-            response_tokens = self.count_tokens(response, provider.model)
+            counted = reported_counts(provider)
+            if counted is None:
+                prompt_tokens = self.count_tokens(prompt, provider.model)
+                response_tokens = self.count_tokens(response, provider.model)
+                counts_source, output_includes_thinking = "ours", "excludes"
+            else:
+                prompt_tokens, response_tokens, output_includes_thinking = counted
+                counts_source = "engine"
             total_tokens = prompt_tokens + response_tokens
 
             # Get model's context window
@@ -711,6 +834,193 @@ class LLMManager:
                 "vision_used": bool(images),  # Indicate if vision API was used
                 "thinking": thinking_content,  # Thinking/reasoning content (if any)
                 "thinking_tokens": thinking_tokens,  # Tokens used for thinking
+                # ... and who made that number: the engine where it reported the
+                # split, this door or the provider where one estimated it, None
+                # where nothing said. A row copies the word; it never infers one.
+                "thinking_source": thinking_source,
+                # Whose numbers those are, and what is inside them: the engine's
+                # where it reported any, and the recount over the visible text —
+                # which the thinking is already out of — only where it did not.
+                "counts_source": counts_source,
+                "output_includes_thinking": output_includes_thinking,
+                # The effort word this door passed to the provider, normalised
+                # as the provider will read it; None is «none was applied»,
+                # which is not `off`. What the provider's own configuration
+                # then does is the provider's, and is not claimed here.
+                "served_effort": normalize_reasoning_effort(kwargs.get("reasoning_effort")),
+                # ... and the rung the provider says it ran on, which is the
+                # word a usage row wants and the only one that cannot be wrong.
+                "provider_served_effort": reported_served_effort(provider),
+            }
+        return response
+
+    async def query_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        system: Any = "",
+        tools: Optional[List[Dict[str, Any]]] = None,
+        on_chunk: Optional[Callable] = None,
+        conversation_id: Optional[str] = None,
+        provider_alias: str | None = None,
+        return_metadata: bool = False,
+        reasoning_effort: Optional[str] = None,
+    ):
+        """A conversation, optional tools and an optional chunk callback in;
+        `query(return_metadata=True)`'s dict plus five keys out.
+
+        Beside `query`, not instead of it: `query` takes a flat prompt, so a
+        caller above it must flatten `messages`, and a provider that streams
+        or calls tools natively is unreachable from there. `messages` is the
+        Anthropic Messages shape `generate_with_tools` already accepts, which
+        is also the only provider entry point taking the list un-flattened.
+        `finish_reason` stays in the vocabulary the providers report it in.
+
+        `reasoning_effort` is the word from `REASONING_EFFORTS` (or `off`) the
+        caller asks the model to think at: it travels to whichever of the three
+        entry points this request takes and comes back as `served_effort`,
+        exactly as the same kwarg does through `query`. A path whose signature
+        cannot take the word raises rather than dropping it — an answer that
+        thought less than it was asked to must not come back looking like one
+        that did. `None` asks for nothing and reaches no provider, which is
+        what every caller written before this parameter existed keeps doing.
+        """
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("query_messages needs a non-empty list of messages.")
+
+        alias_to_use = provider_alias or self.default_provider
+        if not alias_to_use:
+            raise ValueError("No provider specified and no default provider is set.")
+        if alias_to_use not in self.providers:
+            raise ValueError(f"Provider '{alias_to_use}' is not configured or failed to load.")
+        provider = self.providers[alias_to_use]
+
+        # Rendered on every route, not only the ones that send it: the counts
+        # below are then `query`'s counts over `query`'s prompt, so a usage row
+        # built from this dict is the row the conversation left before.
+        prompt_text = flatten_messages(messages, system)
+
+        tool_calls: List[Dict[str, Any]] = []
+        path_usage: Dict[str, Any] = {}
+        # Image blocks in the turns, including those a tool returned inside its
+        # result: the same count the host's gate in front of this call reads.
+        image_count = image_blocks_in_turns(messages)
+        path, entry_point = entry_point_for(
+            provider, tools=bool(tools), streaming=on_chunk is not None, images=image_count > 0,
+        )
+        if tools and getattr(provider, "generate_with_tools", None) is None:
+            raise ValueError(
+                f"Provider '{alias_to_use}' (model: {provider.model}) has no native "
+                f"tool-calling path, and {len(tools)} tool(s) were asked for. Use an "
+                "alias whose provider implements generate_with_tools."
+            )
+        if image_count and entry_point is None:
+            raise ValueError(
+                f"Provider '{alias_to_use}' (model: {provider.model}) cannot take the "
+                f"{image_count} image(s) in this conversation on its {path} path: images "
+                "travel in the turns only through generate_with_tools, to a provider "
+                "whose supports_vision() is true. Use a vision-capable alias with tools, "
+                "or send the conversation without images."
+            )
+        effort_kwargs: Dict[str, Any] = {}
+        if reasoning_effort is not None:
+            if not accepts_reasoning_effort(entry_point):
+                raise ValueError(
+                    f"Provider '{alias_to_use}' (model: {provider.model}) takes no reasoning "
+                    f"effort on its {path} path, and '{reasoning_effort}' was asked for. Send "
+                    "the request without an effort, or to an alias whose provider takes one "
+                    "on this path."
+                )
+            effort_kwargs["reasoning_effort"] = reasoning_effort
+        if path == "generate_with_tools":
+            logger.info("Routing tool query to provider '%s' with model '%s' (%d tools)",
+                        alias_to_use, provider.model, len(tools))
+            raw = await entry_point(
+                messages, tools, system=system, on_chunk=on_chunk, conversation_id=conversation_id,
+                **effort_kwargs,
+            ) or {}
+            response = raw.get("content") or ""
+            tool_calls = [_tool_use_block(call) for call in raw.get("tool_calls_raw") or []]
+            path_usage = raw.get("usage") or {}
+            streamed, flattened, tools_used = False, False, True
+        elif path == "generate_response_stream":
+            logger.info("Routing streaming query to provider '%s' with model '%s'",
+                        alias_to_use, provider.model)
+            response = await entry_point(prompt_text, on_chunk, conversation_id, **effort_kwargs)
+            streamed, flattened, tools_used = True, True, False
+        else:
+            logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
+            response = await entry_point(prompt_text, **effort_kwargs)
+            streamed, flattened, tools_used = False, True, False
+            if on_chunk is not None:
+                logger.info("Provider '%s' has no generate_response_stream: the answer is "
+                            "delivered whole and 'streamed' says so", alias_to_use)
+                await on_chunk(response, conversation_id)
+
+        # None means the provider reported nothing, and stays None: a constant
+        # here is what leaves a tool round indistinguishable from a finished
+        # sentence, which is the defect this door exists to end.
+        finish_reason = (provider.get_last_usage() or {}).get("finish_reason")
+        if finish_reason is None:
+            finish_reason = path_usage.get("finish_reason")
+
+        # The rule `query` applies, including the part that matters: the
+        # reasoning-token count is the one the vendor reported, never one
+        # recomputed from the text. The two copies must move together.
+        thinking_content = None
+        thinking_tokens = None
+        thinking_source = None
+        if provider.supports_thinking():
+            if hasattr(provider, 'get_last_thinking'):
+                thinking_content = provider.get_last_thinking()
+            if not thinking_content:
+                response, thinking_content = parse_thinking_tags(response)
+            if thinking_content:
+                usage = provider.get_last_usage() or {}
+                reported = usage.get("reasoning_tokens")
+                if isinstance(reported, int) and reported > 0:
+                    thinking_tokens = reported
+                    thinking_source = reported_thinking_source(usage)
+                else:
+                    thinking_tokens = self.count_tokens(thinking_content, provider.model)
+                    thinking_source = "estimated"
+
+        if return_metadata:
+            counted = reported_counts(provider)
+            if counted is None:
+                prompt_tokens = self.count_tokens(prompt_text, provider.model)
+                response_tokens = self.count_tokens(response, provider.model)
+                counts_source, output_includes_thinking = "ours", "excludes"
+            else:
+                prompt_tokens, response_tokens, output_includes_thinking = counted
+                counts_source = "engine"
+            return {
+                # `query`'s ten keys, because a usage row is built from them.
+                "response": response,
+                "provider": alias_to_use,
+                "model": provider.model,
+                "tokens_used": prompt_tokens + response_tokens,
+                "prompt_tokens": prompt_tokens,
+                "response_tokens": response_tokens,
+                "model_max_tokens": self.get_context_window(provider.model),
+                "vision_used": image_count > 0,  # a refusal above leaves no other way here
+                "thinking": thinking_content,
+                "thinking_tokens": thinking_tokens,
+                "thinking_source": thinking_source,  # `query`'s rule, same two copies
+                "counts_source": counts_source,  # same rule as `query`
+                "output_includes_thinking": output_includes_thinking,
+                # The effort word this door passed to the provider, normalised
+                # as the provider will read it — `query`'s rule, and the two
+                # copies must move together. None is «no effort control was
+                # applied», which is not `off`.
+                "served_effort": normalize_reasoning_effort(reasoning_effort),
+                "provider_served_effort": reported_served_effort(provider),
+                # ... and what the provider was given, did, and stopped on.
+                "streamed": streamed,
+                "flattened": flattened,
+                "tools_used": tools_used,
+                "tool_calls": tool_calls,
+                "finish_reason": finish_reason,
             }
         return response
 

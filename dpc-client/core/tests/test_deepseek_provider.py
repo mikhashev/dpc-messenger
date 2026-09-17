@@ -215,7 +215,9 @@ async def test_generate_with_tools_maps_response_to_contract():
     assert result["content"] == "working on it"
     assert result["thinking"] == "thinking about dirs"
     # No native cache fields on the response → hit=0, miss=prompt_tokens (conservative).
-    # No completion_tokens_details → reasoning=0, content=completion.
+    # No completion_tokens_details → the vendor said nothing about reasoning:
+    # the numbers stay as reported, and the row's convention is `unknown`,
+    # never a defaulted «reasoning=0, so completion excludes nothing».
     assert result["usage"] == {
         "prompt_tokens": 100, "completion_tokens": 20,
         "reasoning_tokens": 0, "content_tokens": 20,
@@ -223,6 +225,10 @@ async def test_generate_with_tools_maps_response_to_contract():
         "cache_read_input_tokens": 0,
         "prompt_cache_hit_tokens": 0,
         "prompt_cache_miss_tokens": 100,
+        "output_includes_thinking": "unknown",
+        # Thinking is on and no rung was named, by the call or by the alias:
+        # the vendor's own default ran, and no word describes it.
+        "served_effort": None,
     }
     assert len(result["tool_calls_raw"]) == 1
     tc = result["tool_calls_raw"][0]
@@ -730,3 +736,95 @@ async def test_the_stream_has_somewhere_to_put_an_effort_and_sends_it():
     _, kwargs = p.client.chat.completions.create.call_args
     assert kwargs["extra_body"]["reasoning_effort"] == "medium"
 
+
+
+# --- what the output count includes, decided where the number is born -----------------
+
+
+def test_a_reported_split_inside_the_total_is_includes():
+    """`completion_tokens_details.reasoning_tokens` present and not above
+    `completion_tokens`: the total contains the reasoning, and says so."""
+    usage = DeepSeekProvider._usage_from_response(SimpleNamespace(
+        prompt_tokens=10, completion_tokens=100, total_tokens=110,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=60),
+    ))
+    assert usage["output_includes_thinking"] == "includes"
+    assert (usage["reasoning_tokens"], usage["content_tokens"]) == (60, 40)
+
+
+def test_a_reported_split_larger_than_the_total_is_excludes_and_is_said_out_loud(caplog):
+    """The day the vendor moves reasoning outside `completion_tokens`, the
+    subtraction goes negative. That used to clamp to zero in silence; now the
+    row says `excludes`, the visible count is the total, and the log names it."""
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="dpc_client_core.providers.deepseek_provider"):
+        usage = DeepSeekProvider._usage_from_response(SimpleNamespace(
+            prompt_tokens=10, completion_tokens=1, total_tokens=11,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=56),
+        ))
+    assert usage["output_includes_thinking"] == "excludes"
+    assert (usage["completion_tokens"], usage["reasoning_tokens"], usage["content_tokens"]) == (1, 56, 1)
+    assert any("output_includes_thinking" in r.getMessage() for r in caplog.records)
+
+
+def test_no_split_at_all_is_unknown_not_zero_reasoning_asserted():
+    usage = DeepSeekProvider._usage_from_response(SimpleNamespace(
+        prompt_tokens=10, completion_tokens=100, total_tokens=110,
+    ))
+    assert usage["output_includes_thinking"] == "unknown"
+
+
+# --- images: carried by the shared converter, refused where the model cannot see ---
+
+SHOT = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+
+
+def test_deepseek_and_its_subclasses_speak_the_one_shared_converter():
+    from dpc_client_core.providers.base import anthropic_to_openai_messages
+    from dpc_client_core.providers.llamacpp_server_provider import LlamaServerProvider
+
+    assert DeepSeekProvider._anthropic_to_openai_messages is anthropic_to_openai_messages
+    assert LlamaServerProvider._anthropic_to_openai_messages is anthropic_to_openai_messages
+
+
+def test_a_text_only_conversation_converts_exactly_as_it_did_before_images_were_carried():
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tu_1", "name": "x", "input": {"k": 1}},
+        ]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "r"}]},
+    ]
+    out = DeepSeekProvider._anthropic_to_openai_messages("sys", messages)
+    assert out == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "ab"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "tu_1", "type": "function", "function": {"name": "x", "arguments": '{"k": 1}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "tu_1", "content": "r"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deepseek_refuses_an_image_by_name_rather_than_answering_as_if_none_were_sent():
+    """V4 is text-only. The copy this replaced dropped the block and sent the
+    question on, and the answer came back about a picture nobody showed it."""
+    p = _make()
+    p.client.chat.completions.create = AsyncMock()
+
+    with pytest.raises(ValueError) as refused:
+        await p.generate_with_tools(
+            messages=[{"role": "user", "content": [{"type": "text", "text": "what is this"}, SHOT]}],
+            tools=[{"name": "t", "description": "", "input_schema": {"type": "object"}}],
+        )
+
+    assert "deepseek_test" in str(refused.value) and "vision" in str(refused.value)
+    p.client.chat.completions.create.assert_not_called()
+
+
+def test_an_image_block_whose_source_is_not_base64_is_refused_rather_than_fetched_or_dropped():
+    url_shot = {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}}
+    with pytest.raises(ValueError, match="base64"):
+        DeepSeekProvider._anthropic_to_openai_messages("", [{"role": "user", "content": [url_shot]}])

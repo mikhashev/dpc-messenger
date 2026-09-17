@@ -370,8 +370,13 @@ class ApplyKnowledgeCommitHandler(MessageHandler):
             for signer in provenance.unverifiable_signers:
                 await self._ask_for_certificate(signer, sender_node_id)
 
+            knowledge_service = getattr(self.service, "knowledge_service", None)
+            judged_here = bool(
+                knowledge_service
+                and knowledge_service.judged_proposal(getattr(commit, "proposal_id", "") or "")
+            )
             await self.service.consensus_manager._apply_commit(
-                commit, origin=provenance.verdict
+                commit, origin=provenance.verdict, judged_here=judged_here
             )
             say = self.logger.info if provenance.verdict == "verified" else self.logger.warning
             say(

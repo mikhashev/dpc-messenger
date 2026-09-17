@@ -26,30 +26,20 @@ class _Root:
     name = "agent_x"
 
 
-class _Firewall:
-    def __init__(self, domains):
-        self._domains = domains
-
-    def get_agent_web_auth_domains(self, agent_id):
-        return self._domains
-
-
-class _Service:
-    def __init__(self, domains):
-        self.firewall = _Firewall(domains)
-
-
 class _Ctx:
-    def __init__(self, domains):
+    def __init__(self):
         self.agent_root = _Root()
-        self.dpc_service = _Service(domains)
 
 
 def _run(monkeypatch, domains, statuses):
     monkeypatch.setattr(
         web_auth, "get_auth_status", lambda agent_id, d: statuses[d],
     )
-    return asyncio.run(list_auth_domains(_Ctx(domains)))
+    monkeypatch.setattr(
+        web_auth, "list_domains",
+        lambda agent_id: [{"domain": d} for d in domains],
+    )
+    return asyncio.run(list_auth_domains(_Ctx()))
 
 
 def test_a_jar_past_its_earliest_expiry_says_so(monkeypatch):
@@ -92,4 +82,4 @@ def test_a_session_only_jar_is_unchanged(monkeypatch):
 def test_an_empty_jar_is_unchanged(monkeypatch):
     out = _run(monkeypatch, ["z.ru"],
                {"z.ru": {"has_cookies": False, "expires": None}})
-    assert "not logged in (re-login required)" in out
+    assert "no cookies stored" in out

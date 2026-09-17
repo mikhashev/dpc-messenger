@@ -56,6 +56,7 @@ import type {
     ContextUpdatedEvent,
     TokenWarningEvent,
     ExtractionFailureEvent,
+    KnowledgeExtractionFallbackEvent,
     KnowledgeCommitResultEvent,
     AIResponseWithImageEvent,
 } from '$lib/types';
@@ -111,6 +112,7 @@ export type {
     ContextUpdatedEvent,
     TokenWarningEvent,
     ExtractionFailureEvent,
+    KnowledgeExtractionFallbackEvent,
     KnowledgeCommitResultEvent,
     AIResponseWithImageEvent,
 };
@@ -121,14 +123,14 @@ export type {
 
 import { connectionStatus, nodeStatus, coreMessages } from './services/connection';
 import { p2pMessages, unreadMessageCounts } from './services/messaging';
-import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance } from './services/providers';
+import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerRetries } from './services/providers';
 import { showNotificationIfBackground } from './notificationService';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
-import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
+import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
 
 // Re-export all service stores for backward compatibility.
@@ -136,13 +138,13 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 // services/providers.ts and re-export it here. See CLAUDE.md "UI Integration Pattern".
 export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
-export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance };
+export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerRetries };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
 export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
-export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings, votingConversationId };
+export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionFallback, tokenWarning, integrityWarnings, votingConversationId };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
 
 // Track currently active chat to prevent unread badges on open chats
@@ -204,6 +206,9 @@ function startPolling() {
             }
             
             nodeStatus.set(null);
+            // No backend, no closing notice: drop the rows rather than leave
+            // them claiming waits that no longer exist.
+            providerRetries.set(new Map());
             socket = null;
 
             // Attempt reconnection
@@ -383,10 +388,28 @@ export async function connectToCoreService() {
                     console.log("Knowledge commit approved:", message.payload);
                     // Refresh personal context after approval
                     sendCommand("get_personal_context");
+                } else if (message.event === "knowledge_vote_deferred") {
+                    console.log("Knowledge vote deferred:", message.payload);
+                    knowledgeVoteStatus.set({
+                        proposal_id: message.payload?.proposal_id,
+                        conversation_id: message.payload?.conversation_id ?? null,
+                        status: "pending",
+                        message: message.payload?.message ?? "",
+                    });
+                } else if (message.event === "knowledge_vote_resolved") {
+                    console.log("Knowledge vote resolved:", message.payload);
+                    knowledgeVoteStatus.set({
+                        proposal_id: message.payload?.proposal_id,
+                        conversation_id: message.payload?.conversation_id ?? null,
+                        status: message.payload?.status === "success" ? "success" : "error",
+                        reason: message.payload?.reason,
+                        message: message.payload?.message ?? "",
+                    });
                 } else if (message.event === "knowledge_commit_result") {
                     console.log("Knowledge commit result received:", message.payload);
                     knowledgeCommitResult.set(message.payload);
                     votingConversationId.set(null);
+                    knowledgeVoteStatus.set(null);
                 }
                 // New session proposal handlers (v0.11.3)
                 else if (message.event === "new_session_proposed") {
@@ -428,6 +451,20 @@ export async function connectToCoreService() {
                 else if (message.event === "token_usage_updated") {
                     tokenUsageUpdated.set(message.payload);
                 }
+                // A provider is waiting out a backoff (providers/base.py
+                // _retry_with_backoff). One event per attempt, keyed by retry_id
+                // so two waits cannot clear each other; the finished event below
+                // closes the row on recovered, failed or cancelled alike.
+                else if (message.event === "provider_retry") {
+                    providerRetries.update(m => new Map(m).set(message.payload.retry_id, message.payload));
+                }
+                else if (message.event === "provider_retry_finished") {
+                    providerRetries.update(m => {
+                        const next = new Map(m);
+                        next.delete(message.payload.retry_id);
+                        return next;
+                    });
+                }
                 // Handle token limit warning (Phase 2)
                 else if (message.event === "token_limit_warning") {
                     console.log("Token limit warning:", message.payload);
@@ -437,6 +474,14 @@ export async function connectToCoreService() {
                 else if (message.event === "knowledge_extraction_failed") {
                     console.error("Knowledge extraction failed:", message.payload);
                     extractionFailure.set(message.payload);
+                }
+                // A peer refused a knowledge-extraction inference request and
+                // extraction retried on the cold local alias instead — the
+                // retry succeeded, but the refusal must not go silent
+                // (knowledge_service.py, THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+                else if (message.event === "knowledge_extraction_fallback") {
+                    console.warn("Knowledge extraction fell back after a peer refusal:", message.payload);
+                    extractionFallback.set(message.payload);
                 }
                 // Phase 7: Handle personal context update (for status indicators)
                 else if (message.event === "personal_context_updated") {
@@ -859,15 +904,6 @@ export async function connectToCoreService() {
                     );
                 }
 
-                // Headless web-auth approval (ADR-029 Task 008). Nothing had
-                // ever listened to this event, so every request expired after
-                // its 120s wait — 19 of them, none approved.
-                else if (message.event === "web_auth_headless_approval_request") {
-                    console.log("Web auth headless approval request:", message.payload);
-                    const { pendingWebAuthApprovals } = await import("$lib/services/webAuthApproval");
-                    pendingWebAuthApprovals.update((list: any[]) => [...list, message.payload]);
-                }
-
                 // Whisper model loading events (v0.13.3+ model pre-loading)
                 else if (message.event === "whisper_model_loading_started") {
                     console.log("Whisper model loading started:", message.payload);
@@ -1158,6 +1194,9 @@ export async function connectToCoreService() {
             clearLogSender();
             console.log("WebSocket closed:", event.code, event.reason);
             nodeStatus.set(null);
+            // No backend, no closing notice: drop the rows rather than leave
+            // them claiming waits that no longer exist.
+            providerRetries.set(new Map());
             socket = null;
 
             // Code 1008 = policy violation. The backend uses this exclusively for
@@ -1242,6 +1281,8 @@ export function disconnectFromCoreService() {
     
     connectionStatus.set('disconnected');
     nodeStatus.set(null);
+    // Same reason as in the close handler: no backend, no closing notice.
+    providerRetries.set(new Map());
 }
 
 export function resetReconnection() {

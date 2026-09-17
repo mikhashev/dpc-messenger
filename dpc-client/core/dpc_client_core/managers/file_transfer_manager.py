@@ -60,6 +60,15 @@ class TransferStatus(Enum):
     CANCELLED = "cancelled"
 
 
+def group_file_ui_key(group_id: str, filename: str) -> str:
+    """Dedup key shared by the group send paths and FileCompleteHandler.
+
+    The sender seeds it on send; the handler checks it on every FILE_COMPLETE
+    echo. `filename` is the on-disk name (what `transfer.filename` carries).
+    """
+    return f"group_file_ui:{group_id}:{filename}"
+
+
 @dataclass
 class FileTransfer:
     """
@@ -768,6 +777,24 @@ class FileTransferManager:
                 f"{node_id}:file-received:{transfer.transfer_id}:{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
 
+            # Group history sync may already have brought the sender's own
+            # record of this file, pointing at the sender's disk. Then this
+            # transfer completes that record rather than adding a second one
+            # — the UI could render only ours, so one paste showed up twice
+            # in the store and once on screen.
+            existing_record = None
+            monitor_key = transfer.group_id if transfer.group_id else node_id
+            conversation_monitor = (
+                self.service._get_or_create_conversation_monitor(monitor_key)
+                if self.service and hasattr(self.service, "_get_or_create_conversation_monitor")
+                else None
+            )
+            finder = getattr(conversation_monitor, "find_file_record", None)
+            if transfer.group_id and callable(finder):
+                existing_record = finder(node_id, transfer.filename, transfer.size_bytes, transfer.hash)
+                if existing_record:
+                    message_id = existing_record["id"]
+
             # Get sender name from peer metadata
             sender_name = node_id
             if self.service and hasattr(self.service, 'peer_metadata'):
@@ -809,6 +836,12 @@ class FileTransferManager:
             if is_image and transfer.image_metadata:
                 caption_text = transfer.image_metadata.get("text", "")
 
+            if existing_record is not None:
+                # Patched in place: the signature covers no attachment field.
+                attachment = conversation_monitor.attach_received_file(existing_record, attachment)
+                logger.info("Completed the sender's record %s with the received %s",
+                            message_id, transfer.filename)
+
             # Route to group chat or P2P chat based on group_id
             message_event = {
                 "sender_node_id": node_id,
@@ -844,9 +877,7 @@ class FileTransferManager:
             # Add to backend conversation monitor (RECEIVER SIDE)
             # This ensures transcriptions can be attached and knowledge extraction works
             # For group transfers, key on group_id; for P2P, key on node_id
-            monitor_key = transfer.group_id if transfer.group_id else node_id
-            conversation_monitor = self.service._get_or_create_conversation_monitor(monitor_key)
-            if conversation_monitor:
+            if conversation_monitor and existing_record is None:
                 # Determine message content based on attachment type
                 if is_voice:
                     message_content = f"Received voice message: {transfer.filename} ({size_mb} MB)"
@@ -871,6 +902,11 @@ class FileTransferManager:
                     # history backfill drew the file a second time.
                     message_id=message_id,
                 )
+                # So the merge can drop this note when the sender's own
+                # record of the file arrives after the transfer.
+                remember = getattr(conversation_monitor, "note_local_file_record", None)
+                if transfer.group_id and callable(remember):
+                    remember(message_id)
                 logger.debug(f"Added received {attachment['type']} to conversation history: {transfer.filename}")
 
         # Auto-transcribe voice messages if enabled (v0.13.2+ recipient-side)

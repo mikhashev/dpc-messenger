@@ -33,7 +33,12 @@ class TestTheBaseCarriesTheContract:
     def test_a_recorded_usage_comes_back(self):
         p = _Bare("bare", {"type": "bare"})
         p._record_last_usage({"prompt_tokens": 10, "completion_tokens": 2})
-        assert p.get_last_usage() == {"prompt_tokens": 10, "completion_tokens": 2}
+        assert p.get_last_usage() == {
+            "prompt_tokens": 10, "completion_tokens": 2,
+            # Recorded counts always name what their output count holds; a
+            # provider that declares nothing declares `unknown`.
+            "output_includes_thinking": "unknown",
+        }
 
     def test_the_stored_usage_is_a_copy(self):
         """A caller that mutates what it was handed must not edit the provider."""
@@ -42,7 +47,9 @@ class TestTheBaseCarriesTheContract:
         p._record_last_usage(source)
         source["prompt_tokens"] = 999
         p.get_last_usage()["prompt_tokens"] = 111
-        assert p.get_last_usage() == {"prompt_tokens": 10}
+        assert p.get_last_usage() == {
+            "prompt_tokens": 10, "output_includes_thinking": "unknown",
+        }
 
     def test_recording_nothing_clears_it(self):
         p = _Bare("bare", {"type": "bare"})

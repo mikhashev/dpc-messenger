@@ -12,7 +12,9 @@ Coverage:
 """
 from __future__ import annotations
 
-from .conftest import TEST_DOMAIN, TEST_DOMAIN_WWW, TEST_DOMAIN_URL
+from .conftest import (
+    TEST_DOMAIN, TEST_DOMAIN_WWW, TEST_DOMAIN_URL, service_with_ui,
+)
 import asyncio
 import json
 import time
@@ -126,15 +128,27 @@ def _make_firewall(tmp_path: Path, rules: dict):
     return ContextFirewall(rules_file)
 
 
-def _make_ctx(agent_root: Path, firewall=None):
+def _make_ctx(agent_root: Path, firewall=None, ui=False):
     ctx = types.SimpleNamespace()
     ctx.agent_root = agent_root
-    if firewall is not None:
+    if ui:
+        # A headless authenticated browse now refuses when there is no UI
+        # to approve it, so a test that means to reach the browser has to
+        # say who is at the screen.
+        ctx.dpc_service = service_with_ui(firewall=firewall)
+    elif firewall is not None:
         ctx.dpc_service = types.SimpleNamespace()
         ctx.dpc_service.firewall = firewall
     else:
         ctx.dpc_service = None
     return ctx
+
+
+def _gate_rows(entries):
+    """Rows the headless path writes before the browse itself. There are
+    none left: what used to gate it was an approval dialog, and the only
+    pre-flight now is a refusal when no session is stored."""
+    return [e["status"] for e in entries[:-1]]
 
 
 def _fresh_cookies():
@@ -144,50 +158,7 @@ def _fresh_cookies():
              "samesite": "Lax"}]
 
 
-def test_browse_page_audit_on_firewall_denied(vault_home):
-    from dpc_client_core import web_auth
-    from dpc_client_core.dpc_agent.tools import browser as browser_mod
-
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": []}}}}
-    fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
-
-    agent_root = vault_home / "agents" / "agent_a"
-    agent_root.mkdir(parents=True, exist_ok=True)
-    ctx = _make_ctx(agent_root, firewall=fw)
-
-    asyncio.run(browser_mod.browse_page(
-        ctx, url=f"https://{TEST_DOMAIN}/my", use_auth=f"{TEST_DOMAIN}"
-    ))
-    entries = _read_audit(vault_home, "agent_a")
-    assert len(entries) == 1
-    # Status now carries the denial reason after the S142 UX fix —
-    # was "firewall_denied", now "firewall_denied:<reason>" where
-    # <reason> is one of not_in_whitelist|cookies_missing|cookies_expired.
-    assert entries[0]["status"].startswith("firewall_denied")
-    assert entries[0]["domain"] == f"{TEST_DOMAIN}"
-
-
-@pytest.mark.xfail(
-    reason=(
-        "The empty-vault case is undecided, and this suite contradicts itself "
-        "about it. This test says an empty vault must produce 'auth_required'; "
-        "test_auth_browser.py's own docstring records the opposite as intended "
-        "- AuthBrowser._open() calls _load_all_cookies(skip_missing=True), so "
-        "re-login surfaces only when a protected request is rejected. ADR-028 "
-        "specifies the domain whitelist (:179, implemented 2026-08-25) and is "
-        "silent on the vault. Marked xfail rather than left red so the "
-        "disagreement is stated instead of accumulating as an unread alarm; see "
-        "the board entry THE-EMPTY-VAULT-CASE-HAS-TWO-TESTS-ASSERTING-OPPOSITE-"
-        "THINGS. Whoever owns ADR-028 decides, and then one of the two tests "
-        "changes."
-    ),
-    strict=True,
-)
-def test_browse_page_audit_on_auth_required(vault_home):
-    """No cookies in vault → AuthRequiredError → audit 'auth_required'.
-    Firewall is None here so the firewall layer is bypassed; the
-    AuthBrowser construction layer raises AuthRequiredError."""
+def test_browse_page_audit_on_vault_denied(vault_home):
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
     agent_root = vault_home / "agents" / "agent_a"
@@ -199,7 +170,10 @@ def test_browse_page_audit_on_auth_required(vault_home):
     ))
     entries = _read_audit(vault_home, "agent_a")
     assert len(entries) == 1
-    assert entries[0]["status"] == "auth_required"
+    # An empty vault means a headless fetch would download a login page
+    # into a window nobody can see. Refused before a browser is launched.
+    assert entries[0]["status"] == "auth_denied:no_session"
+    assert entries[0]["domain"] == f"{TEST_DOMAIN}"
 
 
 def test_browse_page_audit_on_success(vault_home):
@@ -208,13 +182,11 @@ def test_browse_page_audit_on_success(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
-    fw = _make_firewall(vault_home, rules)
     web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
-    ctx = _make_ctx(agent_root, firewall=fw)
+    ctx = _make_ctx(agent_root, ui=True)
 
     raw_html = "<html><body><h1>Title</h1><p>Body text</p></body></html>"
     expected_markdown = browser_mod._html_to_markdown(raw_html)
@@ -228,9 +200,10 @@ def test_browse_page_audit_on_success(vault_home):
         browser_mod._auth_browse_html = original
 
     entries = _read_audit(vault_home, "agent_a")
+    assert _gate_rows(entries) == []
     assert len(entries) == 1
-    assert entries[0]["status"] == 200
-    assert entries[0]["bytes"] == len(expected_markdown)
+    assert entries[-1]["status"] == 200
+    assert entries[-1]["bytes"] == len(expected_markdown)
 
 
 def test_browse_page_audit_on_browser_error(vault_home):
@@ -238,13 +211,11 @@ def test_browse_page_audit_on_browser_error(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
-    fw = _make_firewall(vault_home, rules)
     web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
-    ctx = _make_ctx(agent_root, firewall=fw)
+    ctx = _make_ctx(agent_root, ui=True)
 
     def _raise_runtime(*a, **kw):
         raise RuntimeError("simulated browser crash")
@@ -259,8 +230,9 @@ def test_browse_page_audit_on_browser_error(vault_home):
         browser_mod._auth_browse_html = original
 
     entries = _read_audit(vault_home, "agent_a")
+    assert _gate_rows(entries) == []
     assert len(entries) == 1
-    assert entries[0]["status"] == "browser_error"
+    assert entries[-1]["status"] == "browser_error"
 
 
 def test_browse_page_anonymous_path_records_a_fetch_row(vault_home):

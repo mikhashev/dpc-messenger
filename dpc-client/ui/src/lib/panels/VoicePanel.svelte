@@ -128,7 +128,7 @@
   // Handle voice transcription complete (local transcription)
   $effect(() => {
     if ($voiceTranscriptionComplete) {
-      const { transfer_id, text, transcriber_node_id, provider, confidence, language, timestamp, remote_provider_node_id } = $voiceTranscriptionComplete;
+      const { transfer_id, text, transcriber_node_id, provider, confidence, language, timestamp, remote_provider_node_id, filename } = $voiceTranscriptionComplete;
       console.log(`[VoiceTranscription] Received transcription for ${transfer_id}: "${text}"`);
 
       chatHistories.update(histories => {
@@ -137,13 +137,15 @@
           const updatedMessages = messages.map(message => {
             if (message.attachments) {
               const hasTargetVoice = message.attachments.some(
-                (att: any) => att.type === 'voice' && att.transfer_id === transfer_id
+                (att: any) => att.type === 'voice'
+                  && (att.transfer_id === transfer_id || (!!filename && att.filename === filename))
               );
               if (hasTargetVoice) {
                 return {
                   ...message,
                   attachments: message.attachments.map((attachment: any) => {
-                    if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
+                    if (attachment.type === 'voice'
+                        && (attachment.transfer_id === transfer_id || (!!filename && attachment.filename === filename))) {
                       console.log(`[VoiceTranscription] Adding transcription to message in chat ${chatId}`);
                       return {
                         ...attachment,
@@ -167,7 +169,7 @@
   // Handle voice transcription received from peer
   $effect(() => {
     if ($voiceTranscriptionReceived) {
-      const { transfer_id, text, transcriber_node_id, provider, confidence, language, timestamp } = $voiceTranscriptionReceived;
+      const { transfer_id, text, transcriber_node_id, provider, confidence, language, timestamp, filename } = $voiceTranscriptionReceived;
       console.log(`[VoiceTranscription] Received transcription from peer for ${transfer_id}: "${text}"`);
 
       chatHistories.update(histories => {
@@ -176,13 +178,15 @@
           const updatedMessages = messages.map(message => {
             if (message.attachments) {
               const hasTargetVoice = message.attachments.some(
-                (att: any) => att.type === 'voice' && att.transfer_id === transfer_id
+                (att: any) => att.type === 'voice'
+                  && (att.transfer_id === transfer_id || (!!filename && att.filename === filename))
               );
               if (hasTargetVoice) {
                 return {
                   ...message,
                   attachments: message.attachments.map((attachment: any) => {
-                    if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
+                    if (attachment.type === 'voice'
+                        && (attachment.transfer_id === transfer_id || (!!filename && attachment.filename === filename))) {
                       console.log(`[VoiceTranscription] Adding peer transcription to message in chat ${chatId}`);
                       return {
                         ...attachment,

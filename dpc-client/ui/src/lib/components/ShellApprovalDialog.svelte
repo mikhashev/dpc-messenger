@@ -130,8 +130,13 @@
         max-width: 420px;
     }
 
+    /* The dark surface has to bring its own text colour with it. Nothing in
+       this app sets one on body or :root, so anything left without a `color`
+       inherits the browser default — black, which is right on the light panels
+       and invisible here. ScheduleApprovalDialog already pairs the two. */
     .shell-result-card {
         background: var(--bg-secondary, #1e1e2e);
+        color: var(--text-primary, #cdd6f4);
         border: 1px solid var(--border-success, #28a745);
         border-radius: 8px;
         padding: 10px;
@@ -210,8 +215,13 @@
         overflow-y: auto;
     }
 
+    /* Same pairing as the result card above: the line naming the matched rule
+       (`.approval-reason`) carries no colour of its own and was reaching the
+       screen as the page's black on this card — 1.21:1 once its 0.7 opacity
+       had blended it further into the background. */
     .shell-approval-card {
         background: var(--bg-secondary, #1e1e2e);
+        color: var(--text-primary, #cdd6f4);
         border: 1px solid var(--border-warning, #f9a825);
         border-radius: 8px;
         padding: 12px;

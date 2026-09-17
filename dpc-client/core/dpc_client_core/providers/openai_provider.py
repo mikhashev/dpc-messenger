@@ -1,18 +1,37 @@
 # dpc_client_core/providers/openai_provider.py
 
 import os
-import base64
 import logging
 from typing import Dict, Any, List
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, OPENAI_THINKING_MODELS
+from .base import AIProvider, OPENAI_THINKING_MODELS, image_base64, network_client_bounds
 
 logger = logging.getLogger(__name__)
 
+# The hosts whose documentation the convention below was read from. Any other
+# base URL is another vendor wearing OpenAI's request shape, and its output
+# counter is its own business.
+OPENAI_OWN_HOSTS = ("api.openai.com",)
+
 
 class OpenAICompatibleProvider(AIProvider):
+    """OpenAI and anything else that speaks Chat Completions.
+
+    The output count convention is per alias rather than per class, because this
+    type is pointed at whatever `base_url` an alias names and OpenAI's
+    documentation settles OpenAI's endpoint and nobody else's. Against
+    `api.openai.com` the answer is `includes` — reasoning tokens "still occupy
+    space in the model's context window and are billed as output tokens"
+    (https://developers.openai.com/api/docs/guides/reasoning), and
+    `completion_tokens_details`, which holds `reasoning_tokens`, is defined as
+    "Breakdown of tokens used in a completion"
+    (https://developers.openai.com/api/docs/api-reference/chat/object). Against
+    any other host it stays `unknown` until that vendor's own page says otherwise.
+    """
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         api_key = config.get("api_key")
@@ -24,7 +43,20 @@ class OpenAICompatibleProvider(AIProvider):
         if not api_key:
             raise ValueError(f"API key not found for OpenAI compatible provider '{self.alias}'")
 
-        self.client = AsyncOpenAI(base_url=config.get("base_url"), api_key=api_key)
+        self.client = AsyncOpenAI(base_url=config.get("base_url"), api_key=api_key,
+                                  **network_client_bounds(config))
+        self.DECLARED_OUTPUT_INCLUDES_THINKING = (
+            "includes" if self._is_openais_own_endpoint() else "unknown"
+        )
+
+    def _is_openais_own_endpoint(self) -> bool:
+        """Whether this alias is pointed at OpenAI itself.
+
+        Read off the client rather than the config, because an alias that names
+        no `base_url` still reaches OpenAI through the SDK's default.
+        """
+        host = urlparse(str(self.client.base_url)).hostname or ""
+        return host.lower() in OPENAI_OWN_HOSTS
 
     def supports_vision(self) -> bool:
         """OpenAI vision models: gpt-4o, gpt-4-turbo, gpt-4o-mini"""
@@ -53,31 +85,20 @@ class OpenAICompatibleProvider(AIProvider):
         OpenAI vision API using multimodal content arrays.
         Docs: https://platform.openai.com/docs/guides/vision
         """
+        # Built before the try: a refusal here is about the request, not about
+        # the API, and must not be reported as the API having failed.
+        content = [{"type": "text", "text": prompt}]
+        for img in images:
+            mime_type = img.get("mime_type", "image/png")
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{image_base64(img, self.alias)}",
+                    "detail": "high"  # or "low" for faster/cheaper processing
+                }
+            })
+
         try:
-            # Build multimodal message content
-            content = [{"type": "text", "text": prompt}]
-
-            for img in images:
-                # Encode image to base64 if not already
-                if "base64" in img:
-                    base64_data = img["base64"]
-                    # Strip data URL prefix if present
-                    if base64_data.startswith("data:"):
-                        base64_data = base64_data.split(",", 1)[1]
-                else:
-                    with open(img["path"], "rb") as f:
-                        base64_data = base64.b64encode(f.read()).decode("utf-8")
-
-                # OpenAI expects data URL format
-                mime_type = img.get("mime_type", "image/png")
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{mime_type};base64,{base64_data}",
-                        "detail": "high"  # or "low" for faster/cheaper processing
-                    }
-                })
-
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": content}],

@@ -2,13 +2,15 @@
 
     uv run python tools/backlog/build.py                 # rebuild board + graph
     uv run python tools/backlog/build.py --check         # validate, write nothing
+    uv run python tools/backlog/build.py --snapshot      # copy the board if it is due
     uv run python tools/backlog/build.py add NAME    --desc=… --priority=… --origin=… --by=CC
     uv run python tools/backlog/build.py move NAME   --to='IN PROGRESS' --by=CC
     uv run python tools/backlog/build.py rename OLD NEW --by=CC
     uv run python tools/backlog/build.py close NAME  --session=S72 --resolution=fixed \\
                                                      --evidence='…' --by=CC
+    uv run python tools/backlog/build.py append NAME --text='…' --by=CC
 
-`--by` is mandatory on all four write verbs and never falls back to the OS user: five
+`--by` is mandatory on all five write verbs and never falls back to the OS user: five
 actors share one account on this box, so a derived name would stamp one label on all of
 them and look authoritative doing it. It stood in brackets here — optional — for a day
 after the code stopped accepting it that way.
@@ -16,32 +18,47 @@ after the code stopped accepting it that way.
 The board and the graph are written in one pass, so the two artefacts can never disagree
 about how fresh they are.
 
-Rendering and `--check` never touch backlog.md. The four verbs do (ADR-039): each writes
+Rendering and `--check` never touch backlog.md. The five verbs do (ADR-039): each writes
 the file, re-runs `--check` over the result in a scratch copy first, and refuses to keep a
 write that would introduce a refusal. Add `--dry-run` to validate without writing.
+
+Every write in this script goes through `_atomic_write`, and every verb copies the board
+into ~/.dpc/backlog-backups/<project>/ twice — before its first write and after its last,
+so the newest copy is never older than the last successful edit. Between edits backlog.md and
+backlog_closed.md are held read-only, so a write that does not come through this tool is
+refused rather than obeyed; `--check` and the render also copy the board when the newest
+copy is over an hour old. To edit by hand, clear the bit (`attrib -R` / `chmod u+w`) — the
+next run of this script puts it back. DPC_BACKLOG_NO_PROTECT=1 turns the layer off.
 
 The verbs are convenience, not the guarantee — the file opens in any editor, so `--check`
 is what actually holds the format. See docs/BACKLOG_FORMAT.md.
 """
+import hashlib
 import html
 import json
 import math
 import os
 import re
+import stat
 import sys
 import time
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parents[2]   # tools/backlog/build.py -> repo root
 
-# ADR-039 item 1: the four mutations are subcommands of this script rather than a sibling,
+# ADR-039 item 1: the mutations are subcommands of this script rather than a sibling,
 # so the thing that writes an entry and the thing that validates it can never drift apart.
 # A verb is only ever argv[1]; anywhere else the word is an entry name, not a command.
-VERBS = ("add", "close", "move", "rename")
+#
+# `append` joined the four on 2026-09-09. Its absence is why the board was edited by a
+# hand-written script that truncated it: adding a dated observation to an existing entry
+# is the commonest edit there is, and the tool had no verb for it, so the common path led
+# straight out of the tool and past every guard in it.
+VERBS = ("add", "append", "close", "move", "rename")
 VERB = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in VERBS else ""
 
 # An explicit path lets --check run against any project's backlog (and against a fixture,
@@ -89,6 +106,13 @@ ROADMAP = SRC.parent / "ROADMAP.md"
 
 PRIORITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "RESEARCH", "—"]
 CUTOFF = "2026-08-10"          # BACKLOG_FORMAT.md §6 — envelope required from here on
+
+# Which direction an entry serves. Words rather than Ark's letters because the letters
+# collide — the network vector and the honesty loop were both proposed as «C». Mike's
+# call, 2026-09-01; the standing argument against a formal field (§4) is answered in
+# BACKLOG_FORMAT.md §4a.
+AXES = ("collective", "knowledge", "network", "honesty", "reach")
+AXIS_CUTOFF = "2026-09-01"     # required from here on; older entries warn, as in §7
 RESOLUTIONS = {"fixed", "disproved", "moot", "superseded", "duplicate", "wontfix"}
 # The shelf is left by recording an observation, and only `close` moves the entry — so an
 # observation written into a body and nowhere else leaves the entry sitting there. Four did,
@@ -321,7 +345,20 @@ for i, line in enumerate(lines):
 
     _nm = NAME_RE.match(name)
 
+    # A body bullet rather than per-entry front matter (§5): an entry has to stay legible
+    # when an agent receives it as a bare chunk, and `- **axis:** network` reads as a
+    # sentence where a YAML block reads as noise.
+    _body_text = "\n".join(lines[i + 1:end])
+    _al = re.findall(r"^\s*-\s*\*\*axis:?\*\*\s*(.+)$", _body_text, re.M)
+    _axis = [t.strip().lower() for t in re.split(r"[,;/]", _al[0])
+             if t.strip()] if _al else []
+
     entries.append({
+        "axis": _axis,
+        # Two bullets is not two axes: the parser reads the first and the second becomes
+        # invisible prose that disagrees with the meter. Caught rather than merged.
+        "axis_twice": len(_al) > 1,
+        "axis_bad": [a for a in _axis if a not in AXES],
         "ref": _nm.group(0) if _nm else "",
         "section": section, "name": name, "desc": desc, "pri": pri, "pri_typo": pri_typo,
         "when": when, "first": first, "line": i + 1,
@@ -374,6 +411,95 @@ def read_roadmap(path):
 
 
 road_covers, road_deps, road_phases = read_roadmap(ROADMAP)
+
+
+# ------------------------------------------------------------- roadmap status block
+# И2 (protocol 13, rule 13): the roadmap points, it does not assert. Every status cell
+# between these markers is rendered from the two surfaces that get re-measured — the ADR
+# front matter and the board — so a cell cannot drift from them without the check saying
+# so. Prose stays outside the markers, and only the kind that is not a claim about state:
+# why an axis exists, and what would count as finishing it.
+GEN_OPEN = "<!-- generated by tools/backlog/build.py --roadmap · do not edit inside -->"
+GEN_CLOSE = "<!-- /generated -->"
+
+
+def adr_front_matter():
+    """{number: (path, front matter dict or None)} for every decision file."""
+    out = {}
+    d = SRC.parent / "docs" / "decisions"
+    if not d.is_dir():
+        return out
+    for f in sorted(d.glob("[0-9]*.md")):
+        m = re.match(r"^(\d{3})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$", f.name)
+        if not m:
+            continue
+        text = f.read_text(encoding="utf-8-sig")
+        fm = None
+        head = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n", text, re.DOTALL)
+        if head:
+            fm = {}
+            for raw in head.group(1).split("\n"):
+                kv = re.match(r"^([a-z_]+):\s*(.*)$", raw)
+                if kv:
+                    fm[kv.group(1)] = kv.group(2).strip()
+        out[int(m.group(1))] = (f, fm)
+    return out
+
+
+def status_of_section(sec, mapping):
+    for key, st in mapping.items():
+        if sec.upper().startswith(key):
+            return st
+    return None
+
+
+def render_status_block(entries, adr_meta, canonical):
+    """The status of every axis, from the ADRs and the board. Never from prose."""
+    by_axis = {a: [e for e in entries if a in e["axis"]] for a in AXES}
+    shelf = [e for e in entries
+             if canonical(e["section"]) == "done-awaiting-observation"]
+    blind = [e for e in shelf if not e["axis"]]
+    no_axis = [e for e in entries if not e["axis"]]
+
+    adr_by_axis = {a: [] for a in AXES}
+    adr_unplaced = []
+    for num, (_f, fm) in sorted(adr_meta.items()):
+        if not fm:
+            continue
+        st = (fm.get("status") or "").strip().strip('"').lower().split()
+        st = st[0] if st else ""
+        axes = [t.strip().lower() for t in re.split(r"[,;/]", fm.get("axis", "")) if t.strip()]
+        if not axes:
+            if st in ("accepted", "implemented"):
+                adr_unplaced.append(f"ADR-{num:03d}")
+            continue
+        for a in axes:
+            if a in adr_by_axis:
+                adr_by_axis[a].append(f"ADR-{num:03d} {st or '?'}")
+
+    out = [GEN_OPEN, "",
+           "| axis | decisions | board entries | awaiting observation |",
+           "|---|---|---|---|"]
+    for a in AXES:
+        decisions = " · ".join(adr_by_axis[a]) or "—"
+        n = len(by_axis[a])
+        obs = sum(1 for e in by_axis[a]
+                  if canonical(e["section"]) == "done-awaiting-observation")
+        out.append(f"| **{a}** | {decisions} | {n} | {obs} |")
+    out += ["",
+            f"**Observation debt: {len(shelf) - len(blind)} under an axis + {len(blind)} in "
+            f"entries that carry none = {len(shelf)}.** Work finished and never seen working; "
+            f"per axis it says which direction is running ahead of its evidence.", ""]
+    if no_axis:
+        out.append(f"Not yet placed: {len(no_axis)} of {len(entries)} board entries carry no "
+                   f"axis, and a guessed one would report coverage this does not have.")
+    if adr_unplaced:
+        out.append(f"Accepted decisions with no axis: {', '.join(adr_unplaced)} — these are a "
+                   f"refusal in `--check`, not a gap to live with.")
+    out += ["", f"Rendered from `docs/decisions/*.md` front matter and `backlog.md`. "
+                f"Nothing here is written by hand; correct it at the source and re-run "
+                f"`uv run python tools/backlog/build.py --roadmap`.", "", GEN_CLOSE]
+    return "\n".join(out)
 
 
 # --------------------------------------------------------------------- freshness
@@ -531,8 +657,366 @@ adr_dep_edges = [(a, b, r) for a, b, r in road_deps if a in cited_adr or b in ci
 dependencies = sorted({(a, b, r) for a, b, r in edges + arc_edges + adr_edges + adr_dep_edges
                        if r in DEPENDENCY_RELS})
 
+# ------------------------------------------------------------------- writing safely
+# `open(path, "wb")` truncates at open, *before* the argument expression is evaluated, so
+# a guard written after the open cannot fire and a raising write leaves an empty file.
+# That is how this project's only copy of backlog.md was lost (2026-09-09). Hence: the
+# complete bytes exist as a value before anything on disk is touched, and the target is
+# replaced rather than opened.
+
+
+# ---------------------------------------------------------- the read-only tripwire
+# The atomic write below guards a verb. This guards the file against everything that is
+# not a verb, which is what lost the board: `open(path, "wb")` on a read-only file raises
+# before it truncates. Every claim about how the bit behaves is asserted in
+# recovery_drill.py rather than stated here, including the two counter-intuitive ones: it
+# does not survive an os.replace, and on POSIX it does not stop one.
+BOARD_NAMES = ("backlog.md", "backlog_closed.md")
+PROTECT = not os.environ.get("DPC_BACKLOG_NO_PROTECT")     # the per-environment way out
+
+
+def _is_board(path: Path) -> bool:
+    """Only the board pair is protected: `--check` also reads fixtures and other files."""
+    return path.name in BOARD_NAMES
+
+
+def _protected(path: Path) -> bool:
+    """The state of the bit, not what this caller may do with the file — root may write a
+    0o444 one, so os.access would report every run as needing to be armed again."""
+    try:
+        return not (stat.S_IMODE(path.stat().st_mode) & 0o222)
+    except OSError:
+        return False
+
+
+def _protect(path: Path) -> None:
+    if not (PROTECT and _is_board(path)):
+        return
+    try:
+        os.chmod(path, stat.S_IMODE(path.stat().st_mode) & ~0o222)
+    except OSError as exc:
+        print(f"WARNING   {path.name} could not be made read-only ({exc}); the tripwire "
+              f"is not armed on this file.")
+
+
+def _unprotect(path: Path) -> None:
+    if not (PROTECT and _is_board(path)) or not path.exists():
+        return
+    try:
+        os.chmod(path, stat.S_IMODE(path.stat().st_mode) | 0o200)
+    except OSError as exc:
+        # Not fatal: the replace then fails with the board intact, which is the outcome
+        # this layer exists to produce.
+        print(f"WARNING   the read-only bit on {path.name} could not be cleared ({exc}).")
+
+
+def _arm_boards() -> None:
+    """Assert protection on the boards, whatever state they are in. Idempotent.
+
+    Runs on every invocation, because this is the case no `finally` reaches: a process
+    killed inside the one syscall the bit is cleared for. Protection is a property of the
+    file rather than a transaction, so there is nothing to remember and a kill costs it
+    until the next run of this script rather than for good. The same path is why an
+    unprotected board is armed rather than refused — every board predates this, and a hand
+    edit is meant to work (§8a).
+    """
+    if not PROTECT:
+        return
+    for p in (SRC, ARCHIVE):
+        if _is_board(p) and p.exists() and not _protected(p):
+            _protect(p)
+            if _protected(p):
+                print(f"protect   {p.name} is now read-only between edits — a write that "
+                      f"does not come through this tool is refused, not obeyed "
+                      f"(hand edit: docs/BACKLOG_FORMAT.md §8a).")
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Replace `path` with `data`, or leave `path` untouched. Never something between."""
+    # A sibling, so os.replace is a rename inside one filesystem rather than a copy — a
+    # copy would reopen the window this closes. The pid keeps two sessions off each
+    # other's temp file; the override is how the recovery drill forces a failure here.
+    suffix = os.environ.get("DPC_BACKLOG_TMP_SUFFIX") or f".tmp-{os.getpid()}"
+    tmp = path.with_name(path.name + suffix)
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        # The bytes went to a sibling, so the replace is the only moment the target has to
+        # be writable: one syscall wide rather than one command long, and a verb that
+        # refuses earlier never touches the bit.
+        _unprotect(path)
+        try:
+            os.replace(tmp, path)
+        finally:
+            # Unconditional and addressed to the path: on success a different inode
+            # carrying the temp file's mode, on failure the original still needing its bit
+            # back, and one call covers both.
+            _protect(path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Text form: encoding first, so an unencodable character never opens the file."""
+    _atomic_write_bytes(path, text.encode(encoding))
+
+
+# ------------------------------------------------------------------------ snapshots
+# What this layer catches: a verb that writes a wrong-but-valid file — a `close` that took
+# the wrong entry, a `rename` that rewrote more than it meant to. The atomic write above
+# cannot, because such a write succeeds.
+#
+# What it does not catch, said plainly: the loss it was written after. That edit was a
+# hand-written script which never called this tool, and no guard inside the verbs reaches
+# code that does not run them. The answer to that one is the `append` verb below — the
+# edit that script was making now has a verb.
+BACKUP_ROOT = Path(os.environ.get("DPC_BACKLOG_BACKUP_DIR")
+                   or Path.home() / ".dpc" / "backlog-backups")
+
+
+def _project_segment(board: Path) -> str:
+    """Which project's board this is: the repository it sits in, else its own directory.
+
+    Six projects share this script and all six boards are called `backlog.md`, so one
+    flat directory gives them one stem: dedup compares this board against another
+    project's copy and skips the copy as unchanged, and the pruner thins six histories as
+    if they were one.
+
+    Derived from the board's own location, never from a config value (which goes stale on
+    the first move, silently) and never from the cwd. The walk looks for a `.git` entry
+    rather than running git: this script has no dependencies and must work where git is
+    absent, and `.exists()` covers the worktree spelling where `.git` is a file.
+
+    Outside a repository the board's directory names the segment — two of the six
+    projects may not be repositories, and no separation is worse than a coarse one. Two
+    clones of one repository share a segment; `DPC_BACKLOG_BACKUP_DIR` separates them.
+    """
+    start = board.resolve().parent
+    for d in [start, *start.parents]:
+        if (d / ".git").exists():
+            start = d
+            break
+    # Sanitise rather than refuse: an unwritable snapshot path must not be able to make
+    # the board uneditable (see _snapshot_warn). A drive root has no name at all.
+    seg = re.sub(r"[^A-Za-z0-9._-]+", "-", start.name).strip("-.")
+    return seg or "board"
+
+
+# Appended under the override rather than replacing it: the override says where copies
+# live, the segment says whose they are. Conditioning the segment on the override would
+# arm the collision guard only for people who had not thought about it.
+BACKUP_DIR = BACKUP_ROOT / _project_segment(SRC)
+BACKUP_KEEP_ALL_DAYS = 7          # every snapshot for a week …
+BACKUP_KEEP_DAILY_DAYS = 30       # … then one a day for a month, then nothing
+# `.auto.md` marks a snapshot as this tool's. The same directory holds hand-made copies,
+# and the pruner must not be able to reach one of those.
+#
+# The stamp carries microseconds because two verbs inside one second are ordinary here,
+# and at one-second resolution the second snapshot silently overwrote the first — losing
+# exactly the older copy this exists to keep. The recovery drill caught that.
+SNAP_RE = re.compile(r"^(?P<stem>.+)\.(?P<ts>20\d{6}T\d{6}\.\d{6})Z\.auto\.md$")
+
+
+def _snapshot_warn(msg: str) -> None:
+    """A snapshot that cannot be taken warns; the verb proceeds.
+
+    Abort was weighed and rejected. The verb's own write is already protected by two
+    stronger things — the result is validated in a scratch copy first, and the write is
+    atomic — so the snapshot guards only the narrower valid-but-wrong write. Aborting
+    would let an unwritable ~/.dpc make the board uneditable, losing the edit the person
+    is holding while the file on disk was never in danger. Refusing to work is not a safe
+    default when the failing component is the backup rather than the write.
+
+    The same holds for the copy taken after the write, where the edit is already on disk
+    and there is nothing left to abort — hence one wording for both sides.
+    """
+    print(f"WARNING   {msg}")
+    print("WARNING   the edit is not held up by this — see _snapshot_warn for why.")
+
+
+def _newest_snapshot(stem: str):
+    """(timestamp, path) of the most recent auto snapshot for `stem`, or None."""
+    best = None
+    try:
+        candidates = list(BACKUP_DIR.glob("*.auto.md"))
+    except OSError:
+        return None
+    for f in candidates:
+        m = SNAP_RE.match(f.name)
+        if m and m.group("stem") == stem and (best is None or m.group("ts") > best[0]):
+            best = (m.group("ts"), f)
+    return best
+
+
+def _prune_snapshots() -> None:
+    """Every snapshot for BACKUP_KEEP_ALL_DAYS, then one a day to BACKUP_KEEP_DAILY_DAYS.
+
+    Age is read from the name, not the mtime: a restore or a copy rewrites mtimes while
+    the name still says when the content was taken.
+    """
+    today = datetime.now(timezone.utc).date()
+    by_stem = defaultdict(list)
+    try:
+        candidates = list(BACKUP_DIR.glob("*.auto.md"))
+    except OSError:
+        return
+    for f in candidates:
+        m = SNAP_RE.match(f.name)
+        if m:
+            by_stem[m.group("stem")].append((m.group("ts"), f))
+    for _stem, items in by_stem.items():
+        items.sort(reverse=True)                    # newest first
+        kept_days = set()
+        for ts, f in items:
+            when = date(int(ts[0:4]), int(ts[4:6]), int(ts[6:8]))
+            age = (today - when).days
+            if age <= BACKUP_KEEP_ALL_DAYS:
+                continue
+            if age <= BACKUP_KEEP_DAILY_DAYS and when not in kept_days:
+                kept_days.add(when)                 # the newest of that day, kept
+                continue
+            try:
+                f.unlink()
+            except OSError as exc:
+                print(f"note      could not prune {f.name}: {exc}")
+
+
+_LEGACY_SAID = []
+
+
+def _mention_legacy_snapshots() -> None:
+    """Say once that copies from before the project segment are sitting one level up.
+
+    They stay where they are, and both halves of that are deliberate. They are outside
+    `_newest_snapshot`, so the first copy taken under the segment is taken even though
+    the content has not changed — one extra copy, once. They are outside the pruner too,
+    so they are kept for good: reaching up into the shared root to delete would put this
+    project's pruner back over five other projects' files, which is the collision the
+    segment exists to end.
+    """
+    if _LEGACY_SAID or BACKUP_ROOT == BACKUP_DIR:
+        return
+    _LEGACY_SAID.append(True)
+    try:
+        loose = [f for f in BACKUP_ROOT.glob("*.auto.md") if SNAP_RE.match(f.name)]
+    except OSError:
+        return
+    if loose:
+        print(f"note      {len(loose)} snapshot(s) from before the per-project directory "
+              f"sit in {BACKUP_ROOT} itself. They are not read for dedup and never "
+              f"pruned; move or delete them by hand if you want them gone.")
+
+
+def _snapshot(paths, moment: str = "") -> None:
+    """Copy each existing path into BACKUP_DIR under a UTC-stamped name, then prune."""
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _snapshot_warn(f"no snapshot: {BACKUP_DIR} could not be created ({exc}).")
+        return
+    _mention_legacy_snapshots()
+    tag = f" ({moment})" if moment else ""
+    now = datetime.now(timezone.utc)
+    for p in paths:
+        if not p.exists():
+            continue
+        try:
+            data = p.read_bytes()
+        except OSError as exc:
+            _snapshot_warn(f"no snapshot of {p.name}: it could not be read ({exc}).")
+            continue
+        # By content, not by mtime: an mtime moves when nothing changed and stays put on
+        # a same-second rewrite, so it answers a different question than this one.
+        newest = _newest_snapshot(p.stem)
+        if newest and newest[1].exists():
+            try:
+                same = hashlib.sha256(newest[1].read_bytes()).digest() == \
+                    hashlib.sha256(data).digest()
+            except OSError:
+                same = False
+            if same:
+                print(f"snapshot  {p.name} is unchanged since {newest[1].name} — "
+                      f"not copied again{tag}")
+                continue
+        # Never write over an existing snapshot: the one already there is the older board,
+        # which is the one worth having.
+        while True:
+            dst = BACKUP_DIR / f"{p.stem}.{now:%Y%m%dT%H%M%S.%f}Z.auto.md"
+            if not dst.exists():
+                break
+            now += timedelta(microseconds=1)
+        try:
+            _atomic_write_bytes(dst, data)
+        except OSError as exc:
+            _snapshot_warn(f"no snapshot of {p.name}: {dst} could not be written ({exc}).")
+            continue
+        print(f"snapshot  {dst}{tag}")
+    _prune_snapshots()
+
+
+# --------------------------------------------------------------- the hourly snapshot
+# _snapshot above is taken *by* a verb, so an edit that never calls a verb is never
+# copied — which is the edit that lost the board. This one is taken on the clock.
+SNAPSHOT_EVERY_SEC = 3600
+# A verb validates its result by running `--check` over a scratch copy, and that copy is
+# also called backlog.md — so the clock trigger below fired on it and filed the candidate
+# under the board's own stem. Measured on this fixture: a write the checker refused left a
+# copy of the refused content sitting among the copies of the board, and a restore could
+# not tell them apart. _validate sets this; nothing else should.
+SNAPSHOT_ON_CLOCK = not os.environ.get("DPC_BACKLOG_NO_SNAPSHOT")
+
+
+def _hourly_snapshot() -> int:
+    """Copy the boards if the newest copy is older than SNAPSHOT_EVERY_SEC. Count copied.
+
+    Age comes from the snapshot name; whether the content changed stays with _snapshot,
+    which answers it by hash. This decides only when to ask.
+    """
+    due = []
+    for q in (SRC, ARCHIVE):
+        if not (_is_board(q) and q.exists()):
+            continue
+        newest = _newest_snapshot(q.stem)
+        if not newest:
+            due.append(q)
+            continue
+        try:
+            when = datetime.strptime(newest[0], "%Y%m%dT%H%M%S.%f").replace(
+                tzinfo=timezone.utc)
+        except ValueError:
+            due.append(q)
+            continue
+        if (datetime.now(timezone.utc) - when).total_seconds() >= SNAPSHOT_EVERY_SEC:
+            due.append(q)
+    before = len(list(BACKUP_DIR.glob("*.auto.md"))) if BACKUP_DIR.is_dir() else 0
+    if due:
+        _snapshot(due)
+    after = len(list(BACKUP_DIR.glob("*.auto.md"))) if BACKUP_DIR.is_dir() else 0
+    return max(0, after - before)
+
+
+_arm_boards()
+
+# Triggered by the commands that already run whenever somebody is working, rather than by
+# a scheduler; what that buys and what it misses is weighed in §8a. `--roadmap` is
+# excluded because a verb runs it as a subprocess, which would snapshot twice per command.
+if not VERB and "--roadmap" not in sys.argv and SNAPSHOT_ON_CLOCK:
+    _copied = _hourly_snapshot()
+    if "--snapshot" in sys.argv:
+        print(f"snapshot  {_copied} board(s) copied into {BACKUP_DIR} · one is taken at "
+              f"most every {SNAPSHOT_EVERY_SEC // 60} minutes, and skipped when the "
+              f"content already matches the newest copy.")
+        sys.exit(0)
+
+
 # ------------------------------------------------------------------------ verbs
-# ADR-039 items 1, 5 and 7. Four mutations that write the file, then re-run this same
+# ADR-039 items 1, 5 and 7. Five mutations that write the file, then re-run this same
 # checker against the result and refuse to keep the write if the result carries a refusal.
 # Warnings never block: the live file carries 99 of them, and a `close` that recites them
 # every time is how people learn to stop reading the output.
@@ -650,10 +1134,31 @@ def _validate(src_text, arc_text):
         _dec = SRC.parent / "docs" / "decisions"
         if _dec.is_dir():
             shutil.copytree(_dec, tmp / "docs" / "decisions")
+        # The candidate has one more entry than the roadmap block was rendered from, so
+        # the drift check would refuse every write — Warren predicted exactly this from
+        # the code and the first `add` after И2 confirmed it. The block is regenerated
+        # here, against the candidate, before the check runs, and again on the real file
+        # in `_commit`: the writer and the checker see one state or the guard is a wall.
+        # The candidate is not the board: it must not be armed (a read-only file
+        # defeats shutil.rmtree on Windows, so every verb would leak a temp directory)
+        # and it must not be copied into the board's history either.
+        _env = dict(os.environ, DPC_BACKLOG_NO_PROTECT="1", DPC_BACKLOG_NO_SNAPSHOT="1")
+        _g = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                             "--roadmap", str(tmp / SRC.name)],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", env=_env)
+        if _g.returncode != 0:
+            # Discarding this code left a trap armed: a scratch regeneration that failed
+            # for its own reason would surface one step later as a mismatch, or — with the
+            # markers absent — as nothing at all. Both reviewers found it in the same hour.
+            return _g.returncode, ((_g.stdout or "") + (_g.stderr or "") +
+                                   "\nREFUSE  the roadmap block could not be rendered for "
+                                   "the candidate, so the write was not validated against "
+                                   "the state it would produce")
         r = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                             "--check", str(tmp / SRC.name)],
                            capture_output=True, text=True, encoding="utf-8",
-                           errors="replace")
+                           errors="replace", env=_env)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -676,10 +1181,54 @@ def _commit(src_text, arc_text, announcement):
         print("dry run — validated, nothing written.")
         print("ANNOUNCE  " + announcement)
         return
-    SRC.write_text(src_text, encoding="utf-8")
-    ARCHIVE.write_text(arc_text, encoding="utf-8")
+    # The archive is snapshotted only when the verb changes it, which is `close` and
+    # nothing else — and the same list is copied on both sides, so the pair always
+    # describes the same files.
+    _touched = [SRC] + ([ARCHIVE] if arc_text != _ARC_TEXT else [])
+    # Before the verb's first byte: this is the copy a mistaken verb is undone from.
+    _snapshot(_touched, "before the write")
+    _atomic_write(SRC, src_text)
+    _atomic_write(ARCHIVE, arc_text)
+    # And after it. The copy above preserves the state this verb destroyed; this one
+    # preserves the state the *next* accident destroys, so the newest copy is never older
+    # than the last successful edit. The loss of 2026-09-09 was recovered from a copy five
+    # days old for exactly the want of this: every guard was aimed at the edit in flight
+    # and nothing captured a good state on the way past.
+    #
+    # It cannot lose the edit, because the edit is already on disk when it runs. So a
+    # failure here must not raise: a verb that reported failure after a successful write
+    # invites the operator to run it again and apply it twice. _snapshot warns on its own
+    # errors; this catches the rest for the same reason.
+    try:
+        _snapshot(_touched, "after the write")
+    except Exception as exc:                                    # noqa: BLE001
+        _snapshot_warn(f"the board was written, but no copy of the new state was taken "
+                       f"({exc}). The edit is on disk; the next run will copy it.")
+    # Part of the same write, not a chore left for later: the roadmap's status block is
+    # rendered from what just changed, so leaving it for a separate command would put the
+    # tree in the one state `--check` refuses — and it would be the verb that did it.
+    _road = ""
+    if ROADMAP.exists():
+        import subprocess as _sp
+        # The path is passed. Without it the verb regenerated *this* project's roadmap
+        # whatever board it had just written, so every other project the standard serves
+        # kept the wall this fix exists to remove — and a fixture run could rewrite the
+        # tracked file behind the author's back. GLM 5.3 found both halves.
+        _r = _sp.run([sys.executable, str(Path(__file__).resolve()),
+                      "--roadmap", str(SRC)],
+                     capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if _r.returncode != 0:
+            # The board is already on disk, so this cannot be undone by refusing — say it
+            # loudly instead of reporting a success the tree does not have.
+            print(f"WARNING   {SRC.name} was written but {ROADMAP.name} could not be "
+                  f"regenerated, so `--check` will refuse until it is:")
+            for ln in ((_r.stdout or "") + (_r.stderr or "")).strip().split("\n")[:6]:
+                print("  " + ln)
+        elif "written" in (_r.stdout or ""):
+            _road = f" + {ROADMAP.name}"
     summary = next((ln for ln in out.split("\n") if " entries · " in ln), "")
-    print(f"written   {SRC.name}" + (f" + {ARCHIVE.name}" if arc_text != _ARC_TEXT else ""))
+    print(f"written   {SRC.name}" + (f" + {ARCHIVE.name}" if arc_text != _ARC_TEXT else "")
+          + _road)
     if summary:
         print("check     " + summary)
     # Item 7: the announcement is a text line in the closure-line grammar and nothing else.
@@ -825,8 +1374,8 @@ if VERB == "rename":
 if VERB == "add":
     if not ARGS:
         _die("usage: build.py add NAME --desc='claim, not topic' --priority=HIGH "
-             "--origin=\"Mike: '…'\" --by=CC [--section=OPEN] [--observed='…'] "
-             "[--first-step='…'] [--dry-run]")
+             "--axis=network --origin=\"Mike: '…'\" --by=CC [--section=OPEN] "
+             "[--observed='…'] [--first-step='…'] [--dry-run]")
     name = ARGS[0]
     if not re.fullmatch(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+", name):
         _die(f"«{name}» is not a name (§1): SCREAMING-KEBAB, at least two segments.",
@@ -847,6 +1396,21 @@ if VERB == "add":
         _die("--origin is mandatory (§1): who raised it, in their words when there are "
              "words. An entry with no origin cannot be taken back to the person who "
              "wanted it.")
+    axis = [t.strip().lower() for t in re.split(r"[,;/]", _flag("axis") or "") if t.strip()]
+    if not axis:
+        _die(f"--axis is mandatory (§4a): which direction this serves, one or two of "
+             f"{' / '.join(AXES)}.",
+             "An entry that names no direction cannot be counted under one, and the "
+             "generated ROADMAP has nowhere to put it.")
+    bad = [a for a in axis if a not in AXES]
+    if bad:
+        _die(f"axis token(s) {', '.join(repr(a) for a in bad)} not in the vocabulary "
+             f"({' / '.join(AXES)}).")
+    if len(axis) > 2:
+        # `--check` warns and §4a says «warned about, not refused»; the verb used to kill
+        # the write. Three surfaces, one rule — Fable 5 found the third disagreeing.
+        print(f"warning   {len(axis)} axes: an entry that serves everything reports "
+              f"nothing, and this is usually two entries.")
     sec_name, _ = _section_at(lines, _flag("section", "OPEN"))
     status = _status_for(sec_name)
     body = []
@@ -864,6 +1428,7 @@ if VERB == "add":
     # The actor as an appended event, the same shape `move` uses for `taken:`. It is
     # deliberately not part of the heading: `origin` says who *wanted* the entry, this
     # says who *wrote* it, and the two are frequently different people.
+    body.append(f"- **axis:** {', '.join(axis)}")
     body.append(f"- **filed:** {_by} · {_when}")
     head = f"### {name}: {desc} ({pri}, {status}, {_when} — {origin})"
     rest = list(lines)
@@ -872,6 +1437,74 @@ if VERB == "add":
     _commit("\n".join(rest), _ARC_TEXT,
             f"add {name} · {pri.lower()} · {sec_name.lower()} · {_by}")
     sys.exit(0)
+
+# Trailing metadata bullets, which prose goes above. Measured on backlog.md 2026-09-09:
+# in 610 of 642 entries with a body these four form one contiguous run at the end, and
+# every dated `- **YYYY-MM-DD, who:**` bullet already in the file sits immediately before
+# that run. `Renamed` is in the list because `rename` appends its trace below them all.
+META_BULLET_RE = re.compile(r"^\s*-\s*\*\*(?:axis|filed|taken|Renamed)\b")
+
+if VERB == "append":
+    # The commonest edit there is: one dated observation onto an entry that already
+    # exists. Its absence is what sent people to hand-written scripts.
+    if not ARGS:
+        _die("usage: build.py append NAME --text='…' --by=CC [--date=YYYY-MM-DD] "
+             "[--dry-run]")
+    e = _find(ARGS[0])
+    text = (_flag("text") or "").strip()
+    if not text:
+        _die("--text is mandatory: the observation to append.",
+             "  build.py append NAME --text='what was seen, with a file:line, a log line "
+             "or a measurement' --by=CC")
+    if "\n" in text or "\r" in text:
+        _die("--text is one bullet and so one line, and this text carries a newline.",
+             "A newline here can open a heading of its own and split the entry in two, "
+             "which is the graph corruption §8 refuses. Run the verb twice, or write the "
+             "second half as its own entry.")
+    start, end = _span(e)
+    block = lines[start:end]
+    j = len(block)
+    while j > 1 and (not block[j - 1].strip() or META_BULLET_RE.match(block[j - 1])):
+        j -= 1
+    # An entry with no body at all keeps the blank line under its heading.
+    block[j:j] = ([""] if j == 1 else []) + [f"- **{_when}, {_by}:** {text}"]
+    _commit("\n".join(lines[:start] + block + lines[end:]), _ARC_TEXT,
+            f"append {e['ref'] or e['name']} · {text[:60]} · {_by}")
+    sys.exit(0)
+
+
+def _status_block_now():
+    """The block as the two source surfaces say it should read, right now."""
+    mapping = section_status_map(lines)
+    return render_status_block(entries, adr_front_matter(),
+                               lambda sec: status_of_section(sec, mapping))
+
+
+if "--roadmap" in sys.argv:
+    # И2: the roadmap points rather than asserts. Only the span between the markers is
+    # rewritten — the prose around it is the half a generator has no business touching,
+    # and it is also the half that may not make a claim about state.
+    if not ROADMAP.exists():
+        _die(f"{ROADMAP} does not exist.")
+    doc = ROADMAP.read_text(encoding="utf-8-sig")
+    if GEN_OPEN not in doc or GEN_CLOSE not in doc:
+        _die(f"{ROADMAP.name} has no generated block. Add the two markers where the "
+             f"status belongs, once, by hand:",
+             f"    {GEN_OPEN}", f"    {GEN_CLOSE}",
+             "Everything between them is rewritten from the ADRs and the board; "
+             "everything outside is yours.")
+    head, rest = doc.split(GEN_OPEN, 1)
+    _, tail = rest.split(GEN_CLOSE, 1)
+    fresh = _status_block_now()
+    new_doc = head + fresh + tail
+    if new_doc == doc:
+        print(f"{ROADMAP.name}: the generated block already matches the sources.")
+        sys.exit(0)
+    _atomic_write(ROADMAP, new_doc)
+    print(f"written   {ROADMAP.name}  (status block rendered from "
+          f"{len(adr_front_matter())} decisions and {len(entries)} entries)")
+    sys.exit(0)
+
 
 if "--check" in sys.argv:
     # Validate the file against docs/BACKLOG_FORMAT.md. Reports, never rewrites:
@@ -980,6 +1613,26 @@ if "--check" in sys.argv:
                   "from the first character, so «(**HIGH …» reads as no priority at all. "
                   "The value is recovered on read, but new entries write it plain", refusals)
 
+        # Which direction the entry serves (§4a). Its own cutoff, not CUTOFF: the field
+        # was agreed on 2026-09-01 with 528 entries already written, and a refusal on all
+        # of them would leave exit 1 permanently on — the same reasoning §7 uses for the
+        # envelope. Legacy entries warn, and that warning count is the backfill meter.
+        axis_new = bool(e["when"]) and e["when"] >= AXIS_CUTOFF
+        if e["axis_twice"]:
+            at(e, "two `- **axis:**` bullets — the parser reads the first and the second "
+                  "is invisible prose that can disagree with it", refusals)
+        if e["axis_bad"]:
+            at(e, f"axis token(s) {', '.join(repr(a) for a in e['axis_bad'])} not in the "
+                  f"vocabulary ({' / '.join(AXES)}) — a misspelled axis groups the entry "
+                  f"under nothing at all", refusals if axis_new else warnings)
+        elif not e["axis"]:
+            at(e, f"no `- **axis:**` bullet — the entry does not say which direction it "
+                  f"serves, so it cannot be counted under one ({' / '.join(AXES)})",
+               refusals if axis_new else warnings)
+        elif len(e["axis"]) > 2:
+            at(e, f"{len(e['axis'])} axes on one entry — an entry that serves everything "
+                  f"reports nothing; split it or pick the two it actually serves", warnings)
+
         if new:
             missing = [f for f, v in (("priority", e["pri"] != "—" or e["pri_typo"]),
                                       ("status", e["status"]),
@@ -1082,6 +1735,14 @@ if "--check" in sys.argv:
                          f"{num:03d} — one of the two is wrong", refusals)
                 st = (fm.get("status") or "").strip().strip('"').lower()
                 head = st.split()[0] if st else ""
+                # The number in the status is a reference like any other, and until now it
+                # was the only one nobody resolved: a scratch ADR declaring
+                # `superseded-by-999` produced no finding at all, and the fixture's own
+                # canonical escape pointed at a decision absent from its directory.
+                _sup = re.fullmatch(r"superseded-by-(\d{3})", head or "")
+                if _sup and int(_sup.group(1)) not in adr_nums:
+                    _adr(f"status says superseded-by-{_sup.group(1)}, which is not a file "
+                         f"in {DECISIONS.name}/ — the escape from И1 points at nothing")
                 if head and not (head in ADR_STATUS or re.fullmatch(r"superseded-by-\d{3}", head)):
                     _adr(f"status «{head}» is outside the vocabulary "
                          f"({'/'.join(sorted(ADR_STATUS))}/superseded-by-NNN)")
@@ -1095,9 +1756,74 @@ if "--check" in sys.argv:
                         if int(ref) not in adr_nums:
                             _adr(f"{key} points at ADR-{int(ref):03d}, which is not a file "
                                  f"in {DECISIONS.name}/", warnings)
+
+                # И1 (protocol 13, rule 13): a decision that is live has to be reachable
+                # from a direction. The escape is the status the vocabulary already has —
+                # a superseded decision belongs to no current axis and is not asked for
+                # one. Measured the day this landed: 41 ADRs, 15 with front matter, and
+                # `superseded-by-NNN` used by none of them, so nothing legitimate is
+                # caught by the escape being absent.
+                adr_axis = [t.strip().lower() for t in
+                            re.split(r"[,;/]", fm.get("axis", "")) if t.strip()]
+                superseded = bool(re.fullmatch(r"superseded-by-\d{3}", head))
+                if head in ("accepted", "implemented") and not superseded:
+                    bad = [a for a in adr_axis if a not in AXES]
+                    if bad:
+                        _adr(f"axis token(s) {', '.join(repr(a) for a in bad)} not in the "
+                             f"vocabulary ({' / '.join(AXES)})")
+                    elif not adr_axis:
+                        _adr(f"status is «{head}» and no `axis:` — an accepted decision "
+                             f"that names no direction cannot be reached from the plan "
+                             f"({' / '.join(AXES)}, or status superseded-by-NNN)")
+                    elif len(adr_axis) > 2:
+                        _adr(f"{len(adr_axis)} axes — a decision that serves everything "
+                             f"points nowhere; two is the ceiling", warnings)
             if not re.search(r"^## Decision\b", text, re.M):
                 _adr("no `## Decision` section — Context + Decision is the minimum an ADR "
                      "has to carry (TEMPLATE.md, RFC 3)")
+
+    # The glossary points, it does not define (docs/GLOSSARY.md, 2026-09-05): every row
+    # carries a «Defined in» link, and a link that resolves to nothing is the same defect
+    # as a stale reference one document up. Content, not structure — it warns, never
+    # refuses. The second check is the one that made the file exist: an axis token that
+    # has no row is a word the board files work under and nobody has written down.
+    # The walk itself lives in glossary_check.py so the client suite can run it without a
+    # board — this script needs backlog.md, which no clone has, so CI never saw it here.
+    GLOSSARY = SRC.parent / "docs" / "GLOSSARY.md"
+    glossary_terms, glossary_links, glossary_bad = [], 0, 0
+    if GLOSSARY.exists():
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from glossary_check import check_glossary
+        glossary_terms, glossary_links, _bad_links, _no_row = check_glossary(GLOSSARY, AXES)
+        glossary_bad = len(_bad_links)
+        warnings.extend(_bad_links + _no_row)
+
+    # И2's checkable half: the block is rendered, so a stale one is a claim that has
+    # drifted from the two surfaces it was rendered from. Nothing here reads the prose —
+    # a rule about what prose may assert is for review, not for a validator.
+    if ROADMAP.exists():
+        _doc = ROADMAP.read_text(encoding="utf-8-sig")
+        if GEN_OPEN in _doc and GEN_CLOSE in _doc:
+            _cur = GEN_OPEN + _doc.split(GEN_OPEN, 1)[1].split(GEN_CLOSE, 1)[0] + GEN_CLOSE
+            if _cur.strip() != _status_block_now().strip():
+                refusals.append(
+                    f"{ROADMAP.name}\n    the generated status block no longer matches the "
+                    f"decisions and the board it is rendered from. Run "
+                    f"`{rebuild_command().replace('build.py', 'build.py --roadmap')}` — "
+                    f"and if the new numbers are wrong, they are wrong at the source, "
+                    f"which is the point of generating them")
+        else:
+            # A refusal, not a warning. GLM 5.3 demonstrated the asymmetry end to end: a
+            # hand edit *inside* the block was caught, deleting the whole block left exit 0
+            # for ever, and no verb ever re-adds the markers. The invariant was one
+            # deletion away from off — which is what a merge resolution or a tidy-up does.
+            refusals.append(
+                f"{ROADMAP.name}\n    no generated status block (rule 13, И2). Add the two "
+                f"markers once, by hand, where the status belongs:\n"
+                f"      {GEN_OPEN}\n      {GEN_CLOSE}\n"
+                f"    Without them the status is written by hand again, and nothing can "
+                f"tell you when it stops being true — that is how it came to claim "
+                f"enforcement the code did not have")
 
     for line in refusals:
         print(f"REFUSE  {line}")
@@ -1154,9 +1880,83 @@ if "--check" in sys.argv:
     # been migrated; this measures how much of "what blocks what" has never been written
     # down at all. Nobody was going to open graph.json to find out.
     dep_all = len(dependencies)
+    no_axis = sum(1 for e in entries if not e["axis"])
+    bad_axis = sum(1 for e in entries if e["axis_bad"])
     print(f"\n{len(entries)} entries · {len(refusals)} refusals · {len(warnings)} warnings"
           f" · {len(dangling)} stale references · {len(short_refs)} shortened"
-          f" · {dep_all} dependencies")
+          f" · {dep_all} dependencies · {no_axis} without axis · {bad_axis} bad axis")
+
+    # Protocol 13 rule 19 asks two questions before a tag: what is burning, and what was
+    # marked done and never watched. Both numbers were already computed — for the HTML
+    # board, and nowhere else — so the pre-tag sweep had to open a gitignored page that
+    # goes stale in silence, while the person doing the sweep was in a terminal running
+    # this check. Printed here they cost nothing.
+    #
+    # Not enforcement: nothing invokes `--check` against the real board — the tests run this
+    # script against `fixture.md`, and `backlog.md` is gitignored. The runner is a person.
+    #
+    # The CRITICAL entries are named rather than counted, because two is a number you act
+    # on and a count is a number you note. The shelf is not named: 172 lines would bury
+    # everything above them, and the board already lists it by axis.
+    # `canonical` maps IDEAS and the decomposition queue to `open` too, which is right for
+    # the board and wrong here: IDEAS rows are, in the section's own words, "headings not
+    # yet decomposed" — a track name is not a defect anybody can be asked to clear before a
+    # tag. Excluded by section name rather than by status, because it is the section that
+    # says what its rows are.
+    def gate_scope(e):
+        return (canonical(e["section"]) in ("open", "in-progress")
+                and not e["section"].upper().startswith("IDEAS"))
+
+    burning = [e for e in entries if e["pri"] in ("CRITICAL", "HIGH") and gate_scope(e)]
+    shelf = [e for e in entries
+             if canonical(e["section"]) == "done-awaiting-observation"]
+    shelf_hi = [e for e in shelf if e["pri"] in ("CRITICAL", "HIGH")]
+    # The legacy tail, lifted out of the warning list. It is warned about entry by entry
+    # already (§7 makes the envelope new-entries-only, so a pre-cutoff entry missing its
+    # priority is legal), but one warning among two hundred is not a list anybody can work
+    # through. What makes it release business is that these entries are invisible to the
+    # two counts above: no priority means neither burning nor quiet, just unclassified.
+    tail = [e for e in entries
+            if e["pri"] == "—" and not (bool(e["when"]) and e["when"] >= CUTOFF)
+            and gate_scope(e)]
+    # Broken down by section, not just totalled: a bare figure is a number without a window,
+    # and the reader cannot tell which sections `canonical` folded into `open` (the
+    # decomposition queue is one of them).
+    burn_by_sec = Counter(e["section"] for e in burning)
+    print("\n-- release gate (rule 19) --")
+    print(f"  burning       {len(burning)} CRITICAL/HIGH open or in progress"
+          f"  [{' · '.join(f'{s} {n}' for s, n in sorted(burn_by_sec.items()))}]")
+    print(f"  awaiting obs  {len(shelf)} on the shelf, {len(shelf_hi)} of them CRITICAL/HIGH")
+    print(f"  unclassified  {len(tail)} open pre-{CUTOFF} entries with no priority "
+          f"— counted in neither line above")
+    for e in burning:
+        if e["pri"] == "CRITICAL":
+            print(f"  CRITICAL      {SRC.name}:{e['line']}  {e['name']}")
+    for e in tail:
+        print(f"  no priority   {SRC.name}:{e['line']}  {e['name']}")
+
+    # The backfill meter (§4a). Printed as a distribution rather than a total, because the
+    # useful question is not "how many are unmarked" but "does any direction hold nothing" —
+    # an axis with no entries is either finished or forgotten, and the two look identical
+    # from the ROADMAP.
+    if len(entries) - no_axis:
+        by_axis = {a: sum(1 for e in entries if a in e["axis"]) for a in AXES}
+        obs = {a: sum(1 for e in entries if a in e["axis"]
+                      and canonical(e["section"]) == "done-awaiting-observation") for a in AXES}
+        print("axis     " + " · ".join(f"{a} {by_axis[a]} ({obs[a]} awaiting obs)"
+                                       for a in AXES))
+        # The per-axis figures above cannot be summed: an entry may carry two axes, and
+        # an unmarked entry carries none, so a shelf item can be counted twice or not at
+        # all. Warren caught the second half — 18 of the 80 were sitting in the unmarked
+        # and the line reported a triad with eighteen invisible units. Both halves are
+        # counted here directly, and the marked half is the remainder by construction, so
+        # neither number can go stale against the other.
+        shelf = sum(1 for e in entries
+                    if canonical(e["section"]) == "done-awaiting-observation")
+        shelf_blind = sum(1 for e in entries if not e["axis"]
+                          and canonical(e["section"]) == "done-awaiting-observation")
+        print(f"shelf    {shelf - shelf_blind} awaiting observation under an axis "
+              f"+ {shelf_blind} in entries that carry none = {shelf}")
     print(f"Of the {len(dangling)} stale, {stated_n} sit next to a stated relation and "
           f"{len(dangling) - stated_n} are bare mentions. The first number is the one to "
           f"drive to zero; the total is an upper bound on real breakage, not a count of it.")
@@ -1208,6 +2008,10 @@ if "--check" in sys.argv:
               f"files, {adr_no_fm} without front matter — required from "
               f"{ADR_FM_FROM:03d} on, so the older ones warn rather than refuse. The "
               f"backlog cites {len(cited_adr)} of them.")
+    if glossary_terms:
+        print(f"glossary   {GLOSSARY.parent.name}/{GLOSSARY.name}: {len(glossary_terms)} terms, "
+              f"{glossary_links} «Defined in» links, {glossary_bad} resolving to nothing; "
+              f"{sum(1 for a in AXES if a in glossary_terms)} of {len(AXES)} axis tokens have a row.")
     print(f"Rules: docs/BACKLOG_FORMAT.md §8. Cutoff for the required envelope: {CUTOFF}.")
     print("Stale and shortened references do not set the exit code: they are content, not "
           "structure, and this checker points rather than edits.")
@@ -1603,15 +2407,16 @@ doc = f"""<!doctype html>
 </html>
 """
 
-DST.write_text(doc, encoding="utf-8")
+_atomic_write(DST, doc)
 
 # ===================================================================== graph.html
 # The board answers "what is open". This answers "what leans on what" — the one thing a
-# flat list cannot show. Only nodes with at least one link are drawn: on the day this
-# shipped, 116 of 217 entries referenced nothing and nothing referenced them, and a
-# force layout with half its points floating in space hides the structure it exists to
-# reveal. Those entries are listed underneath instead, by priority, because "18 HIGH
-# entries no one has connected to anything" is a finding in its own right.
+# flat list cannot show. The linked nodes make the picture: on the day this shipped, 116
+# of 217 entries referenced nothing and nothing referenced them, and a force layout with
+# half its points floating in space hides the structure it exists to reveal. Those
+# entries are listed underneath, by priority, because "18 HIGH entries no one has
+# connected to anything" is a finding in its own right — and since 2026-09-04 they are
+# also drawn, as a ring outside the linked graph behind a chip that starts off.
 g_deg = Counter()
 node_kind = {}
 for a, b, _ in edges:
@@ -1679,38 +2484,70 @@ g_links = (_links(edges, 0) + _links(adr_edges, 1) + _links(arc_edges, 2)
 # one a human's spatial memory needs. Warm-starting from the last layout delivers it.
 def layout(nodes, links, prev):
     n = len(nodes)
-    warm = sum(1 for d in nodes if d["id"] in prev)
-    steps = 90 if warm > n * 0.8 else 420          # refine an old picture, or draw a new one
+    ln = [(l["s"], l["t"]) for l in links]
+    tied = {i for pair in ln for i in pair}
+    # Warm or cold is decided by the linked nodes alone: a node no spring pulls is not a
+    # body that re-routes the descent, and 165 of them arriving at once must not turn a
+    # refinement into a redraw.
+    warm = sum(1 for i, d in enumerate(nodes) if i in tied and d["id"] in prev)
+    steps = 90 if warm > len(tied) * 0.8 else 420  # refine an old picture, or draw a new one
+
+    def seed(name):
+        # A new node starts where its name says, not where its index says: the same
+        # entry lands in the same place whatever else was added alongside it.
+        h = 2166136261
+        for ch in name:
+            h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
+        return (h / 0x100000000) * 6.283185, ((h >> 8) % 1000) / 1000
+
     xs, ys = [0.0] * n, [0.0] * n
+    loose = []
     for i, d in enumerate(nodes):
         if d["id"] in prev:
             xs[i], ys[i] = prev[d["id"]]
-        else:
-            # A new node starts where its name says, not where its index says: the same
-            # entry lands in the same place whatever else was added alongside it.
-            h = 2166136261
-            for ch in d["id"]:
-                h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
-            ang = (h / 0x100000000) * 6.283185
-            rad = 30 + ((h >> 8) % 1000) / 1000 * 430
+        elif i in tied:
+            ang, u = seed(d["id"])
+            rad = 30 + u * 430
             xs[i], ys[i] = 600 + rad * math.cos(ang), 410 + rad * math.sin(ang)
+        else:
+            loose.append(i)
+    # A node with no link starts on a ring just outside the linked cloud and lets the
+    # repulsion and the centring settle it against the cloud's edge. Seeded inside like the
+    # others it wedges between linked nodes and never leaves — measured 2026-09-04: median
+    # radius 505 px against 381 px for the linked nodes, and the run went cold, moving the
+    # linked median 68 px.
+    if loose:
+        rad = max([math.hypot(xs[i] - 600, ys[i] - 410) for i in tied] or [0.0]) + 70
+        for i in loose:
+            ang, _ = seed(nodes[i]["id"])
+            xs[i], ys[i] = 600 + rad * math.cos(ang), 410 + rad * math.sin(ang)
+    # The loose nodes are pushed by everything and push only each other: 165 bodies
+    # leaning on the cloud's edge otherwise squeeze it — measured 2026-09-04, the linked
+    # median moved 27 px and the outer radius lost a tenth, with the chip that shows them
+    # still off.
+    held = [i in tied for i in range(n)]
     vx, vy = [0.0] * n, [0.0] * n
-    ln = [(l["s"], l["t"]) for l in links]
     for s in range(steps):
         cool = 1 - s / steps
         for i in range(n):
             for j in range(i + 1, n):
                 dx, dy = xs[j] - xs[i], ys[j] - ys[i]
-                d2 = dx * dx + dy * dy or 1.0
+                # Never closer than 20 px for the force: at sub-pixel distances 2600/d2 is
+                # thousands of px per step, the pair flies past the 300 px cutoff, the
+                # spring drags it back through the crowd and the run never settles.
+                # Measured 2026-09-04: bbox 21 639 x 10 456 without this line, 1 276 x 1 288 with it.
+                d2 = max(dx * dx + dy * dy, 400.0)
                 if d2 > 90000:
                     continue
                 d = math.sqrt(d2)
                 f = 2600 / d2
                 fx, fy = f * dx / d, f * dy / d
-                vx[i] -= fx
-                vy[i] -= fy
-                vx[j] += fx
-                vy[j] += fy
+                if held[j] or not held[i]:
+                    vx[i] -= fx
+                    vy[i] -= fy
+                if held[i] or not held[j]:
+                    vx[j] += fx
+                    vy[j] += fy
         for a, b in ln:
             dx, dy = xs[b] - xs[a], ys[b] - ys[a]
             d = math.hypot(dx, dy) or 1.0
@@ -1741,19 +2578,80 @@ if JSON_DST.exists():
     except (ValueError, OSError):
         previous = {}                    # a corrupt or hand-edited file just means cold start
 
+orphans = [e for e in entries if e["is_name"] and e["ref"] not in idx]
+# One node per name, because the id is a key and a fixture may repeat a name on purpose;
+# the `unlinked` list below keeps every occurrence.
+# why a class and not a kind: git log -S'"lone"' -- tools/backlog/build.py
+for ref in sorted({e["ref"] for e in orphans}):
+    e = live[ref]
+    g_nodes.append({
+        "id": ref,
+        "k": "task",
+        "lone": True,
+        "p": e["pri"],
+        "sec": e["section"].split(" ")[0],
+        "d": (e["desc"] or e["first"])[:220],
+        "ln": e["line"],
+        "deg": 0,
+    })
+
 layout_steps = layout(g_nodes, g_links, previous)
 
-orphans = [e for e in entries if e["is_name"] and e["ref"] not in idx]
 orph_by_pri = Counter(e["pri"] for e in orphans)
 _orph_rows = []
 for e in sorted(orphans, key=lambda x: (PRIORITIES.index(x["pri"])
                                         if x["pri"] in PRIORITIES else 9, x["ref"])):
     _d = f'<p class="d">{md(e["desc"])}</p>' if e["desc"] else ""
     _orph_rows.append(
-        f'<li class="item" data-pri="{esc(e["pri"])}">'
-        f'<div class="hd">{chip(e["pri"])}<code>{esc(e["ref"])}</code>'
+        f'<li class="item" data-pri="{esc(e["pri"])}" data-sec="{esc(e["section"].split(" ")[0])}" '
+        f'data-ref="{esc(e["ref"])}">'
+        f'<div class="hd">{chip(e["pri"])}<code><a data-node="{esc(e["ref"])}">{esc(e["ref"])}</a></code>'
         f'<time>{esc(e["section"].split(" ")[0])}</time></div>{_d}</li>')
 orph_html = "".join(_orph_rows)
+orph_count_line = (f"{len(orphans)} of {len(orphans)} shown — "
+                   + " · ".join(f"{p} {orph_by_pri[p]}" for p in PRIORITIES if orph_by_pri.get(p)))
+
+# Legend chips are filters (Mike, 2026-09-04). A chip's key is what the page's visible()
+# reads: a task's priority ('none' for '—') and its section, any other node's kind. The
+# first row is fixed; the section row is whatever sections the linked tasks are in.
+g_class = Counter()
+_sec_label = {}
+for n in g_nodes:
+    if n["k"] != "task":
+        g_class[n["k"]] += 1
+        continue
+    g_class["none" if n["p"] == "—" else n["p"]] += 1
+    g_class[n["sec"]] += 1
+    if n.get("lone"):
+        g_class["lone"] += 1
+    _sec_label.setdefault(n["sec"], live.get(n["id"], {}).get("section", n["sec"]))
+_sec_order = ["OPEN", "IN", "DONE", "BACKLOG", "IDEAS"]
+sec_chips = [s for s in _sec_order if s in _sec_label] \
+    + sorted(s for s in _sec_label if s not in _sec_order)
+kind_chips = [("CRITICAL", "CRITICAL", '<i class="sw" style="background:var(--crit)"></i>'),
+              ("HIGH", "HIGH", '<i class="sw" style="background:var(--high)"></i>'),
+              ("MEDIUM", "MEDIUM", '<i class="sw" style="background:var(--med)"></i>'),
+              ("LOW", "LOW", '<i class="sw" style="background:var(--low)"></i>'),
+              ("RESEARCH", "RESEARCH", '<i class="sw" style="background:var(--res)"></i>'),
+              ("none", "no priority", '<i class="sw" style="background:var(--none)"></i>'),
+              ("adr", "ADR", '<i class="sw adr" style="background:var(--accent)"></i>'),
+              ("phase", "ROADMAP phase", '<i class="sw adr" style="background:var(--ok)"></i>'),
+              ("arc", "closed, in the archive", '<i class="sw arc"></i>'),
+              ("lone", "linked to nothing", '<i class="sw lone"></i>')]
+
+
+def _gk(key, label, group, sw=""):
+    return (f'<button type="button" class="gk" data-filter="{esc(key)}" data-group="{group}" '
+            f'aria-pressed="true">{sw}{esc(label)} <b class="n">{g_class.get(key, 0)}</b></button>')
+
+
+def _gk_ctl(group):
+    return (f'<button type="button" class="gk ctl" data-all="{group}">all</button>'
+            f'<button type="button" class="gk ctl" data-none="{group}">none</button>')
+
+
+kind_chips_html = "".join(_gk(k, lab, "kind", sw) for k, lab, sw in kind_chips) + _gk_ctl("kind")
+sec_chips_html = "".join(_gk(s, _sec_label[s], "sec") for s in sec_chips) + _gk_ctl("sec")
 
 GRAPH_CSS = """
 /* The board's 1080px column is sized for prose. A graph is not prose — on a wide screen
@@ -1787,6 +2685,20 @@ font-size:.72rem;color:var(--ink-mut)}
 .sw{width:12px;height:12px;border-radius:50%;display:inline-block}
 .sw.adr{border-radius:2px}
 .sw.arc{background:none;border:1.5px dashed var(--ink-faint)}
+.sw.lone{background:none;border:1.5px solid var(--ink-mut)}
+/* The list under the canvas obeys the priority and section chips; a name in it is a link
+   to its node. */
+#lone .item.off{display:none}
+#lone a[data-node]{color:inherit;cursor:pointer;text-decoration:none;border-bottom:1px dotted var(--ink-faint)}
+/* Legend chips are filters: a struck chip is a hidden class. */
+.gkey .gk{display:inline-flex;align-items:center;gap:.35rem;font:inherit;color:inherit;
+background:none;border:0;padding:0;cursor:pointer}
+.gkey .gk .n{color:var(--ink-faint);font-weight:400}
+.gkey .gk.hid{opacity:.45;text-decoration:line-through}
+.gkey .gk.ctl{border:1px solid var(--line);border-radius:3px;padding:.05rem .4rem;color:var(--ink-mut)}
+#gqn{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint)}
+.side .hidn{color:var(--ink-faint)}
+.node.off,.link.off{display:none}
 .node{cursor:pointer}
 .node text{font-family:var(--mono);font-size:9.5px;fill:var(--ink-mut);pointer-events:none;
 paint-order:stroke;stroke:var(--surface);stroke-width:3.5px;stroke-linejoin:round}
@@ -1817,13 +2729,16 @@ const W=1200,H=820;
 // entry is added. This page only draws, drags and queries.
 const adj=NODES.map(()=>[]);
 LINKS.forEach(l=>{adj[l.s].push(l.t);adj[l.t].push(l.s);});
+let shown=NODES.map(()=>true);   // set by applyFilters(), read by everything else
 // The drawing sits wherever the simulation left it. Rather than squeeze it into a fixed
 // viewBox (which left a third of the canvas empty, because the content's aspect is not the
-// element's), frame the content: the starting view IS the bounding box. Extra room on the
-// right is label space.
-const BB=(function(){const xs=NODES.map(n=>n.x),ys=NODES.map(n=>n.y);
+// element's), frame the content: the starting view IS the bounding box — of what is shown,
+// so a class hidden by default (the unlinked ring) does not zoom the picture out to fit
+// itself. Extra room on the right is label space.
+function frame(){const on=NODES.filter((n,i)=>shown[i]);if(!on.length)return vb;
+  const xs=on.map(n=>n.x),ys=on.map(n=>n.y);
   const x0=Math.min(...xs)-40,x1=Math.max(...xs)+150,y0=Math.min(...ys)-30,y1=Math.max(...ys)+30;
-  return{x:x0,y:y0,w:x1-x0,h:y1-y0};})();
+  return{x:x0,y:y0,w:x1-x0,h:y1-y0};}
 const R=n=>4+Math.sqrt(n.deg)*2.6;
 const lg=document.getElementById('links'),ng=document.getElementById('nodes');
 // Arrowheads: the semantics were always directed — src wrote dst's name, not the reverse —
@@ -1848,6 +2763,8 @@ ng.innerHTML=NODES.map((n,i)=>{
     ? `<rect x="${-r}" y="${-r}" width="${2*r}" height="${2*r}" rx="2" fill="var(--accent)" stroke="var(--accent)"></rect>`
     : n.k==='arc'
     ? `<circle r="${r}" fill="none" stroke="var(--ink-faint)" stroke-dasharray="2 2"></circle>`
+    : n.lone   // a task nothing links to: hollow, the priority on the rim
+    ? `<circle r="${r}" fill="var(--surface)" stroke="var(--${PC[n.p]||'none'})" stroke-width="1.6"></circle>`
     : `<circle r="${r}" fill="var(--${PC[n.p]||'none'})" stroke="var(--surface)" stroke-width="1"></circle>`;
   return `<g class="node" data-i="${i}" transform="translate(${n.x},${n.y})">${shape}${lab}</g>`;
 }).join('');
@@ -1861,7 +2778,7 @@ function draw(){
 }
 draw();
 // pan and zoom
-let vb={...BB};
+let vb=frame();
 const setvb=()=>svg.setAttribute('viewBox',`${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
 setvb();
 svg.addEventListener('wheel',ev=>{ev.preventDefault();
@@ -1898,9 +2815,12 @@ svg.addEventListener('pointermove',ev=>{
 addEventListener('pointerup',()=>{
   if(drag&&!drag.moved)select(drag.i);
   drag=null;pan=null;svg.classList.remove('drag');});
-// selection
+// selection — a hidden node cannot be selected; a hidden neighbour is listed, marked.
 const info=document.getElementById('info');
+let sel=-1;
 function select(i){
+  if(!shown[i])return;
+  sel=i;
   const near=new Set([i,...adj[i]]);
   gs.forEach((g,j)=>{g.classList.toggle('sel',j===i);
     g.classList.toggle('nbr',near.has(j));
@@ -1908,28 +2828,98 @@ function select(i){
   lines.forEach((e,j)=>{const on=LINKS[j].s===i||LINKS[j].t===i;
     e.classList.toggle('hot',on);e.classList.toggle('dim',!on);});
   const n=NODES[i];
-  const out=LINKS.filter(l=>l.s===i).map(l=>[NODES[l.t].id,l.rel]);
-  const inn=LINKS.filter(l=>l.t===i).map(l=>[NODES[l.s].id,l.rel]);
-  const list=(t,a)=>a.length?`<p class="k">${t}</p><ul>${a.map(([x,r])=>
-    `<li><a data-jump="${x}">${x}</a>${r&&r!=='mention'?` <em>${r}</em>`:''}</li>`).join('')}</ul>`:'';
+  const out=LINKS.filter(l=>l.s===i).map(l=>[NODES[l.t].id,l.rel,shown[l.t]]);
+  const inn=LINKS.filter(l=>l.t===i).map(l=>[NODES[l.s].id,l.rel,shown[l.s]]);
+  const list=(t,a)=>a.length?`<p class="k">${t}</p><ul>${a.map(([x,r,on])=>
+    `<li>${on?`<a data-jump="${x}">${x}</a>`:`<span class="hidn">${x} (hidden by filter)</span>`}`
+    +`${r&&r!=='mention'?` <em>${r}</em>`:''}</li>`).join('')}</ul>`:'';
   info.innerHTML=`<h3><code>${n.id}</code></h3>
-    <p class="k">${n.k==='adr'?'decision record':n.k==='arc'?'closed — in the archive':n.sec+' · '+n.p}${n.ln?' · backlog.md:'+n.ln:''}</p>
+    <p class="k">${n.k==='adr'?'decision record':n.k==='arc'?'closed — in the archive':n.sec+' · '+n.p}${n.lone?' · linked to nothing':''}${n.ln?' · backlog.md:'+n.ln:''}</p>
     ${n.d?`<p>${n.d}</p>`:''}${list('references',out)}${list('referenced by',inn)}`;
   info.querySelectorAll('[data-jump]').forEach(a=>a.addEventListener('click',()=>{
     const j=NODES.findIndex(x=>x.id===a.dataset.jump);if(j>=0)select(j);}));
 }
-document.getElementById('gq').addEventListener('input',ev=>{
-  const t=ev.target.value.trim().toLowerCase();
-  const hit=j=>NODES[j].id.toLowerCase().includes(t);
+// search — only among shown nodes; a hit the filter hides is counted, not unhidden.
+const gq=document.getElementById('gq'),gqn=document.getElementById('gqn');
+function search(){
+  const t=gq.value.trim().toLowerCase();
+  const hit=j=>shown[j]&&NODES[j].id.toLowerCase().includes(t);
   gs.forEach((g,j)=>g.classList.toggle('dim',!!t&&!hit(j)));
   lines.forEach((e,j)=>e.classList.toggle('dim',!!t&&!hit(LINKS[j].s)&&!hit(LINKS[j].t)));
-});
-document.getElementById('reset').addEventListener('click',()=>{
-  vb={...BB};setvb();
+  if(!t){gqn.textContent='';return;}
+  const all=NODES.filter(n=>n.id.toLowerCase().includes(t)).length;
+  const vis=NODES.filter((n,j)=>hit(j)).length;
+  gqn.textContent=`${vis} shown`+(all>vis?`, ${all-vis} hidden by filter`:'');
+}
+gq.addEventListener('input',search);
+function clearSel(){sel=-1;
   gs.forEach(g=>g.classList.remove('dim','sel','nbr'));
   lines.forEach(e=>e.classList.remove('dim','hot'));
-  info.innerHTML=START;});
+  info.innerHTML=START;}
+document.getElementById('reset').addEventListener('click',()=>{vb=frame();setvb();clearSel();});
 const START=info.innerHTML;
+// filters (Mike, 2026-09-04). One predicate decides what is on the canvas; drawing,
+// hover, search and selection all read `shown`. `filters` is the set of hidden class
+// keys: a task's priority ('none' for '—') and its section, any other node's kind.
+function visible(n,filters){
+  const cs=n.k==='task'?[n.p==='—'?'none':n.p,n.sec]:[n.k];
+  if(n.lone)cs.push('lone');   // an unlinked task is a task, and one class more
+  return !cs.some(c=>filters.has(c));
+}
+// What a first visit hides: the unlinked ring, so the picture stays the one it was until
+// somebody asks for it. A stored choice wins — including the choice to hide nothing, which
+// is why an empty set is written rather than removed. A set stored before the lone class
+// existed (the old key) cannot have decided about it and is migrated with the ring hidden.
+function initialFilters(stored,legacy){
+  if(stored!==null)try{return new Set(JSON.parse(stored));}catch(e){}
+  if(legacy!==null)try{return new Set([...JSON.parse(legacy),'lone']);}catch(e){}
+  return new Set(['lone']);
+}
+const FKEY='backlog-graph-filters-2',OLDKEY='backlog-graph-filters';
+let hidden=new Set(['lone']);
+try{hidden=initialFilters(localStorage.getItem(FKEY),localStorage.getItem(OLDKEY));}catch(e){}
+const chips=[...document.querySelectorAll('.gk[data-filter]')];
+const loneItems=[...document.querySelectorAll('#lone .item')],loneCnt=document.getElementById('lonecnt');
+function applyFilters(){
+  shown=NODES.map(n=>visible(n,hidden));
+  gs.forEach((g,i)=>g.classList.toggle('off',!shown[i]));
+  lines.forEach((e,j)=>e.classList.toggle('off',!shown[LINKS[j].s]||!shown[LINKS[j].t]));
+  chips.forEach(c=>{const k=c.dataset.filter,rest=new Set(hidden);rest.delete(k);
+    // what the chip toggles: its members that the other chips let through
+    c.querySelector('.n').textContent=NODES.filter(x=>!visible(x,new Set([k]))&&visible(x,rest)).length;
+    c.classList.toggle('hid',hidden.has(k));c.setAttribute('aria-pressed',String(!hidden.has(k)));});
+  // The list under the canvas obeys the priority and section chips and never the lone
+  // chip: it is the reading that exists whether or not the ring is drawn.
+  let on=0;const by={};
+  loneItems.forEach(li=>{const v=visible({k:'task',p:li.dataset.pri,sec:li.dataset.sec},hidden);
+    li.classList.toggle('off',!v);if(v){on++;by[li.dataset.pri]=(by[li.dataset.pri]||0)+1;}});
+  loneCnt.textContent=`${on} of ${loneItems.length} shown`
+    +(on?' — '+Object.entries(by).map(([p,c])=>`${p} ${c}`).join(' · '):'');
+  try{localStorage.setItem(FKEY,JSON.stringify([...hidden]));}catch(e){}
+  if(sel>=0)shown[sel]?select(sel):clearSel();
+  if(gq.value.trim())search();
+}
+// A name in the list finds its node. The ring is switched on for the click when it is off,
+// and the panel says so — a chip flipping by itself is the kind of thing nobody notices.
+loneItems.forEach(li=>li.querySelector('[data-node]').addEventListener('click',()=>{
+  const j=NODES.findIndex(x=>x.id===li.dataset.ref);if(j<0)return;
+  const flipped=hidden.has('lone');
+  if(flipped){hidden.delete('lone');applyFilters();}
+  select(j);
+  vb.x=NODES[j].x-vb.w/2;vb.y=NODES[j].y-vb.h/2;setvb();
+  if(flipped&&sel===j)info.insertAdjacentHTML('beforeend',
+    '<p class="k">the «linked to nothing» chip was turned on for this click</p>');
+  document.querySelector('.stagebox').scrollIntoView({behavior:'smooth',block:'start'});}));
+const inGroup=g=>chips.filter(c=>c.dataset.group===g);
+chips.forEach(c=>c.addEventListener('click',ev=>{const k=c.dataset.filter;
+  if(ev.shiftKey){inGroup(c.dataset.group).forEach(o=>hidden.add(o.dataset.filter));hidden.delete(k);}
+  else hidden.has(k)?hidden.delete(k):hidden.add(k);
+  applyFilters();}));
+document.querySelectorAll('.gk[data-all],.gk[data-none]').forEach(b=>b.addEventListener('click',()=>{
+  inGroup(b.dataset.all||b.dataset.none).forEach(c=>b.dataset.all?hidden.delete(c.dataset.filter):hidden.add(c.dataset.filter));
+  applyFilters();}));
+applyFilters();
+vb=frame();setvb();
 """
 
 gdoc = f"""<!doctype html>
@@ -1947,7 +2937,7 @@ gdoc = f"""<!doctype html>
   <h1>Backlog graph</h1>
   <div class="meta">
     <span>built <b>{today}</b> from <b>backlog.md</b></span>
-    <span><b>{len(g_nodes)}</b> linked nodes</span>
+    <span><b>{len([n for n in g_nodes if not n.get("lone")])}</b> linked nodes</span>
     <span><b>{len(g_links)}</b> links</span>
     <span><b>{len(orphans)}</b> entries link to nothing</span>
   </div>
@@ -1966,18 +2956,20 @@ gdoc = f"""<!doctype html>
 
 <div class="controls">
   <input id="gq" type="search" placeholder="highlight by name" aria-label="Highlight nodes by name">
+  <span id="gqn"></span>
   <button class="fbtn" type="button" id="reset">reset view</button>
 </div>
 
 <div class="gkey">
-  <span><i class="sw" style="background:var(--crit)"></i>CRITICAL</span>
-  <span><i class="sw" style="background:var(--high)"></i>HIGH</span>
-  <span><i class="sw" style="background:var(--med)"></i>MEDIUM</span>
-  <span><i class="sw" style="background:var(--low)"></i>LOW</span>
-  <span><i class="sw" style="background:var(--res)"></i>RESEARCH</span>
-  <span><i class="sw adr" style="background:var(--accent)"></i>ADR</span>
-  <span><i class="sw adr" style="background:var(--ok)"></i>ROADMAP phase</span>
-  <span><i class="sw arc"></i>closed, in the archive</span>
+  {kind_chips_html}
+  <span>click a chip to hide its nodes · shift-click: only this one</span>
+</div>
+<div class="gkey">
+  <span>sections</span>
+  {sec_chips_html}
+</div>
+
+<div class="gkey">
   <span><i class="sw" style="background:var(--crit);border-radius:1px;height:3px"></i>stated dependency</span>
   <span>size = number of links</span>
   <span>drag the bottom-right corner of the canvas to resize it</span>
@@ -2022,12 +3014,14 @@ gdoc = f"""<!doctype html>
   </aside>
 </div>
 
-<section class="sec">
+<section class="sec" id="lone">
   <h2>Linked to nothing <span class="cnt">{len(orphans)}</span></h2>
-  <p class="legend">{" · ".join(f"{p} {orph_by_pri[p]}" for p in PRIORITIES if orph_by_pri.get(p))}</p>
+  <p class="legend" id="lonecnt">{orph_count_line}</p>
   <p class="legend">No other entry mentions these by name, and they mention none. That is
-  either genuine independence or a missing Cross-ref — the graph cannot tell which, so it
-  lists them rather than drawing them as dust.</p>
+  either genuine independence or a missing Cross-ref — the graph cannot tell which. They
+  are drawn as a ring of hollow dots around the linked graph, off until the «linked to
+  nothing» chip is on; click a name here to find its dot. This list follows the priority
+  and section chips.</p>
   <ul class="list">{orph_html}</ul>
 </section>
 
@@ -2049,7 +3043,7 @@ gdoc = f"""<!doctype html>
 </html>
 """
 
-GRAPH_DST.write_text(gdoc, encoding="utf-8")
+_atomic_write(GRAPH_DST, gdoc)
 
 # The same graph, for readers who cannot click. Agents receive backlog entries as retrieval
 # chunks; an entry's own outgoing references are in the prose it was handed, but "what
@@ -2059,7 +3053,7 @@ backlinks = defaultdict(list)
 for a, b, _ in edges + arc_edges + adr_edges:
     backlinks[b].append(a)
 
-JSON_DST.write_text(json.dumps({
+_atomic_write(JSON_DST, json.dumps({
     "built": today,
     "source": SRC.name,
     "entries": len(entries),
@@ -2074,7 +3068,7 @@ JSON_DST.write_text(json.dumps({
     "unlinked": sorted(e["ref"] for e in orphans),
     "stale_references": [{"from": s, "token": t, "line": ln, "stated": bool(st)}
                          for s, t, ln, st in dangling],
-}, ensure_ascii=False, indent=1), encoding="utf-8")
+}, ensure_ascii=False, indent=1))
 
 print(f"entries: {len(entries)}  ->  {DST}  ({len(doc)} chars)")
 print("sections:", {s: sum(1 for e in entries if e['section'] == s) for s in sections})

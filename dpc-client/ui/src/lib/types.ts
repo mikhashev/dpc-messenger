@@ -202,7 +202,9 @@ export interface VoteTally {
     approve: number;
     reject: number;
     request_changes?: number;  // Revision-requested votes
+    abstain?: number;          // Participants that could not judge the proposal
     total: number;
+    participants?: number;     // The denominator: the roster the proposal names
 }
 
 export interface KnowledgeCommit {
@@ -245,6 +247,9 @@ export interface KnowledgeCommitProposal extends KnowledgeCommit {
 export interface VoiceTranscription {
     transfer_id: string;
     node_id: string;
+    // One voice message becomes one transfer per recipient, so the sender's own
+    // record carries no transfer id; the file name is minted once and joins them.
+    filename?: string;
     text: string;
     provider: string;
     confidence?: number;
@@ -542,8 +547,24 @@ export interface TokenWarningEvent {
 
 export interface ExtractionFailureEvent {
     conversation_id: string;
-    error: string;
-    reason?: string;             // Alias for error in some payloads
+    reason: string;              // machine-readable: participants_offline, no_entries, ...
+    message?: string;            // the sentence written for a person; prefer it on screen
+    error?: string;              // legacy; no emitter in knowledge_service.py sends it
+}
+
+// Emitted when a peer refused a knowledge-extraction inference request (D2)
+// and the extraction was retried on the node's own cold local alias instead.
+// dpc-client/core/dpc_client_core/knowledge_service.py ~:1391, payload is
+// ConversationMonitor.last_compute_refusal (conversation_monitor.py
+// _note_compute_fallback). Sibling of ExtractionFailureEvent above, but this
+// one is a fallback that *succeeded* — the peer's refusal must not go silent
+// just because extraction still ran (THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+export interface KnowledgeExtractionFallbackEvent {
+    conversation_id: string | null;
+    node_id: string | null;         // the peer that refused, if known
+    requested_alias: string | null; // provider/alias that was asked for
+    reason: string;                 // free-text error from the refusal (str(primary_error))
+    fallback_alias: string;         // local alias extraction actually ran on
 }
 
 export interface KnowledgeCommitResultEvent {

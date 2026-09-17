@@ -184,6 +184,26 @@ class NewSessionResultHandler(MessageHandler):
         # cared to name. The gate is made of what this node already knows, so it
         # needs neither signatures nor the ADR-038 marker to stand up today.
         session = self.service.session_manager.get_session(proposal_id)
+
+        # Every participant now counts the votes it receives, so the node that
+        # finalises first tells the others something they have already decided.
+        # That result is a confirmation: its work is done and repeating it
+        # would archive an empty history a second time. It still has to earn
+        # the same three answers the live gate asks, from the record the
+        # finalised session left behind.
+        if session is None and self.service.session_manager.confirms_our_own_decision(
+            proposal_id, conversation_id, sender_node_id
+        ):
+            self.logger.info(
+                "NEW_SESSION_RESULT from %s confirms proposal %s, already decided here",
+                sender_node_id[:20], proposal_id[:8],
+            )
+            # Relayed anyway: in a star the far edge may still be waiting for
+            # it, and the dedup key below makes this at most one relay per
+            # proposal however many copies arrive.
+            await self._relay_result_once(payload, sender_node_id, conversation_id, proposal_id)
+            return None
+
         refusal = self._refuse_reason(session, sender_node_id, conversation_id)
         if refusal:
             self.logger.warning(
@@ -220,13 +240,18 @@ class NewSessionResultHandler(MessageHandler):
         ui_payload = {**payload, "sender_node_id": sender_node_id}
         await self.service.local_api.broadcast_event("new_session_result", ui_payload)
 
-        # Relay to group members that can't reach the result sender directly (star topology)
-        if conversation_id and conversation_id.startswith("group-"):
-            dedup_key = f"ser:{proposal_id}"
-            if dedup_key not in self.service._processed_message_ids:
-                self.service._processed_message_ids.add(dedup_key)
-                await self._relay_to_group(
-                    "NEW_SESSION_RESULT", payload, sender_node_id, conversation_id
-                )
+        await self._relay_result_once(payload, sender_node_id, conversation_id, proposal_id)
 
         return None
+
+    async def _relay_result_once(self, payload, sender_node_id, conversation_id, proposal_id):
+        """Pass the result on to group members that cannot reach its sender."""
+        if not (conversation_id and conversation_id.startswith("group-")):
+            return
+        dedup_key = f"ser:{proposal_id}"
+        if dedup_key in self.service._processed_message_ids:
+            return
+        self.service._processed_message_ids.add(dedup_key)
+        await self._relay_to_group(
+            "NEW_SESSION_RESULT", payload, sender_node_id, conversation_id
+        )

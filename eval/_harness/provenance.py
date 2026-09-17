@@ -43,21 +43,34 @@ _SECRET_HINTS = ("token", "api_key", "apikey", "secret", "password", "credential
 
 
 def _redact(entry: Dict[str, Any]) -> Dict[str, Any]:
-    """Drop anything whose key smells like a secret. Names of env vars stay."""
+    """Drop anything whose key smells like a secret. Names of env vars stay.
+
+    A number is never a secret, and matching the key alone hid a live sampling
+    knob: `reasoning_budget_tokens` contains "token", so every provenance file
+    on disk reads `"[redacted]"` where the reasoning budget was — in the one
+    file whose purpose is «everything needed to run this again». Found by
+    GLM 5.3 in the 2026-08-30 history audit.
+    """
     out = {}
     for k, v in entry.items():
         lowered = k.lower()
-        if any(h in lowered for h in _SECRET_HINTS) and not lowered.endswith("_env"):
-            out[k] = "[redacted]"
-        else:
-            out[k] = v
+        secretish = any(h in lowered for h in _SECRET_HINTS) and not lowered.endswith("_env")
+        out[k] = "[redacted]" if secretish and isinstance(v, str) else v
     return out
 
 
-def _run(cmd, cwd=None, timeout=30) -> str:
+def _run(cmd, cwd=None, timeout=30, keep_indent=False) -> str:
+    """`keep_indent` for output whose leading spaces are data.
+
+    `git status --porcelain` puts the status in columns 1-2, so an unstaged
+    edit is ` M path`. Stripping the whole blob eats the first line's leading
+    space, and the `[3:]` that removes the columns then eats a character of the
+    path: every dirty provenance file on disk names its first dirty file as
+    `pc-client/…`. Found by Fable 5 in the 2026-08-30 history audit.
+    """
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout)
-        return res.stdout.strip()
+        return res.stdout.rstrip() if keep_indent else res.stdout.strip()
     except Exception as exc:
         return f"[unavailable: {type(exc).__name__}]"
 
@@ -66,7 +79,7 @@ def _git(repo: Path) -> Dict[str, Any]:
     try:
         sha = _run(["git", "rev-parse", "HEAD"], cwd=str(repo))
         branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(repo))
-        status = _run(["git", "status", "--porcelain"], cwd=str(repo))
+        status = _run(["git", "status", "--porcelain"], cwd=str(repo), keep_indent=True)
         dirty_files = [ln[3:] for ln in status.splitlines() if ln.strip()]
         return {
             "sha": sha,

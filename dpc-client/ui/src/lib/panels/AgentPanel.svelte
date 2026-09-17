@@ -7,7 +7,7 @@
 <script lang="ts">
   import { type Writable, get } from 'svelte/store';
   import { untrack } from 'svelte';
-  import { mapBackendMessage, resolveSenderIdentity } from '$lib/utils/messageMapper';
+  import { mapBackendMessage, resolveSenderIdentity, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import { nextStrip, clearedStrip } from '$lib/utils/speedStripOwner';
   import {
     historyUpdateApplies,
@@ -191,7 +191,7 @@
                 // See messageMapper: an undated record takes the time of the
                 // one before it rather than the clock at load.
                 let previousTimestamp: number | undefined;
-                const msgs = histResult.messages.map((msg: any, index: number) => {
+                const msgs: Message[] = histResult.messages.map((msg: any, index: number) => {
                   const { sender, senderName } = mapMessageSender(msg, conv_id, agent.name || conv_id);
                   const stableId = msg.id || `${conv_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
                   const local = localById.get(stableId);
@@ -209,7 +209,11 @@
                   mapped.streamingRaw = msg.streaming_raw || local?.streamingRaw;
                   return mapped;
                 });
-                newMap.set(conv_id, msgs);
+                const { kept: dedupedMsgs, droppedCount, conflictCount } = dedupeMessagesById(msgs);
+                if (droppedCount > 0) {
+                  console.warn(`[Agents] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in history for ${conv_id}`);
+                }
+                newMap.set(conv_id, dedupedMsgs);
                 return newMap;
               });
               console.log(`[Agents] Restored ${histResult.message_count} messages for ${conv_id}`);
@@ -505,22 +509,30 @@
             return mapped;
           }) as Message[];
 
+          // Same guard as the get_conversation_history load paths: this batch
+          // is a backend-pushed snapshot too, and a repeated id reaches the
+          // keyed {#each} and crashes the panel (each_key_duplicate).
+          const { kept: dedupedMappedMessages, droppedCount, conflictCount } = dedupeMessagesById(mappedMessages);
+          if (droppedCount > 0) {
+            console.warn(`[Agents] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in history update for ${conversation_id}`);
+          }
+
           // Attach streamingRaw and thinking to the last assistant message
-          const lastAssistantIdx = [...mappedMessages].reverse().findIndex(m => m.sender === conversation_id);
+          const lastAssistantIdx = [...dedupedMappedMessages].reverse().findIndex(m => m.sender === conversation_id);
           if (lastAssistantIdx !== -1) {
-            const idx = mappedMessages.length - 1 - lastAssistantIdx;
-            mappedMessages[idx] = {
-              ...mappedMessages[idx],
-              streamingRaw: capturedAgentStreaming || mappedMessages[idx].text || undefined,
+            const idx = dedupedMappedMessages.length - 1 - lastAssistantIdx;
+            dedupedMappedMessages[idx] = {
+              ...dedupedMappedMessages[idx],
+              streamingRaw: capturedAgentStreaming || dedupedMappedMessages[idx].text || undefined,
               thinking: thinking || undefined,
             };
           }
 
           // B2 Fix 2: Merge backend messages with pending placeholders, sort by timestamp
           // Backend messages are authoritative for content; pending placeholders kept until resolved
-          const backendIds = new Set(mappedMessages.map((m: any) => m.id));
+          const backendIds = new Set(dedupedMappedMessages.map((m: any) => m.id));
           const keptPending = pendingMsgs.filter((m: any) => !backendIds.has(m.id));
-          const merged = [...mappedMessages, ...keptPending];
+          const merged = [...dedupedMappedMessages, ...keptPending];
           merged.sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0));
 
           newMap.set(conversation_id, merged);

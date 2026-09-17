@@ -3,15 +3,16 @@
 import os
 import re
 import json
-import base64
 import asyncio
+import time
 import logging
 from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider
+from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, image_base64,
+                   network_client_bounds)
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,18 @@ class ZaiProvider(AIProvider):
     changed is the endpoint it points at and the fact that every path now records
     what it spent, because a prepaid route whose spend is invisible is worse than
     no route at all.
+
+    The output count convention stays `unknown`, and that is the reading rather
+    than an omission: the usage object at
+    https://docs.z.ai/api-reference/llm/chat-completion is three fields —
+    `prompt_tokens` "Number of tokens in user input", `completion_tokens`
+    "Number of output tokens", `total_tokens` "Total number of tokens" — with no
+    reasoning counter beside them and no sentence saying whether the reasoning a
+    GLM model emits is inside `completion_tokens`. A row this adapter writes is
+    therefore analytics and not a bill until the vendor documents it.
     """
+
+    RETRY_LABEL = "Z.AI"
 
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
@@ -108,7 +120,8 @@ class ZaiProvider(AIProvider):
                 f"{ZAI_DEFAULT_BASE_URL}"
             )
 
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url,
+                                  **network_client_bounds(config, default_retries=0))
         self.base_url = base_url
 
         self.max_tokens = config.get("max_tokens", 8192)
@@ -170,7 +183,7 @@ class ZaiProvider(AIProvider):
             "APIConnectionError", "APITimeoutError", "InternalServerError",
         )
 
-    def _note_if_subscription_error(self, error: Exception) -> None:
+    def _on_non_retryable(self, error: Exception) -> None:
         """A 1313 from here is a canary, not a hiccup — say so at ERROR."""
         if "1313" in str(error).lower():
             logger.error(
@@ -180,31 +193,6 @@ class ZaiProvider(AIProvider):
                 "API key's plan before retrying anything.",
                 self.alias, self.base_url,
             )
-
-    async def _retry_with_backoff(self, fn, last_error: Exception):
-        delay = 3
-        elapsed = 0
-        attempt = 0
-        while elapsed < self.max_retry_seconds:
-            attempt += 1
-            logger.warning(
-                "Z.AI retry %d, waiting %ds (elapsed %ds/%ds): %s",
-                attempt, delay, elapsed, self.max_retry_seconds, last_error,
-            )
-            await asyncio.sleep(delay)
-            elapsed += delay
-            try:
-                return await fn()
-            except Exception as e:
-                if not self._is_retryable(e):
-                    self._note_if_subscription_error(e)
-                    raise
-                last_error = e
-                delay = min(delay * 2, 192)
-        raise RuntimeError(
-            f"Z.AI provider '{self.alias}' failed after {attempt} retries "
-            f"({elapsed}s elapsed): {last_error}"
-        ) from last_error
 
     def _build_extra_body(self, reasoning_effort: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """GLM's thinking is a switch, not a level — there is no `reasoning_effort`
@@ -218,6 +206,19 @@ class ZaiProvider(AIProvider):
             return {"thinking": {"type": "enabled"}}
         return None
 
+    def reasoning_words_served(self) -> Optional[List[str]]:
+        """`off` and nothing else. GLM's thinking is a switch: `off` becomes
+        `{"type": "disabled"}`, and every level lands on the same `enabled` that
+        no word at all lands on — so a level here is a word nobody applies."""
+        return [REASONING_OFF]
+
+    def _served_effort(self, extra_body: Optional[Dict[str, Any]]) -> Optional[str]:
+        """The rung this call ran at, read off the body that was sent: `off`
+        where thinking was disabled, None otherwise — `enabled` is thinking at a
+        depth this API names no word for."""
+        thinking = (extra_body or {}).get("thinking") or {}
+        return REASONING_OFF if thinking.get("type") == "disabled" else None
+
     def _effective_temperature(self, override: Optional[float] = None) -> float:
         if override is not None:
             return override
@@ -225,7 +226,7 @@ class ZaiProvider(AIProvider):
             return self._temperature_explicit
         return 1.0
 
-    def _usage_from(self, resp) -> Dict[str, int]:
+    def _usage_from(self, resp) -> Dict[str, Any]:
         """Normalise the SDK's usage object into the shape the cost meter reads.
 
         Every path calls this, not only the tool path. This is a prepaid provider:
@@ -243,18 +244,25 @@ class ZaiProvider(AIProvider):
             "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
             "total_tokens": getattr(u, "total_tokens", 0) or 0,
             "cache_read_input_tokens": cached or 0,
+            "output_includes_thinking": self.DECLARED_OUTPUT_INCLUDES_THINKING,
         }
 
-    def _log_usage(self, usage: Dict[str, int], path: str, tool_calls: int = 0) -> None:
+    def _log_usage(
+        self, usage: Dict[str, Any], path: str, tool_calls: int = 0,
+        served_effort: Optional[str] = None,
+    ) -> None:
         if not usage:
             return
+        # The rung, for whoever writes the usage row. Mutated in place because
+        # the tools path hands this same dict back to its caller.
+        usage["served_effort"] = served_effort
         self._record_last_usage(usage)
         logger.info(
             "Z.AI usage: alias=%s model=%s prompt=%d (cache_read=%d), completion=%d, "
-            "tool_calls=%d, path=%s",
+            "tool_calls=%d, effort=%s, path=%s",
             self.alias, self.model,
             usage.get("prompt_tokens", 0), usage.get("cache_read_input_tokens", 0),
-            usage.get("completion_tokens", 0), tool_calls, path,
+            usage.get("completion_tokens", 0), tool_calls, served_effort, path,
         )
 
     # --- plain text generation ---
@@ -278,7 +286,8 @@ class ZaiProvider(AIProvider):
             resp = await self.client.chat.completions.create(**params)
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
-            self._log_usage(self._usage_from(resp), path="plain")
+            self._log_usage(self._usage_from(resp), path="plain",
+                            served_effort=self._served_effort(extra))
             return msg.content or ""
 
         try:
@@ -286,7 +295,7 @@ class ZaiProvider(AIProvider):
         except Exception as e:
             if self._is_retryable(e):
                 return await self._retry_with_backoff(_call, e)
-            self._note_if_subscription_error(e)
+            self._on_non_retryable(e)
             raise RuntimeError(
                 f"Z.AI provider '{self.alias}' failed: {type(e).__name__}: {e}"
             ) from e
@@ -322,7 +331,7 @@ class ZaiProvider(AIProvider):
 
             full_text = ""
             thinking_text = ""
-            usage: Dict[str, int] = {}
+            usage: Dict[str, Any] = {}
             stream = await self.client.chat.completions.create(**params)
             async for chunk in stream:
                 chunk_usage = self._usage_from(chunk)
@@ -342,7 +351,7 @@ class ZaiProvider(AIProvider):
             if thinking_text:
                 self._last_thinking = thinking_text
                 logger.info("Z.AI streaming thinking: %d chars", len(thinking_text))
-            self._log_usage(usage, path="plain-stream")
+            self._log_usage(usage, path="plain-stream", served_effort=self._served_effort(extra))
             return full_text
 
         try:
@@ -366,7 +375,7 @@ class ZaiProvider(AIProvider):
                 # three lines live in `deepseek_provider.py:461` and
                 # `llamacpp_server_provider.py:729`.)
                 return await self._retry_with_backoff(_call, e)
-            self._note_if_subscription_error(e)
+            self._on_non_retryable(e)
             logger.error("Z.AI streaming failed: %s", e, exc_info=True)
             raise RuntimeError(
                 f"Z.AI streaming provider '{self.alias}' failed: {type(e).__name__}: {e}"
@@ -392,85 +401,9 @@ class ZaiProvider(AIProvider):
             })
         return out
 
-    @staticmethod
-    def _anthropic_to_openai_messages(
-        system: Union[str, List[Dict[str, Any]]],
-        messages: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        if system:
-            sys_text = system if isinstance(system, str) else "".join(
-                b.get("text", "") for b in system if isinstance(b, dict)
-            )
-            if sys_text:
-                out.append({"role": "system", "content": sys_text})
-
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content")
-
-            if isinstance(content, str):
-                out.append({"role": role, "content": content})
-                continue
-
-            blocks = content if isinstance(content, list) else []
-
-            if role == "assistant":
-                text_parts: List[str] = []
-                tool_calls: List[Dict[str, Any]] = []
-                for b in blocks:
-                    if not isinstance(b, dict):
-                        continue
-                    bt = b.get("type")
-                    if bt == "text":
-                        text_parts.append(b.get("text", ""))
-                    elif bt == "tool_use":
-                        tool_calls.append({
-                            "id": b.get("id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": b.get("name", ""),
-                                "arguments": json.dumps(b.get("input", {})),
-                            },
-                        })
-                msg: Dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
-                if tool_calls:
-                    msg["tool_calls"] = tool_calls
-                out.append(msg)
-                continue
-
-            if role == "user":
-                tool_results = [
-                    b for b in blocks
-                    if isinstance(b, dict) and b.get("type") == "tool_result"
-                ]
-                if tool_results:
-                    for tr in tool_results:
-                        # Anthropic tool_result.content may be a string or a list
-                        # of content blocks; flatten the list form to text.
-                        tr_content = tr.get("content", "")
-                        if isinstance(tr_content, list):
-                            tr_content = "".join(
-                                b.get("text", "") for b in tr_content
-                                if isinstance(b, dict)
-                            )
-                        out.append({
-                            "role": "tool",
-                            "tool_call_id": tr.get("tool_use_id", ""),
-                            "content": str(tr_content),
-                        })
-                else:
-                    text_parts = [
-                        b.get("text", "") for b in blocks
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    ]
-                    out.append({"role": "user", "content": "".join(text_parts)})
-                continue
-
-            # Fallback: stringify unknown block content
-            out.append({"role": role or "user", "content": json.dumps(blocks)})
-
-        return out
+    # The shared converter: images stay in their turns, and a provider asked by
+    # `provider=` refuses one it cannot see rather than dropping it.
+    _anthropic_to_openai_messages = staticmethod(anthropic_to_openai_messages)
 
     async def generate_with_tools(
         self,
@@ -486,7 +419,7 @@ class ZaiProvider(AIProvider):
         as consumed by llm_adapter._chat_native_tools.
         """
         self._last_thinking = None
-        openai_messages = self._anthropic_to_openai_messages(system, messages)
+        openai_messages = self._anthropic_to_openai_messages(system, messages, provider=self)
         openai_tools = self._anthropic_to_openai_tools(tools)
 
         async def _call():
@@ -525,7 +458,8 @@ class ZaiProvider(AIProvider):
                 await on_chunk(content, conversation_id)
 
             usage = self._usage_from(resp)
-            self._log_usage(usage, path="tools", tool_calls=len(tool_calls_raw))
+            self._log_usage(usage, path="tools", tool_calls=len(tool_calls_raw),
+                            served_effort=self._served_effort(extra))
             return {
                 "content": content,
                 "tool_calls_raw": tool_calls_raw,
@@ -538,7 +472,7 @@ class ZaiProvider(AIProvider):
         except Exception as e:
             if self._is_retryable(e):
                 return await self._retry_with_backoff(_call, e)
-            self._note_if_subscription_error(e)
+            self._on_non_retryable(e)
             raise RuntimeError(
                 f"Z.AI native tool calling failed for '{self.alias}': "
                 f"{type(e).__name__}: {e}"
@@ -548,17 +482,12 @@ class ZaiProvider(AIProvider):
         """OpenAI-format vision (image_url data URLs) for GLM-V models."""
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in images:
-            if "base64" in img:
-                base64_data = img["base64"]
-                if base64_data.startswith("data:"):
-                    base64_data = base64_data.split(",", 1)[1]
-            else:
-                with open(img["path"], "rb") as f:
-                    base64_data = base64.b64encode(f.read()).decode("utf-8")
             mime_type = img.get("mime_type", "image/png")
             content.append({
                 "type": "image_url",
-                "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{image_base64(img, self.alias)}"
+                },
             })
 
         async def _call():
@@ -568,7 +497,7 @@ class ZaiProvider(AIProvider):
                 messages=[{"role": "user", "content": content}],
                 temperature=self._effective_temperature(kwargs.get("temperature")),
             )
-            self._log_usage(self._usage_from(resp), path="vision")
+            self._log_usage(self._usage_from(resp), path="vision", served_effort=None)
             return resp.choices[0].message.content or ""
 
         try:
@@ -576,7 +505,7 @@ class ZaiProvider(AIProvider):
         except Exception as e:
             if self._is_retryable(e):
                 return await self._retry_with_backoff(_call, e)
-            self._note_if_subscription_error(e)
+            self._on_non_retryable(e)
             raise RuntimeError(
                 f"Z.AI vision failed for '{self.alias}': {type(e).__name__}: {e}"
             ) from e

@@ -8,29 +8,55 @@ Expanded in Phase C Step 5 with incoming P2P request handlers.
 
 import asyncio
 import logging
-from typing import Dict, List
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 import websockets
 
+from .firewall import SERVING_LOCAL_KEY, AppliedTariff, ServingLists, onward_sharing_refusal
+from .node_ledger import NodeLedger, default_ledger, tariff_amount_for, usage_row
+
 logger = logging.getLogger(__name__)
+
+#: What a row this door writes says about who called, and the word the daily
+#: ceiling counts under. One constant for the writer and the counter: a quota
+#: that summed a different word from the one `_record_peer_call` writes would
+#: read zero forever.
+PEER_CALLER_KIND = "peer"
+
+
+class EffortRefused(ValueError):
+    """A guest asked this node to think in a word its serving alias has no rung
+    for. Its message lists the words the alias does know — the ones its menu row
+    advertises — and reaches the guest as the inference error response, before
+    any inference has run and before any usage row exists.
+    """
 
 
 class P2PCoordinator:
     """Coordinates P2P connection lifecycle, messaging, and request handling."""
 
-    def __init__(self, service):
+    def __init__(self, service, ledger: Optional[NodeLedger] = None):
         """
         Initialize P2PCoordinator with reference to CoreService.
 
         Args:
             service: CoreService instance (provides access to managers, etc.)
+            ledger: Where a served peer call's usage row goes; default is the
+                node's own ledger
         """
         self.service = service
         self.p2p_manager = service.p2p_manager
         self.hub_client = service.hub_client
+        self._ledger = ledger
         # One peer generation at a time on the shared alias. The full queue with
         # priorities and a remote-share cap is D4-β of ADR-040; this is the half
         # that keeps two peers from paging the resident model out between them.
         self._peer_inference_lock = asyncio.Semaphore(1)
+        # The request ids being served right now, per peer: the guest mints the
+        # id that keys the host's row and routes its chunks, so only the host
+        # can see a reuse. Per peer, because two guests share no namespace.
+        self._in_flight_requests: Dict[str, set] = {}
 
     async def connect_via_uri(self, uri: str):
         """
@@ -167,11 +193,434 @@ class P2PCoordinator:
     # Incoming P2P request handlers (Phase C Step 5 Batch 1)
     # ─────────────────────────────────────────────────────────────
 
-    async def handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None):
-        """Handle incoming remote inference request from a peer."""
-        from dpc_protocol.protocol import create_remote_inference_response
+    def _effort_for_peer(
+        self, peer_id: str, requested: str, serving_alias: str,
+    ) -> Optional[str]:
+        """The rung a served call runs on: the guest's word under this node's cap,
+        or, where the guest chose nothing, what this node's own configuration runs
+        at. `EffortRefused` for a word the alias has no rung for.
 
-        logger.debug("Handling inference request from %s (request_id: %s, images: %s)", peer_id, request_id, "yes" if images else "no")
+        The vocabulary is the alias's own where its model named its words and the
+        shared scale where it did not; `off` is the foot of every scale and is
+        reachable wherever there is a scale at all — an alias whose provider sends
+        no effort has none, and refuses every word including that one. A word the
+        guest chose is sent to the provider; the host's own
+        configured word is not, because the alias already holds it and what would
+        travel from here is this node's normalisation of it — a downgrade on a
+        vendor whose ladder has more words than ours.
+
+        None is «no word describes this call», which is not `off`: an alias with no
+        effort channel, or a configured ceiling this node cannot read, where the
+        call runs at the host's default and nothing here knows its name.
+        `GatewayServer._served_effort` is the same rule at the other door.
+
+        What a guest that asks for nothing is served is
+        `effective_reasoning_default`, the same helper the alias's menu row quotes
+        as `reasoning_default` — so the rung the row promises is the rung the door
+        serves. Until 2026-09-14 the two were separate sentences and disagreed:
+        the row said `xhigh`, the template's default, while the door served the
+        configured `low`.
+        """
+        from .providers.base import (
+            REASONING_EFFORTS,
+            REASONING_OFF,
+            declared_reasoning_words,
+            effective_reasoning_default,
+        )
+
+        provider = self._provider_for_alias(serving_alias)
+        words, _template_default = declared_reasoning_words(provider)
+        configured = self._configured_effort_for_alias(serving_alias)
+        asked = (requested or "").strip()
+
+        if not asked:
+            rung = effective_reasoning_default(provider)
+            if rung is None and configured:
+                logger.info(
+                    "Peer %s chose no reasoning effort; %s is configured as %r, which is not "
+                    "a word this alias knows — serving this node's default, under no name",
+                    peer_id, serving_alias, configured,
+                )
+            return rung
+
+        if words is not None and not words:
+            # An empty vocabulary is this alias saying it serves no effort at
+            # all — `off` included, since a provider with no effort channel has
+            # no way of saying no either.
+            raise EffortRefused(
+                f"This node serves '{serving_alias}' at no reasoning effort at all — its "
+                f"provider sends none to its engine — so '{asked}' reaches nothing here; "
+                "send the request without an effort"
+            )
+
+        wanted = self._rung_of(provider, asked)
+        if wanted is None:
+            known = ", ".join(words) if words else ", ".join((REASONING_OFF,) + REASONING_EFFORTS)
+            source = "the words its own model named" if words else "the shared scale"
+            raise EffortRefused(
+                f"This node serves '{serving_alias}' at efforts {known} — {source} — and "
+                f"'{asked}' reaches none of them; ask for one of those, or send the request "
+                "without an effort"
+            )
+
+        if not configured:
+            return wanted
+        cap = self._rung_of(provider, configured)
+        if cap is None:
+            # A ceiling this node stated and cannot read back. Serving the
+            # guest's wish would be fail-open, so the call takes the host's
+            # default and the row names nothing rather than a word nobody applied.
+            logger.info(
+                "Peer %s asked for reasoning effort %s; %s is configured as %r, which is "
+                "not a word this alias knows — serving this node's default rather than the "
+                "peer's request", peer_id, wanted, serving_alias, configured,
+            )
+            return None
+
+        served = self._lower_rung(wanted, cap, words)
+        if served is None:
+            logger.info(
+                "Peer %s asked for reasoning effort %s and %s is capped at %s: the two sit "
+                "on ladders this node cannot rank together — serving this node's default",
+                peer_id, wanted, serving_alias, cap,
+            )
+            return None
+        if served != wanted:
+            logger.info(
+                "Peer %s asked for reasoning effort %s; this node caps %s at %s, serving %s",
+                peer_id, wanted, serving_alias, cap, served,
+            )
+        return served
+
+    @staticmethod
+    def _lower_rung(wanted: str, cap: str, words: Optional[List[str]]) -> Optional[str]:
+        """The lower of two rungs, or None when the two cannot be ranked.
+
+        The alias's own ladder first, in the order its model named it; the shared
+        scale otherwise, which is where `xhigh` and `max` meet. Neither: a ceiling
+        this node cannot apply, which is not an open door.
+        """
+        from .providers.base import REASONING_EFFORTS, REASONING_OFF, normalize_reasoning_effort
+
+        if words:
+            ladder = (REASONING_OFF,) + tuple(words)
+            if wanted in ladder and cap in ladder:
+                return wanted if ladder.index(wanted) <= ladder.index(cap) else cap
+        shared = (REASONING_OFF,) + REASONING_EFFORTS
+        low, high = normalize_reasoning_effort(wanted), normalize_reasoning_effort(cap)
+        if low is None or high is None:
+            return None
+        return wanted if shared.index(low) <= shared.index(high) else cap
+
+    @staticmethod
+    def _rung_of(provider: Any, word: str) -> Optional[str]:
+        """The rung `word` names on this alias, or None when it names none.
+
+        A provider whose ladder is its model's own answers for itself; the rest
+        are the shared scale. An answer that is not a word is not an answer.
+        """
+        from .providers.base import normalize_reasoning_effort, reasoning_word_for
+
+        if provider is None:
+            return normalize_reasoning_effort(word)
+        rung = reasoning_word_for(provider, word)
+        return rung if isinstance(rung, str) and rung else None
+
+    def _provider_for_alias(self, alias: str) -> Optional[Any]:
+        """The loaded provider behind an alias, or None. The registry is a dict or
+        it is nothing: a stand-in answering every attribute would be read here as
+        a model with a ladder."""
+        manager = getattr(self.service, "llm_manager", None)
+        providers = getattr(manager, "providers", None)
+        return providers.get(alias) if isinstance(providers, dict) else None
+
+    def _configured_effort_for_alias(self, alias: str) -> str:
+        """The effort this node configured for the alias it serves peers from.
+
+        Read off the built provider's own `config` (`AIProvider.__init__` keeps
+        the providers.json entry there), because that is the only place the
+        alias's configured effort exists at run time — there is no separate
+        table of configs to consult.
+        """
+        config = self._provider_config(alias)
+        return config.get("reasoning_effort") if config else None
+
+    def _provider_config(self, alias: str) -> Optional[Dict[str, Any]]:
+        """The providers.json entry of a loaded alias, or None when the alias
+        is not loaded or its provider keeps no dict there."""
+        config = getattr(self._provider_for_alias(alias), "config", None)
+        return config if isinstance(config, dict) else None
+
+    def _provider_type(self, alias: str) -> Optional[str]:
+        """The provider `type` of a loaded alias — what `gateway.provider_types`
+        reads for every alias, read here for the one the door serves."""
+        config = self._provider_config(alias)
+        return config.get("type") if config else None
+
+    def _serving_lists(self) -> Any:
+        """The two serving lists, classified the way the gateway classifies them.
+
+        One classification for both doors (ADR-041 D5): the gateway's own
+        object when this node has one. The listener is opt-in and the ceiling
+        is not, so with no gateway the same predicate is asked of the firewall
+        directly, over the registry reader this door already uses.
+
+        Raises `ValueError` (`GatewayConfigError` is one) when the lists
+        cannot be classified.
+        """
+        from .gateway import Gateway
+
+        gateway = getattr(getattr(self.service, "gateway", None), "gateway", None)
+        if isinstance(gateway, Gateway):
+            return gateway.serving_lists()
+        firewall = getattr(self.service, "firewall", None)
+        providers = getattr(getattr(self.service, "llm_manager", None), "providers", None)
+        aliases = providers if isinstance(providers, dict) else {}
+        return firewall.classify_serving_lists({a: self._provider_type(a) for a in aliases})
+
+    def _vendor_quota_refusal(self, peer_id: str, serving_alias: str) -> Optional[tuple]:
+        """Why this peer may not be served `serving_alias` today, or None.
+
+        ADR-041 D5 on the peer door. A vendor alias is bounded by money —
+        `compute.vendor_quotas`, USD per day and per caller — summed from the
+        rows `_record_peer_call` wrote under this peer's own name, so a
+        restart changes nothing and one peer's spending never counts against
+        another's. A local alias is bounded by the card, which is the queue
+        below, and passes untouched. Lists that cannot be classified are
+        refused: with the class unknown, «not a vendor alias» is a guess, and
+        the wrong guess spends the host's money.
+
+        Returns `(error text, refusal code)` or None — three refusals under
+        three words, because only the ceiling refills by itself.
+        """
+        from dpc_protocol.protocol import (
+            REFUSAL_INSUFFICIENT_QUOTA,
+            REFUSAL_MISCONFIGURED,
+            REFUSAL_UNRATED,
+        )
+        from .gateway import vendor_alias_is_priced
+
+        try:
+            lists = self._serving_lists()
+        except ValueError as e:
+            return (
+                f"This node cannot serve '{serving_alias}': its compute serving lists are "
+                f"refused as a configuration error ({e}), and an alias whose class is unknown "
+                "is not served",
+                REFUSAL_MISCONFIGURED,
+            )
+        if not isinstance(lists, ServingLists) or lists.owner_of(serving_alias) != "vendor":
+            return None
+        model = (self._provider_config(serving_alias) or {}).get("model")
+        # No WARNING of its own: `handle_inference_request` logs every refusal
+        # this returns, with this text in it, and one event deserves one line.
+        if not vendor_alias_is_priced(serving_alias, model):
+            return (
+                f"This node cannot serve '{serving_alias}': it is a vendor alias and this node "
+                f"has no rate for it (model {model!r}), so what a call spends cannot be counted "
+                "against the daily ceiling in compute.vendor_quotas — an unpriced alias is "
+                "refused rather than served against a ceiling that would read $0.00 for ever",
+                REFUSAL_UNRATED,
+            )
+        # A vendor alias with no ceiling is refused when the rules are read, so
+        # a missing one here is absent rather than unlimited.
+        quota = float(lists.quotas.get(serving_alias) or 0.0)
+        spent = (self._ledger or default_ledger()).spent_today(
+            serving_alias, caller=peer_id, caller_kind=PEER_CALLER_KIND,
+        )
+        # The call that crosses the line is served: the ceiling stops the call
+        # *after* the one that reached it, so the overrun is at most one call
+        # — and under streaming a call is long by construction, so «at most
+        # one» is not «by a little». A per-call ceiling is the other half and
+        # is not decided (ADR-041 D5, open).
+        if spent < quota:
+            return None
+        return (
+            f"This node serves '{serving_alias}' behind a daily ceiling and yours is spent: "
+            f"${spent:.4f} of ${quota:.2f} today (compute.vendor_quotas, per caller); it is "
+            "served again after midnight UTC",
+            REFUSAL_INSUFFICIENT_QUOTA,
+        )
+
+    def _tariff_for_call(
+        self, serving_alias: str, peer_id: str, started_at: datetime,
+    ) -> Optional[AppliedTariff]:
+        """What this peer is charged for this alias at this moment, or None.
+
+        None is «nothing declared» — the v1 gift — and so is a firewall that
+        cannot answer: a tariff that fails to resolve must not turn a served
+        answer into a refusal, and an unpriced row is the honest record of it.
+        """
+        firewall = getattr(self.service, "firewall", None)
+        try:
+            return firewall.tariff_for(serving_alias, peer_id=peer_id, at=started_at)
+        except Exception:
+            logger.error(
+                "The tariff for %s served to %s could not be resolved; the call is recorded "
+                "as unpriced", serving_alias, peer_id, exc_info=True,
+            )
+            return None
+
+    def _record_peer_call(
+        self,
+        *,
+        peer_id: str,
+        request_id: str,
+        serving_alias: str,
+        result: Dict[str, Any],
+        model: Optional[str],
+        started_at: datetime,
+        duration_s: float,
+        served_effort: Optional[str] = None,
+    ) -> tuple[str, Optional[AppliedTariff], Optional[float]]:
+        """Price a served call once, at the moment it was made, and write its
+        usage row under the peer's name (ADR-041 D3), naming the effort it ran
+        at and whether the transport proved the name the row is written under.
+
+        Two prices, and only one of them leaves this node. `cost_usd` is what
+        the call cost us — a vendor's dollars, or zero for our own card — and
+        stays on this row. The owner's tariff is what the guest is charged, is
+        resolved for this peer at `started_at`, and travels: returned here as
+        `(billing, tariff, tariff_amount)` for the response to carry.
+
+        A row that cannot be built is logged and does not fail the answer: the
+        tokens have already been generated and paid for.
+        """
+        from .dpc_agent.pricing import compute_cost_usd, get_billing_model
+        from .p2p_manager import peer_proof
+
+        proved, connection_type = peer_proof(getattr(self.p2p_manager, "peers", None), peer_id)
+        billing = get_billing_model(serving_alias, model)
+        cost_usd = compute_cost_usd(
+            serving_alias,
+            result.get("prompt_tokens") or 0,
+            result.get("response_tokens") or 0,
+            model=model,
+            at=started_at,
+        )
+        output_includes_thinking = result.get("output_includes_thinking", "unknown")
+        tariff = self._tariff_for_call(serving_alias, peer_id, started_at)
+        tariff_amount = tariff_amount_for(
+            prompt_tokens=result.get("prompt_tokens"),
+            completion_tokens=result.get("response_tokens"),
+            thinking_tokens=result.get("thinking_tokens"),
+            output_includes_thinking=output_includes_thinking,
+            tariff_in=tariff.in_per_1m if tariff else None,
+            tariff_out=tariff.out_per_1m if tariff else None,
+        )
+        try:
+            row = usage_row(
+                request_id=request_id,
+                caller=peer_id,
+                caller_kind=PEER_CALLER_KIND,
+                alias=serving_alias,
+                model=model,
+                route="local",
+                prompt_tokens=result.get("prompt_tokens"),
+                completion_tokens=result.get("response_tokens"),
+                thinking_tokens=result.get("thinking_tokens"),
+                counts_source=result.get("counts_source", "ours"),
+                output_includes_thinking=output_includes_thinking,
+                thinking_source=result.get("thinking_source"),
+                served_effort=served_effort,
+                peer_proved=proved,
+                peer_connection_type=connection_type,
+                started_at=started_at,
+                duration_s=duration_s,
+                billing=billing,
+                cost_usd=cost_usd,
+                tariff_in=tariff.in_per_1m if tariff else None,
+                tariff_out=tariff.out_per_1m if tariff else None,
+                tariff_currency=tariff.currency if tariff else None,
+                tariff_at=tariff.at if tariff else None,
+                tariff_amount=tariff_amount,
+            )
+        except Exception:
+            logger.error(
+                "Usage row for peer %s request %s was not built", peer_id, request_id, exc_info=True
+            )
+            return billing, tariff, tariff_amount
+        (self._ledger or default_ledger()).append(row)
+        return billing, tariff, tariff_amount
+
+    async def handle_inference_request(
+        self, peer_id: str, request_id: str, prompt: str, model: str = None,
+        provider: str = None, images: list = None, reasoning_effort: str = None,
+        messages: list = None, system: Any = None, tools: list = None,
+        stream: bool = False,
+    ):
+        """Handle incoming remote inference request from a peer.
+
+        `messages`, `system`, `tools` and `stream` are the DPTP v1.7 half: with
+        `messages` the call goes to `query_messages`, which sees the turns
+        un-flattened and can call tools and stream; without it the flattened
+        `prompt` takes `query`, as every released guest's request does. Image
+        blocks standing in `messages` go with the turns to `query_messages`,
+        tools or not — the one path that carries images beside tools, and the
+        one this node's menu row answers for in `serves_images_with_tools`.
+        The flat `images` field keeps `query`, the vision entry point, which
+        holds no tools: beside `tools` it is refused with `tools_unsupported`
+        rather than answered without them, and without tools it is served from
+        the prompt as every older guest's request always was.
+
+        None of this is read before the gates below have passed, and a refused
+        call emits no chunk.
+        """
+        from dpc_protocol.protocol import (
+            REFUSAL_IDENTITY_UNPROVED,
+            REFUSAL_INVALID_VALUE,
+            REFUSAL_MODEL_NOT_FOUND,
+            REFUSAL_NOT_ALLOWED,
+            REFUSAL_ONWARD_SHARING_REFUSED,
+            REFUSAL_TOOLS_UNSUPPORTED,
+            create_remote_inference_chunk,
+            create_remote_inference_response,
+        )
+        from .p2p_manager import peer_proof
+
+        # Counted, never quoted: the flat field and the blocks in the turns are
+        # one number, because either is a picture this call carries.
+        from .providers.base import image_blocks_in_turns
+
+        images_in_turns = image_blocks_in_turns(messages)
+        image_count = len(images or []) + images_in_turns
+        tool_count = len(tools or [])
+        logger.debug(
+            "Handling inference request from %s (request_id: %s, images=%d tools=%d)",
+            peer_id, request_id, image_count, tool_count,
+        )
+
+        # Identity before every other gate (ADR-041 D2). `peer_id` is the name
+        # the firewall admits on, the ledger writes under and a quota counts
+        # against, and only the direct tier proved it: WebRTC takes it from the
+        # Hub's signal, relay from our own intention, gossip from an envelope
+        # field. This request reaches here over any of them, so the tier is
+        # asked here — before `can_request_inference`, before the serving alias
+        # is read, before any provider call. The order matters beyond the cost:
+        # a sender the transport could not prove must learn nothing about this
+        # node's alias list, and both gates below answer about aliases (D7
+        # part 1, D4-0). No usage row either — a refused call is not a call.
+        proved, connection_type = peer_proof(getattr(self.p2p_manager, "peers", None), peer_id)
+        if proved is not True:
+            over = "no connection of record" if connection_type is None else repr(connection_type)
+            logger.warning(
+                "Peer inference refused for %s: the request arrived over %s, and the peer's "
+                "key is proved only on direct TLS (ADR-041 D2)", peer_id, over,
+            )
+            error_response = create_remote_inference_response(
+                request_id=request_id,
+                error=(
+                    "This node serves peer inference only over a connection whose key is "
+                    "proved — direct TLS, where the peer's key has been proved (ADR-041 D2). "
+                    f"This request arrived over {over}."
+                ),
+                code=REFUSAL_IDENTITY_UNPROVED,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
 
         # The alias the peer named is evidence for the gate, never an instruction
         # to the router (ADR-040 D4-0).
@@ -181,7 +630,8 @@ class P2PCoordinator:
             logger.warning("Access denied: %s cannot request inference%s", peer_id, denied_for)
             error_response = create_remote_inference_response(
                 request_id=request_id,
-                error="Access denied: You are not authorized to request inference" + denied_for
+                error="Access denied: You are not authorized to request inference" + denied_for,
+                code=REFUSAL_NOT_ALLOWED,
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
@@ -201,6 +651,10 @@ class P2PCoordinator:
             error_response = create_remote_inference_response(
                 request_id=request_id,
                 error="This node shares no compute: no serving alias is configured",
+                # The guest named a model this node does not serve — here because
+                # it serves none at all. One word for «not on the menu», whether
+                # the menu is empty or the alias is simply not on it.
+                code=REFUSAL_MODEL_NOT_FOUND,
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
@@ -208,27 +662,200 @@ class P2PCoordinator:
                 logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
             return
 
+        # What is shared is not shared onward (ADR-041 D7 part 1). The gateway
+        # classifies its lists against the registry on every request; the rules
+        # loader cannot, because no registry exists when they are parsed, so
+        # this door asks the same predicate here, before the router and before
+        # any usage row: an alias that is somebody else's model is not served.
+        refusal = onward_sharing_refusal(SERVING_LOCAL_KEY, serving_alias, self._provider_type(serving_alias))
+        if refusal:
+            logger.warning("Peer inference refused for %s: %s", peer_id, refusal)
+            error_response = create_remote_inference_response(
+                request_id=request_id,
+                error=f"This node cannot serve '{serving_alias}' to a peer: {refusal}",
+                code=REFUSAL_ONWARD_SHARING_REFUSED,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # Money, before the queue and before anything runs: what this peer has
+        # already spent on a vendor alias today is read from the ledger and
+        # weighed against its ceiling. Nothing is written — a refused call is
+        # not a call — and the guest learns only that its own ceiling is spent.
+        quota_refusal = self._vendor_quota_refusal(peer_id, serving_alias)
+        if quota_refusal:
+            error_text, code = quota_refusal
+            logger.warning("Peer inference refused for %s: %s", peer_id, error_text)
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=error_text, code=code or None,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # Before the call and before any row: a word this alias has no rung for
+        # is answered with the words it has, not served at whatever the model
+        # would have done with silence.
+        try:
+            served_effort = self._effort_for_peer(peer_id, reasoning_effort, serving_alias)
+        except EffortRefused as refusal:
+            logger.warning("Peer inference refused for %s: %s", peer_id, refusal)
+            # The guest's own request is what is wrong — a word, not this node's
+            # door — so the code says so and its gateway answers 400 rather than
+            # blaming the host for a bad gateway.
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=str(refusal), code=REFUSAL_INVALID_VALUE,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # Tools the serving alias has no path for: the guest's own request, and
+        # the gate that means `tools_unsupported`. The flat `images` field
+        # reaches `query`, whose vision entry point holds no tools, so beside
+        # tools it is refused here rather than answered without them; images
+        # beside tools travel in the turns. For the turns the predicate is
+        # `entry_point_for`'s own, asked with the images they hold — the one
+        # `query_messages` asks before the call and the menu row states.
+        from .llm_manager import entry_point_for
+
+        refused = None
+        if tools and images:
+            refused = (
+                f"The request carries {len(images)} image(s) on the images field and "
+                f"{len(tools)} tool(s): that field reaches this node's vision entry point, which "
+                "takes no tools. Images beside tools must travel in the turns, as image blocks "
+                "in messages, to an alias whose menu row says serves_images_with_tools."
+            )
+        elif tools and messages and entry_point_for(
+            self._provider_for_alias(serving_alias), tools=True, streaming=stream,
+            images=images_in_turns > 0,
+        )[1] is None:
+            if images_in_turns:
+                refused = (
+                    f"This node's serving alias '{serving_alias}' cannot take the "
+                    f"{images_in_turns} image(s) in these turns beside {len(tools)} tool(s): it "
+                    "has no native tool-calling path, or it cannot see. Send the request without "
+                    "one of them, or to an alias whose menu row says serves_images_with_tools."
+                )
+            else:
+                refused = (
+                    f"This node's serving alias '{serving_alias}' has no native tool-calling path, "
+                    f"and {len(tools)} tool(s) were asked for. Send the request without tools, or to "
+                    "a node whose serving alias implements generate_with_tools."
+                )
+        if refused:
+            logger.warning("Peer inference refused for %s: %s", peer_id, refused)
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=refused, code=REFUSAL_TOOLS_UNSUPPORTED,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # An id reused while its first call is still running would cross two
+        # chunk streams and collapse two rows onto one, so it is refused before
+        # the queue and before any row
+        # (THE-GUEST-CHOOSES-THE-REQUEST-ID-THAT-JOINS-ITS-ROW-TO-THE-HOSTS-AND-
+        # THE-HOST-NEVER-CHECKS-IT). Released in the `finally` below, so the same
+        # id serves again once this call has answered.
+        in_flight = self._in_flight_requests.setdefault(peer_id, set())
+        if request_id in in_flight:
+            refused = (
+                f"request_id {request_id!r} is already in flight from this peer: the id keys the "
+                "usage row of the call and routes its chunks, and two calls under one id would "
+                "cross them. Send a new request_id, or wait for the first answer."
+            )
+            logger.warning("Peer inference refused for %s: %s", peer_id, refused)
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=refused, code=REFUSAL_INVALID_VALUE,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+        if request_id:
+            in_flight.add(request_id)
+
         try:
             logger.info("Running inference for %s (requested model: %s, requested provider: %s, serving alias: %s)",
                         peer_id, model or 'default', provider or 'default', serving_alias)
 
+            # Only a word the guest chose travels to the provider: this node's
+            # own configured effort is already inside the alias.
+            query_kwargs = (
+                {"reasoning_effort": served_effort}
+                if served_effort and (reasoning_effort or "").strip() else {}
+            )
+
+            seq = 0
+
+            async def send_chunk(text: str, _conversation_id: Any = None) -> None:
+                nonlocal seq
+                if not text:
+                    return
+                await self.p2p_manager.send_message_to_peer(
+                    peer_id, create_remote_inference_chunk(request_id, seq, text)
+                )
+                seq += 1
+
             async with self._peer_inference_lock:
-                result = await self.service.llm_manager.query(prompt, provider_alias=serving_alias, images=images, return_metadata=True)
+                # Clocked inside the lock: the wait is not part of the call, and
+                # the price depends on the hour the call is made (ADR-041 D3).
+                started_at = datetime.now(timezone.utc)
+                clock = time.monotonic()
+                # The turns, image blocks and all, take `query_messages`; only
+                # the flat `images` field keeps `query`, and beside tools that
+                # field was refused above, so no tool is dropped on this branch.
+                if messages and not images:
+                    result = await self.service.llm_manager.query_messages(
+                        messages, system=system or "", tools=tools or None,
+                        on_chunk=send_chunk if stream else None,
+                        provider_alias=serving_alias, return_metadata=True,
+                        **query_kwargs,
+                    )
+                else:
+                    result = await self.service.llm_manager.query(
+                        prompt, provider_alias=serving_alias, images=images,
+                        return_metadata=True, **query_kwargs,
+                    )
+            duration_s = time.monotonic() - clock
             logger.info("Inference completed successfully for %s", peer_id)
 
             actual_model = result.get("model", model)
-            # A peer's request belongs to no agent, so it writes no row in any
-            # events.jsonl and appears in no cost series. This line is the record.
-            # The counts are named `_est` because they are ours: llm_manager fills
-            # them with its own count_tokens over the prompt and the answer, not
-            # with what the engine reported. On an Ollama alias the daemon's own
-            # figures for the same call are on the neighbouring "Ollama usage:"
-            # line; whoever compares the two will find them close and different,
-            # and should not have to discover that from the numbers.
+            # What the door decided to serve is a claim about the alias; what
+            # the provider reports is the rung its entry point ran. The guest
+            # and both rows get the second where there is one.
+            ran_effort = result.get("provider_served_effort") or served_effort
+            billing, tariff, tariff_amount = self._record_peer_call(
+                peer_id=peer_id, request_id=request_id, serving_alias=serving_alias,
+                result=result, model=actual_model, started_at=started_at,
+                duration_s=duration_s, served_effort=ran_effort,
+            )
+            # The usage row above is the record of this call (ADR-041 D3): a
+            # peer's request belongs to no agent, so no events.jsonl carries it,
+            # and on a paid alias the vendor's own usage line lands in the
+            # owner's burn series wearing nobody's name. This line is a log line.
+            # `counts` says whose numbers these are, because the two differ by
+            # more than rounding: an engine counts the template and the image,
+            # our own recount sees the visible text alone.
             logger.info(
-                "Peer inference served: peer=%s alias=%s model=%s prompt_tokens_est=%s response_tokens_est=%s",
-                peer_id, serving_alias, actual_model,
+                "Peer inference served: peer=%s alias=%s model=%s effort=%s "
+                "images=%d tools=%d prompt_tokens=%s response_tokens=%s counts=%s",
+                peer_id, serving_alias, actual_model, ran_effort or "unnamed",
+                image_count, tool_count,
                 result.get("prompt_tokens"), result.get("response_tokens"),
+                result.get("counts_source", "ours"),
             )
             success_response = create_remote_inference_response(
                 request_id=request_id,
@@ -240,18 +867,47 @@ class P2PCoordinator:
                 model=actual_model,
                 provider=result.get("provider"),
                 thinking=result.get("thinking"),
-                thinking_tokens=result.get("thinking_tokens")
+                thinking_tokens=result.get("thinking_tokens"),
+                tariff_in=tariff.in_per_1m if tariff else None,
+                tariff_out=tariff.out_per_1m if tariff else None,
+                tariff_currency=tariff.currency if tariff else None,
+                tariff_at=tariff.at.isoformat() if tariff else None,
+                tariff_amount=tariff_amount,
+                billing=billing,
+                output_includes_thinking=result.get("output_includes_thinking"),
+                # Where that count came from, so the guest can tell an engine's
+                # split from an estimate made over the reasoning text.
+                thinking_source=result.get("thinking_source"),
+                # The rung this call ran on, asked for or not: the guest's only
+                # way to check the depth it paid for against the depth it asked for.
+                served_effort=ran_effort,
+                # The calls the model made, already `tool_use` blocks, and the
+                # word its provider stopped on. Both empty on the prompt path,
+                # where no entry point reports either.
+                tool_calls=result.get("tool_calls"),
+                finish_reason=result.get("finish_reason"),
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)
 
         except Exception as e:
             logger.error("Inference failed for %s: %s", peer_id, e, exc_info=True)
-            error_response = create_remote_inference_response(request_id=request_id, error=str(e))
+            # No code: whatever failed in here failed on this node's side, and the
+            # guest's gateway reads an absent word as 502. The two words that blame
+            # the guest are set at the gates that mean them, because an exception's
+            # type says nothing about whose fault it was - a provider's own
+            # validation raises `ValueError` too.
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=str(e),
+            )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
             except Exception as send_err:
                 logger.error("Error sending inference error response to %s: %s", peer_id, send_err, exc_info=True)
+        finally:
+            in_flight.discard(request_id)
+            if not in_flight:
+                self._in_flight_requests.pop(peer_id, None)
 
     async def handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
         """Handle incoming remote transcription request from a peer."""
@@ -339,55 +995,14 @@ class P2PCoordinator:
 
         logger.debug("Handling GET_PROVIDERS request from %s", peer_id)
 
-        has_compute_access = self.service.firewall.can_request_inference(peer_id)
-        has_transcription_access = self.service.firewall.can_request_transcription(peer_id)
+        # The selection lives in `CoreService.menu_for_peer`, which the
+        # save-triggered notify path calls too: one builder, so a peer is told
+        # the same thing whether it asked or was notified.
+        filtered_providers, reason = self.service.menu_for_peer(peer_id)
 
-        if not has_compute_access and not has_transcription_access:
-            logger.warning("Access denied: %s cannot access compute or transcription resources", peer_id)
-            response = create_providers_response([])
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, response)
-            except Exception as e:
-                logger.error("Error sending providers response to %s: %s", peer_id, e, exc_info=True)
-            return
-
-        all_providers = [
-            self.service.build_p2p_provider_info(alias, provider)
-            for alias, provider in self.service.llm_manager.providers.items()
-        ]
-
-        filtered_providers = []
-        for provider_info in all_providers:
-            provider_type = provider_info["type"]
-            model = provider_info["model"]
-            if provider_type == "local_whisper":
-                if has_transcription_access and self.service.firewall.can_request_transcription(peer_id, model):
-                    filtered_providers.append(provider_info)
-            else:
-                # Offer only what we will actually serve (ADR-040 D4-0). Offering
-                # the rest both invites a request the gate now refuses and tells a
-                # peer which paid accounts this node holds.
-                if (has_compute_access
-                        and provider_info["alias"] == self.service.firewall.compute_serving_alias
-                        and self.service.firewall.can_request_inference(peer_id, model)):
-                    filtered_providers.append(provider_info)
-
-        logger.debug("Sending %d providers to %s (filtered from %d total)",
-                    len(filtered_providers), peer_id[:20], len(all_providers))
-
-        # Say the quiet part once. Compute sharing on, the peer allowed, and the
-        # answer still carries no inference provider — because `serving_alias`
-        # is what designates one and it is empty by default (D4-0: the host
-        # allocates, not the caller). Until this line the only trace was the
-        # DEBUG count above, so a person who had switched sharing on and added
-        # the peer to a group saw a peer offering nothing and no reason for it.
-        if has_compute_access and not self.service.firewall.compute_serving_alias:
-            logger.info(
-                "Compute sharing is enabled and %s is allowed, but no compute.serving_alias "
-                "is designated — no inference provider is offered. Set it in the firewall "
-                "rules (Compute Sharing) to name the one alias peers are served from.",
-                peer_id[:20],
-            )
+        logger.debug("Sending %d providers to %s", len(filtered_providers), peer_id[:20])
+        if not filtered_providers and reason:
+            logger.info("Answering %s with an empty menu: %s", peer_id[:20], reason)
 
         response = create_providers_response(filtered_providers)
         try:
@@ -469,8 +1084,28 @@ class P2PCoordinator:
     # Outgoing P2P requests (Phase C Step 5 Batch 3)
     # ─────────────────────────────────────────────────────────────
 
-    async def request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 1200.0) -> str:
-        """Request remote inference from a specific peer."""
+    async def request_inference_from_peer(
+        self, peer_id: str, prompt: str, model: str = None, provider: str = None,
+        images: list = None, reasoning_effort: str = None, timeout: float = 1200.0,
+        messages: list = None, system: Any = None, tools: list = None,
+        on_chunk: Optional[Any] = None, request_id: Optional[str] = None,
+    ) -> str:
+        """Request remote inference from a specific peer.
+
+        `prompt` is required whatever else travels, and a caller that has
+        `messages` must render it from those same turns: that is what lets an
+        older host answer this request at all (DPTP §3.4).
+
+        `on_chunk` is called with each REMOTE_INFERENCE_CHUNK's delta as the
+        host makes the answer; asking for it is what sets `stream` on the wire.
+        A host that ignores the field sends no chunk and the whole answer
+        arrives in the response as before, so a caller builds its text from the
+        response, never from what it was handed here.
+
+        `request_id` is minted here only when the caller supplies none: a door
+        that has already shown an id to its own client passes it in, and the
+        frame, the future, the chunk registry and both rows carry that one.
+        """
         import uuid
         from dpc_protocol.protocol import create_remote_inference_request
 
@@ -480,13 +1115,18 @@ class P2PCoordinator:
             raise ConnectionError(f"Peer {peer_id} is not connected")
 
         try:
-            request_id = str(uuid.uuid4())
+            request_id = request_id or str(uuid.uuid4())
             response_future = asyncio.Future()
             self.service._pending_inference_requests[request_id] = response_future
+            if on_chunk is not None:
+                self.service._pending_inference_chunks[request_id] = on_chunk
 
             request_message = create_remote_inference_request(
                 request_id=request_id, prompt=prompt,
-                model=model, provider=provider, images=images
+                model=model, provider=provider, images=images,
+                reasoning_effort=reasoning_effort,
+                messages=messages, system=system, tools=tools,
+                stream=on_chunk is not None,
             )
             await self.p2p_manager.send_message_to_peer(peer_id, request_message)
 
@@ -499,6 +1139,7 @@ class P2PCoordinator:
                 raise TimeoutError(f"Inference request to {peer_id} timed out after {timeout}s")
             finally:
                 self.service._pending_inference_requests.pop(request_id, None)
+                self.service._pending_inference_chunks.pop(request_id, None)
         except Exception as e:
             logger.error("Error requesting inference from %s: %s", peer_id, e, exc_info=True)
             raise

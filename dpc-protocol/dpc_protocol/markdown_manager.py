@@ -501,6 +501,11 @@ class MarkdownKnowledgeManager:
             lines.append(f"author: {frontmatter['author']}")
         if 'provenance' in frontmatter:
             lines.append(f"provenance: {frontmatter['provenance']}")
+        if 'verified_by_this_node' in frontmatter:
+            lines.append(
+                f"verified_by_this_node: "
+                f"{'true' if frontmatter['verified_by_this_node'] else 'false'}"
+            )
         if 'created_at' in frontmatter:
             lines.append(f"created_at: {frontmatter['created_at']}")
         if 'last_modified' in frontmatter:

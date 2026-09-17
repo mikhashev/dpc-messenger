@@ -3,6 +3,7 @@ adr: 036
 title: "Sign a message at its author, not at whoever stored it"
 status: accepted
 date: 2026-08-05
+axis: collective
 deciders: [Mike]
 consulted: [Ark, CC, Fable 5, GLM 5.2]
 informed: []

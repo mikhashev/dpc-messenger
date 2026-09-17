@@ -30,13 +30,35 @@ log = logging.getLogger(__name__)
 # Agent Storage
 # ---------------------------------------------------------------------------
 
+AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def get_agent_root(agent_id: str) -> pathlib.Path:
     """
     Get the agent's storage root directory: ~/.dpc/agents/{agent_id}/
 
     All agent files (memory, logs, state, knowledge) are stored here.
     This is sandboxed to prevent the agent from accessing other DPC files.
+
+    The identifier becomes a directory that this call creates, so anything
+    that is not a folder id is refused rather than made. An external agent's
+    tag reached here twice on 2026-09-03 (`ext:CC`): Windows raised deep in
+    `os.mkdir`, and Linux would have silently grown `~/.dpc/agents/ext:CC/`.
+
+    A dot is not in the set at all, which is what makes `.`, `..` and `...`
+    ordinary refusals rather than special cases. Win32 strips a trailing dot
+    from the component: measured here, `...` resolves to the agents directory
+    itself — the whole sandbox as one agent's root — and `a...` resolves to
+    `a`, so four ids share one folder. Linux keeps them apart, which is the
+    same defect wearing the other operating system. No agent directory on this
+    machine carries a dot, so nothing is lost by excluding it.
     """
+    if not agent_id or not AGENT_ID_RE.match(agent_id):
+        raise ValueError(
+            f"«{agent_id}» is not an agent id. This creates a directory under "
+            "~/.dpc/agents, so it takes letters, digits, underscore and hyphen — "
+            "an external agent's tag or a display name does not belong here."
+        )
     agent_root = pathlib.Path.home() / ".dpc" / "agents" / agent_id
     agent_root.mkdir(parents=True, exist_ok=True)
     return agent_root
@@ -394,6 +416,27 @@ class AgentRegistry:
             # Agent-initiated messages
             "agent_message",
         ]
+
+    def set_agent_telegram_enabled(
+        self, agent_id: str, enabled: bool
+    ) -> Optional[Dict[str, Any]]:
+        """Pause or resume a link, leaving its configuration in place.
+
+        Unlinking is the destructive verb; this writes only the flag the bridge
+        is gated on. Raises ValueError on enabling what was never configured.
+        """
+        agent = self.get_agent(agent_id)
+        if not agent:
+            return None
+
+        if enabled and not (
+            agent.get("telegram_bot_token") and agent.get("telegram_allowed_chat_ids")
+        ):
+            raise ValueError(
+                "Agent has no Telegram configuration to enable; link it first"
+            )
+
+        return self.update_agent(agent_id, {"telegram_enabled": bool(enabled)})
 
     def unlink_agent_from_telegram(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -955,11 +998,25 @@ def truncate_for_log(s: str, max_chars: int = 4000) -> str:
 
 
 def clip_text(text: str, max_chars: int) -> str:
-    """Clip text to max_chars, keeping start and end with truncation marker."""
+    """Clip text to max_chars, keeping start and end; the marker names the loss.
+
+    The dropped count is derived from what is kept, not from ``max_chars``: the
+    ``max(200, ...)`` floor lets the two halves be wider than ``max_chars`` and,
+    for a short text, overlap and cover it whole — then nothing is dropped and
+    the text is returned unchanged.
+    """
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     half = max(200, max_chars // 2)
-    return text[:half] + "\n...(truncated)...\n" + text[-half:]
+    dropped = len(text) - 2 * half
+    if dropped <= 0:
+        return text
+    marker = (
+        f"\n\n[!] MIDDLE OMITTED: {dropped} of {len(text)} characters are missing here. "
+        f"You are seeing the first {half} characters and the last {half}, "
+        f"not the whole text.\n\n"
+    )
+    return text[:half] + marker + text[-half:]
 
 
 def short(s: Any, n: int = 120) -> str:

@@ -1,0 +1,517 @@
+"""The gateway speaks the Anthropic Messages form over the same door.
+
+`POST /v1/messages` is a second HTTP shape over the same `Gateway` as
+`/v1/chat/completions` (ADR-041): one listener, one key, one Host check, the
+same two serving lists, the same vendor quota and the same ledger row. What
+differs is only the wire: the key may arrive as `x-api-key` as well as
+`Authorization: Bearer`, the body is the Messages request, the answer is a
+`message` object, the stream is the six Messages events, and an error is the
+Anthropic envelope `{"type": "error", "error": {"type", "message"}}`.
+
+The conversation reaches the provider layer un-flattened, through
+`LLMManager.query_messages`, and `flatten_messages` is what the same turns
+render as for a provider that takes only a prompt. Tools reach the door as
+sent, and the `stop_reason` is the one the provider reported; what the
+gateway renders when the door returns a call is the tool-call test file's.
+
+The stand-in service, the running listener and the key are the ones the
+OpenAI-shape test file builds; the listener is a real `aiohttp` `TCPSite` on
+port 0. Cross-platform: pure asyncio.
+"""
+
+import json
+import logging
+from datetime import datetime, timezone
+
+import aiohttp
+import pytest
+
+from dpc_client_core.gateway import GatewayConfigError
+from dpc_client_core.llm_manager import flatten_messages
+from dpc_client_core.node_ledger import NodeLedger
+from tests.test_the_gateway_serves_only_the_two_lists_on_loopback import (
+    ANSWER,
+    BOTH_LISTS,
+    LOCAL,
+    NODE_ID,
+    UNLISTED,
+    VENDOR,
+    _chat,
+    _key,
+    _request,
+    _running,
+    _service,
+    _spend,
+)
+
+SYSTEM = "be brief"
+OPENAI_PROMPT = f"[SYSTEM]\n{SYSTEM}\n\n[USER]\nhi"
+
+
+def _messages(model, text="hi", *, system=SYSTEM, **extra):
+    body = {"model": model, "max_tokens": 256, "messages": [{"role": "user", "content": text}]}
+    if system is not None:
+        body["system"] = system
+    body.update(extra)
+    return body
+
+
+async def _post_messages(server, body, *, key=None, header="x-api-key", headers=None, query=""):
+    """POST /v1/messages; the key goes in `x-api-key` unless `header="bearer"`."""
+    hdrs = dict(headers or {})
+    if key is not None:
+        if header == "bearer":
+            hdrs["Authorization"] = f"Bearer {key}"
+        else:
+            hdrs["x-api-key"] = key
+    url = f"http://127.0.0.1:{server.port}/v1/messages{query}"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=body, headers=hdrs) as resp:
+            return resp.status, await resp.text()
+
+
+def _anthropic_error(text):
+    body = json.loads(text)
+    assert body["type"] == "error", body
+    assert set(body["error"]) == {"type", "message"}, body
+    return body["error"]
+
+
+def _sse_events(text):
+    """[(event name, parsed data)] in wire order."""
+    events = []
+    for block in text.split("\n\n"):
+        lines = [line for line in block.split("\n") if line]
+        if not lines:
+            continue
+        assert lines[0].startswith("event: ") and lines[1].startswith("data: "), block
+        events.append((lines[0][len("event: "):], json.loads(lines[1][len("data: "):])))
+    return events
+
+
+# --- (1) a local completion, Messages-shaped, one row, the same prompt --------------
+
+
+@pytest.mark.asyncio
+async def test_a_messages_request_on_a_local_alias_is_messages_shaped_and_leaves_one_gateway_row(tmp_path):
+    service = _service(tmp_path, BOTH_LISTS)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path))
+        assert status == 200, text
+        body = json.loads(text)
+        assert (body["type"], body["role"], body["model"]) == ("message", "assistant", LOCAL)
+        assert body["content"] == [{"type": "text", "text": ANSWER}]
+        assert (body["stop_reason"], body["stop_sequence"]) == ("end_turn", None)
+        assert body["usage"] == {"input_tokens": 12, "output_tokens": 5}
+
+        rows = list(ledger.rows())
+        assert len(rows) == 1
+        row = rows[0]
+        assert (row["caller"], row["caller_kind"], row["route"]) == (NODE_ID, "gateway", "local")
+        assert (row["alias"], row["model"]) == (LOCAL, "qwen3:8b")
+        assert (row["prompt_tokens"], row["completion_tokens"]) == (12, 5)
+        assert body["id"] == "msg_" + row["request_id"]
+
+        # The turns reach the provider layer as turns, with the system beside them.
+        assert service.calls[0]["alias"] == LOCAL
+        assert service.calls[0]["messages"] == [{"role": "user", "content": "hi"}]
+        assert service.calls[0]["system"] == SYSTEM
+        assert "prompt" not in service.calls[0], "the Messages route flattened the conversation"
+
+        # The OpenAI route reaches the same door with the same turns, and both render to one prompt.
+        status, _ = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path), body=_chat(LOCAL))
+        assert status == 200
+        assert (service.calls[1]["messages"], service.calls[1]["system"]) == ([{"role": "user", "content": "hi"}], SYSTEM)
+        assert flatten_messages(service.calls[0]["messages"], service.calls[0]["system"]) == OPENAI_PROMPT
+        assert flatten_messages(service.calls[1]["messages"], service.calls[1]["system"]) == OPENAI_PROMPT
+
+
+# --- (2) two header forms, one key -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_x_api_key_and_bearer_both_open_the_door_and_a_wrong_key_is_401_in_the_anthropic_envelope(tmp_path):
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS)) as (server, _):
+        key = _key(tmp_path)
+        assert (await _post_messages(server, _messages(LOCAL), key=key))[0] == 200
+        assert (await _post_messages(server, _messages(LOCAL), key=key, header="bearer"))[0] == 200
+
+        for header in ("x-api-key", "bearer"):
+            status, text = await _post_messages(server, _messages(LOCAL), key="not-" + key, header=header)
+            assert status == 401, header
+            error = _anthropic_error(text)
+            assert error["type"] == "authentication_error"
+            assert ".gateway_key" in error["message"]
+        status, text = await _post_messages(server, _messages(LOCAL))
+        assert status == 401 and _anthropic_error(text)["type"] == "authentication_error"
+
+        # The OpenAI route still takes Bearer, and now x-api-key too; its errors keep its envelope.
+        assert (await _request(server, "GET", "/v1/models", key=key))[0] == 200
+        assert (await _request(server, "GET", "/v1/models", headers={"x-api-key": key}))[0] == 200
+        status, text = await _request(server, "GET", "/v1/models", key="not-" + key)
+        assert status == 401
+        body = json.loads(text)
+        assert "type" not in body and body["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_host_on_the_messages_route_is_400_in_the_anthropic_envelope(tmp_path):
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS)) as (server, _):
+        status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path),
+                                            headers={"Host": "gateway.example:9997"})
+        assert status == 400
+        error = _anthropic_error(text)
+        assert error["type"] == "invalid_request_error" and "gateway.example:9997" in error["message"]
+
+
+# --- (3) stream: true, the six events in order ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_true_yields_the_six_message_events_with_the_whole_text_in_one_delta(tmp_path):
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS)) as (server, ledger):
+        url = f"http://127.0.0.1:{server.port}/v1/messages"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=_messages(LOCAL, stream=True),
+                                    headers={"x-api-key": _key(tmp_path)}) as resp:
+                assert resp.status == 200
+                assert resp.content_type == "text/event-stream"
+                text = await resp.text()
+        events = _sse_events(text)
+        assert [name for name, _ in events] == [
+            "message_start", "content_block_start", "content_block_delta",
+            "content_block_stop", "message_delta", "message_stop",
+        ]
+        assert all(data["type"] == name for name, data in events)
+        (row,) = ledger.rows()
+
+        start = events[0][1]["message"]
+        assert start["id"] == "msg_" + row["request_id"]
+        assert (start["type"], start["role"], start["model"]) == ("message", "assistant", LOCAL)
+        assert (start["content"], start["stop_reason"], start["stop_sequence"]) == ([], None, None)
+        assert start["usage"] == {"input_tokens": 12, "output_tokens": 0}
+        assert events[1][1] == {"type": "content_block_start", "index": 0,
+                                "content_block": {"type": "text", "text": ""}}
+        assert events[2][1] == {"type": "content_block_delta", "index": 0,
+                                "delta": {"type": "text_delta", "text": ANSWER}}
+        assert events[3][1] == {"type": "content_block_stop", "index": 0}
+        # Cumulative on the wire: the input count travels here as well as in the head.
+        assert events[4][1] == {"type": "message_delta",
+                                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                                "usage": {"input_tokens": 12, "output_tokens": row["completion_tokens"]}}
+        assert events[5][1] == {"type": "message_stop"}
+
+
+# --- (4) refusals in the Anthropic envelope, reaching neither provider nor ledger -----
+
+
+@pytest.mark.asyncio
+async def test_an_alias_outside_both_lists_is_404_not_found_error(tmp_path):
+    service = _service(tmp_path, BOTH_LISTS)
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _post_messages(server, _messages(UNLISTED), key=_key(tmp_path))
+        assert status == 404
+        error = _anthropic_error(text)
+        assert error["type"] == "not_found_error" and UNLISTED in error["message"]
+        assert service.calls == [] and list(ledger.rows()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_vendor_alias_over_its_quota_is_429_rate_limit_error(tmp_path):
+    quota = 0.01
+    service = _service(tmp_path, {"serving_vendor": [VENDOR], "vendor_quotas": {VENDOR: quota}})
+    ledger = NodeLedger(tmp_path / "ledger")
+    _spend(ledger, cost=quota, started_at=datetime.now(timezone.utc), request_id="the-whole-day")
+    async with _running(tmp_path, service, ledger=ledger) as (server, _):
+        status, text = await _post_messages(server, _messages(VENDOR), key=_key(tmp_path))
+        assert status == 429
+        error = _anthropic_error(text)
+        assert error["type"] == "rate_limit_error"
+        assert VENDOR in error["message"] and "0.01" in error["message"]
+        assert service.calls == []
+        assert [r["request_id"] for r in ledger.rows()] == ["the-whole-day"]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_failure_is_502_api_error(tmp_path):
+    service = _service(tmp_path, BOTH_LISTS, fail=RuntimeError("Ollama is not running"))
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path))
+        assert status == 502
+        error = _anthropic_error(text)
+        assert error["type"] == "api_error" and "Ollama is not running" in error["message"]
+        assert list(ledger.rows()) == []
+
+    # An alias listed but not loaded no longer reaches a request at all: it has
+    # no class, and the class is what says whether money bounds it, so the
+    # lists are refused before the port opens (Ark, 2026-09-14). The same
+    # answer in the OpenAI shape is in the sibling file.
+    listed_but_unloaded = _service(tmp_path, {"serving_local": ["gone"]}, providers={})
+    with pytest.raises(GatewayConfigError) as refused:
+        async with _running(tmp_path, listed_but_unloaded):
+            pass
+    assert "gone" in str(refused.value) and "not loaded" in str(refused.value)
+
+
+# --- (5) tools reach the door as sent; a turn the door answers with text is end_turn ---
+
+
+@pytest.mark.asyncio
+async def test_tools_and_a_tool_result_in_the_history_reach_the_door_as_sent_and_a_text_answer_is_end_turn(tmp_path):
+    service = _service(tmp_path, BOTH_LISTS)
+    body = {
+        "model": LOCAL, "max_tokens": 256, "system": SYSTEM,
+        "tools": [{"name": "read_file", "description": "read", "input_schema": {"type": "object", "properties": {}}}],
+        "tool_choice": {"type": "auto"},
+        "messages": [
+            # No image block here: an image beside tools is its own test file's
+            # subject (test_a_screenshot_crosses_the_gateway_beside_the_tools_in_its_own_turn.py).
+            {"role": "user", "content": [{"type": "text", "text": "read a.txt"}]},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "reading"},
+                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "a.txt"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "the file says hi"}]},
+            ]},
+        ],
+    }
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _post_messages(server, body, key=_key(tmp_path))
+        assert status == 200, text
+        answer = json.loads(text)
+        assert answer["content"] == [{"type": "text", "text": ANSWER}]
+        assert answer["stop_reason"] == "end_turn"
+        assert len(list(ledger.rows())) == 1
+
+        # Every block reaches the door as it was sent, and the tools beside them.
+        (call,) = service.calls
+        assert call["messages"] == body["messages"]
+        assert call["messages"][1]["content"][1]["type"] == "tool_use"
+        assert call["kwargs"]["tools"] == body["tools"], "the tools did not reach the door as sent"
+
+        # And what a provider taking only a prompt would be given still holds them.
+        prompt = flatten_messages(call["messages"], call["system"])
+        assert prompt.startswith(f"[SYSTEM]\n{SYSTEM}\n\n[USER]\nread a.txt\n\n[ASSISTANT]\nreading\n")
+        assert "read_file" in prompt
+        assert "[TOOL RESULT:" in prompt and "the file says hi" in prompt
+
+
+# --- (6) malformed bodies are 400 invalid_request_error --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_body_without_model_or_messages_or_text_is_400_invalid_request_error(tmp_path):
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS)) as (server, ledger):
+        key = _key(tmp_path)
+        bodies = (
+            {"max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
+            {"model": LOCAL, "max_tokens": 1},
+            {"model": LOCAL, "max_tokens": 1, "messages": []},
+            {"model": LOCAL, "max_tokens": 1, "messages": "hi"},
+            {"model": LOCAL, "max_tokens": 1, "messages": ["hi"]},
+            # A `role: "system"` message is folded into `system` now, not
+            # refused — section (9); what stays a 400 is its content's shape.
+            {"model": LOCAL, "max_tokens": 1, "messages": [{"role": "system", "content": 5}]},
+            {"model": LOCAL, "max_tokens": 1, "messages": [{"role": "user", "content": ""}]},
+            {"model": LOCAL, "max_tokens": 1, "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "data": "AA=="}}]}]},
+            {"model": LOCAL, "max_tokens": 1, "system": {"text": "x"}, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        for body in bodies:
+            status, text = await _post_messages(server, body, key=key)
+            assert status == 400, (body, text)
+            assert _anthropic_error(text)["type"] == "invalid_request_error", body
+        assert list(ledger.rows()) == []
+
+        url = f"http://127.0.0.1:{server.port}/v1/messages"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=b"not json", headers={"x-api-key": key}) as resp:
+                assert resp.status == 400
+                assert _anthropic_error(await resp.text())["type"] == "invalid_request_error"
+
+
+# --- (7) system travels as it was sent, and renders alike either way --------------------
+
+
+@pytest.mark.asyncio
+async def test_a_block_list_system_and_a_string_system_reach_the_door_as_they_were_sent(tmp_path):
+    service = _service(tmp_path, BOTH_LISTS)
+    async with _running(tmp_path, service) as (server, _):
+        key = _key(tmp_path)
+        blocks = [{"type": "text", "text": "be ", "cache_control": {"type": "ephemeral"}},
+                  {"type": "text", "text": "brief"}]
+        assert (await _post_messages(server, _messages(LOCAL, system=SYSTEM), key=key))[0] == 200
+        assert (await _post_messages(server, _messages(LOCAL, system=blocks), key=key))[0] == 200
+        assert (await _post_messages(server, _messages(LOCAL, system=None), key=key))[0] == 200
+        systems = [c["system"] for c in service.calls]
+        assert systems == [SYSTEM, blocks, None], "the gateway rewrote the system prompt on the way"
+        rendered = [flatten_messages(c["messages"], c["system"]) for c in service.calls]
+        assert rendered[0] == rendered[1] == OPENAI_PROMPT
+        assert rendered[2] == "[USER]\nhi"
+
+
+# --- (8) the stop reason the provider reported, not a constant --------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_stop_reason_is_the_providers_own_and_end_turn_only_when_none_was_reported(tmp_path):
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS, finish_reason="length")) as (server, _):
+        status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path))
+        assert status == 200, text
+        assert json.loads(text)["stop_reason"] == "max_tokens"
+
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS, finish_reason="content_filter")) as (server, _):
+        status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path))
+        assert json.loads(text)["stop_reason"] == "content_filter", "an unmapped word was folded away"
+
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS)) as (server, _):
+        status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path))
+        assert json.loads(text)["stop_reason"] == "end_turn"
+
+
+# --- (9) a `role: "system"` message is folded into `system`, not refused --------------
+
+# What the VS Code extension's own binary sends as `messages[1]`, shortened:
+# the environment block the CLI on PATH puts nowhere at all.
+ENV = "Here is useful information about the environment you are running in:\n<env>cwd: /tmp</env>"
+
+
+@pytest.mark.asyncio
+async def test_the_extension_shape_is_served_and_its_system_message_reaches_system_in_order(tmp_path):
+    """Both clients through one door: a top-level `system`, a user turn, and a
+    `role: "system"` message beside it, which is the shape that used to be a
+    400. It is folded into `system`, after what already stood there, and the
+    turns reach the provider without it."""
+    service = _service(tmp_path, BOTH_LISTS)
+    body = {"model": LOCAL, "max_tokens": 256, "system": SYSTEM,
+            "messages": [{"role": "user", "content": "hi"},
+                         {"role": "system", "content": ENV}],
+            # The rest of the extension's body, as measured, so the shape is
+            # answered whole and not only in the part this fold touches.
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "context_management": {"edits": []},
+            "metadata": {"user_id": "someone"}}
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _post_messages(server, body, key=_key(tmp_path), query="?beta=true")
+        assert status == 200, text
+        (call,) = service.calls
+        assert call["system"] == f"{SYSTEM}\n\n{ENV}", "the lifted block is missing, reordered or rewritten"
+        assert call["messages"] == [{"role": "user", "content": "hi"}], "the system turn stayed among the turns"
+        assert flatten_messages(call["messages"], call["system"]) == f"[SYSTEM]\n{SYSTEM}\n\n{ENV}\n\n[USER]\nhi"
+        assert len(list(ledger.rows())) == 1
+
+        # The CLI's shape — no system message at all — is unchanged by the fold.
+        assert (await _post_messages(server, _messages(LOCAL), key=_key(tmp_path)))[0] == 200
+        assert service.calls[1]["system"] == SYSTEM
+
+
+@pytest.mark.asyncio
+async def test_blocks_on_either_side_fold_to_a_block_list_with_every_field_kept(tmp_path):
+    """A block carries fields a string cannot, `cache_control` among them, so
+    the fold is a block list the moment either side sends blocks."""
+    service = _service(tmp_path, BOTH_LISTS)
+    system_blocks = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
+    env_blocks = [{"type": "text", "text": ENV, "cache_control": {"type": "ephemeral"}}]
+    turn = {"role": "user", "content": "hi"}
+    async with _running(tmp_path, service) as (server, _):
+        key = _key(tmp_path)
+        for system, content, expected in (
+            (system_blocks, env_blocks, system_blocks + env_blocks),
+            (SYSTEM, env_blocks, [{"type": "text", "text": SYSTEM}] + env_blocks),
+            (system_blocks, ENV, system_blocks + [{"type": "text", "text": ENV}]),
+            (None, env_blocks, env_blocks),
+        ):
+            body = {"model": LOCAL, "max_tokens": 256, "system": system,
+                    "messages": [turn, {"role": "system", "content": content}]}
+            status, text = await _post_messages(server, body, key=key)
+            assert status == 200, text
+            assert service.calls[-1]["system"] == expected, (system, content)
+            assert service.calls[-1]["messages"] == [turn]
+
+
+@pytest.mark.asyncio
+async def test_two_system_messages_fold_in_the_order_they_were_sent(tmp_path):
+    service = _service(tmp_path, BOTH_LISTS)
+    messages = [{"role": "system", "content": "first"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "second"}]
+    async with _running(tmp_path, service) as (server, _):
+        key = _key(tmp_path)
+        status, text = await _post_messages(
+            server, {"model": LOCAL, "max_tokens": 256, "system": SYSTEM, "messages": messages}, key=key)
+        assert status == 200, text
+        assert service.calls[-1]["system"] == f"{SYSTEM}\n\nfirst\n\nsecond"
+
+        status, text = await _post_messages(
+            server, {"model": LOCAL, "max_tokens": 256, "messages": messages}, key=key)
+        assert status == 200, text
+        assert service.calls[-1]["system"] == "first\n\nsecond", "a request with no top-level system lost the order"
+        assert service.calls[-1]["messages"] == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_a_role_that_is_not_system_is_still_refused_in_the_same_words(tmp_path):
+    """Only `system` is lifted: every other role outside {user, assistant}
+    keeps the refusal it had, word for word."""
+    refusal = ("each message's 'role' must be 'user' or 'assistant'; "
+               "the system prompt goes in 'system'")
+    service = _service(tmp_path, BOTH_LISTS)
+    async with _running(tmp_path, service) as (server, ledger):
+        key = _key(tmp_path)
+        for role in ("tool", "developer", "System", "", None):
+            body = {"model": LOCAL, "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}, {"role": role, "content": "x"}]}
+            status, text = await _post_messages(server, body, key=key)
+            assert status == 400, (role, text)
+            assert _anthropic_error(text) == {"type": "invalid_request_error", "message": refusal}, role
+        assert service.calls == [] and list(ledger.rows()) == []
+
+
+@pytest.mark.asyncio
+async def test_the_fold_leaves_one_debug_line_naming_the_path_and_the_count_and_no_content(tmp_path, caplog):
+    """The fold is a shape correction on somebody else's request, so it is
+    visible from this machine: once per request, counted, and never quoted."""
+    service = _service(tmp_path, BOTH_LISTS)
+    body = {"model": LOCAL, "max_tokens": 256, "system": SYSTEM,
+            "messages": [{"role": "user", "content": "hi"},
+                         {"role": "system", "content": ENV},
+                         {"role": "system", "content": [{"type": "text", "text": "and this"}]}]}
+    async with _running(tmp_path, service) as (server, _):
+        with caplog.at_level(logging.DEBUG, logger="dpc_client_core.gateway"):
+            status, text = await _post_messages(server, body, key=_key(tmp_path))
+    assert status == 200, text
+    lines = [r.getMessage() for r in caplog.records if "folded" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "/v1/messages" in lines[0] and "2 'system' message(s)" in lines[0] and "2 block(s)" in lines[0]
+    assert ENV not in lines[0] and "and this" not in lines[0] and SYSTEM not in lines[0]
+
+    # And a request in the CLI's shape leaves no such line at all.
+    service = _service(tmp_path, BOTH_LISTS)
+    async with _running(tmp_path, service) as (server, _):
+        with caplog.at_level(logging.DEBUG, logger="dpc_client_core.gateway"):
+            before = len(caplog.records)
+            assert (await _post_messages(server, _messages(LOCAL), key=_key(tmp_path)))[0] == 200
+    assert not [r.getMessage() for r in caplog.records[before:] if "folded" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_an_image_in_a_lifted_system_turn_is_refused_rather_than_dropped(tmp_path):
+    """`system` has nowhere to put an image — the providers' converter reads
+    only its text — so the fold refuses it in the words the other door uses."""
+    service = _service(tmp_path, BOTH_LISTS)
+    body = {"model": LOCAL, "max_tokens": 1, "system": SYSTEM, "messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": [
+            {"type": "text", "text": ENV},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}},
+        ]},
+    ]}
+    async with _running(tmp_path, service) as (server, ledger):
+        status, text = await _post_messages(server, body, key=_key(tmp_path))
+    assert status == 400, text
+    error = _anthropic_error(text)
+    assert error["type"] == "invalid_request_error"
+    assert error["message"] == ("messages[1] is a system turn carrying an image; "
+                                "an image crosses the gateway in a user turn only")
+    assert service.calls == [] and list(ledger.rows()) == []

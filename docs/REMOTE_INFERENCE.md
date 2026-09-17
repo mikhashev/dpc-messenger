@@ -19,7 +19,7 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 
 **With Remote Inference:**
 1. Bob connects to Anna via P2P (Direct TLS or WebRTC)
-2. Bob enables compute sharing for Anna in his firewall config
+2. Bob enables inference sharing for Anna in his firewall config
 3. Bob asks a complex question about game mechanics
 4. Bob selects "Anna" as the compute host in the UI
 5. The query runs on Anna's powerful model
@@ -65,7 +65,7 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 
 ### Firewall Integration
 
-**Compute Sharing Permissions** (`~/.dpc/privacy_rules.json`):
+**Inference Sharing Permissions** (`~/.dpc/privacy_rules.json`):
 ```json
 {
   "compute": {
@@ -109,15 +109,15 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 
 ## Configuration
 
-### Enabling Compute Sharing
+### Enabling Inference Sharing
 
-Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
+Edit `~/.dpc/privacy_rules.json` to enable inference sharing:
 
 ```json
 {
   "_comment": "Firewall access control configuration",
   "compute": {
-    "_comment": "Compute sharing settings (Remote Inference)",
+    "_comment": "Inference sharing settings (Remote Inference)",
     "enabled": true,
     "allow_groups": ["friends", "colleagues"],
     "allow_nodes": ["dpc-node-alice-abc123"],
@@ -135,7 +135,7 @@ Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
 ### Security Considerations
 
 **Access Control:**
-- Compute sharing is **disabled by default**
+- Inference sharing is **disabled by default**
 - Must explicitly enable and specify allowed peers
 - Can restrict which models peers can use
 - All requests go through firewall permission checks
@@ -161,7 +161,7 @@ Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
 
 ### From the UI
 
-1. **Enable Compute Sharing** (Host Side):
+1. **Enable Inference Sharing** (Host Side):
    - Edit `~/.dpc/privacy_rules.json`
    - Add `"compute"` section with permissions
    - Restart the client
@@ -179,6 +179,36 @@ Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
    - Type your question
    - Press Enter or click "Send"
    - Query runs on selected peer's hardware
+
+### What a guest sees before it calls
+
+A peer's menu row (`PROVIDERS_RESPONSE`, [DPTP §3.5](../specs/dptp_v1.md)) carries the
+host's `tariff` and `settings` beside the capabilities, and the Text dropdown shows them
+for a `remote:` alias: one summary line — `<alias> · <price> · ctx <n> · effort <default>`
+— that opens into a panel. Both fields are read fail-closed, the way the wire writes them.
+
+**The price has three states, and the first two are not the same thing:**
+
+| On the row | The guest reads | Why |
+|---|---|---|
+| no `tariff` key | "no price declared (a gift)" | The host declared nothing. The word *free* is never used here — it would report a decision the host never made |
+| `free: true`, or rates of `0` | "free for you" | A declared zero is a price somebody chose, for this recipient (`free_nodes` / `free_groups`) |
+| rates > 0 | "₽20 / ₽60 per 1M tokens in / out, from 2026-09-01" | The rate the receipt will carry, formatted for the reader's locale from the ISO 4217 code — a code `Intl` refuses is printed as the bare code, never as a guessed symbol |
+
+A `unit` other than `per_1m_tokens` is shown as raw numbers and priced at nothing: §3.5
+says a receiver that does not know the word must not price the row, and this one does not
+guess a scale.
+
+**The settings block** is titled "Runs at the host's settings" and lists `temperature`,
+`top_p`, `top_k`, `max_output_tokens`, `variant`, then `context_window` and
+`reasoning_default`. A key the host did not state reads **"not stated by the host"** —
+never "default" or "none", because a vendor default the host never chose still applies at
+the vendor. The host's settings are what the guest gets; the one dial the guest owns is
+the header's Reasoning control, under the host's own cap.
+
+The reading itself is `dpc-client/ui/src/lib/components/peerMenu.ts` (`priceLine`,
+`settingsLines`, `menuSummary`), with no DOM in it, and the panel is in
+`ProviderSelector.svelte`.
 
 ### From Python API
 
@@ -259,18 +289,22 @@ result = await core_service.send_ai_query(
 - [ ] Multi-hop inference (chain multiple peers)
 - [ ] Inference result caching
 
-### ⚠️ Current Limitation: No Streaming Support
+### ⚠️ Current Limitation: the chat UI does not ask for the stream the wire can carry
 
-Remote inference uses a **request-response pattern** over DPTP and does not support streaming responses. This means:
+DPTP v1.7 carries a stream: a request that sets `stream: true` is answered with
+REMOTE_INFERENCE_CHUNK frames as the host makes the answer, terminated by the
+REMOTE_INFERENCE_RESPONSE that still holds the whole text and every count (spec §3.4).
+The gateway's peer route (`remote:<node>:<alias>`) uses it. **The chat UI path does
+not**: it calls `_request_inference_from_peer` with no chunk callback, so nothing is
+asked for and nothing is sent. That means, on that path:
 
 - The requestor waits for the full response before displaying it
 - Long-running queries (e.g., thinking models like GLM-4.7) may take several minutes
 - Users see a loading indicator instead of real-time token streaming
 
-**Why streaming is not yet implemented:**
-1. Protocol changes needed to support chunked responses over DPTP
-2. Remote peer would need to send intermediate chunks during generation
-3. Handler would need to accumulate and forward chunks in real-time
+**What is left to do:** hand `_request_inference_from_peer` an `on_chunk` from the UI
+door and forward each delta over the local WebSocket API as the chat already forwards a
+local model's chunks. Nothing in the protocol or the host is missing.
 
 **Workaround:** the default is now 1200 s on every door, which is the host's own budget plus
 overhead; a shorter one can still be set per alias via `timeout`. (The former advice — «up to
@@ -286,7 +320,7 @@ overhead; a shorter one can still be set per alias via `timeout`. (The former ad
 ```bash
 # Terminal 1: Start Host (powerful PC)
 cd dpc-client/core
-# Edit ~/.dpc/privacy_rules.json to enable compute sharing
+# Edit ~/.dpc/privacy_rules.json to enable inference sharing
 uv run python run_service.py
 
 # Terminal 2: Start Requestor (weak laptop)
@@ -301,7 +335,7 @@ uv run python run_service.py
 
 **Test 2: Access Denied**
 ```json
-// Host: Disable compute sharing in ~/.dpc/privacy_rules.json
+// Host: Disable inference sharing in ~/.dpc/privacy_rules.json
 {
   "compute": {
     "enabled": false
@@ -360,7 +394,7 @@ ollama serve  # Ensure service is running
 
 ## Security Best Practices
 
-1. **Only enable compute sharing for trusted peers**
+1. **Only enable inference sharing for trusted peers**
    - Remote inference exposes your GPU/CPU to peer's prompts
    - Use `allow_nodes` or tight `allow_groups` restrictions
 
@@ -378,13 +412,14 @@ ollama serve  # Ensure service is running
 
 ---
 
-## Contributing
+## Feedback
 
-The remote inference feature is open for community contributions:
+External pull requests are not being accepted yet — see the root
+[README](../README.md) §Community & Support, which is the one place that states
+the project's position. What is welcome:
 
 - **Feature requests:** [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues)
-- **Bug reports:** Include logs from both host and requestor
-- **Enhancements:** PRs welcome (see `CONTRIBUTING.md`)
+- **Bug reports:** [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues) — include logs from both host and requestor
 
 ---
 

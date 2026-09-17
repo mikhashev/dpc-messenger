@@ -31,6 +31,28 @@ The working tree is shared — a second developer and a second CC session write 
 mtime and do not assume a change there is mine. `backlog.md` is a dated synthesis, not the
 state of the code: an entry tells you what to check, never that it is still true.
 
+## Vocabulary — read the project's words before naming anything
+
+The project already has a vocabulary; the failure is not looking for it. Before naming a
+file, a function, a field, a backlog entry or a concept in a document:
+
+1. **Read the words that exist**, in this order: [docs/GLOSSARY.md](docs/GLOSSARY.md) (one
+   row per word, each pointing at the document that owns it); the document that owns the
+   area (`docs/BACKLOG_FORMAT.md` for the board, `protocol-13-public.md` for roles,
+   `docs/GROUP_CHAT.md` for groups, `specs/dptp_v1.md` for the wire); then the neighbours in
+   code — the handler, provider or tool beside the one being written.
+2. **Build the name from those words.** No field called `login` means no `find_by_login`.
+3. **Grep before you coin**: `rg --no-ignore -c "<word>"` over the repository and the
+   gitignored working layer. Zero hits means the word is invented; many hits means check
+   what it already means — `node` is a network node here and an XML or DOM node elsewhere,
+   `tier` is a connection tier (1–6) and a shell tier (0–2), `session` carries three
+   numbering families.
+4. **A word the vocabulary lacks is a question to the owner before the code**, not a note
+   after it. The owner of this vocabulary is Mike.
+
+Everything that lands in this repository is English; Russian is for the working chat and
+the gitignored layer only (`docs/BACKLOG_FORMAT.md` §6; the commit hook refuses Cyrillic).
+
 ## Project Overview
 
 **D-PC Messenger** is a privacy-first, peer-to-peer messaging platform enabling collaborative AI intelligence through secure sharing of personal contexts. The project implements a novel "transactional communication" paradigm with end-to-end encryption and no server-stored messages.
@@ -70,16 +92,32 @@ uv run pytest --cov=dpc_client_core  # Run with coverage
 > ⚠️ **`uv sync` is declarative, not additive.** It makes the environment match
 > exactly what the command asks for, so a bare `uv sync` **uninstalls** every
 > optional extra installed earlier — `browser` (camoufox, playwright),
-> `graph-ner` (gliner), `graph-grafeo` (grafeo). Re-syncing an environment that
-> uses extras must repeat the full list in one command:
+> `graph-ner` (gliner), `pdf` (pypdfium2), `mlx` (Apple Silicon only).
+> Re-syncing an environment that uses extras asks the package rather than a
+> memory:
 >
 > ```bash
-> uv sync --extra browser --extra graph-ner --extra graph-grafeo
+> uv sync --all-extras
 > ```
+>
+> This replaced a hand-written list of `--extra` flags on 2026-09-18. The list
+> had fallen behind `pyproject.toml` — it named three extras where six were
+> declared, so running it as written removed `pypdfium2` and took document
+> reading away in silence. `--all-extras` cannot fall behind, and it is safe on
+> every platform only because **each extra carries its own platform markers**:
+> add one without them and this command breaks on an untested OS.
 >
 > The same applies to `uv sync --extra X` on its own: it keeps `X` and drops the
 > others. Check with `uv sync --dry-run` before running it on a live environment
-> — it prints exactly what would be uninstalled.
+> — it prints exactly what would be uninstalled. An extra that is not declared
+> is not ignored: uv refuses with `Extra \`X\` is not defined`.
+>
+> **To add one extra without touching the rest, pass `--inexact`** — it leaves
+> alone anything the command did not name: `uv sync --extra pdf --inexact`.
+> Measured 2026-09-02 on this machine: the same line without it would have
+> uninstalled 17 packages. Repeat the full list only when the environment is
+> meant to become exactly what the line says, because `--inexact` also keeps
+> packages a dependency change was supposed to remove.
 
 **Platform-Specific Dependencies (macOS Apple Silicon):**
 
@@ -97,8 +135,9 @@ uv sync --extra mlx
 
 > These two are alternatives, not steps — and `--extra mlx` alone drops any
 > other extras (see the `uv sync` warning above). On a machine that also uses
-> `browser`/`graph-ner`/`graph-grafeo`, list them together:
-> `uv sync --extra mlx --extra browser --extra graph-ner --extra graph-grafeo`.
+> `browser`/`graph-ner`/`pdf`, take them all at once with `uv sync --all-extras`:
+> `mlx` carries `sys_platform == 'darwin' and platform_machine == 'arm64'`, so
+> the same command installs it on Apple Silicon and skips it everywhere else.
 
 **Technical Details:**
 - **Dependencies**: `mlx>=0.4.0`, `mlx-whisper>=0.2.0`
@@ -962,7 +1001,7 @@ The `special_instructions` block (added in schema v1.1) provides comprehensive g
 auto_collect_device_info = true   # Master toggle
 collect_hardware_specs = true     # CPU/RAM/disk/GPU details
 collect_dev_tools = true          # Git, Docker, Node, etc.
-collect_ai_models = false         # Ollama models (opt-in for compute-sharing)
+collect_ai_models = false         # Ollama models (opt-in for inference-sharing)
 ```
 
 **Example AI Assistance** (powered by special_instructions):
@@ -970,7 +1009,7 @@ collect_ai_models = false         # Ollama models (opt-in for compute-sharing)
 - **Driver-aware**: "CUDA 12.8 detected - use PyTorch 2.5+ for compatibility"
 - **Resource-aware**: "You have 24GB RAM - can run 2 models simultaneously"
 - **Platform-specific**: "Windows 10 detected - use WSL2 for better Linux compatibility"
-- **Compute-sharing**: "Alice has RTX 4090 (24GB) - offload training to her GPU"
+- **Inference-sharing**: "Alice has RTX 4090 (24GB) - offload training to her GPU"
 - **Privacy-aware**: "Sharing only OS version and dev tools, hardware specs require explicit allow rules"
 
 ### In-App Configuration Editors
@@ -1000,7 +1039,7 @@ The client provides in-app editors for key configuration files, eliminating the 
 - **Format**: JSON (stored as `~/.dpc/privacy_rules.json`)
 - **UI Style**: Form-based interface matching Personal Context editor (DRY principle)
 - **Features**:
-  - Tab-based navigation (Hub Sharing, Node Groups, Compute Sharing, Peer Permissions)
+  - Tab-based navigation (Hub Sharing, Node Groups, Inference Sharing, Peer Permissions)
   - Native HTML form elements (no Monaco editor)
   - Edit/Save/Cancel workflow with unsaved changes detection
   - Real-time validation on save
@@ -1008,7 +1047,7 @@ The client provides in-app editors for key configuration files, eliminating the 
 - **Tabs**:
   - **Hub Sharing**: Control what the Hub can see for discovery
   - **Node Groups**: Define groups of nodes with add/remove functionality
-  - **Compute Sharing**: Enable/configure remote inference with checkboxes and textareas
+  - **Inference Sharing**: Enable/configure remote inference with checkboxes and textareas
   - **Peer Permissions**: View per-node and per-group access rules (read-only for now)
 - **Validation**:
   - Checks JSON structure
@@ -1072,12 +1111,22 @@ message is public and permanent while a chat line is neither: on 2026-08-28 ten
 of the 432 commits on `dev` were found to carry somebody's words from the team
 room, the oldest three weeks old, and the messages had to be rewritten. Write
 the reason in English and attribute the decision — «Mike's call, 2026-08-28» —
-rather than transcribing the sentence; the verbatim line belongs in the backlog
-entry or the ADR. Deliberate exception: `git commit --no-verify`.
+rather than transcribing the sentence; the verbatim line stays in the working
+chat, and what lands in a tracked document is the decision with its attribution.
+Deliberate exception: `git commit --no-verify`.
 
 The check is `tools/git-hooks/commit_msg_check.py`; its tests run in the client
 suite (`tests/test_a_commit_message_carries_no_quoted_chat.py`), because
 `tools/` is imported by no package and would otherwise go untested.
+
+The file git calls is the shell wrapper `tools/git-hooks/commit-msg`. It has to carry
+the executable bit *in the index* (`git ls-files -s` shows `100755`) and LF endings
+(`.gitattributes` pins them): with either missing, git prints a one-line hint and
+runs nothing, which is how the rule held only on Windows from 2026-08-28 to 2026-09-05
+— the bit was `100644`, and Windows does not check it. The wrapper starts `python3`,
+then `python`, then `py -3`, trusting each only after it has run once, because the
+Microsoft Store leaves a `python3.exe` stub on PATH. The same test file checks the
+bit, the endings and one end-to-end run through `sh`.
 
 ### Starting Full Stack Locally
 
@@ -1230,6 +1279,14 @@ Access control file format (`~/.dpc/privacy_rules.json`):
     "allow_groups": [],
     "allowed_models": []
   },
+  "transcription": {
+    "enabled": false,
+    "allow_nodes": [],
+    "allow_groups": [],
+    "allowed_models": [],
+    "send_to_nodes": [],
+    "send_to_groups": []
+  },
   "file_transfer": {
     "allow_nodes": ["dpc-node-alice-123"],
     "allow_groups": ["friends"],
@@ -1243,6 +1300,15 @@ Access control file format (`~/.dpc/privacy_rules.json`):
   }
 }
 ```
+
+**Transcription has two directions and two permissions.** `enabled` / `allow_nodes` /
+`allow_groups` / `allowed_models` govern *serving*: whether a peer may use this node's
+Whisper. `send_to_nodes` / `send_to_groups` govern the opposite — whether this node's own
+audio may leave the machine when local transcription fails and no cloud provider is
+configured, which is when the fallback chain asks a peer (Mike's call, 2026-09-07). They
+are separate because sharing a model with a friend is not consent to hand them your
+microphone. Both send lists default to empty, meaning never; a peer chosen by hand as
+`remote:<node>:<alias>` bypasses them, because choosing it is the consent.
 
 **Adding a new agent tool — `default_enabled` is required (S148):**
 

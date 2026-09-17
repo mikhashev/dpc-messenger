@@ -39,6 +39,7 @@
     // child serves, the per-request thinking cap (ADR-040 route b2), and the
     // supervisor knobs the form exposes doors to
     gguf_path?: string;
+    reasoning_effort?: string;
     reasoning_budget_tokens?: number;
     mmproj?: string;         // vision projector; absent = text-only child
     n_ctx?: number;          // KV cells the child allocates (-c); unset = 262144
@@ -61,6 +62,7 @@
     checkpoint_min_step?: number; // unset = the build's 8192
     kv_unified?: boolean;       // unset = true; only meaningful above one slot
     cache_ram_mib?: number;     // host RAM prompt cache, not VRAM
+    vram_overhead_mib?: number; // what a loaded context costs beyond weights and KV
     slot_save_path?: string;    // where slot state is persisted
     jinja?: boolean;            // unset = true
     start_timeout_s?: number;   // unset = 300
@@ -349,6 +351,28 @@
     think: false, // Reasoning is opt-in on a new provider — see the form's help text
   };
 
+  let effortWords: Record<string, { words: string[]; default: string | null }> = {};
+
+  const FLEET_EFFORTS = ['low', 'medium', 'high', 'max'];
+
+  /** The words this alias may be given: the model's own when they were read
+   *  from it, the fleet scale otherwise. A stored value the model does not
+   *  know stays on the list so opening the form cannot silently clear it. */
+  function effortOptions(alias: string, current?: string) {
+    const known = effortWords[alias]?.words;
+    const base = known ?? FLEET_EFFORTS;
+    const words = current && current !== 'off' && !base.includes(current)
+      ? [...base, current]
+      : base;
+    return words.map((w) => ({
+      value: w,
+      label:
+        w.charAt(0).toUpperCase() + w.slice(1) +
+        (known && w === effortWords[alias]?.default ? ' — default for this model' : '') +
+        (known && !known.includes(w) ? ' — not in this model' : ''),
+    }));
+  }
+
   // Load config when modal opens
   $: if (open && !config) {
     loadConfig();
@@ -359,6 +383,9 @@
       const result = await sendCommand('get_providers_config', {});
       if (result.status === 'success') {
         config = result.config;
+        // What each model's own chat template accepts, read from the file.
+        // Absent for an alias whose template names no words.
+        effortWords = result.effort_words || {};
       } else {
         console.error('Failed to load providers config:', result.message);
       }
@@ -1378,6 +1405,52 @@
                       </div>
 
                       <div class="form-group">
+                        <label for="reasoning-effort-{i}">Reasoning effort (optional)</label>
+                        <select
+                          id="reasoning-effort-{i}"
+                          value={editedConfig.providers[i].reasoning_effort ?? ''}
+                          on:change={(e) => {
+                            if (!editedConfig) return;
+                            const v = (e.target as HTMLSelectElement).value;
+                            if (v) {
+                              editedConfig.providers[i].reasoning_effort = v;
+                            } else {
+                              delete editedConfig.providers[i].reasoning_effort;
+                            }
+                            editedConfig = editedConfig;
+                          }}
+                        >
+                          <option value="">Not set — the model decides</option>
+                          <option value="off">Off</option>
+                          {#each effortOptions(editedConfig.providers[i].alias, editedConfig.providers[i].reasoning_effort) as w}
+                            <option value={w.value}>{w.label}</option>
+                          {/each}
+                        </select>
+                        <p class="help-text">
+                          The level this alias asks for when neither the chat nor the agent
+                          named one — the last say before the model's own default. Leave it
+                          unset and nothing is sent, and the model applies its own default.
+                          {#if effortWords[editedConfig.providers[i].alias]}
+                            This model's chat template accepts
+                            <code>{effortWords[editedConfig.providers[i].alias].words.join(', ')}</code>
+                            {#if effortWords[editedConfig.providers[i].alias].default}
+                              and defaults to
+                              <code>{effortWords[editedConfig.providers[i].alias].default}</code>
+                            {/if}
+                            — read from the model file, and the list above offers exactly
+                            those. A level that arrives from somewhere else on the shared
+                            scale — a chat header, an agent's own setting — is folded onto
+                            the nearest rung this model has, or dropped with a warning when
+                            it has none.
+                          {:else}
+                            This model names no words of its own, so the list above is the
+                            shared scale and the provider folds it onto whatever its model
+                            can do.
+                          {/if}
+                        </p>
+                      </div>
+
+                      <div class="form-group">
                         <label for="reasoning-budget-{i}">Reasoning budget (tokens, optional)</label>
                         <input
                           id="reasoning-budget-{i}"
@@ -1418,14 +1491,15 @@
                           >
                             <!-- The eleven values `--spec-type` accepts on the pin, with the
                                  same honesty the KV menu above got. A name in the parser's
-                                 list is not a working implementation: draft-dflash is in this
-                                 list and cannot load on the pinned build at all. The list was
-                                 read off b10472's own --help on 2026-08-22; three values were
-                                 missing from this menu until then. -->
+                                 list is not a working implementation, and every label here says
+                                 how far each one has actually been taken on this machine. The
+                                 list was read off b10472's own --help on 2026-08-22; the value
+                                 list is character-identical on b10809, re-read 2026-09-09, so
+                                 the menu still matches the binary. -->
                             <option value="">default (draft-mtp)</option>
                             <option value="none">none — plain decoding</option>
                             <option value="draft-mtp">draft-mtp — head inside the GGUF, measured here</option>
-                            <option value="draft-dflash">draft-dflash — DOES NOT LOAD ON THE PINNED BUILD</option>
+                            <option value="draft-dflash">draft-dflash — this is DFlash2; loads on this pin, but kills image requests beside an mmproj</option>
                             <option value="draft-eagle3">draft-eagle3 — needs a drafter file (unverified here)</option>
                             <option value="draft-simple">draft-simple — needs a drafter file (unverified here)</option>
                             <option value="draft-dspark">draft-dspark — needs a drafter file (unverified here)</option>
@@ -1444,13 +1518,28 @@
                             flags below — and a drafter beside an mmproj kills every request
                             carrying an image on this build.
                             <br />
-                            <strong><code>draft-dflash</code> cannot start on the pinned
-                            binary.</strong> The DFlash2 drafter declares 81 tensors and the pin
-                            builds 58 of them — measured on b10472 and unchanged on b10566, because PR&nbsp;27342 is still unmerged — the 20 convolution and 3 selector tensors are
-                            what PR&nbsp;27342 adds — so the child dies with
-                            <code>expected 81, got 58</code> before serving anything. It loads
-                            only under a <code>binary_path</code> pointing at a build carrying
-                            that PR. Everything else here is accepted by the parser and
+                            <strong><code>draft-dflash</code> is DFlash2 — upstream never put
+                            the 2 in the value name — and it loads on this pin.</strong> On
+                            b10472 and b10566 the child died with
+                            <code>expected 81, got 58</code> before serving anything: the
+                            drafter declares 81 tensors and those builds made 58, the missing
+                            ones being what PR&nbsp;27342 adds. That PR merged upstream on
+                            2026-08-27. Measured here on 2026-09-10, CPU-only on a spare port so
+                            the live child was not disturbed: the target plus
+                            <code>--spec-draft-model</code> pointing at the DFlash2 GGUF reaches
+                            <code>model loaded</code> and <code>listening on</code>, and the
+                            tensor-count refusal is gone.
+                            <br />
+                            <strong>What has not changed is the reason not to switch this alias
+                            to it.</strong> A drafter beside an
+                            <code>mmproj</code> kills every request carrying an image on this
+                            build — measured on b10684, and nothing in the range to b10809
+                            touches it. So <code>draft-dflash</code> belongs on a text-only
+                            alias, it needs its own drafter file named through
+                            <code>--spec-draft-model</code> in Extra flags below, and its speed
+                            against <code>draft-mtp</code> is <strong>unmeasured</strong>: it
+                            has been loaded here, never benchmarked. Everything
+                            else here is accepted by the parser and
                             <strong>unverified on this build</strong>: the parser's list is not
                             evidence that the path works, which is the same trap the KV menu
                             above documents.
@@ -1589,6 +1678,33 @@
                             System RAM, <strong>not</strong> VRAM — it holds whole conversations
                             outside the card so a returning slot need not re-read its prompt.
                             Raising it costs nothing on the GPU.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="vram-overhead-{i}">VRAM overhead, MiB (vram_overhead_mib)</label>
+                          <input
+                            id="vram-overhead-{i}"
+                            type="number"
+                            min="0"
+                            value={editedConfig.providers[i].vram_overhead_mib ?? ''}
+                            on:input={(e) => setNum(i, 'vram_overhead_mib', (e.target as HTMLInputElement).value)}
+                            placeholder="empty — use the measured default"
+                          />
+                          <p class="help-text">
+                            What a loaded context costs on the card <strong>beyond</strong> the
+                            weights and the attention KV: compute buffers, a draft context if
+                            the model has an MTP head, the recurrent state of hybrid blocks,
+                            the CUDA context. The admission arithmetic adds it before deciding
+                            whether a KV rung fits, so a wrong figure either refuses a
+                            configuration that would have run or admits one that does not.
+                            Empty uses 4608 MiB, measured on qwen3.8-27B at 262 144 — every
+                            term in that sum belongs to that model, so a different one should
+                            carry its own. Measure it the same way: load, read the process's
+                            VRAM, subtract weights and KV. The start line prints which figure
+                            was used and whether it came from here. It is not a flag the child is
+                            started with, so a running server keeps the figure it began
+                            with until it next starts.
                           </p>
                         </div>
 

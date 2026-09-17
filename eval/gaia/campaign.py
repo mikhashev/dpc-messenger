@@ -51,8 +51,28 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-RESULTS = HERE / "results"
+sys.path.insert(0, str(HERE.parent))
+from _harness.results_root import results_root  # noqa: E402
+
+RESULTS = results_root("gaia")
 RUNNER = HERE / "run_gaia_eval.py"
+# The runner's own exit for «the agent read a planted answer key». Named here
+# rather than folded into the generic failure branch: the run did not fail, it
+# produced a number that must not be counted.
+CONTAMINATED_EXIT = 3
+
+
+def stops_the_queue(record: dict) -> bool:
+    """A run that died before it started tells the rest of the queue nothing.
+
+    Contamination is not that: the run worked, its number is simply not a
+    score, and the next configuration is no more doomed than before. Folding
+    exit 3 into «failed fast» said the opposite.
+    """
+    return (
+        record["exit_code"] not in (0, CONTAMINATED_EXIT)
+        and record["minutes"] < FAST_FAILURE_MINUTES
+    )
 CORE = HERE.parent.parent / "dpc-client" / "core"
 
 # Order matters: the reference number first, so that if the night is cut short
@@ -60,12 +80,14 @@ CORE = HERE.parent.parent / "dpc-client" / "core"
 QUEUE = [
     {"name": "t0-xhigh", "temperature": 0.0, "reasoning_effort": "xhigh",
      "why": "greedy reference — a second run of this returns the same number"},
-    {"name": "t1-xhigh-b", "temperature": 1.0, "reasoning_effort": "xhigh",
-     "why": "second sample at the production setting, for a spread"},
-    {"name": "t1-xhigh-c", "temperature": 1.0, "reasoning_effort": "xhigh",
-     "why": "third sample — three points is the least that says anything"},
-    {"name": "t0-high", "temperature": 0.0, "reasoning_effort": "high",
-     "why": "does less thinking cost accuracy, measured against the greedy reference"},
+    {"name": "t0-low", "temperature": 0.0, "reasoning_effort": "low",
+     "why": "the effort question, asked where the noise is smallest: this pair "
+            "differs in one word and both runs are greedy"},
+    {"name": "t1-xhigh", "temperature": 1.0, "reasoning_effort": "xhigh",
+     "why": "the production setting, one draw from a spread measured at 9.4 points"},
+    {"name": "t1-low", "temperature": 1.0, "reasoning_effort": "low",
+     "why": "the same question at the production temperature — a second reading, "
+            "weaker than the greedy pair and not a substitute for it"},
 ]
 
 # What one run actually occupies: the 16 GB model plus its KV cache. The gate
@@ -197,9 +219,39 @@ def run_one(cfg: dict, deadline: datetime, stamp: str) -> dict:
             record["tasks"] = report.get("tasks")
         except Exception as exc:
             record["read_error"] = str(exc)
-    print(f"  -> {record.get('correct')}/{record.get('tasks')} "
-          f"= {record.get('accuracy')} in {record['minutes']} min", flush=True)
+    if proc.returncode == CONTAMINATED_EXIT:
+        record["contaminated"] = True
+        print(f"  -> CONTAMINATED: the canary was read, so "
+              f"{record.get('correct')}/{record.get('tasks')} is not a score "
+              f"({record['minutes']} min) — {out_log}", flush=True)
+    elif proc.returncode == 0:
+        print(f"  -> {record.get('correct')}/{record.get('tasks')} "
+              f"= {record.get('accuracy')} in {record['minutes']} min", flush=True)
+    else:
+        print(f"  -> FAILED (exit {proc.returncode}) after {record['minutes']} min "
+              f"— {out_log}", flush=True)
+        for line in _log_tail(out_log):
+            print(f"     {line}", flush=True)
     return record
+
+
+def _log_tail(path: Path, lines: int = 3) -> list:
+    """The last non-empty lines of a run's log, for the operator's screen.
+
+    A failed run used to read `-> None/None = None in 0.1 min`, with the cause
+    in a file nobody opens until morning.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [ln.strip() for ln in text.splitlines() if ln.strip()][-lines:]
+
+
+# A run that dies in the first minutes died of its configuration — a token, a
+# missing model, a path — and every other run in the queue carries the same
+# configuration. Stopping is what keeps a typo from reading as a night's work.
+FAST_FAILURE_MINUTES = 3.0
 
 
 def main() -> int:
@@ -232,15 +284,27 @@ def main() -> int:
             print("not starting the rest of the queue: the card never came free",
                   flush=True)
             break
-        done.append(run_one(cfg, deadline, stamp))
+        record = run_one(cfg, deadline, stamp)
+        done.append(record)
         summary = RESULTS / f"{stamp}-campaign.json"
         summary.write_text(json.dumps({"runs": done}, indent=2), encoding="utf-8")
+        if stops_the_queue(record):
+            print(f"\nstopping the queue: {cfg['name']} failed in "
+                  f"{record['minutes']} min, so the rest would fail the same way. "
+                  f"Fix what the lines above name and start the campaign again.",
+                  flush=True)
+            break
 
     print("\n=== campaign ===", flush=True)
     for r in done:
+        if r["exit_code"] == CONTAMINATED_EXIT:
+            outcome = f"CONTAMINATED ({r.get('correct')}/{r.get('tasks')}, not a score)"
+        elif r["exit_code"] == 0:
+            outcome = f"{r.get('correct')}/{r.get('tasks')} = {r.get('accuracy')}"
+        else:
+            outcome = f"FAILED (exit {r['exit_code']})"
         print(f"  {r['name']:12} t={r['temperature']} effort={r['reasoning_effort']:6} "
-              f"{r.get('correct')}/{r.get('tasks')} = {r.get('accuracy')} "
-              f"({r['minutes']} min)", flush=True)
+              f"{outcome} ({r['minutes']} min)", flush=True)
     return 0
 
 

@@ -20,6 +20,7 @@ import logging
 import pathlib
 import time
 import queue
+import re
 import threading
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
@@ -77,6 +78,35 @@ def merge_optional_usage(accumulated: Dict[str, Any], usage: Dict[str, Any]) -> 
         accumulated[field] = accumulated.get(field, 0) + int(value)
 
 
+def accumulate_call_usage(
+    accumulated: Dict[str, Any],
+    usage: Dict[str, Any],
+    *,
+    counts_as_round: bool = True,
+) -> None:
+    """Add one model call's usage to the task's running total.
+
+    Every call a task makes goes through here, the rounds and the finalising
+    call after a guard stop alike: `chat()` writes a ledger row for each, and
+    ADR-041 D3 reads a task's totals as the sum of its rows.
+
+    `counts_as_round` is False for the finalising call — it spends tokens but
+    is not a round, and `rounds` is read against the round limit.
+    """
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    first_call = accumulated.get("rounds", 0) == 0
+    accumulated["prompt_tokens"] = accumulated.get("prompt_tokens", 0) + prompt_tokens
+    if first_call:
+        accumulated["first_prompt_tokens"] = prompt_tokens
+    accumulated["last_prompt_tokens"] = prompt_tokens  # replace — tracks peak context
+    accumulated["completion_tokens"] = accumulated.get("completion_tokens", 0) + usage.get("completion_tokens", 0)
+    accumulated["total_tokens"] = accumulated.get("total_tokens", 0) + usage.get("total_tokens", 0)
+    accumulated["cost"] = accumulated.get("cost", 0) + usage.get("cost", 0)
+    if counts_as_round:
+        accumulated["rounds"] = accumulated.get("rounds", 0) + 1
+    merge_optional_usage(accumulated, usage)
+
+
 def round_progress_payload(
     speed: Optional[Dict[str, Any]],
     *,
@@ -131,7 +161,13 @@ def round_progress_payload(
 # changes nothing, and why the bounded wait in run_service cannot reach it:
 # the bound fires during shutdown, _python_exit fires after it.
 #
-# Four workers, as before, so tools still run in parallel.
+# Four workers, as before. They serve tools from different loops at once; the
+# calls inside one round are not among them — `run_llm_loop` awaits each in turn
+# (see "Execute tool calls"), and has since the first commit. Saying "tools run
+# in parallel" here without that half is what this line used to do, and a reader
+# of the round believed it — including the thread that decided what to do about
+# it: `~/.dpc/conversations/agent_001/archive/2026/04/2026-04-08T10-00-39_reset_session.json`,
+# messages 59-70, where the answer was to watch rather than to add a control.
 _TOOL_WORKERS = 4
 # Kept under run_service's own 5 s bound, so this returns and lets the caller
 # log rather than racing it.
@@ -241,8 +277,13 @@ def shutdown_shared_executor() -> None:
         )
 
 
+TOOL_RESULT_CHAR_CAP = 15000
+"""How much of a tool result reaches the model. Read by the tools that offer a
+continuation, so their advice cannot promise what this cap will take away."""
+
+
 def _truncate_tool_result(result: Any) -> str:
-    """Hard-cap tool result string to 15000 characters with scope metadata.
+    """Hard-cap tool result string to TOOL_RESULT_CHAR_CAP characters with scope metadata.
 
     The truncation marker is intentionally prominent (S24 audit found that
     the previous mild "... (truncated: ...)" was being missed by the agent,
@@ -261,13 +302,13 @@ def _truncate_tool_result(result: Any) -> str:
     much of what arrived is shown.
     """
     result_str = str(result)
-    if len(result_str) <= 15000:
+    if len(result_str) <= TOOL_RESULT_CHAR_CAP:
         return result_str
     # Count lines for scope context
     total_lines = result_str.count("\n") + 1
-    shown_lines = result_str[:15000].count("\n") + 1
+    shown_lines = result_str[:TOOL_RESULT_CHAR_CAP].count("\n") + 1
     return (
-        result_str[:15000]
+        result_str[:TOOL_RESULT_CHAR_CAP]
         + f"\n\n[!] OUTPUT TRUNCATED — showing {shown_lines:,} of {total_lines:,} lines"
         f" ({len(result_str):,} chars) of what the tool returned."
         f"\n[!] This is a PARTIAL view, and the number above is NOT the size"
@@ -327,6 +368,55 @@ def _sanitize_tool_result(result: str) -> str:
         )
 
     return sanitized
+
+
+_TOOL_CALL_FENCE = re.compile(r"```+\s*tool_call\b.*?```+", re.DOTALL | re.IGNORECASE)
+_BARE_TOOL_CALL_JSON = re.compile(
+    r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\}', re.DOTALL
+)
+
+
+def _prose_outside_tool_calls(content: str) -> str:
+    """What the model said this round beside the calls it made.
+
+    A round whose whole message is the call has no reasoning to show, and
+    putting the call there labels a tool invocation as the agent's thinking.
+    The shapes stripped here are the ones `_parse_tool_calls` accepts, so the
+    two stay in step: fenced tool_call blocks first, then a bare
+    {"name": …, "arguments": …} object for the providers that emit no fence.
+    """
+    if not content:
+        return ""
+    stripped = _TOOL_CALL_FENCE.sub("", content)
+    stripped = _BARE_TOOL_CALL_JSON.sub("", stripped)
+    return stripped.strip()
+
+
+def _round_reasoning(
+    message_thinking: Optional[str],
+    provider_thinking: Optional[str],
+    content: Optional[str],
+    tool_calls: Optional[List[Dict[str, Any]]],
+) -> str:
+    """Everything the model produced this round for display, deduped.
+
+    `content` is in here because a model often writes a preamble before its
+    calls. On the remote path the whole message *is* the call — the peer's text
+    is returned as content and parsed into tool calls — and including it whole
+    put the tool_call JSON on screen labelled as the agent's thinking.
+
+    A function rather than four lines inside the loop so the rule can be tested:
+    as inline code the call-site could be reverted with every test still green,
+    which is how it was written the first time.
+    """
+    prose = _prose_outside_tool_calls(content) if tool_calls else content
+    return "\n\n".join(
+        dict.fromkeys(
+            s.strip()
+            for s in (message_thinking, provider_thinking, prose)
+            if s and s.strip()
+        )
+    )
 
 
 def _detect_reasoning_quality(thinking: str, tool_names: List[str]) -> Dict[str, Any]:
@@ -396,21 +486,106 @@ def _extract_thinking_prefix(content: str) -> str:
     return prefix
 
 
-_ROLE_BOUNDARY_PATTERNS = ["\n[USER]\n", "\n[ASSISTANT]\n", "\n[SYSTEM]\n", "[USER]"]
+# The scaffolding a model writes into a final answer because it has seen the runtime
+# write it. `[USER]` / `[ASSISTANT]` / `[SYSTEM]` came first; the last two were added
+# 2026-09-03 after Ark posted a ```tool_call fence and two [TOOL RESULT: call_00_...]
+# sections into a group chat, the second carrying an absolute path under the user's
+# home. The comment on `_extract_thinking_prefix` above had named [TOOL RESULT] as a
+# known hallucination since GLM-4.7; the list simply never grew to match it.
+#
+# The fence is the uncomfortable one: this project discusses its own tool format in
+# prose, so cutting there can eat a real sentence. It is cut anyway, because the
+# alternative is internal ids and home paths in a shared room — and the cut is named
+# in the log, so eating prose is visible rather than silent.
+_ROLE_BOUNDARY_PATTERNS = ["\n[USER]\n", "\n[ASSISTANT]\n", "\n[SYSTEM]\n", "[USER]",
+                          "[TOOL RESULT:", "```tool_call"]
+
+# `[#74 | 06:42:57 | Johnny]` — the marker `context.history_prefix` puts on every
+# history line, the reader's own past turns included, which is why a model emits it
+# as if it were its own: it has only ever seen its words wearing it.
+#
+# It has to be stripped rather than tolerated, because it compounds. The marker the
+# model writes is stored in the message, and next turn the runtime prepends its own
+# on top — so the stored count grows by exactly one per turn. Measured 2026-09-03 in
+# group-b88b65076b85: 2 markers, then 3, then 4, then 436 in one 13516-character
+# message that was nothing else and ended mid-token on the max_tokens cap.
+#
+# Three shapes in production, which is why one pattern was not enough: bare
+# `[#76 | 07:45 | Johnny]`, bold `**[#76 | 07:45 | Johnny]**`, and any number of
+# either, one per line. The old pattern matched a single bare marker that was the
+# whole message, so the run of 436 passed it as a real answer.
+_HISTORY_MARKER = r"\*{0,2}\[#\d+(?:\s*\|[^\]\n]*)?\]\*{0,2}"
+_LEADING_HISTORY_MARKERS = re.compile(rf"^(?:\s*{_HISTORY_MARKER})+\s*")
+# What a run of markers leaves behind when max_tokens cuts it: an opener with no
+# closing bracket, because generation stopped inside one. Five characters, and
+# without this the 13516-character message above would have been stored as `**[#7`
+# and counted as an answer.
+_DANGLING_MARKER = re.compile(r"^\*{0,2}\[#\d*[^\]\n]*$")
+
+
+def _without_history_markers(content: str) -> str:
+    """The front markers removed. Silent — `_strip_history_markers` is the one
+    that reports, and `_is_answerless` must be free to ask without narrating."""
+    return _LEADING_HISTORY_MARKERS.sub("", content or "", count=1)
+
+
+def _is_answerless(content: str) -> bool:
+    """True when there is nothing here a reader could use."""
+    rest = _without_history_markers(content).strip()
+    return not rest or bool(_DANGLING_MARKER.match(rest))
+
+
+def _empty_answer_diagnosis(content: str, thinking: str) -> str:
+    """Why a round ended with no answer, in the words a reader needs.
+
+    The length is in it because without it a 25-character label and a 13 516-
+    character runaway of the same marker log the same sentence — and on 2026-09-03
+    the difference between those two was ninety minutes of generation that nothing
+    in the client log distinguished from a quiet night.
+    """
+    if (content or "").strip():
+        return f"history prefix only, no answer behind {len(content)} characters"
+    if (thinking or "").strip():
+        return "thinking-budget (CoT present, no output text)"
+    return "transient (no CoT either)"
+
+
+def _strip_history_markers(content: str) -> str:
+    """Remove the runtime's own history marker from the front of an answer.
+
+    Only from the front: a marker quoted mid-sentence is the agent talking *about*
+    the format, which in this project happens more than it does in most.
+    """
+    stripped = _without_history_markers(content)
+    if stripped != content:
+        log.warning(
+            "_strip_history_markers: stripped %d chars of history marker the model "
+            "copied from its own replayed turns",
+            len(content) - len(stripped),
+        )
+    return stripped
 
 
 def _strip_role_boundaries(content: str) -> str:
-    """Strip hallucinated role markers and everything after them from a final response."""
+    """Strip runtime scaffolding, and everything after it, from a final response.
+
+    The log names which marker it cut on: with six patterns «a role marker» no longer
+    identifies anything, and the one that can cut a real sentence needs to be legible
+    when it does.
+    """
     lower = content.lower()
     earliest = len(content)
+    hit = ""
     for pat in _ROLE_BOUNDARY_PATTERNS:
         idx = lower.find(pat.lower())
         if idx != -1 and idx < earliest:
             earliest = idx
+            hit = pat.strip()
     if earliest < len(content):
         log.warning(
-            "_strip_role_boundaries: stripped %d chars starting at hallucinated role marker",
-            len(content) - earliest,
+            "_strip_role_boundaries: cut %d chars at %r — scaffolding the model copied "
+            "from the runtime, not an answer",
+            len(content) - earliest, hit,
         )
         return content[:earliest].strip()
     return content
@@ -647,6 +822,7 @@ async def _finalize_after_guard_stop(
     accumulated_usage: Dict[str, Any],
     llm_trace: Dict[str, Any],
     fallback_reason: str,
+    task_id: str = "",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Shared "guard fired → graceful termination" sequence.
 
@@ -662,12 +838,14 @@ async def _finalize_after_guard_stop(
         log.warning("Guard %s stopped loop: %s", mw.__class__.__name__, stop_msg)
         messages.append({"role": "system", "content": stop_msg})
     try:
-        final_msg, _ = await llm.chat(
+        final_msg, final_usage = await llm.chat(
             messages,
             tools=None,
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
+            task_id=task_id or None,
         )
+        accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
         if final_msg and final_msg.get("content"):
             return final_msg["content"], accumulated_usage, llm_trace
     except Exception:
@@ -818,6 +996,7 @@ async def run_llm_loop(
                     hooks, messages, llm, on_stream_chunk, conversation_id,
                     accumulated_usage, llm_trace,
                     fallback_reason=f"⚠️ Task exceeded MAX_ROUNDS ({max_rounds}).",
+                    task_id=task_id,
                 )
 
             # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
@@ -840,17 +1019,10 @@ async def run_llm_loop(
                     on_stream_chunk=on_stream_chunk,
                     conversation_id=conversation_id,
                     reasoning_effort=reasoning_effort,
+                    task_id=task_id or None,
                 )
-                round_prompt_tokens = usage.get("prompt_tokens", 0)
-                accumulated_usage["prompt_tokens"] += round_prompt_tokens
-                if accumulated_usage["rounds"] == 0:  # first round, before increment
-                    accumulated_usage["first_prompt_tokens"] = round_prompt_tokens
-                accumulated_usage["last_prompt_tokens"] = round_prompt_tokens  # replace — tracks peak context
-                accumulated_usage["completion_tokens"] += usage.get("completion_tokens", 0)
-                accumulated_usage["total_tokens"] += usage.get("total_tokens", 0)
-                accumulated_usage["cost"] += usage.get("cost", 0)
-                accumulated_usage["rounds"] += 1
-                merge_optional_usage(accumulated_usage, usage)
+                accumulate_call_usage(accumulated_usage, usage)
+                round_prompt_tokens = accumulated_usage["last_prompt_tokens"]
                 if reasoning_effort:
                     # Recorded, not summed: it is the word this task was run
                     # with, and it is what joins a cost to a decision.
@@ -923,12 +1095,28 @@ async def run_llm_loop(
                     hooks, messages, llm, on_stream_chunk, conversation_id,
                     accumulated_usage, llm_trace,
                     fallback_reason="⚠️ Agent loop stopped by guard.",
+                    task_id=task_id,
                 )
 
             # No tool calls — final response or empty-response retry
             if not tool_calls:
-                if content and content.strip():
-                    clean_content = _strip_role_boundaries(content)
+                # The ledger used to be written only where tools were called, so
+                # the turn that ends a run — the one a reader opens when an
+                # answer looks wrong — left no record of what was thought.
+                _final_quality = _detect_reasoning_quality(
+                    (msg.get("thinking") or "") or _extract_thinking_prefix(content), []
+                )
+                _final_quality["ts"] = utc_now_iso()
+                _final_quality["round"] = round_idx
+                _final_quality["task_id"] = task_id
+                # Asked once: the predicate decides both what the ledger records and
+                # which branch runs, and calling it twice invites the two to disagree.
+                _answered = not _is_answerless(content)
+                _final_quality["answered"] = _answered
+                append_jsonl(logs_dir / "reasoning.jsonl", _final_quality)
+
+                if _answered:
+                    clean_content = _strip_history_markers(_strip_role_boundaries(content))
                     # Intermediate per-round text is shown per-round (round_text), not
                     # assembled into the final answer (Variant 2). Final = this last round.
                     llm_trace["assistant_notes"].append(clean_content.strip()[:320])
@@ -954,17 +1142,12 @@ async def run_llm_loop(
                         llm_trace,
                     )
                 # LLM returned empty content (e.g. GLM thinking-only with no text).
-                # Retry the same call without prompt modification.
-                # Diagnose the empty: non-empty thinking + empty content points at
-                # thinking-budget exhaustion (CoT consumed the output-token budget);
-                # empty thinking too points at a transient provider/network blip. The
-                # retry is a blind re-send, so a deterministic cause repeats identically.
+                # Retry the same call without prompt modification: it is a blind
+                # re-send, so a deterministic cause repeats identically — which is why
+                # the line below has to say which cause it was. `_empty_answer_diagnosis`
+                # holds that reasoning and is tested on its own.
                 _empty_thinking = (msg.get("thinking") or "").strip()
-                _empty_diag = (
-                    "thinking-budget (CoT present, no output text)"
-                    if _empty_thinking
-                    else "transient (no CoT either)"
-                )
+                _empty_diag = _empty_answer_diagnosis(content, _empty_thinking)
                 if empty_retry_count < MAX_EMPTY_RETRIES:
                     empty_retry_count += 1
                     log.warning(
@@ -994,10 +1177,8 @@ async def run_llm_loop(
             # CoT (extended thinking) + content preamble, deduped. Shown per-round in the
             # collapsible (round_text) and emitted live. Per Variant 2 this is the ONLY
             # home for intermediate text — it is no longer folded into the final answer.
-            round_reasoning = "\n\n".join(
-                dict.fromkeys(
-                    s.strip() for s in (msg.get("thinking"), thinking, content) if s and s.strip()
-                )
+            round_reasoning = _round_reasoning(
+                msg.get("thinking"), thinking, content, tool_calls
             )
 
             if round_reasoning:

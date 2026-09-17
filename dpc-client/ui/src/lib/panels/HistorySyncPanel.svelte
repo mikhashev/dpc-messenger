@@ -6,7 +6,7 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { get } from 'svelte/store';
-  import { mapBackendMessage } from '$lib/utils/messageMapper';
+  import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import {
     historyRestored,
     groupHistorySynced,
@@ -62,18 +62,53 @@
 
       chatHistories.update(map => {
         const newMap = new Map(map);
-        const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => {
-          const isSelf = msg.sender_node_id ? msg.sender_node_id === selfNodeId : msg.role === 'user';
-          return {
-            id: `restored-${index}-${Date.now()}`,
-            sender: isSelf ? 'user' : ($historyRestored.conversation_id),
-            senderName: isSelf ? (msg.sender_name || 'You') : (msg.sender_name || getPeerDisplayName($historyRestored.conversation_id)),
-            text: msg.content,
-            timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,
-            attachments: msg.attachments || []
-          };
+        const conversationId = $historyRestored.conversation_id;
+        const incoming = $historyRestored.messages;
+        // The id must be the record's own, or the backfill that follows
+        // matches nothing and draws every message a second time. The wire
+        // spells it `id` and the backend `message_id`; mapBackendMessage reads
+        // both, and carries the sender identity with it. msg_index stays 0
+        // until the backfill supplies it — the export omits it deliberately.
+        let previousTimestamp: number | undefined;
+        const restoredMessages = incoming.map((msg: any, index: number) => {
+          const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
+          const isLocalHuman = !isAgent && (msg.sender_node_id
+            ? msg.sender_node_id === selfNodeId
+            : msg.role === 'user');
+          const mapped = mapBackendMessage(msg, {
+            fallbackSender: isLocalHuman ? 'user' : (msg.sender_node_id || conversationId),
+            fallbackSenderName: isLocalHuman
+              ? (msg.sender_name || 'You')
+              : (msg.sender_name || getPeerDisplayName(msg.sender_node_id || conversationId)),
+            index,
+            totalCount: incoming.length,
+            previousTimestamp,
+          });
+          previousTimestamp = mapped.timestamp;
+          return mapped;
         });
-        newMap.set($historyRestored.conversation_id, restoredMessages);
+
+        // The backend batch is not trusted to be clean: a repeated id reaches
+        // the {#each ... (msg.id)} keyed block and Svelte 5 throws
+        // each_key_duplicate in production, with no boundary around this
+        // panel to catch it.
+        const { kept: dedupedRestoredMessages, droppedCount: restoredDropped, conflictCount: restoredConflicts } =
+          dedupeMessagesById(restoredMessages);
+        if (restoredDropped > 0) {
+          console.warn(`[HistorySync] Dropped ${formatDedupeDrop(restoredDropped, restoredConflicts)} in restored history for ${conversationId}`);
+        }
+
+        dedupedRestoredMessages.forEach((m: any) => {
+          if (m.id && !m.id.startsWith('msg-')) processedMessageIds.add(m.id);
+        });
+
+        // Anything on screen the restore does not carry arrived while it was
+        // in flight; replacing outright would drop it.
+        const restoredIds = new Set(dedupedRestoredMessages.map((m: any) => m.id).filter(Boolean));
+        const frontendOnly = (map.get(conversationId) || [])
+          .filter((m: any) => m.id && !restoredIds.has(m.id));
+        newMap.set(conversationId, [...dedupedRestoredMessages, ...frontendOnly]
+          .sort((a: any, b: any) => a.timestamp - b.timestamp));
         return newMap;
       });
 
@@ -128,14 +163,22 @@
                 return mapped;
               });
 
-              syncedMessages.forEach((m: any) => {
+              // Same guard as the 1:1 restore path: a repeated id in the batch
+              // would otherwise reach the keyed {#each} and crash the panel.
+              const { kept: dedupedSyncedMessages, droppedCount: syncedDropped, conflictCount: syncedConflicts } =
+                dedupeMessagesById(syncedMessages);
+              if (syncedDropped > 0) {
+                console.warn(`[GroupHistorySync] Dropped ${formatDedupeDrop(syncedDropped, syncedConflicts)} in synced history for ${syncedGroupId}`);
+              }
+
+              dedupedSyncedMessages.forEach((m: any) => {
                 if (m.id && !m.id.startsWith('synced-')) processedMessageIds.add(m.id);
               });
 
-              const backendIds = new Set(syncedMessages.map((m: any) => m.id).filter(Boolean));
+              const backendIds = new Set(dedupedSyncedMessages.map((m: any) => m.id).filter(Boolean));
               const existingMsgs = map.get(syncedGroupId) || [];
               const frontendOnly = existingMsgs.filter((m: any) => m.id && !backendIds.has(m.id));
-              const merged = [...syncedMessages, ...frontendOnly].sort((a: any, b: any) => a.timestamp - b.timestamp);
+              const merged = [...dedupedSyncedMessages, ...frontendOnly].sort((a: any, b: any) => a.timestamp - b.timestamp);
               newMap.set(syncedGroupId, merged);
               return newMap;
             });

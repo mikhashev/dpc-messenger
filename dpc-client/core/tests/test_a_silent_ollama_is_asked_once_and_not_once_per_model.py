@@ -177,15 +177,21 @@ def test_a_model_already_described_is_returned_while_its_host_is_silent(clock):
     assert FakeClient.calls == 0
 
 
-# --- the answer a caller gets does not change, only what it costs ------------
+# --- what a silent host costs, and what it is allowed to answer --------------
 
 
-def test_a_silent_host_leaves_the_name_list_deciding_exactly_as_before(clock):
+def test_a_silent_host_costs_one_probe_and_credits_nobody_with_vision(clock):
+    """The cost is what this file was written for. The answer changed with it:
+    a silent host is no longer a vision claim, because that yes is what routes
+    an image query to a daemon that is not there. Thinking keeps the list — it
+    is read after a provider is chosen and diverts nothing."""
     FakeClient.raises = httpx.ConnectTimeout("timed out")
     vision = OP.OllamaProvider("a", {"model": "qwen3-vl:8b"})
     plain = OP.OllamaProvider("b", {"model": "llama3.1:8b"})
+    thinker = OP.OllamaProvider("c", {"model": "deepseek-r1:8b"})
 
-    # First reads pay one probe between them; the answers come from the lists.
-    assert vision.supports_vision() is True
+    # The reads pay one probe between them.
+    assert vision.supports_vision() is False
     assert plain.supports_vision() is False
+    assert thinker.supports_thinking() is True
     assert FakeClient.calls == 1

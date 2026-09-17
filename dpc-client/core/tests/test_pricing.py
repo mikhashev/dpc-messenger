@@ -346,3 +346,46 @@ def test_a_weekend_call_made_before_the_change_still_bills_at_the_old_rule():
 
 def test_the_weekend_rule_starts_at_the_stated_minute():
     assert WEEKEND_OFF_PEAK_FROM == datetime(2026, 8, 22, 16, 0, tzinfo=timezone.utc)
+
+
+# --- our own purchase price follows the same formula the tariff does ----------------
+
+
+def test_an_exclusive_count_adds_the_reasoning_to_the_billable_output():
+    """ADR-041 D3, amendment 2026-09-13: reasoning is billable output at the
+    output rate, and whether it is already inside `completion_tokens` is what
+    the row's `output_includes_thinking` says. A vendor that reports the two
+    apart is billed on their sum, or we under-bill our own purchase by the
+    whole reasoning."""
+    rates = rates_at("deepseek-v4-flash", AT_OLD_TARIFF)
+    common = dict(model="deepseek-v4-flash", cache_miss_tokens=0, at=AT_OLD_TARIFF)
+
+    excludes = compute_cost_usd("a", 0, 1, thinking_tokens=56,
+                                output_includes_thinking="excludes", **common)
+    includes = compute_cost_usd("a", 0, 1, thinking_tokens=56,
+                                output_includes_thinking="includes", **common)
+
+    assert excludes == pytest.approx(57 * rates["output"] / 1_000_000)
+    assert includes == pytest.approx(1 * rates["output"] / 1_000_000)
+
+
+def test_a_caller_that_says_nothing_keeps_the_arithmetic_it_had():
+    """The pre-column behaviour: `completion_tokens` alone, whatever is beside
+    it. Treating silence as `unknown` would zero every vendor cost overnight."""
+    common = dict(model="deepseek-v4-flash", cache_miss_tokens=0, at=AT_OLD_TARIFF)
+
+    silent = compute_cost_usd("a", 0, 1, thinking_tokens=56, **common)
+    inclusive = compute_cost_usd("a", 0, 1, thinking_tokens=56,
+                                 output_includes_thinking="includes", **common)
+
+    assert silent == inclusive
+
+
+def test_an_unknown_convention_keeps_the_same_arithmetic_and_does_not_zero_the_cost():
+    """`unknown` is «do not bill» for the owner's tariff, where the guest's
+    money is at stake. Here the money is already spent, so a cost the vendor
+    will charge either way is still computed."""
+    common = dict(model="deepseek-v4-flash", cache_miss_tokens=0, at=AT_OLD_TARIFF)
+
+    assert compute_cost_usd("a", 0, 1, thinking_tokens=56,
+                            output_includes_thinking="unknown", **common) > 0

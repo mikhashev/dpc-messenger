@@ -25,6 +25,29 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 
+
+def _name_refusal(name):
+    """Why this display name cannot be used, or "" if it can.
+
+    A name is how a mention reaches the agent, and mention routing stops at the
+    first non-word character — so `Fifth Agent` answers to `@Fifth`, alongside
+    anything else whose name starts that way.
+    """
+    from .service import MENTIONABLE_NAME_RE
+    n = (name or "").strip()
+    if not n:
+        return "An agent needs a name."
+    if not MENTIONABLE_NAME_RE.fullmatch(n):
+        reachable = MENTIONABLE_NAME_RE.match(n)
+        return (
+            f"«{n}» cannot be addressed whole: a mention is parsed up to the first "
+            f"character outside letters, digits and underscore, so this agent would "
+            f"answer to «@{reachable.group(0) if reachable else ''}» and share it with "
+            f"anything else starting the same way. Use letters, digits and underscore."
+        )
+    return ""
+
+
 class AgentService:
     """DPC Agent lifecycle management."""
 
@@ -137,6 +160,10 @@ class AgentService:
             create_agent_storage,
             AgentRegistry,
         )
+
+        refusal = _name_refusal(name)
+        if refusal:
+            return {"status": "error", "message": refusal}
 
         try:
             agent_id = generate_agent_id(name)
@@ -260,6 +287,11 @@ class AgentService:
                     "status": "error",
                     "message": f"Agent not found: {agent_id}",
                 }
+
+            if "name" in updates:
+                refusal = _name_refusal(updates["name"])
+                if refusal:
+                    return {"status": "error", "message": refusal}
 
             config = load_agent_config(agent_id)
             config.update(updates)
@@ -850,6 +882,7 @@ class AgentService:
                 "compaction_enabled": config.get("compaction_enabled", False),
                 "compaction_provider": config.get("compaction_provider"),
                 "compaction_threshold": config.get("compaction_threshold", 0.8),
+                "reasoning_effort": config.get("reasoning_effort", ""),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_list,
@@ -884,6 +917,7 @@ class AgentService:
         compaction_threshold: float = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
+        reasoning_effort: str = None,
         providers_getter=None,
     ) -> Dict[str, Any]:
         """Save per-agent model configuration (Main LLM + Sleep LLM +
@@ -897,11 +931,21 @@ class AgentService:
             if provider_alias is not None:
                 config["provider_alias"] = provider_alias
                 registry.update_agent(agent_id, {"provider_alias": provider_alias})
+                # Local first. An alias is a bare string and two machines may
+                # well use the same one; until 2026-08-31 only `peer_metadata`
+                # was consulted here, so a peer advertising our own name took
+                # the agent by construction — and `llm_adapter.chat` puts the
+                # peer ahead of every local branch, so it never came back.
+                local_providers = getattr(getattr(self, "llm_manager", None), "providers", None) or {}
                 resolved_peer = None
-                for peer_id, meta in self.peer_metadata.items():
-                    if any(p.get("alias") == provider_alias for p in meta.get("providers", [])):
-                        resolved_peer = peer_id
-                        break
+                if provider_alias in local_providers:
+                    logger.info("Agent %s: '%s' is served locally — not resolving to a peer",
+                                agent_id, provider_alias)
+                else:
+                    for peer_id, meta in self.peer_metadata.items():
+                        if any(p.get("alias") == provider_alias for p in meta.get("providers", [])):
+                            resolved_peer = peer_id
+                            break
                 if resolved_peer:
                     config["compute_host"] = resolved_peer
                     cw = self._peer_provider_context_window(resolved_peer, provider_alias)
@@ -928,6 +972,13 @@ class AgentService:
                 config["retrieval_vector"] = retrieval_vector
             if retrieval_text is not None:
                 config["retrieval_text"] = retrieval_text
+            # '' is the panel's «Default (global)»: drop the agent's own level so
+            # the alias decides again. None means the caller left the field alone.
+            if reasoning_effort is not None:
+                if reasoning_effort:
+                    config["reasoning_effort"] = reasoning_effort
+                else:
+                    config.pop("reasoning_effort", None)
             save_agent_config(agent_id, config)
             context_window = await self._refresh_live_agent_manager(agent_id, config)
             providers_data = await providers_getter() if providers_getter else {"providers": [], "default_provider": ""}
@@ -941,6 +992,7 @@ class AgentService:
                 "compaction_enabled": config.get("compaction_enabled", False),
                 "compaction_provider": config.get("compaction_provider"),
                 "compaction_threshold": config.get("compaction_threshold", 0.8),
+                "reasoning_effort": config.get("reasoning_effort", ""),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "context_window": context_window,

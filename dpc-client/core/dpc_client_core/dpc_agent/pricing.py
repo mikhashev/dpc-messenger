@@ -9,8 +9,13 @@ spend at zero.
 
 Pay-per-use providers (DeepSeek, z.ai) get real dollar cost from per-1M-token rates,
 applying DeepSeek's cache-hit / cache-miss input split when the provider reports
-it (prompt_cache_hit_tokens / prompt_cache_miss_tokens). reasoning_content tokens
-are already counted inside completion_tokens, so the output rate covers them.
+it (prompt_cache_hit_tokens / prompt_cache_miss_tokens). Reasoning is billable
+output at the output rate everywhere (ADR-041 D3, amendment 2026-09-13), but
+whether completion_tokens already holds it is a per-count fact, not a constant:
+the answer travels as `output_includes_thinking` — the ledger column and the
+DPTP field — and `compute_cost_usd` takes it as a parameter. A caller that
+passes nothing gets the arithmetic this module had before the column existed,
+completion_tokens alone.
 """
 
 from __future__ import annotations
@@ -308,6 +313,16 @@ def get_billing_model(provider_alias: str, model: Optional[str] = None) -> str:
     return str(PROVIDERS[key]["billing"])
 
 
+def _billable_output(
+    completion_tokens: int, thinking_tokens: int, output_includes_thinking: Optional[str]
+) -> int:
+    """The output tokens the output rate is charged on."""
+    out = max(0, completion_tokens or 0)
+    if output_includes_thinking == "excludes":
+        out += max(0, thinking_tokens or 0)
+    return out
+
+
 def compute_cost_usd(
     provider_alias: str,
     prompt_tokens: int,
@@ -316,6 +331,8 @@ def compute_cost_usd(
     model: Optional[str] = None,
     cache_hit_tokens: int = 0,
     cache_miss_tokens: Optional[int] = None,
+    thinking_tokens: int = 0,
+    output_includes_thinking: Optional[str] = None,
     at: Optional[datetime] = None,
 ) -> float:
     """Compute USD cost for a single LLM call.
@@ -324,6 +341,13 @@ def compute_cost_usd(
     per-1M rates. When the cache split is not supplied, treats all prompt tokens
     as cache-miss (conservative — never undershoots). Subscription/unknown
     providers return 0.0. Never raises.
+
+    `output_includes_thinking` decides which tokens the output rate covers:
+    `excludes` bills `completion_tokens + thinking_tokens`, anything else bills
+    `completion_tokens` alone. A caller that passes nothing keeps the
+    pre-column arithmetic, and that is kept until every call site passes the
+    state: unlike the owner's tariff, where `unknown` means «do not bill», the
+    money here is already spent and an unreadable convention is still charged.
 
     `at` is the moment the call was made, defaulting to now. It exists because
     from 2026-08-16 16:00 UTC DeepSeek prices by the clock — off-peak, doubled
@@ -338,7 +362,7 @@ def compute_cost_usd(
             miss = max(0, (prompt_tokens or 0) - hit)
         else:
             miss = max(0, cache_miss_tokens)
-        out = max(0, completion_tokens or 0)
+        out = _billable_output(completion_tokens, thinking_tokens, output_includes_thinking)
         return (
             hit * rates["cache_hit"]
             + miss * rates["cache_miss"]
@@ -350,4 +374,5 @@ def compute_cost_usd(
         return 0.0
     input_rate = float(entry["input_per_1k"])
     output_rate = float(entry["output_per_1k"])
-    return (prompt_tokens / 1000.0) * input_rate + (completion_tokens / 1000.0) * output_rate
+    out = _billable_output(completion_tokens, thinking_tokens, output_includes_thinking)
+    return (prompt_tokens / 1000.0) * input_rate + (out / 1000.0) * output_rate

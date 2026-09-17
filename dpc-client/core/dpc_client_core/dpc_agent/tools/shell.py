@@ -7,7 +7,8 @@ Restricted tool — requires explicit enable in privacy_rules.json.
 
 Safety guardrails (ADR-030): 3-tier command classification.
   Tier 0 — auto-approve (safe read-only commands)
-  Tier 1 — require approval (v2, currently blocked same as Tier 2)
+  Tier 1 — goes to the approval queue: the caller is asked and the command runs
+           only if a person says yes
   Tier 2 — hard block (catastrophic/destructive commands)
 """
 
@@ -21,7 +22,7 @@ import subprocess
 import threading
 import time
 import unicodedata
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 # Moved to `process.py` on 2026-08-26 so they cover every spawn this service
@@ -148,6 +149,9 @@ def _normalize_command(command: str) -> str:
     return normalized
 
 
+_SEGMENT_OPERATORS = ("||", "&&", "|", ";", "&", "\r", "\n")
+
+
 def _split_segments(command: str) -> list[str]:
     """Split command by pipe/chain operators to check each segment.
 
@@ -157,9 +161,43 @@ def _split_segments(command: str) -> list[str]:
     blob — and it is safety by accident: any pattern anchored at the start of
     a line, and any future check that assumes a segment is one command, was
     blind to it.
+
+    Quotes are honoured: an operator inside them is part of an argument, not a
+    boundary. Splitting `cd "C:/R&D/tools"` at the `&` gave the cwd tracker a
+    confident, wrong directory, and a wrong-but-truthy answer never trips a
+    fail-closed net.
+
+    Grouping punctuation is stripped from the edges, so `( cd sub` is still a cd.
     """
-    parts = re.split(r"\s*(?:\|\||&&|[|;&\r\n])\s*", command)
-    return [part for part in parts if part and part.strip()]
+    parts, buf, quote, i = [], [], "", 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        hit = next((op for op in _SEGMENT_OPERATORS if command.startswith(op, i)), None)
+        if hit:
+            parts.append("".join(buf))
+            buf = []
+            i += len(hit)
+            continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return [cleaned for cleaned in (_strip_grouping(part) for part in parts) if cleaned]
+
+
+def _strip_grouping(segment: str) -> str:
+    """One command, without the shell's grouping punctuation around it."""
+    return segment.strip().strip("(){}").strip()
 
 
 def _is_fork_bomb(command: str) -> bool:
@@ -206,7 +244,230 @@ def _is_whitelisted(command: str, whitelist: list[str]) -> bool:
     return False
 
 
-def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Optional[Tuple[str, str]]:
+PATH_PATTERNS: list[re.Pattern] = [
+    re.compile(r'\b([A-Z]:\\[^\s"\'<>|&;]+)'),
+    re.compile(r'(?<!\w)(/[a-zA-Z][^\s"\'<>|&;]*)'),
+]
+
+# An interpreter invoked on a script file. `-c` and `-e` have their own Tier 1
+# rules; running a file had none.
+#
+# `bat` and `cmd` were absent until 2026-08-30, on a Windows fleet. Two
+# independent reviews of the eval traces found the agent write `dl.bat` around a
+# refused `curl` — it never ran it, but nothing here would have seen it if it
+# had. Measured on this tree the same day: `dl.cmd` containing a drive-letter
+# read of the answer archive classified Tier 0, and so did a bare `grab.py`,
+# because the shebang pattern demanded a separator in the name.
+_SCRIPT_EXT = r"py|pyw|js|mjs|cjs|ts|rb|pl|sh|bash|zsh|bat|cmd"
+_SCRIPT_LAUNCH_PATTERNS: list[re.Pattern] = [
+    # `python3.12 x.py` and `py -3 x.py` as well as the bare name.
+    re.compile(
+        r"\b(?:python(?:3(?:\.\d+)?)?|py|node|deno|ruby|perl|bash|sh|zsh)\s+"
+        r"(?:-[^\s]+\s+)*"
+        rf"([^\s\"'<>|&;]+\.(?:{_SCRIPT_EXT}))\b",
+        re.I,
+    ),
+    re.compile(r"\b(?:powershell|pwsh)\b.*?-f(?:i(?:l(?:e)?)?)?\s+([^\s\"'<>|&;]+\.ps1)\b", re.I),
+    # The cmd wrappers, which are how a batch file is usually reached.
+    re.compile(
+        r"\b(?:call|start|cmd(?:\.exe)?\s+/c|cmd(?:\.exe)?\s+/k)\s+"
+        r"(?:/[^\s]+\s+)*"
+        rf"([^\s\"'<>|&;]+\.(?:{_SCRIPT_EXT}|ps1))\b",
+        re.I,
+    ),
+    # A script run by its own name: `./x.py`, `.\x.bat`, or plain `x.py`, which
+    # Windows runs by file association and POSIX by the executable bit.
+    re.compile(rf"^\s*([^\s\"'<>|&;]+\.(?:{_SCRIPT_EXT}|ps1))(?:\s|$)", re.I),
+]
+
+_SCRIPT_READ_LIMIT = 256 * 1024
+
+_CD_RE = re.compile(r"^\s*(?:cd|chdir|pushd)\b(?:\s+/d\b)?\s*(?P<target>.*?)\s*$", re.I)
+_POPD_RE = re.compile(r"^\s*popd\b", re.I)
+_PUSHD_RE = re.compile(r"^\s*pushd\b", re.I)
+# A target we cannot evaluate without running the shell: a variable, a
+# substitution, or `cd -`. Resolving one of these by guessing is worse than
+# saying the directory is unknown.
+#
+# Bare `(` and `%` are NOT that. The first spelling of this rule listed them as
+# plain characters, so `cd "C:/Program Files (x86)/tool"` — the most ordinary
+# path on the fleet's own platform — read as unresolvable and every script after
+# it went to the approval queue. That is the same false-positive shape as the
+# four XPath firings of 2026-08-30, introduced by the fix for them.
+_UNRESOLVABLE_CD = re.compile(r"\$[\w{(]|\$$|`|%\w+%")
+
+
+class _Move(NamedTuple):
+    """A directory change, as much of it as the gate can know statically."""
+
+    kind: str          # move | push | pop | previous | unknown
+    target: str = ""
+
+
+def _cd_move(segment: str) -> Optional[_Move]:
+    """The directory change this segment makes, or None if it makes none.
+
+    `popd` and `cd -` are *knowable* moves, not unknown ones — the first
+    returns to what `pushd` recorded, the second to where we just were. Calling
+    them unknown made every later script in the command unreadable, which
+    refused ordinary work on a directory the gate had already cleared.
+    """
+    if _POPD_RE.match(segment):
+        return _Move("pop")
+    match = _CD_RE.match(segment)
+    if not match:
+        return None
+    kind = "push" if _PUSHD_RE.match(segment) else "move"
+    target = _strip_comment(match.group("target")).strip().strip("\"'")
+    if target == "-":
+        return _Move("previous")
+    if not target:
+        return _Move("move", os.path.expanduser("~"))
+    if _UNRESOLVABLE_CD.search(target):
+        return _Move("unknown")
+    return _Move(kind, os.path.expanduser(target))
+
+
+def _strip_comment(text: str) -> str:
+    """Everything before an unquoted `#` that starts a word."""
+    quote = ""
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or text[i - 1].isspace()):
+            return text[:i]
+    return text
+
+
+class _Cwd:
+    """Where each segment of one command runs, tracked as the shell would.
+
+    `here` is "" once a move cannot be evaluated. `candidates` always offers the
+    starting directory as well, so a move can only add places the gate looks.
+    """
+
+    def __init__(self, base_dir: str):
+        self.base = os.path.normpath(base_dir)
+        self.here = self.base
+        self._stack: list[str] = []
+        self._previous = self.base
+
+    def apply(self, move: _Move) -> None:
+        if move.kind == "pop":
+            self.here = self._stack.pop() if self._stack else ""
+            return
+        if move.kind == "previous":
+            self.here, self._previous = self._previous, self.here
+            return
+        if move.kind == "push":
+            self._stack.append(self.here)
+        was = self.here
+        if move.kind == "unknown":
+            self.here = ""
+        elif os.path.isabs(move.target):
+            self.here = os.path.normpath(move.target)
+        else:
+            self.here = os.path.normpath(os.path.join(was, move.target)) if was else ""
+        self._previous = was
+
+    @property
+    def candidates(self) -> list[str]:
+        return list(dict.fromkeys(d for d in (self.here, self.base) if d))
+
+
+def _script_named_in(segment: str) -> str:
+    """The first script this segment launches, or "" if it launches none."""
+    for pat in _SCRIPT_LAUNCH_PATTERNS:
+        match = pat.search(segment)
+        if match:
+            return match.group(1).strip("\"'")
+    return ""
+
+
+def _script_paths_out_of_sandbox(
+    segment: str, ctx: "ToolContext", base_dir: str
+) -> Tuple[Optional[Tuple[str, str]], bool]:
+    """A path that leaves the sandbox, found inside a script this segment runs.
+
+    A speed bump rather than a boundary: it catches the naive form and an
+    import, a computed name or base64 walks past it. The class is closed only
+    by isolation — see WRITE-A-SCRIPT-AND-RUN-IT-AND-THE-PATH-GATE-NEVER-SEES-THE-PATH.
+
+    Returns ((script, offending path), resolved); ("", script) when the script
+    is present and unreadable, because a gate that cannot see must say so.
+
+    `resolved` says whether a launched script was actually located here and
+    read. Without it the caller cannot tell «nothing to look at» from «looked,
+    and it was clean», and treating the second as the first refuses work the
+    gate has already cleared.
+    """
+    resolved = False
+    for pat in _SCRIPT_LAUNCH_PATTERNS:
+        for match in pat.finditer(segment):
+            raw = match.group(1).strip("\"'")
+            candidate = raw if os.path.isabs(raw) else os.path.join(base_dir, raw)
+            candidate = os.path.normpath(os.path.expanduser(candidate))
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                # Never open a file outside the sandbox to decide: that is the
+                # hole this check exists for.
+                ctx.validate_extended_path(candidate)
+            except PermissionError:
+                continue
+            try:
+                # Too big to read is a kind of cannot read, and the branch three
+                # lines down already answers that with a refusal. This used to
+                # `continue`, so a script over the limit ran unexamined.
+                size = os.path.getsize(candidate)
+                if size > _SCRIPT_READ_LIMIT:
+                    log.warning(
+                        "script gate: %s is %d bytes, over the %d-byte read limit",
+                        candidate, size, _SCRIPT_READ_LIMIT,
+                    )
+                    return ("", raw), True
+                with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+                    body = fh.read()
+                resolved = True
+            except OSError as e:
+                log.warning("script gate could not read %s: %s", candidate, e)
+                return ("", raw), True
+            for path_pat in PATH_PATTERNS:
+                for hit in path_pat.finditer(body):
+                    if not _reads_as_a_filesystem_path(body, hit):
+                        continue
+                    try:
+                        ctx.validate_extended_path(hit.group(1))
+                    except PermissionError:
+                        return (raw, hit.group(1)), True
+    return None, resolved
+
+
+def _reads_as_a_filesystem_path(body: str, hit: "re.Match") -> bool:
+    """Inside a file, most slashes are not paths.
+
+    Measured on the campaign of 2026-08-30: all four firings of this gate were
+    XPath prefixes — `//w:t`, `//a:t` — from scripts parsing docx and pptx, and
+    every one refused a legitimate read inside the sandbox. URLs are the same
+    shape. Both are rejected here rather than in PATH_PATTERNS, which the
+    command-line scan shares and which has its own, larger version of this
+    problem.
+    """
+    text = hit.group(1)
+    start = hit.start(1)
+    if start > 0 and body[start - 1] in "/:":
+        return False
+    if re.match(r"^[A-Za-z]:[\\/]", text):
+        return True
+    return bool(re.match(r"^/[^/:\s]+/", text))
+
+
+def _validate_command(
+    command: str, ctx: Optional["ToolContext"] = None, cwd: str = ""
+) -> Optional[Tuple[str, str]]:
     """Validate command against safety tiers. Returns (tier, reason) or None if allowed."""
     normalized = _normalize_command(command)
 
@@ -252,15 +513,11 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
         return ("tier1", "Requires approval: " + "; ".join(dangerous))
 
     if ctx:
-        _PATH_PATTERNS = [
-            re.compile(r'\b([A-Z]:\\[^\s"\'<>|&;]+)'),
-            re.compile(r'(?<!\w)(/[a-zA-Z][^\s"\'<>|&;]*)'),
-        ]
         whitelist = _get_tier1_whitelist(ctx)
         # Per segment, for the same reason: the path that leaves the sandbox is
         # in one segment, and only that segment may be waived.
         for segment in segments:
-            for pat in _PATH_PATTERNS:
+            for pat in PATH_PATTERNS:
                 for match in pat.finditer(segment):
                     extracted = match.group(1)
                     try:
@@ -269,6 +526,44 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
                         if whitelist and _is_whitelisted(segment, whitelist):
                             break
                         return ("tier1", f"Command accesses path outside sandbox: {extracted}")
+
+        base_dir = os.path.expanduser(cwd) if cwd else str(getattr(ctx, "agent_root", "") or "")
+        if base_dir:
+            # The cwd travels with the command. It used to be fixed once here and
+            # applied to every segment, so `cd sub && python steal.py` resolved the
+            # script against the directory above the one it runs in, os.path.isfile
+            # missed, and the gate skipped it — one cd was the whole bypass.
+            walk = _Cwd(base_dir)
+            for segment in segments:
+                move = _cd_move(segment)
+                if move is not None:
+                    walk.apply(move)
+                    continue
+                found, resolved = None, False
+                for candidate_dir in walk.candidates:
+                    found, seen = _script_paths_out_of_sandbox(segment, ctx, candidate_dir)
+                    resolved = resolved or seen
+                    if found:
+                        break
+                if not found and not resolved and not walk.here:
+                    # The gate cannot say where this file is: the move before it was
+                    # a variable or a substitution, and no directory it does know
+                    # holds the script. That is the case the unreadable branch
+                    # already answers with a refusal.
+                    named = _script_named_in(segment)
+                    if named:
+                        found = ("", named)
+                if not found:
+                    continue
+                if whitelist and _is_whitelisted(segment, whitelist):
+                    continue
+                script, path = found
+                if not script:
+                    return ("tier1", f"Command runs a script the gate could not read: {path}")
+                return (
+                    "tier1",
+                    f"Script {script} accesses path outside sandbox: {path}",
+                )
 
     return None
 
@@ -540,7 +835,7 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
 
 def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "") -> str:
     # ADR-030: validate command before execution
-    violation = _validate_command(command, ctx)
+    violation = _validate_command(command, ctx, cwd)
     if violation:
         tier, reason = violation
         if tier == "tier2":

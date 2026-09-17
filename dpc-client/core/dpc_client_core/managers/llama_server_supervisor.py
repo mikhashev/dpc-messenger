@@ -62,7 +62,12 @@ DEFAULTS: Dict[str, Any] = {
     "flash_attn": None,
     "mmproj": None,
     "spec_type": "draft-mtp",
-    "spec_draft_n_max": 3,  # measured: acceptance 0.686 against 4's 0.578
+    # 3 came from one synthetic prompt on 2026-08-19 comparing acceptance
+    # RATES (0.686 against 4's 0.578) — the wrong quantity: what a turn gets is
+    # acceptance x n, and 7 547 production tasks give 0.592 at n=3 against
+    # 0.589 at n=4, i.e. 2.78 tokens per target pass against 3.35. The value
+    # stays until its owner picks; the aliases already override it with 4.
+    "spec_draft_n_max": 3,
     # None = the server's own choice (4 unified slots on b10472). An explicit
     # value is ALWAYS sent, so -np 1 is expressible — the old guard ate it and
     # the config said 1 while the server ran 4.
@@ -98,6 +103,10 @@ DEFAULTS: Dict[str, Any] = {
     # 0 is expressible and means off, which is why the guard tests None.
     "cache_reuse": None,
     "cache_ram_mib": None,
+    # What a loaded context costs beyond weights and attention-KV, in MiB. None
+    # uses the figure below, which was measured on one model: every term in it
+    # is model-shaped, so an alias serving a different model owns its own.
+    "vram_overhead_mib": None,
     "slot_save_path": None,
     "jinja": True,
     "start_timeout_s": 300.0,
@@ -148,6 +157,30 @@ def _flash_attn_value(value: Any) -> Optional[str]:
     return None
 
 
+_QUANTISED_KV_TYPES = frozenset({"q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"})
+
+
+def _flash_attn_effective(value: Any, type_v: Any) -> str:
+    """What the child will do, which silence here does not say.
+
+    `auto` is the binary's default, and on a quantised V cache the pin
+    resolves it to on and refuses to start when it is off
+    (`src/llama-context.cpp:3698-3707`, b10809). So the one configuration
+    production runs — no flag, `-ctv q4_0` — is the one a reader of the start
+    line could not resolve without opening llama.cpp; the child's own log
+    never names flash_attn at any verbosity.
+    """
+    explicit = _flash_attn_value(value)
+    quantised_v = str(type_v or "").strip().lower() in _QUANTISED_KV_TYPES
+    if explicit == "on":
+        return "on"
+    if explicit == "off":
+        return "off (refused at start by the quantised V cache)" if quantised_v else "off"
+    if quantised_v:
+        return "on (auto, forced by the quantised V cache)"
+    return "auto (build default)"
+
+
 def _fmt_knob(value: Any) -> str:
     """How a knob reads in the start line: silence and an explicit 0 differ.
 
@@ -190,7 +223,7 @@ _KV_BYTES_PER_ELEM = {"f16": 2.0, "bf16": 2.0, "q8_0": 34 / 32, "q4_0": 18 / 32}
 # buffers, MTP draft contexts, the hybrid blocks' recurrent state, CUDA
 # context. Measured on qwen3.8-27B @ 262 144 on b10472 (ADR-040 table):
 # 748 + 1360 + 1024 + 324 + 1136 = 4592, rounded up.
-_FIXED_OVERHEAD_MIB = 4608
+_DEFAULT_OVERHEAD_MIB = 4608
 
 # The card is shared with the desktop; a load that consumes it all is the
 # paging regime measured 2026-08-17 ("card busy computing nothing, window
@@ -234,6 +267,80 @@ def _total_vram_mib() -> Optional[int]:
 
 
 _GGUF_VALUE_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+
+def gguf_effort_dictionary(path: str) -> Optional[Tuple[Tuple[str, ...], Optional[str]]]:
+    """(words the chat template accepts, the word it defaults to), or None.
+
+    The template is the authority on effort words and it ships inside the model:
+    `tokenizer.chat_template` holds the same jinja the server reports at /props,
+    so the dictionary can be read without starting a child. A template that
+    guards the value names its own vocabulary in the guard.
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            if struct.unpack("<I", f.read(4))[0] < 2:
+                return None
+            _, n_kv = struct.unpack("<QQ", f.read(16))
+
+            def read_str():
+                n = struct.unpack("<Q", f.read(8))[0]
+                return f.read(n).decode("utf-8", errors="replace")
+
+            template = None
+            for _ in range(n_kv):
+                key = read_str()
+                t = struct.unpack("<I", f.read(4))[0]
+                if t == 8:
+                    value = read_str()
+                    if key == "tokenizer.chat_template":
+                        template = value
+                        break
+                elif t == 9:
+                    et = struct.unpack("<I", f.read(4))[0]
+                    cnt = struct.unpack("<Q", f.read(8))[0]
+                    if et == 8:
+                        for _ in range(cnt):
+                            read_str()
+                    elif et in _GGUF_VALUE_SIZES:
+                        f.seek(_GGUF_VALUE_SIZES[et] * cnt, 1)
+                    else:
+                        return None
+                elif t in _GGUF_VALUE_SIZES:
+                    f.seek(_GGUF_VALUE_SIZES[t], 1)
+                else:
+                    return None
+    except Exception as e:
+        logger.warning("effort dictionary unreadable in %s: %s", path, e)
+        return None
+    if not template:
+        logger.warning("no chat template in %s — effort words fall back to the table", path)
+        return None
+    words = effort_dictionary_of(template)
+    if words is None:
+        logger.warning(
+            "the chat template in %s does not guard reasoning_effort — "
+            "effort words fall back to the table", path,
+        )
+    return words
+
+
+_EFFORT_GUARD = re.compile(r"reasoning_effort\s+not\s+in\s*\(([^)]*)\)")
+_EFFORT_DEFAULT = re.compile(r"reasoning_effort\s*\|\s*default\(\s*'([^']+)'")
+
+
+def effort_dictionary_of(template: str) -> Optional[Tuple[Tuple[str, ...], Optional[str]]]:
+    """The guard's own tuple and the default beside it, or None when unguarded."""
+    guard = _EFFORT_GUARD.search(template)
+    if not guard:
+        return None
+    words = tuple(w.strip().strip("'\"") for w in guard.group(1).split(",") if w.strip())
+    if not words:
+        return None
+    default = _EFFORT_DEFAULT.search(template)
+    return words, (default.group(1) if default else None)
 
 
 def _gguf_attention_kv_dims(path: str) -> Optional[Tuple[int, int]]:
@@ -326,6 +433,83 @@ def _looks_like_oom(log_lines: List[str]) -> bool:
     return any(marker in joined for marker in _OOM_MARKERS)
 
 
+# The four lines the engine writes when a parked prefix cannot be laid back
+# into the pool. Taken from this machine's own child logs rather than from a
+# quote: 2 blocks in the current alias file, 6 in the pre-rename one.
+# Matched on bytes, because the position they are remembered by is a byte
+# offset into the log: decoding first would drift the two apart on any
+# non-ASCII line the child ever writes.
+_RESTORE_CELLS_RE = re.compile(rb"state_read_meta: failed to find (\d+) available cells in kv cache")
+_RESTORE_SIZE_RE = re.compile(rb"load: failed to restore state with size (\d+)")
+_RESTORE_SLOT_RE = re.compile(rb"prompt_load: id\s+(\d+) \| task \S+ \| failed to load prompt from cache")
+
+# How far past the anchor line the companions are looked for. The four arrive
+# within two milliseconds of each other; the window only has to survive another
+# slot interleaving a line between them.
+_RESTORE_BLOCK_BYTES = 4000
+
+
+def format_restore_refusal(refusal: Dict[str, Any], n_ctx: int) -> str:
+    """The sentence the engine does not write: the arithmetic behind a refusal.
+
+    A restore that wanted W cells out of a P-cell pool failed because fewer
+    than W were free, so at least P-W were held by other work. When W exceeds
+    the pool the parked state could never have fitted it at all.
+    """
+    wanted = refusal["cells"]
+    where = f"slot {refusal['slot']}" if refusal.get("slot") is not None else "an unnamed slot"
+    size = f"{refusal['bytes'] / (1024 * 1024):.0f} MiB" if refusal.get("bytes") else "unknown size"
+    if wanted >= n_ctx:
+        arithmetic = (
+            f"the parked state alone wants {wanted} of the {n_ctx}-cell pool, "
+            "so it cannot fit whatever else is running"
+        )
+    else:
+        arithmetic = (
+            f"{wanted} cells wanted against a {n_ctx}-cell pool, so at least "
+            f"{n_ctx - wanted} were held by other conversations"
+        )
+    return (
+        f"host-cache restore refused on {where} ({size} parked): {arithmetic}. "
+        "The turn re-reads that prefix from zero; the usage line's reuse% is what it cost."
+    )
+
+
+# `mean len` is tokens emitted per target forward pass, not draft length: it
+# equals acceptance × n_max + 1, which reproduces every line in this box's log
+# to two decimals. That identity is also the only place a finished child says
+# which n_max it ran with — neither the command line nor the log records it.
+_DRAFT_RE = re.compile(
+    r"draft acceptance = ([\d.]+) \(\s*(\d+) accepted /\s*(\d+) generated\), "
+    r"mean len =\s*([\d.]+)"
+)
+
+
+def _parse_draft(tail: str) -> Dict[str, Any]:
+    """Speculation counters of the last finished task, or {} when there are none.
+
+    Empty rather than zero: an alias with no `--spec-type` writes no such line,
+    and a reader that cannot tell "not drafting" from "drafted nothing" is the
+    defect this project already paid for once.
+    """
+    found = _DRAFT_RE.findall(tail)
+    if not found:
+        return {}
+    rate, accepted, generated, mean_len = found[-1]
+    rate, mean_len = float(rate), float(mean_len)
+    out: Dict[str, Any] = {
+        "draft_acceptance": rate,
+        "draft_accepted": int(accepted),
+        "draft_generated": int(generated),
+        "draft_tokens_per_pass": mean_len,
+    }
+    if rate > 0:
+        n_est = (mean_len - 1) / rate
+        if abs(n_est - round(n_est)) <= 0.08 and 1 <= round(n_est) <= 16:
+            out["draft_n_max"] = round(n_est)
+    return out
+
+
 def _gguf_mib(path: str) -> int:
     try:
         return os.path.getsize(path) // (1024 * 1024)
@@ -355,7 +539,20 @@ class LlamaServerSupervisor:
         # spending VRAM, so draining the old child cannot turn into two children.
         self._predecessor: Optional["asyncio.Task"] = None
         self._in_flight = 0
+        # The most slots held at once since the last telemetry read. Nothing
+        # serialises traffic to the child, so this is what says whether the
+        # last timing block in the shared log belongs to the caller asking.
+        self._peak_in_flight = 0
         self._start_lock = asyncio.Lock()
+        # Where the restore-refusal scan has already looked. The log is opened
+        # "ab" and outlives restarts, so None means "not primed yet": the first
+        # scan starts at the end of the file rather than reporting a previous
+        # child's refusal as this one's.
+        self._restore_scan_offset: Optional[int] = None
+        # Offsets already reported that the cursor deliberately sits behind, so
+        # the rewind that lets a straddling anchor complete cannot also make a
+        # whole one arrive twice.
+        self._reported_refusals: set = set()
 
     # --- command assembly, pure and table-testable -------------------------
 
@@ -480,6 +677,19 @@ class LlamaServerSupervisor:
         except (OSError, ValueError):
             logger.debug("llama-server[%s]: could not write the KV fit memo", self.alias, exc_info=True)
 
+    def _overhead_mib(self) -> int:
+        """The alias's own overhead when it names one, the measured default
+        otherwise. Whichever it is, the arithmetic below prints it."""
+        configured = self.config.get("vram_overhead_mib")
+        try:
+            return int(configured) if configured is not None else _DEFAULT_OVERHEAD_MIB
+        except (TypeError, ValueError):
+            logger.warning(
+                "llama-server[%s]: vram_overhead_mib %r is not a number — using %d",
+                self.alias, configured, _DEFAULT_OVERHEAD_MIB,
+            )
+            return _DEFAULT_OVERHEAD_MIB
+
     def _admission(self) -> Optional[Tuple[int, int, int]]:
         """(budget_mib, weights_mib, kv_dims) for the arithmetic, or None when
         the card or the model cannot be sized and the ladder must fall back to
@@ -497,7 +707,7 @@ class LlamaServerSupervisor:
 
     def _predicted_total_mib(self, admission: Tuple[int, int, int], cache_type: str) -> int:
         _, weights, (layers, width) = admission
-        return weights + _kv_cache_mib(layers, width, self.config["n_ctx"], cache_type) + _FIXED_OVERHEAD_MIB
+        return weights + _kv_cache_mib(layers, width, self.config["n_ctx"], cache_type) + self._overhead_mib()
 
     def _warn_if_explicit_type_exceeds_budget(self) -> None:
         """An alias that names a KV type owns the consequence — the arithmetic
@@ -557,7 +767,8 @@ class LlamaServerSupervisor:
                         "llama-server[%s]: KV %s refused by arithmetic — predicted %d MiB "
                         "(weights %d + kv %d + overhead %d) against a %d MiB budget",
                         self.alias, rung, predicted, weights,
-                        predicted - weights - _FIXED_OVERHEAD_MIB, _FIXED_OVERHEAD_MIB, budget,
+                        predicted - weights - self._overhead_mib(), self._overhead_mib(),
+                        budget,
                     )
                     candidates.remove(rung)
                     memo_hit = memo_hit and rung != memo.get("type")
@@ -622,17 +833,25 @@ class LlamaServerSupervisor:
         window = self.config.get("context_window")
         logger.info(
             "llama-server[%s] starting on :%s (binary=%s, n_ctx=%s, context_window=%s, "
-            "kv=%s, cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, "
-            "n_ubatch=%s, cache_reuse=%s, spec_type=%s, spec_draft_n_max=%s)",
+            "kv=%s, flash_attn=%s, cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, "
+            "n_ubatch=%s, cache_reuse=%s, spec_type=%s, spec_draft_n_max=%s, "
+            "vram_overhead=%s)",
             self.alias, self.port, binary if binary is not None else "unknown",
             n_ctx, _fmt_knob(window),
-            cache_type or "configured", _cache,
+            cache_type or "configured",
+            _flash_attn_effective(
+                self.config.get("flash_attn"),
+                cache_type or self.config.get("cache_type_v"),
+            ),
+            _cache,
             _fmt_knob(self.config.get("ctx_checkpoints")),
             _fmt_knob(self.config.get("checkpoint_min_step")),
             _fmt_knob(self.config.get("n_ubatch")),
             _fmt_knob(self.config.get("cache_reuse")),
             _fmt_knob(self.config.get("spec_type")),
             _fmt_knob(self.config.get("spec_draft_n_max")),
+            f"{self._overhead_mib()} MiB"
+            + ("" if self.config.get("vram_overhead_mib") else " (measured elsewhere)"),
         )
         if window_outgrows_pool(window, n_ctx):
             # The direction that fails without a word: the agent fills to a
@@ -656,6 +875,7 @@ class LlamaServerSupervisor:
         self.log_start(cache_type, env, binary)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_fh = open(self._log_path, "ab")
+        self.prime_restore_scan()
         self._proc = await self._spawn(cmd, env)
         try:
             await self._wait_healthy()
@@ -715,6 +935,112 @@ class LlamaServerSupervisor:
         if not self.port:
             raise LlamaServerError(f"llama-server[{self.alias}] is not running")
         return await self._get("/slots")
+
+    def _read_tail(self, window: int = 65536) -> Optional[Tuple[bytes, int]]:
+        """(the last `window` bytes, the absolute offset they start at).
+
+        Bytes rather than text: one of the two readers remembers where it
+        stopped, and that position has to mean the same thing as the seek.
+        """
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                start = max(0, size - window)
+                f.seek(start)
+                return f.read(), start
+        except OSError:
+            return None
+
+    _SCAN_CHUNK = 8 * 1024 * 1024
+
+    def _read_from(self, offset: int) -> Optional[Tuple[bytes, int]]:
+        """(bytes from `offset` forward, the offset they start at).
+
+        Forward from the cursor, not backward from EOF. A tail read loses every
+        refusal a busy window has already pushed out of it — measured: a refusal
+        with 70 KiB of log after it was reported as nothing, and stayed nothing,
+        which is exactly the noisy start this mechanism exists for. A read is
+        capped, and the cursor stops short of the cap so the next call picks up
+        a match that straddled the boundary.
+        """
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                start = 0 if offset > size else max(0, offset)
+                f.seek(start)
+                return f.read(self._SCAN_CHUNK), start
+        except OSError:
+            return None
+
+    def prime_restore_scan(self) -> None:
+        """Watch from here on. Called at launch, so the previous child's lines
+        in this append-only file are never reported as this one's."""
+        try:
+            self._restore_scan_offset = self._log_path.stat().st_size
+        except OSError:
+            self._restore_scan_offset = 0
+        self._reported_refusals = set()
+
+    def new_restore_refusals(self) -> List[Dict[str, Any]]:
+        """Restore refusals appended since the last scan, oldest first.
+
+        The engine logs a prompt-cache load only when it FAILS, so this is the
+        one place the host cache is visible at all. Keyed by the anchor line's
+        absolute offset: the window moves forward, the offset does not go back.
+        """
+        if self._restore_scan_offset is None:
+            self.prime_restore_scan()
+            return []
+        already = self._reported_refusals
+        read = self._read_from(self._restore_scan_offset)
+        if read is None:
+            return []
+        data, start = read
+        end = start + len(data)
+        if start < self._restore_scan_offset:
+            # The file shrank — rotated or truncated under us. What we counted
+            # is gone; watch what is there now, including its first byte.
+            self._restore_scan_offset = start
+        out: List[Dict[str, Any]] = []
+        for m in _RESTORE_CELLS_RE.finditer(data):
+            offset = start + m.start()
+            if offset < self._restore_scan_offset or offset in already:
+                continue
+            block = data[m.end():m.end() + _RESTORE_BLOCK_BYTES]
+            size_m = _RESTORE_SIZE_RE.search(block)
+            slot_m = _RESTORE_SLOT_RE.search(block)
+            out.append({
+                "cells": int(m.group(1)),
+                "bytes": int(size_m.group(1)) if size_m else None,
+                "slot": int(slot_m.group(1)) if slot_m else None,
+                "offset": offset,
+            })
+        # To the end of what was read, never to the last hit: a cursor that stops
+        # at the last refusal re-reads the same window for ever and loses the
+        # event once the window has moved past it.
+        capped = len(data) == self._SCAN_CHUNK
+        self._restore_scan_offset = max(
+            self._restore_scan_offset,
+            end - _RESTORE_BLOCK_BYTES if capped else end,
+        )
+        cursor = self._restore_scan_offset
+        self._reported_refusals = {
+            r["offset"] for r in list(out) + [{"offset": o} for o in already]
+            if r["offset"] >= cursor
+        }
+        return out
+
+    def log_restore_refusals(self) -> int:
+        """Say what the child said, with the arithmetic it does not carry."""
+        refusals = self.new_restore_refusals()
+        for refusal in refusals:
+            logger.warning(
+                "llama-server[%s]: %s",
+                self.alias, format_restore_refusal(refusal, int(self.config["n_ctx"])),
+            )
+        return len(refusals)
 
     def tail_log(self, n: int = 12) -> List[str]:
         try:
@@ -779,6 +1105,7 @@ class LlamaServerSupervisor:
         if self._draining:
             raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
         self._in_flight += 1
+        self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
         return self._Slot(self)
 
     class _Slot:
@@ -861,18 +1188,25 @@ class LlamaServerSupervisor:
         estimate. Gives the phase split to non-streaming callers (the agents'
         tools path has no first-chunk boundary to time it by itself).
 
-        Caveat, stated: with concurrent slots the last block in the file
-        belongs to whichever task finished last - under the supervisor's
-        serialized traffic that is the caller's own task."""
+        Not attributable under concurrency, and it says so rather than
+        guessing. The caveat here used to rest on "the supervisor's serialized
+        traffic", which the same file refutes: call_slot increments a counter
+        and refuses only while draining - there is no semaphore, no queue and
+        no cap. So when more than one slot has been held since the last read,
+        the last block in the shared log belongs to whichever task finished
+        last and this returns None instead of handing it to the caller."""
         import re
-        try:
-            with open(self._log_path, "rb") as f:
-                f.seek(0, 2)
-                size = f.tell()
-                f.seek(max(0, size - 65536))
-                tail = f.read().decode("utf-8", errors="replace")
-        except OSError:
+        peak, self._peak_in_flight = self._peak_in_flight, self._in_flight
+        if peak > 1:
+            logger.debug(
+                "llama-server[%s]: %d slots in flight since the last read, so the "
+                "engine's timing block is not this caller's", self.alias, peak,
+            )
             return None
+        read = self._read_tail()
+        if read is None:
+            return None
+        tail = read[0].decode("utf-8", errors="replace")
         # [\d.]+ in the rate capture: the rate is fractional ("438.86 tokens
         # per second") and a \d+ capture eats only its tail ("86").
         pre = re.findall(
@@ -892,12 +1226,14 @@ class LlamaServerSupervisor:
             return None
         n_prompt, prefill_rate = pre[-1]
         n_gen, decode_rate = dec[-1]
-        return {
+        out = {
             "prefill_tok_s": int(float(prefill_rate)),
             "decode_tok_s": int(float(decode_rate)),
             "engine_prompt_tokens": int(n_prompt),
             "engine_gen_tokens": int(n_gen),
         }
+        out.update(_parse_draft(tail))
+        return out
 
     def _close_log(self) -> None:
         if self._log_fh:

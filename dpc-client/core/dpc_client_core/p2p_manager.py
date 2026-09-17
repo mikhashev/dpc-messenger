@@ -24,9 +24,33 @@ from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
 from .dht import DHTManager, DHTConfig
 from .peer_cache import PeerCache
+from .own_addresses import OwnAddresses
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+# The connection types on which the peer's key has been proved (ADR-041 D2):
+# `_verify_hello_identity` inbound, `_validate_peer_certificate` outbound.
+PROVED_CONNECTION_TYPES = ("direct_tls",)
+
+
+def peer_proof(peers: Any, peer_id: str) -> tuple[Optional[bool], Optional[str]]:
+    """The two columns a usage row carries about the node at the other end of
+    the call: whether its key was proved, and the tier that says so.
+
+    `(None, None)` when there is no connection to read — the peer is gone by
+    the time the row is written, or the row has no peer in it at all (an agent
+    or a gateway client on this machine is not reached over a tier). A wrapper
+    that names no tier is `"unknown"`, and unknown is not proved.
+    """
+    connection = peers.get(peer_id) if hasattr(peers, "get") else None
+    if connection is None:
+        return None, None
+    connection_type = getattr(connection, "connection_type", None)
+    if not isinstance(connection_type, str):
+        connection_type = "unknown"
+    return connection_type in PROVED_CONNECTION_TYPES, connection_type
 
 
 class PeerConnection:
@@ -107,6 +131,9 @@ class P2PManager:
         # Background task tracking for graceful shutdown
         self._peer_listener_tasks: Dict[str, asyncio.Task] = {}  # Track _listen_to_peer tasks
 
+        # Addresses that are this machine — see own_addresses.py
+        self.own_addresses = OwnAddresses()
+
         # DHT (Distributed Hash Table) for decentralized peer discovery
         self.dht_manager: DHTManager | None = None  # Initialized in start_server()
 
@@ -114,6 +141,13 @@ class P2PManager:
         self._failed_hello_counts: Dict[str, list] = {}  # ip -> [timestamps]
         self._rate_limit_max_failures = 10
         self._rate_limit_window_seconds = 300  # 5 minutes
+
+        # What the failed-HELLO count cannot see (ADR-041 D8): a peer that
+        # completes TLS and never sends HELLO fails nothing, so its read is
+        # bounded and its connections are counted while they wait.
+        self._pending_hello_counts: Dict[str, int] = {}  # ip -> connections before HELLO_ACK
+        self._hello_timeout = settings.get_hello_timeout() if settings else 10.0
+        self._max_pending_hellos_per_ip = settings.get_max_pending_hellos_per_ip() if settings else 8
 
         # Peer cache for faster reconnection (stores last known IP/port)
         cache_file = Path.home() / ".dpc" / "peer_cache.json"
@@ -291,6 +325,11 @@ class P2PManager:
             logger.info("P2PManager Direct TLS server listening on %s:%d for node %s",
                       formatted_host, port, self.node_id)
 
+        # Learned before the DHT block, not inside it: the peer-cache check
+        # consults this set on every dial, and a node with the DHT switched
+        # off knew one address instead of eighteen.
+        self.own_addresses.learn_local_interfaces()
+
         # Initialize DHT (Distributed Hash Table) for peer discovery
         if self.settings.get_dht_enabled():
             try:
@@ -312,6 +351,8 @@ class P2PManager:
                 # Get local IP for DHT announcements (not 0.0.0.0)
                 dht_announce_ip = await self._get_primary_local_ip()
 
+                self.own_addresses.learn(dht_announce_ip, "dht announce")
+
                 # DHT announces the configured P2P TLS port for connections, not the DHT UDP port
                 p2p_port = self.settings.get_p2p_listen_port()
 
@@ -328,6 +369,16 @@ class P2PManager:
 
                 # Bootstrap DHT from seed nodes if available
                 seed_nodes = self.settings.get_dht_seed_nodes()
+                mine = self.own_addresses.self_seeds(seed_nodes)
+                if mine:
+                    # A warning, not a filter: two machines behind one NAT
+                    # share an address, so this can be wrong about someone
+                    # else's node. The node id in the reply decides.
+                    logger.warning(
+                        "DHT seed(s) %s look like this node's own address(es) — "
+                        "a seed has to be a node somewhere else",
+                        ", ".join(f"{ip}:{port}" for ip, port in mine),
+                    )
                 if seed_nodes:
                     logger.info("Bootstrapping DHT from %d seed nodes", len(seed_nodes))
                     success = await self.dht_manager.bootstrap(seed_nodes)
@@ -336,7 +387,11 @@ class P2PManager:
                         # Announce our presence to the DHT
                         await self.announce_to_dht()
                     else:
-                        logger.warning("DHT bootstrap failed (no responsive seeds)")
+                        # The reason lives in bootstrap(), which has just said
+                        # whether the seeds were silent or were us. Repeating a
+                        # guess here put the old lie back on the screen one line
+                        # under the correct answer.
+                        logger.info("DHT did not bootstrap — see the reason above")
             except Exception as e:
                 logger.error("Failed to initialize DHT: %s", e, exc_info=True)
                 self.dht_manager = None
@@ -431,7 +486,8 @@ class P2PManager:
                     node_id=target_node_id,
                     direct_ip=cached_peer.last_direct_ip,
                     direct_port=cached_peer.last_direct_port,
-                    supports_direct=True
+                    supports_direct=True,
+                    direction="out",
                 )
                 return True
             except Exception as e:
@@ -451,7 +507,8 @@ class P2PManager:
                     node_id=target_node_id,
                     direct_ip=ip,
                     direct_port=port,
-                    supports_direct=True
+                    supports_direct=True,
+                    direction="out",
                 )
 
                 # Announce ourselves after successful connection
@@ -483,18 +540,34 @@ class P2PManager:
             self._failed_hello_counts[ip] = []
         self._failed_hello_counts[ip].append(time.monotonic())
 
+    def _release_pending_hello(self, ip: str):
+        """One connection from `ip` is past HELLO_ACK, or gone."""
+        left = self._pending_hello_counts.get(ip, 0) - 1
+        if left > 0:
+            self._pending_hello_counts[ip] = left
+        else:
+            self._pending_hello_counts.pop(ip, None)
+
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
         peer_node_id = None
         peer_addr = writer.get_extra_info('peername')
         peer_addr_str = f"{peer_addr[0]}:{peer_addr[1]}" if peer_addr else "unknown"
         peer_ip = peer_addr[0] if peer_addr else "unknown"
-        try:
-            if self._is_rate_limited(peer_ip):
-                logger.debug("Rate-limited connection from %s, closing silently", peer_ip)
-                writer.close()
-                return
+        if self._is_rate_limited(peer_ip):
+            logger.debug("Rate-limited connection from %s, closing silently", peer_ip)
+            writer.close()
+            return
+        # Silent like the rate limit: whoever holds eight connections open
+        # before HELLO_ACK learns nothing from a ninth.
+        if self._pending_hello_counts.get(peer_ip, 0) >= self._max_pending_hellos_per_ip:
+            logger.debug("%s already holds %d connections before HELLO_ACK, closing silently",
+                         peer_ip, self._max_pending_hellos_per_ip)
+            writer.close()
+            return
 
+        self._pending_hello_counts[peer_ip] = self._pending_hello_counts.get(peer_ip, 0) + 1
+        try:
             logger.info("Received a direct TLS connection attempt from %s", peer_addr_str)
             await asyncio.sleep(0.01)
 
@@ -509,7 +582,14 @@ class P2PManager:
             }
             await write_message(writer, challenge)
 
-            hello_msg = await read_message(reader)
+            # Bounded, and the expiry lands in the except below as one more
+            # failed HELLO; the dial side's _handshake_read has the same shape.
+            try:
+                hello_msg = await asyncio.wait_for(read_message(reader), timeout=self._hello_timeout)
+            except asyncio.TimeoutError:
+                raise ConnectionError(
+                    f"No HELLO within {self._hello_timeout}s of the challenge"
+                ) from None
             if not hello_msg or hello_msg.get("command") != "HELLO":
                 raise ConnectionError("Invalid HELLO message received.")
 
@@ -580,7 +660,8 @@ class P2PManager:
                     display_name=peer_name,
                     direct_ip=peer_ip,
                     direct_port=8888,  # Default port (peer connects FROM random port but listens ON 8888)
-                    supports_direct=True
+                    supports_direct=True,
+                    direction="in",
                 )
                 logger.debug("Cached peer %s at %s:8888", peer_node_id[:20], peer_ip)
 
@@ -605,6 +686,8 @@ class P2PManager:
                     await writer.wait_closed()
                 except (ConnectionResetError, BrokenPipeError, OSError):
                     pass
+        finally:
+            self._release_pending_hello(peer_ip)
 
     async def test_port_connectivity(self, host: str, port: int, timeout: float = 10.0) -> tuple[bool, str]:
         """
@@ -670,11 +753,19 @@ class P2PManager:
 
         logger.info("Initiating direct connection to %s at %s:%d", target_node_id, host, port)
 
+        # One budget for the whole dial, taken before the first packet. The
+        # pre-flight below is itself a TCP connect, so leaving it outside meant a
+        # caller asking for five seconds could wait ten.
+        deadline = asyncio.get_running_loop().time() + timeout
+
+        def _budget_left() -> float:
+            return deadline - asyncio.get_running_loop().time()
+
         # Pre-flight check: Test basic port connectivity before SSL handshake
         # This provides clearer error messages than cryptic SSL errors (e.g., WinError 121)
         logger.debug("Running pre-flight port connectivity check for %s:%d", host, port)
         # Respect caller's timeout (e.g., 5s for quick cache probes) up to 60s max for slow networks
-        preflight_timeout = min(timeout, 60.0)
+        preflight_timeout = max(0.0, min(_budget_left(), 60.0))
         port_accessible, port_message = await self.test_port_connectivity(host, port, preflight_timeout)
 
         if not port_accessible:
@@ -700,11 +791,29 @@ class P2PManager:
         ssl_context.verify_mode = ssl.CERT_NONE  # Required for self-signed certs
 
         try:
-            # Add timeout to prevent long hangs
+            # The connect gets what the pre-flight left, and the handshake reads
+            # below get what the connect left: a peer that completes TLS and then
+            # says nothing used to hold this task for ever.
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port, ssl=ssl_context),
-                timeout=timeout
+                timeout=max(0.0, _budget_left()),
             )
+
+            async def _handshake_read(expected: str) -> Optional[dict]:
+                """A read that cannot outlive the budget the caller paid for."""
+                left = _budget_left()
+                try:
+                    if left <= 0:
+                        raise asyncio.TimeoutError
+                    return await asyncio.wait_for(read_message(reader), timeout=left)
+                except asyncio.TimeoutError:
+                    writer.close()
+                    await writer.wait_closed()
+                    raise ConnectionError(
+                        f"Handshake with {target_node_id} at {host}:{port} timed out "
+                        f"waiting for {expected}: the TLS connect succeeded inside the "
+                        f"{timeout}s budget and the peer then said nothing."
+                    ) from None
 
             # Enable TCP keepalive to detect zombie connections (half-open TCP)
             # Without this, a dead connection appears alive indefinitely and causes
@@ -753,7 +862,7 @@ class P2PManager:
 
             # Read the server's challenge nonce (new in authenticated HELLO protocol).
             import base64 as _b64
-            challenge_msg = await read_message(reader)
+            challenge_msg = await _handshake_read("HELLO_CHALLENGE")
             if not challenge_msg or challenge_msg.get("command") != "HELLO_CHALLENGE":
                 error_msg = (
                     f"Expected HELLO_CHALLENGE from {target_node_id} but got "
@@ -783,7 +892,7 @@ class P2PManager:
             }
             await write_message(writer, hello)
 
-            response = await read_message(reader)
+            response = await _handshake_read("HELLO_ACK")
             if not response or response.get("status") != "OK":
                 raise ConnectionError(f"Peer did not acknowledge HELLO.")
 
@@ -844,7 +953,8 @@ class P2PManager:
                 node_id=target_node_id,
                 direct_ip=host,
                 direct_port=port,
-                supports_direct=True
+                supports_direct=True,
+                direction="out",
             )
 
             # Announce to DHT after successful connection
@@ -926,7 +1036,9 @@ class P2PManager:
         expected_node_id: str
     ) -> bool:
         """
-        Validate peer certificate matches expected node_id.
+        Validate peer certificate matches expected node_id: CN, then the
+        public key's fingerprint. The CN catches a wrong peer, the key
+        catches a peer that says the right name.
 
         Args:
             cert: Peer's X.509 certificate
@@ -965,6 +1077,22 @@ class P2PManager:
                         "Certificate validation failed: CN=%r but expected node_id=%r",
                         cn, expected_node_id
                     )
+                return False
+
+            # A CN is a claim; the key fingerprint is the proof. node_id is the
+            # hash of the public key, and TLS has already made the far end prove
+            # it holds that key's private half — so this comparison turns
+            # possession into identity. Without it a stranger who terminates TLS
+            # with a self-signed certificate carrying the right CN is that peer
+            # for the rest of the session, and every instrument keyed on
+            # sender_node_id downstream inherits the lie.
+            derived_id = generate_node_id(cert.public_key())
+            if derived_id != expected_node_id:
+                logger.error(
+                    "Certificate validation failed: CN says %r but its public key "
+                    "hashes to %r — the name matches and the key does not",
+                    expected_node_id, derived_id
+                )
                 return False
 
             logger.info("Certificate validated: node_id=%s", cn)
@@ -1094,11 +1222,11 @@ class P2PManager:
         answers None ("cert not cached") for every peer, every time — so message
         signatures can be produced but never checked.
 
-        The identity is re-derived here rather than trusted from the caller: the
-        outbound path validates CN alone (_validate_peer_certificate), and a CN
-        is a claim. node_id is the fingerprint of the public key, so a cert whose
-        key hashes to the claimed node_id is that peer's by construction — which
-        also makes overwriting a re-issued cert for the same key safe.
+        The identity is re-derived here rather than trusted from the caller,
+        because callers are many and this store is one. node_id is the
+        fingerprint of the public key, so a cert whose key hashes to the claimed
+        node_id is that peer's by construction — which also makes overwriting a
+        re-issued cert for the same key safe.
 
         Returns:
             True if the certificate is now stored, False if it was refused.
@@ -1518,6 +1646,10 @@ class P2PManager:
         Args:
             external_ip: External/public IP address to announce
         """
+        # Learned before the guard: the peer-cache check needs this address
+        # even on a node whose DHT is switched off.
+        self.own_addresses.learn(external_ip, "stun")
+
         if not self.dht_manager:
             return
 

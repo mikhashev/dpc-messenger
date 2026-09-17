@@ -1,7 +1,11 @@
 """Handlers for remote inference commands (compute sharing)."""
 
 from typing import Dict, Any, Optional
+
+from dpc_protocol.protocol import PeerRefused
+
 from . import MessageHandler
+from ..node_ledger import stated_output_includes_thinking, stated_thinking_source
 
 
 class RemoteInferenceRequestHandler(MessageHandler):
@@ -20,17 +24,86 @@ class RemoteInferenceRequestHandler(MessageHandler):
 
         Args:
             sender_node_id: Node ID of requester
-            payload: Contains "request_id", "prompt", "model", "provider", "images" (optional)
+            payload: "request_id" and "prompt", plus the optional "model",
+                "provider", "images", "reasoning_effort", "messages", "system",
+                "tools" and "stream". A field this node has never heard of is
+                neither read nor refused: a newer guest must still be answered.
         """
         request_id = payload.get("request_id")
         prompt = payload.get("prompt")
         model = payload.get("model")
         provider = payload.get("provider")
         images = payload.get("images")  # Phase 2: Remote Vision support
+        # What the peer asked to spend on thinking. The host clamps it; absent
+        # means it did not choose.
+        reasoning_effort = payload.get("reasoning_effort")
+        messages = payload.get("messages")
+        system = payload.get("system")
+        tools = payload.get("tools")
+        stream = bool(payload.get("stream"))
 
         await self.service._handle_inference_request(
-            sender_node_id, request_id, prompt, model, provider, images
+            sender_node_id, request_id, prompt, model, provider, images,
+            reasoning_effort, messages=messages, system=system, tools=tools,
+            stream=stream,
         )
+        return None
+
+
+class RemoteInferenceChunkHandler(MessageHandler):
+    """Handles REMOTE_INFERENCE_CHUNK messages (a piece of an answer being made).
+
+    Transport, not record: a chunk reaches the caller's callback and nothing
+    else. No count is read off one, no usage row is built from one, and the
+    caller's text comes from the REMOTE_INFERENCE_RESPONSE that ends the
+    stream. A chunk whose `request_id` this node is not waiting for, or whose
+    `seq` is not the next one, is dropped with a warning — this handler does
+    not reorder or buffer, because the answer it would be reconstructing is
+    already in the terminating response.
+    """
+
+    def __init__(self, service):
+        super().__init__(service)
+        self._next_seq: Dict[str, int] = {}
+
+    @property
+    def command_name(self) -> str:
+        return "REMOTE_INFERENCE_CHUNK"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        request_id = payload.get("request_id")
+        seq = payload.get("seq")
+        delta = payload.get("delta")
+
+        pending = getattr(self.service, "_pending_inference_chunks", None) or {}
+        self._next_seq = {rid: n for rid, n in self._next_seq.items() if rid in pending}
+
+        on_chunk = pending.get(request_id)
+        if on_chunk is None:
+            self.logger.warning(
+                "Remote inference chunk discarded: request %s is not streaming here "
+                "(peer %s, seq %s, %d chars)",
+                request_id, sender_node_id, seq, len(delta or ""),
+            )
+            return None
+
+        expected = self._next_seq.get(request_id, 0)
+        if seq != expected:
+            self.logger.warning(
+                "Remote inference chunk discarded: request %s expected seq %d and got %r "
+                "(peer %s) — the answer is taken from the response that ends the stream",
+                request_id, expected, seq, sender_node_id,
+            )
+            return None
+        self._next_seq[request_id] = expected + 1
+
+        try:
+            await on_chunk(delta or "")
+        except Exception:
+            self.logger.error(
+                "Remote inference chunk for request %s from %s was not delivered",
+                request_id, sender_node_id, exc_info=True,
+            )
         return None
 
 
@@ -55,6 +128,14 @@ class RemoteInferenceResponseHandler(MessageHandler):
         status = payload.get("status")
         response = payload.get("response")
         error = payload.get("error")
+        # Why the host refused, in one word (v1.7). It travels beside the prose
+        # and does not replace it: the text is what a person reads. A code this
+        # node has no meaning for is carried anyway — the reader above decides
+        # what it can do with a word, and a word it cannot place it reads like
+        # an absent one. Anything that is not a string is not a code.
+        code = payload.get("code")
+        if not isinstance(code, str):
+            code = ""
 
         # Extract token metadata
         tokens_used = payload.get("tokens_used")
@@ -70,12 +151,45 @@ class RemoteInferenceResponseHandler(MessageHandler):
         thinking = payload.get("thinking")
         thinking_tokens = payload.get("thinking_tokens")
 
+        # The owner's price for this call (v1.7): the applied rates, their unit,
+        # the dated entry they came from and what they came to. Read as one
+        # group, as it is sent — a half group is no tariff at all — and absent
+        # stays absent, because a zero would read as «declared free».
+        # The host's own cost is not on the wire and is not this node's to copy.
+        tariff = {name: payload.get(name) for name in
+                  ("tariff_in", "tariff_out", "tariff_currency", "tariff_at")}
+        if any(value is None for value in tariff.values()):
+            tariff = {}
+        elif payload.get("tariff_amount") is not None:
+            tariff["tariff_amount"] = payload.get("tariff_amount")
+        billing = payload.get("billing")
+        # Any string can arrive here; only the three words go further (v1.7).
+        output_includes_thinking = payload.get("output_includes_thinking")
+        if output_includes_thinking is not None:
+            output_includes_thinking = stated_output_includes_thinking(
+                output_includes_thinking, peer=sender_node_id, log=self.logger,
+            )
+        # Where the host's thinking count came from (v1.7); a word that is
+        # neither of the two is dropped, not carried.
+        thinking_source = stated_thinking_source(
+            payload.get("thinking_source"), peer=sender_node_id, log=self.logger,
+        )
+        # The effort the host actually ran at, after its clamp (v1.7). Absent
+        # means the host applied no effort control, which is not `off`.
+        served_effort = payload.get("served_effort")
+        # The calls the model made, as `tool_use` blocks, and the word its
+        # provider stopped on (v1.7). A host that ran no tools sends neither.
+        tool_calls = payload.get("tool_calls")
+        finish_reason = payload.get("finish_reason")
+
         if request_id in self.service._pending_inference_requests:
             future = self.service._pending_inference_requests[request_id]
             if not future.done():
                 if status == "success":
                     # Return dict with response, token, model, and thinking metadata
                     result_data = {
+                        # The wire id: the requester's usage row joins the host's on it.
+                        "request_id": request_id,
                         "response": response,
                         "tokens_used": tokens_used,
                         "model_max_tokens": model_max_tokens,
@@ -86,9 +200,27 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         "thinking": thinking,
                         "thinking_tokens": thinking_tokens,
                     }
+                    result_data.update(tariff)
+                    if billing is not None:
+                        result_data["billing"] = billing
+                    if output_includes_thinking is not None:
+                        result_data["output_includes_thinking"] = output_includes_thinking
+                    if thinking_source is not None:
+                        result_data["thinking_source"] = thinking_source
+                    if served_effort is not None:
+                        result_data["served_effort"] = served_effort
+                    if tool_calls:
+                        result_data["tool_calls"] = tool_calls
+                    if finish_reason is not None:
+                        result_data["finish_reason"] = finish_reason
                     future.set_result(result_data)
                 else:
-                    future.set_exception(RuntimeError(error or "Remote inference failed"))
+                    # `PeerRefused` is a `RuntimeError`: a caller that reads
+                    # `.code` tells a bad request from a shut door, and every
+                    # caller written before the code keeps what it had.
+                    future.set_exception(
+                        PeerRefused(error or "Remote inference failed", code=code)
+                    )
             else:
                 self.logger.warning(
                     "Remote inference answer for %s arrived after its future was settled "

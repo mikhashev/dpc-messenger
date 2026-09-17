@@ -36,6 +36,35 @@
   let modelConfigCompactionThreshold = $state<number>(0.8);
   let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string}[]>([]);
   let modelConfigSaving = $state(false);
+  let modelConfigReasoningEffort = $state('');
+  // The words belong to the model picked above, so the sentence follows the dropdown.
+  const FLEET_EFFORTS = ['low', 'medium', 'high', 'max'];
+
+  // The words the model picked above will actually take. A level already stored
+  // for this agent stays on the list even when the model does not know it, so
+  // opening the dialog cannot silently clear a setting.
+  let modelConfigEffortOptions = $derived.by(() => {
+    const known = modelConfigEffortWords?.words;
+    const base = known ?? FLEET_EFFORTS;
+    const current = modelConfigReasoningEffort;
+    const words = current && current !== 'off' && !base.includes(current)
+      ? [...base, current]
+      : base;
+    return words.map((w) => ({
+      value: w,
+      label:
+        w.charAt(0).toUpperCase() + w.slice(1) +
+        (known && w === modelConfigEffortWords?.default ? ' — default for this model' : '') +
+        (known && !known.includes(w) ? ' — not in this model' : ''),
+    }));
+  });
+
+  let modelConfigEffortWords = $derived.by(() => {
+    const row: any = modelConfigProvidersList.find(p => p.alias === modelConfigProviderAlias);
+    return row?.reasoning_words
+      ? { words: row.reasoning_words as string[], default: row.reasoning_default as string | null }
+      : null;
+  });
   let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
   let modelConfigRetrievalText = $state<'native' | 'grafeo'>('native');
   let mainConfigPeerId = $derived(
@@ -140,6 +169,17 @@
     }
   }
 
+  // Pause or resume the link from the dialog; the dialog stays open.
+  async function handleToggleEnabledFromDialog() {
+    if (!onSetAgentTelegramEnabled || !linkingAgentId) return;
+    try {
+      linkErrorMessage = '';
+      await onSetAgentTelegramEnabled(linkingAgentId, !linkingEnabled);
+    } catch (error: any) {
+      linkErrorMessage = error.message || 'Failed to change the Telegram link state';
+    }
+  }
+
   // Unlink agent from Telegram (from dialog)
   async function handleUnlinkFromDialog() {
     if (onUnlinkAgentTelegram && linkingAgentId) {
@@ -198,6 +238,7 @@
         ? Number(result.compaction_threshold)
         : 0.8;
       modelConfigProvidersList = result.providers || [];
+      modelConfigReasoningEffort = result.reasoning_effort || '';
       modelConfigRetrievalVector = (result.retrieval_vector === 'grafeo') ? 'grafeo' : 'native';
       modelConfigRetrievalText = (result.retrieval_text === 'grafeo') ? 'grafeo' : 'native';
       showModelConfigPopup = true;
@@ -219,6 +260,7 @@
         compactionThreshold: modelConfigCompactionThreshold,
         retrievalVector: modelConfigRetrievalVector,
         retrievalText: modelConfigRetrievalText,
+        reasoningEffort: modelConfigReasoningEffort,
       }));
       showModelConfigPopup = false;
     } catch (error) {
@@ -256,6 +298,7 @@
     agent_id: string;
     name: string;
     provider_alias: string;
+    reasoning_effort?: string;
     profile_name: string;
     instruction_set_name?: string;
     created_at: string;
@@ -313,6 +356,7 @@
     onDeleteAgent,
     onLinkAgentTelegram,
     onUnlinkAgentTelegram,
+    onSetAgentTelegramEnabled,
     onGetAgentModelConfig,
     onSaveAgentModelConfig,
   }: {
@@ -359,9 +403,22 @@
       unified_conversation?: boolean;
     }) => Promise<void>;
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
+    onSetAgentTelegramEnabled?: (agentId: string, enabled: boolean) => Promise<void>;
     onGetAgentModelConfig: (agentId: string) => Promise<any>;
     onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; compaction_enabled?: boolean; compaction_provider?: string | null; compaction_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
   } = $props();
+
+  // The agent whose dialog is open, and the two states it can be in. Being
+  // configured is not being enabled: a paused link keeps every field, so the
+  // dialog stays an editor and only the verb on the button changes.
+  // Unlink nulls all three, so this is false after one and true after a pause.
+  // Reading more than telegram_linked_at keeps agents linked before that field
+  // existed out of the "never configured" branch.
+  const isTelegramConfigured = (a?: AgentInfo) =>
+    !!(a?.telegram_linked_at || a?.telegram_bot_token || a?.telegram_enabled);
+  const linkingAgent = $derived(agents.find(a => a.agent_id === linkingAgentId));
+  const linkingConfigured = $derived(isTelegramConfigured(linkingAgent));
+  const linkingEnabled = $derived(!!linkingAgent?.telegram_enabled);
 </script>
 
 <div class="sidebar">
@@ -690,19 +747,32 @@
                   onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
                   onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
                 >{agent.provider_alias}</span>
-                {#if agent.telegram_enabled}
+                <span
+                  role="button"
+                  tabindex="0"
+                  class="agent-effort"
+                  title={agent.reasoning_effort
+                    ? `Reasoning: ${agent.reasoning_effort} — click to change`
+                    : 'Reasoning: not set, the model decides — click to change'}
+                  onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
+                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
+                >{agent.reasoning_effort || '—'}</span>
+                {#if isTelegramConfigured(agent)}
                   <span
                     role="button"
                     tabindex="0"
                     class="telegram-link-badge"
-                    title="Linked to Telegram — click to edit settings"
+                    class:paused={!agent.telegram_enabled}
+                    title={agent.telegram_enabled
+                      ? 'Linked to Telegram — click to edit settings'
+                      : 'Telegram link disabled, settings kept — click to edit or enable'}
                     onclick={(e) => { e.stopPropagation(); handleLinkTelegram(agent.agent_id); }}
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleLinkTelegram(agent.agent_id); } }}
-                  >✓ 📱</span>
+                  >{agent.telegram_enabled ? '✓ 📱' : '⏸ 📱'}</span>
                 {/if}
               </button>
               <div class="agent-actions">
-                {#if !agent.telegram_enabled && onLinkAgentTelegram}
+                {#if !isTelegramConfigured(agent) && onLinkAgentTelegram}
                   <button
                     type="button"
                     class="telegram-action-btn link-btn"
@@ -881,6 +951,25 @@
         </select>
         <p class="dialog-hint">Primary language model used for agent conversations.</p>
 
+        <label for="agent-reasoning" class="dialog-label">Reasoning effort:</label>
+        <select id="agent-reasoning" class="dialog-input" bind:value={modelConfigReasoningEffort}>
+          <option value="">Not set — the model decides</option>
+          <option value="off">Off</option>
+          {#each modelConfigEffortOptions as w}
+            <option value={w.value}>{w.label}</option>
+          {/each}
+        </select>
+        <p class="dialog-hint">
+          How hard this agent thinks before answering. This is the level a chat header
+          means by "Agent config", and the one used when no chat overrides it. Leave it
+          unset and nothing is sent — the model applies its own default.
+          {#if modelConfigEffortWords}
+            The model chosen above accepts <strong>{modelConfigEffortWords.words.join(', ')}</strong>{#if modelConfigEffortWords.default}, defaulting to <strong>{modelConfigEffortWords.default}</strong>{/if} — read from the model itself, and the list offers exactly those. Change the model and the list changes with it; a level this agent already had that the new model does not know stays on the list, marked, until you replace it. Off is not one of the model's words: it is the switch that turns thinking off, and every provider takes it.
+          {:else}
+            This model names no words of its own, so the list is the shared scale and the provider folds it onto whatever its model can do. Off is the one value all of them accept.
+          {/if}
+        </p>
+
         <label for="sleep-llm" class="dialog-label">Sleep feature LLM:</label>
         <select id="sleep-llm" class="dialog-input" bind:value={modelConfigSleepProvider}>
           <option value="">Default (global)</option>
@@ -974,7 +1063,7 @@
     <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="telegram-dialog-title">
       <div class="dialog-header">
         <h3 id="telegram-dialog-title">
-          {agents.find(a => a.agent_id === linkingAgentId)?.telegram_enabled ? 'Edit Telegram Configuration' : 'Link Agent to Telegram'}
+          {linkingConfigured ? 'Edit Telegram Configuration' : 'Link Agent to Telegram'}
         </h3>
         <button
           type="button"
@@ -986,18 +1075,40 @@
         </button>
       </div>
       <div class="dialog-content">
-        {#if agents.find(a => a.agent_id === linkingAgentId)?.telegram_enabled}
-          <div class="existing-link-info">
-            <p class="dialog-info">
-              ✓ This agent is already linked to Telegram with {agents.find(a => a.agent_id === linkingAgentId)?.telegram_allowed_chat_ids?.length || 0} chat(s)
+        {#if linkingConfigured}
+          <div class="existing-link-info" class:paused={!linkingEnabled}>
+            <div class="link-state-row">
+              <p class="dialog-info link-state-text">
+                {#if linkingEnabled}
+                  ✓ Linked and running
+                {:else}
+                  ⏸ Linked but disabled — every setting below is kept
+                {/if}
+              </p>
+              {#if onSetAgentTelegramEnabled}
+                <button
+                  type="button"
+                  class="dialog-btn dialog-btn-toggle"
+                  onclick={handleToggleEnabledFromDialog}
+                  title={linkingEnabled
+                    ? 'Stop the bot and keep every setting'
+                    : 'Start the bot again with the settings it already has'}
+                >
+                  {linkingEnabled ? 'Disable' : 'Enable'}
+                </button>
+              {/if}
+            </div>
+            <p class="dialog-info small">
+              Chats: {#if linkingAgent?.telegram_allowed_chat_ids?.length}{#each linkingAgent.telegram_allowed_chat_ids as chatId}<span class="chat-id-chip">{chatId}</span>{/each}{:else}none{/if}
             </p>
             <p class="dialog-info small">
-              Linked at: {agents.find(a => a.agent_id === linkingAgentId)?.telegram_linked_at || 'Unknown'}
+              Linked at: {linkingAgent?.telegram_linked_at || 'Unknown'}
             </p>
           </div>
           <hr class="dialog-divider">
           <p class="dialog-info">
-            Update the configuration below or click "Unlink" to remove Telegram integration.
+            Update the configuration below, or click "Unlink" to remove Telegram integration
+            and its settings.
           </p>
         {:else}
           <p class="dialog-info">
@@ -1116,7 +1227,7 @@
           >
             Cancel
           </button>
-          {#if agents.find(a => a.agent_id === linkingAgentId)?.telegram_enabled}
+          {#if linkingConfigured}
             <button
               type="button"
               class="dialog-btn dialog-btn-unlink"
@@ -1131,7 +1242,7 @@
             onclick={confirmTelegramLink}
             disabled={!telegramBotToken.trim() || !telegramAllowedChatIds.trim()}
           >
-            {agents.find(a => a.agent_id === linkingAgentId)?.telegram_enabled ? 'Update Configuration' : 'Link Agent'}
+            {linkingConfigured ? 'Update Configuration' : 'Link Agent'}
           </button>
         </div>
       </div>
@@ -1955,6 +2066,17 @@
     cursor: not-allowed;
   }
 
+  .agent-effort {
+    font-size: 0.68rem;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--bg-tertiary, #2a2a2a);
+    color: var(--text-secondary, #999);
+    border: 1px solid var(--border-color, #3a3a3a);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
   .telegram-link-badge {
     font-size: 0.65rem;
     background: #0088cc;
@@ -2153,6 +2275,52 @@
   .dialog-btn-unlink {
     background: #d32f2f;
     color: white;
+  }
+  .dialog-btn-toggle {
+    background: #6d6d6d;
+    color: white;
+  }
+  .dialog-btn-toggle:hover {
+    background: #565656;
+  }
+  .link-state-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 0.75rem;
+    max-width: 100%;
+  }
+  .link-state-text {
+    margin: 0;
+    flex: 1 1 auto;
+    /* Without this a flex item refuses to shrink below its longest word, which
+       is what pushes a sibling out of the box. */
+    min-width: 0;
+  }
+  .link-state-row .dialog-btn-toggle {
+    /* width is spelled out because .dialog-btn is flex:1 for the footer row,
+       and a grown button here squeezes the sentence into one word per line. */
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 100%;
+    padding: 0.3rem 0.9rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+  .chat-id-chip {
+    display: inline-block;
+    background: rgba(0, 0, 0, 0.07);
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+    margin-right: 0.3rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .telegram-link-badge.paused {
+    background: #8a8a8a;
+  }
+  .existing-link-info.paused {
+    background: #f1f1f1;
   }
 
   .dialog-btn-unlink:hover {

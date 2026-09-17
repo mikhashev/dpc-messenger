@@ -2,9 +2,13 @@
 
 import json
 import logging
+import math
 import os
+import re
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Tuple, Any, Iterable, Optional, Set
+from typing import List, Dict, Mapping, Tuple, Any, Iterable, Optional, Set, Union
 import fnmatch
 from copy import deepcopy
 
@@ -74,6 +78,124 @@ def _known_tool_names() -> Optional[Set[str]]:
         return None
 
 
+# What this node serves, in two lists (ADR-041 D5). Each key is one constant
+# so a rename is one line. `serving_alias` is the deprecated single form,
+# folded into `serving_local` at load.
+SERVING_LOCAL_KEY = 'serving_local'
+SERVING_VENDOR_KEY = 'serving_vendor'
+VENDOR_QUOTAS_KEY = 'vendor_quotas'
+SERVING_ALIAS_KEY = 'serving_alias'
+
+# Which provider types may stand in which list, by the resource they spend:
+# a local type's is the card, a vendor type's is money and needs a ceiling.
+# The last two are somebody else's model and belong in neither (D7 part 1).
+LOCAL_PROVIDER_TYPES = frozenset({'ollama', 'llamacpp_server', 'local_whisper'})
+VENDOR_PROVIDER_TYPES = frozenset({
+    'openai_compatible', 'anthropic', 'zai', 'deepseek', 'gemini', 'github_models', 'gigachat',
+})
+UNSERVABLE_PROVIDER_TYPES = frozenset({'dpc_agent', 'remote_peer'})
+
+# The owner's tariff (ADR-041 D3, amendment): rates per 1M tokens in the
+# node's currency, dated per alias, and the subset of the allowed peers who
+# get them at zero. Beside the serving lists because they answer the next
+# question about the same aliases — what a call on them costs the caller.
+COMPUTE_CURRENCY_KEY = 'currency'
+SERVING_TARIFF_KEY = 'serving_tariff'
+FREE_NODES_KEY = 'free_nodes'
+FREE_GROUPS_KEY = 'free_groups'
+
+# ISO 4217 List One (current currencies and funds) as published by SIX, the
+# standard's maintenance agency: list-one.xml, Pblshd="2026-01-01", 178 codes.
+# Two of them are left out on purpose — XXX «no currency» and XTS «for
+# testing» are placeholders, not a unit an owner can price in. Fund codes
+# (BOV, CHE, …) and the X-codes for metals and units of account are kept: the
+# table says what the standard says, and the owner chooses.
+ISO_4217_CODES = frozenset((
+    'AED', 'AFN', 'ALL', 'AMD', 'AOA', 'ARS', 'AUD', 'AWG', 'AZN', 'BAM', 'BBD', 'BDT',
+    'BHD', 'BIF', 'BMD', 'BND', 'BOB', 'BOV', 'BRL', 'BSD', 'BTN', 'BWP', 'BYN', 'BZD',
+    'CAD', 'CDF', 'CHE', 'CHF', 'CHW', 'CLF', 'CLP', 'CNY', 'COP', 'COU', 'CRC', 'CUP',
+    'CVE', 'CZK', 'DJF', 'DKK', 'DOP', 'DZD', 'EGP', 'ERN', 'ETB', 'EUR', 'FJD', 'FKP',
+    'GBP', 'GEL', 'GHS', 'GIP', 'GMD', 'GNF', 'GTQ', 'GYD', 'HKD', 'HNL', 'HTG', 'HUF',
+    'IDR', 'ILS', 'INR', 'IQD', 'IRR', 'ISK', 'JMD', 'JOD', 'JPY', 'KES', 'KGS', 'KHR',
+    'KMF', 'KPW', 'KRW', 'KWD', 'KYD', 'KZT', 'LAK', 'LBP', 'LKR', 'LRD', 'LSL', 'LYD',
+    'MAD', 'MDL', 'MGA', 'MKD', 'MMK', 'MNT', 'MOP', 'MRU', 'MUR', 'MVR', 'MWK', 'MXN',
+    'MXV', 'MYR', 'MZN', 'NAD', 'NGN', 'NIO', 'NOK', 'NPR', 'NZD', 'OMR', 'PAB', 'PEN',
+    'PGK', 'PHP', 'PKR', 'PLN', 'PYG', 'QAR', 'RON', 'RSD', 'RUB', 'RWF', 'SAR', 'SBD',
+    'SCR', 'SDG', 'SEK', 'SGD', 'SHP', 'SLE', 'SOS', 'SRD', 'SSP', 'STN', 'SVC', 'SYP',
+    'SZL', 'THB', 'TJS', 'TMT', 'TND', 'TOP', 'TRY', 'TTD', 'TWD', 'TZS', 'UAH', 'UGX',
+    'USD', 'USN', 'UYI', 'UYU', 'UYW', 'UZS', 'VED', 'VES', 'VND', 'VUV', 'WST', 'XAD',
+    'XAF', 'XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XCD', 'XCG', 'XDR', 'XOF', 'XPD',
+    'XPF', 'XPT', 'XSU', 'XUA', 'YER', 'ZAR', 'ZMW', 'ZWG',
+))
+
+# `from` is a calendar day and nothing looser: `date.fromisoformat` would also
+# take `20260901`, which is not what a hand edit means to write.
+_ISO_DATE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def parse_iso_date(text: Any) -> Optional[date]:
+    """`YYYY-MM-DD` as a date, or None for anything else."""
+    if not isinstance(text, str) or not _ISO_DATE.match(text):
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class TariffEntry:
+    """One dated line of an alias's tariff: rates per 1M tokens from a day on."""
+    from_date: date
+    in_per_1m: float
+    out_per_1m: float
+
+
+@dataclass(frozen=True)
+class AppliedTariff:
+    """What a call is charged at: the entry that applied on its day, in the
+    node's currency. `at` is that entry's `from`, so a row can name which line
+    of the declaration priced it."""
+    in_per_1m: float
+    out_per_1m: float
+    currency: str
+    at: date
+
+
+def onward_sharing_refusal(key: str, alias: str, provider_type: Optional[str]) -> Optional[str]:
+    """Why `alias` may be served from neither door, or None (ADR-041 D7 part 1).
+
+    A `remote_peer` or `dpc_agent` alias is somebody else's model: sharing is
+    a permission between two nodes and does not travel, so what is shared is
+    not shared onward. One predicate and one sentence for the gateway
+    (`ContextFirewall.classify_serving_lists`) and the P2P door
+    (`P2PCoordinator.handle_inference_request`), because the door has no
+    registry when the rules are parsed and must ask at request time.
+    """
+    if provider_type in UNSERVABLE_PROVIDER_TYPES:
+        return (
+            f"compute.{key} names '{alias}', whose provider type is {provider_type}: somebody "
+            "else's model may not be shared onward (ADR-041 D7)"
+        )
+    return None
+
+
+@dataclass(frozen=True)
+class ServingLists:
+    """The two lists after classification: what the doors may serve."""
+    local: Tuple[str, ...]
+    vendor: Tuple[str, ...]
+    quotas: Dict[str, float]  # alias -> USD per day, per caller
+
+    def owner_of(self, alias: str) -> Optional[str]:
+        """`"local"`, `"vendor"`, or None for an alias in neither list."""
+        if alias in self.local:
+            return 'local'
+        if alias in self.vendor:
+            return 'vendor'
+        return None
+
+
 def _split_tool_setting(name: str) -> Optional[Tuple[str, str]]:
     """`run_shell_group_allowed` -> ('run_shell', 'group_allowed')."""
     for suffix in TOOL_SETTING_SUFFIXES:
@@ -132,22 +254,326 @@ class ContextFirewall:
         self.compute_allowed_nodes: List[str] = compute.get('allow_nodes', [])
         self.compute_allowed_groups: List[str] = compute.get('allow_groups', [])
         self.compute_allowed_models: List[str] = compute.get('allowed_models', [])
-        # The one alias this node serves peers from. The peer used to name the
-        # provider itself, which meant a peer could point us at a paid alias;
-        # the host designates it instead. Unset means we serve nobody — the
-        # opposite of `allowed_models`, where empty means all, so it is said out
-        # loud here rather than left to be discovered from behaviour.
-        self.compute_serving_alias: Optional[str] = compute.get('serving_alias') or None
-        logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d, serving_alias=%s",
+        # What this node serves, in two lists (ADR-041 D5). The peer used to
+        # name the provider itself, which meant a peer could point us at a paid
+        # alias; the host designates what is served instead. Empty lists mean
+        # we serve nobody — the opposite of `allowed_models`, where empty means
+        # all, so it is said out loud here rather than left to be discovered
+        # from behaviour. A malformed block is refused here with its reason,
+        # as invalid JSON is, rather than read as "share nothing".
+        errors = self._compute_list_errors(compute)
+        if errors:
+            raise ValueError("privacy_rules.json compute: " + "; ".join(errors))
+        local = [alias for alias in (compute.get(SERVING_LOCAL_KEY) or [])]
+        legacy = compute.get(SERVING_ALIAS_KEY) or None
+        if legacy and compute.get(SERVING_LOCAL_KEY) is None:
+            local = [legacy]
+            logger.warning(
+                "compute.%s is deprecated and was read as compute.%s = [%r]; move the "
+                "alias into the list in privacy_rules.json",
+                SERVING_ALIAS_KEY, SERVING_LOCAL_KEY, legacy,
+            )
+        self.compute_serving_local: List[str] = local
+        self.compute_serving_vendor: List[str] = list(compute.get(SERVING_VENDOR_KEY) or [])
+        self.compute_vendor_quotas: Dict[str, float] = {
+            alias: float(quota)
+            for alias, quota in (compute.get(VENDOR_QUOTAS_KEY) or {}).items()
+            if not alias.startswith('_')
+        }
+        # The tariff (ADR-041 D3, amendment). The shape was checked above; here
+        # it is only read. Entries stay in the order written — `tariff_for`
+        # sorts — and a free list is a subset of its allow list by the check
+        # above, so membership below needs no second look at the door.
+        self.compute_currency: Optional[str] = compute.get(COMPUTE_CURRENCY_KEY)
+        self.compute_serving_tariff: Dict[str, Tuple[TariffEntry, ...]] = {
+            alias: tuple(
+                TariffEntry(parse_iso_date(entry['from']), float(entry['in']), float(entry['out']))
+                for entry in entries
+            )
+            for alias, entries in (compute.get(SERVING_TARIFF_KEY) or {}).items()
+            if not alias.startswith('_')
+        }
+        self.compute_free_nodes: List[str] = list(compute.get(FREE_NODES_KEY) or [])
+        self.compute_free_groups: List[str] = list(compute.get(FREE_GROUPS_KEY) or [])
+        if self.compute_serving_tariff and self.compute_currency is None:
+            logger.warning(
+                "compute.%s names %d alias(es) but compute.%s is not set, so no tariff is "
+                "declared and every call is a gift (tariff null). Set the ISO 4217 code of the "
+                "unit the rates are in, in privacy_rules.json under compute.%s.",
+                SERVING_TARIFF_KEY, len(self.compute_serving_tariff), COMPUTE_CURRENCY_KEY,
+                COMPUTE_CURRENCY_KEY,
+            )
+        served = set(self.compute_serving_local) | set(self.compute_serving_vendor)
+        for alias in self.compute_serving_tariff:
+            if alias not in served:
+                logger.warning(
+                    "compute.%s prices '%s', which is in neither compute.%s nor compute.%s: the "
+                    "tariff is kept, but nothing is served at it until the alias is listed",
+                    SERVING_TARIFF_KEY, alias, SERVING_LOCAL_KEY, SERVING_VENDOR_KEY,
+                )
+        logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d, serving_local=%s, serving_vendor=%s",
                      self.compute_enabled, len(self.compute_allowed_nodes),
                      len(self.compute_allowed_groups), len(self.compute_allowed_models),
-                     self.compute_serving_alias)
+                     self.compute_serving_local, self.compute_serving_vendor)
         if self.compute_enabled and not self.compute_serving_alias:
             logger.warning(
-                "Compute sharing is enabled but no compute.serving_alias is set — "
-                "peer inference requests will be refused. Name the alias this node "
-                "should serve peers from in privacy_rules.json under compute.serving_alias."
+                "Compute sharing is enabled but compute.serving_local is empty (and the older "
+                "serving_alias unset) — peer inference requests will be refused. Name the alias "
+                "this node should serve peers from in privacy_rules.json under compute.serving_local."
             )
+
+    @property
+    def compute_serving_alias(self) -> Optional[str]:
+        """The one alias the P2P door serves peers from: the first local entry.
+
+        The two doors read one list. A one-entry `serving_local` — which is
+        what a folded `serving_alias` produces — leaves the peer path exactly
+        as it was.
+        """
+        return self.compute_serving_local[0] if self.compute_serving_local else None
+
+    @staticmethod
+    def _compute_list_errors(compute: Any) -> List[str]:
+        """Why a compute block's serving lists cannot be read, or nothing.
+
+        Shared by the load path (which refuses) and `validate_config` (which
+        refuses the save), so the UI and a hand edit are told the same thing.
+        Only the shape and the rules that need no provider registry live here;
+        classification by provider type is `classify_serving_lists`.
+        """
+        errors: List[str] = []
+        if not isinstance(compute, dict):
+            return errors
+
+        def aliases_in(key: str) -> List[str]:
+            value = compute.get(key)
+            if value is None:
+                return []
+            if not isinstance(value, list) or not all(isinstance(a, str) and a for a in value):
+                errors.append(f"'compute.{key}' must be a list of provider aliases (non-empty strings)")
+                return []
+            return value
+
+        local = aliases_in(SERVING_LOCAL_KEY)
+        vendor = aliases_in(SERVING_VENDOR_KEY)
+
+        quotas = compute.get(VENDOR_QUOTAS_KEY)
+        known_quotas: Dict[str, float] = {}
+        if quotas is not None:
+            if not isinstance(quotas, dict):
+                errors.append(f"'compute.{VENDOR_QUOTAS_KEY}' must be an object of alias -> USD per day per caller")
+            else:
+                for alias, quota in quotas.items():
+                    if alias.startswith('_'):
+                        continue
+                    if isinstance(quota, bool) or not isinstance(quota, (int, float)) or quota < 0:
+                        errors.append(
+                            f"'compute.{VENDOR_QUOTAS_KEY}.{alias}' must be a non-negative number of USD per day, got {quota!r}"
+                        )
+                    else:
+                        known_quotas[alias] = float(quota)
+
+        for alias in vendor:
+            if alias not in known_quotas:
+                errors.append(
+                    f"'{alias}' is in compute.{SERVING_VENDOR_KEY} with no ceiling in compute.{VENDOR_QUOTAS_KEY}: "
+                    "a vendor alias spends money and is refused without one (ADR-041 D5)"
+                )
+        for alias in local:
+            if alias in vendor:
+                errors.append(
+                    f"'{alias}' is in both compute.{SERVING_LOCAL_KEY} and compute.{SERVING_VENDOR_KEY}; an alias is bounded "
+                    "by the card or by money, not both"
+                )
+
+        legacy = compute.get(SERVING_ALIAS_KEY)
+        if legacy and compute.get(SERVING_LOCAL_KEY) is not None and isinstance(legacy, str):
+            if not local or local[0] != legacy:
+                errors.append(
+                    f"compute.{SERVING_ALIAS_KEY} = {legacy!r} disagrees with compute.{SERVING_LOCAL_KEY} = {local!r}; "
+                    f"the P2P door serves the first local entry, so put the alias first in the list and drop "
+                    f"{SERVING_ALIAS_KEY}"
+                )
+
+        errors.extend(ContextFirewall._tariff_errors(compute))
+        return errors
+
+    @staticmethod
+    def _tariff_errors(compute: Dict[str, Any]) -> List[str]:
+        """Why the tariff block cannot be read, or nothing (ADR-041 D3, amendment).
+
+        The currency is checked against the bundled ISO table and not only
+        its shape, so `XYZ` is refused with the same sentence as `rub`. A
+        free list must be a subset of its allow list: it distinguishes among
+        the admitted, it does not admit. An alias priced but not served is
+        not an error here — the load path warns about it.
+        """
+        errors: List[str] = []
+
+        currency = compute.get(COMPUTE_CURRENCY_KEY)
+        if currency is not None and (not isinstance(currency, str) or currency not in ISO_4217_CODES):
+            errors.append(
+                f"'compute.{COMPUTE_CURRENCY_KEY}' must be an ISO 4217 code — three upper-case letters "
+                f"from the standard's list, such as 'USD' or 'RUB' — got {currency!r}"
+            )
+
+        tariff = compute.get(SERVING_TARIFF_KEY)
+        if tariff is not None and not isinstance(tariff, dict):
+            errors.append(
+                f"'compute.{SERVING_TARIFF_KEY}' must be an object of alias -> list of dated entries "
+                "{from, in, out}"
+            )
+        elif tariff:
+            for alias, entries in tariff.items():
+                if alias.startswith('_'):
+                    continue
+                where = f"compute.{SERVING_TARIFF_KEY}.{alias}"
+                if not isinstance(entries, list):
+                    errors.append(f"'{where}' must be a list of dated entries {{from, in, out}}")
+                    continue
+                seen: Set[str] = set()
+                for index, entry in enumerate(entries):
+                    if not isinstance(entry, dict):
+                        errors.append(f"'{where}[{index}]' must be an object {{from, in, out}}, got {entry!r}")
+                        continue
+                    day = entry.get('from')
+                    if parse_iso_date(day) is None:
+                        errors.append(f"'{where}[{index}].from' must be an ISO date YYYY-MM-DD, got {day!r}")
+                    elif day in seen:
+                        errors.append(f"'{where}' has two entries from {day}; one day has one rate")
+                    else:
+                        seen.add(day)
+                    for field in ('in', 'out'):
+                        rate = entry.get(field)
+                        if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+                            errors.append(
+                                f"'{where}[{index}].{field}' must be a non-negative number per 1M tokens, "
+                                f"got {rate!r}"
+                            )
+                        elif not math.isfinite(rate):
+                            # `json.loads` reads the bare literals NaN, Infinity and
+                            # -Infinity, and NaN fails every comparison — `rate < 0`
+                            # below is False for it — so without this line a NaN rate
+                            # loads and every amount computed from it is NaN (Zcode,
+                            # 2026-09-10). -Infinity was refused by the sign check
+                            # alone; the other two were not.
+                            errors.append(
+                                f"'{where}[{index}].{field}' must be a finite number per 1M tokens, "
+                                f"got {rate!r}"
+                            )
+                        elif rate < 0:
+                            errors.append(
+                                f"'{where}[{index}].{field}' must be a non-negative number per 1M tokens, "
+                                f"got {rate!r}"
+                            )
+
+        for free_key, allow_key in ((FREE_NODES_KEY, 'allow_nodes'), (FREE_GROUPS_KEY, 'allow_groups')):
+            free = compute.get(free_key)
+            if free is None:
+                continue
+            if not isinstance(free, list) or not all(isinstance(entry, str) and entry for entry in free):
+                errors.append(f"'compute.{free_key}' must be a list of non-empty strings")
+                continue
+            allowed = compute.get(allow_key)
+            allowed = allowed if isinstance(allowed, list) else []
+            for entry in free:
+                if entry not in allowed:
+                    errors.append(
+                        f"'{entry}' is in compute.{free_key} but not in compute.{allow_key}: a free list "
+                        "distinguishes among the peers already allowed, it does not admit (ADR-041 D3)"
+                    )
+        return errors
+
+    def _is_free_for(self, peer_id: str) -> bool:
+        """In `free_nodes`, or in a group `free_groups` names — resolved the way
+        `can_request_inference` resolves the allow groups."""
+        if peer_id in self.compute_free_nodes:
+            return True
+        return any(group in self.compute_free_groups for group in self._get_groups_for_node(peer_id))
+
+    def tariff_for(self, alias: str, *, peer_id: str, at: Union[datetime, date]) -> Optional[AppliedTariff]:
+        """The tariff a call on `alias` by `peer_id` on the day of `at` is charged at.
+
+        None is «not declared» — no currency, or no entry for the alias whose
+        `from` is on or before the day — and the call is a gift. The newest
+        such entry applies; a free peer gets the same entry at zero, and only
+        then: with nothing declared a free peer gets None like everyone else,
+        because a free list says who pays nothing of a price, not that there
+        is one (ADR-041 D3, amendment). The day is taken in UTC, so a naive
+        moment is refused rather than read in whatever zone the process has.
+        """
+        if isinstance(at, datetime):
+            if at.tzinfo is None:
+                raise ValueError("tariff_for needs an aware moment; the day is taken in UTC")
+            day = at.astimezone(timezone.utc).date()
+        else:
+            day = at
+        if self.compute_currency is None:
+            return None
+        applicable = [entry for entry in self.compute_serving_tariff.get(alias, ()) if entry.from_date <= day]
+        if not applicable:
+            return None
+        entry = max(applicable, key=lambda e: e.from_date)
+        if self._is_free_for(peer_id):
+            return AppliedTariff(0.0, 0.0, self.compute_currency, entry.from_date)
+        return AppliedTariff(entry.in_per_1m, entry.out_per_1m, self.compute_currency, entry.from_date)
+
+    def classify_serving_lists(self, provider_types: Mapping[str, Optional[str]]) -> ServingLists:
+        """The two lists checked against what each alias's provider is.
+
+        `provider_types` maps alias -> provider `type` for the aliases that
+        are loaded. Every alias named in either list must be in it and must be
+        of a type its list can hold. Refused, with the reason, are an alias
+        that is somebody else's model — `remote_peer`, `dpc_agent` — in either
+        list (ADR-041 D7 part 1: what is shared is not shared onward), a
+        paying type under `serving_local`, a card type under `serving_vendor`,
+        a type the tables do not know, and an alias whose type this mapping
+        does not carry at all.
+
+        That last refusal is the one an earlier reading of this docstring got
+        wrong: an unloaded alias used to keep its place silently, and the
+        place is what `owner_of` answers from. So an empty registry — the
+        state at early start, before the providers are read — made every
+        alias «unknown», and a vendor alias misfiled under `serving_local`
+        then answered `owner_of == "local"`, was never asked for a quota, and
+        ran on the vendor's key (Ark's review of `11b1de5c`, 2026-09-14). The
+        class of an alias is what decides whether money bounds it, so an
+        unknown class is a refusal of that alias and not a pass; both callers
+        already turn the refusal into a shut door.
+        """
+        for key, aliases, allowed, other_key in (
+            (SERVING_LOCAL_KEY, self.compute_serving_local, LOCAL_PROVIDER_TYPES, SERVING_VENDOR_KEY),
+            (SERVING_VENDOR_KEY, self.compute_serving_vendor, VENDOR_PROVIDER_TYPES, SERVING_LOCAL_KEY),
+        ):
+            for alias in aliases:
+                provider_type = provider_types.get(alias)
+                if provider_type is None:
+                    raise ValueError(
+                        f"compute.{key} names '{alias}', whose provider is not loaded, so what "
+                        "bounds it — the card or a daily ceiling in dollars — cannot be "
+                        "established; it is refused rather than served on a guess (ADR-041 D5). "
+                        "Either the alias is absent from providers.json, or the registry is not "
+                        "up yet at this moment"
+                    )
+                refusal = onward_sharing_refusal(key, alias, provider_type)
+                if refusal:
+                    raise ValueError(refusal)
+                if provider_type in allowed:
+                    continue
+                if provider_type in LOCAL_PROVIDER_TYPES | VENDOR_PROVIDER_TYPES:
+                    raise ValueError(
+                        f"compute.{key} names '{alias}', a {provider_type} provider, which belongs under "
+                        f"compute.{other_key} (ADR-041 D5: the card and the vendor key are bounded differently)"
+                    )
+                raise ValueError(
+                    f"compute.{key} names '{alias}', whose provider type {provider_type!r} is classified as "
+                    "neither local nor vendor; it is refused rather than guessed at"
+                )
+        return ServingLists(
+            local=tuple(self.compute_serving_local),
+            vendor=tuple(self.compute_serving_vendor),
+            quotas=dict(self.compute_vendor_quotas),
+        )
 
     def log_compute_sharing_state(self, known_aliases: Optional[Iterable[str]] = None):
         """Say the compute-sharing posture once, where the log can hear it.
@@ -166,9 +592,9 @@ class ContextFirewall:
             logger.info("Compute sharing: disabled")
         elif not self.compute_serving_alias:
             logger.warning(
-                "Compute sharing is enabled but no compute.serving_alias is set — "
-                "peer inference requests will be refused. Name the alias this node "
-                "should serve peers from in privacy_rules.json under compute.serving_alias."
+                "Compute sharing is enabled but compute.serving_local is empty (and the older "
+                "serving_alias unset) — peer inference requests will be refused. Name the alias "
+                "this node should serve peers from in privacy_rules.json under compute.serving_local."
             )
         elif known_aliases is not None and self.compute_serving_alias not in set(known_aliases):
             # A name that resolves to nothing used to read like a name that
@@ -177,7 +603,7 @@ class ContextFirewall:
             # arrive only when a peer asked. Observed 2026-08-21 with
             # `serving_alias` still naming an Ollama alias deleted hours before.
             logger.warning(
-                "Compute sharing is enabled and compute.serving_alias names '%s', which is "
+                "Compute sharing is enabled and compute.serving_local names '%s' first, which is "
                 "not a configured provider — peers are told this node offers nothing, and a "
                 "request that does arrive is refused on the missing alias. Point it at a "
                 "live alias in privacy_rules.json, or turn compute.enabled off.",
@@ -197,6 +623,11 @@ class ContextFirewall:
         self.transcription_allowed_nodes: List[str] = transcription.get('allow_nodes', [])
         self.transcription_allowed_groups: List[str] = transcription.get('allow_groups', [])
         self.transcription_allowed_models: List[str] = transcription.get('allowed_models', [])
+        # The other direction. Letting a peer use our Whisper says nothing about
+        # whether our own microphone may leave this machine, so the outgoing
+        # permission is its own list and defaults to empty.
+        self.transcription_send_to_nodes: List[str] = transcription.get('send_to_nodes', [])
+        self.transcription_send_to_groups: List[str] = transcription.get('send_to_groups', [])
         logger.debug("Transcription sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
                      self.transcription_enabled, len(self.transcription_allowed_nodes),
                      len(self.transcription_allowed_groups), len(self.transcription_allowed_models))
@@ -822,11 +1253,6 @@ class ContextFirewall:
             return profiles[profile_name].copy()
         return None
 
-    def get_agent_web_auth_domains(self, agent_id: str) -> list:
-        """Return the list of allowed web-auth domains for an agent profile."""
-        profile = self.rules.get('agent_profiles', {}).get(agent_id, {})
-        return profile.get('web_auth', {}).get('allowed_domains', [])
-
     def get_agent_permissions_summary(self, agent_id: str = "agent_001") -> Dict[str, Any]:
         """
         Get a complete permissions summary for an agent — for UI transparency.
@@ -1003,21 +1429,31 @@ class ContextFirewall:
                     "personal": ["personal.json", "hobbies.json"]
                 },
                 "compute": {
-                    "_comment": "Compute sharing settings - Allow peers to run AI inference on your GPU/CPU",
+                    "_comment": "Inference sharing settings - Share this node's models with peers (its peer door and its own aliases on the loopback gateway). Asking a peer for inference does not need it. With enabled false neither door serves this node's own aliases, whatever serving_local and serving_vendor name, while a peer's remote:<node_id>:<alias> stays callable on the gateway; the gateway also needs [gateway] enabled = true in config.ini, so this node's own aliases are served only when both are on. Peers' prompts arrive on this machine in plaintext when served, and this application shows, stores and logs none of them (ADR-041 D7, amendment 2026-09-14).",
                     "enabled": False,
                     "allow_groups": [],
                     "allow_nodes": [],
                     "_allowed_models": "Empty = every model. Since the host designates serving_alias, this list can only refuse a peer that names a model; it never chooses one. A non-empty list that does not contain the serving alias's own model makes this node advertise nothing and refuse everything.",
                     "allowed_models": [],
-                    "_serving_alias": "The one provider alias peers are served from; a peer naming any other is refused. Empty = share nothing (the opposite of allowed_models, where empty = all).",
-                    "serving_alias": None
+                    "_serving_alias": "Deprecated single form of serving_local, still read. What this node serves is serving_local (aliases on this machine; the first is what peers get) and serving_vendor (paid APIs, each needing a USD-per-day ceiling in vendor_quotas). Empty = share nothing (the opposite of allowed_models, where empty = all).",
+                    "serving_alias": None,
+                    "_currency": "ISO 4217 code of the unit the tariff below is priced in, e.g. \"USD\" or \"RUB\". Null = no tariff declared: every call served is a gift, whatever serving_tariff says.",
+                    "currency": None,
+                    "_serving_tariff": "Rates per 1M input / output tokens, in currency, dated per alias: {\"alias\": [{\"from\": \"2026-09-01\", \"in\": 20, \"out\": 60}]}. The newest entry on or before the call's day (UTC) applies; an alias with no entry is a gift.",
+                    "serving_tariff": {},
+                    "_free_nodes": "Peers among allow_nodes / allow_groups who get the tariff at zero. Each entry must also be in the matching allow list: these lists distinguish, they do not admit.",
+                    "free_nodes": [],
+                    "free_groups": []
                 },
                 "transcription": {
                     "_comment": "Transcription sharing settings - Allow peers to use your Whisper model for voice transcription",
                     "enabled": False,
                     "allow_groups": [],
                     "allow_nodes": [],
-                    "allowed_models": ["openai/whisper-large-v3", "openai/whisper-medium"]
+                    "allowed_models": ["openai/whisper-large-v3", "openai/whisper-medium"],
+                    "_send_to": "The other direction: peers this node may send its OWN audio to when local transcription fails. Empty = never, and an automatic fallback is the only thing that reads these — a peer chosen by hand as 'remote:node:alias' is consent in itself and bypasses them.",
+                    "send_to_nodes": [],
+                    "send_to_groups": []
                 },
                 "nodes": {
                     "_comment": "Per-node access rules - Most specific, overrides group rules. Add entries like: \"dpc-node-xxxx\": {\"personal.json:profile.*\": \"allow\"}"
@@ -1556,6 +1992,29 @@ class ContextFirewall:
         # Not authorized
         return False
 
+    def can_send_audio_to(self, peer_node_id: str) -> bool:
+        """May this node hand its own audio to that peer to be transcribed?
+
+        The opposite direction from `can_request_transcription`, and a separate
+        list on purpose: a node that shares its Whisper with a friend has not
+        thereby agreed that its own microphone may leave the machine.
+
+        Empty lists mean never, and that is the whole safety of the automatic
+        fallback built on this: a chain that defaulted to "any connected peer"
+        would put a voice message on somebody else's disk on the strength of a
+        failed model load. A peer named by hand — the `remote:node:alias`
+        spelling — does not come through here at all, because choosing it is
+        the consent.
+        """
+        if peer_node_id in self.transcription_send_to_nodes:
+            return True
+
+        for group in self._get_groups_for_node(peer_node_id):
+            if group in self.transcription_send_to_groups:
+                return True
+
+        return False
+
     def get_available_models_for_peer(self, requester_node_id: str, all_models: List[str]) -> List[str]:
         """
         Returns the list of models that a peer is allowed to use.
@@ -1778,6 +2237,8 @@ class ContextFirewall:
                             and not isinstance(compute['serving_alias'], str):
                         errors.append("'compute.serving_alias' must be a provider alias (a string) or null")
 
+                    errors.extend(ContextFirewall._compute_list_errors(compute))
+
             # Validate transcription section
             if 'transcription' in config_dict:
                 transcription = config_dict['transcription']
@@ -1795,6 +2256,12 @@ class ContextFirewall:
 
                     if 'allowed_models' in transcription and not isinstance(transcription['allowed_models'], list):
                         errors.append("'transcription.allowed_models' must be a list")
+
+                    if 'send_to_nodes' in transcription and not isinstance(transcription['send_to_nodes'], list):
+                        errors.append("'transcription.send_to_nodes' must be a list")
+
+                    if 'send_to_groups' in transcription and not isinstance(transcription['send_to_groups'], list):
+                        errors.append("'transcription.send_to_groups' must be a list")
 
             # Validate nodes section
             if 'nodes' in config_dict:

@@ -228,7 +228,17 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     sections = []
 
     scratchpad_raw = memory.load_scratchpad()
-    sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000))
+    scratchpad_shown = clip_text(scratchpad_raw, 90000)
+    scratchpad_section = "## Scratchpad\n\n" + scratchpad_shown
+    if scratchpad_shown != scratchpad_raw:
+        scratchpad_section += (
+            "\n\n> **This scratchpad is incomplete.** Only its first and last part are "
+            f"above; the middle is missing. The whole file is {len(scratchpad_raw)} "
+            f"characters at {memory.scratchpad_path()}. A question about what lies "
+            "between the two ends cannot be answered from this section — read the file "
+            "directly (read_file, with offset/limit)."
+        )
+    sections.append(scratchpad_section)
 
     # Morning brief injection (ADR-014 Sleep Consolidation)
     try:
@@ -879,6 +889,21 @@ def _build_dpc_context_section(dpc_context: Dict[str, Any]) -> str:
     return ""
 
 
+# There is deliberately no «How to Use Tools» section in the prompt below, and the
+# absence is the fix for 2026-09-03.
+#
+# A provider with a tools API never parses a ```tool_call block: the call comes back
+# in its own field. A provider without one gets the format instructions from
+# `llm_adapter._format_tools_for_prompt`, injected at each of the three text paths
+# (llm_adapter.py:251, :433, :716) beside the prompt they build. So the section here
+# was duplication on the text path and a contradiction on the native one — the model
+# was handed schemas through the API and, in the same request, a sentence telling it
+# to write the call as text instead. It did, in a group chat, together with two
+# invented [TOOL RESULT:] sections carrying an absolute path under the user's home.
+#
+# Keeping it out of here also keeps this prompt byte-identical across providers,
+# which is what lets every agent share one cached prefix (static_text, ttl 1h).
+# Making the section conditional would have split that prefix in two.
 def _default_system_prompt() -> str:
     """Return default system prompt for the agent (v2)."""
     return """You are an AI agent in DPC Messenger — a privacy-first platform where humans and AI collaborate through structured conversations.
@@ -916,21 +941,6 @@ You may operate in a P2P network where compute resources are shared. When releva
 - Coordinate with available peers for complex tasks
 - Respect resource limits of shared compute
 - Acknowledge when a task requires more resources than available locally
-
-## How to Use Tools
-
-When you want to use a tool, output a code block like:
-```tool_call
-{"name": "tool_name", "arguments": {"arg1": "value1"}}
-```
-
-**Rules:**
-- Output the ```tool_call block DIRECTLY, without any preceding explanation text
-- Do NOT use `<tool_call>`, `(tool_call)`, or any XML/HTML format
-- The JSON must have exactly `"name"` and `"arguments"` keys
-- Do NOT write the tool name outside the JSON (e.g. `tool_name>{...}` is WRONG)
-
-Available tools are listed in your context. Use them to accomplish tasks.
 
 ## Memory Management
 

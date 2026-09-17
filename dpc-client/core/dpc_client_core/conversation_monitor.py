@@ -19,6 +19,7 @@ from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSour
 
 from . import knowledge_routing
 from . import conversation_paths
+from .p2p_manager import peer_proof
 
 
 def chain_hash_for(message: Dict[str, Any], prev_hash: str) -> str:
@@ -46,7 +47,96 @@ def rechain(messages: List[Dict[str, Any]]) -> None:
         prev_hash = m["chain_hash"]
 
 
-def digest_for(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+def attachment_matches(att: Dict[str, Any], filename: Optional[str],
+                       size_bytes: Optional[int], file_hash: Optional[str]) -> bool:
+    """Same file: same name, then the hash when both sides have a real one,
+    else the size. A sender's own record carries neither hash nor transfer id
+    — only what it pasted — so the size is what it can be matched on."""
+    if not filename or att.get("filename") != filename:
+        return False
+    mine = att.get("hash")
+    if mine and mine != "none" and file_hash and file_hash != "none":
+        return mine == file_hash
+    return att.get("size_bytes") == size_bytes
+
+
+def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold what a completed transfer knows into the sender's attachment.
+
+    Path, hash, transfer id and status are the transfer's; a thumbnail or
+    dimensions the sender's copy already carries are kept.
+    """
+    for key in ("file_path", "hash", "transfer_id", "size_mb", "size_bytes",
+                "status", "mime_type", "voice_metadata"):
+        value = source.get(key)
+        if value in (None, ""):
+            continue
+        if key == "hash" and value == "none" and target.get("hash"):
+            continue
+        target[key] = value
+    for key in ("thumbnail", "dimensions"):
+        if not target.get(key) and source.get(key):
+            target[key] = source[key]
+    return target
+
+
+def _local_node_id_from_disk() -> Optional[str]:
+    """This node's id as the identity file states it, or None when there is none.
+
+    The free digest path has no roster to read the local node id off, but it
+    has the same disk `peek_group_messages` reads the history from. Read at
+    call time and not cached, for the reason `signing.py` gives: tests point
+    `Path.home()` at their own directory, and a module-level cache filled by an
+    earlier test hands the next one the wrong identity.
+    """
+    try:
+        path = Path.home() / ".dpc" / "node.id"
+        if not path.exists():
+            return None
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError as exc:  # an unreadable identity file is not a crash
+        logger.debug("Could not read node.id: %s", exc)
+        return None
+
+
+def is_local_file_note(record: Dict[str, Any], local_node_id: Optional[str]) -> bool:
+    """A record this node wrote *about* a peer's file: attributed to the peer,
+    signed by us.
+
+    The one predicate for that shape, so the export and the digest cannot
+    disagree about it: a record the export refuses to ship must not be
+    advertised either, or the peer asks for a hash nobody can deliver and the
+    difference never closes.
+
+    With no `local_node_id` nothing is a note: two of the three parts of the
+    shape are "signed by us" and "not authored by us", so without knowing who
+    we are, a peer's genuine record is indistinguishable from our note about
+    it, and filtering on a guess would drop real history from both sides.
+
+    The third part is the file. "Signed by us, attributed to somebody else" is
+    also what this node stores for a message it did not write but did have to
+    sign: one bridged in from Telegram, which `telegram_coordinator` attributes
+    to `telegram-bot-<chat_id>`, and a peer's group message that arrived
+    unsigned or under a preimage this build cannot recompute, which
+    `group_handler._authenticate_author` hands on with no signature fields.
+    Neither says anything about a file and neither carries an attachment, so
+    the attachment is what tells them from a note — `_drop_local_file_note`
+    already matches on one, and a note with no attachment would be a note about
+    nothing.
+
+    It does not separate a note from a *bridged* message that carries a file;
+    by shape those are the same record, and only a mark made where the note is
+    written can part them. `note_local_file_record` is that mark and is not
+    enough on its own: it lives in memory, so it is empty after a restart, and
+    `file_transfer_manager` fills it for group transfers only.
+    """
+    return bool(local_node_id) and record.get("signer_node_id") == local_node_id \
+        and record.get("sender_node_id") not in (None, local_node_id) \
+        and bool(record.get("attachments"))
+
+
+def digest_for(messages: List[Dict[str, Any]],
+               local_node_id: Optional[str] = None) -> Dict[str, Any]:
     """Per-author counts and digests over a message list.
 
     A free function so a node can advertise what it holds without loading the
@@ -55,9 +145,17 @@ def digest_for(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     produce a digest falls back to comparing chain tips — a comparison that
     never matches between two honest nodes, because the tip covers arrival
     order and the per-reader `role`.
+
+    Records `export_history` will never ship are left out; see
+    `is_local_file_note`. `local_node_id` names this node, and when it is
+    omitted the identity file answers — so a caller holding only a list of
+    messages filters exactly as a loaded monitor does.
     """
+    local = local_node_id if local_node_id is not None else _local_node_id_from_disk()
     by_author: Dict[str, List[str]] = {}
     for msg in messages:
+        if is_local_file_note(msg, local):
+            continue
         author = msg.get("sender_node_id") or ""
         key = msg.get("content_hash") or f"id:{msg.get('id', '')}"
         by_author.setdefault(author, []).append(key)
@@ -241,7 +339,12 @@ def _write_history_messages(
     except OSError as exc:
         logger.warning("Could not update the chain anchor beside %s: %s", path, exc)
 from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
-from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
+from dpc_protocol.message_signing import (
+    LEGACY_PREIMAGE_VERSIONS,
+    PREIMAGE_VERSION,
+    digest_of_tool_calls,
+    message_content_hash,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +366,9 @@ class Message:
     # signs everything with the local key on the way to disk, and a checked
     # signature is replaced by the checker's own.
     signature_fields: Optional[Dict[str, Any]] = None
+    # Inside the signing preimage: an agent's tool calls set after signing
+    # produce a record whose hash every peer recomputes differently.
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
 
 class ConversationMonitor:
@@ -288,6 +394,7 @@ class ConversationMonitor:
         auto_detect: bool = False,  # Legacy parameter, always False (CLEAN-4: auto-detection removed)
         instruction_set_name: str = "general",  # NEW: Which instruction set to use for this conversation
         display_name: str = None,  # Human-readable name appended to folder (e.g. "Work", "Mike MacOS")
+        p2p_manager = None,  # Optional P2PManager, for peer_proof() before retrying a fallback on a peer
     ):
         """Initialize conversation monitor
 
@@ -302,6 +409,12 @@ class ConversationMonitor:
             auto_detect: Legacy parameter, always False. Messages are buffered for manual extraction only (CLEAN-4).
             instruction_set_name: Key of the instruction set to use for AI queries in this conversation (default: "general")
             display_name: Optional human-readable label appended to the conversation folder name for easy navigation
+            p2p_manager: Optional P2PManager. When given, a local-inference
+                         failure is not retried on a peer that is not on a
+                         proved connection (THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+                         When None, that check is skipped and the retry behaves
+                         as it always did — the monitor cannot fake a check it
+                         has no way to make.
         """
         self.conversation_id = conversation_id
         self.display_name = display_name
@@ -312,6 +425,13 @@ class ConversationMonitor:
         self.ai_query_func = ai_query_func  # Enables both local and remote inference
         self.auto_detect = auto_detect  # Controls automatic detection vs manual-only
         self.instruction_set_name = instruction_set_name  # NEW: Track instruction set for this conversation
+        self.p2p_manager = p2p_manager  # For peer_proof() — may be None, see __init__ docstring
+
+        # What the last knowledge-extraction fallback did, for the caller to
+        # announce (KnowledgeService reads this after generate_commit_proposal()
+        # the same way it reads last_consolidation). None when the extraction's
+        # primary call succeeded outright, or never ran.
+        self.last_compute_refusal: Optional[Dict[str, Any]] = None
 
         # Message buffer
         self.message_buffer: List[Message] = []  # Cleared after each extraction (for incremental auto-detect)
@@ -340,9 +460,13 @@ class ConversationMonitor:
         # Conversation history tracking (Phase 7: Conversation History)
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
         self.message_ids: Set[str] = set()  # Track unique message IDs for deduplication
+        self.last_merge_rejected: List[Dict[str, Any]] = []  # what the last merge_history refused
         self._history_dirty: bool = False  # Track unsaved changes
         self._signer = None  # Lazy-loaded CommitSigner for message signing
         self._chain_rebuilt = False  # One-time local repair of a pre-local chain
+        # Ids of «Received file» notes this node wrote for a peer's transfer,
+        # to be dropped when the peer's own record of that file arrives.
+        self._local_file_notes: set = set()
         # What the last folder consolidation did, for the caller to announce.
         self.last_consolidation: Dict[str, Any] = {"merged": 0}
         self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
@@ -426,6 +550,7 @@ class ConversationMonitor:
                         timestamp=timestamp, sender_node_id=sender_node_id,
                         sender_name=sender_name, message_id=message.message_id,
                         sender_type=sender_type, agent_owner=agent_owner,
+                        tool_calls=getattr(message, "tool_calls", None),
                         signature_fields=getattr(message, "signature_fields", None))
         logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
 
@@ -528,6 +653,52 @@ class ConversationMonitor:
                 getattr(self.llm_manager, "providers", None) or {}, configured)
         except knowledge_routing.NoKnowledgeProvider:
             return None
+
+    def _check_peer_proof(self, peer_id: str) -> tuple[Optional[bool], Optional[str]]:
+        """Whether `peer_id`'s P2P connection is proved, via the p2p_manager
+        this monitor was built with.
+
+        `(None, None)` both when there is no connection to read (see
+        `p2p_manager.peer_proof`) and when this monitor has no p2p_manager at
+        all — the two are not the same thing, but callers must treat both the
+        same way: "cannot tell", never "proved False". Only an explicit
+        `False` licenses skipping a retry.
+        """
+        if self.p2p_manager is None:
+            return None, None
+        return peer_proof(getattr(self.p2p_manager, "peers", None), peer_id)
+
+    def _note_compute_fallback(
+        self,
+        *,
+        node_id: Optional[str],
+        requested_alias: Optional[str],
+        reason: str,
+        fallback_alias: str,
+    ) -> None:
+        """Record that a compute call was refused and knowledge extraction
+        proceeded anyway on `fallback_alias` — the retry is the right call
+        (extraction keeps working), but the refusal must not become invisible
+        just because the retry succeeded.
+
+        Read by KnowledgeService after generate_commit_proposal() returns
+        (same pattern as `last_consolidation`) and turned into an event for
+        the UI. One helper, called from both `_calculate_knowledge_score` and
+        `_generate_commit_proposal`, so a third copy of this block cannot
+        silently drift from the other two (THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+        """
+        self.last_compute_refusal = {
+            "conversation_id": self.conversation_id,
+            "node_id": node_id,
+            "requested_alias": requested_alias,
+            "reason": reason,
+            "fallback_alias": fallback_alias,
+        }
+        logger.info(
+            "Monitor %s: knowledge extraction fell back from %s (%s) to '%s' — "
+            "the extraction still ran, but the refusal is not silent",
+            self.conversation_id, node_id or "peer", reason, fallback_alias,
+        )
 
     def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
         """Who extracts this conversation, as a chain — see `knowledge_routing`.
@@ -1029,25 +1200,46 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                                 provider=local_retry
                             )
                             response = result["response"]
+                            # The retry is right — extraction still ran — but a
+                            # peer's refusal (D2) must not read back as a plain
+                            # success with nothing saying the peer refused.
+                            self._note_compute_fallback(
+                                node_id=compute_host,
+                                requested_alias=provider,
+                                reason=str(primary_error),
+                                fallback_alias=local_retry,
+                            )
                             primary_error = None  # Success! Clear error
                         except Exception as local_error:
                             logger.error("Local inference fallback also failed: %s", local_error)
 
-                    # Case 2: Local failed (or wasn't configured), try remote as fallback for peer conversations
+                    # Case 2: Local failed (or wasn't configured), try remote as fallback for peer conversations.
+                    # Skip the peer entirely when it is known not to be on a proved
+                    # connection — the host now refuses an unproved tier (D2), so
+                    # dialling it only spends a round trip on a call that was
+                    # always going to be refused, logged as a misleading ERROR.
                     elif not compute_host and self.conversation_id.startswith("dpc-node-"):
-                        logger.warning("Local inference failed, trying remote inference as fallback: %s", primary_error)
-                        fallback_attempted = True
-                        try:
-                            result = await self.ai_query_func(
-                                prompt=prompt,
-                                compute_host=self.conversation_id,  # Try peer compute
-                                model=self.last_model,
-                                provider=None
+                        proved, tier = self._check_peer_proof(self.conversation_id)
+                        if proved is False:
+                            logger.info(
+                                "Not retrying peer %s for knowledge extraction — connection "
+                                "is not proved (tier=%s), the host would refuse it: %s",
+                                self.conversation_id, tier, primary_error,
                             )
-                            response = result["response"]
-                            primary_error = None  # Success! Clear error
-                        except Exception as remote_error:
-                            logger.error("Remote inference fallback also failed: %s", remote_error)
+                        else:
+                            logger.warning("Local inference failed, trying remote inference as fallback: %s", primary_error)
+                            fallback_attempted = True
+                            try:
+                                result = await self.ai_query_func(
+                                    prompt=prompt,
+                                    compute_host=self.conversation_id,  # Try peer compute
+                                    model=self.last_model,
+                                    provider=None
+                                )
+                                response = result["response"]
+                                primary_error = None  # Success! Clear error
+                            except Exception as remote_error:
+                                logger.error("Remote inference fallback also failed: %s", remote_error)
 
                     # If no fallback attempted or both failed, raise original error
                     if primary_error:
@@ -1362,27 +1554,46 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                                 provider=local_retry
                             )
                             response = inference_result["response"]
+                            # Same shape as _calculate_knowledge_score's copy of this
+                            # block — a papered-over peer refusal must not go silent
+                            # here either (THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+                            self._note_compute_fallback(
+                                node_id=compute_host,
+                                requested_alias=provider,
+                                reason=str(primary_error),
+                                fallback_alias=local_retry,
+                            )
                             primary_error = None  # Success! Clear error
                         except Exception as local_error:
                             logger.error("Local inference fallback also failed: %s", local_error)
 
                     # Case 2: Local failed (or wasn't configured), try remote as fallback
-                    # Works for peer conversations (dpc-node-) and group conversations (last_compute_host set)
+                    # Works for peer conversations (dpc-node-) and group conversations (last_compute_host set).
+                    # Skipped when the target is known not to be on a proved
+                    # connection — see the matching comment in _calculate_knowledge_score.
                     elif not compute_host and (self.conversation_id.startswith("dpc-node-") or self.last_compute_host):
                         remote_host = self.last_compute_host or self.conversation_id
-                        logger.warning("Local inference failed, trying remote compute %s as fallback: %s", remote_host[:20], primary_error)
-                        fallback_attempted = True
-                        try:
-                            inference_result = await self.ai_query_func(
-                                prompt=prompt,
-                                compute_host=remote_host,
-                                model=self.last_model,
-                                provider=None
+                        proved, tier = self._check_peer_proof(remote_host)
+                        if proved is False:
+                            logger.info(
+                                "Not retrying %s for knowledge extraction — connection is not "
+                                "proved (tier=%s), the host would refuse it: %s",
+                                remote_host[:20], tier, primary_error,
                             )
-                            response = inference_result["response"]
-                            primary_error = None  # Success! Clear error
-                        except Exception as remote_error:
-                            logger.error("Remote inference fallback also failed: %s", remote_error)
+                        else:
+                            logger.warning("Local inference failed, trying remote compute %s as fallback: %s", remote_host[:20], primary_error)
+                            fallback_attempted = True
+                            try:
+                                inference_result = await self.ai_query_func(
+                                    prompt=prompt,
+                                    compute_host=remote_host,
+                                    model=self.last_model,
+                                    provider=None
+                                )
+                                response = inference_result["response"]
+                                primary_error = None  # Success! Clear error
+                            except Exception as remote_error:
+                                logger.error("Remote inference fallback also failed: %s", remote_error)
 
                     # If no fallback attempted or both failed, raise original error
                     if primary_error:
@@ -1806,7 +2017,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # here is how a checked signature became the checker's own, which
             # is why signer_node_id used to name whoever stored the message
             # rather than whoever wrote it.
-            for field in ("content_hash", "signature", "signer_node_id", "preimage_version"):
+            for field in ("content_hash", "signature", "signer_node_id",
+                          "preimage_version", "tool_calls_digest"):
                 if signature_fields.get(field):
                     message_dict[field] = signature_fields[field]
         else:
@@ -1826,6 +2038,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 content=content,
                 tool_calls=tool_calls,
             )
+            # The value the preimage actually covers under v2. Stored, because a
+            # peer receives this and never the calls themselves (ADR-042).
+            message_dict["tool_calls_digest"] = digest_of_tool_calls(tool_calls)
             signer = self._get_signer()
             if signer:
                 message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
@@ -1946,6 +2161,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self.message_buffer = [
             m for m in self.message_buffer if m.message_id in kept_ids
         ]
+        self.rebuild_message_ids()
         self._history_dirty = True
         self.save_history()
         logger.info(
@@ -1978,10 +2194,20 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         proven, and claiming them would refuse honest voters forever.
         """
         by_id = {}
+        unprovable = 0
         for stored in self.message_history:
             content_hash = stored.get("content_hash")
-            if content_hash:
-                by_id[stored.get("id")] = content_hash
+            if not content_hash:
+                continue
+            if not self._hash_matches_record(stored):
+                unprovable += 1
+                continue
+            by_id[stored.get("id")] = content_hash
+        if unprovable:
+            logger.info(
+                "Window: left out %d record(s) whose stored hash does not recompute "
+                "(conversation %s)", unprovable, self.conversation_id,
+            )
 
         seen = set()
         window = []
@@ -1994,6 +2220,45 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 seen.add(content_hash)
                 window.append(content_hash)
         return window
+
+    def _hash_matches_record(self, stored: Dict[str, Any]) -> bool:
+        """Can a peer verify this record from the record itself?
+
+        A record signed before its `tool_calls` were stored carries a hash taken
+        without them, so every receiver recomputes a different value and refuses
+        it. Naming such a record in a window asks voters for something no honest
+        node can hold.
+        """
+        content_hash = stored.get("content_hash")
+        if not content_hash:
+            return False
+        return any(
+            content_hash == self._recompute_hash(stored, room)
+            for room in self._room_candidates()
+        )
+
+    def _recompute_hash(self, record: Dict[str, Any], room: str) -> str:
+        """The record's own hash, under the preimage version it declares.
+
+        A v1 record is covered over its tool calls and a v2 record over their
+        digest, so the version has to be read from the record rather than
+        assumed — a verifier that assumes the current one rejects every record
+        written before it.
+        """
+        version = record.get("preimage_version") or LEGACY_PREIMAGE_VERSIONS[0]
+        return message_content_hash(
+            conversation_id=room,
+            message_id=record.get("id"),
+            sender_node_id=record.get("sender_node_id"),
+            sender_name=record.get("sender_name"),
+            sender_type=record.get("sender_type"),
+            agent_owner=record.get("agent_owner"),
+            timestamp=record.get("timestamp"),
+            content=record.get("content") or "",
+            tool_calls=record.get("tool_calls"),
+            tool_calls_digest=record.get("tool_calls_digest"),
+            version=version,
+        )
 
     def get_last_msg_index(self) -> int:
         if self.message_history:
@@ -2231,46 +2496,48 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             List of attachment dicts with remapped file_path (if file exists locally)
         """
         import os
-        from pathlib import Path
 
-        # Construct local files directory: ~/.dpc/conversations/{peer_id}/files/
-        dpc_home = Path.home() / ".dpc"
-        local_files_dir = dpc_home / "conversations" / self.conversation_id / "files"
+        # The folder in use, not a folder named after the id: a group store is
+        # `{id}-{slug}` when it has a name, and images land one level deeper.
+        # Resolved from the bare id, this looked in a folder that did not exist
+        # and left every synced screenshot pointing at the sender's disk.
+        conv_dir = self._get_conversation_dir()
+        subdirs = (conv_dir / "files" / "screenshots", conv_dir / "files")
 
         remapped = []
         for attachment in attachments:
-            # Make a copy to avoid modifying original
             att = dict(attachment)
-
-            # Check if this attachment has a file_path (voice/file attachments)
-            if "file_path" in att and att["file_path"]:
-                peer_path = att["file_path"]
-
-                # Extract filename from peer's path (cross-platform)
-                # Handle both Unix (/) and Windows (\) separators
-                filename = os.path.basename(peer_path.replace("\\", "/"))
-
-                # Construct local path: ~/.dpc/conversations/{peer_id}/files/{filename}
-                local_file_path = local_files_dir / filename
-
-                # Check if file exists locally
-                if local_file_path.exists():
-                    # Replace with local path
-                    att["file_path"] = str(local_file_path)
-                    logger.debug(f"Remapped attachment path: {peer_path} -> {local_file_path}")
-                else:
-                    # File doesn't exist locally - keep peer's path but log warning
-                    logger.warning(
-                        f"Voice/file attachment not found locally: {filename}. "
-                        f"Expected at {local_file_path}. Voice message may not play."
-                    )
-                    # Keep the peer's path (will fail to play, but preserves history)
-
+            peer_path = att.get("file_path") or ""
+            if peer_path and Path(peer_path).exists():
+                remapped.append(att)  # already ours
+                continue
+            names = []
+            if peer_path:
+                names.append(os.path.basename(str(peer_path).replace("\\", "/")))
+            if att.get("filename") and att["filename"] not in names:
+                names.append(att["filename"])
+            local = next(
+                (d / n for n in names for d in subdirs if n and (d / n).is_file()), None
+            )
+            if local is not None:
+                att["file_path"] = str(local)
+                logger.debug(f"Remapped attachment path: {peer_path or '<none>'} -> {local}")
+            elif peer_path:
+                # Kept as it came: the UI falls back to the thumbnail, and the
+                # transfer that brings the file may still be on its way.
+                logger.warning(
+                    "Attachment %s not found locally under %s; keeping the sender's path",
+                    names[0] if names else "?", conv_dir,
+                )
             remapped.append(att)
 
         return remapped
 
-    def export_history(self, authors: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def export_history(
+        self,
+        authors: Optional[List[str]] = None,
+        content_hashes: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """Export conversation history for syncing with peer
 
         Returns history in serializable format with timestamps added.
@@ -2286,14 +2553,32 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 the answering side used to ignore them and send everything, so
                 the property "sync asks only for what is missing" held in the
                 request and never in the transfer.
+            content_hashes: exact records wanted, by `content_hash`. A voter
+                whose history lacks messages of a proposal's extraction window
+                asks for those and nothing else. Takes precedence over
+                `authors`; an empty list exports nothing, as above.
 
         Returns:
             List of message dicts with 'role', 'content', 'timestamp', 'attachments'
         """
         wanted = set(authors) if authors is not None else None
+        wanted_hashes = set(content_hashes) if content_hashes is not None else None
         exported = []
+        skipped_local_notes = 0
         for msg in self.message_history:
-            if wanted is not None and (msg.get("sender_node_id") or "") not in wanted:
+            if wanted_hashes is not None:
+                if (msg.get("content_hash") or "") not in wanted_hashes:
+                    continue
+            elif wanted is not None and (msg.get("sender_node_id") or "") not in wanted:
+                continue
+            # A note this node wrote about a peer's file is attributed to that
+            # peer and signed by us, so every other node refuses it on arrival —
+            # see _is_local_file_note. Sending it can only produce a rejection,
+            # and it produced one on every sync of one group for five days.
+            # Tested by shape rather than by the remembered ids: that set lives
+            # in memory and is empty after a restart.
+            if self._is_local_file_note(msg):
+                skipped_local_notes += 1
                 continue
             exported_msg = {
                 "id": msg.get("id"),  # Preserve ID so merge_history can deduplicate
@@ -2323,6 +2608,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # them for its own. Sending them made the receiver's chain break on
             # every load, and they never verified anything on the far side
             # because the hash covers `role`, which differs by reader.
+            # tool_calls does not travel: what v2 signs is their digest, and
+            # the calls are the owner's (ADR-042). A v1 record's hash does cover
+            # them, so a v1 record that has any is unverifiable on the far side
+            # either way — the eleven this pair already carries.
             for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner",
                           "isAgent"):
                 if field in msg:
@@ -2331,19 +2620,28 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # preimage. A record predating it carries a hash of a different
             # shape, and shipping it would have the receiver recompute, find a
             # mismatch, and reject a legitimate message as tampered.
-            if msg.get("preimage_version") == PREIMAGE_VERSION:
+            if msg.get("preimage_version") in (PREIMAGE_VERSION, *LEGACY_PREIMAGE_VERSIONS):
                 for field in ("content_hash", "signature", "signer_node_id",
-                              "preimage_version"):
+                              "preimage_version", "tool_calls_digest"):
                     if field in msg:
                         exported_msg[field] = msg[field]
             exported.append(exported_msg)
 
-        if wanted is None:
+        if wanted_hashes is not None:
+            logger.info(
+                "Exported %d of %d messages, limited to %d content hash(es)",
+                len(exported), len(self.message_history), len(wanted_hashes),
+            )
+        elif wanted is None:
             logger.info(f"Exported {len(exported)} messages from conversation history")
         else:
             logger.info(
                 "Exported %d of %d messages, limited to %d author(s)",
                 len(exported), len(self.message_history), len(wanted),
+            )
+        if skipped_local_notes:
+            logger.info(
+                "Held back %d local file note(s) the peer would refuse", skipped_local_notes
             )
         return exported
 
@@ -2403,6 +2701,14 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                           "preimage_version", "verification"):
                 if field in msg:
                     imported_msg[field] = msg[field]
+            # The digest is what v2 signs, so it has to survive an import or the
+            # record fails its own signature on re-export. The calls themselves
+            # no longer travel at all (ADR-042); a v1 record that still carries
+            # some is kept as it arrived.
+            if msg.get("tool_calls"):
+                imported_msg["tool_calls"] = msg["tool_calls"]
+            if msg.get("tool_calls_digest"):
+                imported_msg["tool_calls_digest"] = msg["tool_calls_digest"]
             # msg_index and chain_hash are this node's, not the sender's.
             imported_msg = self._chain_locally(imported_msg)
             if "attachments" in msg:
@@ -2436,6 +2742,19 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             self.full_conversation.append(message_obj)
 
         logger.info(f"Imported {len(accepted)} messages into all conversation buffers")
+
+        # The dedup set is a derivative of the history, not a parallel store:
+        # this path replaces the history wholesale, so without the rebuild the
+        # set keeps the ids of the history it replaced — the next merge_history
+        # then stores every imported record a second time, or refuses a
+        # legitimate one the set still remembers (backlog: AN-IMPORTED-
+        # HISTORY-IS-MISSING-FROM-THE-DEDUP-SET-SO-THE-NEXT-MERGE-STORES-IT-TWICE).
+        self.rebuild_message_ids()
+
+        # Written now, as merge_history does, not at the next add_message: a
+        # restart in between lost every restored record (41, 2026-09-06).
+        self._history_dirty = True
+        self.save_history()
 
     # Phase 7: Peer context cache management methods
     def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):
@@ -2698,8 +3017,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         Records written before `content_hash` existed fall back to their id, so
         a legacy history is compared as best it can be rather than dropped.
+
+        Notes this node wrote about a peer's files are left out, the same ones
+        `export_history` holds back — see `is_local_file_note`.
         """
-        return digest_for(self.message_history)
+        return digest_for(self.message_history, self._local_node_id())
 
     def authors_that_differ(self, remote_digest: Dict[str, Any]) -> List[str]:
         """Which authors the two sides disagree about; empty means agreement."""
@@ -3043,6 +3365,96 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             return (self.conversation_id, local)
         return (self.conversation_id,)
 
+    def _local_node_id(self) -> Optional[str]:
+        """This node's id, or None when neither the roster nor the disk says.
+
+        A group roster follows member order, so the local node is the entry
+        marked `context: local`, not necessarily the first one. A roster that
+        marks none answered with its first entry, which is somebody else: the
+        Telegram monitors carry one participant and no `context` at all, and a
+        group this node has been removed from lists only peers. The identity
+        file answers instead, so a monitor and a bare message list filter by
+        the same id.
+        """
+        for p in getattr(self, "participants", None) or ():
+            if p.get("context") == "local" and p.get("node_id"):
+                return p["node_id"]
+        return _local_node_id_from_disk()
+
+    def find_file_record(self, sender_node_id: str, filename: str,
+                         size_bytes: Optional[int], file_hash: Optional[str]
+                         ) -> Optional[Dict[str, Any]]:
+        """The record already holding this file from this sender, if any."""
+        for record in self.message_history:
+            if record.get("sender_node_id") != sender_node_id:
+                continue
+            for att in record.get("attachments") or ():
+                if attachment_matches(att, filename, size_bytes, file_hash):
+                    return record
+        return None
+
+    def note_local_file_record(self, message_id: str) -> None:
+        """Remember a «Received file» note this node wrote for a peer's transfer."""
+        self._local_file_notes.add(message_id)
+
+    def _is_local_file_note(self, record: Dict[str, Any]) -> bool:
+        """`is_local_file_note` for a loaded monitor, which also remembers the
+        notes it wrote this session."""
+        if record.get("id") in getattr(self, "_local_file_notes", ()):
+            return True
+        return is_local_file_note(record, self._local_node_id())
+
+    def _drop_local_file_note(self, arriving: Dict[str, Any]) -> bool:
+        """Drop our own note for a file once the sender's record of it arrives.
+
+        Safe for the chain: it describes this node's copy and is recomputed
+        from genesis on every reorder (`restore_chronological_order`), so it
+        is rechained here the same way. `save_history` rewrites the deletion
+        anchor alongside.
+        """
+        sender = arriving.get("sender_node_id")
+        for i, record in enumerate(self.message_history):
+            if record.get("sender_node_id") != sender or not self._is_local_file_note(record):
+                continue
+            if not any(
+                attachment_matches(mine, theirs.get("filename"), theirs.get("size_bytes"),
+                                   theirs.get("hash"))
+                for mine in record.get("attachments") or ()
+                for theirs in arriving.get("attachments") or ()
+            ):
+                continue
+            # Our note carries the local path, the hash and the transfer id;
+            # the sender's copy carries none of them. Move them over.
+            for mine in record.get("attachments") or ():
+                for theirs in arriving.get("attachments") or ():
+                    if attachment_matches(mine, theirs.get("filename"), theirs.get("size_bytes"),
+                                          theirs.get("hash")):
+                        merge_received_attachment(theirs, mine)
+            del self.message_history[i]
+            self.message_ids.discard(record.get("id"))
+            self._local_file_notes.discard(record.get("id"))
+            rechain(self.message_history)
+            self._history_dirty = True
+            logger.info("Dropped local file note %s: the sender's record %s arrived",
+                        record.get("id"), arriving.get("id"))
+            return True
+        return False
+
+    def attach_received_file(self, record: Dict[str, Any], attachment: Dict[str, Any]) -> Dict[str, Any]:
+        """Complete the sender's record with what the transfer brought.
+
+        The signature covers none of `attachments`, so the record stays the
+        sender's and stays verifiable.
+        """
+        for att in record.get("attachments") or ():
+            if attachment_matches(att, attachment.get("filename"), attachment.get("size_bytes"),
+                                  attachment.get("hash")):
+                merge_received_attachment(att, attachment)
+                self._history_dirty = True
+                self.save_history()
+                return att
+        raise ValueError("record holds no attachment matching the transfer")
+
     def _verify_incoming(self, message: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], str]:
         """Decide what an arriving record is before it can enter history.
 
@@ -3079,11 +3491,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 return None, "unsigned, and reject_unsigned is on"
             return dict(message, verification="legacy"), "legacy"
 
-        if message.get("preimage_version") != PREIMAGE_VERSION:
+        if message.get("preimage_version") not in (PREIMAGE_VERSION, *LEGACY_PREIMAGE_VERSIONS):
             # Signed over a preimage we cannot recompute — a node one version
             # ahead or behind. Refusing that is not a security decision, it is
             # an outage, so it is treated as legacy exactly as the live path
-            # treats it.
+            # treats it. Versions we still know how to build are recomputed
+            # rather than waved through (ADR-042).
             if self._reject_unsigned():
                 return None, "preimage %s cannot be recomputed" % message.get("preimage_version")
             return dict(message, verification="legacy"), "legacy"
@@ -3093,17 +3506,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         # inherits that. The room name comes from us, never from the message —
         # otherwise a signed message from another room verifies happily here.
         if not any(
-            content_hash == message_content_hash(
-                conversation_id=room,
-                message_id=message.get("id"),
-                sender_node_id=message.get("sender_node_id"),
-                sender_name=message.get("sender_name"),
-                sender_type=message.get("sender_type"),
-                agent_owner=message.get("agent_owner"),
-                timestamp=message.get("timestamp"),
-                content=message.get("content") or "",
-                tool_calls=message.get("tool_calls"),
-            )
+            content_hash == self._recompute_hash(message, room)
             for room in self._room_candidates()
         ):
             return None, "content does not match its hash"
@@ -3127,6 +3530,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # a denial of service against ourselves. reverify_author() revisits.
             return dict(message, verification="unverified"), "unverified"
         return dict(message, verification="verified"), "verified"
+
+    def rebuild_message_ids(self):
+        self.message_ids = {m.get("id") for m in self.message_history if m.get("id")}
 
     def add_message_with_id(self, message: Dict[str, Any]) -> bool:
         """Add a message to history with duplicate detection
@@ -3153,6 +3559,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if msg_id:
             self.message_ids.add(msg_id)
 
+        # A peer's attachment names a file on the peer's disk. Rebased here,
+        # not only in import_history: this is the path group sync takes, and
+        # it used to store the foreign path as it came.
+        if message.get("attachments") and message.get("sender_node_id") != self._local_node_id():
+            message = dict(message, attachments=self._remap_attachment_paths(message["attachments"]))
+
         # Add to history, re-chained for this node. A foreign index and hash
         # appended verbatim broke the local chain permanently: the loader
         # recomputes what it expects from the local sequence, finds the
@@ -3174,17 +3586,39 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             remote_messages: List of message dicts from peer
 
         Returns:
-            Count of new messages added
+            Count of new messages added. The records refused are left in
+            `last_merge_rejected` (id, content_hash, sender, verdict), so a
+            caller waiting for a specific record can learn it will never come.
         """
         added = 0
         rejected = 0
         legacy = 0
+        dropped = 0
+        self.last_merge_rejected: List[Dict[str, Any]] = []
         for msg in remote_messages:
             checked, verdict = self._verify_incoming(msg)
             if checked is None:
                 logger.warning("Rejected message %s: %s", msg.get("id", "?"), verdict)
                 rejected += 1
+                self.last_merge_rejected.append({
+                    "id": msg.get("id"),
+                    "content_hash": msg.get("content_hash"),
+                    "sender_node_id": msg.get("sender_node_id"),
+                    "sender_name": msg.get("sender_name"),
+                    "verdict": verdict,
+                })
                 continue
+            # The transfer got here before the sender's record of it, and we
+            # wrote a note of our own meanwhile. One file, one record.
+            #
+            # Attempted on every arrival, not only a new one. Gated on novelty,
+            # the drop had exactly one chance — the record's first arrival — and
+            # if the note was written after that, the record was never new again
+            # and the note stayed for good: one group re-synced twenty-eight
+            # times a day, merging nothing each time, because of it.
+            if checked.get("attachments"):
+                if self._drop_local_file_note(checked):
+                    dropped += 1
             if self.add_message_with_id(checked):
                 added += 1
                 if verdict == "legacy":
@@ -3197,7 +3631,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "Merged %d unsigned record(s) into %s: stored `verification: legacy`, not checked",
                 legacy, self.conversation_id,
             )
-        if added > 0:
+        if added > 0 or dropped > 0:
             self.restore_chronological_order()
             self.save_history()
             logger.info("Merged %d new messages into conversation history", added)

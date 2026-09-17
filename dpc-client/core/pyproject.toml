@@ -1,6 +1,6 @@
 [project]
 name = "dpc-client-core"
-version = "0.29.0"
+version = "0.30.0"
 description = ""
 authors = [{name = "Mike Shevchenko", email = "legoogmiha@gmail.com"}]
 readme = "README.md"
@@ -12,7 +12,11 @@ dependencies = [
     "toml>=0.10.2,<0.11.0",
     "openai>=1.0.0,<2.0.0",
     "anthropic>=0.45.0",
-    "tiktoken>=0.5.1,<0.6.0",
+    # The ceiling has to clear every interpreter requires-python allows: 0.5.2
+    # builds through PyO3 0.20, which refuses anything above 3.12, so a 3.13
+    # install of this project could not succeed with or without a Rust
+    # toolchain. 0.14.0 ships a cp313 wheel — measured 2026-09-02.
+    "tiktoken>=0.5.1,<0.15",
     "httpx>=0.27.0,<0.28.0",
     "aiortc>=1.6.0,<2.0.0",
     "certifi>=2024.0.0",
@@ -36,20 +40,29 @@ dependencies = [
     "trafilatura>=1.12,<3.0",
     "stopwordsiso>=0.6",
     "discord.py>=2.7.0,<3.0.0",
+    "aiohttp>=3.14,<4",  # the gateway's HTTP server; declared, not inherited from discord.py (ADR-041 D6)
     "keyring>=24.0",
     "cryptography>=50.0.0",
-    # PDF text, page geometry and per-character font attribution for
-    # read_document. One self-contained wheel bundling PDFium, no transitive
-    # dependencies, BSD-3-Clause OR Apache-2.0 — the licence matters because
-    # the client is GPL-3.0-or-later and pymupdf's AGPL would carry §13 into
-    # every node. In the base set rather than an extra on purpose: an extra is
-    # one more name to remember on every `uv sync`, and forgetting it here
-    # takes document reading away silently.
-    "pypdfium2>=5.0,<6.0",
 ]
 
 [project.optional-dependencies]
-dev = ["fastapi"]
+# PDF text, page geometry and per-character font attribution for read_document.
+# One self-contained wheel bundling PDFium, no transitive dependencies,
+# BSD-3-Clause OR Apache-2.0 — the licence matters because the client is
+# GPL-3.0-or-later and pymupdf's AGPL would carry §13 into every node.
+#
+# It sat in the base set on the argument that an extra is one more name to
+# remember and forgetting it takes document reading away silently. The cost of
+# the other side turned out to be larger: from 5.12.0 the x86_64 macOS wheel is
+# tagged macosx_13_0, so an Intel Mac on 12.x finds no wheel, builds the sdist,
+# and that build fetches PDFium over HTTPS — one machine could not install the
+# client at all because of a PDF reader. Both call sites already degrade, and
+# they now name this extra, so nothing is lost silently.
+pdf = [
+    "pypdfium2>=5.0,<6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    # The last release whose x86_64 macOS wheel still accepts 12.x.
+    "pypdfium2>=5.0,<5.12; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+]
 mlx = [
     "mlx>=0.4.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-whisper>=0.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -64,9 +77,6 @@ browser = [
 ]
 graph-ner = [
     "gliner>=0.2.20",
-]
-graph-grafeo = [
-    "grafeo>=0.5.42",
 ]
 
 [dependency-groups]

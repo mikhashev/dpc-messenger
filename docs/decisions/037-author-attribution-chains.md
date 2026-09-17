@@ -3,6 +3,7 @@ adr: 037
 title: "Make the author's chain the unit of history, in phases, and not all of it now"
 status: accepted
 date: 2026-08-05
+axis: collective
 deciders: [Mike]
 consulted: [Ark, CC, Fable 5, GLM 5.2]
 informed: []

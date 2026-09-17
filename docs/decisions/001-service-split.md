@@ -27,7 +27,7 @@ Then split remaining dispatch glue into:
 
 Target: CoreService < 2,000 lines after all extractions.
 
-## State Variables Per Service (Арх mapping)
+## State Variables Per Service (Ark mapping)
 
 **VoiceService** (4 vars, service.py lines 333-341):
 - `_pending_transcription_requests` (Dict[str, asyncio.Future])

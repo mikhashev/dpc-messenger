@@ -1,4 +1,4 @@
-# Group Chat (v0.26.0)
+# Group Chat
 
 D-PC Messenger's group chat enables multi-participant communication with full feature parity to 1:1 P2P chat: text, files, voice messages, screenshots, voice transcription, knowledge commits, and session management.
 
@@ -14,7 +14,11 @@ There are **two participant types**:
 
 ### Data Model
 
-Group metadata stored at `~/.dpc/groups/{group_id}.json`:
+Group metadata is stored beside the conversation, at
+`~/.dpc/conversations/{group_id}-{slug}/metadata.json` (the slug is the group
+name; a group with no name gets `{group_id}/`). The older
+`~/.dpc/groups/{group_id}.json` is read for migration only — the directory now
+holds nothing but `deleted_registry.json`.
 
 ```json
 {
@@ -50,7 +54,7 @@ Group metadata stored at `~/.dpc/groups/{group_id}.json`:
 | `GROUP_DELETE` | Creator deletes group (all members remove it) |
 | `GROUP_DELETED_STATUS` | Exchange deleted group IDs on connect (notify of deletions that happened while offline) |
 | `GROUP_SYNC` | Metadata reconciliation on connect — carries the full group dict (incl. `agents`/`agent_names`); version + content-hash tie-break |
-| `GROUP_HISTORY_REQUEST` / `GROUP_HISTORY_RESPONSE` | Chat-history reconciliation (hash-based, bidirectional) |
+| `GROUP_HISTORY_REQUEST` / `GROUP_HISTORY_RESPONSE` | Chat-history reconciliation (hash-based, bidirectional); the request may narrow to `authors` or to individual `content_hashes` |
 | `CHAT_HISTORY_RESPONSE` | Full-history push to a newly added member on join |
 | `cc_group_mention` *(local event)* | Broadcasts an `@CC` mention to the Claude Code CLI bridge |
 
@@ -95,6 +99,7 @@ On connect, nodes reconcile group history so all members converge.
 - **Disk as source of truth:** history is read from `history.json` on disk (not the in-memory monitor, which may be unloaded), and the disk fast-path exposes a stable `message_id` (normalised via `setdefault`) for dedup.
 - **message_id dedup:** both disk- and monitor-paths expose `message_id`; the frontend merges by it, fixing the post-sync double-render (GROUP-HISTORY-UI-DOUBLE-LOAD).
 - **GROUP_SYNC tie-break:** metadata convergence uses the version counter; equal versions resolve by deterministic content hash. Topic edits broadcast a `GROUP_SYNC` with an incremented version.
+- **Two selectors on `GROUP_HISTORY_REQUEST`:** `authors` narrows the answer to the authors whose per-author digests differ; `content_hashes` asks for individual records by their `content_hash` and takes precedence over `authors`. An empty list means "nothing", never "everything". A request that carries neither is answered with the whole history, which is what a node from before the fields sends. The hash selector exists for a voter missing records of a proposal's extraction window: see *Knowledge Commits* below.
 
 ## Features
 
@@ -109,6 +114,13 @@ On connect, nodes reconcile group history so all members converge.
 
 ### Knowledge Commits
 - "End Session & Save Knowledge" works for groups; a `ConversationMonitor` keyed by `group_id` tracks the conversation, and `consensus_manager` runs multi-party voting (devil's advocate for 3+ participants).
+- A proposal names every message its extraction read, by `content_hash`. A voter that does not hold all of them cannot judge the same text, so its vote is **held**: the missing records are requested from the connected participants through `GROUP_HISTORY_REQUEST` with `content_hashes`, and the vote is cast for real once they merge. If the answer arrives without them, or with records that fail their own signature, the vote is dropped and the person is told which of the two happened (`knowledge_vote_deferred` / `knowledge_vote_resolved`). A record refused by signature cannot be rescued this way: its author has to repost, and the new proposal is extracted after that.
+- **A refusal is never held.** `reject` and `abstain` reach consensus whatever the voter holds — declining to sign, and saying you cannot judge, need no evidence. `approve` and `request_changes` are judgements about the text and stay held until the window is complete.
+- **Approval is counted over the participants**, the roster the proposal names, never over the votes that happen to have arrived; a vote from a node outside the roster is not counted on either side of the fraction. A participant that cannot judge answers `abstain` with a mandatory reason — the held vote turns into one automatically when the records never come — and an abstention stays in the denominator, so with two or three participants it stops the commit. **A deadline never approves**: it ends the proposal as `timeout`, because otherwise the rule is bypassed by waiting.
+- **Everyone who has to vote must be reachable when the vote starts.** In a group of more than one member, `End Session & Save Knowledge` is refused up front while any member is offline, naming who — and refused again if someone drops during the extraction, before the vote is opened. Under a denominator counted over participants an absent member cannot be outvoted, only waited for, so the proposal would spend its deadline and end as a timeout with the extraction already paid for. Same rule, same reason as the New Session vote.
+- **A participant that was away is offered the proposal again.** A proposal is broadcast once, so a node that was disconnected at that moment holds no session and shows no dialog. On every peer-list change each open proposal is re-sent to the participants that have not answered it — once per proposal per peer, never to one whose vote already arrived, since the receiver rebuilds its session from the proposal and would discard its own vote. The vote then finishes as soon as every participant has answered, without waiting out the deadline.
+- **A node signs only what it judged.** A commit whose proposal this node abstained on (or never voted on) is still applied — the knowledge is available — but it is not signed, no `COMMIT_SIGNED` goes out, and the stored card carries `verified_by_this_node: false`. A signature is a judgement, not a delivery receipt.
+- **The window names only records another node could verify.** A record whose stored `content_hash` does not recompute from its own fields — an agent post signed before its `tool_calls` were stored beside it — is left out of the anchor, exactly as records carrying no hash at all already were. Naming one would hold every other participant's vote on every future proposal, for good, since no honest node can ever produce that hash.
 
 ### Group Sleep & Morning Briefs
 - A per-group **Sleep** button triggers sleep consolidation; agents post **morning briefs** into the group chat. `_delete_group_briefs` removes the previous briefs when new ones arrive.
@@ -163,6 +175,10 @@ On connect, nodes reconcile group history so all members converge.
 | `update_group_topic` | group_id, topic | Update topic (creator-only; broadcasts `GROUP_SYNC`) |
 | `add_group_member` | group_id, node_id | Add member + push full history |
 | `remove_group_member` | group_id, node_id | Remove member; broadcast `GROUP_SYNC` |
+| `set_group_agents` | group_id, agent_ids | Choose which of this node's agents take part |
+| `set_group_reasoning_effort` | group_id, reasoning_effort | Group-scoped thinking depth for this node's agents; local, not synced |
+| `trigger_group_sleep` | group_id | Run sleep consolidation and post the morning briefs |
+| `activate_group_chat` | group_id | Called when the group is opened; posts any pending morning briefs |
 | `get_groups` | (none) | List all groups |
 | `leave_group` | group_id | Leave a group |
 | `delete_group` | group_id | Delete group (creator-only) |

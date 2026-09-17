@@ -38,6 +38,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def gossip_message_frame(msg: GossipMessage) -> Dict:
+    """The one GOSSIP_MESSAGE frame every sender emits.
+
+    DPTP §3.10 puts the serialized message under ``payload.gossip_message``,
+    and ``GossipMessageHandler`` reads that key. Fan-out, multi-hop forwarding
+    and the anti-entropy resend all build their frame here so a second shape
+    cannot reappear: from 2025-12-07 to 2026-09-14 fan-out sent the message
+    flat in the payload and the handler dropped every such frame, so the tier
+    delivered only through its five-minute reconciliation.
+    """
+    return {
+        "command": "GOSSIP_MESSAGE",
+        "payload": {"gossip_message": msg.to_dict()},
+    }
+
+
 class GossipManager:
     """
     Manages gossip protocol for store-and-forward messaging.
@@ -126,6 +142,9 @@ class GossipManager:
             "messages_delivered": 0,
             "messages_dropped": 0,
             "sync_cycles": 0,
+            # Flat GOSSIP_MESSAGE frames read from nodes older than 2026-09-14;
+            # counted by GossipMessageHandler. See gossip_message_frame().
+            "flat_frames_accepted": 0,
         }
 
         logger.info(
@@ -647,10 +666,7 @@ class GossipManager:
         # Send to selected peers
         for peer in forward_to:
             try:
-                await peer.send({
-                    "command": "GOSSIP_MESSAGE",
-                    "payload": msg.to_dict()
-                })
+                await peer.send(gossip_message_frame(msg))
 
                 self.stats["messages_forwarded"] += 1
 
@@ -798,12 +814,7 @@ class GossipManager:
                     message = self.messages[msg_id]
                     try:
                         # Re-gossip the message (will use existing routing)
-                        await connection.send({
-                            "command": "GOSSIP_MESSAGE",
-                            "payload": {
-                                "gossip_message": message.to_dict()
-                            }
-                        })
+                        await connection.send(gossip_message_frame(message))
                         logger.debug(f"Sent missing message {msg_id[:8]}... to {peer_id[:20]}")
                     except Exception as e:
                         logger.error(f"Failed to send missing message {msg_id}: {e}")

@@ -3,8 +3,10 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand, providersList } from '$lib/coreService';
+  import { sendCommand } from '$lib/coreService';
   import AgentPermissionsPanel from './AgentPermissionsPanel.svelte';
+  import InferenceSharingEditor from './InferenceSharingEditor.svelte';
+  import type { ComputeRules } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
 
   export let open: boolean = false;
@@ -16,20 +18,19 @@
     hub?: Record<string, string>;
     node_groups?: Record<string, string[]>;
     file_groups?: Record<string, string[]>;
-    compute?: {
-      _comment?: string;
-      enabled: boolean;
-      allow_nodes: string[];
-      allow_groups: string[];
-      allowed_models: string[];
-      serving_alias?: string | null;
-    };
+    // The block's shape is owned by inferenceSharing.ts, beside the component
+    // that edits it, and mirrors firewall.py's `_parse_compute_settings`.
+    compute?: ComputeRules;
     transcription?: {
       _comment?: string;
       enabled: boolean;
       allow_nodes: string[];
       allow_groups: string[];
       allowed_models: string[];
+      // The other direction: who may receive THIS node's audio. Optional
+      // because a rules file written before it existed is still valid.
+      send_to_nodes?: string[];
+      send_to_groups?: string[];
     };
     dpc_agent?: {
       _comment?: string;
@@ -132,6 +133,9 @@
   let isSaving: boolean = false;
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
+  // The reasons the backend refused the last save with, one per line, kept
+  // apart from the banner so a section can show the ones that concern it.
+  let saveErrors: string[] = [];
 
   // Inline input state — replaces all prompt() calls (blocked on macOS WKWebView)
   // Node Groups tab
@@ -169,14 +173,12 @@
   let addingRuleToGroupName: string | null = null;
   let newGroupRulePathInput: string = '';
 
-  // Intermediate string variables for textarea editing (compute sharing)
-  let allowNodesText: string = '';
-  let allowGroupsText: string = '';
-
   // Intermediate string variables for textarea editing (transcription sharing)
   let transcriptionAllowNodesText: string = '';
   let transcriptionAllowGroupsText: string = '';
   let transcriptionAllowedModelsText: string = '';
+  let transcriptionSendToNodesText: string = '';
+  let transcriptionSendToGroupsText: string = '';
 
   // Load rules when modal opens
   $: if (open && !rules) {
@@ -225,24 +227,13 @@
     }
   }
 
-  // The aliases that can serve a peer's inference. Whisper is left out: it is
-  // reached through Transcription Sharing, which has a gate of its own.
-  $: servingAliasChoices = ($providersList || []).filter((entry) => entry.type !== 'local_whisper');
-  $: servingAliasMissing =
-    !!displayRules?.compute?.serving_alias &&
-    !servingAliasChoices.some((entry) => entry.alias === displayRules?.compute?.serving_alias);
-
-  // Sync string variables with arrays when entering edit mode
-  $: if (editMode && editedRules?.compute) {
-    allowNodesText = editedRules.compute.allow_nodes.join('\n');
-    allowGroupsText = editedRules.compute.allow_groups.join('\n');
-  }
-
   // Sync transcription string variables with arrays when entering edit mode
   $: if (editMode && editedRules?.transcription) {
     transcriptionAllowNodesText = editedRules.transcription.allow_nodes.join('\n');
     transcriptionAllowGroupsText = editedRules.transcription.allow_groups.join('\n');
     transcriptionAllowedModelsText = editedRules.transcription.allowed_models.join('\n');
+    transcriptionSendToNodesText = (editedRules.transcription.send_to_nodes ?? []).join('\n');
+    transcriptionSendToGroupsText = (editedRules.transcription.send_to_groups ?? []).join('\n');
   }
 
   async function loadRules() {
@@ -264,6 +255,14 @@
     editMode = true;
     // Deep copy the rules for editing
     editedRules = JSON.parse(JSON.stringify(rules));
+
+    // A rules file written before the outgoing permission existed has neither
+    // key; without this the textareas below bind to undefined and the section
+    // cannot be filled in at all.
+    if (editedRules?.transcription) {
+      editedRules.transcription.send_to_nodes ??= [];
+      editedRules.transcription.send_to_groups ??= [];
+    }
 
     // Initialize agent_profiles if missing (Phase 4)
     if (editedRules && !editedRules.agent_profiles) {
@@ -292,6 +291,7 @@
     editedRules = null;
     saveMessage = '';
     saveMessageType = '';
+    saveErrors = [];
   }
 
   // Save changes
@@ -301,6 +301,7 @@
     isSaving = true;
     saveMessage = '';
     saveMessageType = '';
+    saveErrors = [];
 
     try {
       const result = await sendCommand('save_firewall_rules', {
@@ -327,6 +328,7 @@
         saveMessage = result.message;
         if (result.errors && result.errors.length > 0) {
           saveMessage += ':\n' + result.errors.join('\n');
+          saveErrors = [...result.errors];
         }
         saveMessageType = 'error';
       }
@@ -1041,7 +1043,7 @@
           class:active={selectedTab === 'compute'}
           on:click={() => selectedTab = 'compute'}
         >
-          Compute Sharing
+          Inference Sharing
         </button>
         <button
           class="tab"
@@ -1268,141 +1270,26 @@
           </div>
 
         {:else if selectedTab === 'compute'}
-          <div class="section">
-            <h3>Compute Sharing (Remote Inference)</h3>
-            <p class="help-text">Allow peers to use your local AI models for inference.</p>
+          <!-- Blocks (1)-(4) of the compute tab live in their own component;
+               the edit object is mutated in place, so saveChanges posts it as is.
+               draftRules hands down that same editedRules, so the tab's own
+               Validate button checks exactly what saveChanges would post. -->
+          <InferenceSharingEditor
+            displayCompute={displayRules?.compute ?? null}
+            editCompute={editMode && editedRules ? (editedRules.compute ?? null) : null}
+            {editMode}
+            draftRules={editMode && editedRules ? (editedRules as Record<string, unknown>) : null}
+            nodeGroups={displayRules?.node_groups ?? null}
+            nodeRuleIds={Object.keys(displayRules?.nodes ?? {}).filter((id) => !id.startsWith('_'))}
+            {saveErrors}
+          />
 
-            {#if displayRules?.compute}
-              <div class="compute-settings">
-                <div class="setting-item">
-                  <label>
-                    {#if editMode && editedRules && editedRules.compute}
-                      <input id="compute-enabled" name="compute-enabled" type="checkbox" bind:checked={editedRules.compute.enabled} />
-                    {:else}
-                      <input id="compute-enabled-display" name="compute-enabled-display" type="checkbox" checked={displayRules.compute.enabled} disabled />
-                    {/if}
-                    <strong>Enable Compute Sharing</strong>
-                  </label>
-                </div>
-
-                {#if displayRules.compute.enabled}
-                  <div class="subsection">
-                    <h4>Allowed Nodes</h4>
-                    {#if editMode && editedRules}
-                      <textarea
-                        id="compute-allow-nodes"
-                        name="compute-allow-nodes"
-                        class="edit-textarea"
-                        rows="3"
-                        placeholder="Enter node IDs (one per line)"
-                        bind:value={allowNodesText}
-                        on:blur={() => {
-                          if (editedRules?.compute) {
-                            // Remove duplicates using Set
-                            const nodes = allowNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
-                            editedRules.compute.allow_nodes = [...new Set(nodes)];
-                            // Update textarea to show deduplicated list
-                            allowNodesText = editedRules.compute.allow_nodes.join('\n');
-                          }
-                        }}
-                      ></textarea>
-                    {:else}
-                      <div class="tags">
-                        {#each displayRules.compute.allow_nodes as nodeId}
-                          <span class="tag">{nodeId}</span>
-                        {:else}
-                          <span class="empty-small">No specific nodes allowed</span>
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-
-                  <div class="subsection">
-                    <h4>Allowed Groups</h4>
-                    {#if editMode && editedRules}
-                      <textarea
-                        id="compute-allow-groups"
-                        name="compute-allow-groups"
-                        class="edit-textarea"
-                        rows="2"
-                        placeholder="Enter group names (one per line)"
-                        bind:value={allowGroupsText}
-                        on:blur={() => {
-                          if (editedRules?.compute) {
-                            // Remove duplicates using Set
-                            const groups = allowGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
-                            editedRules.compute.allow_groups = [...new Set(groups)];
-                            // Update textarea to show deduplicated list
-                            allowGroupsText = editedRules.compute.allow_groups.join('\n');
-                          }
-                        }}
-                      ></textarea>
-                    {:else}
-                      <div class="tags">
-                        {#each displayRules.compute.allow_groups as groupName}
-                          <span class="tag">{groupName}</span>
-                        {:else}
-                          <span class="empty-small">No groups allowed</span>
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-
-                  <div class="subsection">
-                    <h4>Serving Alias</h4>
-                    <p class="help-text-small">
-                      The one provider alias peers are served from. Peers cannot choose:
-                      a request naming any other provider is refused, and choosing nothing
-                      shares no compute at all. This is the only control here &mdash;
-                      <code>compute.allowed_models</code> is still read from the rules file
-                      for compatibility, but once an alias decides what runs, a list of
-                      models can only refuse, never choose (ADR-040 D4-0).
-                    </p>
-                    {#if editMode && editedRules}
-                      <select
-                        id="compute-serving-alias"
-                        name="compute-serving-alias"
-                        class="inline-input"
-                        value={editedRules.compute?.serving_alias ?? ''}
-                        on:change={(e) => {
-                          if (editedRules?.compute) {
-                            const v = (e.currentTarget as HTMLSelectElement).value;
-                            editedRules.compute.serving_alias = v.length > 0 ? v : null;
-                          }
-                        }}
-                      >
-                        <option value="">&mdash; share no compute &mdash;</option>
-                        {#each servingAliasChoices as choice (choice.alias)}
-                          <option value={choice.alias}>{choice.alias} ({choice.model})</option>
-                        {/each}
-                        <!-- An alias no longer in providers.json would otherwise vanish from
-                             the list and be cleared by the next save without a word. It stays
-                             selectable, and says what happened to it. -->
-                        {#if servingAliasMissing}
-                          <option value={displayRules.compute.serving_alias}
-                            >{displayRules.compute.serving_alias} (not in providers.json)</option>
-                        {/if}
-                      </select>
-                    {:else}
-                      <div class="tags">
-                        {#if displayRules.compute.serving_alias}
-                          <span class="tag">{displayRules.compute.serving_alias}</span>
-                        {:else}
-                          <span class="empty-small">No alias designated &mdash; peer inference is refused</span>
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
-                {/if}
-              </div>
-            {:else}
-              <p class="empty">Compute sharing not configured.</p>
-            {/if}
-          </div>
-
-          <!-- Transcription Sharing Section -->
-          <div class="section">
-            <h3>Transcription Sharing (Remote Whisper)</h3>
+          <!-- (7) Transcription Sharing: block seven of the same tab, numbered
+               and indented like blocks 1-6, which live in the component above.
+               Both classes: .subsection draws the block, .section carries the
+               heading style its h4s read. -->
+          <div class="section subsection">
+            <h4>7. Transcription Sharing (Remote Whisper)</h4>
             <p class="help-text">Allow peers to use your local Whisper model for voice transcription.</p>
 
             {#if displayRules?.transcription}
@@ -1507,6 +1394,73 @@
                     {/if}
                   </div>
                 {/if}
+
+                <!-- The other direction. Deliberately outside the switch above:
+                     that one lets peers use our Whisper, and says nothing about
+                     whether our own audio may leave this machine. -->
+                <div class="subsection">
+                  <h4>Send My Audio To</h4>
+                  <p class="help-text-small">
+                    When local transcription fails and no cloud provider is configured, ask one of
+                    these peers instead. Empty means never — the audio stays on this machine and the
+                    voice message simply goes untranscribed. Choosing a peer by hand in the recorder
+                    is unaffected by this list.
+                  </p>
+
+                  <h5>Nodes</h5>
+                  {#if editMode && editedRules}
+                    <textarea
+                      id="transcription-send-to-nodes"
+                      name="transcription-send-to-nodes"
+                      class="edit-textarea"
+                      rows="3"
+                      placeholder="Enter node IDs (one per line) — asked in this order"
+                      bind:value={transcriptionSendToNodesText}
+                      on:blur={() => {
+                        if (editedRules?.transcription) {
+                          const nodes = transcriptionSendToNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                          editedRules.transcription.send_to_nodes = [...new Set(nodes)];
+                          transcriptionSendToNodesText = editedRules.transcription.send_to_nodes.join('\n');
+                        }
+                      }}
+                    ></textarea>
+                  {:else}
+                    <div class="tags">
+                      {#each displayRules.transcription.send_to_nodes ?? [] as nodeId}
+                        <span class="tag">{nodeId}</span>
+                      {:else}
+                        <span class="empty-small">No peer may receive this node's audio</span>
+                      {/each}
+                    </div>
+                  {/if}
+
+                  <h5>Groups</h5>
+                  {#if editMode && editedRules}
+                    <textarea
+                      id="transcription-send-to-groups"
+                      name="transcription-send-to-groups"
+                      class="edit-textarea"
+                      rows="2"
+                      placeholder="Enter group names (one per line)"
+                      bind:value={transcriptionSendToGroupsText}
+                      on:blur={() => {
+                        if (editedRules?.transcription) {
+                          const groups = transcriptionSendToGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                          editedRules.transcription.send_to_groups = [...new Set(groups)];
+                          transcriptionSendToGroupsText = editedRules.transcription.send_to_groups.join('\n');
+                        }
+                      }}
+                    ></textarea>
+                  {:else}
+                    <div class="tags">
+                      {#each displayRules.transcription.send_to_groups ?? [] as groupName}
+                        <span class="tag">{groupName}</span>
+                      {:else}
+                        <span class="empty-small">No group may receive this node's audio</span>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
               </div>
             {:else}
               <p class="empty">Transcription sharing not configured.</p>
@@ -2521,6 +2475,12 @@
 
   .subsection h4 {
     margin-top: 0;
+  }
+
+  .subsection h5 {
+    margin: 0.75rem 0 0.25rem;
+    font-size: 0.85rem;
+    color: #555;
   }
 
   .tags {

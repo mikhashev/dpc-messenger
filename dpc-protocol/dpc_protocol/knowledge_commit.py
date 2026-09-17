@@ -106,7 +106,7 @@ class KnowledgeCommitProposal:
 
     # Voting status
     status: Literal["proposed", "voting", "approved", "rejected", "revised"] = "proposed"
-    votes: Dict[str, Literal["approve", "reject", "request_changes"]] = field(default_factory=dict)
+    votes: Dict[str, Literal["approve", "reject", "request_changes", "abstain"]] = field(default_factory=dict)
     vote_deadline: Optional[str] = None  # ISO timestamp
 
     def to_dict(self) -> Dict[str, Any]:
@@ -178,7 +178,7 @@ class CommitVote:
 
     proposal_id: str
     voter_node_id: str
-    vote: Literal["approve", "reject", "request_changes"]
+    vote: Literal["approve", "reject", "request_changes", "abstain"]
     comment: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 

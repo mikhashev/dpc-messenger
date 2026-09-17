@@ -366,6 +366,17 @@ omit section 6 (Installation Information) due to Apple's restrictions.
 
 ## Contributing
 
+**External contributions are not being accepted yet** (root README §Community &
+Support). The machinery below is written and waiting rather than in use: what
+checks a signature is the CLA Assistant webhook on the repository, not a
+workflow in `.github/`, and as measured on 2026-09-17T19:00Z it is active and
+subscribed but has recorded no delivery in the window since its last
+configuration change. Where the register of signatures actually lives is not
+something this side can see: the webhook points at cla-assistant.io, and
+[CLA.md](./CLA.md) §Manual Signing names a mailbox — neither is in this
+repository, and neither has been confirmed to hold a register. Read the check
+recorded in CLA.md §How to Sign, with its limits, before relying on any of it.
+
 All code contributions require signing a Contributor License Agreement (CLA).
 
 **Why?** The CLA allows us to:

@@ -16,7 +16,7 @@
 Knowledge extraction in DPC Messenger descends from Mike's pre-DPC experiments with AI assistants via a single personal context JSON file. The original mechanism is preserved in the reference file `C:\Users\mike\Documents\Context\example_context.json`:
 
 - A JSON file containing `personal_context` (sections with personal data) and an `instruction` block that tells the AI how to work with it.
-- The instruction included a command: **"Завершение сессии"** — upon which the AI would collect what it learned during the session into `context_updates.updates`, show the updated file, and Mike would manually save.
+- The instruction included a command, **"End of session"** (written in Russian in the original file) — upon which the AI would collect what it learned during the session into `context_updates.updates`, show the updated file, and Mike would manually save.
 - **No multi-perspective fields.** No `alternative_viewpoints`, no `cultural_perspectives`, no `devil_advocate_analysis`. Just `updates` entries with `updated_by` metadata (e.g. `"Grok 3"`) as a simple audit trail.
 - One user, one AI, one JSON file. Solo bias-mitigation was not part of the design.
 
@@ -33,7 +33,7 @@ These were **user-level methods** ("ask the AI from multiple angles, check acros
 
 ### DPC era evolution
 
-- **November 2025 — DPC Messenger launched.** Inherited from PCM: `personal.json` schema, the "Завершение сессии" concept (renamed to "End Session and Extract Knowledge"), conversation monitoring + auto-detection from the UserTesting methodology (May 2025).
+- **November 2025 — DPC Messenger launched.** Inherited from PCM: `personal.json` schema, the "End of session" concept (renamed to "End Session and Extract Knowledge"), conversation monitoring + auto-detection from the UserTesting methodology (May 2025).
 - **Multi-perspective fields added to `KnowledgeCommit` schema** (sometime between Nov 2025 and Feb 2026 — exact commit not verified).
 - **P2P voting added on top via `consensus_manager`** — multi-party approval, crypto signatures, Devil's Advocate as a required dissenter role when `participants >= 3`.
 - **Feb 21, 2026** — first verified `.md` commit in `~/.dpc/knowledge/` (`ai_agent_integration_into_dpc_messenger_commit-ae975ad9f955c0f3.md`). Empirical verification: **template-collapse already present in this file** — all 10 entries share identical `alternative_viewpoints` about "integration paths" and "collaboration styles" regardless of entry topic. The LLM-self-reflection mechanism was never producing genuinely varied outputs.
@@ -135,7 +135,7 @@ Agent chat (Mike + Ark) will have two parallel extraction mechanisms, both opera
 - The tool ran a redundant LLM call on the same conversation Ark already participated in — overhead without added value.
 - Template-collapse (P1) was a direct consequence of LLM self-reflection without external input.
 - The `_index.md` desync (P2) and `.json` hardcoding (P3) were bugs in a tool that shouldn't exist.
-- Mike's rationale (S33 msg [96]): "сохранение знаний это у нас ритуал в конце сессии и дисциплина" — discipline, not automation.
+- Mike's rationale (S33 msg [96]): saving knowledge is a ritual at the end of a session — discipline, not automation.
 - CC already works this way (auto-memory) — proven pattern.
 
 ### The two paths are fully independent

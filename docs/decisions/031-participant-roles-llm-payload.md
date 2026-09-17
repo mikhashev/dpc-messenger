@@ -3,6 +3,7 @@ adr: 031
 title: "Derive LLM roles per-reader from participant identity; single-writer conversation history"
 status: accepted
 date: 2026-06-10
+axis: collective
 deciders: [Mike]
 consulted: [Ark, CC]
 informed: []

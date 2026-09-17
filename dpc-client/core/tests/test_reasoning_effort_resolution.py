@@ -29,6 +29,23 @@ def test_a_room_carrying_a_level_answers_and_is_named_as_the_source():
     assert manager._resolve_reasoning_effort("group-b88b65076b85") == ("high", "group")
 
 
+def test_a_level_chosen_in_the_chat_header_outranks_the_room_and_the_config(monkeypatch):
+    """The header is a lever over one call: the agent keeps its own level in its
+    config, and a chat borrows a different one without writing it there."""
+    manager = _manager(group=SimpleNamespace(reasoning_effort="low"))
+    monkeypatch.setattr(CONFIG_READER, lambda _id: {"reasoning_effort": "max"})
+
+    assert manager._resolve_reasoning_effort("group-b88b65076b85", "high") == ("high", "call")
+
+
+def test_an_empty_header_hands_the_choice_back_to_the_agent(monkeypatch):
+    """«Agent config» is the empty option, and it must not read as a level."""
+    manager = _manager(group=SimpleNamespace(reasoning_effort=None))
+    monkeypatch.setattr(CONFIG_READER, lambda _id: {"reasoning_effort": "max"})
+
+    assert manager._resolve_reasoning_effort("agent_001", "") == ("max", "agent-config")
+
+
 def test_a_conversation_that_is_not_a_room_never_consults_one(monkeypatch):
     """The fourth way to the ceiling: the room branch is gated on the id's shape,
     so a call named anything else skips it whatever the room holds."""

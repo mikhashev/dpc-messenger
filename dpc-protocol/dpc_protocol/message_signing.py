@@ -23,6 +23,13 @@ Timestamp normalisation is the likeliest place — Python writes UTC as
 ``+00:00``, other stacks write ``Z``, and both are the same instant — so it is
 absorbed here rather than left to whoever writes the caller.
 
+**v2 signs a digest of the tool calls, not the calls.** A verifier that must
+hold the field is a verifier the field has to travel to, which replicated an
+agent's tool inputs and outputs to every group member (ADR-042). The digest
+keeps the audit trail bound to its author while the calls stay on the node that
+ran them. v1 records keep verifying under the old rule for good — the version
+tag opens the preimage precisely so both can be read.
+
 See specs/dptp_v1.md §4.1.
 """
 
@@ -31,10 +38,13 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-PREIMAGE_VERSION = "dptp-msg-v1"
+PREIMAGE_VERSION = "dptp-msg-v2"
+LEGACY_PREIMAGE_VERSIONS = ("dptp-msg-v1",)
 
 __all__ = [
     "PREIMAGE_VERSION",
+    "LEGACY_PREIMAGE_VERSIONS",
+    "digest_of_tool_calls",
     "message_preimage",
     "message_content_hash",
     "VOTE_PREIMAGE_VERSION",
@@ -76,6 +86,19 @@ def _canonical_json(value: Any) -> str:
         return repr(value)
 
 
+def digest_of_tool_calls(tool_calls: Any) -> str:
+    """The value v2 signs in place of the calls themselves.
+
+    Empty maps to the empty string, so a message with no calls hashes the same
+    whether they arrive as None, [] or an absent digest — the property
+    `_canonical_json` already gave the blob.
+    """
+    canonical = _canonical_json(tool_calls)
+    if not canonical:
+        return ""
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def message_preimage(
     *,
     conversation_id: Optional[str],
@@ -87,6 +110,8 @@ def message_preimage(
     timestamp: Optional[str] = None,
     content: str = "",
     tool_calls: Any = None,
+    tool_calls_digest: Optional[str] = None,
+    version: str = PREIMAGE_VERSION,
 ) -> bytes:
     """Build the exact bytes a message signature covers.
 
@@ -97,8 +122,19 @@ def message_preimage(
     append, and appending requires a new PREIMAGE_VERSION — the version tag
     opens the preimage so signatures never cross field sets.
     """
+    if version == "dptp-msg-v1":
+        # The calls themselves. A verifier had to hold them, which is why they
+        # travelled to every group member (ADR-042).
+        last = _canonical_json(tool_calls)
+    else:
+        last = (
+            tool_calls_digest
+            if tool_calls_digest is not None
+            else digest_of_tool_calls(tool_calls)
+        )
+
     fields = [
-        PREIMAGE_VERSION,
+        version,
         conversation_id or "",
         message_id or "",
         sender_node_id or "",
@@ -107,7 +143,7 @@ def message_preimage(
         agent_owner or "",
         _canonical_timestamp(timestamp),
         content or "",
-        _canonical_json(tool_calls),
+        last,
     ]
 
     out = bytearray()

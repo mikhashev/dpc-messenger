@@ -463,11 +463,16 @@ class TestTheOtherTwoBrowsePagePathsAnnounceTheSameThings:
     """
 
     def _ctx(self):
+        from .conftest import service_with_ui
+
         class _Root:
             name = "agent_x"
 
         class _Ctx:
             agent_root = _Root()
+            # The auth path is headless, and a headless browse with no
+            # UI to approve it is refused before any header is built.
+            dpc_service = service_with_ui()
 
         return _Ctx()
 
@@ -495,6 +500,10 @@ class TestTheOtherTwoBrowsePagePathsAnnounceTheSameThings:
         from dpc_client_core.dpc_agent.tools import browser as b
 
         monkeypatch.setattr(wa, "audit_append", lambda *a, **k: None)
+        # A stored session is what a headless browse needs. This class is
+        # about the answer header, not that check, so it is asserted into
+        # existence rather than earned by signing in.
+        monkeypatch.setattr(wa, "has_session", lambda agent_id, domain: True)
         monkeypatch.setattr(
             b, "_auth_browse_html", lambda agent_id, domain, url, headed: html,
         )
@@ -553,7 +562,7 @@ class TestTheOtherTwoBrowsePagePathsAnnounceTheSameThings:
     # --- and what the old line did carry is not lost ----------------------
 
     def test_the_session_that_served_the_page_is_still_named(self, monkeypatch):
-        assert "headed browser, no auth domain named" in self._headed(monkeypatch, _APP_SHELL)
+        assert "visible browser, no auth domain named" in self._headed(monkeypatch, _APP_SHELL)
         assert "auth domain example.test" in self._auth(monkeypatch, _APP_SHELL)
 
 

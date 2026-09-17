@@ -83,6 +83,52 @@ export function resolveSenderIdentity(
     };
 }
 
+export interface DedupedMessages<T> {
+    kept: T[];
+    droppedCount: number;
+    /** Subset of droppedCount: rows whose text differs from the kept row for that id. */
+    conflictCount: number;
+}
+
+/**
+ * Collapse a batch to one row per id, keeping the FIRST occurrence and the
+ * original order. An id-less message is never collapsed against another.
+ * conflictCount counts, among the dropped rows, the ones whose `text` also
+ * differs — msg_index and timestamps are not compared, since two copies of
+ * the same message can differ there without being a real conflict.
+ *
+ * An old server-side dedup bug left one node's `history.json` with repeated
+ * ids (38 rows / 21 unique); Svelte 5's `{#each msg (msg.id)}` throws
+ * `each_key_duplicate` on a repeated key, and this panel has no boundary.
+ */
+export function dedupeMessagesById<T extends { id?: string | null; text?: string }>(messages: T[]): DedupedMessages<T> {
+    const seen = new Map<string, T>();
+    const kept: T[] = [];
+    let droppedCount = 0;
+    let conflictCount = 0;
+    for (const msg of messages) {
+        const id = msg?.id;
+        if (typeof id === 'string' && id.length > 0) {
+            const first = seen.get(id);
+            if (first) {
+                droppedCount++;
+                if (first.text !== msg?.text) conflictCount++;
+                continue;
+            }
+            seen.set(id, msg);
+        }
+        kept.push(msg);
+    }
+    return { kept, droppedCount, conflictCount };
+}
+
+/** Shared wording for the dedupe warn lines across call sites. */
+export function formatDedupeDrop(droppedCount: number, conflictCount: number): string {
+    return conflictCount > 0
+        ? `${droppedCount} duplicate id(s) (${conflictCount} with different content)`
+        : `${droppedCount} duplicate id(s)`;
+}
+
 export function mapBackendMessage(msg: any, opts: MapOptions = {}): MappedMessage {
     // An undated record borrows the time of the one before it. Deriving it from
     // the clock instead put it later than every real message in an old history,

@@ -4,10 +4,11 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { providerToRemember } from '$lib/utils/rememberedProvider';
+  import { voteStatusAppliesTo } from '$lib/utils/voteStatusIdentity';
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
-  import { mapBackendMessage } from "$lib/utils/messageMapper";
+  import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from "$lib/utils/messageMapper";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -26,7 +27,6 @@
   import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
   import ShellApprovalDialog from "$lib/components/ShellApprovalDialog.svelte";
-  import WebAuthApprovalDialog from "$lib/components/WebAuthApprovalDialog.svelte";
   import ChatPanel from "$lib/panels/ChatPanel.svelte";
   import AgentPanel from "$lib/panels/AgentPanel.svelte";
   import VoicePanel from "$lib/panels/VoicePanel.svelte";
@@ -181,6 +181,10 @@
   let showExtractionFailure = $state(false);
   let extractionFailureMessage = $state("");
 
+  // Knowledge extraction fallback state: peer refused, extraction retried locally
+  let showExtractionFallback = $state(false);
+  let extractionFallbackMessage = $state("");
+
   // Knowledge commit result notification state
   let showCommitResultToast = $state(false);
   let commitResultMessage = $state("");
@@ -284,7 +288,7 @@
               const newMap = new Map(map);
               const agentName = $agentsList?.find((a: any) => a.agent_id === state.agent_id)?.name || state.agent_id;
               let previousTimestamp: number | undefined;
-              const msgs = result.messages.map((msg: any, index: number) => {
+              const msgs: Message[] = result.messages.map((msg: any, index: number) => {
                 const mapped = mapBackendMessage(msg, {
                   index,
                   totalCount: result.messages.length,
@@ -294,7 +298,11 @@
                 previousTimestamp = mapped.timestamp;
                 return mapped;
               });
-              newMap.set(state.agent_id, msgs);
+              const { kept: dedupedMsgs, droppedCount, conflictCount } = dedupeMessagesById(msgs);
+              if (droppedCount > 0) {
+                console.warn(`[AgentWake] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in reloaded history for ${state.agent_id}`);
+              }
+              newMap.set(state.agent_id, dedupedMsgs);
               return newMap;
             });
           }
@@ -517,7 +525,7 @@
             const localHistory: any[] = newMap.get(activeChatId) || [];
             const localById = new Map(localHistory.map((m: any) => [m.id, m]));
             let previousTimestamp: number | undefined;
-            const msgs = result.messages.map((msg: any, index: number) => {
+            const msgs: Message[] = result.messages.map((msg: any, index: number) => {
               const local = localById.get(msg.id);
               const mapped = mapBackendMessage(msg, {
                 index,
@@ -529,7 +537,11 @@
               previousTimestamp = mapped.timestamp;
               return mapped;
             });
-            newMap.set(activeChatId, msgs);
+            const { kept: dedupedMsgs, droppedCount, conflictCount } = dedupeMessagesById(msgs);
+            if (droppedCount > 0) {
+              console.warn(`[ActiveChat] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in reloaded history for ${activeChatId}`);
+            }
+            newMap.set(activeChatId, dedupedMsgs);
             return newMap;
           });
         }
@@ -863,9 +875,33 @@
       commitVoteError = "Not connected to the backend — vote was not sent";
       return;
     }
+    // Both keep the dialog open: a held vote is not a cast one either.
+    if (result?.status === "pending" || result?.status === "error") {
+      commitVoteError = result.message || "Vote could not be cast";
+      return;
+    }
     commitVoteError = "";
     showCommitDialog = false;
   }
+
+  $effect(() => {
+    const held = $knowledgeVoteStatus;
+    if (!held) return;
+    // Only about the proposal on screen. Written without this check, a refusal
+    // raised in one group stayed up over an unrelated vote in another and told
+    // its only member he could not vote in a group he is alone in. The store
+    // clears correctly; the text below is a plain variable nothing reconciles,
+    // so the identity has to be checked where it is written. ChatPanel gates
+    // the same store on conversation_id — this is the same rule, by proposal.
+    if (!voteStatusAppliesTo(held, $knowledgeCommitProposal)) return;
+    if (held.status === "success") {
+      commitVoteError = "";
+      showCommitDialog = false;
+      knowledgeCommitProposal.set(null);
+    } else {
+      commitVoteError = held.message;
+    }
+  });
 
   function closeCommitDialog() {
     commitVoteError = "";
@@ -895,9 +931,20 @@
   async function handleEndSession(conversationId: string) {
     // No confirm dialog — user can Reject the proposal if extraction was accidental.
     extractingChats = new Set(extractingChats).add(conversationId);
-    sendCommand("end_conversation_session", {
-      conversation_id: conversationId
-    });
+    // The response is read, not only the events: the backend answers a refusal
+    // under an OK envelope, and a caller that ignores it leaves the button
+    // disabled at "Extracting..." with no way back.
+    try {
+      const answer: any = await sendCommand("end_conversation_session", {
+        conversation_id: conversationId
+      });
+      if (answer === false || answer?.status === "error") stopExtracting(conversationId);
+    } catch (e) {
+      // A timeout or a transport error produces no event at all.
+      stopExtracting(conversationId);
+      showExtractionFailure = true;
+      extractionFailureMessage = (e as Error).message;
+    }
   }
 
   // untrack is load-bearing: this is called from an $effect and reads
@@ -977,6 +1024,9 @@
   async function handleUnlinkAgentTelegram(agentId: string) {
     agentManagementPanelRef?.handleUnlinkAgentTelegram(agentId);
   }
+  async function handleSetAgentTelegramEnabled(agentId: string, enabled: boolean) {
+    return agentManagementPanelRef?.handleSetAgentTelegramEnabled(agentId, enabled);
+  }
 
 
   // execute_ai_query response moved to MessageRouterPanel.svelte (Step 8)
@@ -1028,6 +1078,7 @@
       onDeleteAgent={handleDeleteAgent}
       onLinkAgentTelegram={handleLinkAgentTelegram}
       onUnlinkAgentTelegram={handleUnlinkAgentTelegram}
+      onSetAgentTelegramEnabled={handleSetAgentTelegramEnabled}
       onGetAgentModelConfig={async (agentId) => await sendCommand('get_agent_model_config', { agent_id: agentId })}
       onSaveAgentModelConfig={async (agentId, config) => { const res = await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); const r = await listAgents(); if (r?.status === 'success' && r.agents) agentsList.set(r.agents); if (config.provider_alias) aiChats.update(m => { const e = m.get(agentId); if (e) { e.llm_provider = config.provider_alias; } return new Map(m); }); if (config.provider_alias && res?.context_window) { tokenUsageMap = new Map(tokenUsageMap); const cur = tokenUsageMap.get(agentId); tokenUsageMap.set(agentId, { ...cur, used: cur?.used ?? 0, limit: Number(res.context_window) }); } }}
     />
@@ -1078,11 +1129,11 @@
               <span class="group-effort-label">Reasoning:</span>
               <select
                 class="group-effort-select"
-                title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount."
+                title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount. Agent config keeps the room out of it: every agent answers at the level in its own config, which is the only way a room of mixed models can be set per agent."
                 value={$groupChats.get(activeChatId)?.reasoning_effort || ''}
                 onchange={(e: Event) => setGroupReasoningEffort(activeChatId, (e.currentTarget as HTMLSelectElement).value)}
               >
-                <option value="">Config</option>
+                <option value="">Agent config</option>
                 <option value="off">Off</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
@@ -1098,24 +1149,16 @@
               <select
                 class="group-effort-select"
                 title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount."
-                value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort
-                       ?? ($chatEfforts.get(activeChatId) || '')}
-                onchange={async (e: Event) => {
+                value={$chatEfforts.get(activeChatId) || ''}
+                onchange={(e: Event) => {
+                  // A lever over this chat, not the agent's setting: the level the
+                  // agent keeps lives in Agent Models Configuration, and the empty
+                  // option is how a chat hands the choice back to it.
                   const level = (e.currentTarget as HTMLSelectElement).value;
-                  // The write mirrors the read one line above: a chat that answers to an
-                  // agent stores the level in that agent's config, and one that does not
-                  // keeps it here and sends it with the query. Deciding by the same
-                  // lookup both ways is what keeps the control from writing somewhere
-                  // the reader never looks.
-                  if ($agentsList.find((a: any) => a.agent_id === activeChatId)) {
-                    await updateAgentConfig(activeChatId, { reasoning_effort: level });
-                    await listAgents();
-                  } else {
-                    chatEfforts.update(m => new Map(m).set(activeChatId, level));
-                  }
+                  chatEfforts.update(m => new Map(m).set(activeChatId, level));
                 }}
               >
-                <option value="">Config</option>
+                <option value="">Agent config</option>
                 <option value="off">Off</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
@@ -1221,6 +1264,7 @@
 
       <ChatPanel
         bind:this={chatPanelRef}
+        onOpenVote={() => { if ($knowledgeCommitProposal) { commitVoteError = ""; showCommitDialog = true; } }}
         {activeChatId}
         {chatHistories}
         {commandToChatMap}
@@ -1346,12 +1390,6 @@
      shell commands. Subscribes to pendingShellApprovals store fed by
      coreService.ts shell_approval_request WS handler. -->
 <ShellApprovalDialog />
-
-<!-- WebAuthApprovalDialog: ADR-029 Task 008 — the same shape for an agent
-     asking to use saved cookies in a browser the human cannot see. The
-     backend has broadcast this request since June with nothing mounted to
-     answer it. -->
-<WebAuthApprovalDialog />
 
 <!-- ChatHistorySyncPanel: loads history from backend when switching to peer/agent/group chat (Step 8) -->
 <ChatHistorySyncPanel
@@ -1509,6 +1547,20 @@
   />
 {/if}
 
+<!-- Knowledge Extraction Fallback Toast (peer refused, retried locally) -->
+{#if showExtractionFallback}
+  <Toast
+    message={extractionFallbackMessage}
+    type="warning"
+    duration={8000}
+    dismissible={true}
+    onDismiss={() => {
+      showExtractionFallback = false;
+      extractionFallback.set(null);
+    }}
+  />
+{/if}
+
 <!-- Knowledge Commit Result Toast -->
 {#if showCommitResultToast}
   <Toast
@@ -1608,7 +1660,7 @@
 
 <!-- KnowledgeEventsPanel: commit/token/extraction/context hash events -->
 <KnowledgeEventsPanel
-  onOpenCommitDialog={(conversationId) => { showCommitDialog = true; stopExtracting(conversationId); }}
+  onOpenCommitDialog={(conversationId) => { commitVoteError = ""; showCommitDialog = true; stopExtracting(conversationId); }}
   onUpdateTokenUsage={(convId, usage) => {
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.set(convId, usage);
@@ -1621,6 +1673,17 @@
     showExtractionFailure = true;
     extractionFailureMessage = message;
     stopExtracting(conversationId);
+    // A proposal can be announced and then refused a few milliseconds later.
+    // A dialog left standing over it takes votes on a proposal no vote was
+    // opened for, and the backend answers every one of them "Proposal not found".
+    if ($knowledgeCommitProposal &&
+        (!conversationId || $knowledgeCommitProposal.conversation_id === conversationId)) {
+      closeCommitDialog();
+    }
+  }}
+  onShowExtractionFallback={(message, conversationId) => {
+    showExtractionFallback = true;
+    extractionFallbackMessage = message;
   }}
   onShowCommitResult={(message, type, result) => {
     commitResultMessage = message;
@@ -1634,6 +1697,7 @@
     showCommitResultToast = true;
   }}
   onCloseCommitDialog={() => {
+    commitVoteError = "";
     showCommitDialog = false;
     knowledgeCommitProposal.set(null);
   }}

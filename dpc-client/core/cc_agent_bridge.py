@@ -1,7 +1,7 @@
 """
-CC Agent Bridge — unified module for CC to read agent chat and send responses.
+Agent chat bridge — an external agent (Claude Code or any harness) reads a 1:1
+DPC agent chat and sends responses. File name is historical.
 
-Replaces MCP bridge with stateless file + WebSocket approach:
 - READ: history.json (always on disk, survives End Session / New Session)
 - WRITE: WebSocket to localhost:9999 (send_cc_agent_response command)
 - ANALYZE: Ark thinking/tools/behavioral patterns
@@ -9,8 +9,8 @@ Replaces MCP bridge with stateless file + WebSocket approach:
 Usage:
     python cc_agent_bridge.py                       # poll mode (5s interval)
     python cc_agent_bridge.py --once --last 5       # show last 5 messages
-    python cc_agent_bridge.py --mentions             # show @CC mentions
-    python cc_agent_bridge.py --send "hello"         # send CC response
+    python cc_agent_bridge.py --mentions             # mentions of this bridge's name
+    python cc_agent_bridge.py --send "hello"         # send a response
     python cc_agent_bridge.py --thinking             # show Ark thinking
     python cc_agent_bridge.py --analyze              # Ark behavioral analysis
 """
@@ -136,9 +136,25 @@ def _get_default_conversation_id() -> str:
 
 
 def _get_cc_display_name() -> str:
-    """Read CC display name from config.ini [agent_chat] section."""
+    """Config fallback: [agent_chat] cc_display_name in config.ini, "CC" when unset."""
     config = _read_config()
     return config.get("agent_chat", "cc_display_name", fallback="CC")
+
+
+def _configured_display_name() -> str:
+    """The name-neutral reader; the key it reads keeps its historical name."""
+    return _get_cc_display_name()
+
+
+def _is_mention(content: str, name: str) -> bool:
+    """@<name> in content, case-insensitively; Cyrillic @сс only when the name is CC."""
+    low = (content or "").lower()
+    return f"@{name.lower()}" in low or (name.lower() == "cc" and "@сс" in low)
+
+
+def _mentions_banner(name: str, n: int) -> str:
+    """The --mentions header, naming the name scanned for."""
+    return f"=== {n} mention(s) of @{name} ==="
 
 
 def _get_ws_url() -> str:
@@ -190,19 +206,15 @@ def read_history(last_n: int = 0, conversation_id: str = None) -> list:
 
 
 def find_mentions(messages: list, since_index: int = 0) -> list:
-    """Find @CC mentions after since_index. Returns [(index, msg), ...]."""
-    cc_name = _get_cc_display_name()
-    cc_lower = cc_name.lower()
+    """Mentions of the configured display name after since_index: [(index, msg), ...]."""
+    name = _configured_display_name()
     mentions = []
     for i, msg in enumerate(messages):
         if i < since_index:
             continue
-        content = msg.get("content", "")
-        sender = msg.get("sender_name", "")
-        if sender == cc_name:
+        if msg.get("sender_name", "") == name:
             continue
-        content_lower = content.lower()
-        if f"@{cc_lower}" in content_lower or "@сс" in content_lower:
+        if _is_mention(msg.get("content", ""), name):
             mentions.append((i, msg))
     return mentions
 
@@ -242,7 +254,7 @@ def check_backend_status(conversation_id: str = None) -> dict:
 # ─────────────────────────────────────────────────────────────
 
 async def send_response(text: str, conversation_id: str = None) -> dict:
-    """Send CC response via WebSocket to backend."""
+    """Send a response to the 1:1 agent chat via WebSocket; the backend stamps the sender."""
     if conversation_id is None:
         conversation_id = _get_default_conversation_id()
     try:
@@ -252,6 +264,8 @@ async def send_response(text: str, conversation_id: str = None) -> dict:
         return {"status": "error", "message": "websockets not installed"}
 
     import uuid
+    # Command name and the sender id 'cc' are the backend's (local_api.py:140,
+    # service.py:7413/:7459) — no sender field exists on this path yet.
     command = {
         "id": str(uuid.uuid4())[:8],
         "command": "send_cc_agent_response",
@@ -414,12 +428,13 @@ def format_message(i: int, msg: dict, show_thinking: bool = False, show_tools: b
 # ─────────────────────────────────────────────────────────────
 
 def poll(show_thinking: bool = False, show_tools: bool = False, conversation_id: str = None):
-    """Poll loop: watch for new messages and @CC mentions."""
+    """Poll loop: watch for new messages and mentions of this bridge's name."""
     messages = read_history(conversation_id=conversation_id)
     last_count = len(messages)
-    print(f"[CC Bridge] Started. History: {last_count} msgs. Poll every {POLL_INTERVAL}s.")
-    print(f"[CC Bridge] Path: {_get_history_path(conversation_id)}")
-    print(f"[CC Bridge] Ctrl+C to stop.\n")
+    name = _configured_display_name()
+    print(f"[Agent Bridge] Started as {name}. History: {last_count} msgs. Poll every {POLL_INTERVAL}s.")
+    print(f"[Agent Bridge] Path: {_get_history_path(conversation_id)}")
+    print(f"[Agent Bridge] Ctrl+C to stop.\n")
 
     try:
         while True:
@@ -431,43 +446,46 @@ def poll(show_thinking: bool = False, show_tools: bool = False, conversation_id:
                 new_msgs = messages[last_count:]
                 for i, msg in enumerate(new_msgs, last_count):
                     sender = msg.get("sender_name", "?")
-                    content = msg.get("content", "")
-                    cc_name = _get_cc_display_name()
-                    cc_lower = cc_name.lower()
-                    content_lower = content.lower()
-                    is_mention = (f"@{cc_lower}" in content_lower or "@сс" in content_lower) and sender != cc_name
-                    prefix = f">>> @{cc_name} MENTION" if is_mention else "    NEW"
+                    is_mention = _is_mention(msg.get("content", ""), name) and sender != name
+                    prefix = f">>> @{name} MENTION" if is_mention else "    NEW"
                     print(f"{prefix} {format_message(i, msg, show_thinking, show_tools)}")
                 last_count = current_count
             elif current_count < last_count:
-                print(f"[CC Bridge] History reset: {last_count} -> {current_count}")
+                print(f"[Agent Bridge] History reset: {last_count} -> {current_count}")
                 last_count = current_count
     except KeyboardInterrupt:
-        print("\n[CC Bridge] Stopped.")
+        print("\n[Agent Bridge] Stopped.")
 
 
 # ─────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="CC Agent Bridge")
+def _build_parser() -> argparse.ArgumentParser:
+    """The CLI; factored out so tests can read its help."""
+    parser = argparse.ArgumentParser(
+        prog="cc_agent_bridge.py",
+        description="Agent chat bridge for an external agent: read a 1:1 agent chat, "
+                    "scan for mentions of this bridge's name, send responses")
     parser.add_argument("--once", action="store_true", help="Single check, exit")
     parser.add_argument("--thinking", action="store_true", help="Show Ark thinking")
     parser.add_argument("--tools", action="store_true", help="Show tool calls")
     parser.add_argument("--last", type=int, default=5, help="Last N messages")
-    parser.add_argument("--mentions", action="store_true", help="Show @CC mentions")
+    parser.add_argument("--mentions", action="store_true",
+                        help="Show mentions of this bridge's name")
     parser.add_argument("--analyze", action="store_true", help="Ark behavioral analysis")
-    parser.add_argument("--send", type=str, help="Send CC response text")
+    parser.add_argument("--send", type=str, help="Send a response as this bridge's name")
     parser.add_argument("--send-file", type=str, metavar="PATH",
                         dest="send_file",
-                        help="Send CC response text read from a UTF-8 file. "
+                        help="Send a response read from a UTF-8 file. "
                              "Prefer this over --send when the message contains "
                              "backticks, code blocks, or other shell-special "
                              "characters — file I/O avoids bash command "
                              "substitution (rule #44 class).")
     parser.add_argument("--status", action="store_true", help="Check backend/frontend status")
-    parser.add_argument("--check", type=int, metavar="SINCE", help="Scan full content for @CC mentions since message index")
+    parser.add_argument("--check", type=int, metavar="SINCE",
+                        help="Scan full content for mentions of this bridge's name "
+                             "since message index")
     parser.add_argument("--full", action="store_true", help="Show full message content without truncation")
     parser.add_argument("--conversation-id", type=str, default=None,
                         help="Target a specific agent chat by display name "
@@ -475,7 +493,11 @@ def main():
                              "If omitted, the bridge uses the only agent when "
                              "exactly one exists; with multiple agents you "
                              "must specify which one.")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = _build_parser().parse_args()
     conv_id = _resolve_conversation_id(args.conversation_id) if args.conversation_id else None
 
     # If --conversation-id was supplied but resolved to itself, the value
@@ -534,12 +556,11 @@ def main():
         count = len(messages)
         print(f"TOTAL: {count}")
         mentions = find_mentions(messages, since_index=args.check)
+        needle = "@" + _configured_display_name().lower()
         for i, msg in mentions:
             sender = msg.get("sender_name", "?")
             content = msg.get("content", "")
-            idx = content.find("@CC")
-            if idx < 0:
-                idx = content.lower().find("@cc")
+            idx = content.lower().find(needle)
             if idx >= 0:
                 ctx = content[max(0, idx - 20):idx + 100]
             else:
@@ -550,7 +571,7 @@ def main():
         return
 
     messages = read_history(conversation_id=conv_id)
-    print(f"[CC Bridge] {len(messages)} messages in history.json\n")
+    print(f"[Agent Bridge] {len(messages)} messages in history.json\n")
 
     if args.analyze:
         print("=== Ark Behavioral Analysis ===")
@@ -561,7 +582,7 @@ def main():
 
     if args.mentions:
         mentions = find_mentions(messages)
-        print(f"=== @CC Mentions ({len(mentions)}) ===")
+        print(_mentions_banner(_configured_display_name(), len(mentions)))
         for i, msg in mentions:
             print(format_message(i, msg, args.thinking, args.tools, args.full))
         return

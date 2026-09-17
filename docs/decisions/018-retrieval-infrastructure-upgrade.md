@@ -147,7 +147,7 @@ Full research: `ideas/dpc-research/search-infrastructure-quality/` (3 files, S75
 **Fundamental finding:** retrieval quality is bounded by query quality, not model sophistication. All three channels (FAISS dense, BGE-M3 sparse, BM25) failed to find "EEG" content because query dilution affected all of them simultaneously:
 - Dense: rare keyword "EEG" averaged out by common conversation words in embedding
 - Sparse: learned sparse features diluted by noise tokens
-- BM25: common words ("ну", "давайте") outscored rare term in TF-IDF sum
+- BM25: common Russian filler words (*nu*, *davayte* — "well", "let's") outscored rare term in TF-IDF sum
 
 **Fixes applied (S78):**
 1. BM25 enabled as third channel alongside sparse (was dead code via elif)

@@ -97,6 +97,36 @@ A specific governing law and jurisdiction will be designated upon formal entity 
 
 When you open your first pull request, the **CLA Assistant bot** will prompt you to agree. Click "I agree" and you're done. The bot will remember for all future contributions.
 
+> **How to check that this is true rather than trusting the sentence above.** The
+> bot is not a workflow in `.github/` — it is [cla-assistant.io](https://cla-assistant.io)
+> reached by a repository webhook, which is why it cannot be found by reading the
+> tree. What is configured on the GitHub side is readable with:
+>
+> ```bash
+> gh api repos/mikhashev/dpc-messenger/hooks \
+>   --jq '.[] | {active, events, url: .config.url, last_response}'
+> ```
+>
+> **Measured 2026-09-17T19:00Z by CC:** the hook exists (created
+> `2026-03-01T19:59Z`), is `active`, and is subscribed to `issue_comment`,
+> `pull_request` and `merge_group` — the first two being what the bot needs. Its
+> `last_response.status` is `unused` and its delivery list is empty, although
+> Dependabot opened five pull requests on 2026-08-22, months after the hook was
+> created.
+>
+> **Read that as narrowly as it deserves.** The hook's `updated_at` is
+> `2026-09-17T18:42Z`, and whether reconfiguring a hook resets `last_response` is
+> not something this command answers. So "never fired" holds for the window since
+> that change, and what happened between March and August is unknown rather than
+> disproved. Two further things the command cannot see, and nothing in this
+> repository records them: whether cla-assistant.io still has this repository
+> registered, and where the register of signatures actually lives — the webhook
+> points at that service, which is not the same as knowing it holds a register.
+> Both are answered only by signing in there.
+>
+> Until a real external pull request has been through it, treat the paragraph
+> above as the intended flow rather than an observed one, and use Manual Signing.
+
 ### Manual Signing
 
 If CLA Assistant is unavailable or you prefer manual signing:

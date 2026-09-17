@@ -17,14 +17,82 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from .pricing import compute_cost_usd
+from ..node_ledger import (
+    TARIFF_FIELDS,
+    NodeLedger,
+    default_ledger,
+    stated_output_includes_thinking,
+    stated_thinking_source,
+    usage_row,
+)
+from .pricing import compute_cost_usd, get_billing_model
 
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
 
 log = logging.getLogger(__name__)
+
+
+def messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
+    """
+    Convert message list to single prompt string for DPC providers.
+
+    DPC's AI providers expect a prompt string, not a message list.
+    This function preserves the structure by using role markers. Module-level
+    because the gateway flattens an OpenAI `messages` array the same way, and
+    `loop._sanitize_tool_result` guards tool output against these same
+    markers: one scheme, one definition.
+    """
+    parts = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        # Handle multipart content (system messages with cache_control blocks)
+        if isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if text:
+                        text_parts.append(text)
+            content = "\n\n".join(text_parts)
+
+        # Skip empty content
+        if not content or not str(content).strip():
+            continue
+
+        # Format based on role
+        if role == "system":
+            parts.append(f"[SYSTEM]\n{content}")
+        elif role == "user":
+            parts.append(f"[USER]\n{content}")
+        elif role == "assistant":
+            tool_calls = msg.get("tool_calls") or []
+            if tool_calls:
+                tc_lines = []
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    tc_lines.append(f'```tool_call\n{{"name": "{fn.get("name", "")}", "arguments": {fn.get("arguments", "{}")}}}\n```')
+                tc_text = "\n".join(tc_lines)
+                if content:
+                    parts.append(f"[ASSISTANT]\n{content}\n{tc_text}")
+                else:
+                    parts.append(f"[ASSISTANT]\n{tc_text}")
+            elif content:
+                parts.append(f"[ASSISTANT]\n{content}")
+        elif role == "tool":
+            # Include tool results
+            tool_call_id = msg.get("tool_call_id", "unknown")
+            parts.append(f"[TOOL RESULT: {tool_call_id}]\n{content}")
+
+    return "\n\n".join(parts)
 
 
 class DpcLlmAdapter:
@@ -35,11 +103,21 @@ class DpcLlmAdapter:
     the embedded agent to use DPC's configured AI providers.
     """
 
+    # Class-level defaults, so an instance built without `__init__` still has
+    # them: no caller named, the node's own ledger, nothing noted yet.
+    _caller: Optional[str] = None
+    _caller_kind: str = "agent"
+    _ledger: Optional[NodeLedger] = None
+    _last_call: Optional[Dict[str, Any]] = None
+
     def __init__(
         self,
         llm_manager: "LLMManager",
         provider_alias: Optional[str] = None,
         compute_host: str = "",
+        caller: Optional[str] = None,
+        caller_kind: str = "agent",
+        ledger: Optional[NodeLedger] = None,
     ):
         """
         Initialize the adapter.
@@ -48,11 +126,17 @@ class DpcLlmAdapter:
             llm_manager: DPC's LLMManager instance (injected from CoreService)
             provider_alias: Specific provider to use (overrides agent_provider/default_provider)
             compute_host: Optional remote peer node_id — routes all LLM calls to that peer
+            caller: Whose calls these are (the agent id), written into every usage row
+            caller_kind: The row's `caller_kind`: agent, peer or gateway
+            ledger: Where the rows go; default is the node's own ledger
         """
         self._llm_manager = llm_manager
         self._provider_alias = provider_alias  # Per-agent provider override
         self._compute_host = compute_host  # Per-agent remote peer override
         self._default_model: Optional[str] = None
+        self._caller = caller
+        self._caller_kind = caller_kind
+        self._ledger = ledger
         # Reuse existing TokenCountManager for accurate token counting
         self._token_counter = getattr(llm_manager, 'token_count_manager', None)
         if self._token_counter is None:
@@ -62,6 +146,26 @@ class DpcLlmAdapter:
         """Update the per-agent provider override at runtime (Main LLM switch) and drop the cached model so the next call re-resolves."""
         self._provider_alias = provider_alias
         self._default_model = None
+
+    def set_compute_host(self, compute_host: Optional[str]) -> None:
+        """Update the per-agent remote peer at runtime, so unpinning an agent
+        takes effect on the agent that is already running.
+
+        Without this the pin was a constructor argument and nothing else: a
+        model switch rewrote the config, the live adapter kept the old peer, and
+        every following call went to that peer carrying an alias it does not
+        serve. Only `disconnect_from_peer` cleared it. `None` and `""` are the
+        same answer — the config writes one, the registry may write the other,
+        and neither may reach the routing test as truthy.
+        """
+        self._compute_host = compute_host or ""
+        self._default_model = None
+
+    def set_caller(self, caller: Optional[str], caller_kind: str = "agent") -> None:
+        """Name whose calls the usage rows record — `set_provider_alias`'s
+        counterpart for the identity column."""
+        self._caller = caller
+        self._caller_kind = caller_kind
 
     def _get_agent_provider_alias(self) -> Optional[str]:
         """
@@ -113,6 +217,57 @@ class DpcLlmAdapter:
             return provider.supports_vision()
         return False
 
+    def _remote_provider_alias(self, dpc_agent_provider: Any) -> Optional[str]:
+        """The alias the peer will be asked to run — the per-agent pin, else the global row."""
+        if self._compute_host:
+            return self._provider_alias
+        return getattr(dpc_agent_provider, 'remote_provider', None) if dpc_agent_provider else None
+
+    def _peer_alias_supports_vision(self, dpc_agent_provider: Any, peer_id: str) -> bool:
+        """Whether the peer advertised vision for the alias this agent will ask it to run.
+
+        DPTP §3.14 makes `supports_vision: true` in PROVIDERS_RESPONSE the
+        condition for sending a vision query, so an unknown alias or an
+        unanswered PROVIDERS_RESPONSE reads as no.
+        """
+        alias = self._remote_provider_alias(dpc_agent_provider)
+        if not alias:
+            return False
+        service = getattr(dpc_agent_provider, '_service', None) if dpc_agent_provider else None
+        peer_providers = (getattr(service, 'peer_metadata', None) or {}).get(
+            peer_id, {}
+        ).get("providers") or []
+        for row in peer_providers:
+            if row.get("alias") == alias:
+                return bool(row.get("supports_vision"))
+        return False
+
+    @staticmethod
+    def _images_for_peer(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Copies of the images carrying only what DPTP §3.4 lets the peer read.
+
+        `base64` and `mime_type` are both required there, and `path` is the
+        original filename, which the receiver is nowhere promised it can open —
+        on the peer's disk it is missing or a different file. An entry lacking
+        either required field is malformed, and one malformed entry drops the
+        set: a partial set would reach the model as the whole set.
+
+        The builder refuses the same entry by raising, which is the difference in
+        role rather than in rule: refusing a malformed message is its job, while
+        choosing a route is this one's.
+        """
+        prepared: List[Dict[str, Any]] = []
+        for img in images:
+            missing = [f for f in ("base64", "mime_type") if not img.get(f)]
+            if missing:
+                log.error(
+                    "Image is missing %s (DPTP §3.4 requires both) — not sending it to a peer",
+                    " and ".join(missing),
+                )
+                return []
+            prepared.append({"base64": img["base64"], "mime_type": img["mime_type"]})
+        return prepared
+
     def default_model(self) -> str:
         """Return the current DPC provider's model name."""
         try:
@@ -133,6 +288,7 @@ class DpcLlmAdapter:
         max_tokens: int = 4096,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Send chat request through DPC's LLMManager.
@@ -146,47 +302,168 @@ class DpcLlmAdapter:
             max_tokens: Max completion tokens
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks
+            task_id: The task this call belongs to, carried into its usage row (node_ledger)
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
         """
-        # Check if user message contains images (vision query)
-        user_images = self._extract_images_from_messages(messages)
-        if user_images:
-            log.debug(f"Vision query with {len(user_images)} images")
+        # One usage row per call, after whichever route `_chat` took (ADR-041
+        # D3). A call that raises leaves no row: a named gap, since a paid call
+        # that fails after the vendor answered has spent money recorded nowhere.
+        started_at = datetime.now(timezone.utc)
+        clock = time.monotonic()
+        self._last_call = {}
+        response_msg, usage = await self._chat(
+            messages, model=model, tools=tools, reasoning_effort=reasoning_effort,
+            max_tokens=max_tokens, on_stream_chunk=on_stream_chunk,
+            conversation_id=conversation_id,
+        )
+        self._write_usage_row(
+            usage, started_at=started_at, duration_s=time.monotonic() - clock,
+            task_id=task_id, conversation_id=conversation_id,
+        )
+        return response_msg, usage
 
-            # Two-tier vision handling:
-            # 1. If agent's provider supports vision → use native vision support
-            # 2. If not → pre-analyze with vision model, inject description
-            if self._agent_provider_supports_vision():
-                log.info("Agent provider supports vision - using native vision")
-                # Get the agent's provider for native vision call
-                alias = self._get_agent_provider_alias()
-                if not alias:
-                    raise RuntimeError("No AI provider configured in DPC Messenger")
-                provider = self._llm_manager.providers[alias]
-                # Use native vision support (passes images directly to provider)
-                return await self._chat_with_native_vision(
-                    provider, messages, user_images, tools, on_stream_chunk, conversation_id
-                )
-            else:
-                log.info("Agent provider does not support vision - pre-analyzing image")
-                # Get user's text message for context
-                user_text = self._extract_user_text(messages)
-                # Pre-analyze the image with a vision model
-                description = await self._pre_analyze_image_for_agent(
-                    user_images, user_text
-                )
-                # Inject description into messages as text context
-                messages = self._inject_image_description_into_messages(messages, description)
-                # Continue with normal text-based agent flow
+    def _note_call(self, **facts: Any) -> None:
+        """What only the route knows — where the counts came from, and on the
+        peer route which model answered — for the row `chat` writes."""
+        if self._last_call is None:
+            self._last_call = {}
+        self._last_call.update(facts)
 
-        # Check for remote peer routing — per-agent compute_host takes priority over global peer_id
+    def _write_usage_row(
+        self,
+        usage: Dict[str, Any],
+        *,
+        started_at: datetime,
+        duration_s: float,
+        task_id: Optional[str],
+        conversation_id: Optional[str],
+    ) -> None:
+        facts = self._last_call or {}
+        try:
+            alias = facts.get("alias") or self._provider_alias
+            model = facts["model"] if "model" in facts else self.default_model()
+            row = usage_row(
+                # The wire id on the peer route, so both nodes' rows join on it.
+                request_id=facts.get("request_id") or str(uuid.uuid4()),
+                caller=self._caller,
+                caller_kind=self._caller_kind,
+                alias=alias,
+                model=model,
+                route=facts.get("route", "local"),
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                # `reasoning_tokens` in the usage dict; `thinking_tokens` on the wire and in D3.
+                thinking_tokens=usage.get("reasoning_tokens"),
+                counts_source=facts.get("counts_source", "ours"),
+                # Set by whoever made the count: the provider's usage dict or the wire.
+                output_includes_thinking=usage.get("output_includes_thinking", "unknown"),
+                # ... and whether that thinking count was counted or estimated,
+                # from the same two places; None where neither said.
+                thinking_source=usage.get("thinking_source"),
+                # On the peer route, the host's word after its clamp, copied from
+                # the wire; the local routes do not set it yet.
+                served_effort=usage.get("served_effort"),
+                # The connection the round went over, noted by the peer route
+                # before it called; a local route has no far end to prove.
+                peer_proved=facts.get("peer_proved"),
+                peer_connection_type=facts.get("peer_connection_type"),
+                # The host on the peer route, so the guest's row names whom the
+                # alias belongs to and whom the tariff is owed.
+                served_by=facts.get("served_by"),
+                started_at=started_at,
+                duration_s=duration_s,
+                # Priced by the route; on the peer route both are the host's copy
+                # from the wire, or absent: this node did not run the call (D3).
+                billing=facts.get("billing") or get_billing_model(alias or "", model),
+                cost_usd=usage.get("cost"),
+                # Copied from the wire on the peer route, never computed here.
+                **{name: facts.get(name) for name in TARIFF_FIELDS},
+                task_id=task_id,
+                conversation_id=conversation_id,
+            )
+        except Exception:
+            log.error("Usage row for caller %s was not built", self._caller, exc_info=True)
+            return
+        (self._ledger or default_ledger()).append(row)
+
+    async def _chat(
+        self,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: Optional[str] = None,
+        max_tokens: int = 4096,
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """`chat` without the usage row: picks the route and makes the call."""
+        # Check for remote peer routing — per-agent compute_host takes priority over global peer_id.
+        # Resolved before the image branch, which has to know whether the image is
+        # leaving this node at all: handling it locally re-resolves the alias in
+        # the LOCAL registry, where a pinned agent's alias is absent, and the
+        # fallback to default_provider can hand the picture to a cloud vendor the
+        # user never chose for this agent.
         dpc_agent_provider = self._llm_manager.providers.get("dpc_agent")
         effective_peer_id = self._compute_host or (
             getattr(dpc_agent_provider, 'peer_id', None) if dpc_agent_provider else None
         )
+
+        # Check if user message contains images (vision query)
+        user_images = self._extract_images_from_messages(messages)
+        peer_images: List[Dict[str, Any]] = []
+        if user_images:
+            log.debug(f"Vision query with {len(user_images)} images")
+
+            if effective_peer_id and self._peer_alias_supports_vision(
+                dpc_agent_provider, effective_peer_id
+            ):
+                peer_images = self._images_for_peer(user_images)
+                if not peer_images:
+                    log.error(
+                        "Peer %s serves vision for this agent, but the image cannot be "
+                        "sent under DPTP §3.4; handling it locally instead",
+                        effective_peer_id,
+                    )
+
+            if not peer_images:
+                # Two-tier vision handling:
+                # 1. If agent's provider supports vision → use native vision support
+                # 2. If not → pre-analyze with vision model, inject description
+                if self._agent_provider_supports_vision():
+                    log.info("Agent provider supports vision - using native vision")
+                    # Get the agent's provider for native vision call
+                    alias = self._get_agent_provider_alias()
+                    if not alias:
+                        raise RuntimeError("No AI provider configured in DPC Messenger")
+                    provider = self._llm_manager.providers[alias]
+                    self._note_call(route="local", alias=alias)
+                    # Use native vision support (passes images directly to provider)
+                    return await self._chat_with_native_vision(
+                        provider, messages, user_images, tools, on_stream_chunk, conversation_id
+                    )
+                else:
+                    log.info("Agent provider does not support vision - pre-analyzing image")
+                    # Get user's text message for context
+                    user_text = self._extract_user_text(messages)
+                    # Pre-analyze the image with a vision model
+                    description, failure_reason = await self._pre_analyze_image_for_agent(
+                        user_images, user_text
+                    )
+                    # Inject description into messages as text context
+                    messages = self._inject_image_description_into_messages(
+                        messages, description, failure_reason
+                    )
+                    # Continue with normal text-based agent flow
+
         if effective_peer_id:
+            # This node did not run the call; the row says so, under the alias
+            # the peer was asked for.
+            self._note_call(
+                route="peer", alias=self._remote_provider_alias(dpc_agent_provider),
+                served_by=effective_peer_id,
+            )
             if self._compute_host:
                 # Per-agent remote routing: build a context object from per-agent values
                 from types import SimpleNamespace
@@ -199,19 +476,24 @@ class DpcLlmAdapter:
                 )
                 log.debug(f"Routing to per-agent remote peer: {effective_peer_id} (provider={self._provider_alias})")
                 return await self._chat_via_remote_peer(
-                    remote_ctx, messages, tools, on_stream_chunk, conversation_id
+                    remote_ctx, messages, tools, on_stream_chunk, conversation_id,
+                    images=peer_images,
+                    reasoning_effort=reasoning_effort,
                 )
             else:
                 # Global peer_id routing (legacy KISS approach)
                 log.debug(f"Routing to remote peer: {effective_peer_id}")
                 return await self._chat_via_remote_peer(
-                    dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
+                    dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id,
+                    images=peer_images,
+                    reasoning_effort=reasoning_effort,
                 )
 
         alias = self._get_agent_provider_alias()
         if not alias:
             raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
         provider = self._llm_manager.providers[alias]
+        self._note_call(route="local", alias=alias)
 
         # Native tool calling path — use when provider supports it and tools are requested.
         # This eliminates the text-based tool injection pattern that causes GLM-4.7 to
@@ -295,6 +577,7 @@ class DpcLlmAdapter:
             # usage dict privately while this reader priced its own estimate.
             reported = provider.get_last_usage()
             if reported:
+                self._note_call(counts_source="engine")
                 usage: Dict[str, Any] = dict(reported)
                 usage.setdefault(
                     "cost",
@@ -327,8 +610,11 @@ class DpcLlmAdapter:
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
                 "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
+                # Counted over the visible text; the thinking, if any, was already apart from it.
+                "output_includes_thinking": "excludes",
             }
 
+            self._note_call(counts_source="ours")
             return response_msg, usage
 
         except Exception as e:
@@ -411,8 +697,12 @@ class DpcLlmAdapter:
                     f"(model cannot process the image). Falling back to pre-analysis."
                 )
                 user_text = self._extract_user_text(messages)
-                description = await self._pre_analyze_image_for_agent(images, user_text)
-                messages = self._inject_image_description_into_messages(messages, description)
+                description, failure_reason = await self._pre_analyze_image_for_agent(
+                    images, user_text
+                )
+                messages = self._inject_image_description_into_messages(
+                    messages, description, failure_reason
+                )
                 # Re-build prompt with injected description and continue as text-only
                 prompt = self._messages_to_prompt(messages)
                 if tools:
@@ -448,8 +738,11 @@ class DpcLlmAdapter:
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
                 "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
+                # Counted over the visible text; the thinking, if any, was already apart from it.
+                "output_includes_thinking": "excludes",
             }
 
+            self._note_call(counts_source="ours")
             return response_msg, usage
 
         except Exception as e:
@@ -535,8 +828,12 @@ class DpcLlmAdapter:
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
                 "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
+                # Counted over `content` alone; `thinking` came apart from it.
+                "output_includes_thinking": "excludes",
             }
+            self._note_call(counts_source="ours")
         else:
+            self._note_call(counts_source="engine")
             usage.setdefault(
                 "cost",
                 compute_cost_usd(
@@ -670,6 +967,7 @@ class DpcLlmAdapter:
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
         images: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Route inference to remote peer when dpc_agent.peer_id is set.
@@ -683,7 +981,8 @@ class DpcLlmAdapter:
             tools: Optional list of tool schemas
             on_stream_chunk: Optional streaming callback
             conversation_id: Optional conversation ID
-            images: Optional list of image dicts for vision queries
+            images: Optional list of image dicts for vision queries; sent only
+                as DPTP §3.4 allows, i.e. carrying base64 rather than a path
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -692,6 +991,15 @@ class DpcLlmAdapter:
         service = getattr(dpc_agent_provider, '_service', None)
         if not service:
             raise RuntimeError("DpcAgentProvider missing CoreService reference - cannot route to remote peer")
+
+        # Read before the call and kept for the row: what the answer travelled
+        # over, and so whether the host's name was proved (ADR-041 D2).
+        from ..p2p_manager import peer_proof
+        proved, connection_type = peer_proof(
+            getattr(getattr(service, "p2p_manager", None), "peers", None),
+            dpc_agent_provider.peer_id,
+        )
+        self._note_call(peer_proved=proved, peer_connection_type=connection_type)
 
         # Convert messages to prompt
         prompt = self._messages_to_prompt(messages)
@@ -713,7 +1021,10 @@ class DpcLlmAdapter:
                 prompt=prompt,
                 model=dpc_agent_provider.remote_model,
                 provider=dpc_agent_provider.remote_provider,
-                images=[],
+                # Re-checked at the wire, not only at the caller: this is the last
+                # place a `path` could leave the machine (DPTP §3.4).
+                images=self._images_for_peer(images or []),
+                reasoning_effort=reasoning_effort,
                 timeout=timeout
             )
 
@@ -724,18 +1035,29 @@ class DpcLlmAdapter:
                 remote_tokens = result.get("tokens_used")
                 remote_prompt_tokens = result.get("prompt_tokens")
                 remote_response_tokens = result.get("response_tokens")
+                remote_thinking = result.get("thinking")
+                remote_thinking_tokens = result.get("thinking_tokens")
             else:
                 # Fallback if result is already a string (shouldn't happen but be safe)
                 response_text = str(result) if result else ""
                 remote_tokens = None
                 remote_prompt_tokens = None
                 remote_response_tokens = None
+                remote_thinking = None
+                remote_thinking_tokens = None
 
             # Build response message in Ouroboros format
             response_msg: Dict[str, Any] = {
                 "role": "assistant",
                 "content": response_text,
             }
+
+            # The peer sends its reasoning and the whole wire carries it; reading
+            # it here is what gives a remote agent the same channel a local one
+            # has. Without it the round falls back to `content`, which on a tool
+            # round is the tool_call block itself.
+            if remote_thinking:
+                response_msg["thinking"] = remote_thinking
 
             # Parse for tool calls if tools were provided
             if tools:
@@ -745,16 +1067,39 @@ class DpcLlmAdapter:
                     response_msg["tool_calls"] = tool_calls
                     log.info(f"Found {len(tool_calls)} tool call(s) from remote peer")
 
+            # For the row: which model answered, whose counts these are, and the
+            # host's own id and billing model for the call (ADR-041 D3).
+            _peer = result if isinstance(result, dict) else {}
+            self._note_call(
+                model=_peer.get("model") or getattr(dpc_agent_provider, "remote_model", None),
+                counts_source="engine" if remote_prompt_tokens and remote_response_tokens else "ours",
+                request_id=_peer.get("request_id"),
+                billing=_peer.get("billing"),
+                # The owner's price as it arrived, whole or not at all.
+                **{name: _peer.get(name) for name in TARIFF_FIELDS},
+            )
+
             # Use actual token counts from remote if available, otherwise count locally
             if remote_prompt_tokens and remote_response_tokens:
                 usage: Dict[str, Any] = {
                     "prompt_tokens": remote_prompt_tokens,
                     "completion_tokens": remote_response_tokens,
                     "total_tokens": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
-                    "cost": compute_cost_usd(self._provider_alias or "", remote_prompt_tokens, remote_response_tokens),
                 }
+                # The loop sums this field across a task (OPTIONAL_USAGE_FIELDS);
+                # absent means «no round reported one», so it is set only when
+                # the peer sent a count rather than defaulted to zero.
+                if remote_thinking_tokens:
+                    usage["reasoning_tokens"] = remote_thinking_tokens
+                if _peer.get("output_includes_thinking") is not None:
+                    # The host's word about its count, checked: the wire can carry anything.
+                    usage["output_includes_thinking"] = stated_output_includes_thinking(
+                        _peer["output_includes_thinking"],
+                        peer=getattr(dpc_agent_provider, "peer_id", None) or "?", log=log,
+                    )
             elif self._token_counter:
-                # Count locally using TokenCountManager
+                # Count locally using TokenCountManager, over the visible text: the
+                # host sent its thinking apart from `response`, so the label is ours.
                 model_name = self.default_model()
                 prompt_tokens = self._token_counter.count_tokens(prompt, model_name)
                 completion_tokens = self._token_counter.count_tokens(response_text, model_name)
@@ -762,18 +1107,34 @@ class DpcLlmAdapter:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
-                    "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
+                    "output_includes_thinking": "excludes",
                 }
             else:
-                # Final fallback to character estimation
+                # Final fallback to character estimation, over the same visible text
                 est_prompt_tokens = len(prompt) // 4
                 est_completion_tokens = len(response_text) // 4
                 usage: Dict[str, Any] = {
                     "prompt_tokens": est_prompt_tokens,
                     "completion_tokens": est_completion_tokens,
                     "total_tokens": est_prompt_tokens + est_completion_tokens,
-                    "cost": compute_cost_usd(self._provider_alias or "", est_prompt_tokens, est_completion_tokens),
+                    "output_includes_thinking": "excludes",
                 }
+            # The host's cost does not travel and is not copied: this node spent
+            # nothing of its own and prices nothing, so its row's cost_usd stays
+            # null (D3). What it owes is the tariff, noted above for the row.
+            # The effort the host actually served, after its clamp (DPTP v1.7):
+            # the only place this node can learn what depth it paid for. Set
+            # whether or not the host counted, so the row carries it either way.
+            if _peer.get("served_effort") is not None:
+                usage["served_effort"] = _peer["served_effort"]
+            # Where the host's thinking count came from, checked as its
+            # convention is; a word that is neither of the two is dropped.
+            _source = stated_thinking_source(
+                _peer.get("thinking_source"),
+                peer=getattr(dpc_agent_provider, "peer_id", None) or "?", log=log,
+            )
+            if _source is not None:
+                usage["thinking_source"] = _source
 
             return response_msg, usage
 
@@ -844,20 +1205,23 @@ class DpcLlmAdapter:
         self,
         images: List[Dict[str, Any]],
         user_message: str,
-    ) -> str:
+    ) -> Tuple[Optional[str], Optional[str]]:
         """
-        Pre-analyze images using a vision model and return description.
+        Pre-analyze images using a vision model.
 
         This is used when the agent's provider doesn't support vision natively.
         The description is injected into the messages so the agent can reason
         about visual content using its tools.
+
+        The failure reason travels beside the description, never inside it: a
+        reason returned as the description reads to the model as one.
 
         Args:
             images: List of image dicts with base64 and mime_type keys
             user_message: The user's text message (for context)
 
         Returns:
-            Text description of the image content
+            (description, None) on success, (None, reason) on failure.
         """
         try:
             # Build analysis prompt
@@ -882,16 +1246,17 @@ class DpcLlmAdapter:
 
             description = response_metadata.get("response", "")
             log.debug(f"Image analysis complete ({len(description)} chars)")
-            return description
+            return description, None
 
         except Exception as e:
             log.error(f"Image pre-analysis failed: {e}")
-            return f"[Image analysis failed: {e}]"
+            return None, str(e)
 
     def _inject_image_description_into_messages(
         self,
         messages: List[Dict[str, Any]],
-        description: str,
+        description: Optional[str],
+        failure_reason: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Inject image description into the last user message.
@@ -901,7 +1266,8 @@ class DpcLlmAdapter:
 
         Args:
             messages: List of message dicts
-            description: Text description of the image
+            description: Text description of the image, None when it failed
+            failure_reason: Why the analysis failed, when it did
 
         Returns:
             Modified messages list with description injected
@@ -914,7 +1280,14 @@ class DpcLlmAdapter:
         # agent it has seen the image when it has not — the same substitution
         # the provider stopped making when it quit returning reasoning in the
         # answer's place, one layer up.
-        if not (description or "").strip():
+        if description is None:
+            because = f" ({failure_reason})" if failure_reason else ""
+            header = (
+                "[The user has shared an image. The visual analysis failed"
+                f"{because}, so you have not seen it — say the image could not "
+                "be analysed rather than guessing at its contents.]"
+            )
+        elif not description.strip():
             header = (
                 "[The user has shared an image. The vision model returned no "
                 "description, so you have not seen it — say so rather than "
@@ -955,57 +1328,9 @@ class DpcLlmAdapter:
         return messages
 
     def _messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
-        """
-        Convert message list to single prompt string for DPC providers.
-
-        DPC's AI providers expect a prompt string, not a message list.
-        This method preserves the structure by using role markers.
-        """
-        parts = []
-
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-
-            # Handle multipart content (system messages with cache_control blocks)
-            if isinstance(content, list):
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "")
-                        if text:
-                            text_parts.append(text)
-                content = "\n\n".join(text_parts)
-
-            # Skip empty content
-            if not content or not str(content).strip():
-                continue
-
-            # Format based on role
-            if role == "system":
-                parts.append(f"[SYSTEM]\n{content}")
-            elif role == "user":
-                parts.append(f"[USER]\n{content}")
-            elif role == "assistant":
-                tool_calls = msg.get("tool_calls") or []
-                if tool_calls:
-                    tc_lines = []
-                    for tc in tool_calls:
-                        fn = tc.get("function", {})
-                        tc_lines.append(f'```tool_call\n{{"name": "{fn.get("name", "")}", "arguments": {fn.get("arguments", "{}")}}}\n```')
-                    tc_text = "\n".join(tc_lines)
-                    if content:
-                        parts.append(f"[ASSISTANT]\n{content}\n{tc_text}")
-                    else:
-                        parts.append(f"[ASSISTANT]\n{tc_text}")
-                elif content:
-                    parts.append(f"[ASSISTANT]\n{content}")
-            elif role == "tool":
-                # Include tool results
-                tool_call_id = msg.get("tool_call_id", "unknown")
-                parts.append(f"[TOOL RESULT: {tool_call_id}]\n{content}")
-
-        return "\n\n".join(parts)
+        """The adapter's prompt flattening; the shared function does the work
+        so the gateway speaks the same role markers without a second copy."""
+        return messages_to_prompt(messages)
 
     def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
         """Format tool schemas as text descriptions for prompt injection."""

@@ -3,6 +3,7 @@ adr: 040
 title: "Add the second local inference path as a DPC-owned llama-server child, not an in-process binding — and fix residency before adding an engine"
 status: accepted
 date: 2026-08-18
+axis: network
 deciders: [Mike]
 consulted: [Ark, Johnny, Warren, CC, Fable 5, GLM 5.3]
 informed: []
@@ -226,8 +227,8 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   three *downloads* of upstream builds, not three builds; a build only if a needed flag or patch is
   missing upstream (none identified). Never hard-code Ollama's install layout: `binary_path` in
   configuration with auto-discovery as a fallback.
-  *(**Amendment, 2026-08-23 — the pin moves to `b10566`, and stops being ours to guess.** Mike:
-  «Да, давай пересядем». On 2026-08-21 upstream began publishing `vX.Y.Z` releases beside the
+  *(**Amendment, 2026-08-23 — the pin moves to `b10566`, and stops being ours to guess.**
+  Mike's call: switch over. On 2026-08-21 upstream began publishing `vX.Y.Z` releases beside the
   `b[NUM]` ones and stated which is for whom: `vX.Y.Z` is «stable, slower release cadence,
   recommended for downstream distribution», `b[NUM]` is «bleeding edge … recommended for developers».
   We are downstream and had been sitting on a nightly tag chosen by hand.
@@ -247,6 +248,157 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   unavailable: PR 27342 is still open, so `b10566` builds the same 58 of the 81 tensors `b10472` did.
   Measurements in this document taken on `b10472` stay as they are: they are dated observations, not
   claims about the current pin.)*
+
+  *(**Amendment, 2026-09-09 — the pin moves to `b10809`, and the rule above is what moved it.**
+  Upstream's newest non-prerelease is **`v0.4.0`** (published 2026-09-04); its sole asset
+  `nightly-tag.txt` holds exactly `b10809`. So the tag was read rather than picked, and the three
+  asset rows in `llama_server_fetcher.py` were re-digested from the release API (the `cudart` asset
+  is byte-identical and unchanged). The newest nightly on the day was **`b10878`**, 69 commits
+  further on, and it was deliberately **not** taken: leaving the versioned tag is a decision about
+  which channel we sit on — the one the amendment above settled — not a bump. The range
+  `b10566...b10809` is **243 commits**, walked through the GitHub compare API paged to exhaustion
+  (`Observed`; nothing sampled).
+
+  Three things arrive with the bump, and each is narrower than its changelog line.
+  **(i) `1729ed53` turns a prefill `b10566` accepted into an error.** llama-server now raises
+  `invalid_argument` when the message array *ends* with an assistant message carrying a non-empty
+  `tool_calls`, where `b10566` silently stripped them. **Sending no `continue_final_message` does not
+  exempt us, and a review argued it did.** `server-common.cpp:1275-1294` at `b10809` reads: the field
+  is `NONE` unless the body sets it (`:1275-1277`), but when it is `NONE`, `--prefill-assistant` is on
+  — the default, `arg.cpp:3806`, and we pass no `--no-prefill-assistant` — and the last message is an
+  assistant message, the server **promotes it to `AUTO` itself** (`:1283`); the throw at `:1289-1293`
+  then tests the promoted value. A second, adjacent throw is new in the same block: two or more
+  assistant messages at the end of the list (`:1281`). Our loop normally ends a request with a
+  `role: "tool"` message, so the trigger stays narrow — resume-after-a-tool-call, a replay, or a
+  history truncated at the wrong boundary — but it fails the request rather than degrading it.
+  **Measured against the live child on 2026-09-10**, three requests, no `continue_final_message` in
+  any body: a tail of assistant-with-`tool_calls` → **HTTP 400**, «Cannot continue an assistant
+  message that contains tool calls»; the shape our loop actually sends, ending in a `role: "tool"`
+  message → **HTTP 200**, served; two assistant messages at the end → **HTTP 400**, «Cannot have 2
+  or more assistant messages at the end of the list». So both throws are reachable from a plain
+  OpenAI-shaped body and neither is reached by today's loop (`Observed`).
+  **(ii) `925e1179` invalidates saved slot state**: `LLAMA_SESSION_VERSION` 9 → 10 and
+  `LLAMA_STATE_SEQ_VERSION` 2 → 3, so slot state written by `b10566` is rejected by this build
+  rather than quietly misread (`Observed` in the constants). **It does not reach us today, and the
+  first draft of this amendment said it did.** `--slot-save-path` is a supervisor option that
+  defaults to `None` (`llama_server_supervisor.py:110`) and is emitted only when set (`:610-611`);
+  no alias in `providers.json` sets it, and the live child command line of 2026-09-10 does not
+  carry it. So the break is real and conditional: it bites the first time someone turns the option
+  on and expects state from an older pin to load.
+  **(iii) `e750b887` makes `preserve_reasoning` default to true — and it is a no-op for us**, which
+  was checked rather than assumed: our loop never sends `reasoning_content` back (the llamacpp path
+  passes `reasoning_echo=False`, and the agent adapter keeps `thinking` as a top-level key the
+  converter never reads), and on this model's template `undefined` and `true` take the same branch
+  (`Observed`).
+
+  **One sentence of the amendment above no longer describes the pin.** PR 27342 merged upstream on
+  **2026-08-27**, and `src/llama-arch.h` at `b10809` declares **7** `LLM_TENSOR_DFLASH_*` entries
+  against **0** at `b10566` (the 1-against-13 first written here counted every `dflash` substring —
+  7 tensors, 5 `LLM_KV`, 1 `LLM_ARCH` — which is a different quantity; caught in review, `Observed`). `expected 81, got 58` is therefore a
+  measurement of `b10472`/`b10566`, not a property of this build; `ProvidersEditor.svelte` now says
+  so, and marks `draft-dflash` **untried** here rather than broken, because nobody has started the
+  drafter since the pin moved (`Not verified`). Two upstream citations in our own code were re-read
+  at `b10809` and their line numbers corrected — `server-context.cpp:284 → :328`,
+  `llama-context.cpp:3596-3605 → :3698-3707`; the cited code is byte-identical, only the file moved
+  under it.
+
+  **The half of the re-shoot that needs no card was done; the half that needs one was not.** The
+  `win-cuda-13.3-x64` assets were fetched and their sha256 verified against the pinned table on this
+  box (2026-09-09 23:33–23:35, `Observed`), and `llama-server --version` answers
+  `0.4.0-dev (build 10809, commit 5266f24da)` against `b10566`'s `0.2.0-dev (build 10566, commit
+  bb4caa754)`, same Clang 20.1.8. Read out of the shipped `ggml-cuda.dll` rather than from a banner:
+  the arch list `750,800,860,890,900,1200,1210` — the value string beside the `ARCHS` key, and
+  **byte-identical, once each, in all four pins on this disk** (b10472, b10566, b10684, b10809), so
+  what the build declares did not move; `BLACKWELL_NATIVE_FP4`
+  and `USE_GRAPHS` are present as keys, and their `= 1` values are built by code rather than sitting
+  in a static table, so the `= 1` half stays `Not verified` until a banner is read. The flag surface
+  grew and lost nothing: 336 → 345 flags, **0 removed**, 9 added (`--kv-unified-per-slot`,
+  `--n-cpu-ffn`, `--spec-synth-len`, `--spec-synth-rates`, three `--video-*`, `-lzm`), and all 25
+  flags the supervisor emits were passed to the new binary and accepted, the harness first falsified
+  on an invented flag (`Observed`).
+
+  **And the reading corrects G2's instrument rather than its verdict.** `GGML_CUDA_FORCE_MMQ` and
+  `GGML_CUDA_FORCE_CUBLAS` are **CMake options**, not environment variables:
+  `ggml/CMakeLists.txt:201-202` declares both `OFF` by default, and `ggml-cuda.cu:5626-5631` consumes
+  them as `#ifdef`, pushing the feature keys `FORCE_MMQ` / `FORCE_CUBLAS`. Neither key is present in
+  the shipped DLL at `b10566` or at `b10809`, and neither name is read through `getenv` anywhere in
+  the CUDA backend. The one occurrence of the string is inside a diagnostic advising a `-D` compile
+  flag. So `GGML_CUDA_FORCE_MMQ=1` in the environment forced nothing, and the G2 pair — 886.2/879.5
+  at 77 876 tokens, 707.9/707.5 at 139 490 — was **two runs of one configuration**; what it measured
+  is run-to-run spread, which is a useful number and not the one it was labelled with. The 2026-08-19
+  entry had already caught this for `FORCE_CUBLAS` and drew the boundary one variable too narrow.
+  What survives untouched: the server did not crash, the banner was byte-identical, and no
+  cuBLAS-fallback signature appeared — but «forcing MMQ moves nothing» is now vacuous rather than
+  evidential, and G2's question is **open again** (`Observed` in upstream's own source; the
+  falsification is filed on the board).
+
+  **What still needs the card.** No prefill at our own depth, no startup banner, and therefore no
+  runtime confirmation of `BLACKWELL_NATIVE_FP4 = 1` on this build; the live child is still the
+  `b10566` binary (`Observed`, the running process's own path). Q4 below says why that is not a
+  formality: the G2 check is a property of a build and does not transfer between them. **No speed
+  number from `b10809` exists**, and every figure in this document stays what it was — a dated
+  observation on the build it was taken on.)*
+
+  *(**Amendment, 2026-09-15 — the pin moves to `b10964`, read the same way, and this time the
+  argument is not the channel rule but a numerical fix in our own architecture.** Upstream's newest
+  non-prerelease is **`v0.4.1`** (published 2026-09-14T18:27:29Z); its sole asset `nightly-tag.txt`
+  is 7 bytes holding exactly `b10964`. The range `b10809...b10964` is **155 commits**, and unlike
+  last time it was taken by three independent instruments that agree: the paged compare endpoint
+  (`total_commits` and `ahead_by` both 155, 100+55 commit objects actually received), a walk of the
+  commit list from `b29c606e` finding `5266f24d` at position 155, and a line count of the release
+  body's own "Changelog since v0.4.0" section. `b10809` itself is the commit `llama.cpp : bump
+  version to 0.4.0 (#28386)`, so the previous pin was v0.4.0 entire (`Observed`, Ark).
+
+  The asset rows were re-digested from the release API. **The `cudart` asset is byte-identical again
+  — digest and size both — and this time that is measured rather than carried over**, because ggml
+  went 0.23.0 → 0.24.0 in this range and "it did not change last time" would have been the wrong
+  kind of argument. A guard went into the suite with the rows
+  (`test_every_asset_name_carries_the_pinned_tag`): the download URL is built from the tag and the
+  asset name and **nothing compared the two**, so a table where one platform kept the old name is a
+  404 on that platform alone with a green suite everywhere else (Ark's finding; the guard was
+  falsified against a deliberately stale row before it was trusted).
+
+  What arrives, each narrower than its changelog line.
+  **(i) `#28334` removes `--mmap`, `--mlock` and `--direct-io` from the arg parser** — not
+  deprecates, removes; the PR is titled so. We emit none of them, and `extra_args` is empty on both
+  nodes (`Observed`: the Windows `providers.json` has no such key in the `llamacpp_server` entry, and
+  the Linux node has no `llamacpp_server` entry at all — read whole, not grepped).
+  **(ii) `#28068` changes the GDN q/k normalisation from a clamped `max` to `rsqrt`, and it lands in
+  our architecture.** The PR names `qwen35` among the seven it affects and its diff patches
+  `src/models/qwen35.cpp`'s `build_layer_attn_linear`; our GGUF's own `general.architecture` is
+  `qwen35`, with `qwen35.ssm.*` hparams and per-block `ssm_conv1d`/`ssm_a`/`ssm_alpha`/`ssm_beta`/
+  `ssm_dt.bias`/`ssm_norm`/`ssm_out` tensors and `full_attention_interval = 4` — read from the file's
+  own KV block, not from its name. **No figure from `b10809` or `b10566` transfers across this
+  change, and neither does output quality.** The PR's own KLD table is measured on a *Q4_K_M* build;
+  ours is `general.file_type = 7` with 448 NVFP4 / 664 F32 / 10 Q8_0 tensors and no k-quant at all,
+  so **the magnitude of the defect for our file is unknown** — the shape of it (a divergence only
+  where the q/k norm approaches `eps`, i.e. in the tail) is what carries over, not the numbers.
+  **(iii) `#28079` removes the `K->type != V->type → BEST_FATTN_KERNEL_NONE` guard in `fattn.cu`.**
+  This does not fix what we run: our pair is matched `q4_0/q4_0`. It makes the mixed pair an option
+  on prefill only — `q8_0-q4_0` is still absent from the default `GGML_CUDA_FA_QUANTS`
+  (`ggml/CMakeLists.txt:207` at `b10964`), and the release CI passes no FA flag at all: the
+  `windows-cuda` job is byte-identical between the two tags. PR **#27269**, which this document's
+  neighbours cite as the pending fix for that pair, was **closed unmerged on 2026-09-13**.
+  **(iv) `#28587` and `#28715` fix the drafter beside the projector** — `#28587`'s body quotes our
+  own error strings (`llama_decode(ctx_dft) failed`, `failed to decode mtmd chunk`, `failed to
+  process mtmd chunk`) and its repro condition is an image larger than `-ub`, which our alias sets to
+  1024. This is the strongest single argument in the range, and it is for an open HIGH on the board,
+  not for this ADR.
+  **(v) `#27870`** fixes a divergent barrier in the CUDA f16 flash-attention tile kernel
+  (`compute-sanitizer`: 3232 errors before, 0 after) — the only genuine FA fix in the range.
+
+  What did **not** change, checked rather than assumed: `cache_reuse` is still zeroed under
+  `--mmproj` at `server-context.cpp:1179` and `:1191`, same addresses, with the per-slot predicate
+  moved `:3211 → :3227` and textually identical; and the flash-attention logic in `tools/mtmd/
+  clip.cpp` is byte-identical between the two tags apart from one API rename.
+
+  **Nothing here was measured on `b10964`.** The pin was moved on Mike's verb of 2026-09-15 after the
+  rollback was shown to cost nothing — installs are per-tag, `b10809` stays on disk, and
+  `resolve_binary` accepts it again from the marker without a network call. Every figure in this
+  document remains a dated observation on the build it was taken on, and **no speed number from
+  either `b10809` or `b10964` exists**. When the two-node ADR-041 observations are taken, each must
+  record which build it ran on: three of them go through this llama-server, and the pin moved
+  between them and the ones already recorded (Ark, 2026-09-15).)*
 
   *(Post-acceptance, 2026-08-19: the pin was fetched and verified, gates G1/G2 closed, steps 1–4
   of the implementation plan shipped, and the provider answered its first live calls. The
@@ -372,8 +524,8 @@ confirmed independently by Ark and by CC on the logs). Four defects, each closed
   (`ollama_provider.py:69`). Anything that runs longer than the requester's ceiling and shorter than the
   host's is abandoned mid-flight while the host keeps generating for nobody — the wire edition of
   `A-TIMED-OUT-VISION-CALL-KEEPS-GENERATING-AND-THE-NEXT-ONE-PAYS-FOR-IT`. **Fix: 1200 s on all three
-  doors** — the host's budget plus overhead (Mike, 2026-08-18: «900 +300… с учётом того как долго может
-  работать vision»), and the UI door gains a configurable value at the same time.
+  doors** — the host's budget plus overhead (Mike's call, 2026-08-18: 900 + 300, given how long a
+  vision call can run), and the UI door gains a configurable value at the same time.
 
 A semaphore on the shared alias belongs here too. Everything else — the full queue with priorities and
 a remote-share cap — is **D4-β** and stays in Stage 2.
@@ -629,6 +781,22 @@ Compliance, not progress — each item is a measurement with a stated failing re
       CPU; on macOS the Metal binary serves a GGUF the node's memory holds.
 - [ ] **Venv discipline** — `uv sync --dry-run` shows no change to `dpc-client/core/.venv` after
       Stage 2 lands.
+- [ ] **Moving an agent off the paid provider is a measurement, not a consequence of this ADR
+      (`added 2026-09-08` on Mike's word, from @Johnny's objection).** Everything above measures
+      whether the local path *works*; nothing here says an agent should be moved onto it, and the
+      standing intention to «run to $0 and move the agents local» has never been measured against
+      what it replaces. The cell: for each agent proposed for the move, run **our own** task material
+      on both providers and compare **cost per completed task** — not price per token, because a
+      cheaper model that needs more rounds, or fails and is re-run, is not cheaper — with a stated
+      quality floor per agent, decided before the run. Fail: the local path costs more per completed
+      task at the same floor, or misses the floor at any cost → that agent does not move, and the
+      reason is recorded beside its alias. Two conditions on the measurement itself, both from the
+      same source (Anthropic, «a guide to the anatomy of effective commerce agents», Part 2 —
+      external, and cited for its method rather than its numbers): the sweep runs the **whole** task
+      set on every candidate and effort level, and each candidate gets a few rounds of prompt
+      iteration on its failing cases first, because a prompt is tuned to the model it was written
+      against and a sweep with one prompt underrates every other model. What this cell does **not**
+      claim: nothing here bears on the numbers that article reports for its own fleet.
 
 ## Scope
 

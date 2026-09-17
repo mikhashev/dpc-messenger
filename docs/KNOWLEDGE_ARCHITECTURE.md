@@ -786,18 +786,22 @@ async def collect_votes(proposal: KnowledgeCommitProposal):
             "ai_critique": proposal.devil_advocate
         })
 
-    # Collect votes
-    for participant_id in proposal.participants:
-        vote = await wait_for_vote(participant_id, timeout=300)  # 5 min
-        votes[participant_id] = vote
+    # Collect votes until the roster has answered or the deadline arrives.
+    # A participant that cannot judge the proposal — it does not hold the
+    # messages the extraction read — answers "abstain" with a reason.
+    votes = await collect_until_deadline(proposal)   # {node_id: "approve"|"reject"|"request_changes"|"abstain"}
 
-    # Check consensus
-    if all(v == "approve" for v in votes.values()):
+    # Check consensus. The denominator is the roster, never the votes that
+    # arrived, and a deadline that leaves anyone unanswered ends the proposal
+    # rather than carrying it: silence is not consent.
+    if deadline_reached and len(votes) < len(proposal.participants):
+        await expire(proposal, votes)
+    elif approvals(votes) / len(proposal.participants) >= 0.75:
         await apply_commit(proposal)
-    elif any(v == "request_changes" for v in votes.values()):
-        await revise_commit(proposal, votes)
-    else:
+    elif rejections(votes) > change_requests(votes):
         await reject_commit(proposal, votes)
+    else:
+        await revise_commit(proposal, votes)
 
 
 # 4. Apply Commit to All Participants

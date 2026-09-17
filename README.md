@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Co-Evolution
 
-> **Status:** Alpha | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.29.0
+> **Status:** Alpha | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.30.0
 > **Runs on:** Windows | Linux | macOS
 
 ---
@@ -30,7 +30,9 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 - **Privacy on your terms** — granular firewall, field-level control
 - **Direct by default** — IPv6/IPv4 peer-to-peer, LAN or open internet; relay and gossip fallbacks are experimental
 
-**[Read the full vision →](./VISION.md)** | **[Roadmap →](./ROADMAP.md)** | **[Quick Start →](./QUICK_START.md)** | **[Documentation →](./docs/)**
+**Two ways to take it:** take the ideas — Personal Context Technology, Protocol 13, knowledge commits, the context firewall — and build them your own way, or run the whole of it and develop inside it. Both are what this is published for. Terms differ by component — specs are CC0, the protocol library LGPL v3, the client GPL v3; see [LICENSING.md](./LICENSING.md). There is no growth metric behind it: what counts is that someone took something and made it theirs.
+
+**[Read the full vision →](./VISION.md)** | **[Roadmap →](./ROADMAP.md)** | **[Quick Start →](./QUICK_START.md)** | **[Glossary →](./docs/GLOSSARY.md)** | **[Documentation →](./docs/)**
 
 ---
 
@@ -73,6 +75,26 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 ```
 
 **This is peer-to-peer software, not a messaging service.** Messages flow directly between users. The Hub is optional (discovery + signaling only, never sees content).
+
+---
+
+## Which branch
+
+`main` carries the releases — it is what a version tag points at. **`dev` is where the work lands, and it normally runs well ahead of `main`:** fixes arrive there first, often weeks before they are tagged, along with everything else not yet released.
+
+So if you want the fixes rather than the last tag, take `dev`:
+
+```bash
+git clone -b dev https://github.com/mikhashev/dpc-messenger.git
+```
+
+To see how far apart the two are at any moment, rather than trusting a number written here:
+
+```bash
+git rev-list --left-right --count origin/main...origin/dev
+```
+
+What you are accepting by using it: `dev` is not a release. It holds work in progress, a commit on it can be reverted, and the alpha warning at the top of this file applies to it more than anywhere else. What you are not accepting: an untested branch. CI runs the client and protocol suites on every push to `main` and `dev` alike ([tests.yml](.github/workflows/tests.yml)) — the same gate, whichever you take.
 
 ---
 

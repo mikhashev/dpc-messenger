@@ -99,7 +99,16 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "ai_assisted_instruction_creation_remote",
     # Firewall
     "get_firewall_rules",
+    # Node ledger (A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-INSTRUMENT)
+    "get_usage_summary",
+    "get_inference_usage",
     "save_firewall_rules",
+    "validate_firewall_rules",
+    # The IDE door and the guest preview (ADR-041 D1, D5)
+    "get_gateway_state",
+    "rotate_gateway_key",
+    "get_gateway_client_lines",
+    "get_peer_provider_menu",
     "list_all_tools",
     "get_cc_config",
     "set_cc_display_name",
@@ -156,6 +165,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "link_telegram_chat",
     "delete_telegram_conversation_link",
     "link_agent_telegram",
+    "set_agent_telegram_enabled",
     "unlink_agent_telegram",
     # Session archive
     "get_session_archive_info",
@@ -195,6 +205,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "schedule_agent_task",
     "cancel_agent_task",
     "interrupt_agent",
+    # Stop a provider sitting in a backoff (providers/base.py)
+    "cancel_provider_retry",
     # Frontend logging relay
     "ui_log",
     # Sleep Consolidation (ADR-014)
@@ -204,9 +216,12 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Reload from disk
     "reload_personal_context",
     "reload_firewall",
-    # Web auth headless approval (ADR-029 Task 008)
-    "web_auth_approve_headless",
-    "web_auth_reject_headless",
+    # Web auth vault: see an agent's stored cookies, and delete this
+    # machine's copy. The deleting half is here and not in the agent's tool
+    # registry on purpose.
+    "web_auth_list_domains",
+    "web_auth_forget_cookies",
+    "web_auth_restore_previous_cookies",
     # Shell approval (ADR-030 v2)
     "resolve_schedule_approval",
     "shell_approve_command",

@@ -9,19 +9,43 @@ request_inference_from_peer.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dpc_client_core.node_ledger import NodeLedger
 from dpc_client_core.p2p_coordinator import P2PCoordinator
+from dpc_client_core.service import CoreService
 
 
-def make_coordinator():
-    """Create a P2PCoordinator with mocked service."""
+class ProvedConnection:
+    """What `p2p_manager.peers[peer_id]` is on the tier that proves a key: a
+    wrapper naming `direct_tls` (p2p_manager.py:62). A request arrives over a
+    connection, and since ADR-041 D2 the host serves peer inference only where
+    that connection proved the sender — so the fixture has to hold one."""
+
+    connection_type = "direct_tls"
+
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+
+
+def make_coordinator(peers=None):
+    """Create a P2PCoordinator with mocked service.
+
+    `peers` is what `p2p_manager.peers` holds; the default is the two peers
+    these tests call on, each on a proved connection. Pass `{}` for a node
+    nobody is connected to.
+    """
     service = MagicMock()
     service.p2p_manager = MagicMock()
-    service.p2p_manager.peers = {}
+    service.p2p_manager.peers = (
+        {"peer-1": ProvedConnection("peer-1"), "peer-2": ProvedConnection("peer-2")}
+        if peers is None else peers
+    )
     service.p2p_manager.node_id = "dpc-node-test123"
     service.p2p_manager.send_message_to_peer = AsyncMock()
     service.hub_client = MagicMock()
@@ -29,6 +53,9 @@ def make_coordinator():
     # The host designates what it serves; without this the coordinator refuses
     # (D4-0). A MagicMock attribute would be truthy and hide that rule.
     service.firewall.compute_serving_alias = "ollama_local"
+    # Nothing declared, so a served call is the v1 gift. A MagicMock here would
+    # stand in for an AppliedTariff and make every row refuse itself.
+    service.firewall.tariff_for.return_value = None
     service.llm_manager = MagicMock()
     service.local_api = MagicMock()
     service.local_api.broadcast_event = AsyncMock()
@@ -38,6 +65,9 @@ def make_coordinator():
     service._pending_providers_requests = {}
     service.file_transfer_manager = MagicMock()
     service._provider_supports_voice = MagicMock(return_value=False)
+    # The menu selection is CoreService's own, bound to this stand-in: a copy
+    # of the rule here would answer for a builder nobody ships.
+    service.menu_for_peer = lambda peer_id: CoreService.menu_for_peer(service, peer_id)
 
     coord = P2PCoordinator(service)
     return coord, service
@@ -123,6 +153,69 @@ async def test_a_node_that_designates_no_alias_serves_nobody():
     assert "serving alias" in msg["payload"]["error"]
 
 
+def _designate(svc, alias: str, provider_type: str):
+    """The host designates `alias`, and the registry knows its provider type.
+
+    `make_coordinator` leaves `llm_manager.providers` a MagicMock, whose
+    `config` is not a dict, so the door reads no type there. These tests need
+    the type read, because the type is what is under test.
+    """
+    svc.firewall.compute_serving_alias = alias
+    svc.llm_manager.providers = {alias: SimpleNamespace(config={"type": provider_type})}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_type", ["remote_peer", "dpc_agent"])
+async def test_the_peer_door_refuses_to_serve_an_alias_that_is_itself_remote(tmp_path, caplog, provider_type):
+    """ADR-041 D7 part 1 on the P2P door: what is shared is not shared onward.
+
+    The gateway has refused a `remote_peer` / `dpc_agent` serving alias since
+    `1ebe8441`; this door read `serving_local[0]` and served it without a look
+    at its type, so B could designate A's model and C would reach A through
+    B under B's name. Refused before the router, with no usage row: nothing
+    ran.
+    """
+    coord, svc = make_coordinator()
+    coord._ledger = NodeLedger(tmp_path / "ledger")
+    svc.firewall.can_request_inference.return_value = True
+    _designate(svc, "relay", provider_type)
+    svc.llm_manager.query = AsyncMock(return_value={"response": "ok", "model": "m"})
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.p2p_coordinator"):
+        await coord.handle_inference_request("peer-1", "req-1", "hello")
+
+    svc.llm_manager.query.assert_not_called()
+    msg = svc.p2p_manager.send_message_to_peer.call_args[0][1]
+    error = msg["payload"]["error"]
+    assert "relay" in error and provider_type in error
+    assert "shared onward" in error and "ADR-041 D7" in error
+    assert list(coord._ledger.rows()) == []
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING and "shared onward" in r.getMessage()]
+    assert len(warned) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_type", ["ollama", "llamacpp_server"])
+async def test_a_local_alias_whose_type_is_known_is_still_served_and_written_down(tmp_path, provider_type):
+    """The regression guard for the check above: a card type passes it."""
+    coord, svc = make_coordinator()
+    coord._ledger = NodeLedger(tmp_path / "ledger")
+    svc.firewall.can_request_inference.return_value = True
+    _designate(svc, "ollama_local", provider_type)
+    svc.llm_manager.query = AsyncMock(return_value={
+        "response": "ok", "model": "gemma3:27b", "prompt_tokens": 12, "response_tokens": 3,
+    })
+
+    await coord.handle_inference_request("peer-1", "req-1", "hello")
+
+    svc.llm_manager.query.assert_called_once()
+    assert svc.llm_manager.query.call_args[1]["provider_alias"] == "ollama_local"
+    msg = svc.p2p_manager.send_message_to_peer.call_args[0][1]
+    assert msg["payload"].get("error") is None and msg["payload"]["response"] == "ok"
+    (row,) = list(coord._ledger.rows())
+    assert row["alias"] == "ollama_local" and row["caller"] == "peer-1" and row["request_id"] == "req-1"
+
+
 @pytest.mark.asyncio
 async def test_a_served_peer_request_is_written_down(caplog):
     """It belonged to no agent, so it appeared in no cost series at all."""
@@ -140,11 +233,13 @@ async def test_a_served_peer_request_is_written_down(caplog):
     line = [r.getMessage() for r in caplog.records if "Peer inference served" in r.getMessage()]
     assert len(line) == 1
     assert "peer-1" in line[0] and "ollama_local" in line[0]
-    # Named `_est` on purpose: these are llm_manager's own count_tokens, not the
-    # engine's report (Ark and Johnny, review of 2026-08-18). Two numbers for one
-    # call is fine; two numbers that both look measured is not.
-    assert "prompt_tokens_est=1200" in line[0]
-    assert "response_tokens_est=300" in line[0]
+    # The `_est` suffix said whose numbers these are, and said it of every call
+    # (Ark and Johnny, review of 2026-08-18). Since the engine's own counts win
+    # wherever it reported any, the source is a field rather than a suffix — and
+    # a door that reported none is still named, which is what the suffix was for.
+    assert "prompt_tokens=1200" in line[0]
+    assert "response_tokens=300" in line[0]
+    assert "counts=ours" in line[0]
 
 
 @pytest.mark.asyncio
@@ -287,7 +382,7 @@ async def test_cancel_file_transfer_broadcasts_event():
 
 @pytest.mark.asyncio
 async def test_request_inference_peer_not_connected():
-    coord, svc = make_coordinator()
+    coord, svc = make_coordinator(peers={})
 
     with pytest.raises(ConnectionError):
         await coord.request_inference_from_peer("peer-1", "hello")
@@ -321,7 +416,7 @@ async def test_only_the_designated_alias_is_offered_to_a_peer():
         "deepseek_pro": {"alias": "deepseek_pro", "model": "deepseek-v4-pro", "type": "deepseek"},
     }
     svc.llm_manager.providers = {k: MagicMock() for k in infos}
-    svc.build_p2p_provider_info = MagicMock(side_effect=lambda alias, provider: infos[alias])
+    svc.build_p2p_provider_info = MagicMock(side_effect=lambda alias, provider, **_: infos[alias])
 
     await coord.handle_get_providers_request("peer-1")
 

@@ -8,6 +8,10 @@ name: tests
 on:
   push:
     branches: [main, dev]
+    # A release is a claim about one commit, and the run that backs it should be
+    # findable by the name of the tag rather than by knowing which branch push
+    # happened to carry the same sha.
+    tags: ['v*']
   pull_request:
 
 concurrency:
@@ -25,14 +29,22 @@ jobs:
         with:
           enable-cache: true
       # Extras rather than skip-if-missing: 31 of the 35 failures on 2026-08-27
-      # were these two packages missing, and a skip would hide 31 tests that run
-      # here perfectly well. Both are pure wheels on manylinux x86_64 (grafeo
-      # 5.3 MB + solvor 0.4 MB); camoufox needs its Firefox build only for the
+      # were these packages missing, and a skip would hide 31 tests that run
+      # here perfectly well. camoufox needs its Firefox build only for the
       # browser-launching tests, which this suite does not contain. mlx stays
       # out — Apple Silicon only.
+      #
+      # This stays a hand-written list where the release form is `--all-extras`,
+      # and the difference is the point: the release describes a whole
+      # environment, this job installs only the extras whose tests exist here.
+      # `graph-grafeo` was on this line until 2026-09-18 and is gone from
+      # `pyproject.toml` (Mike's call) — an undefined extra is not ignored, uv
+      # refuses with "Extra `X` is not defined", so the removal had to land in
+      # the same commit or this job would have failed on the next push. The
+      # grafeo parity tests now skip themselves through `pytest.importorskip`.
       - name: Sync (with the extras whose tests exist here)
         working-directory: dpc-client/core
-        run: uv sync --extra graph-grafeo --extra browser
+        run: uv sync --extra browser --extra pdf
       # Baseline measured on Windows 2026-08-20: 4 failed · 2086 passed · 3 skipped (160s).
       # The four are deselected by name, not hidden by a bare `|| true`, and each one has a
       # backlog entry (CI-BASELINE-FOUR-TESTS-FAIL-BEFORE-THE-FIRST-RUN). A gate that is red

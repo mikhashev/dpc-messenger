@@ -31,7 +31,106 @@ def create_send_text_message(text: str) -> Dict[str, Any]:
     # For now, we don't need a chat_id, the P2PManager knows the sender.
     return {"command": "SEND_TEXT", "payload": {"text": text}}
 
-def create_remote_inference_request(request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None) -> Dict[str, Any]:
+def _image_for_the_wire(img: Dict[str, Any]) -> Dict[str, Any]:
+    """One image reduced to the two fields a receiver can act on (§3.4).
+
+    `base64` is required there; without it the receiving provider falls back to
+    opening `path`, which is the sender's own filesystem — missing on another
+    machine, and on a like one possibly a different file that happens to sit at
+    the same place. `path` is documented as the original filename and nothing
+    on the far side reads it, so it does not travel and cannot be reached for.
+
+    `mime_type` is required there too, and an absent one is not harmless: a
+    receiver defaults it to PNG, so a JPEG would arrive announced as something
+    it is not rather than announced as unknown.
+    """
+    missing = [f for f in ("base64", "mime_type") if not img.get(f)]
+    if missing:
+        raise ValueError(
+            f"image carries no {' and no '.join(missing)}; DPTP 3.4 requires both "
+            "for a remote inference request"
+        )
+    return {"base64": img["base64"], "mime_type": img["mime_type"]}
+
+
+# --- REMOTE_INFERENCE_RESPONSE refusal codes (DPTP v1.7) ---------------------
+#
+# One machine-readable word beside the prose `error`, so that a refusal keeps
+# its reason across the hop. Without it every host refusal arrives at a guest
+# as the same failure, and a guest answering an HTTP client has to call its
+# own bad request, a firewall rule and a broken model by one status.
+#
+# Each word is the one a refusing site already uses on this side of the wire,
+# so nothing here is a second vocabulary: `invalid_value`, `model_not_found`
+# and `tools_unsupported` are the gateway's own codes, and
+# `onward_sharing_refused` is named after the firewall's
+# `onward_sharing_refusal`. `insufficient_quota` is the word the gateway
+# already refuses a spent vendor ceiling with on its own local route; the peer
+# door refuses with the same word, so one ceiling has one name on both doors.
+#
+# A word is read as an instruction, so the three money-shaped refusals are
+# three words: `insufficient_quota` refills at midnight and means «come back
+# tomorrow»; `unrated` (the host has no rate for a vendor alias) and
+# `misconfigured` (its serving lists cannot be classified) never recover by
+# waiting, and a receiver that answered them 429 would set an auto-retrying
+# client looping against a state only the host's owner can change.
+REFUSAL_IDENTITY_UNPROVED = "identity_unproved"
+REFUSAL_NOT_ALLOWED = "not_allowed"
+REFUSAL_MODEL_NOT_FOUND = "model_not_found"
+REFUSAL_ONWARD_SHARING_REFUSED = "onward_sharing_refused"
+REFUSAL_INVALID_VALUE = "invalid_value"
+REFUSAL_TOOLS_UNSUPPORTED = "tools_unsupported"
+REFUSAL_INSUFFICIENT_QUOTA = "insufficient_quota"
+REFUSAL_UNRATED = "unrated"
+REFUSAL_MISCONFIGURED = "misconfigured"
+
+#: The words a host may send today. A receiver reads it to recognise, never to
+#: refuse: a newer host may name a reason this one has no word for, and an
+#: unknown code is read exactly like an absent one.
+REFUSAL_CODES = frozenset({
+    REFUSAL_IDENTITY_UNPROVED,
+    REFUSAL_NOT_ALLOWED,
+    REFUSAL_MODEL_NOT_FOUND,
+    REFUSAL_ONWARD_SHARING_REFUSED,
+    REFUSAL_INVALID_VALUE,
+    REFUSAL_TOOLS_UNSUPPORTED,
+    REFUSAL_INSUFFICIENT_QUOTA,
+    REFUSAL_UNRATED,
+    REFUSAL_MISCONFIGURED,
+})
+
+
+class PeerRefused(RuntimeError):
+    """A host refused a REMOTE_INFERENCE_REQUEST: its words, and its code.
+
+    `RuntimeError` on purpose. That is what a refused remote inference has
+    raised since before the code existed, and every caller in the tree — the
+    gateway's peer route, `RemotePeerProvider`, an agent's round — is written
+    against it. A caller that reads `.code` tells the reasons apart; a caller
+    that does not keeps the behaviour it had.
+
+    `code` is one word of `REFUSAL_CODES`, or `""` where the host sent none —
+    an older host, or a refusal it has no word for. Empty is not a reason: a
+    reader that cannot name the cause says so rather than guessing one.
+    """
+
+    def __init__(self, message: str, code: str = ""):
+        super().__init__(message)
+        self.code = code or ""
+
+
+def create_remote_inference_request(
+    request_id: str,
+    prompt: str,
+    model: str = None,
+    provider: str = None,
+    images: list = None,
+    reasoning_effort: str = None,
+    messages: list = None,
+    system: Any = None,
+    tools: list = None,
+    stream: bool = False,
+) -> Dict[str, Any]:
     """
     Creates a remote inference request message.
 
@@ -40,8 +139,23 @@ def create_remote_inference_request(request_id: str, prompt: str, model: str = N
         prompt: Text prompt for the model
         model: Optional model name to use
         provider: Optional provider alias to use
-        images: Optional list of image dicts for vision models (Phase 2: Remote Vision)
-                Each image dict contains: {path: str, base64: str, mime_type: str}
+        images: Optional list of image dicts for vision models (Phase 2: Remote Vision).
+                Each is reduced by _image_for_the_wire before it travels; see there
+                for what a receiver is given and why a path is not part of it.
+        reasoning_effort: How much thinking the caller wants (off/low/medium/high/max).
+                A request, not an instruction: the host clamps it downwards to what
+                it is willing to spend. Absent means the caller did not choose, and
+                the host answers at its own default.
+        messages: The conversation un-flattened, Anthropic-shaped (DPTP v1.7).
+                `prompt` stays required beside it and carries the same turns
+                flattened, so a host that ignores this field still answers.
+        system: The system prompt beside `messages`; a string or a block list.
+        tools: Anthropic tool definitions `{name, description, input_schema}`.
+        stream: Whether to ask for REMOTE_INFERENCE_CHUNK frames; absent and
+                False alike mean the whole answer in the response, as before.
+
+    The four v1.7 fields ride only when they carry something, so a request
+    without them is byte-identical to the prompt-only one.
     """
     payload = {
         "request_id": request_id,
@@ -52,8 +166,33 @@ def create_remote_inference_request(request_id: str, prompt: str, model: str = N
     if provider:
         payload["provider"] = provider
     if images:
-        payload["images"] = images
+        payload["images"] = [_image_for_the_wire(img) for img in images]
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
+    if messages:
+        payload["messages"] = messages
+    if system:
+        payload["system"] = system
+    if tools:
+        payload["tools"] = tools
+    if stream:
+        payload["stream"] = True
     return {"command": "REMOTE_INFERENCE_REQUEST", "payload": payload}
+
+
+def create_remote_inference_chunk(request_id: str, seq: int, delta: str) -> Dict[str, Any]:
+    """One piece of an answer being made, on its way to the caller (DPTP v1.7).
+
+    Transport, not record: no count is born here and no usage row is built from
+    these. The REMOTE_INFERENCE_RESPONSE that ends the stream carries the whole
+    `response` and all the counts, and the deltas concatenated in `seq` order
+    equal that `response`. Sent only for a request that asked `stream: true`,
+    and only after the host's gates have passed.
+    """
+    return {
+        "command": "REMOTE_INFERENCE_CHUNK",
+        "payload": {"request_id": request_id, "seq": seq, "delta": delta},
+    }
 
 def create_remote_inference_response(
     request_id: str,
@@ -66,9 +205,65 @@ def create_remote_inference_response(
     model: str = None,
     provider: str = None,
     thinking: str = None,
-    thinking_tokens: int = None
+    thinking_tokens: int = None,
+    tariff_in: float = None,
+    tariff_out: float = None,
+    tariff_currency: str = None,
+    tariff_at: str = None,
+    tariff_amount: float = None,
+    billing: str = None,
+    output_includes_thinking: str = None,
+    thinking_source: str = None,
+    served_effort: str = None,
+    tool_calls: list = None,
+    finish_reason: str = None,
+    code: str = None,
 ) -> Dict[str, Any]:
-    """Creates a remote inference response message with optional token, model, and thinking metadata."""
+    """Creates a remote inference response message with optional token, model, and thinking metadata.
+
+    `code` names why a refusal was refused, one word of `REFUSAL_CODES`
+    (DPTP v1.7). It rides on the error form only, beside the prose `error`
+    that keeps saying the same thing in the host's own words — the code is
+    what a machine reads, the text is what a person reads, and neither
+    replaces the other. Absent means the host has no word for this refusal or
+    predates the field, and a receiver then knows only that it was refused.
+
+    `served_effort` is the effort word the host ran at after clamping the
+    request's `reasoning_effort` (DPTP v1.7); absent means no effort control
+    was applied, which is not `off`. Never on an error.
+
+    The tariff group — `tariff_in`, `tariff_out`, `tariff_currency`,
+    `tariff_at` — is the owner's price for this call: the applied rates per 1M
+    tokens, their ISO 4217 unit and the dated entry they came from. It travels
+    whole or not at all, because half of it is a price to one reader and a gift
+    to another. Absent means no tariff was declared; zeros mean declared free.
+    `tariff_amount` is what the rates came to on this call, in that currency,
+    and rides only with the group: absent beside it means the call could not be
+    priced (`output_includes_thinking` unknown), never that it was free.
+
+    What the call cost the *host* does not travel at all (ADR-041 D3,
+    amendment): that is the host's own economy and stays in the host's ledger.
+    `billing` does — it names the meter the host reads, not the sum it paid.
+
+    `output_includes_thinking` (`includes` | `excludes` | `unknown`) says
+    whether `response_tokens` already holds `thinking_tokens`, as the node
+    that counted knows it (DPTP v1.7). Optional; absent from an older host.
+    Under `includes`, `thinking_tokens` is inside `response_tokens` and never
+    exceeds it.
+
+    `thinking_source` (`engine` | `estimated`) says where `thinking_tokens`
+    came from — the vendor's own split, or an estimate the host made over the
+    reasoning text, which is what a host serving a build that reports no split
+    sends. Optional; absent means the host said nothing about provenance, which
+    is not a claim that an engine counted.
+
+    `tool_calls` are the calls the model made, as Anthropic `tool_use` blocks
+    `{type, id, name, input}` — the shape the provider layer already returns
+    them in. `finish_reason` is what the host's provider said it stopped on, in
+    the providers' own vocabulary (`stop`, `length`, `tool_calls`); a receiver
+    rendering the Messages form converts it. Both optional, both v1.7, and
+    neither is sent on an error.
+    """
     payload = {"request_id": request_id}
     if response is not None:
         payload["response"] = response
@@ -92,9 +287,31 @@ def create_remote_inference_response(
             payload["thinking"] = thinking
         if thinking_tokens is not None:
             payload["thinking_tokens"] = thinking_tokens
+        tariff = {
+            "tariff_in": tariff_in, "tariff_out": tariff_out,
+            "tariff_currency": tariff_currency, "tariff_at": tariff_at,
+        }
+        if all(value is not None for value in tariff.values()):
+            payload.update(tariff)
+            if tariff_amount is not None:
+                payload["tariff_amount"] = tariff_amount
+        if billing is not None:
+            payload["billing"] = billing
+        if output_includes_thinking is not None:
+            payload["output_includes_thinking"] = output_includes_thinking
+        if thinking_source is not None:
+            payload["thinking_source"] = thinking_source
+        if served_effort is not None:
+            payload["served_effort"] = served_effort
+        if tool_calls:
+            payload["tool_calls"] = tool_calls
+        if finish_reason is not None:
+            payload["finish_reason"] = finish_reason
     else:
         payload["error"] = error or "Unknown error"
         payload["status"] = "error"
+        if code:
+            payload["code"] = code
     return {"command": "REMOTE_INFERENCE_RESPONSE", "payload": payload}
 
 def create_remote_transcription_request(
@@ -164,7 +381,10 @@ def create_providers_response(providers: list) -> Dict[str, Any]:
     """Creates a response containing available AI providers.
 
     Args:
-        providers: List of provider dicts with keys: alias, model, type
+        providers: Provider rows as specs/dptp_v1.md §3.5 describes them. The
+            shape is owned by the sender's builder rather than by this helper,
+            which is why it is not restated here — it has grown from three keys
+            to eight, and a second list would be the one that goes stale.
     """
     return {"command": "PROVIDERS_RESPONSE", "payload": {"providers": providers}}
 
@@ -388,10 +608,33 @@ def create_group_text_message(
     return {"command": "GROUP_TEXT", "payload": payload}
 
 
-async def read_message(reader: asyncio.StreamReader) -> dict | None:
+# The most a frame may declare, read or written. Ten ASCII digits allow
+# 9 999 999 999 bytes and readexactly() buffers whatever is declared — the
+# 64 KiB StreamReader limit guards readline()/readuntil() only — so the cap is
+# checked before the allocation. What it must clear, measured 2026-09-10:
+#   CHAT_HISTORY_RESPONSE carries a whole history in one frame; the largest
+#     seen is 3 885 616 bytes, and histories grow
+#   an image in REMOTE_INFERENCE_REQUEST or a group image frame: capped at
+#     vision.max_image_size_mb = 5, about 6.7 MB once base64-encoded
+#   a FILE_CHUNK: 64 KiB raw, about 88 KB framed
+# Stated in specs/dptp_v1.md §2 as well; move the two together.
+MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+
+async def read_message(
+    reader: asyncio.StreamReader, *, max_frame_bytes: int = MAX_FRAME_BYTES
+) -> dict | None:
     try:
         header = await reader.readexactly(10)
         payload_length = int(header.decode())
+
+        # Refused before the allocation: the declared length is the stranger's.
+        if payload_length > max_frame_bytes:
+            logger.warning(
+                "Refusing a frame declaring %d bytes: the cap is %d bytes - closing the connection",
+                payload_length, max_frame_bytes,
+            )
+            return None
 
         payload = await reader.readexactly(payload_length)
 
@@ -418,11 +661,19 @@ async def read_message(reader: asyncio.StreamReader) -> dict | None:
             logger.warning("Protocol error: invalid message format (%s)", e)
         return None
 
-async def write_message(writer: asyncio.StreamWriter, data: dict):
+async def write_message(
+    writer: asyncio.StreamWriter, data: dict, *, max_frame_bytes: int = MAX_FRAME_BYTES
+):
     try:
         payload = json.dumps(data).encode()
         payload_length = len(payload)
-        
+
+        # Loud here, at the origin, rather than a silent close at the far end.
+        if payload_length > max_frame_bytes:
+            raise ValueError(
+                f"Message of {payload_length} bytes exceeds the {max_frame_bytes}-byte frame cap"
+            )
+
         header = f"{payload_length:010d}".encode()
         
         writer.write(header)

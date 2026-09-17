@@ -36,6 +36,17 @@ class VotingSession:
             self.votes = {}
 
 
+VOTE_VALUES = ("approve", "reject", "request_changes", "abstain")
+
+
+def _everyone_answered(session) -> bool:
+    """Has every participant of this proposal cast a vote?"""
+    roster = set(session.proposal.participants or ())
+    if not roster:
+        return False
+    return roster.issubset(set(session.votes or {}))
+
+
 class ConsensusManager:
     """Manages consensus voting for knowledge commits
 
@@ -81,9 +92,19 @@ class ConsensusManager:
         self.on_commit_signed: Optional[Callable] = None    # Called after apply so service can sign+broadcast COMMIT_SIGNED
         self.on_commit_ack: Optional[Callable] = None       # Called after apply so service can broadcast COMMIT_ACK
         self.on_commit_apply_failed: Optional[Callable] = None  # Called when _apply_commit fails (disk error etc); arg: (commit, error_msg)
+        self.on_apply_retransmit: Optional[Callable] = None  # Called when the ACK window closes on a silent participant; args: (commit, node_ids)
 
         # Tracks which nodes confirmed successful apply per commit_id (Gap 3 observability)
         self.commit_acks: Dict[str, set] = {}  # commit_id -> set of node_ids that sent COMMIT_ACK
+
+        # How long a participant may stay silent before it is sent the commit itself.
+        # A COMMIT_ACK says "I applied it"; silence says nothing about why, and the node
+        # that failed its apply is exactly the one that cannot ask. Long enough that an
+        # ordinary apply and its ACK have both had time to travel.
+        self.ack_retransmit_seconds: float = 60.0
+        # Held so the retransmit is not collected mid-sleep: a task nobody references is
+        # this board's most frequent defect shape wearing an asyncio hat.
+        self._retransmit_tasks: set = set()
 
     async def propose_commit(
         self,
@@ -142,7 +163,7 @@ class ConsensusManager:
     async def cast_vote(
         self,
         proposal_id: str,
-        vote: str,  # "approve", "reject", "request_changes"
+        vote: str,  # one of VOTE_VALUES
         comment: Optional[str] = None,
         broadcast_func: Optional[Callable] = None
     ) -> bool:
@@ -158,6 +179,15 @@ class ConsensusManager:
             True if vote was cast, False if session not found
         """
         if proposal_id not in self.sessions:
+            return False
+
+        if vote not in VOTE_VALUES:
+            logger.warning("cast_vote: refusing unknown vote value %r", vote)
+            return False
+        # An abstention counts in the denominator and therefore blocks, so it
+        # has to say why.
+        if vote == "abstain" and not (comment or "").strip():
+            logger.warning("cast_vote: refusing an abstention with no reason")
             return False
 
         session = self.sessions[proposal_id]
@@ -207,8 +237,9 @@ class ConsensusManager:
                 'payload': vote_payload
             })
 
-        # Check if voting is complete
-        if len(session.votes) == len(session.proposal.participants):
+        # Every participant has answered — the deadline has nothing left
+        # to add. Votes from outside the roster do not fill a seat.
+        if _everyone_answered(session):
             await self._finalize_vote(session)
 
         # Trigger callback
@@ -311,8 +342,9 @@ class ConsensusManager:
         # Record vote
         session.votes[vote.voter_node_id] = vote
 
-        # Check if voting is complete
-        if len(session.votes) == len(session.proposal.participants):
+        # Every participant has answered — the deadline has nothing left
+        # to add. Votes from outside the roster do not fill a seat.
+        if _everyone_answered(session):
             await self._finalize_vote(session)
 
         # Trigger callback
@@ -334,21 +366,36 @@ class ConsensusManager:
             logger.debug("_finalize_vote called but session %s already in status '%s' — skipping",
                          session.proposal.proposal_id, session.status)
             return
+        deadline_fired = session.status == "timeout"
         # Mark as finalizing immediately (before any awaits) to block re-entry from the
         # other path. No await between this line and the check above — asyncio guarantees
         # no task switch between consecutive synchronous statements.
         session.status = "finalizing"
 
         proposal = session.proposal
-        votes = session.votes
+        # Only the participants decide. A vote relayed by a node the proposal
+        # does not name was counted before, on both sides of the fraction.
+        roster = set(proposal.participants or ())
+        votes = {
+            nid: v for nid, v in session.votes.items() if nid in roster
+        } if roster else session.votes
+        if len(votes) != len(session.votes):
+            logger.warning(
+                "Proposal %s: %d vote(s) from nodes that are not participants were not counted",
+                proposal.proposal_id, len(session.votes) - len(votes),
+            )
 
         # Count votes
         approve_count = sum(1 for v in votes.values() if v.vote == "approve")
         reject_count = sum(1 for v in votes.values() if v.vote == "reject")
         change_count = sum(1 for v in votes.values() if v.vote == "request_changes")
+        abstain_count = sum(1 for v in votes.values() if v.vote == "abstain")
 
         total_votes = len(votes)
-        approval_rate = approve_count / total_votes if total_votes > 0 else 0
+        # Participants, not votes cast: otherwise the group shrinks to whoever
+        # answered and one voice becomes unanimity.
+        participant_count = len(proposal.participants) or total_votes
+        approval_rate = approve_count / participant_count if participant_count else 0
 
         # No votes cast (timeout with no user action) — expire, don't treat as request_changes
         if total_votes == 0:
@@ -358,24 +405,30 @@ class ConsensusManager:
             if self.on_commit_rejected:
                 await self.on_commit_rejected(proposal, votes)
 
-            result_payload = {
-                "proposal_id": proposal.proposal_id,
-                "topic": proposal.topic,
-                "summary": proposal.summary,
-                "status": "timeout",
-                "vote_tally": {
-                    "approve": 0, "reject": 0, "request_changes": 0,
-                    "total": 0, "threshold": self.consensus_threshold,
-                    "approval_rate": 0
-                },
-                "votes": [],
-            }
+            # Same helper the main path uses below, so this payload cannot drift
+            # from the fields spec §3.7 requires (timestamp, vote_tally.abstain,
+            # vote_tally.participants) the way it did before.
+            result_payload = self._build_result_payload(
+                proposal, "timeout", votes,
+                approve_count=0, reject_count=0, change_count=0, abstain_count=0,
+                total_votes=0, participant_count=participant_count, approval_rate=0,
+            )
             if self.on_result_broadcast:
                 await self.on_result_broadcast(result_payload, proposal.participants)
             return
 
-        # Determine outcome
-        if approval_rate >= self.consensus_threshold:
+        # A deadline can no longer approve: otherwise the rule above is
+        # bypassed by waiting.
+        if deadline_fired:
+            session.status = "timeout"
+            proposal.status = "timeout"
+            logger.info(
+                "Proposal %s reached its deadline with %d of %d participants answered — "
+                "not approved", proposal.proposal_id, total_votes, participant_count,
+            )
+            if self.on_commit_rejected:
+                await self.on_commit_rejected(proposal, votes)
+        elif approval_rate >= self.consensus_threshold:
             # Approved!
             session.status = "approved"
             proposal.status = "approved"
@@ -383,12 +436,12 @@ class ConsensusManager:
             # Create finalized commit
             commit = KnowledgeCommit(
                 summary=proposal.summary,
-                description=f"Approved by {approve_count}/{total_votes} participants",
+                description=f"Approved by {approve_count}/{participant_count} participants",
                 topic=proposal.topic,
                 entries=proposal.entries,
                 conversation_id=proposal.conversation_id,
                 participants=proposal.participants,
-                consensus_type="unanimous" if approval_rate == 1.0 else "majority",
+                consensus_type="unanimous" if approve_count == participant_count else "majority",
                 approved_by=[nid for nid, v in votes.items() if v.vote == "approve"],
                 rejected_by=[nid for nid, v in votes.items() if v.vote == "reject"],
                 vote_comments={nid: v.comment for nid, v in votes.items() if v.comment},
@@ -404,6 +457,12 @@ class ConsensusManager:
                 # the same commit_hash (parent_commit_id is part of the hash input).
                 parent_commit_id=proposal.parent_commit_id,
                 proposal_id=proposal.proposal_id,
+                # The same rule, and the field it was not applied to. `timestamp`
+                # is in the hash input too, and its default is this node's clock —
+                # so two nodes counting one vote a microsecond apart minted two
+                # commit ids for it, and neither could hold the other's signature.
+                # The proposal is what every participant already shares.
+                timestamp=proposal.timestamp,
             )
 
             # Apply commit to local context; only fire success callbacks if write succeeded
@@ -437,16 +496,58 @@ class ConsensusManager:
                 await self.on_commit_revision_needed(proposal, votes)
 
         # Prepare result notification payload
-        result_payload = {
+        result_payload = self._build_result_payload(
+            proposal, session.status, votes,  # "approved", "rejected", "revision_needed", "timeout"
+            approve_count=approve_count, reject_count=reject_count, change_count=change_count,
+            abstain_count=abstain_count, total_votes=total_votes,
+            participant_count=participant_count, approval_rate=approval_rate,
+            commit_id=commit.commit_id if session.status == "approved" else None,
+        )
+
+        # Fire result_broadcast callback — recipient filtering (self vs remote)
+        # happens inside the callback. Log reflects callback invocation, not
+        # delivery: callback may emit zero P2P sends for solo-vote conversations.
+        if self.on_result_broadcast:
+            await self.on_result_broadcast(result_payload, proposal.participants)
+            logger.debug(
+                "result_broadcast callback fired for proposal %s (participants=%d)",
+                proposal.proposal_id, len(proposal.participants),
+            )
+
+    def _build_result_payload(
+        self,
+        proposal: KnowledgeCommitProposal,
+        status: str,
+        votes: Dict[str, CommitVote],
+        *,
+        approve_count: int,
+        reject_count: int,
+        change_count: int,
+        abstain_count: int,
+        total_votes: int,
+        participant_count: int,
+        approval_rate: float,
+        commit_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build the KNOWLEDGE_COMMIT_RESULT payload (spec §3.7).
+
+        The no-vote timeout path and the normal finalize path both call this,
+        so the timeout payload cannot drift from the fields the main path
+        carries — `timestamp`, `vote_tally.abstain`, `vote_tally.participants` —
+        the way it used to (THE-SPEC-REQUIRES-A-TIMESTAMP-NOBODY-SENDS...).
+        """
+        return {
             "proposal_id": proposal.proposal_id,
             "topic": proposal.topic,
             "summary": proposal.summary,
-            "status": session.status,  # "approved", "rejected", "revision_needed", "timeout"
+            "status": status,  # "approved", "rejected", "revision_needed", "timeout"
             "vote_tally": {
                 "approve": approve_count,
                 "reject": reject_count,
                 "request_changes": change_count,
+                "abstain": abstain_count,
                 "total": total_votes,
+                "participants": participant_count,
                 "threshold": self.consensus_threshold,
                 "approval_rate": approval_rate
             },
@@ -459,31 +560,31 @@ class ConsensusManager:
                     "timestamp": v.timestamp
                 } for v in votes.values()
             ],
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **({"commit_id": commit_id} if commit_id is not None else {}),
         }
 
-        # Add commit_id if approved
-        if session.status == "approved":
-            result_payload["commit_id"] = commit.commit_id
-
-        # Fire result_broadcast callback — recipient filtering (self vs remote)
-        # happens inside the callback. Log reflects callback invocation, not
-        # delivery: callback may emit zero P2P sends for solo-vote conversations.
-        if self.on_result_broadcast:
-            await self.on_result_broadcast(result_payload, proposal.participants)
-            logger.debug(
-                "result_broadcast callback fired for proposal %s (participants=%d)",
-                proposal.proposal_id, len(proposal.participants),
-            )
-
-    async def _apply_commit(self, commit: KnowledgeCommit, origin: str = "local") -> bool:
+    async def _apply_commit(
+        self,
+        commit: KnowledgeCommit,
+        origin: str = "local",
+        judged_here: bool = True,
+    ) -> bool:
         """Apply approved commit to local PCM; False on any error.
 
         `origin` is "local" or the verdict `verify_provenance()` gave a received
         commit: one from elsewhere keeps the hash it arrived with, and only a
         hash we could check is signed with our key (ADR-036 §4).
         """
-        attested = origin in ("local", "verified")
+        # A signature is a judgement, not a delivery receipt: a node that could
+        # not read the text the knowledge came from applies it and says so,
+        # rather than vouching for it.
+        attested = origin in ("local", "verified") and judged_here
+        if not judged_here:
+            logger.info(
+                "Applying commit %s without signing it: this node did not judge the proposal",
+                commit.commit_id[:12],
+            )
         try:
             import hashlib
             from dpc_protocol.crypto import load_identity
@@ -596,6 +697,7 @@ class ConsensusManager:
                 'version': topic.version,
                 'author': node_id if origin == "local" else (commit.proposed_by or "peer"),
                 'provenance': origin,
+                'verified_by_this_node': bool(judged_here),
                 'participants': commit.participants,
                 'approved_by': commit.approved_by,
                 'rejected_by': commit.rejected_by,
@@ -640,6 +742,9 @@ class ConsensusManager:
             # 11. Broadcast COMMIT_ACK so peers know we successfully applied the commit
             if self.on_commit_ack:
                 await self.on_commit_ack(commit)
+
+            # 12. Close the loop on whoever stays silent.
+            self.arm_ack_retransmit(commit, origin)
 
             return True
 
@@ -760,6 +865,65 @@ class ConsensusManager:
                 oldest = next(iter(self.commit_acks))
                 del self.commit_acks[oldest]
 
+    def arm_ack_retransmit(self, commit: KnowledgeCommit, origin: str) -> bool:
+        """Start the ACK window for a commit we minted, and only for such a commit.
+
+        A commit that arrived over the recovery path is already somebody else's
+        retransmit; re-arming it there would have two nodes hand the same commit back
+        and forth for as long as one of them stayed quiet.
+
+        Returns whether the window was armed, so the decision can be exercised
+        without standing up the whole of `_apply_commit` around it.
+        """
+        if origin != "local":
+            return False
+        if not self.on_apply_retransmit or not (commit.participants or []):
+            return False
+        task = asyncio.create_task(self._retransmit_after_ack_window(commit))
+        self._retransmit_tasks.add(task)
+        task.add_done_callback(self._retransmit_tasks.discard)
+        return True
+
+    def silent_participants(self, commit: KnowledgeCommit) -> List[str]:
+        """Participants that never confirmed this commit.
+
+        Our own apply is not an ACK we send to ourselves, so this node is never
+        counted among the silent.
+        """
+        acked = self.commit_acks.get(commit.commit_id, set())
+        return [
+            node_id for node_id in (commit.participants or [])
+            if node_id != self.node_id and node_id not in acked
+        ]
+
+    async def _retransmit_after_ack_window(self, commit: KnowledgeCommit) -> None:
+        """Send the commit itself to every participant that let the ACK window pass.
+
+        The sender `ApplyKnowledgeCommitHandler` was written for and never had, so a
+        node whose apply failed could not learn the commit existed — it cannot ask for
+        what it does not know about.
+        """
+        try:
+            await asyncio.sleep(self.ack_retransmit_seconds)
+        except asyncio.CancelledError:
+            return
+
+        silent = self.silent_participants(commit)
+        if not silent:
+            logger.debug(
+                "All participants confirmed commit %s within the ACK window",
+                commit.commit_id[:12]
+            )
+            return
+
+        logger.info(
+            "Commit %s unconfirmed by %d participant(s) after %.0fs — retransmitting: %s",
+            commit.commit_id[:12], len(silent), self.ack_retransmit_seconds,
+            ", ".join(n[:20] for n in silent)
+        )
+        if self.on_apply_retransmit:
+            await self.on_apply_retransmit(commit, silent)
+
     async def _handle_vote_deadline(self, proposal_id: str) -> None:
         """Handle vote deadline timeout
 
@@ -875,6 +1039,20 @@ class ConsensusManager:
                 caller could not establish it.
         """
         try:
+            # A value nobody counts still enters the tally and approves nothing,
+            # so it silently blocks the proposal it was sent about.
+            if payload.get('vote') not in VOTE_VALUES:
+                logger.warning(
+                    "Discarding vote from %s: %r is not a vote value",
+                    sender_node_id[:20], payload.get('vote'),
+                )
+                return
+            if payload.get('vote') == "abstain" and not (payload.get('comment') or "").strip():
+                logger.warning(
+                    "Discarding abstention from %s: no reason given", sender_node_id[:20],
+                )
+                return
+
             # Reconstruct vote from dict
             vote = CommitVote(
                 proposal_id=payload.get('proposal_id'),

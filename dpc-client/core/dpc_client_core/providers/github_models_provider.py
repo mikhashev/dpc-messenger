@@ -22,6 +22,12 @@ class GitHubModelsProvider(AIProvider):
                10 RPM / 50 RPD (high-complexity models).
 
     Auth: GITHUB_TOKEN environment variable.
+
+    The output count convention stays `unknown`: the product page
+    (https://docs.github.com/en/github-models/use-github-models/prototyping-with-ai-models)
+    documents no usage object at all — it now says GitHub Models was retired on
+    2026-07-30 and points at other services — so OpenAI's convention cannot be
+    borrowed for it on the strength of a shared request shape.
     """
 
     ENDPOINT = "https://models.inference.ai.azure.com"

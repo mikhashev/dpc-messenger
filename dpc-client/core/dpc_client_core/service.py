@@ -21,24 +21,42 @@ logger = logging.getLogger(__name__)
 # authoritative ownership of the field. Used by
 # `CoreService._merge_unknown_agent_profile_keys`.
 #
-# Mike S141 regression: FirewallEditor `save_firewall_rules` shipped
-# `web_auth = {allowed_domains: ['example.com']}` (stale snapshot from
-# editor open time) ~3s after a successful login_complete added cookies
-# for `example.org`. Without force-preserve, the absent-key merge
-# skipped the wipe because the `web_auth` key WAS present in incoming,
-# just with stale contents — `example.org` silently disappeared from
-# the whitelist.
-_BACKEND_OWNED_PROFILE_KEYS = frozenset({"web_auth"})
+# Empty since 2026-09-10: `web_auth.allowed_domains` died with the config
+# whitelist — the vault jar is the authorisation now, and no other backend
+# writer of profile sub-keys exists. The S141 selective-merge machinery
+# below stays for the first key that earns its way back in.
+_BACKEND_OWNED_PROFILE_KEYS = frozenset()
 
 from .__version__ import __version__
 from .firewall import ContextFirewall
+from . import node_ledger
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
-from .llm_manager import LLMManager, PROVIDER_MAP
+from .llm_manager import LLMManager, PROVIDER_MAP, entry_point_for
 from . import provider_alias_refs
-from .providers.base import REASONING_EFFORTS, REASONING_OFF
+from .providers.base import (
+    REASONING_EFFORTS,
+    REASONING_OFF,
+    declared_reasoning_words,
+    effective_reasoning_default,
+)
 from .local_api import LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
+from .gateway import (
+    GATEWAY_HOST,
+    GATEWAY_KEY_NAME,
+    Gateway,
+    GatewayConfigError,
+    GatewayServer,
+    client_config_lines,
+    mask_gateway_key,
+    resolve_menu_id,
+    rotate_gateway_key,
+)
+
+#: What the client lines carry where the key would be when no gateway has
+#: ever started: a sentence, so a pasted config fails loudly at the door.
+NO_GATEWAY_KEY_YET = "<no key yet: start the gateway once>"
 from .context_cache import ContextCache
 from .settings import Settings
 from .token_cache import TokenCache
@@ -65,7 +83,8 @@ from .message_handlers.context_handler import (
     RequestDeviceContextHandler, DeviceContextResponseHandler
 )
 from .message_handlers.inference_handler import (
-    RemoteInferenceRequestHandler, RemoteInferenceResponseHandler
+    RemoteInferenceChunkHandler, RemoteInferenceRequestHandler,
+    RemoteInferenceResponseHandler,
 )
 from .message_handlers.transcription_handler import (
     RemoteTranscriptionRequestHandler, RemoteTranscriptionResponseHandler
@@ -80,7 +99,10 @@ from .message_handlers.gossip_handler import GossipSyncHandler, GossipMessageHan
 from .message_handlers.relay_register_handler import RelayRegisterHandler
 from .message_handlers.relay_message_handler import RelayMessageHandler
 from .message_handlers.relay_disconnect_handler import RelayDisconnectHandler
-from .message_handlers.relay_response_handler import RelayWaitingHandler, RelayReadyHandler
+from .message_handlers.relay_response_handler import (
+    RelayWaitingHandler, RelayReadyHandler, RelayDisconnectAckHandler
+)
+from .message_handlers.relay_error_handler import RelayErrorHandler
 from .message_handlers.file_offer_handler import FileOfferHandler
 from .message_handlers.file_accept_handler import FileAcceptHandler
 from .message_handlers.file_chunk_handler import FileChunkHandler
@@ -108,7 +130,7 @@ from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
     SkillSearchHandler, SkillsCatalogHandler, SkillRequestHandler,
     SkillDataHandler, SkillOfferHandler,
 )
-from .managers.file_transfer_manager import FileTransferManager
+from .managers.file_transfer_manager import FileTransferManager, group_file_ui_key
 from .voice_service import VoiceService
 from .knowledge_service import KnowledgeService
 from .telegram_service import TelegramService
@@ -133,6 +155,102 @@ PRIVACY_RULES = "privacy_rules.json"
 PERSONAL_CONTEXT = "personal.json"
 
 NODE_KEY = "node.key"
+
+# An entry in `group.agents[node_id]` is normally a folder id under ~/.dpc/agents.
+# This prefix marks the other kind: an external harness, identified by the tag a
+# person typed in Group Settings. Prefixed rather than bare so the two cannot
+# collide, and so the mention gate can ask «has this node registered any external
+# agent at all» — which is the question the transitional behaviour turns on.
+EXTERNAL_AGENT_PREFIX = "ext:"
+
+# Mention routing parses `@(\w+)\b`, so a name is only addressable as far as its
+# first non-word character: `@CC-lnx` reaches `CC` and `@Fifth Agent` reaches
+# `Fifth`, while `@агент_1` reaches all of itself. Applies to anything a
+# mention can name — an external agent's tag and an embedded agent's display name
+# alike, which is why the rule is here rather than beside either one.
+MENTIONABLE_NAME_RE = re.compile(r"\w+")
+
+_EXTERNAL_TAG_RE = MENTIONABLE_NAME_RE
+
+
+# The unit a menu row's tariff numbers are in (DPTP §3.5), stated on the row
+# itself: `compute.serving_tariff` declares rates per 1M tokens, and a guest
+# that does not know this word must not price the row at all.
+MENU_TARIFF_UNIT = "per_1m_tokens"
+
+
+def menu_tariff_row(firewall: Any, alias: str, peer_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """What `peer_id` is charged for a call on `alias` today, or None.
+
+    The same resolution the call itself is priced by
+    (`P2PCoordinator._tariff_for_call` → `ContextFirewall.tariff_for`), so the
+    menu quotes the rate the receipt will carry rather than a second reading of
+    the rules. None is «nothing declared» — the v1 gift — and is not «free»: a
+    declared tariff of zero is a price, and `free` is what says so. `in` and
+    `out` are per 1M tokens, stated in `unit`, because a guest may not price a
+    row whose unit it does not know.
+    """
+    tariff_for = getattr(firewall, "tariff_for", None)
+    if not peer_id or not callable(tariff_for):
+        return None
+    try:
+        applied = tariff_for(alias, peer_id=peer_id, at=datetime.now(timezone.utc))
+    except Exception:
+        logger.warning(
+            "The tariff for %s could not be resolved for the menu sent to %s; the row "
+            "carries none", alias, peer_id, exc_info=True,
+        )
+        return None
+    if applied is None:
+        return None
+    return {
+        "in": applied.in_per_1m,
+        "out": applied.out_per_1m,
+        "currency": applied.currency,
+        "from": applied.at.isoformat(),
+        "unit": MENU_TARIFF_UNIT,
+        "free": applied.in_per_1m == 0 and applied.out_per_1m == 0,
+    }
+
+
+def menu_settings_row(provider: Any) -> Dict[str, Any]:
+    """The dials the alias runs at, for a menu row — `{}` where the provider
+    vouches for none (`AIProvider.effective_settings`, fail-closed)."""
+    effective = getattr(provider, "effective_settings", None)
+    if not callable(effective):
+        return {}
+    try:
+        settings = effective()
+    except Exception:
+        logger.warning("Provider %r could not state its settings", provider, exc_info=True)
+        return {}
+    if not isinstance(settings, dict):
+        return {}
+    return {key: value for key, value in settings.items() if value is not None}
+
+
+def external_agents_to_wake(allowed_agents, mention_names, cc_display_name,
+                            mention_all=False, sender_name=""):
+    """Which external agents on this node a mention wakes, and whether to warn.
+
+    Called from both mention paths — the one for a message this node sends and
+    the one for a message arriving from a peer. Keep it that way: the two have
+    diverged on the same input before.
+
+    `warn` is true when the answer comes from the display name because nothing is
+    registered for this node in this group.
+    """
+    registered = {a[len(EXTERNAL_AGENT_PREFIX):].lower()
+                  for a in allowed_agents if a.startswith(EXTERNAL_AGENT_PREFIX)}
+    sender = (sender_name or "").lower()
+    if registered:
+        woken = set(registered) if mention_all else (registered & set(mention_names))
+        return {t for t in woken if t != sender}, False
+    cc = (cc_display_name or "").lower()
+    if cc and cc != sender and (mention_all or cc in mention_names):
+        return {cc}, True
+    return set(), False
+
 
 class CoreService:
     """
@@ -186,6 +304,12 @@ class CoreService:
 
         self.local_api = LocalApiServer(core_service=self)
         self.file_server = FileServer(dpc_home_dir=DPC_HOME_DIR, host="127.0.0.1", port=9998)
+
+        # A provider that is waiting out a backoff says so on screen instead of
+        # looking hung for up to its whole budget. Registered here because the
+        # providers are built elsewhere and none of them can reach the interface.
+        from dpc_client_core.providers.base import set_retry_observer
+        set_retry_observer(self._announce_provider_retry)
 
         # Knowledge Architecture components (Phase 1-6)
         self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
@@ -269,6 +393,11 @@ class CoreService:
         # P2P coordinator (coordinates P2P connection lifecycle)
         self.p2p_coordinator = P2PCoordinator(self)
 
+        # The OpenAI-compatible gateway follows the coordinator because a local
+        # alias queues on the coordinator's card lock (ADR-041 D1, D5). None
+        # unless [gateway] enabled: a new listener is opt-in.
+        self.gateway: Optional[GatewayServer] = self._build_gateway()
+
         # File transfer manager (handles P2P file transfers)
         self.file_transfer_manager = FileTransferManager(
             p2p_manager=self.p2p_manager,
@@ -335,6 +464,10 @@ class CoreService:
         # Track pending inference requests (for request-response matching)
         self._pending_inference_requests: Dict[str, asyncio.Future] = {}
 
+        # Where a REMOTE_INFERENCE_CHUNK goes: the caller's own chunk callback,
+        # keyed by the same request_id as the future above and removed with it.
+        self._pending_inference_chunks: Dict[str, Any] = {}
+
         # Track pending transcription requests (for request-response matching)
         self._pending_transcription_requests: Dict[str, asyncio.Future] = {}
 
@@ -355,6 +488,12 @@ class CoreService:
         self._transcription_locks = self.voice_service._transcription_locks
         self._voice_transcription_settings = self.voice_service._voice_transcription_settings
 
+        # Which history we actually asked for, and of whom. A response replaces
+        # a whole conversation, so an unclaimed one is an assertion, not a reply.
+        # Built here because KnowledgeService below asks through it.
+        from .message_handlers.chat_history_handlers import HistoryRequestRegistry
+        self.history_requests = HistoryRequestRegistry()
+
         # Knowledge — managed by KnowledgeService (Phase 1b refactor)
         try:
             self.knowledge_service = KnowledgeService(
@@ -373,6 +512,7 @@ class CoreService:
                 broadcast_to_peers=self._broadcast_to_peers,
                 broadcast_to_group=self._broadcast_to_group,
                 compute_context_hash=self._compute_context_hash,
+                history_requests=self.history_requests,
             )
         except Exception as e:
             logger.error(
@@ -415,10 +555,6 @@ class CoreService:
         self.pending_certificate_requests = set()
         self._max_processed_ids = 1000  # Limit set size
         self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
-        # Which history we actually asked for, and of whom. A response replaces
-        # a whole conversation, so an unclaimed one is an assertion, not a reply.
-        from .message_handlers.chat_history_handlers import HistoryRequestRegistry
-        self.history_requests = HistoryRequestRegistry()
         # (peer, group) pairs a peer has refused us this session. Our roster is
         # what makes us ask, and removal never reaches the node being removed,
         # so without this every reconnect earns another refusal for the same
@@ -470,6 +606,7 @@ class CoreService:
         # Remote inference (compute sharing)
         self.message_router.register_handler(RemoteInferenceRequestHandler(self))
         self.message_router.register_handler(RemoteInferenceResponseHandler(self))
+        self.message_router.register_handler(RemoteInferenceChunkHandler(self))
 
         # Remote transcription (voice transcription sharing)
         self.message_router.register_handler(RemoteTranscriptionRequestHandler(self))
@@ -502,6 +639,8 @@ class CoreService:
         # Relay response handlers (client mode — connecting via relay)
         self.message_router.register_handler(RelayWaitingHandler(self))    # Waiting for other peer
         self.message_router.register_handler(RelayReadyHandler(self))      # Session ready
+        self.message_router.register_handler(RelayDisconnectAckHandler(self))  # Disconnect acked
+        self.message_router.register_handler(RelayErrorHandler(self))      # ERROR: register/forward failures
 
         # File transfer handlers (v0.13.0: FileOfferHandler handles images, voice messages, and regular files)
         self.message_router.register_handler(FileOfferHandler(self))
@@ -772,6 +911,10 @@ class CoreService:
         api_task = asyncio.create_task(self.local_api.start())
         api_task.set_name("local_api")
         self._background_tasks.add(api_task)
+
+        # Awaited rather than tracked: `start()` returns once bound, like
+        # `websockets.serve`, and a refusal has to be logged where it happens.
+        await self._start_gateway()
 
         # Start file server for browser file access (v0.13.3+)
         self.file_server.start()
@@ -1165,9 +1308,51 @@ class CoreService:
         # Shutdown core components
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()
+        await self._stop_gateway()
         self.file_server.stop()  # Stop HTTP file server
         await self.hub_client.close()
         logger.info("D-PC Core Service shut down")
+
+    def _build_gateway(self) -> Optional[GatewayServer]:
+        """The OpenAI-compatible gateway, or None when `[gateway] enabled` is off.
+
+        A host other than 127.0.0.1 is refused here by name (ADR-041 D1) the
+        same way a refused serving list is in `_start_gateway`: the door stays
+        shut, the reason is logged, the messenger runs.
+        """
+        if not self.settings.get_gateway_enabled():
+            return None
+        coordinator = getattr(self, "p2p_coordinator", None)
+        try:
+            return GatewayServer(
+                self,
+                host=self.settings.get_gateway_host(),
+                port=self.settings.get_gateway_port(),
+                key_path=DPC_HOME_DIR / GATEWAY_KEY_NAME,
+                inference_lock=coordinator._peer_inference_lock if coordinator is not None else None,
+            )
+        except GatewayConfigError as e:
+            logger.error("OpenAI-compatible gateway refused to start: %s", e)
+            return None
+
+    async def _start_gateway(self) -> None:
+        """Open the gateway if there is one; a refused list or a taken port
+        keeps the door shut and the messenger running, with the reason logged."""
+        if self.gateway is None:
+            return
+        try:
+            await self.gateway.start()
+        except GatewayConfigError as e:
+            logger.error("OpenAI-compatible gateway refused to start: %s", e)
+            self.gateway = None
+        except OSError as e:
+            logger.error("OpenAI-compatible gateway could not listen on %s:%d: %s",
+                         self.gateway.host, self.gateway.port, e)
+            self.gateway = None
+
+    async def _stop_gateway(self) -> None:
+        if self.gateway is not None:
+            await self.gateway.stop()
 
     async def _discover_external_ip(self):
         """
@@ -1414,7 +1599,14 @@ class CoreService:
                 except Exception:
                     pass
 
-            # Update peer cache
+            # Update peer cache.
+            #
+            # direct_port is deliberately not passed: this loop sees dialled and
+            # accepted connections alike, and only the dialler knows the peer's
+            # listening port. peername[1] is that port outbound and an ephemeral
+            # source port inbound, so it cannot be used here either. Omitting it
+            # leaves the endpoint whoever did know wrote — connect_directly, the
+            # DHT result, or the inbound handler's assumption.
             self.p2p_manager.peer_cache.add_or_update_peer(
                 node_id=peer_id,
                 display_name=display_name,
@@ -1510,6 +1702,14 @@ class CoreService:
                 except Exception as e:
                     logger.debug("Failed to send history status for %s: %s", group.group_id, e)
 
+        # A vote a peer never saw ends in a timeout it could have answered.
+        if self.knowledge_service:
+            for peer_id in list(self.p2p_manager.peers):
+                try:
+                    await self.knowledge_service.resend_open_proposals(peer_id)
+                except Exception as e:
+                    logger.debug("Could not re-offer open proposals to %s: %s", peer_id[:20], e)
+
         # v0.20.0: Exchange deleted group IDs for offline deletion notification
         deleted_groups = self.group_manager.get_deleted_group_ids()
         if deleted_groups:
@@ -1583,10 +1783,36 @@ class CoreService:
 
         # Schedule auto-reconnect if this is a peer we keep a connection to
         if hasattr(self, 'connection_orchestrator') and self.connection_orchestrator:
-            if peer_id in self._peers_to_auto_connect():
+            if peer_id in self._peers_to_auto_connect() and self._worth_dialling(peer_id):
                 task = asyncio.create_task(self._auto_reconnect_peer(peer_id))
                 task.set_name(f"reconnect_{peer_id[:16]}")
                 self._background_tasks.add(task)
+
+    def _worth_dialling(self, peer_id: str) -> bool:
+        """Is a dial to this peer worth five attempts, or will it come back itself?
+
+        Decided by who placed the last connection that worked. A peer that
+        reached us and that we have never reached is behind something we cannot
+        cross — a firewall, an address that is not its listener — and it dials
+        us on its own schedule, so five attempts at it are five guaranteed
+        misses (Mike's call, 2026-09-07).
+
+        Unknown means yes. A peer we have not learned about yet, or one whose
+        situation changed, has to be tried at least once, or the rule would
+        only ever learn from failures.
+        """
+        cache = getattr(getattr(self, "p2p_manager", None), "peer_cache", None)
+        cached = cache.get_peer(peer_id) if cache else None
+        if cached is None:
+            return True
+        if getattr(cached, "last_connection_direction", None) != "in":
+            return True
+        logger.info(
+            "Not redialling %s: it reached us and we have never reached it — "
+            "it reconnects on its own",
+            peer_id[:20],
+        )
+        return False
 
     async def _auto_reconnect_peer(self, peer_id: str, max_attempts: int = 5):
         """Auto-reconnect to a known peer after disconnect with exponential backoff."""
@@ -1830,7 +2056,11 @@ class CoreService:
             peer_data = {
                 "node_id": peer_id,
                 "name": self.peer_metadata.get(peer_id, {}).get("name", None),
-                "strategy_used": getattr(peer_conn, 'strategy_used', None)
+                "strategy_used": getattr(peer_conn, 'strategy_used', None),
+                # Every row here is built from `p2p_manager.peers`, which holds
+                # the connections that exist; the field says so rather than
+                # leaving each reader to infer it from the list it came in.
+                "is_connected": True,
             }
             peer_info.append(peer_data)
 
@@ -2002,9 +2232,12 @@ class CoreService:
             with open(self.llm_manager.config_path, 'r') as f:
                 config = json.load(f)
 
+            # Beside the config rather than inside it: the editor sends the
+            # config back verbatim on save, and these are read from the model.
             return {
                 "status": "success",
-                "config": config
+                "config": config,
+                "effort_words": self._effort_words_by_alias(config),
             }
         except Exception as e:
             return {
@@ -2050,7 +2283,12 @@ class CoreService:
             return {"status": "success", "alias": alias, "balance": balance}
         except Exception as e:
             logger.error("get_provider_balance failed: %s", e)
-            return {"status": "error", "message": str(e)}
+            # A transport exception often carries no message at all — httpx's
+            # ConnectTimeout stringifies to "" — and the screen then shows the
+            # bare word "error", which reads as "the account is empty" on a
+            # project whose standing decision is to spend down to zero. The
+            # class name is the one thing always present.
+            return {"status": "error", "message": str(e) or type(e).__name__}
 
     async def get_default_providers(self) -> Dict[str, Any]:
         """
@@ -2070,6 +2308,21 @@ class CoreService:
             "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or "",  # v0.18.0+
             "knowledge_provider": getattr(self.llm_manager, 'knowledge_provider', None) or ""
         }
+
+    def _effort_words_by_alias(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """{alias: {words, default}} for every alias whose model names them."""
+        from .managers.llama_server_supervisor import gguf_effort_dictionary
+
+        out: Dict[str, Any] = {}
+        for entry in config.get("providers", []) or []:
+            alias, path = entry.get("alias"), entry.get("gguf_path")
+            if not alias or not path:
+                continue
+            dictionary = gguf_effort_dictionary(path)
+            if dictionary:
+                words, default = dictionary
+                out[alias] = {"words": list(words), "default": default}
+        return out
 
     async def get_providers_list(self) -> Dict[str, Any]:
         """
@@ -2112,6 +2365,13 @@ class CoreService:
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)
 
+            words, _ = declared_reasoning_words(provider)
+            if words is not None:
+                provider_dict["reasoning_words"] = words
+                # The rung this alias runs at when nobody asks, not the one the
+                # template would: the reader chooses on this field.
+                provider_dict["reasoning_default"] = effective_reasoning_default(provider)
+
             # v0.18.1+: Add remote inference fields for dpc_agent provider
             if alias == "dpc_agent":
                 provider_dict["peer_id"] = getattr(provider, 'peer_id', None)
@@ -2125,20 +2385,125 @@ class CoreService:
         """Delegated to VoiceService."""
         return self.voice_service._provider_supports_voice(provider)
 
-    def build_p2p_provider_info(self, alias: str, provider: Any) -> Dict[str, Any]:
+    def menu_tariff(self, alias: str, peer_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """This node's tariff row for `alias` as `peer_id` is charged it."""
+        return menu_tariff_row(getattr(self, "firewall", None), alias, peer_id)
+
+    @staticmethod
+    def menu_settings(provider: Any) -> Dict[str, Any]:
+        """The dials `provider` will run a call at, for a menu row."""
+        return menu_settings_row(provider)
+
+    def build_p2p_provider_info(
+        self, alias: str, provider: Any, *, peer_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Single source for the provider dict sent to peers in PROVIDERS_RESPONSE.
 
         context_window is None when the model is unknown locally, so peers can
         distinguish "unknown" from a real window size.
+
+        reasoning_words/reasoning_default are absent unless this model's own
+        template named them — same guard as _provider_rows, so that a fallback
+        table never reaches a peer wearing the model's name.
+
+        `reasoning_default` is this node's *effective* default for the alias —
+        the configured word resolved onto its ladder, the template's default
+        where nothing is configured — because that is the rung a guest asking
+        for nothing is served (`P2PCoordinator._effort_for_peer`, one helper
+        for both). The template's own default alone would promise `xhigh` and
+        serve `low` (live, 2026-09-14).
+
+        `supports_tools` is the same predicate the gateway reads on its own
+        route: a provider with a native `generate_with_tools` path. It saves a
+        guest a round trip it would lose; the host's refusal on the wire is
+        still the gate.
+
+        `serves_images_with_tools` says what this node's route will serve, not
+        what the provider can do: a request whose turns hold images beside
+        tools. It is `entry_point_for`'s answer for that shape — the predicate
+        the host's gate and `query_messages` ask before the call — and never a
+        conjunction of the two flags above, so the row cannot promise a
+        request the door would refuse. A guest reads it absent as no: an older
+        host may take such a request to a converter that drops the pictures.
+
+        `tariff` and `settings` are what the guest decides on: the price this
+        peer is charged and the dials the call will run at, even the ones it
+        cannot change (Mike's rule, 2026-09-14). Both are fail-closed — a
+        tariff nobody declared and a setting the provider cannot vouch for are
+        absent, and absent means «not stated», not «free» or «none applies».
+        `peer_id` is who the row is for: without one there is no free list to
+        resolve and the row carries no tariff.
         """
-        return {
+        info = {
             "alias": alias,
             "model": provider.model,
             "type": provider.config.get("type", "unknown"),
             "supports_vision": provider.supports_vision(),
             "supports_voice": self._provider_supports_voice(provider),
+            "supports_tools": hasattr(provider, "generate_with_tools"),
+            "serves_images_with_tools": entry_point_for(
+                provider, tools=True, streaming=False, images=True,
+            )[1] is not None,
             "context_window": self.llm_manager.lookup_context_window(provider.model),
         }
+
+        words, _ = declared_reasoning_words(provider)
+        if words is not None:
+            info["reasoning_words"] = words
+            info["reasoning_default"] = effective_reasoning_default(provider)
+
+        tariff = menu_tariff_row(getattr(self, "firewall", None), alias, peer_id)
+        if tariff is not None:
+            info["tariff"] = tariff
+        settings = menu_settings_row(provider)
+        if settings:
+            info["settings"] = settings
+
+        return info
+
+    def menu_for_peer(self, peer_id: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """The rows `peer_id` is served in PROVIDERS_RESPONSE, and why.
+
+        One selection for both paths that send that message: the peer's own
+        GET_PROVIDERS and the notify after a firewall save. A `local_whisper`
+        row needs transcription permission on its own model; any other row
+        needs inference permission on its model and must be the one alias this
+        node designates. The second element is the sentence a log line or a
+        preview card says when the list is shorter than the owner expects.
+        """
+        firewall = self.firewall
+        has_compute = firewall.can_request_inference(peer_id)
+        has_transcription = firewall.can_request_transcription(peer_id)
+        if not has_compute and not has_transcription:
+            return [], (
+                f"{peer_id} may ask this node for neither inference "
+                "(compute.allow_nodes / allow_groups) nor transcription "
+                "(transcription.allow_nodes / allow_groups)"
+            )
+
+        rows: List[Dict[str, Any]] = []
+        for alias, provider in self.llm_manager.providers.items():
+            info = self.build_p2p_provider_info(alias, provider, peer_id=peer_id)
+            if info["type"] == "local_whisper":
+                if has_transcription and firewall.can_request_transcription(peer_id, info["model"]):
+                    rows.append(info)
+            elif (has_compute
+                    and alias == firewall.compute_serving_alias
+                    and firewall.can_request_inference(peer_id, info["model"])):
+                rows.append(info)
+
+        if rows:
+            return rows, None
+        if has_compute and not firewall.compute_serving_alias:
+            return rows, (
+                "inference sharing is on and this peer is allowed, but no alias is designated "
+                "in compute.serving_local, so there is nothing to offer"
+            )
+        return rows, (
+            "no configured provider passes this peer's permissions: the designated alias "
+            "(compute.serving_local) and compute.allowed_models decide the inference row, "
+            "and the transcription permissions decide a transcription one"
+        )
 
     async def set_voice_provider(self, provider_alias: str) -> Dict[str, Any]:
         """Delegated to VoiceService."""
@@ -3377,12 +3742,40 @@ class CoreService:
                                 fallback_provider = provider
                                 break
 
-                        if not fallback_provider:
-                            raise ValueError("Local transcription failed and no OpenAI provider available for fallback") from local_error
+                        cloud_error = None
+                        if fallback_provider:
+                            try:
+                                # Use OpenAI API
+                                result = await self._transcribe_with_openai(temp_path, fallback_provider.config)
+                                result["fallback_reason"] = str(local_error)
+                            except Exception as openai_error:
+                                # A configured cloud provider that fails is not the
+                                # end of the chain either — it is one more step that
+                                # did not work.
+                                logger.warning("OpenAI fallback transcription failed: %s", openai_error)
+                                cloud_error = openai_error
+                                result = None
 
-                        # Use OpenAI API
-                        result = await self._transcribe_with_openai(temp_path, fallback_provider.config)
-                        result["fallback_reason"] = str(local_error)
+                        if result is None:
+                            # The peer is the last step, not the second: a cloud
+                            # provider the user configured by hand should not be
+                            # skipped in favour of sending their audio to another
+                            # person's machine. Reached when there is no such
+                            # provider, or when it failed too — both of which
+                            # ended here in a dead end before (Mike's call,
+                            # 2026-09-07).
+                            result = await self._transcribe_with_peer(temp_path, mime_type)
+                            if result is None:
+                                cloud = (
+                                    f"the OpenAI fallback failed ({cloud_error})"
+                                    if cloud_error is not None
+                                    else "no OpenAI provider is configured"
+                                )
+                                raise ValueError(
+                                    f"Local transcription failed, {cloud}, and no peer could "
+                                    f"be asked: {self._peer_transcription_refusal()}"
+                                ) from local_error
+                            result["fallback_reason"] = str(local_error)
                     else:
                         raise RuntimeError(f"Local transcription failed and fallback disabled: {local_error}") from local_error
 
@@ -3670,6 +4063,11 @@ class CoreService:
                 from datetime import datetime, timezone
                 transcription_data = {
                     "text": transcription_text,
+                    # One voice message becomes one transfer per recipient, so a
+                    # transfer id cannot name the message the sender itself
+                    # stored. The file name is minted once and travels with the
+                    # offer, so both sides can join on it.
+                    "filename": Path(file_path).name,
                     "transcriber_node_id": self.p2p_manager.node_id,  # Orchestrator
                     "provider": result.get("provider", "unknown"),
                     "confidence": result.get("confidence", 0.0),
@@ -3934,6 +4332,45 @@ class CoreService:
             logger.error("Error reading firewall rules: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    async def get_usage_summary(self, since: str = None, until: str = None) -> Dict[str, Any]:
+        """This node's own burn: `node_ledger.burn_rows` — every `route=local`
+        row, the calls served to peers included — folded by caller, alias and month
+        (`node_ledger.summarize`) — the ledger's first reader beyond
+        `spent_today`, board entry A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-
+        INSTRUMENT, re-pointed at the ledger 2026-09-14 per board entry
+        TWO-SERIES-CARRY-ONE-PAID-CALL-AND-THE-BURN-READER-STILL-READS-THE-
+        OLD-ONE (Mike's call, 2026-09-13: the ledger is the record, not the
+        `DeepSeek usage:` log line). `since`/`until` are optional ISO datetime
+        bounds. Response shape is unchanged from before the re-pointing."""
+        try:
+            ledger = node_ledger.default_ledger()
+            summary = node_ledger.summarize(
+                node_ledger.burn_rows(ledger.rows()), since=since, until=until
+            )
+            return {"status": "success", **summary}
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+
+    async def get_inference_usage(
+        self, since: str = None, until: str = None, month: str = None
+    ) -> Dict[str, Any]:
+        """The same ledger read by role — `node_ledger.usage_by_role`: what this
+        node served to peers, what peers served it, and what it ran for itself
+        (board entry THE-LEDGER-COUNTS-EVERY-SHARED-CALL-AND-NEITHER-SIDE-CAN-
+        SEE-IT-IN-THE-UI). `get_usage_summary` beside it stays the owner's burn
+        and is unchanged. `since`/`until` are optional ISO datetime bounds;
+        `month` is `YYYY-MM` and reads one partition instead of every one."""
+        try:
+            if month is not None and not re.fullmatch(r"\d{4}-\d{2}", str(month)):
+                raise ValueError(f"month={month!r} is not a partition's YYYY-MM")
+            ledger = node_ledger.default_ledger()
+            return {
+                "status": "success",
+                **node_ledger.usage_by_role(ledger.rows(month=month), since=since, until=until),
+            }
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+
     async def save_firewall_rules(self, rules_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Save updated firewall rules from UI editor.
 
@@ -4049,27 +4486,190 @@ class CoreService:
             logger.error("Error reloading firewall: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    # --- Web auth headless approval (ADR-029 Task 008) ---
+    # --- Web auth vault (UI only: an agent that can delete a stored login
+    #     can delete the one it dislikes) ---
 
-    async def web_auth_approve_headless(self, request_id: str) -> Dict[str, Any]:
-        from .dpc_agent.tools.browser import get_pending_auth_approvals
-        pending = get_pending_auth_approvals()
-        entry = pending.get(request_id)
-        if not entry:
-            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
-        entry["approved"] = True
-        entry["event"].set()
-        return {"status": "approved", "request_id": request_id}
+    @staticmethod
+    def _web_auth_agent_id(agent_id: str) -> str:
+        """Refuse a non-agent-id before it reaches a path. Not
+        `get_agent_root`: that creates the directory and resolves under
+        `Path.home()`, while the vault resolves under `DPC_HOME`."""
+        from .dpc_agent.utils import AGENT_ID_RE
 
-    async def web_auth_reject_headless(self, request_id: str) -> Dict[str, Any]:
-        from .dpc_agent.tools.browser import get_pending_auth_approvals
-        pending = get_pending_auth_approvals()
-        entry = pending.get(request_id)
-        if not entry:
-            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
-        entry["approved"] = False
-        entry["event"].set()
-        return {"status": "rejected", "request_id": request_id}
+        if not agent_id or not AGENT_ID_RE.match(agent_id):
+            raise ValueError(
+                f"«{agent_id}» is not an agent id (letters, digits, "
+                f"underscore, hyphen)."
+            )
+        return agent_id
+
+    async def web_auth_list_domains(self, agent_id: str) -> Dict[str, Any]:
+        """`web_auth.list_domains` rows for one agent, unchanged.
+
+        A pure read: unlike `load_cookies` it does not stamp `last_used_at`,
+        so opening the panel cannot make a stale jar look freshly used.
+        """
+        try:
+            agent_id = self._web_auth_agent_id(agent_id)
+            from . import web_auth
+
+            return {
+                "status": "success",
+                "agent_id": agent_id,
+                "domains": web_auth.list_domains(agent_id),
+            }
+        except Exception as e:
+            logger.error(
+                "web_auth_list_domains failed for %s: %s", agent_id, e,
+                exc_info=True,
+            )
+            return {"status": "error", "message": str(e)}
+
+    async def web_auth_forget_cookies(self, agent_id: str, domain: str) -> Dict[str, Any]:
+        """Delete this machine's copy of one agent's cookie jar for one site.
+
+        Not a logout, and named so it cannot be read as one: the session on
+        the site stays valid until the person signs out there, in the visible
+        window. What this takes away is the agent's ability to send those
+        cookies.
+
+        `domain` is resolved to the eTLD+1 the vault files jars under, so
+        `mail.example.com` addresses the `example.com` jar; an input with no
+        eTLD+1 addresses no jar and is an error rather than a quiet success.
+        `forgotten` is False when there was no jar — reporting a no-op as a
+        deletion claims work not done. Audited either way.
+        """
+        try:
+            agent_id = self._web_auth_agent_id(agent_id)
+            from . import web_auth
+
+            etld1 = web_auth.resolve_etld1(domain)
+            if etld1 is None:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"'{domain}' has no registrable domain — no jar can "
+                        f"be filed under it. Pass the site itself, e.g. "
+                        f"'example.com'."
+                    ),
+                }
+
+            url = f"https://{etld1}/"
+            before = next(
+                (row for row in web_auth.list_domains(agent_id)
+                 if row["domain"] == etld1),
+                None,
+            )
+            web_auth.forget_cookies(agent_id, etld1)
+
+            if before is None:
+                web_auth.audit_append(
+                    agent_id, etld1, url, status="web_auth_forget_no_jar",
+                )
+                return {
+                    "status": "success",
+                    "agent_id": agent_id,
+                    "domain": etld1,
+                    "forgotten": False,
+                    "message": (
+                        f"{agent_id} held no stored cookies for {etld1} — "
+                        f"nothing to forget."
+                    ),
+                }
+
+            web_auth.audit_append(
+                agent_id, etld1, url, status="web_auth_forgotten",
+            )
+            logger.info(
+                "web auth cookies forgotten: agent=%s domain=%s",
+                agent_id, etld1,
+            )
+            return {
+                "status": "success",
+                "agent_id": agent_id,
+                "domain": etld1,
+                "forgotten": True,
+                "message": (
+                    f"Deleted this machine's copy of {agent_id}'s {etld1} "
+                    f"cookies. You are still signed in on {etld1} itself — "
+                    f"sign out there if that is what you meant."
+                ),
+            }
+        except Exception as e:
+            logger.error(
+                "web_auth_forget_cookies failed for %s/%s: %s",
+                agent_id, domain, e, exc_info=True,
+            )
+            return {"status": "error", "message": str(e)}
+
+    async def web_auth_restore_previous_cookies(
+        self, agent_id: str, domain: str
+    ) -> Dict[str, Any]:
+        """Swap one agent's stored jar for the one set kept behind it.
+
+        A swap, not a pop: the jar being undone becomes the kept one, so
+        pressing this twice returns to where it started. One generation is
+        all there is — there is nothing older behind the pair.
+
+        `restored` is False when no previous set is kept, because saying a
+        restore happened when nothing moved is how a person stops trusting
+        the control. Audited either way.
+        """
+        try:
+            agent_id = self._web_auth_agent_id(agent_id)
+            from . import web_auth
+
+            etld1 = web_auth.resolve_etld1(domain)
+            if etld1 is None:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"'{domain}' has no registrable domain — no jar can "
+                        f"be filed under it. Pass the site itself, e.g. "
+                        f"'example.com'."
+                    ),
+                }
+
+            url = f"https://{etld1}/"
+            restored = web_auth.restore_previous_cookies(agent_id, etld1)
+            web_auth.audit_append(
+                agent_id, etld1, url,
+                status=("web_auth_restored" if restored
+                        else "web_auth_restore_nothing_kept"),
+            )
+            if not restored:
+                return {
+                    "status": "success",
+                    "agent_id": agent_id,
+                    "domain": etld1,
+                    "restored": False,
+                    "message": (
+                        f"No earlier {etld1} cookies are kept for {agent_id} "
+                        f"— only the set in use. Nothing was changed."
+                    ),
+                }
+            logger.info(
+                "web auth cookies restored: agent=%s domain=%s",
+                agent_id, etld1,
+            )
+            return {
+                "status": "success",
+                "agent_id": agent_id,
+                "domain": etld1,
+                "restored": True,
+                "message": (
+                    f"Swapped {agent_id}'s {etld1} cookies with the set kept "
+                    f"behind them. The pair has changed places, so doing this "
+                    f"again puts back what was there a moment ago — one "
+                    f"earlier set is kept, and nothing older than that."
+                ),
+            }
+        except Exception as e:
+            logger.error(
+                "web_auth_restore_previous_cookies failed for %s/%s: %s",
+                agent_id, domain, e, exc_info=True,
+            )
+            return {"status": "error", "message": str(e)}
 
     # --- Shell approval (ADR-030 v2) ---
 
@@ -4221,6 +4821,19 @@ class CoreService:
                     logger.info("Schedule approval %s withdrawn from Telegram: %s", request_id, outcome)
             except Exception as e:
                 logger.debug("Could not withdraw schedule approval %s from Telegram: %s", request_id, e)
+
+    def _announce_provider_retry(self, event: str, payload: Dict[str, Any]) -> None:
+        """Carry a provider's retry notice to the interface.
+
+        Called from inside the retry loop, so it must return at once and must
+        not raise — the caller is in the middle of recovering from an error and
+        an exception here would turn a recoverable failure into a lost one.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.local_api.broadcast_event(event, payload))
 
     async def announce_shell_approval_request(
         self,
@@ -4432,14 +5045,150 @@ class CoreService:
         """Delegated to AgentService."""
         return await self.agent_service.clear_session_archives(conversation_id, keep_latest)
 
-    async def validate_firewall_rules(self, rules_text: str) -> Dict[str, Any]:
-        """Validate firewall rules without saving."""
+    async def validate_firewall_rules(self, rules: Dict[str, Any]) -> Dict[str, Any]:
+        """Say what is wrong with a rules object without writing it anywhere.
+
+        `ContextFirewall.validate_config` reads a dict; this took a string, so
+        wired as it stood it answered «invalid» to every input.
+        """
+        if not isinstance(rules, dict):
+            return {
+                "status": "error",
+                "message": f"firewall rules must be an object, got {type(rules).__name__}",
+            }
         try:
-            is_valid, errors = self.firewall.validate_config(rules_text)
-            return {"status": "success", "is_valid": is_valid, "errors": errors}
+            valid, errors = self.firewall.validate_config(rules)
+            return {"status": "success", "valid": valid, "errors": errors}
         except Exception as e:
             logger.error("Error validating firewall rules: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    async def get_gateway_state(self) -> Dict[str, Any]:
+        """What the IDE door is right now: configured, listening, and on what.
+
+        `enabled` is `[gateway] enabled`, which only a restart re-reads;
+        `running` is whether a listener holds the port, and the two differ
+        whenever the door refused to open. The key is masked here —
+        `get_gateway_client_lines` is the command that hands it over.
+        """
+        server = self.gateway
+        enabled = self.settings.get_gateway_enabled()
+        port = server.port if server is not None else self.settings.get_gateway_port()
+        serving_local, serving_vendor, serving_error = [], [], None
+        try:
+            providers = self.llm_manager.providers or {}
+            lists = self.firewall.classify_serving_lists({
+                alias: (getattr(provider, "config", None) or {}).get("type")
+                for alias, provider in providers.items()
+            })
+            serving_local, serving_vendor = list(lists.local), list(lists.vendor)
+        except ValueError as e:
+            serving_error = str(e)
+        key_path = server.key_path if server is not None else DPC_HOME_DIR / GATEWAY_KEY_NAME
+        if server is not None:
+            key_masked = server.key_masked
+        else:
+            try:
+                key_masked = mask_gateway_key(Path(key_path).read_text(encoding="utf-8").strip())
+            except OSError:
+                key_masked = None
+        return {
+            "status": "success",
+            "enabled": enabled,
+            "running": bool(server is not None and server.is_running),
+            "port": port,
+            "bind": GATEWAY_HOST,
+            "key_masked": key_masked,
+            "key_file": str(key_path),
+            "serving_local": serving_local,
+            "serving_vendor": serving_vendor,
+            "serving_error": serving_error,
+            "compute_enabled": bool(getattr(self.firewall, "compute_enabled", False)),
+        }
+
+    async def rotate_gateway_key(self) -> Dict[str, Any]:
+        """A new key, returned once in clear; the old one is 401 from the next
+        request on, with no restart. With no listener the file is still
+        rewritten, so the key an IDE meets after a start is the new one."""
+        try:
+            server = self.gateway
+            if server is not None:
+                key = server.rotate_key()
+                key_file = str(server.key_path)
+            else:
+                key_file = str(DPC_HOME_DIR / GATEWAY_KEY_NAME)
+                key = rotate_gateway_key(Path(key_file))
+        except OSError as e:
+            logger.error("Gateway key rotation failed: %s", e, exc_info=True)
+            return {"status": "error", "message": f"the gateway key file could not be written: {e}"}
+        return {
+            "status": "success",
+            "key": key,
+            "key_masked": mask_gateway_key(key),
+            "key_file": key_file,
+        }
+
+    async def get_gateway_client_lines(self, selected_id: Optional[str] = None) -> Dict[str, Any]:
+        """The paste-ready lines for Continue, Cursor, Claude Code and curl,
+        with the key in clear (Mike's call, 2026-09-14): they are pasted into
+        another tool's config, and this socket already carries `.ws_token`.
+
+        `menu` is `Gateway.chat_menu`, the list `/v1/models` answers with, and
+        the lines are rendered from it: every id offered here is an id that
+        door would serve. `selected_id` names the entry the single-model
+        blocks are written for and is echoed back resolved, so the UI's
+        dropdown and the blocks below it show one choice.
+        """
+        server = self.gateway
+        port = server.port if server is not None else self.settings.get_gateway_port()
+        key_path = server.key_path if server is not None else DPC_HOME_DIR / GATEWAY_KEY_NAME
+        key = getattr(server, "_key", "") if server is not None else ""
+        if not key:
+            try:
+                key = Path(key_path).read_text(encoding="utf-8").strip()
+            except OSError:
+                key = ""
+        # The same builder the route uses, over the same core, whether or not a
+        # listener holds the port: `chat_menu` reads the firewall, the registry
+        # and the peers live, so a `Gateway` made here answers what the running
+        # one would. A refused serving list is `get_gateway_state`'s sentence,
+        # and leaves the card an empty menu rather than an error.
+        try:
+            menu = [entry.as_dict() for entry in Gateway(self).chat_menu()]
+        except Exception as e:
+            logger.warning("The gateway menu could not be built for the client lines: %s", e)
+            menu = []
+        chosen = resolve_menu_id(menu, selected_id if isinstance(selected_id, str) else None)
+        return {
+            "status": "success",
+            "menu": menu,
+            "selected_id": chosen,
+            "lines": client_config_lines(port, key or NO_GATEWAY_KEY_YET, menu, chosen),
+            "key_masked": mask_gateway_key(key),
+        }
+
+    async def get_peer_provider_menu(self, peer_id: str) -> Dict[str, Any]:
+        """The rows this peer would be sent today, from the one builder that
+        sends them: a difference between the preview and the wire would have
+        to be a difference inside one function."""
+        if not isinstance(peer_id, str) or not peer_id:
+            return {"status": "error", "message": "peer_id is required"}
+        known = peer_id in (self.p2p_manager.peer_cache.get_all_peers() or {})
+        connected = peer_id in self.p2p_manager.peers
+        rows, reason = self.menu_for_peer(peer_id)
+        return {
+            "status": "success",
+            "peer_id": peer_id,
+            "known": bool(known or connected),
+            "connected": bool(connected),
+            # Whether a door is open to this peer at all, which is not whether
+            # anything stands behind it: allowed and served nothing is the
+            # owner's own configuration, and `reason` says which.
+            "allowed": bool(self.firewall.can_request_inference(peer_id)
+                            or self.firewall.can_request_transcription(peer_id)),
+            "reason": reason,
+            "rows": rows,
+        }
 
     async def get_voice_transcription_config(self) -> dict:
         """Delegated to VoiceService."""
@@ -4659,8 +5408,17 @@ class CoreService:
                         # Merge transcription data for voice messages
                         if attachment_copy.get("type") == "voice":
                             transfer_id = attachment_copy.get("transfer_id")
-                            if transfer_id and transfer_id in self._voice_transcriptions:
-                                transcription_data = self._voice_transcriptions[transfer_id]
+                            transcription_data = self._voice_transcriptions.get(transfer_id) if transfer_id else None
+                            if transcription_data is None:
+                                # The sender's own group record carries no transfer
+                                # id — one message, one transfer per recipient.
+                                name = attachment_copy.get("filename")
+                                transcription_data = next(
+                                    (t for t in self._voice_transcriptions.values()
+                                     if name and t.get("filename") == name),
+                                    None,
+                                )
+                            if transcription_data:
                                 attachment_copy["transcription"] = {
                                     "text": transcription_data.get("text", ""),
                                     "provider": transcription_data.get("provider", ""),
@@ -4843,10 +5601,15 @@ class CoreService:
                         "tokens_after_last_response": 0,
                         "tokens_after_last_response_at": None,
                     })
-                    if not group.is_discord_bridge:
-                        asyncio.create_task(self.trigger_group_sleep(conversation_id))
-                    else:
-                        logger.info("Skipping sleep for Discord bridge group: %s", conversation_id)
+                    # No sleep here either. This branch is the lone member of a
+                    # group ending its own session, so the node that pressed the
+                    # button is the only one there — the same reason the voted
+                    # path excludes an initiator (Mike's call, 2026-09-07), and
+                    # for a single-node install this is the branch that runs.
+                    logger.info(
+                        "Skipping group sleep for %s: this node asked for the reset",
+                        conversation_id,
+                    )
                     return result
 
                 participants = set(group.members)
@@ -4952,14 +5715,34 @@ class CoreService:
         return {"status": "success", "groups": groups}
 
     async def set_group_agents(self, group_id: str, agent_ids: list = None) -> Dict[str, Any]:
-        """Set which agents from this node participate in a group."""
+        """Set which agents from this node participate in a group.
+
+        An id prefixed `ext:` is an external harness — a Claude Code bridge or
+        anything else that answers over the local API. It has no folder under
+        ~/.dpc/agents, so it carries its own tag as its name, and the tag is what
+        the group mention has to match.
+        """
         try:
+            bad = [a for a in (agent_ids or [])
+                   if a.startswith(EXTERNAL_AGENT_PREFIX)
+                   and not _EXTERNAL_TAG_RE.fullmatch(a[len(EXTERNAL_AGENT_PREFIX):])]
+            if bad:
+                # Refused here and not only in the dialog: a tag with a hyphen looks
+                # unique in the interface and is cut to its first segment by agent
+                # routing, so `CC-lnx` would quietly address every `CC` in the group.
+                return {"status": "error", "message":
+                        "External agent tags may contain only letters, digits and "
+                        "underscore — a hyphen or a space is cut by mention routing "
+                        f"and would address every agent sharing the first part: {bad}"}
             agent_names = {}
             if agent_ids and self.agent_service:
                 result = await self.agent_service.list_agents()
                 for a in result.get("agents", []):
                     if a["agent_id"] in agent_ids:
                         agent_names[a["agent_id"]] = a.get("name", a["agent_id"])
+            for _aid in (agent_ids or []):
+                if _aid.startswith(EXTERNAL_AGENT_PREFIX):
+                    agent_names[_aid] = _aid[len(EXTERNAL_AGENT_PREFIX):]
             self.group_manager.set_node_agents(
                 group_id, self.p2p_manager.node_id, agent_ids or [], agent_names
             )
@@ -5036,7 +5819,14 @@ class CoreService:
         }
         # All four or none: a partial set proves nothing and invites a receiver
         # to improvise the rest.
-        return fields if len(fields) == 4 else {}
+        if len(fields) != 4:
+            return {}
+        # What v2 signs in place of the calls. Absent on a record with none,
+        # and absent on v1 records, where the calls themselves are the field.
+        digest = record.get("tool_calls_digest")
+        if digest:
+            fields["tool_calls_digest"] = digest
+        return fields
 
     async def send_group_message(self, group_id: str, text: str) -> Dict[str, Any]:
         """Send a text message to all group members.
@@ -5158,6 +5948,8 @@ class CoreService:
         # Check if any mention matches an allowed agent's name or id
         sender_lower = sender_name.lower() if sender_name else ""
         for aid in allowed_agents:
+            if aid.startswith(EXTERNAL_AGENT_PREFIX):
+                continue
             aname = self._get_agent_display_name(aid).lower()
             if aname == sender_lower:
                 continue
@@ -5167,15 +5959,25 @@ class CoreService:
                 asyncio.ensure_future(self._invoke_agent_in_group_serialized(
                     group_id, text, sender_name, aid, trigger_message_id))
 
-        cc_name = self.get_cc_display_name().lower()
-        if (mention_all or cc_name in mentions) and cc_name != sender_lower:
+        woken, warn = external_agents_to_wake(
+            allowed_agents, mentions, self.get_cc_display_name(),
+            mention_all=mention_all, sender_name=sender_lower,
+        )
+        if warn:
+            logger.warning(
+                "@%s answered in %s by name alone — nothing is registered for this "
+                "node in that group, so every node carrying this name answers. "
+                "Register it in Group Settings to address one machine.",
+                self.get_cc_display_name().lower(), group_id)
+        for tag in sorted(woken):
             logger.info("Group @%s mention detected — broadcasting cc_group_mention in group %s",
-                        "all" if mention_all else "cc", group_id)
+                        tag, group_id)
             await self.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
                 "text": text,
                 "sender_name": sender_name,
                 "sender_node_id": self.p2p_manager.node_id,
+                "agent_tag": tag,
             })
 
     async def _invoke_agent_in_group_serialized(
@@ -5305,6 +6107,24 @@ class CoreService:
             key=lambda v: (v[0] / v[1]) if v[1] else 0,
         )
 
+    def _names_this_node_may_post_as(self, group) -> set:
+        """Lower-cased names an agent message from this node may carry in `group`:
+        `agent_names[node]`, the display part of each `ext:` tag, the config name
+        of each embedded agent in `agents[node]`, and — under the same transitional
+        rule as `external_agents_to_wake` — the CC display name while no `ext:`
+        tag is registered here."""
+        node_id = self.p2p_manager.node_id
+        agent_ids = list((getattr(group, "agents", None) or {}).get(node_id) or [])
+        names = {n for n in ((getattr(group, "agent_names", None) or {}).get(node_id) or {}).values() if n}
+        for aid in agent_ids:
+            if aid.startswith(EXTERNAL_AGENT_PREFIX):
+                names.add(aid[len(EXTERNAL_AGENT_PREFIX):])
+            else:
+                names.add(self._get_agent_display_name(aid))
+        if not any(a.startswith(EXTERNAL_AGENT_PREFIX) for a in agent_ids):
+            names.add(self.get_cc_display_name())
+        return {n.lower() for n in names if n}
+
     async def send_group_agent_message(
         self, group_id: str, agent_name: str, text: str,
         tool_calls: Optional[list] = None,
@@ -5322,18 +6142,39 @@ class CoreService:
         Returns:
             The generated message_id (16-char hex), or None if the group was not found.
             Callers use this to track posted messages for later deletion (e.g. morning
-            brief replacement on Sleep button).
+            brief replacement on Sleep button). A name this node did not register for
+            the group is refused with `{"status": "error", "message": ...}`.
         """
         group = self.group_manager.get_group(group_id)
         if not group:
             logger.warning("send_group_agent_message: group %s not found", group_id)
             return None
 
+        # A registered folder id resolves to the name it was registered under:
+        # the check_back delivery passed `agent_forge_7244b181` and was refused,
+        # and the report never reached the chat. The record and the wire carry
+        # the display name, never the id.
+        node_id = self.p2p_manager.node_id
+        registered_ids = (getattr(group, "agents", None) or {}).get(node_id) or []
+        if agent_name in registered_ids and not agent_name.startswith(EXTERNAL_AGENT_PREFIX):
+            resolved = ((getattr(group, "agent_names", None) or {}).get(node_id) or {}).get(agent_name) \
+                or self._get_agent_display_name(agent_name)
+            logger.info("send_group_agent_message: agent id %r posts as %r in group %s",
+                        agent_name, resolved, group_id)
+            agent_name = resolved
+
+        allowed = self._names_this_node_may_post_as(group)
+        if (agent_name or "").lower() not in allowed:
+            logger.warning(
+                "send_group_agent_message: %r is not a name this node registered for "
+                "group %s (registered: %s) — refused",
+                agent_name, group_id, sorted(allowed))
+            return {"status": "error", "message":
+                    f"agent name not registered for this node in this group: {agent_name}"}
+
         import uuid
         message_id = uuid.uuid4().hex[:16]
         timestamp = datetime.now(timezone.utc).isoformat()
-
-        node_id = self.p2p_manager.node_id
 
         # Feed to ConversationMonitor FIRST so msg_index gets assigned
         monitor = self._get_or_create_conversation_monitor(group_id)
@@ -5347,12 +6188,10 @@ class CoreService:
             timestamp=timestamp,
             sender_type="agent",
             agent_owner=self.p2p_manager.node_id,
+            # Signed with the record. Patching them in afterwards left the
+            # hash computed without them, and every peer refused the post.
+            tool_calls=tool_calls or None,
         ))
-        if tool_calls:
-            history = monitor.get_message_history()
-            if history and history[-1].get("id") == message_id:
-                history[-1]["tool_calls"] = tool_calls
-                monitor._history_dirty = True
         monitor.save_history()
 
         last_msg = monitor.get_message_history()[-1] if monitor.get_message_history() else {}
@@ -5376,8 +6215,9 @@ class CoreService:
             "is_agent": True,
             "msg_index": msg_index,
             **self._signature_fields_for(monitor, message_id),
-            # tool_calls in the live broadcast so the collapsible renders immediately
-            # on the finalized message, not only after a history reload.
+            # The calls are the owner's: they go to this node's own UI and no
+            # further. What a peer receives is their digest, which is what v2
+            # signs, so it can verify the record without holding them (ADR-042).
             "tool_calls": tool_calls or [],
         }
 
@@ -5393,7 +6233,8 @@ class CoreService:
                 self._processed_message_ids.discard(k)
 
         # Relay to P2P peers so remote members see the agent response
-        await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
+        for_peers = {k: v for k, v in payload.items() if k != "tool_calls"}
+        await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": for_peers})
 
         # Update token count — use agent's tokens_after_last_response if available
         history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
@@ -5466,6 +6307,7 @@ class CoreService:
 
         # Mutate in place
         monitor.message_history[:] = [m for m in history if m not in to_delete]
+        monitor.rebuild_message_ids()
         monitor.save_history()
 
         # Notify UI to remove from view. Include sender + content_prefix hint so
@@ -5760,9 +6602,15 @@ class CoreService:
             filename: Optional filename
             text: Optional text caption
             describe_for_agents: If True, run one vision-model pass over the image and
-                route a text description to the group agents (GROUP-CHAT-VISION-NOT-WIRED).
+                add its description to the message text (GROUP-CHAT-VISION-NOT-WIRED).
                 The image is shared with all members regardless; this only additionally
-                lets agents "see" it. Mentions in `text` drive which agents respond.
+                lets agents "see" it. Mentions in `text` drive which agents respond,
+                with or without a description.
+
+        Returns:
+            On success, `vl_description_status` says what became of the vision pass —
+            "not_requested", "produced", or "failed" — and a "failed" one carries the
+            reason in `warnings`. The image send itself succeeded either way.
         """
         from datetime import datetime, timezone
         import base64 as b64
@@ -5838,12 +6686,21 @@ class CoreService:
             # Computed BEFORE the message is built so the description becomes part of
             # the persisted, human-visible message text (not just ephemeral agent
             # context). Empty string if the option is off or the VL pass fails.
+            # A refusal is carried back to the caller in `vl_description_status` +
+            # `warnings`: the person who ticked the box was told nothing when the
+            # node had no working vision provider.
             vl_description = ""
+            vl_error = ""
             if describe_for_agents:
                 try:
                     vl_description = await self._describe_image_for_agents(encoded_data, mime_type, text)
                 except Exception as e:
+                    vl_error = str(e) or e.__class__.__name__
                     logger.warning("describe_for_agents (VL) failed for group image: %s", e)
+                if not vl_description and not vl_error:
+                    # A provider that answers with nothing refuses just as squarely
+                    # as one that raises; both must reach the caller.
+                    vl_error = "the vision provider returned an empty description"
 
             # Message text = user's caption + VL description (if any). This is exactly
             # what Mike wants persisted: file reference (attachment) + text.
@@ -5877,7 +6734,9 @@ class CoreService:
             image_msg_id = hashlib.sha256(
                 f"{self.p2p_manager.node_id}:group-image-send:{group_id}:{filename}".encode()
             ).hexdigest()[:16]
-            ui_dedup_key = f"group_image_ui:{group_id}:{filename}"
+            # Keyed on the on-disk name: that is what FileCompleteHandler sees as
+            # transfer.filename, and it may carry a "_N" suffix `filename` lacks.
+            ui_dedup_key = group_file_ui_key(group_id, file_path.name)
             if ui_dedup_key not in self._processed_message_ids:
                 self._processed_message_ids.add(ui_dedup_key)
                 # Stored before the broadcast, because the index is assigned on
@@ -5927,17 +6786,34 @@ class CoreService:
                 except Exception as e:
                     logger.warning("Failed to send group image to %s: %s", node_id[:20], e)
 
-            # If VL was requested, route the full text (caption + VL description) into
-            # the group agents so they can reason about the image. @mentions in the
-            # caption decide which agents respond, exactly as with plain text input.
-            if vl_description:
+            # Route the message text into the group agents so they can act on it.
+            # @mentions in the caption decide which agents respond, exactly as with
+            # plain text input. The VL description is an enrichment, not a condition:
+            # gating this on it meant a failed vision pass dropped the mention too,
+            # and the tagged agent never learned the message existed. `full_text` is
+            # caption + description when a description was produced, the bare caption
+            # otherwise. This is the only mention fan-out on the image path —
+            # send_group_image does not go through send_group_message — so routing it
+            # unconditionally cannot fire twice.
+            if full_text:
                 try:
                     sender_display = self.p2p_manager.get_display_name() or "User"
                     await self._handle_group_agent_mentions(group_id, full_text, sender_display)
                 except Exception as e:
-                    logger.warning("routing VL description to group agents failed: %s", e)
+                    logger.warning("routing group image text to group agents failed: %s", e)
 
-            return {
+            # The image send itself succeeded even when the VL pass refused, so the
+            # outcome of the description rides alongside "success" rather than
+            # replacing it: "not_requested" / "produced" / "failed", with the reason
+            # in `warnings` (same shape as save_providers_config above).
+            if not describe_for_agents:
+                vl_description_status = "not_requested"
+            elif vl_description:
+                vl_description_status = "produced"
+            else:
+                vl_description_status = "failed"
+
+            result = {
                 "status": "success",
                 "transfer_ids": transfer_ids,
                 "file_path": str(file_path),
@@ -5945,8 +6821,14 @@ class CoreService:
                 "size_bytes": len(image_data),
                 "width": width,
                 "height": height,
-                "mime_type": mime_type
+                "mime_type": mime_type,
+                "vl_description_status": vl_description_status,
             }
+            if vl_description_status == "failed":
+                result["warnings"] = [
+                    f"Image sent, but describe for agents (VL) produced no description: {vl_error}"
+                ]
+            return result
         except Exception as e:
             logger.error("Error sending group image: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
@@ -6056,7 +6938,7 @@ class CoreService:
                 "file_path": str(file_path),
                 "voice_metadata": voice_metadata,
             }
-            ui_dedup_key = f"group_file_ui:{group_id}:{final_filename}"
+            ui_dedup_key = group_file_ui_key(group_id, final_filename)
             if ui_dedup_key not in self._processed_message_ids:
                 self._processed_message_ids.add(ui_dedup_key)
                 message_id = hashlib.sha256(
@@ -6204,6 +7086,14 @@ class CoreService:
             return
         await self.telegram_service._restart_agent_telegram_bridge(agent_id)
 
+    async def set_agent_telegram_enabled(
+        self, agent_id: str, enabled: bool
+    ) -> Dict[str, Any]:
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.set_agent_telegram_enabled(agent_id, enabled)
+
     async def unlink_agent_telegram(self, agent_id: str) -> Dict[str, Any]:
         """Delegates to TelegramService."""
         if not self.telegram_service:
@@ -6272,13 +7162,16 @@ class CoreService:
             )
             message = {"command": "VOTE_NEW_SESSION", "payload": vote_payload}
 
-            # Record our own vote from the same signed payload the peers get,
-            # so the evidence a session marker carries is one set of bytes and
-            # not a local paraphrase of it.
-            await self.session_manager.record_vote(
-                proposal_id, self.p2p_manager.node_id, vote, signed_payload=vote_payload
-            )
-
+            # Send before recording, because recording can end the vote. This
+            # call completes the tally whenever we are the last to answer, and
+            # finalising broadcasts NEW_SESSION_RESULT — so with the record
+            # first, the outcome left ahead of the vote it was made of. The
+            # peer then applied the result, deleted its session, and dropped
+            # our signed vote as «unknown proposal» 32 ms later; having never
+            # counted a vote it never reached _finalize_proposal, which is the
+            # only writer of the ADR-038 session marker, so the node that asked
+            # for the reset kept no boundary. Each send is guarded, so nothing
+            # here can stop the record below from happening.
             for node_id in proposal.participants:
                 if node_id == self.p2p_manager.node_id:
                     continue
@@ -6289,6 +7182,13 @@ class CoreService:
                         logger.debug("Sent VOTE_NEW_SESSION to %s", node_id[:20])
                     except Exception as e:
                         logger.error("Error sending vote to %s: %s", node_id[:20], e)
+
+            # Record our own vote from the same signed payload the peers get,
+            # so the evidence a session marker carries is one set of bytes and
+            # not a local paraphrase of it.
+            await self.session_manager.record_vote(
+                proposal_id, self.p2p_manager.node_id, vote, signed_payload=vote_payload
+            )
 
             vote_str = "approve" if vote else "reject"
             return {
@@ -6694,9 +7594,12 @@ class CoreService:
         """
         await self.context_coordinator.handle_device_context_request(peer_id, request_id)
 
-    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None):
+    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None, messages: list = None, system=None, tools: list = None, stream: bool = False):
         """Delegated to P2PCoordinator."""
-        await self.p2p_coordinator.handle_inference_request(peer_id, request_id, prompt, model, provider, images)
+        await self.p2p_coordinator.handle_inference_request(
+            peer_id, request_id, prompt, model, provider, images, reasoning_effort,
+            messages=messages, system=system, tools=tools, stream=stream,
+        )
 
     async def _handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
         """Delegated to P2PCoordinator."""
@@ -6786,41 +7689,11 @@ class CoreService:
         for peer_id in connected_peers:
             logger.debug("Processing notification for %s", peer_id)
             try:
-                # Check if compute sharing is enabled and peer is authorized
-                can_access = self.firewall.can_request_inference(peer_id)
-                logger.debug("Firewall check for %s: can_access=%s", peer_id, can_access)
-
-                if not can_access:
-                    # Send empty provider list (access was revoked or never granted)
-                    response = create_providers_response([])
-                    logger.debug("Notifying %s: access denied, sending empty providers list", peer_id)
-                else:
-                    # Build provider list (same as _handle_get_providers_request)
-                    all_providers = []
-                    all_models = []
-
-                    for alias, provider in self.llm_manager.providers.items():
-                        all_providers.append(self.build_p2p_provider_info(alias, provider))
-                        all_models.append(provider.model)
-
-                    logger.debug("Found %d total providers", len(all_providers))
-
-                    # Filter providers based on firewall allowed_models setting
-                    allowed_models = self.firewall.get_available_models_for_peer(peer_id, all_models)
-
-                    # Only include providers with allowed models, and only the one
-                    # alias this node designates for peers (ADR-040 D4-0) — the
-                    # same rule the GET_PROVIDERS path applies, so a peer is told
-                    # the same thing whether it asked or was notified.
-                    filtered_providers = [
-                        p for p in all_providers
-                        if p["model"] in allowed_models
-                        and p["alias"] == self.firewall.compute_serving_alias
-                    ]
-
-                    logger.debug("Filtered to %d providers (from %d total)", len(filtered_providers), len(all_providers))
-                    response = create_providers_response(filtered_providers)
-                    logger.debug("Notifying %s: sending %d providers", peer_id, len(filtered_providers))
+                rows, reason = self.menu_for_peer(peer_id)
+                if not rows and reason:
+                    logger.info("Notifying %s with an empty menu: %s", peer_id[:20], reason)
+                response = create_providers_response(rows)
+                logger.debug("Notifying %s: sending %d providers", peer_id, len(rows))
 
                 # Send the updated providers response
                 logger.debug("Sending PROVIDERS_RESPONSE to %s", peer_id)
@@ -6958,7 +7831,7 @@ class CoreService:
             logger.error("request_skill_from_peer error: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = None) -> str:
+    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None, timeout: float = None) -> str:
         """Delegated to P2PCoordinator.
 
         The UI door used to carry a hardcoded 240 s that no configuration could
@@ -6967,7 +7840,9 @@ class CoreService:
         """
         if timeout is None:
             timeout = self.settings.get_remote_inference_timeout()
-        return await self.p2p_coordinator.request_inference_from_peer(peer_id, prompt, model, provider, images, timeout)
+        return await self.p2p_coordinator.request_inference_from_peer(
+            peer_id, prompt, model, provider, images, reasoning_effort, timeout
+        )
 
     async def _request_transcription_from_peer(
         self, peer_id: str, audio_base64: str, mime_type: str,
@@ -6977,6 +7852,93 @@ class CoreService:
         """Delegated to P2PCoordinator."""
         return await self.p2p_coordinator.request_transcription_from_peer(peer_id, audio_base64, mime_type, model, provider, language, task, timeout)
 
+    def _peer_transcription_candidates(self) -> List[tuple]:
+        """Connected peers we may send audio to that say they can transcribe.
+
+        Three conditions, and all three are checked here rather than at the
+        call site so the refusal can name the one that failed: the peer is
+        connected right now, the firewall permits our audio to reach it, and
+        its last PROVIDERS_RESPONSE advertised a voice-capable alias.
+
+        Order follows `send_to_nodes` as written, because a list of peers a
+        person typed in order is a preference; peers allowed only by group
+        follow, sorted, so the choice does not depend on dict iteration order.
+        """
+        connected = set(getattr(self.p2p_manager, "peers", None) or {})
+        named = [n for n in self.firewall.transcription_send_to_nodes if n in connected]
+        by_group = sorted(
+            p for p in connected
+            if p not in named and self.firewall.can_send_audio_to(p)
+        )
+
+        candidates = []
+        for peer_id in named + by_group:
+            for provider in (self.peer_metadata.get(peer_id, {}).get("providers") or []):
+                if provider.get("supports_voice") and provider.get("alias"):
+                    candidates.append((peer_id, provider["alias"]))
+                    break
+        return candidates
+
+    def _peer_transcription_refusal(self) -> str:
+        """Why no peer was asked — counted, so the log names the missing condition."""
+        connected = set(getattr(self.p2p_manager, "peers", None) or {})
+        if not connected:
+            return "no peer is connected"
+        allowed = [p for p in connected if self.firewall.can_send_audio_to(p)]
+        if not allowed:
+            return (
+                f"{len(connected)} peer(s) connected, none permitted to receive this "
+                f"node's audio (privacy_rules.json: transcription.send_to_nodes / send_to_groups)"
+            )
+        return (
+            f"{len(allowed)} permitted peer(s) connected, none advertising a "
+            f"transcription provider in their last PROVIDERS_RESPONSE"
+        )
+
+    async def _transcribe_with_peer(self, audio_path, mime_type: str) -> Optional[Dict[str, Any]]:
+        """Ask a permitted peer to transcribe, or return None having said why.
+
+        Returns None rather than raising: this is the last step of a fallback
+        chain, and the caller still owes the user the original local failure.
+        """
+        import base64
+        from pathlib import Path as _Path
+
+        candidates = self._peer_transcription_candidates()
+        if not candidates:
+            logger.info("No peer available for transcription fallback: %s", self._peer_transcription_refusal())
+            return None
+
+        audio_base64 = base64.b64encode(_Path(audio_path).read_bytes()).decode()
+
+        for peer_id, alias in candidates:
+            logger.info(
+                "Falling back to peer transcription: %s via '%s' (audio leaves this node)",
+                peer_id[:20], alias,
+            )
+            try:
+                result = await self._request_transcription_from_peer(
+                    peer_id=peer_id,
+                    audio_base64=audio_base64,
+                    mime_type=mime_type,
+                    provider=alias,
+                    timeout=120.0,
+                )
+            except Exception as peer_error:
+                logger.warning("Peer transcription via %s failed: %s", peer_id[:20], peer_error)
+                continue
+
+            return {
+                "text": result.get("text", ""),
+                "language": result.get("language", "unknown"),
+                "duration": result.get("duration_seconds", 0),
+                "provider": f"remote_{result.get('provider', alias)}",
+                "remote_node_id": peer_id,
+            }
+
+        logger.warning("Every permitted peer refused or failed the transcription request")
+        return None
+
     async def _aggregate_contexts(self, query: str, peer_ids: List[str] = None) -> Dict[str, PersonalContext]:
         """Delegated to P2PCoordinator."""
         return await self.p2p_coordinator.aggregate_contexts(query, peer_ids)
@@ -6985,7 +7947,8 @@ class CoreService:
 
     async def _execute_agent_query(self, command_id: str, prompt: str, conversation_id: str,
                                    include_context: bool, instruction_set_name: str,
-                                   agent_llm_provider: str) -> None:
+                                   agent_llm_provider: str,
+                                   reasoning_effort: str = None) -> None:
         """
         Execute an agent query (routes to DpcAgentManager).
 
@@ -6999,6 +7962,8 @@ class CoreService:
             include_context: Whether to include DPC context
             instruction_set_name: Instruction set to use
             agent_llm_provider: Underlying LLM provider for the agent
+            reasoning_effort: Level chosen in this chat's header for this call
+                only; empty means the agent's own configured level applies
         """
         try:
             # Get the dpc_agent provider
@@ -7086,6 +8051,7 @@ class CoreService:
                 message=prompt,
                 conversation_id=conversation_id,
                 include_context=include_context,
+                reasoning_effort=reasoning_effort,
                 agent_llm_provider=agent_llm_provider or conversation_id,
                 sender_name=self.p2p_manager.get_display_name() or "User",
                 _skip_history=True,
@@ -7510,7 +8476,8 @@ class CoreService:
                 conversation_id=conversation_id,
                 include_context=include_context,
                 instruction_set_name=instruction_set_name,
-                agent_llm_provider=agent_llm_provider
+                agent_llm_provider=agent_llm_provider,
+                reasoning_effort=reasoning_effort,
             )
 
         monitor = self._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
@@ -8276,6 +9243,7 @@ class CoreService:
         compaction_threshold: float = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
+        reasoning_effort: str = None,
     ) -> Dict[str, Any]:
         """Delegated to AgentService."""
         if not self.agent_service:
@@ -8293,6 +9261,7 @@ class CoreService:
             compaction_threshold=compaction_threshold,
             retrieval_vector=retrieval_vector,
             retrieval_text=retrieval_text,
+            reasoning_effort=reasoning_effort,
             providers_getter=self.get_providers_list,
         )
 
@@ -8384,6 +9353,23 @@ class CoreService:
         except Exception as e:
             logger.error("interrupt_agent error: %s", e)
             return {"status": "error", "message": str(e)}
+
+    async def cancel_provider_retry(self, retry_id: str = "") -> Dict[str, Any]:
+        """Stop a provider that is sitting in a backoff.
+
+        The wait is bounded by a ten-minute budget, which is the right ceiling
+        for an outage nobody is watching and far too long for someone who is:
+        this is how they take the decision back. Cancelling ends the request,
+        not just the sleep — that is what abandoning it means.
+        """
+        from dpc_client_core.providers.base import cancel_retry
+        if not retry_id:
+            return {"status": "error", "message": "retry_id required"}
+        cancelled = cancel_retry(retry_id)
+        logger.info("cancel_provider_retry: retry_id=%s cancelled=%s", retry_id, cancelled)
+        # Not found is the ordinary race with a call that just recovered, so the
+        # interface is told plainly rather than shown an error.
+        return {"status": "cancelled" if cancelled else "not_waiting"}
 
     # --- Sleep Consolidation (ADR-014) ---
 
@@ -8553,40 +9539,69 @@ class CoreService:
         if not local_agents:
             return {"status": "error", "message": "No agents in group"}
 
+        # External participants (`ext:` tags — a Claude Code bridge or anything else
+        # that answers over the local API, see EXTERNAL_AGENT_PREFIX) have no Sleep
+        # mechanism and must be excluded (Mike's call, DPC Project group, 2026-09-14).
+        # Filtered here, before any directory creation or config load: on 2026-09-14
+        # the Linux node's roster carried `ext:CC_linux` and `ext:Zcode` alongside a
+        # real agent, `load_agent_config` raised `ValueError` on the first external
+        # id, and the exception — uncaught — aborted the loop before the agent listed
+        # after it ever ran. The "found N agents" line must count only the agents
+        # that will actually sleep, not the tags mixed into the roster.
+        sleep_agents = [a for a in local_agents if not a.startswith(EXTERNAL_AGENT_PREFIX)]
+        skipped_external = [a for a in local_agents if a.startswith(EXTERNAL_AGENT_PREFIX)]
+        if skipped_external:
+            logger.info("Group sleep: skipping external participants (no Sleep mechanism) "
+                        "for %s: %s", group_id, skipped_external)
+
+        if not sleep_agents:
+            return {"status": "error", "message": "No agents in group",
+                    "skipped_external": skipped_external}
+
         logger.info("Group sleep: found %d agents for %s (node=%s): %s",
-                     len(local_agents), group_id, local_node_id, local_agents)
+                     len(sleep_agents), group_id, local_node_id, sleep_agents)
 
         from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep
         from dpc_client_core.dpc_agent.utils import load_agent_config
 
         triggered = []
-        for agent_id in local_agents:
-            agent_dir = conversations_dir / agent_id
-            if not agent_dir.exists():
-                agent_dir.mkdir(parents=True, exist_ok=True)
-                logger.info("Group sleep: created conversations dir for %s (group-only agent)", agent_id)
-
-            agent_config = load_agent_config(agent_id)
-            sleep_provider = agent_config.get("sleep_provider_alias") or None
-
-            agent_display_name = self._get_agent_display_name(agent_id)
-            if local_node_id:
-                names_map = metadata.get("agent_names", {}).get(local_node_id, {})
-                agent_display_name = names_map.get(agent_id) or agent_display_name
-
-            sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
-            await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
-
-            # Delete stale briefs from this agent BEFORE running new sleep, so the chat
-            # view doesn't accumulate outdated briefs across manual Sleep button presses.
-            # Pattern-match also catches legacy briefs posted before chat_message_id tracking.
+        failures: Dict[str, str] = {}
+        for agent_id in sleep_agents:
             try:
-                await self._delete_group_briefs(group_id, agent_display_name)
-                if agent_display_name != agent_id:
-                    await self._delete_group_briefs(group_id, agent_id)
+                agent_dir = conversations_dir / agent_id
+                if not agent_dir.exists():
+                    agent_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info("Group sleep: created conversations dir for %s (group-only agent)", agent_id)
+
+                agent_config = load_agent_config(agent_id)
+                sleep_provider = agent_config.get("sleep_provider_alias") or None
+
+                agent_display_name = self._get_agent_display_name(agent_id)
+                if local_node_id:
+                    names_map = metadata.get("agent_names", {}).get(local_node_id, {})
+                    agent_display_name = names_map.get(agent_id) or agent_display_name
+
+                sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
+                await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
+
+                # Delete stale briefs from this agent BEFORE running new sleep, so the chat
+                # view doesn't accumulate outdated briefs across manual Sleep button presses.
+                # Pattern-match also catches legacy briefs posted before chat_message_id tracking.
+                try:
+                    await self._delete_group_briefs(group_id, agent_display_name)
+                    if agent_display_name != agent_id:
+                        await self._delete_group_briefs(group_id, agent_id)
+                except Exception as e:
+                    logger.warning("Failed to clean stale briefs for %s in %s: %s",
+                                   agent_display_name, group_id, e)
             except Exception as e:
-                logger.warning("Failed to clean stale briefs for %s in %s: %s",
-                               agent_display_name, group_id, e)
+                # One agent's setup must never abort the others (S2026-09-14: an
+                # external id did exactly that). Recorded in the result too, so the
+                # UI can show which agent failed instead of the command just erroring.
+                logger.error("Group sleep: failed to start %s in %s: %s",
+                             agent_id, group_id, e, exc_info=True)
+                failures[agent_id] = str(e)
+                continue
 
             async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider, dname=agent_display_name):
                 async def _progress(current, total, phase, archive_file):
@@ -8607,7 +9622,7 @@ class CoreService:
                         chat_text = self._format_morning_brief(brief)
                         new_msg_id = await self.send_group_agent_message(group_id, dname, chat_text)
                         brief["consumed"] = True
-                        if new_msg_id:
+                        if isinstance(new_msg_id, str):  # a refusal is a dict, and truthy
                             brief["chat_message_id"] = new_msg_id
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
                     done_data = {"agent_id": aid, "group_id": group_id, "status": "awake",
@@ -8623,7 +9638,12 @@ class CoreService:
             triggered.append(agent_id)
             await asyncio.sleep(2)
 
-        return {"status": "sleeping", "agents": triggered, "group_id": group_id}
+        result = {"status": "sleeping", "agents": triggered, "group_id": group_id}
+        if skipped_external:
+            result["skipped_external"] = skipped_external
+        if failures:
+            result["failures"] = failures
+        return result
 
     async def activate_group_chat(self, group_id: str) -> Dict[str, Any]:
         """Called when user opens a group chat. Posts pending morning briefs."""

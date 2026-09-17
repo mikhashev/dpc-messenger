@@ -228,30 +228,48 @@ the full set you want in **one** command:
 ```bash
 cd dpc-client/core
 
-# Pick what you need and list it all on one line:
-uv sync --extra graph-grafeo --extra browser --extra graph-ner
+# Take all of them — each one carries its own platform markers:
+uv sync --all-extras
 ```
 
 | Extra | What it adds |
 |---|---|
-| `graph-grafeo` | Grafeo retrieval backend for agent memory (opt-in; default is native FAISS) |
 | `browser` | camoufox — headless browser tool for agents |
 | `graph-ner` | gliner — named-entity extraction |
+| `pdf` | pypdfium2 — PDF reading for `read_document` |
 | `mlx` | macOS Apple Silicon only — GPU Whisper via MLX |
 
-> **Do not run them as separate lines.** `uv sync --extra browser` followed by
-> `uv sync --extra graph-ner` leaves you with *only* `graph-ner` — the second
-> command removes what the first installed.
+**To add one extra to an environment that already works, use `--inexact`:**
+
+```bash
+uv sync --extra pdf --inexact
+```
+
+`--inexact` tells uv to leave alone anything it was not asked about, so the
+extras already installed survive. Measured on the developer machine: the same
+command without it would have uninstalled 17 packages — camoufox, playwright,
+gliner, grafeo and their trees.
+
+> **Without `--inexact`, do not run extras as separate lines.**
+> `uv sync --extra browser` followed by `uv sync --extra graph-ner` leaves you
+> with *only* `graph-ner` — the second command removes what the first installed.
 >
 > The same applies to a plain `uv sync` later (after a `git pull`, say): it
-> removes **every** extra. Whenever you re-sync, repeat the full `--extra`
-> list you want to keep.
+> removes **every** extra. Either repeat the full `--extra` list, or add
+> `--inexact` when you only mean to add something.
+>
+> The full-list form is still the one to use when you want the environment to
+> be *exactly* what you name — `--inexact` also keeps packages a dependency
+> change was supposed to remove.
 
-> If an agent is configured for the Grafeo backend but the package is
-> missing, the log shows
+> If an agent is configured for the Grafeo backend the log now shows
 > `Background memory indexing failed: Grafeo retrieval requires the grafeo package`
-> — re-run the sync above with `--extra graph-grafeo` in the list (keeping your
-> other extras on the same line).
+> and there is no extra to install: `graph-grafeo` was removed from
+> `pyproject.toml` on 2026-09-18 (Mike's call). The retrieval and graph code for
+> it is still in the tree, so a `grafeo` installed by hand still works, but the
+> supported path is the default — native FAISS + BM25. Remove
+> `retrieval_vector` / `retrieval_text` from the agent's `config.json` to go
+> back to it.
 
 ---
 
@@ -270,7 +288,7 @@ every command in it fails.
 
 The usual cause on Windows is OneDrive: turning "Back up your Documents
 folder" on or off swaps `C:\Users\<you>\Documents` for
-`C:\Users\<you>\OneDrive\Documents` (localised — `Документы`, `Dokumente`, …)
+`C:\Users\<you>\OneDrive\Documents` (localised — `Dokumente`, `Documentos`, …)
 and back. Packages installed on one side of that switch point at a path that
 no longer exists. Only the commands installed *before* the switch break, which
 is why the failure looks arbitrary.

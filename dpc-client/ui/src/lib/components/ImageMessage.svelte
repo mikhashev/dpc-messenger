@@ -11,6 +11,7 @@
    */
 
   import { convertFileSrc } from '@tauri-apps/api/core';
+  import { pickImageSrc } from '$lib/utils/attachmentSrc';
 
   interface ImageAttachment {
     type: 'image' | 'file' | 'voice';  // Accept union type from parent (v0.13.0: added voice)
@@ -56,25 +57,19 @@
   // Check if this is an AI conversation
   const isAIChat = $derived(conversationId === 'local_ai' || conversationId.startsWith('ai_'));
 
-  // Get thumbnail source (prefer file_path converted to asset URL, fall back to thumbnail data URL)
-  const thumbnailSrc = $derived(() => {
-    if (attachment.file_path) {
-      // Convert file path to Tauri asset URL for thumbnail display
-      return convertFileSrc(attachment.file_path);
-    }
-    // Fall back to thumbnail data URL (for AI chat or backward compat)
-    return attachment.thumbnail || '';
-  });
+  // Set once the asset URL failed to load (403 from the asset scope, deleted file).
+  let assetFailed = $state(false);
 
-  // Get full-size image source (prefer file_path, fall back to thumbnail)
-  const fullImageSrc = $derived(() => {
-    if (attachment.file_path) {
-      // Convert file path to Tauri asset URL for full-size display
-      return convertFileSrc(attachment.file_path);
-    }
-    // Fall back to thumbnail (for AI chat or if file was deleted)
-    return attachment.thumbnail || '';
-  });
+  // One source for both <img>s: the asset URL when the path is ours, else the
+  // thumbnail data-URL. After a load error the thumbnail is used; if that fails
+  // too, the flag is already set and nothing changes, so there is no loop.
+  const imageSrc = $derived(
+    assetFailed ? (attachment.thumbnail || '') : pickImageSrc(attachment, convertFileSrc)
+  );
+
+  function onImageError() {
+    assetFailed = true;
+  }
 </script>
 
 <div class="image-message">
@@ -87,9 +82,10 @@
         aria-label="Open full image: {attachment.filename}"
       >
         <img
-          src={thumbnailSrc()}
+          src={imageSrc}
           alt={attachment.filename}
           class="image-thumbnail"
+          onerror={onImageError}
         />
 
         <!-- Dimensions badge (if available) -->
@@ -137,9 +133,10 @@
         ✕
       </button>
       <img
-        src={fullImageSrc()}
+        src={imageSrc}
         alt={attachment.filename}
         class="full-image"
+        onerror={onImageError}
       />
       <div class="full-image-info">
         <span class="full-image-filename">{attachment.filename}</span>

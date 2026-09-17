@@ -12,7 +12,9 @@ from typing import Dict, Any, Optional, List, Union
 import httpx
 import ollama
 
-from .base import AIProvider, REASONING_OFF, normalize_reasoning_effort
+from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, image_base64,
+                   normalize_reasoning_effort,
+                   numeric_setting, positive_ceiling)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +164,17 @@ def _model_default(model: str, host: Optional[str], key: str) -> Optional[str]:
 
 
 class OllamaProvider(AIProvider):
+    """Models served by a local Ollama daemon.
+
+    The output count convention stays `unknown` because the daemon's own API
+    reference (https://github.com/ollama/ollama/blob/main/docs/api.md) defines
+    `eval_count` as "number of tokens in the response" and says nothing about
+    where the tokens a model emits under `think` are counted — the parameter is
+    documented as "should the model think before responding? Can be a boolean or
+    a thinking level" and never again in the response fields. What the daemon
+    does is very likely one of the two, and likely is not a convention.
+    """
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         self.client = ollama.AsyncClient(host=config.get("host"))
@@ -227,12 +240,31 @@ class OllamaProvider(AIProvider):
                 )
 
     def supports_vision(self) -> bool:
-        """Whether this model takes images — the daemon's answer if there is
-        one, the name list only when there is not."""
-        caps = _reported_capabilities(self.model, self.config.get("host"))
-        if caps is not None:
-            return "vision" in caps
-        return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
+        """Whether this model takes images — the daemon's answer, the name list
+        only for a daemon too old to carry the field, and no for a daemon that
+        could not be asked at all.
+
+        A yes decides routing: `llm_manager` takes the first provider that
+        answers it, so a name list answering for an unreachable daemon sends
+        image work to a connection that is not there rather than to a provider
+        that could do it. Unknown reads as no, as in `RemotePeerProvider` — a
+        refusal names the provider, a yes we cannot honour does not.
+
+        `supports_thinking` still falls back to its list on the same silence:
+        it is read after a provider is chosen and only shapes `think` on a call
+        already going there, so a wrong yes diverts nothing."""
+        info = _describe(self.model, self.config.get("host"))
+        if info is None:
+            logger.debug(
+                "OllamaProvider '%s': no vision claim — the daemon at %s did not "
+                "describe %s", self.alias,
+                self.config.get("host") or "the default host", self.model,
+            )
+            return False
+        reported = getattr(info, "capabilities", None)
+        if reported is None:
+            return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
+        return "vision" in reported
 
     def supports_thinking(self) -> bool:
         """Whether this model can reason before answering. Can, not should —
@@ -241,6 +273,34 @@ class OllamaProvider(AIProvider):
         if caps is not None:
             return "thinking" in caps
         return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
+
+    def reasoning_words_served(self) -> Optional[List[str]]:
+        """What `_think_flag` can put on `think`. The shared scale where the
+        model can reason and the alias has not switched reasoning off; `off`
+        alone otherwise, because `think=False` is the one value every model
+        accepts while a level is refused 400 and therefore dropped.
+
+        `reasoning_effort` on an Ollama alias is read by nobody: `think` is the
+        knob, and the two sides of that must be read off the same method.
+        """
+        configured = self.config.get("think")
+        if configured is not None and not configured:
+            return [REASONING_OFF]
+        return None if self.supports_thinking() else [REASONING_OFF]
+
+    def reasoning_default_served(self) -> Optional[str]:
+        """The rung a call that names no effort runs at — whatever `_think_flag`
+        decides from the configuration and the model's capability."""
+        return self._served_effort(None)
+
+    def _served_effort(self, effort: Optional[str] = None) -> Optional[str]:
+        """The rung this call runs at: the word `think` carries, or None where
+        it carries no word. `True` is «reason», at a depth the daemon chooses
+        and nothing here can name; `None` is the parameter never sent."""
+        flag = self._think_flag(effort)
+        if flag is False:
+            return REASONING_OFF
+        return flag if isinstance(flag, str) and flag else None
 
     def _think_flag(self, effort: Optional[str] = None) -> Optional[Union[bool, str]]:
         """What to send as `think`: the per-call effort if there is a usable
@@ -373,6 +433,22 @@ class OllamaProvider(AIProvider):
             self.alias, sent, self.model, default,
         )
 
+    def effective_settings(self) -> Dict[str, Any]:
+        """What `_build_options` forwards to the daemon, under the row's names.
+
+        The ceiling is `num_predict`, one of `OLLAMA_SAMPLING_PARAMS`; an alias
+        that names none runs to the model's own end and the row says nothing.
+        """
+        settings = super().effective_settings()
+        for key in ("top_p", "top_k"):
+            value = numeric_setting(self.config.get(key))
+            if value is not None:
+                settings[key] = value
+        ceiling = positive_ceiling(self.config.get("num_predict"))
+        if ceiling is not None:
+            settings["max_output_tokens"] = ceiling
+        return settings
+
     def _build_options(self, **kwargs) -> Optional[Dict[str, Any]]:
         options: Dict[str, Any] = {}
         if self.config.get("context_window"):
@@ -400,7 +476,27 @@ class OllamaProvider(AIProvider):
             )
         return options or None
 
-    def _log_usage(self, response: Any, path: str) -> None:
+    def _usage_from(self, response: Any, served_effort: Optional[str] = None) -> Dict[str, Any]:
+        """What the daemon reported for one call, in this project's shape.
+
+        One builder for all three paths: the tools path used to build the same
+        dict a second time, which is where a field added to one of them goes
+        missing from the other.
+
+        `served_effort` is the rung, for whoever writes the usage row; the
+        daemon reports no such field, so it is read off what `think` carried.
+        """
+        prompt_tokens = getattr(response, "prompt_eval_count", 0) or 0
+        completion_tokens = getattr(response, "eval_count", 0) or 0
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "output_includes_thinking": self.DECLARED_OUTPUT_INCLUDES_THINKING,
+            "served_effort": served_effort,
+        }
+
+    def _log_usage(self, response: Any, path: str, served_effort: Optional[str] = None) -> None:
         """One line per call carrying what the daemon reported, not what we guessed.
 
         `done_reason` separates a model that stopped from one that was cut off,
@@ -418,20 +514,15 @@ class OllamaProvider(AIProvider):
         This is the whole of D4-T on the Ollama side; queue wait, swap counts and
         VRAM headroom are not in this response and need their own reader.
         """
-        prompt_tokens = getattr(response, "prompt_eval_count", 0) or 0
-        completion_tokens = getattr(response, "eval_count", 0) or 0
         # The same numbers the line below prints, kept where a caller can ask for
         # them. Until this existed the tools path built this dict privately and
         # the text path priced a count it made itself (ADR-040, the usage
         # contract on `providers/base.py`).
-        self._record_last_usage({
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        })
+        self._record_last_usage(self._usage_from(response, served_effort))
         logger.info(
             "Ollama usage: alias=%s model=%s prompt=%s completion=%s "
-            "thinking_chars=%d done=%s prompt_tps=%s eval_tps=%s load_ms=%s path=%s",
+            "thinking_chars=%d done=%s prompt_tps=%s eval_tps=%s load_ms=%s "
+            "effort=%s path=%s",
             self.alias, self.model,
             getattr(response, "prompt_eval_count", None),
             getattr(response, "eval_count", None),
@@ -442,6 +533,7 @@ class OllamaProvider(AIProvider):
             self._tokens_per_second(getattr(response, "eval_count", None),
                                     getattr(response, "eval_duration", None)),
             self._milliseconds(getattr(response, "load_duration", None)),
+            served_effort,
             path,
         )
 
@@ -511,7 +603,7 @@ class OllamaProvider(AIProvider):
                     "reasoning in its place.", self.alias, len(self._last_thinking),
                 )
                 content = self._last_thinking
-            self._log_usage(response, "plain")
+            self._log_usage(response, "plain", self._served_effort(kwargs.get("reasoning_effort")))
             return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after {timeout}s.")
@@ -539,23 +631,12 @@ class OllamaProvider(AIProvider):
             str: AI response text
         """
         self._last_thinking = None
-        try:
-            # Build image list (Ollama accepts paths or base64)
-            image_inputs = []
-            for img in images:
-                if "base64" in img:
-                    # Use base64 data if available
-                    base64_data = img["base64"]
-                    # Strip data URL prefix if present (data:image/png;base64,...)
-                    if base64_data.startswith("data:"):
-                        base64_data = base64_data.split(",", 1)[1]
-                    image_inputs.append(base64_data)
-                elif "path" in img:
-                    # Use file path (Ollama SDK handles reading)
-                    image_inputs.append(str(img["path"]))
-                else:
-                    raise ValueError("Image must have 'path' or 'base64' key")
+        # The SDK also takes a file path, and that is the one thing not passed
+        # on: the path in an image belongs to whoever sent it. Built before the
+        # try, so a refusal is not reported as the daemon having failed.
+        image_inputs = [image_base64(img, self.alias) for img in images]
 
+        try:
             # Build message with images
             message = {
                 'role': 'user',
@@ -602,7 +683,7 @@ class OllamaProvider(AIProvider):
                     self.alias, len(self._last_thinking),
                     getattr(response, "done_reason", None),
                 )
-            self._log_usage(response, "vision")
+            self._log_usage(response, "vision", self._served_effort(kwargs.get("reasoning_effort")))
             return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {timeout}s.")
@@ -627,64 +708,45 @@ class OllamaProvider(AIProvider):
         return out
 
     @staticmethod
-    def _anthropic_to_openai_messages(system: Any, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _anthropic_to_openai_messages(
+        system: Any, messages: List[Dict[str, Any]], *, provider: Any = None,
+    ) -> List[Dict[str, Any]]:
+        """The shared converter's output, reshaped onto Ollama's native /api/chat.
+
+        The differences are the wire's, not a second reading of the conversation:
+        `content` is a string, so a turn's images ride in its own `images` list
+        (base64 without the data-URL prefix) and their position inside the turn
+        is lost, though not their turn; tool-call `arguments` are an object, not
+        a JSON string; and calls and results carry no ids — Ollama matches them
+        by order.
+        """
         out: List[Dict[str, Any]] = []
-        if system:
-            sys_text = system if isinstance(system, str) else "".join(
-                b.get("text", "") for b in system if isinstance(b, dict)
-            )
-            if sys_text:
-                out.append({"role": "system", "content": sys_text})
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content")
-            if isinstance(content, str):
-                out.append({"role": role, "content": content})
-                continue
-            blocks = content if isinstance(content, list) else []
+        for m in anthropic_to_openai_messages(system, messages, provider=provider):
+            role, content = m.get("role"), m.get("content")
             if role == "assistant":
-                text_parts: List[str] = []
-                tool_calls: List[Dict[str, Any]] = []
-                for b in blocks:
-                    if not isinstance(b, dict):
-                        continue
-                    bt = b.get("type")
-                    if bt == "text":
-                        text_parts.append(b.get("text", ""))
-                    elif bt == "tool_use":
-                        tool_calls.append({
-                            "type": "function",
-                            "function": {
-                                "name": b.get("name", ""),
-                                "arguments": b.get("input", {}),
-                            },
-                        })
-                msg: Dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
-                if tool_calls:
-                    msg["tool_calls"] = tool_calls
-                out.append(msg)
-                continue
-            if role == "user":
-                tool_results = [
-                    b for b in blocks
-                    if isinstance(b, dict) and b.get("type") == "tool_result"
-                ]
-                if tool_results:
-                    for tr in tool_results:
-                        tr_content = tr.get("content", "")
-                        if isinstance(tr_content, list):
-                            tr_content = "".join(
-                                b.get("text", "") for b in tr_content if isinstance(b, dict)
-                            )
-                        out.append({"role": "tool", "content": str(tr_content)})
-                else:
-                    text_parts = [
-                        b.get("text", "") for b in blocks
-                        if isinstance(b, dict) and b.get("type") == "text"
+                msg: Dict[str, Any] = {"role": "assistant", "content": content or ""}
+                if m.get("tool_calls"):
+                    msg["tool_calls"] = [
+                        {"type": "function", "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": json.loads(tc["function"]["arguments"]),
+                        }}
+                        for tc in m["tool_calls"]
                     ]
-                    out.append({"role": "user", "content": "".join(text_parts)})
-                continue
-            out.append({"role": role or "user", "content": json.dumps(blocks)})
+                out.append(msg)
+            elif role == "tool":
+                out.append({"role": "tool", "content": content})
+            elif isinstance(content, list):
+                out.append({
+                    "role": role,
+                    "content": "".join(p["text"] for p in content if p["type"] == "text"),
+                    "images": [
+                        p["image_url"]["url"].split(",", 1)[1]
+                        for p in content if p["type"] == "image_url"
+                    ],
+                })
+            else:
+                out.append(m)
         return out
 
     async def generate_with_tools(
@@ -697,7 +759,7 @@ class OllamaProvider(AIProvider):
         **kwargs,
     ) -> Dict[str, Any]:
         self._last_thinking = None
-        ollama_messages = self._anthropic_to_openai_messages(system, messages)
+        ollama_messages = self._anthropic_to_openai_messages(system, messages, provider=self)
         ollama_tools = self._anthropic_to_openai_tools(tools)
 
         options = self._build_options(**kwargs)
@@ -754,14 +816,9 @@ class OllamaProvider(AIProvider):
         if on_chunk and content:
             await on_chunk(content, conversation_id)
 
-        self._log_usage(response, "tools")
-        prompt_tokens = getattr(response, 'prompt_eval_count', 0) or 0
-        completion_tokens = getattr(response, 'eval_count', 0) or 0
-        usage = {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        }
+        served_effort = self._served_effort(kwargs.get("reasoning_effort"))
+        self._log_usage(response, "tools", served_effort)
+        usage = self._usage_from(response, served_effort)
         return {
             "content": content,
             "tool_calls_raw": tool_calls_raw,

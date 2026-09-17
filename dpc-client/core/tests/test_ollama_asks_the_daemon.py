@@ -70,10 +70,15 @@ def test_the_daemon_can_also_say_no_for_a_model_the_list_would_accept():
     assert _provider(model="qwen3.5-something-textonly").supports_vision() is False
 
 
-def test_an_unreachable_daemon_falls_back_to_the_list():
+def test_an_unreachable_daemon_is_not_a_vision_claim():
+    """This pinned the opposite until 2026-09-09: the list answered for a daemon
+    nobody could ask, so a node with no Ollama still volunteered as the vision
+    provider and the image work died at the connection. `supports_thinking`
+    keeps the fallback, being read only after a provider is chosen."""
     FakeClient.answer = None
-    assert _provider(model="qwen3-vl:8b").supports_vision() is True
+    assert _provider(model="qwen3-vl:8b").supports_vision() is False
     assert _provider(model="muse-glimmer:latest").supports_vision() is False
+    assert _provider(model="deepseek-r1:8b").supports_thinking() is True
 
 
 def test_a_daemon_that_answers_without_the_field_leaves_the_lists_in_charge():

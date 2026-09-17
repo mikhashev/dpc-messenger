@@ -25,7 +25,7 @@ Ready-made stop word lists (stop-words-iso covers 57 languages, NLTK 20+, spaCy 
 At index build/rebuild time: tokenize entire corpus, compute document frequency (DF) per token. Tokens with DF > threshold (80%?) become automatic stop words for this specific corpus. Self-calibrating — medical corpus gets different stop words than programming corpus. Language-independent. Stored in index metadata.
 
 ### Layer 3: User-specific (personalization)
-Analysis of user messages in conversation history. High-frequency but semantically empty tokens specific to each user's communication patterns. Source: session archives. Mike's insight (S78 [75]): "можно дополнять словарь словами на основе архива сессий — это специфика тех кто общается."
+Analysis of user messages in conversation history. High-frequency but semantically empty tokens specific to each user's communication patterns. Source: session archives. Mike's insight (S78 [75]): the dictionary can be extended with words drawn from the session archive, because this filler is specific to the people doing the talking.
 
 ### Pipeline
 

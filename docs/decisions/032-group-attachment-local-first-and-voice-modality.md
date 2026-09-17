@@ -3,6 +3,7 @@ adr: 032
 title: "Local-first publishing for group attachments + voice input modality routing"
 status: accepted
 date: 2026-06-30
+axis: collective
 deciders: [Mike]
 consulted: [Ark, CC]
 informed: []
@@ -62,8 +63,8 @@ default to (ii).
 
 - **D1 — sender never loses their own content.** A sent message must persist locally
   and show in the sender's UI regardless of peer connectivity.
-- **D2 — dictation is a first-class, always-available option** (Mike [S227]: "даже
-  если есть ≥1 другая подключённая нода, должна быть опция голосовой ввод в input").
+- **D2 — dictation is a first-class, always-available option** (Mike's call [S227]: even
+  when ≥1 other node is connected, the input must still offer voice input).
 - **D3 — input mode must be stable**, not flip with transient online/offline state of
   a peer (Ark: store-and-forward is a separate feature, not a reason to change mode).
 - **D4 — reuse what exists.** Dictation-to-input is already implemented; the work is
@@ -87,8 +88,8 @@ a separate future feature.
 
 **Delivery phasing (Mike, S227):** ship per attachment type, not all at once —
 **(1) voice first**, **(2) images next**, **(3) files deferred** (large files need
-separate size/chunking design before applying local-first echo — "там может быть
-размер ого-го"). The Part A mechanism is identical for all three; only the rollout is
+separate size/chunking design before applying local-first echo — the sizes involved
+can be enormous). The Part A mechanism is identical for all three; only the rollout is
 staged.
 
 ### Part B — Voice input modality routing (voice only)
@@ -204,6 +205,27 @@ Phased per Mike's S227 scope decision. Tasks tracked under
   repurposed**, no selector (only one mode applies in AI chats). The new case is the
   **>1-node group**, where both modes are valid and a selector is needed (two buttons /
   long-press / toggle). Decide the selector form during implementation. — @Mike / CC
+
+## Amendment — 2026-09-07 (Mike): the dictation option is built after all
+
+Task 002 (mode selector UI) was cancelled in S227 with «pure node-count routing, no
+selector», and the body above was never brought into line — it still describes a user
+who picks a mode. A reader therefore got opposite answers from
+`tasks/adr-032-group-attachment-local-first/002-mode-selector-ui.md:3` and from the
+Part B table here, which is how the question came back on 2026-09-07: Mike, seeing only
+«Send» on a two-node group, reported the missing option as a defect.
+
+**Decided (Mike, 2026-09-07): build it.** The cancellation is reversed and the Part B
+table above is authoritative again — with >1 node the recorder offers both sinks:
+«Send» for a voice message and «📝 As text» for dictation into the message box. The
+≤1-node default is unchanged. Task 002 is un-cancelled by this amendment; the record of
+its cancellation stays where it is, because a decision that was reversed should show
+both states rather than only the last one.
+
+Q1 (transcribe once on the sender) remains **unimplemented** and is not changed here:
+what exists is one transcription per recipient transfer, and the sender's own copy is
+now joined to its message by file name rather than by transfer id, because one message
+becomes N transfers.
 
 ## Authors
 

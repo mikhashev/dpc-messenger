@@ -110,6 +110,61 @@
     agentsDirty = false;
   }
 
+  // --- External agents -----------------------------------------------------
+  // An external harness (Claude Code and the like) has no folder under
+  // ~/.dpc/agents, so it cannot appear in the list above — it is identified by
+  // the tag typed here and stored as `ext:<tag>` in this node's slot of the
+  // group. Registering it is what lets one machine be addressed rather than
+  // every machine running a bridge under the same name.
+  const EXT = 'ext:';
+  let newTag = '';
+  let tagError = '';
+
+  $: externalTags = localAgentIds
+    .filter(id => id.startsWith(EXT))
+    .map(id => id.slice(EXT.length));
+
+  // Mention routing parses @(\w+)\b, so a tag is addressable only as far as its
+  // first non-word character, and the interface would show the full name and look
+  // correct. A pasted tag can also carry a character that renders as nothing, in
+  // which case the refusal has to name the code point or it names nothing at all.
+  const INVISIBLE = /[\p{Cf}\u200B-\u200D\u2060\uFEFF]/gu;
+  const cleanTag = (raw: string) => raw.trim().replace(INVISIBLE, '').trim();
+
+  function validateTag(tag: string): string {
+    const t = cleanTag(tag);
+    if (!t) return 'Enter a tag';
+    if (!/^\w+$/u.test(t)) {
+      const bad = [...t].find(c => !/\w/u.test(c)) ?? '';
+      const code = 'U+' + (bad.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0');
+      const named = /\s/u.test(bad) ? 'a space' : '«' + bad + '» (' + code + ')';
+      const reach = t.match(/^\w+/u)?.[0];
+      return 'Letters, digits and underscore only. Mention routing stops at ' + named
+           + ', so ' + (reach
+               ? '«' + t + '» would answer to «@' + reach + '» and share it with every '
+                 + 'agent whose tag starts the same way'
+               : '«' + t + '» would not be reached by any mention at all');
+    }
+    if (externalTags.some(x => x.toLowerCase() === t.toLowerCase())) return 'Already added';
+    return '';
+  }
+
+  function addExternalAgent() {
+    const t = cleanTag(newTag);
+    tagError = validateTag(t);
+    if (tagError) return;
+    localAgentIds = [...localAgentIds, EXT + t];
+    newTag = '';
+    const saved = group?.agents?.[selfNodeId] || [];
+    agentsDirty = JSON.stringify([...localAgentIds].sort()) !== JSON.stringify([...saved].sort());
+  }
+
+  function removeExternalAgent(tag: string) {
+    localAgentIds = localAgentIds.filter(id => id !== EXT + tag);
+    const saved = group?.agents?.[selfNodeId] || [];
+    agentsDirty = JSON.stringify([...localAgentIds].sort()) !== JSON.stringify([...saved].sort());
+  }
+
   function startEditTopic() {
     editTopicValue = group?.topic || '';
     editingTopic = true;
@@ -310,6 +365,56 @@
           </div>
         {/if}
 
+        <!-- External agents: a bridge has no folder id, only the tag typed here -->
+        <div class="section">
+          <div class="section-header">
+            <h3>External agents</h3>
+          </div>
+          <p class="ext-hint">
+            A Claude Code bridge or any harness answering over the local API. Registering
+            it here is what makes <code>@tag</code> reach this machine and not every
+            machine running the same name. Setup for a new agent:
+            <a
+              href="https://github.com/mikhashev/dpc-messenger/blob/main/docs/agent/CC_INTEGRATION_GUIDE.md"
+              target="_blank"
+              rel="noopener noreferrer"
+            >External Agent Integration Guide</a>.
+          </p>
+
+          <div class="member-list">
+            {#each externalTags as tag}
+              <div class="member-row">
+                <span class="toggle-text">@{tag}</span>
+                <button
+                  class="btn-ext-remove"
+                  title="Remove"
+                  on:click={() => removeExternalAgent(tag)}
+                >×</button>
+              </div>
+            {:else}
+              <p class="ext-empty">
+                None registered. This node still answers to its configured display name
+                alone — and so does every other node carrying that name.
+              </p>
+            {/each}
+          </div>
+
+          <div class="ext-add">
+            <input
+              type="text"
+              class="ext-input"
+              bind:value={newTag}
+              placeholder="tag, e.g. CC_win"
+              on:input={() => (tagError = '')}
+              on:keydown={(e) => { if (e.key === 'Enter') addExternalAgent(); }}
+            />
+            <button class="btn-ext-add" on:click={addExternalAgent}>Add</button>
+          </div>
+          {#if tagError}
+            <p class="ext-error">{tagError}</p>
+          {/if}
+        </div>
+
         <!-- Save Button -->
         {#if agentsDirty}
           <div class="save-row">
@@ -503,6 +608,87 @@
     background: #313244;
     border-radius: 6px;
     border: 1px solid #45475a;
+  }
+
+  .ext-hint {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: #a6adc8;
+    line-height: 1.45;
+  }
+
+  .ext-hint a {
+    color: #0088cc;
+    text-decoration: none;
+  }
+
+  .ext-hint a:hover {
+    text-decoration: underline;
+  }
+
+  .ext-empty {
+    margin: 0;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: #a6adc8;
+    background: #313244;
+    border: 1px dashed #45475a;
+    border-radius: 6px;
+    line-height: 1.45;
+  }
+
+  .ext-add {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .ext-input {
+    flex: 1;
+    padding: 8px 10px;
+    background: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  .ext-input:focus {
+    outline: none;
+    border-color: #89b4fa;
+  }
+
+  .btn-ext-add {
+    padding: 8px 14px;
+    background: #89b4fa;
+    color: #1e1e2e;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .btn-ext-add:hover { background: #74a8f7; }
+
+  .btn-ext-remove {
+    background: none;
+    border: none;
+    color: #a6adc8;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+
+  .btn-ext-remove:hover { color: #f38ba8; }
+
+  .ext-error {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: #f38ba8;
+    line-height: 1.45;
   }
 
   .member-name {

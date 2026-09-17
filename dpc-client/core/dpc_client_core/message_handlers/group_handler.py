@@ -6,7 +6,11 @@ import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from . import MessageHandler
-from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
+from dpc_protocol.message_signing import (
+    LEGACY_PREIMAGE_VERSIONS,
+    PREIMAGE_VERSION,
+    message_content_hash,
+)
 from ..conversation_monitor import (
     Message as ConvMessage,
     ConversationMonitor,
@@ -103,7 +107,8 @@ class GroupTextHandler(MessageHandler):
         if not (content_hash and signature and signer):
             return transport_node_id, "legacy", None
 
-        if payload.get("preimage_version") != PREIMAGE_VERSION:
+        version = payload.get("preimage_version")
+        if version not in (PREIMAGE_VERSION, *LEGACY_PREIMAGE_VERSIONS):
             # Signed over a preimage we do not know how to recompute. Treated
             # as legacy rather than rejected: this is what a node one version
             # ahead or behind looks like, and cutting it off is not a security
@@ -126,7 +131,11 @@ class GroupTextHandler(MessageHandler):
             agent_owner=payload.get("agent_owner"),
             timestamp=payload.get("timestamp"),
             content=payload.get("text") or "",
+            # v2 carries the digest and not the calls, so a peer verifies what
+            # it was sent rather than what it was never given (ADR-042).
             tool_calls=payload.get("tool_calls"),
+            tool_calls_digest=payload.get("tool_calls_digest"),
+            version=version,
         )
         if expected != content_hash:
             self.logger.warning(
@@ -156,7 +165,8 @@ class GroupTextHandler(MessageHandler):
             "content_hash": content_hash,
             "signature": signature,
             "signer_node_id": signer,
-            "preimage_version": PREIMAGE_VERSION,
+            "preimage_version": version,
+            "tool_calls_digest": payload.get("tool_calls_digest"),
         }
         if result is None:
             self.logger.info(
@@ -273,6 +283,9 @@ class GroupTextHandler(MessageHandler):
                 timestamp=timestamp,  # v0.20.0: Use sender-provided timestamp
                 sender_type=payload.get("sender_type"),
                 agent_owner=payload.get("agent_owner"),
+                # Covered by the carried hash; stored without them, the copy
+                # fails its own signature on re-export. [] hashes as None.
+                tool_calls=payload.get("tool_calls") or None,
                 signature_fields=signature_fields,
             )
 
@@ -324,6 +337,9 @@ class GroupTextHandler(MessageHandler):
 
         mentions = re.findall(r'@(\w+)\b', text, re.IGNORECASE)
         mention_names = {m.lower() for m in mentions}
+        self.logger.debug(
+            "_handle_agent_mentions (peer path): mentions=%s in group %s (sender=%s)",
+            mention_names, group_id, sender_name)
 
         # Get allowed agents for this group from metadata
         group = self.service.group_manager.get_group(group_id) if self.service.group_manager else None
@@ -340,14 +356,50 @@ class GroupTextHandler(MessageHandler):
             else:
                 self.logger.debug("Skipping @%s — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
 
+        # External agents. The embedded path above asks whether the agent is
+        # registered to THIS node; until 2026-09-03 this path asked nothing at all,
+        # so one `@CC` woke every machine running a bridge under that name — each
+        # with a different working tree and a different memory, and the reply from
+        # the one that could not do the work looked exactly like the reply from the
+        # one that could.
+        #
+        # Transitional on purpose (Mike, 2026-09-03, chose this over a migration).
+        # Nothing was registrable before the Group Settings field existed, so gating
+        # on registration from the first run would have left `@CC` waking nobody,
+        # silently, everywhere. Instead: once this node has registered at least one
+        # external agent for this group, registration decides; until then the old
+        # behaviour stands and says so. The gate arrives per group, on the day
+        # somebody fills the field, rather than on a release date.
+        from dpc_client_core.service import external_agents_to_wake
         cc_name = self.service.get_cc_display_name().lower()
-        if cc_name in mention_names:
-            # Broadcast event — the MCP server bridge subscribes and queues it
+        # Same rule as the send path: @all is a human's word. The agent case
+        # already returned above, so here every sender is a human.
+        mention_all = "all" in mention_names
+        woken, warn = external_agents_to_wake(
+            allowed_agents, mention_names, cc_name,
+            mention_all=mention_all,
+            sender_name=sender_name.lower() if sender_name else "",
+        )
+        if warn:
+            self.logger.warning(
+                "@%s answered in %s by name alone — nothing is registered for this "
+                "node in that group, so every node carrying this name answers. "
+                "Register it in Group Settings to address one machine.",
+                cc_name, group_id)
+
+        for tag in sorted(woken):
+            # Broadcast event — the MCP server bridge subscribes and queues it.
+            # `agent_tag` says which name was matched: with several external agents
+            # on one node, the bridge cannot tell from the text alone.
+            self.logger.info(
+                "Group @%s mention from peer %s — broadcasting cc_group_mention in group %s",
+                tag, sender_name, group_id)
             await self.service.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
                 "text": text,
                 "sender_name": sender_name,
                 "sender_node_id": sender_node_id,
+                "agent_tag": tag,
             })
 
     async def _invoke_agent(self, group_id: str, text: str, sender_name: str,
@@ -635,11 +687,16 @@ class GroupHistoryRequestHandler(MessageHandler):
         """
         group_id = payload.get("group_id")
         authors = payload.get("authors")
+        # Exact records by hash — a voter fetching a proposal's extraction
+        # window. Wins over `authors` when both are present.
+        content_hashes = payload.get("content_hashes")
 
         self.logger.info(
             "Received GROUP_HISTORY_REQUEST from %s for group %s (%s)",
             sender_node_id[:20], group_id,
-            "whole history" if authors is None else f"{len(authors)} author(s)",
+            f"{len(content_hashes)} content hash(es)" if content_hashes is not None
+            else "whole history" if authors is None
+            else f"{len(authors)} author(s)",
         )
 
         if not may_share_group(self.service.group_manager, group_id, sender_node_id):
@@ -658,11 +715,18 @@ class GroupHistoryRequestHandler(MessageHandler):
             return None
 
         # Export history and send back
-        history = monitor.export_history(authors=authors) if hasattr(monitor, "export_history") else []
+        if not hasattr(monitor, "export_history"):
+            history = []
+        elif content_hashes is not None:
+            history = monitor.export_history(content_hashes=content_hashes)
+        else:
+            history = monitor.export_history(authors=authors)
         response = {
             "group_id": group_id,
             "history": history,
         }
+        if content_hashes is not None:
+            response["content_hashes"] = content_hashes
         # Echoed so the asker can tell this answer from an assertion.
         request_id = payload.get("request_id")
         if request_id:
@@ -737,19 +801,33 @@ class GroupHistoryResponseHandler(MessageHandler):
             )
             return None
 
+        # A vote waiting on records of this group is re-tried after every
+        # answer, including an empty one: "the peer had nothing" is an outcome
+        # a deferred vote needs to hear too.
+        retry_votes = getattr(
+            getattr(self.service, "knowledge_service", None), "retry_pending_votes", None
+        )
+
         if not history:
+            if retry_votes is not None:
+                await retry_votes(group_id, rejected=[], request_id=request_id)
             return None
 
         monitor = self.service._get_or_create_conversation_monitor(group_id)
 
         # v0.20.0: Use merge_history instead of import_history
         # This handles duplicates and saves to disk
+        rejected = []
         if hasattr(monitor, "merge_history"):
             added = monitor.merge_history(history)
+            rejected = list(getattr(monitor, "last_merge_rejected", []) or [])
             self.logger.info("Merged %d new messages into group %s history", added, group_id)
         elif hasattr(monitor, "import_history"):
             # Fallback for older monitors
             monitor.import_history(history)
+
+        if retry_votes is not None:
+            await retry_votes(group_id, rejected=rejected, request_id=request_id)
 
         # Notify UI to refresh chat
         await self.service.local_api.broadcast_event("group_history_synced", {

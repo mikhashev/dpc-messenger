@@ -73,6 +73,14 @@ class Settings:
             'host': '127.0.0.1'
         }
 
+        # The OpenAI-compatible gateway (ADR-041 D1): a second loopback listener
+        # for tools on this machine, off until asked for because it is a new port.
+        self._config['gateway'] = {
+            'enabled': 'false',  # Serve /v1/models and /v1/chat/completions to local tools (ADR-041). This node's own aliases need `compute.enabled` in privacy_rules.json too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone
+            'port': '9997',  # 9998 is the file server, 9999 the local API
+            'host': '127.0.0.1'  # Not configurable: any other value is refused at start (ADR-041 D1)
+        }
+
         # A fresh config ships with no TURN relay at all: empty here means the same
         # thing the getters already return for a missing key, so "the default" has one
         # answer instead of two. Relaying is opt-in by name — nobody's traffic should
@@ -146,7 +154,11 @@ class Settings:
             'gossip_timeout': '5',  # How long to wait before falling back to gossip
             # Remote inference: the host budgets 900s for the work, so a
             # requester that gives up sooner pays for tokens it never sees
-            'remote_inference_timeout': '1200'
+            'remote_inference_timeout': '1200',
+            # Inbound handshake (ADR-041 D8): a peer that completes TLS and never
+            # sends HELLO fails no HELLO, so the rate limiter alone never sees it
+            'hello_timeout': '10',  # Seconds the listener waits for HELLO after its challenge
+            'max_pending_hellos_per_ip': '8'  # Inbound connections one address may hold before HELLO_ACK
         }
 
         self._config['hole_punch'] = {
@@ -416,6 +428,20 @@ class Settings:
     def get_api_host(self) -> str:
         """Get the local API server host."""
         return self.get('api', 'host', '127.0.0.1')
+
+    def get_gateway_enabled(self) -> bool:
+        """Whether the OpenAI-compatible gateway listens at all (off by default)."""
+        value = self.get('gateway', 'enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_gateway_port(self) -> int:
+        """Get the OpenAI-compatible gateway port."""
+        return int(self.get('gateway', 'port', '9997'))
+
+    def get_gateway_host(self) -> str:
+        """The gateway's bind address as written; the gateway itself refuses
+        anything but 127.0.0.1 (ADR-041 D1), so this is read, not chosen."""
+        return self.get('gateway', 'host', '127.0.0.1')
 
     def get_hub_auto_connect(self) -> bool:
         """Check if Hub should auto-connect on startup."""
@@ -736,6 +762,14 @@ class Settings:
         not a handshake: the host's own ceiling is 900 s (ADR-040 D4-0).
         """
         return float(self.get('connection', 'remote_inference_timeout', '1200'))
+
+    def get_hello_timeout(self) -> float:
+        """How long the listener waits for HELLO after issuing its challenge."""
+        return float(self.get('connection', 'hello_timeout', '10'))
+
+    def get_max_pending_hellos_per_ip(self) -> int:
+        """How many inbound connections one address may hold before HELLO_ACK."""
+        return int(self.get('connection', 'max_pending_hellos_per_ip', '8'))
 
     def get_hole_punch_port(self) -> int:
         """Get UDP port for hole punching."""

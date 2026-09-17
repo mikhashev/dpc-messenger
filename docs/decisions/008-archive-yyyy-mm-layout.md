@@ -24,10 +24,10 @@ archive/
 Pre-ADR behaviour had three issues:
 
 1. **Hard cap (pre-Batch 1):** `min(50, ...)` in `firewall.py` + `agent_manager.py` constrained `max_archived_sessions` to 50. Raised to 200 in Batch 1 but still an artificial ceiling.
-2. **Prune-by-count:** oldest archive was deleted when limit reached. Mike (S25 [23]) stated explicitly: *"всё без удаления, странно что ты не понимаешь ценность этой информации"* — session history is primary memory for the three-agent workflow and must not be silently lost.
+2. **Prune-by-count:** oldest archive was deleted when limit reached. Nothing is deleted (Mike's call, S25 [23]) — session history is primary memory for the three-agent workflow and must not be silently lost.
 3. **Flat layout scaling:** 39 files in a single flat directory is manageable, but projected ~1,500/year (at ~4 resets/day) makes navigation unusable for humans and inefficient for `ls`/`glob`.
 
-Mike proposed in S25 [19]: *"А почему не archive/YYYY/MM/? как по мне это удобнее есть папка год, внутри папки с месяцами, внутри которых сессии."*
+Mike proposed `archive/YYYY/MM/` in S25 [19]: a folder per year, month folders inside it, sessions inside those — easier to navigate.
 
 ---
 
@@ -132,7 +132,7 @@ Rationale: the ARCH-19 approach is less invasive, preserves user control, and ke
 5. ✅ Clear-all-archives wipes tree and recreates empty `archive/` (S33)
 6. ✅ Pagination — offset / max_message_chars / include_thinking tested by Ark (ARCH-17, S45)
 7. ✅ `search_session_archives` verified by Ark on 494-line code review (ARCH-18, S45)
-8. ✅ Unlimited default — Mike UI PASS ("В UI поменял на unlimeted"), Ark backend PASS across 4 paths (ARCH-19, S45)
+8. ✅ Unlimited default — Mike UI PASS (he set the UI to unlimited), Ark backend PASS across 4 paths (ARCH-19, S45)
 9. ✅ Back-compat — existing `max=40` configs keep their cap (ARCH-19, S45)
 
 ---

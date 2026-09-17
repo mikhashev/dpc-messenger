@@ -653,3 +653,103 @@ class TestEngineTimings:
         log.write_text("nothing here\n", encoding="utf-8")
         sup._log_path = log
         assert sup.last_task_timings() is None
+
+
+class TestTheStartLineResolvesFlashAttention:
+    """The start line is the only place a reader can learn what the child got,
+    and until 2026-08-30 it did not name flash attention at all.
+
+    Measured that day on the production log: 103 804 lines over 74 starts,
+    16 occurrences of "flash", all of them DFlash. The child never prints
+    flash_attn at any verbosity we run, so an absent flag plus `-ctv q4_0`
+    read as "off or unknown" when the pin forces it on
+    (`src/llama-context.cpp:3596-3605`).
+    """
+
+    def _line(self, caplog, **overrides):
+        import logging
+
+        sup = _sup(**overrides)
+        with caplog.at_level(logging.INFO):
+            sup.log_start(None, {}, binary=BINARY)
+        return "\n".join(r.getMessage() for r in caplog.records)
+
+    def test_a_quantised_v_cache_forces_it_on_and_the_line_says_so(self, caplog):
+        line = self._line(caplog, cache_type_k="q4_0", cache_type_v="q4_0")
+        assert "flash_attn=on (auto, forced by the quantised V cache)" in line
+
+    def test_an_unquantised_cache_leaves_the_binarys_auto(self, caplog):
+        line = self._line(caplog, cache_type_k="f16", cache_type_v="f16")
+        assert "flash_attn=auto (build default)" in line
+
+    def test_a_named_value_is_reported_as_named(self, caplog):
+        assert "flash_attn=on" in self._line(caplog, flash_attn=True)
+
+    def test_off_against_a_quantised_v_is_named_as_the_refusal_it_is(self, caplog):
+        """`quantized V cache requires flash_attn to be enabled` -> nullptr:
+        the child does not start, and the start line should not read like a
+        working configuration."""
+        line = self._line(caplog, flash_attn=False, cache_type_v="q4_0")
+        assert "flash_attn=off (refused at start by the quantised V cache)" in line
+
+    def test_the_ladders_rung_wins_over_the_alias(self, caplog):
+        """`build_command` takes `cache_type or config`, so the resolved value
+        must read the same source or the line describes a different child."""
+        import logging
+
+        sup = _sup(cache_type_v="f16")
+        with caplog.at_level(logging.INFO):
+            sup.log_start("q4_0", {}, binary=BINARY)
+        assert "forced by the quantised V cache" in caplog.records[0].getMessage()
+
+
+class TestTelemetryUnderConcurrency:
+    """The engine writes one log and the reader takes the last block in it.
+
+    The docstring used to justify that with «the supervisor's serialized
+    traffic», and the same file refutes it: `call_slot` increments a bare
+    counter and refuses only while draining — no semaphore, no queue, no cap.
+    Concurrent generation is on record in production, peer and agent at once.
+    """
+
+    TIMINGS = (
+        "13.55.1 I slot print_timing: id 3 | task 2717 | prompt eval time =    3693.67 ms /  1621 tokens (    2.28 ms per token,   438.86 tokens per second)\n"
+        "13.55.1 I slot print_timing: id 3 | task 2717 |        eval time =   23196.43 ms /   757 tokens (   30.68 ms per token,    32.59 tokens per second)\n"
+    )
+
+    def _sup_with_timings(self, tmp_path):
+        sup = _sup()
+        log = tmp_path / "timings.log"
+        log.write_text(self.TIMINGS, encoding="utf-8")
+        sup._log_path = log
+        return sup
+
+    def test_one_slot_at_a_time_still_gets_its_numbers(self, tmp_path):
+        """Non-regression: the ordinary path must keep the engine's figures."""
+        sup = self._sup_with_timings(tmp_path)
+        sup.call_slot()
+        sup._in_flight = 0
+
+        assert sup.last_task_timings()["decode_tok_s"] == 32
+
+    def test_two_slots_at_once_means_the_block_is_not_the_callers(self, tmp_path):
+        sup = self._sup_with_timings(tmp_path)
+        sup.call_slot()
+        sup.call_slot()
+        sup._in_flight = 0
+
+        assert sup.last_task_timings() is None, "another task's block was handed out"
+
+    def test_the_next_read_after_an_overlap_is_trusted_again(self, tmp_path):
+        """The peak is per read, not a latch: two overlapping calls must not
+        blind the reader for the rest of the process's life."""
+        sup = self._sup_with_timings(tmp_path)
+        sup.call_slot()
+        sup.call_slot()
+        sup._in_flight = 0
+        assert sup.last_task_timings() is None
+
+        sup.call_slot()
+        sup._in_flight = 0
+
+        assert sup.last_task_timings()["prefill_tok_s"] == 438

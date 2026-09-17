@@ -8,7 +8,8 @@ Each test runs against both backends parametrized by fixture; behaviour
 must match.
 
 Skips Grafeo-side tests if the `grafeo` package is not installed
-(`uv sync --extra graph-grafeo`).
+— and since 2026-09-18 no extra installs it, so on a release environment
+this whole module skips.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """The pinned llama.cpp binary: resolved without a fetch, fetched only pinned.
 
 ADR-040 route (b2) runs a DPC-owned `llama-server`; its binary comes from the
-pinned `b10566` release, verified against sha256 digests taken from the
+pinned `b10964` release, verified against sha256 digests taken from the
 release API — never «latest». A configured `binary_path` always wins, so an
 operator-supplied build is never silently replaced, and a broken download
 must leave nothing behind that a later start would mistake for an install.
@@ -113,6 +113,20 @@ def _sha(data: bytes) -> str:
     import hashlib
 
     return hashlib.sha256(data).hexdigest()
+
+
+def test_every_asset_name_carries_the_pinned_tag():
+    # The download URL is `{BASE}/{LLAMA_CPP_TAG}/{name}` and nothing compares
+    # the two: a table where one platform's name kept the old tag is a 404 on
+    # that platform alone, with a green suite on every other. `cudart-` carries
+    # no tag and is the same file across pins.
+    for plat, rows in fetcher.PLATFORM_ASSETS.items():
+        for row in rows:
+            if row["name"].startswith("cudart-"):
+                continue
+            assert row["name"].startswith(f"llama-{fetcher.LLAMA_CPP_TAG}-"), (
+                f"{plat}: {row['name']} does not carry {fetcher.LLAMA_CPP_TAG}"
+            )
 
 
 def test_extraction_refuses_archive_members_that_escape(tmp_path):

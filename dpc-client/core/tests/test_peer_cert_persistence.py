@@ -70,9 +70,8 @@ def test_a_peer_signature_is_verifiable_after_the_handshake(tmp_path):
 def test_a_cert_whose_key_does_not_hash_to_the_node_id_is_refused(tmp_path):
     """CN is a claim; the key fingerprint is the proof. Store only on proof.
 
-    The outbound path validates CN alone (`_validate_peer_certificate`), so the
-    store cannot inherit its caller's rigour — it has to re-derive the identity
-    itself, or one weak caller poisons every later verification.
+    The store cannot inherit its callers' rigour — it has to re-derive the
+    identity itself, or one weak caller poisons every later verification.
     """
     _, victim_node_id, _ = _identity()
     _, _, attacker_cert_pem = _identity(cn=victim_node_id)  # CN lies, key does not

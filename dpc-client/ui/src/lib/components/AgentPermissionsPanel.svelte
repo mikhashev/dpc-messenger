@@ -321,6 +321,120 @@
     }
   }
 
+  // Stored web cookies (per-agent credential vault).
+  interface WebAuthDomain {
+    domain: string;
+    has_cookies: boolean;
+    has_previous?: boolean;
+    authenticated_at: string | null;
+    last_used_at: string | null;
+  }
+
+  let webAuthDomains: WebAuthDomain[] = [];
+  let webAuthLoadedFor = '';   // guard: keeps the reactive load from re-firing
+  let webAuthLoading = false;
+  let webAuthError = '';
+  let webAuthMessage = '';
+  let forgettingDomain = '';
+  let restoringDomain = '';
+
+  async function loadWebAuthDomains(agentId: string) {
+    webAuthLoadedFor = agentId;
+    webAuthLoading = true;
+    webAuthError = '';
+    try {
+      const result = await sendCommand('web_auth_list_domains', { agent_id: agentId });
+      if (result === false) {
+        webAuthError = 'Backend not connected.';
+        webAuthDomains = [];
+      } else if (result.status === 'success') {
+        webAuthDomains = result.domains ?? [];
+      } else {
+        webAuthError = result.message || 'Could not read the vault.';
+        webAuthDomains = [];
+      }
+    } catch (e) {
+      webAuthError = `${e}`;
+      webAuthDomains = [];
+    }
+    webAuthLoading = false;
+  }
+
+  $: if (!isGlobal && conversationId && conversationId !== webAuthLoadedFor) {
+    webAuthMessage = '';   // another agent's outcome is not this one's
+    loadWebAuthDomains(conversationId);
+  }
+
+  async function handleForgetWebAuth(domain: string) {
+    if (!conversationId || forgettingDomain) return;
+    const agentLabel = agentName || conversationId;
+    // The wording is the point: this deletes our copy of the cookies. Signing
+    // out of the account happens on the site, in the visible window.
+    if (!confirm(
+      `Forget ${agentLabel}'s stored ${domain} cookies?\n\n` +
+      `This deletes D-PC's copy, so the agent can no longer send them. ` +
+      `It does NOT sign you out of ${domain} — do that on the site itself.`
+    )) return;
+    forgettingDomain = domain;
+    webAuthMessage = '';
+    try {
+      const result = await sendCommand('web_auth_forget_cookies', {
+        agent_id: conversationId,
+        domain,
+      });
+      if (result !== false && result.status === 'success') {
+        await loadWebAuthDomains(conversationId);
+        // The backend distinguishes a deletion from a no-op; repeat its own
+        // sentence rather than announcing work that may not have happened.
+        webAuthMessage = result.message;
+      } else {
+        webAuthMessage = `Error: ${result === false ? 'backend not connected' : result.message}`;
+      }
+    } catch (e) {
+      webAuthMessage = `Error: ${e}`;
+    }
+    forgettingDomain = '';
+  }
+
+  async function handleRestoreWebAuth(domain: string) {
+    if (!conversationId || restoringDomain || forgettingDomain) return;
+    const agentLabel = agentName || conversationId;
+    // Say what it does, not what it is for: it swaps the two sets, so the
+    // person can press it again to come straight back.
+    if (!confirm(
+      `Put back the previous ${domain} cookies for ${agentLabel}?\n\n` +
+      `This swaps the stored set with the one kept behind it. Press it again ` +
+      `and you are back where you started. Only one earlier set is kept — ` +
+      `there is nothing older than the two.`
+    )) return;
+    restoringDomain = domain;
+    webAuthMessage = '';
+    try {
+      const result = await sendCommand('web_auth_restore_previous_cookies', {
+        agent_id: conversationId,
+        domain,
+      });
+      if (result !== false && result.status === 'success') {
+        await loadWebAuthDomains(conversationId);
+        // The backend distinguishes a swap from "nothing was kept"; repeat
+        // its own sentence rather than announcing work that may not have
+        // happened.
+        webAuthMessage = result.message;
+      } else {
+        webAuthMessage = `Error: ${result === false ? 'backend not connected' : result.message}`;
+      }
+    } catch (e) {
+      webAuthMessage = `Error: ${e}`;
+    }
+    restoringDomain = '';
+  }
+
+  function webAuthWhen(iso: string | null | undefined): string {
+    if (!iso) return 'unknown';
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? iso : d.toLocaleString();
+  }
+
   // Permissions summary (loaded on demand for transparency)
   let permissionsSummary: any = null;
   let permissionsLoading = false;
@@ -733,6 +847,73 @@
             {:else if !editMode}
               <p class="help-text-small" style="font-style: italic; margin-top: 0.5rem;">No archive data — select an individual agent to view stats.</p>
             {/if}
+          {/if}
+        </div>
+      {/if}
+
+      {#if !isGlobal && conversationId && !editMode}
+        <!-- Stored web cookies (per-agent credential vault, ADR-028).
+             Actions only, like the archive controls: forgetting hits the vault
+             at once and has nothing to do with the unsaved firewall edit. -->
+        <div class="subsection">
+          <h4>Stored Web Cookies</h4>
+          <p class="help-text-small">
+            Sites this agent holds cookies for, saved from a visible browser window.
+            <strong>Forget</strong> deletes D-PC's copy so the agent can no longer send them —
+            it does not sign you out of the account. To do that, sign out on the site itself
+            in the visible window.
+            <strong>Restore previous</strong> swaps the stored cookies with the one set kept
+            behind them, so pressing it twice returns you where you started. Only that one
+            earlier set is kept — there is nothing older than the two.
+          </p>
+
+          {#if webAuthLoading}
+            <p class="help-text-small">Reading the vault…</p>
+          {:else if webAuthError}
+            <p class="help-text-small" style="color: var(--danger);">{webAuthError}</p>
+          {:else if webAuthDomains.length === 0}
+            <p class="help-text-small" style="font-style: italic;">
+              No stored cookies. Ask the agent to open the site with
+              <code>keep_open=true</code>: a window appears on screen, you sign in there by
+              hand, and what you sign into is stored as you do it.
+            </p>
+          {:else}
+            <div class="web-auth-list">
+              {#each webAuthDomains as row (row.domain)}
+                <div class="web-auth-row">
+                  <div class="web-auth-facts">
+                    <span class="web-auth-domain">{row.domain}</span>
+                    <p class="help-text-small" style="margin: 0;">
+                      {row.has_cookies ? 'Cookies stored' : 'No cookies stored'}
+                      · saved {webAuthWhen(row.authenticated_at)}
+                      · last read {webAuthWhen(row.last_used_at)}
+                    </p>
+                  </div>
+                  <div class="web-auth-actions">
+                    <button
+                      type="button"
+                      class="btn-archive-action"
+                      on:click={() => handleRestoreWebAuth(row.domain)}
+                      disabled={restoringDomain !== '' || forgettingDomain !== '' || row.has_previous === false}
+                      title={row.has_previous === false
+                        ? `No earlier set of ${row.domain} cookies is kept — there is nothing to put back.`
+                        : `Swap the stored ${row.domain} cookies with the one set kept behind them. Press it twice and you are back where you started.`}
+                    >{restoringDomain === row.domain ? 'Restoring…' : 'Restore previous'}</button>
+                    <button
+                      type="button"
+                      class="btn-archive-action btn-archive-danger"
+                      on:click={() => handleForgetWebAuth(row.domain)}
+                      disabled={forgettingDomain !== '' || restoringDomain !== ''}
+                      title="Delete D-PC's copy of the {row.domain} cookies. You stay signed in on {row.domain} itself."
+                    >{forgettingDomain === row.domain ? 'Forgetting…' : 'Forget'}</button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          {#if webAuthMessage}
+            <p class="help-text-small" style="margin-top: 0.5rem; color: var(--text-secondary);">{webAuthMessage}</p>
           {/if}
         </div>
       {/if}
@@ -1504,6 +1685,42 @@
 
   .btn-archive-danger {
     background: var(--danger, #ef4444);
+  }
+
+  .web-auth-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.6rem;
+  }
+
+  .web-auth-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border, #333);
+    border-radius: 4px;
+  }
+
+  .web-auth-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+  }
+
+  .web-auth-facts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+
+  .web-auth-domain {
+    font-weight: 600;
+    word-break: break-all;
   }
 
   .whitelist-section {

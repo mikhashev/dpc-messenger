@@ -522,6 +522,28 @@ class TestFirewallValidation:
         assert not is_valid
         assert any("must be a boolean" in error for error in errors)
 
+    def test_compute_allowed_models_is_a_list_of_model_names_or_it_is_refused(self):
+        """The door's model filter is a list, or the save is refused with its name.
+
+        `compute.allowed_models` is the one compute list the Inference Sharing tab
+        could not set until 2026-09-14, so nothing pinned what the validator asks
+        of it. It asks only that it be a list, and checks no element: a caller
+        may name a model no provider on this node carries today, and an empty
+        list accepts every model rather than none.
+        """
+        for models in (["llama3.1:8b", "glm-4.7"], []):
+            is_valid, errors = ContextFirewall.validate_config(
+                {"compute": {"enabled": True, "allowed_models": models}}
+            )
+            assert is_valid, errors
+            assert errors == []
+
+        is_valid, errors = ContextFirewall.validate_config(
+            {"compute": {"enabled": True, "allowed_models": "llama3.1:8b"}}
+        )
+        assert not is_valid
+        assert any("'compute.allowed_models' must be a list" in error for error in errors)
+
     def test_invalid_node_groups_format(self):
         """Test detection of invalid node_groups format."""
         invalid_config = {

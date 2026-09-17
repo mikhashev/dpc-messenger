@@ -1,7 +1,7 @@
 # DPC-Client Configuration Guide
 
-> **Version:** 0.29.0
-> **Last Updated:** 2026-08-10 — reconciled against `settings.py`; the key
+> **Version:** 0.30.0
+> **Last Updated:** 2026-09-18 — reconciled against `settings.py`; the key
 > reference below that date line is generated, not hand-maintained
 
 ## Overview
@@ -61,7 +61,7 @@ mv ~/.dpc/.dpc_access.json ~/.dpc/privacy_rules.json
 
 ## Default Configuration
 
-On first run the client writes **24 sections and 147 keys** into `~/.dpc/config.ini`.
+On first run the client writes **26 sections and 155 keys** into `~/.dpc/config.ini`.
 The four below are the ones most people touch; the rest are in
 [the complete reference](#complete-reference-every-key-the-code-writes), which is
 generated from the code rather than maintained by hand.
@@ -165,6 +165,328 @@ host = 127.0.0.1
 
 ---
 
+### Gateway Settings (`[gateway]`)
+
+The gateway (ADR-041 D1): a second loopback listener that serves `GET /v1/models`,
+`POST /v1/chat/completions` (the OpenAI form) and `POST /v1/messages` (the Anthropic
+Messages form) to tools on this machine — an IDE plugin such as Continue, Claude Code,
+a CLI, a script — from the aliases this node names in `privacy_rules.json`. Off by
+default: a new open port is opt-in.
+
+#### `enabled`
+- **Description:** Start the gateway with the client
+- **Default:** `false`
+- **Environment Variable:** `DPC_GATEWAY_ENABLED`
+
+#### `port`
+- **Description:** Port the gateway listens on. 9998 is the file server and 9999 the
+  local API, so the three loopback listeners are neighbours
+- **Default:** `9997`
+- **Environment Variable:** `DPC_GATEWAY_PORT`
+
+#### `host`
+- **Description:** Read, not chosen: the gateway listens on `127.0.0.1` only, and any
+  other value is refused at start with a message naming it (ADR-041 D1)
+- **Default:** `127.0.0.1`
+
+**The key.** The first start writes `~/.dpc/.gateway_key` (`secrets.token_urlsafe(32)`)
+and never rewrites it: a tool keeps the key in its own config, so a key that changed on
+every restart would break it on every restart. Every request carries it as
+`Authorization: Bearer <key>`; a request without it, or with a different one, is
+answered `401`. **Rotation is the `rotate_gateway_key` command** (the Rotate button on
+the Inference Sharing tab, or the local API directly): a new key is written over the
+file and swapped into the running listener, so the old key is answered `401` from the
+next request on with no restart, and the new one is returned once in clear to paste into
+the tool's config. With the listener off the file is still rewritten. The file is
+written to a temporary name in the same directory and moved into place, so a client
+reading it mid-rotation gets one key or the other and never an empty string. On
+Linux/macOS the mode is `0600`; on Windows the mode bits are advisory and the file
+inherits the ACL of your home directory, as `.ws_token` does.
+The Anthropic form's clients send the same key as `x-api-key: <key>` instead; both
+header forms open every route.
+
+**What crosses, and what is refused by name.** Besides the conversation and `tools`, the
+gateway carries two more things the peer wire under it already had (ADR-041 D4, amendment
+2026-09-14):
+
+- **Reasoning effort.** OpenAI form: `reasoning_effort`. Messages form:
+  `output_config.effort`, and `thinking: {"type": "disabled"}`, which is `off`; `enabled`
+  and `adaptive` name no depth and ask for the alias's own default, and `budget_tokens` is
+  not read. The words are `off, low, medium, high, max` (`xhigh` is read as `high`), and
+  where a model's own template named its rungs those are the words that alias knows — a
+  word reaching none of them is `400` listing them. The usage row's `served_effort` names
+  the rung the call ran on.
+- **Images.** An OpenAI `image_url` part carrying a `data:<mime>;base64,<payload>` URL, or
+  an Anthropic `image` block with a `{"type": "base64", "media_type", "data"}` source.
+  Without tools they travel beside the prompt, so their position among the turns is not
+  kept. Beside tools — Claude Code attaches its tools to every request, so every
+  screenshot is this case — each image stays in the turn it was sent in, history
+  included, and reaches the tools path of the model that runs the call: on a peer's alias
+  only when that peer's menu row says `serves_images_with_tools`, which a host that
+  predates the field does not (2026-09-17). Refused by name: an `http(s)` URL or a `url`
+  source (the gateway fetches nothing from the web); an image past
+  `[vision] max_image_size_mb`, answered `413`; images beside tools on an alias that
+  cannot see or call tools, or on a peer's alias whose row does not say it serves both
+  (`tools_unsupported`); an alias or a peer that says it has no vision path.
+
+Sampling — `max_tokens`, `temperature`, `top_p`, `stop_sequences` — stays the alias
+owner's configuration on this node and is not read from the request.
+
+**What it does not serve, said out loud.** The three routes above are the whole surface.
+An IDE client also indexes a repository and completes a line, and those calls —
+`/v1/embeddings`, `/v1/completions`, and Anthropic's legacy `/v1/complete` — are answered
+`404` with `"code": "endpoint_not_served"` and a sentence naming the route and the two
+that are served (`/v1/complete` in the Anthropic envelope). Nothing is implemented behind
+them: this node's only embedding model belongs to an agent's memory index, is no provider
+alias, and stands in neither serving list, so there is nothing for an embeddings call to
+run on — the refusal says that rather than leaving the client to read a bare 404 as a
+wrong port (ADR-041 D1, amendment 2026-09-14).
+
+**Two switches, one door.** `[gateway] enabled` above is not the only one: `compute.enabled`
+in `privacy_rules.json` governs **both** of this node's doors — the peer door it has always
+governed, and this loopback gateway (Mike's call, 2026-09-13). The table between them is AND.
+`compute.enabled` is about what this node **gives**, never about what it may **ask**: a
+`remote:<peer>:<alias>` row is the peer's door, guarded by the peer's own flag, so a node that
+shares nothing still reaches its peers through its own gateway (Mike's call, 2026-09-14):
+
+| `compute.enabled` | `[gateway] enabled` | This node's own aliases | `remote:<peer>:<alias>` rows |
+|---|---|---|---|
+| `true` | `true` | **Open.** `/v1/models` lists the two serving lists; completions are served | **Open.** Listed and called, one row per proved, connected peer |
+| `true` | `false` | **Shut.** No listener at all; the peer door stays open | **Shut.** No listener to ask through |
+| `false` | `true` | **Shut.** The listener runs, `/v1/models` lists none of them, and a local or vendor completion is `404` naming `compute.enabled`; the peer door is shut too | **Open.** Listed and called as above — what a peer serves is the peer's to refuse |
+| `false` | `false` | **Shut.** Neither door serves anything | **Shut.** No listener to ask through |
+
+The flag is read from the live firewall on every request, so turning sharing off in the UI
+(or editing `privacy_rules.json` and reloading) closes the gateway on the next request
+without restarting the client — and turning it back on reopens it the same way.
+
+**What it serves.** Only the aliases in the two serving lists of `privacy_rules.json`;
+an alias outside them is `404`, and the gateway never falls back to `default_provider`:
+
+```json
+"compute": {
+  "serving_local": ["ollama_local"],
+  "serving_vendor": ["ds_flash"],
+  "vendor_quotas": {"ds_flash": 2.0}
+}
+```
+
+- `serving_local` — aliases whose provider runs on this machine (`ollama`,
+  `llamacpp_server`, `local_whisper`). The card is the scarce resource: a request queues
+  behind peer inference on the same lock, and one that would wait longer than
+  `[connection] remote_inference_timeout` is answered `503` (the card is busy). The
+  first entry is also what the P2P door serves peers from; the older `serving_alias`
+  key is still read and folded into this list with a warning, and a file carrying both
+  keys with different values is refused at load. A `local_whisper` alias belongs in this
+  list — that is how the P2P door offers transcription to a peer who holds the
+  permission — but it transcribes and does not chat, so the gateway leaves it off
+  `/v1/models` and answers a completion addressed to it `404` saying so. The same
+  applies to a peer's `local_whisper` row: it is not listed as `remote:<peer>:<alias>`.
+- `serving_vendor` — aliases whose provider is a paid API (`anthropic`, `deepseek`,
+  `zai`, `openai_compatible`, `gemini`, `github_models`, `gigachat`). Money is the
+  scarce resource, so **every entry needs a ceiling in `vendor_quotas`** — USD per UTC
+  calendar day, per caller; a vendor alias without one is a configuration error refused
+  at load with a message naming it (ADR-041 D5). The day's spend is read from the node
+  ledger (`~/.dpc/ledger/`), so it survives a restart; at or over the ceiling the
+  gateway answers `429` naming the alias, the ceiling and the spend.
+- A `remote_peer` or `dpc_agent` alias may stand in neither list: what is shared is not
+  shared onward (ADR-041 D7).
+
+**What it costs a peer.** The owner sets a price for what this node serves; the same block
+holds it (ADR-041 D3, amendment). The peer door applies it, the loopback gateway does not
+charge its own machine:
+
+```json
+"compute": {
+  "currency": "RUB",
+  "serving_tariff": {"ollama_local": [{"from": "2026-09-01", "in": 20, "out": 60}]},
+  "free_nodes": ["dpc-node-alice-123"],
+  "free_groups": ["friends"]
+}
+```
+
+- `currency` — the ISO 4217 code the rates below are in, checked against the standard's
+  list. Unset means no tariff is declared whatever `serving_tariff` says, and every served
+  call is a gift.
+- `serving_tariff` — per alias, dated entries `{from, in, out}` in that currency per 1M
+  prompt and per 1M output tokens. The newest entry whose `from` is on or before the call's
+  UTC day applies; an alias with no entry is a gift. Reasoning is billable output at `out`.
+  A rate that is negative, non-finite (`NaN` and `Infinity` are JSON literals) or malformed
+  is refused at load and at save, naming the alias and the field.
+- `free_nodes` / `free_groups` — which of the peers already allowed are served at zero.
+  Every entry must also be in `allow_nodes` / `allow_groups`: the allow lists are the door,
+  and a free list only distinguishes among those already through it. Inside a declared
+  tariff a free peer gets a rate of `0` — a price; with nothing declared it gets the same
+  gift as everyone else.
+- Each served call leaves the applied rates, their currency, the dated entry and the
+  amount on the host's usage row (`tariff_in`, `tariff_out`, `tariff_currency`,
+  `tariff_at`, `tariff_amount`) and sends the same group to the guest, whose row copies it
+  and keeps `cost_usd` null. `cost_usd` is only ever what a call cost the node that ran it.
+  Resetting the rules to defaults rewrites the block and drops the tariff with it.
+
+**Reading the door from the UI.** Four commands on the local API answer for the gateway
+itself. `get_gateway_state` says whether it is enabled in `config.ini` and whether a
+listener is actually holding the port — the two differ whenever the door refused to open
+— with the port, the bind, the key masked (`sk-…abcd`), the key file, the two serving
+lists, the refusal that stopped them being classified where there is one, and
+`compute.enabled`. `rotate_gateway_key` is the rotation described above.
+`get_gateway_client_lines` returns the paste-ready configuration for Continue, Cursor,
+Claude Code and curl with the key in clear — the two examples on this page are that
+command's own output, compared by a test so the page and the button cannot drift. It
+answers with the same menu `/v1/models` lists, a proved peer's `remote:<node id>:<alias>`
+models included and not this node's serving lists alone, as `menu` — one entry per model,
+with the `id` a client is configured with, the short `label` a dropdown shows and the
+`context_window` that model states, `null` where nobody knows it and never missing, so a
+reader can tell the two apart — and renders the blocks from it: every model these blocks
+offer is one this door serves.
+Continue takes one entry per model; Cursor and Claude Code name a single one, the optional
+`selected_id` where the menu carries it and this node's first local model otherwise, echoed
+back as `selected_id` and named inside the block itself.
+`get_peer_provider_menu(peer_id)` returns the rows a named peer would be sent in
+`PROVIDERS_RESPONSE`, from the same function that sends them, with `known`, `connected`,
+`allowed` and, where the list is empty, the reason in words. Beside them,
+`validate_firewall_rules(rules)` checks a rules object and names what is wrong without
+saving anything.
+
+**Where they appear.** The Inference Sharing tab of the firewall dialog opens with one
+sentence from `get_gateway_state` and `compute.enabled` together — the AND table above,
+said in words — and carries the door as block «5. IDE door» (address, configured,
+listening, masked key, serving lists, the Rotate button behind a confirm that names the
+`401`, and the client blocks collapsed behind the masked key) and the preview as block
+«6. What a peer sees», a picker over the peers the application already has a name for,
+connected first. Its Validate button sends `validate_firewall_rules` the exact object Save
+would write — the whole draft the dialog holds, an edit on any other tab included — not a
+narrower copy built from the file on disk.
+
+**Reading the rows back.** Two commands on the local API read the node ledger.
+`get_usage_summary` is the owner's burn — every row this node ran itself, folded by
+caller, alias and month. `get_inference_usage` reads the same rows by role and answers
+with three series: `served`, what this node ran for peers, by the peer that asked and by
+the alias that answered, carrying its own `cost_usd` and what it is owed per currency;
+`consumed`, what peers ran for it, keyed `remote:<host node id>:<alias>`, where `cost_usd`
+is null by construction and the money is `tariff_amount`, what this node owes; and `own`,
+its own calls on its own key, neither side of a sharing. Both take optional `since` /
+`until` ISO datetime bounds, and `get_inference_usage` a `month` of `YYYY-MM` to read one
+partition. A tariff that applied over counts nobody could price (`tariff_unpriceable`) and
+a call with no tariff declared at all (`untariffed`) are counted apart from the money and
+never added into it as a zero. The Inference Sharing tab of the firewall dialog reads
+`get_inference_usage` for the current month and shows the three series as three lists.
+
+**Shape and limits.** `model` in a request is the alias; `/v1/models` lists the aliases
+with `owned_by` `local` or `vendor`. `stream: true` yields the text as it is made,
+followed by `data: [DONE]`; where the answer arrives whole — an image on either route, a
+provider or a peer host with no streaming path — it is one chunk, as this door wrote for
+everything before 2026-09-14. Every
+completion leaves one usage row with `caller_kind = gateway` in the node ledger. A
+request whose `Host` header is neither `127.0.0.1:<port>` nor `localhost:<port>` is
+answered `400`.
+
+**Example** (Continue, `config.json`):
+```json
+{
+  "models": [{
+    "title": "DPC ollama_local",
+    "provider": "openai",
+    "apiBase": "http://127.0.0.1:9997/v1",
+    "apiKey": "<contents of ~/.dpc/.gateway_key>",
+    "model": "ollama_local"
+  }]
+}
+```
+
+**The Anthropic Messages form.** `POST /v1/messages` takes the request as the Anthropic
+SDKs and Claude Code send it — `model` is the alias, `system` a string or text blocks,
+`messages` the user/assistant turns — and answers with one `message` object holding one
+text block; an error is the Anthropic envelope (`not_found_error` for an alias outside
+the lists, `rate_limit_error` for a spent vendor ceiling, `api_error` for a provider
+failure). **Tools cross the door** (since 2026-09-14, on a local alias): `tools` in
+either form reach the model, a call comes back as a `tool_use` block with
+`stop_reason: "tool_use"` (OpenAI form: `tool_calls` with `finish_reason: "tool_calls"`),
+and the next request carrying `tool_result` (OpenAI: `role: "tool"`) completes the round
+trip. Forcing is not available — `tool_choice` `any` / `tool` / `required` and
+`parallel_tool_calls: false` are refused with 400, because every provider here runs
+`auto`. A peer alias (`remote:<node>:<alias>`) carries tools too since 2026-09-14
+(DPTP v1.7), and is refused with 400 only when the peer's own menu row does not say
+`supports_tools` — its host refuses the same request on the wire, so the refusal here
+merely saves the round trip. **The stream is real** on either route:
+`stream: true` yields text deltas as they are produced, with the cumulative
+usage in `message_delta` (OpenAI: the usage-only chunk under `stream_options.include_usage`)
+equal to the usage row of the same request; a tool call arrives as one block at the end,
+and a provider or a host that hands the answer back whole still yields one delta. `max_tokens`, `temperature`, `thinking` and the rest are
+accepted and ignored: sampling is the alias's own configuration on this node.
+
+**Example** (Claude Code, environment):
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:9997
+export ANTHROPIC_API_KEY='<contents of ~/.dpc/.gateway_key>'
+export ANTHROPIC_MODEL=ollama_local        # the one model /v1/models lists
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=215040
+```
+`ANTHROPIC_AUTH_TOKEN=<key>` (sent as `Authorization: Bearer`) works in place of
+`ANTHROPIC_API_KEY`. Every value in this block is rendered through `shlex.quote`,
+so an alias with a space in it (`qwen3.8 27b Mythos`) arrives as one word.
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` is the window of the model the block names, taken
+from the same `context_window` `/v1/models` carries for that row; without it that
+client assumes 200k for a model name it does not recognise, which is below this
+node's own alias. Where nobody states a window the line is **absent** rather than
+guessed, and the client keeps its own assumption.
+Not verified against a live Claude Code run at the time of writing; the shape is
+verified by the test suite.
+
+**A peer's model, through your own gateway.** After the two local lists, `/v1/models`
+shows one row per alias each connected peer serves to this node, named
+`remote:<node_id>:<alias>` and owned by that node — the same form a peer's provider has
+everywhere else on this node. A completion on such a name travels the P2P path to that
+peer (`REMOTE_INFERENCE_REQUEST`) and is served only while the peer is connected over
+direct TLS, where its key has been proved (ADR-041 D2); a peer reached over WebRTC, a
+relay or gossip is answered `503` naming the rule, never served from a local alias
+instead. The peer's own firewall decides what it serves you (`404` when the alias is
+not on its menu, `502` carrying the peer's refusal), the peer's card and quota bound
+the call — this node's card lock and `vendor_quotas` are not consulted — and a peer
+that does not answer within `[connection] remote_inference_timeout` is `504`. The row
+this node writes says `route = peer` under the request id both nodes share, with the
+peer's token counts and its price copied when it sent them and `cost_usd` left null
+when it did not: this node did not run the call and does not price it. **The
+conversation, its tools and the stream all cross** since 2026-09-14 (DPTP v1.7): the
+turns travel un-flattened, `tools` reach the host's model, and `stream: true` brings
+REMOTE_INFERENCE_CHUNK frames back as the host makes the answer. The counts and the
+usage row are still built from the response that ends the stream — nothing is counted
+off a delta — so a stream cut before that response leaves this node no row at all while
+the host keeps its own. A host too old to know these fields ignores them and answers
+whole, and your editor then shows the whole reply as one chunk the moment it lands,
+which is what every peer-routed answer did before that date. A request too large for one
+64 MiB DPTP frame — tools plus a long conversation can reach it — is `413` before a byte
+leaves this node.
+
+**What a host sees, what a guest gets.** Sharing compute is trusting the host as a
+person, not only as a machine (Mike's call, 2026-09-14; ADR-041 D7, amendment
+2026-09-14).
+
+- The host's machine receives the prompt in plaintext by construction — decryption
+  happens *at* the host, whichever encrypted path (direct TLS, WebRTC/DTLS, or the
+  relay/gossip hybrid scheme) carried it — and the host can read it if they choose.
+  This application shows, stores and logs none of it: `handle_inference_request`
+  logs only the peer id, the request id and `images=N tools=N` — how many pictures and tools
+  the call carried, counted and never quoted — and the usage row above
+  carries counts, duration, served effort, tariff and proof — never prompt or answer
+  text. Checked on the engine side too (Zcode, 2026-09-14, one machine, default
+  verbosity): `llama-server` and Ollama write counters and timings, not content,
+  unless a host turns on `-v` or the engine's own request-body logging, neither of
+  which DPC turns on by default — and this application cannot prove to a guest that a
+  host has not. Two-sided: the node whose model you call sees your prompt in full;
+  serving peers means their prompts arrive on your machine and you could read them.
+- A host's own model settings — weights, quantization, template, context, sampling,
+  output ceiling — are what a served call runs at; there is no per-guest override and
+  no `max_tokens` on the wire. The one exception is reasoning effort, the caller's
+  preference under the host's own cap (above). A guest's protection against an
+  unbounded reply is the declared tariff and the host's ceiling, not a number it
+  sends.
+- A guest should see the host's full effective settings, even the ones it cannot
+  change, before choosing to route a request there — a future menu card's job; this
+  paragraph states only the principle.
+
+---
+
 ### System Settings (`[system]`)
 
 #### `auto_collect_device_info`
@@ -227,7 +549,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **25 sections, 150 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **26 sections, 155 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -263,6 +585,8 @@ An empty default means the key is written blank and the feature stays off until 
 | `relay_timeout` | `20` |  |
 | `gossip_timeout` | `5` | How long to wait before falling back to gossip |
 | `remote_inference_timeout` | `1200` |  |
+| `hello_timeout` | `10` | Seconds the listener waits for HELLO after its challenge |
+| `max_pending_hellos_per_ip` | `8` | Inbound connections one address may hold before HELLO_ACK |
 
 #### `[conversations]`
 
@@ -309,6 +633,14 @@ An empty default means the key is written blank and the feature stays off until 
 | `preparation_timeout_per_gb` | `40` | Additional timeout per GB (40s/GB) |
 | `preparation_progress_interval_mb` | `100` | Emit progress every N MB during SHA256 |
 | `preparation_progress_interval_chunks` | `10000` | Emit progress every N chunks during CRC32 |
+
+#### `[gateway]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Serve /v1/models and /v1/chat/completions to local tools (ADR-041). This node's own aliases need `compute.enabled` in privacy_rules.json too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone |
+| `port` | `9997` | 9998 is the file server, 9999 the local API |
+| `host` | `127.0.0.1` | Not configurable: any other value is refused at start (ADR-041 D1) |
 
 #### `[gossip]`
 
@@ -507,6 +839,17 @@ An empty default means the key is written blank and the feature stays off until 
 | `stun_servers` | `stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:global.stun.twilio.com:3478,stun:stun.rtc.yandex.net:3478,stun:74.125.250.129:19302,stun:74.125.250.127:19302` |  |
 
 <!-- END GENERATED CONFIG REFERENCE -->
+
+### Notes that do not belong to a single key
+
+**The gateway has no image cap of its own:** an image at either door is bounded
+by `[vision] max_image_size_mb`, the same setting the P2P door enforces.
+
+*Anything written between the markers above is replaced by
+`tools/config_reference.py`, which builds the tables from the inline comments in
+`settings.py`. Prose about one key goes in that comment; prose about more than
+one goes here, below the markers, or the next regeneration deletes it silently —
+which is how the paragraph above was lost once already.*
 
 ## Using Environment Variables
 
@@ -823,7 +1166,7 @@ chmod 600 ~/.dpc/config.ini
 ## Reference: Environment Variables
 
 **Every key in every section has one.** The name is built mechanically —
-`DPC_<SECTION>_<KEY>`, upper case — so all 147 keys in the reference above can be set
+`DPC_<SECTION>_<KEY>`, upper case — so all 155 keys in the reference above can be set
 from the environment without appearing in any list. That includes the secrets this page
 tells you to keep out of version control: `DPC_TELEGRAM_BOT_TOKEN`, `DPC_TURN_USERNAME`,
 `DPC_TURN_CREDENTIAL`.
@@ -1089,6 +1432,25 @@ hole_punch_timeout = 15    # UDP hole punching timeout
 relay_timeout = 20         # Volunteer relay timeout
 gossip_timeout = 5         # Gossip fallback timeout
 ```
+
+#### `hello_timeout`
+- **Description:** Seconds the listener waits for `HELLO` after issuing its
+  `HELLO_CHALLENGE`. A peer that completes TLS and then says nothing is hung up on
+  when this expires, and the expiry counts as a failed HELLO for the per-address
+  rate limiter (10 failures in 300 s close that address silently)
+- **Default:** `10`
+- **Note:** ADR-041 D8. Raise it only for peers on very high-latency links; the
+  dial side budgets `ipv4_timeout` / `ipv6_timeout` for the whole exchange, so
+  this has no reason to be longer than those
+
+#### `max_pending_hellos_per_ip`
+- **Description:** Inbound connections one address may hold between accept and
+  `HELLO_ACK`. The next one is closed silently, as a rate-limited address is, and
+  is not counted as a failed HELLO
+- **Default:** `8`
+- **Note:** ADR-041 D8. A NAT puts many honest peers behind one address, which is
+  why this counts connections *still waiting for HELLO* rather than connections:
+  an honest peer holds a slot for one round trip and releases it
 
 **Example Configuration** — this is what a fresh install writes, so copying it changes
 nothing. Two strategies ship off; turn them on deliberately, not by pasting a block.

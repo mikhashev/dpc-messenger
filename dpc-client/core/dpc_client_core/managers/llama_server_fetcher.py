@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-LLAMA_CPP_TAG = "b10566"
+LLAMA_CPP_TAG = "b10964"
 LLAMA_CPP_RELEASE_BASE = "https://github.com/ggml-org/llama.cpp/releases/download"
 
 DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
@@ -52,14 +52,14 @@ DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 # pin: read `nightly-tag.txt` from the newest `vX.Y.Z`, then take that tag's
 # `digest` and `size` from the release API.
 #
-# b10566 is what v0.2.0 named (2026-08-21). Do not follow `releases/latest`: it
+# b10964 is what v0.4.1 named (2026-09-14). Do not follow `releases/latest`: it
 # now returns the versioned release, whose only asset is that text file.
 PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
     "win-cuda-13.3-x64": [
         {
-            "name": "llama-b10566-bin-win-cuda-13.3-x64.zip",
-            "sha256": "c3e2336c1427e8bd7b5beb3c8618d2f7a268bc5fb6ec3f28c1e06cdb78d2e80a",
-            "size": 146_890_631,
+            "name": "llama-b10964-bin-win-cuda-13.3-x64.zip",
+            "sha256": "cd63ae76ad78a1540aa0f30f6c6284bab14c146d99a58f70c3f0a38cb9c62351",
+            "size": 149_703_589,
         },
         {
             "name": "cudart-llama-bin-win-cuda-13.3-x64.zip",
@@ -69,16 +69,16 @@ PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
     ],
     "macos-arm64": [
         {
-            "name": "llama-b10566-bin-macos-arm64.tar.gz",
-            "sha256": "533f546dab2ce2f8e29ce3070f26acc55acc59528e177f2cd0d52b7f69b44f50",
-            "size": 11_095_544,
+            "name": "llama-b10964-bin-macos-arm64.tar.gz",
+            "sha256": "033c845c1df9bf945ff37bb193238b40910b2244be3e1e637b2ceb5878f1a6f5",
+            "size": 11_149_739,
         },
     ],
     "ubuntu-x64": [
         {
-            "name": "llama-b10566-bin-ubuntu-x64.tar.gz",
-            "sha256": "0c34561d623299c113e46f9fdd97bff5b219b25554243a21a243aebc81253ea1",
-            "size": 16_677_356,
+            "name": "llama-b10964-bin-ubuntu-x64.tar.gz",
+            "sha256": "9abf88aea48a55d0f80edb1ee20220b186848cca0b4e919d71518cfd7ca67443",
+            "size": 16_825_086,
         },
     ],
 }

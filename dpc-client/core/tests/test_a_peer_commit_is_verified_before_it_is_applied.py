@@ -83,7 +83,7 @@ class _Applied:
     def __init__(self):
         self.calls = []
 
-    async def _apply_commit(self, commit, origin="local"):
+    async def _apply_commit(self, commit, origin="local", judged_here=True):
         self.calls.append((commit, origin))
         return True
 
@@ -252,3 +252,51 @@ async def test_our_own_commit_is_still_hashed_and_signed(home, monkeypatch):
     assert commit.commit_hash
     assert list(commit.signatures) == ["dpc-node-us"]
     assert signed == [commit]
+
+
+@pytest.mark.asyncio
+async def test_a_commit_this_node_did_not_judge_is_applied_and_left_unsigned(home, monkeypatch):
+    """Mike's rule, 2026-09-07: the knowledge lands, the signature does not.
+
+    A node whose vote was an abstention — it could not read the text the
+    knowledge was drawn from — used to apply the commit and sign it anyway, so
+    its key vouched for a judgement it had refused to make.
+    """
+    manager = _manager(home, monkeypatch)
+    signed = []
+
+    async def _remember(commit):
+        signed.append(commit)
+
+    manager.on_commit_signed = _remember
+
+    signer, key = _identity()
+    commit = _commit()
+    commit.sign(signer, key)
+
+    assert await manager._apply_commit(commit, origin="verified", judged_here=False) is True
+
+    assert list(commit.signatures) == [signer], "this node signed what it did not judge"
+    assert signed == [], "COMMIT_SIGNED went out for an unjudged commit"
+    card = next((home / "knowledge").glob(f"*{commit.commit_id}.md"))
+    assert "verified_by_this_node: false" in card.read_text(encoding="utf-8").lower()
+
+
+@pytest.mark.asyncio
+async def test_a_commit_this_node_judged_is_signed_as_before(home, monkeypatch):
+    manager = _manager(home, monkeypatch)
+    signed = []
+
+    async def _remember(commit):
+        signed.append(commit)
+
+    manager.on_commit_signed = _remember
+
+    signer, key = _identity()
+    commit = _commit()
+    commit.sign(signer, key)
+
+    await manager._apply_commit(commit, origin="verified", judged_here=True)
+
+    assert signed == [commit]
+    assert "dpc-node-us" in commit.signatures

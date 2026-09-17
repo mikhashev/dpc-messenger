@@ -1,25 +1,32 @@
 """
-CC Group Chat Bridge — read group chat history and send CC responses.
+Group chat bridge — an external agent (Claude Code or any harness) reads a DPC
+group chat and posts under the tag it registered. File name is historical.
 
-Replaces dpc_group_mcp.py with stateless file + WebSocket approach:
 - READ: history.json from ~/.dpc/conversations/{group_id}/history.json
 - WRITE: WebSocket to localhost:9999 (send_group_agent_message command)
 
 Usage:
     python cc_group_chat_bridge.py --list                    # list available groups
     python cc_group_chat_bridge.py --group GROUP_ID --last 5 # show last 5 messages
-    python cc_group_chat_bridge.py --group GROUP_ID --send "hello"  # send CC response
-    python cc_group_chat_bridge.py --group GROUP_ID --mentions      # show @CC mentions
+    python cc_group_chat_bridge.py --group GROUP_ID --send "hello"  # post as this bridge's tag
+    python cc_group_chat_bridge.py --group GROUP_ID --mentions      # mentions of that tag
+    python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "hi"  # pick a tag
+    python cc_group_chat_bridge.py --group GROUP_ID --listen [--once] [--json]  # push, no cron
+
+Identity: --as, else the tag registered for this node in Group Settings
+(metadata.json agents/agent_names), else [agent_chat] cc_display_name.
 """
 
 import json
 import os
+import re
 import sys
 import asyncio
 import argparse
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 CONFIG_PATH = DPC_HOME / "config.ini"
@@ -35,9 +42,69 @@ def _read_config():
 
 
 def _get_cc_display_name() -> str:
-    """Read CC display name from config.ini [agent_chat] section."""
+    """Config fallback: [agent_chat] cc_display_name in config.ini, "CC" when unset."""
     config = _read_config()
     return config.get("agent_chat", "cc_display_name", fallback="CC")
+
+
+def _configured_display_name() -> str:
+    """The name-neutral reader; the key it reads keeps its historical name."""
+    return _get_cc_display_name()
+
+
+def _at_names(names: list) -> str:
+    """'@a, @b' for user-visible lines."""
+    return ", ".join("@" + n for n in names)
+
+
+def _mentions_banner(names: list, n: int) -> str:
+    """The --mentions header, naming the tags scanned for."""
+    if not n:
+        return f"No mentions of {_at_names(names)} found."
+    return f"=== {n} mention(s) of {_at_names(names)} ==="
+
+
+def _get_node_id() -> str:
+    """This node's id from ~/.dpc/node.id, "" if absent."""
+    try:
+        return (DPC_HOME / "node.id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _registered_tags(group_id: str) -> list:
+    """External tags this node registered in the group's metadata.json (display names)."""
+    node_id = _get_node_id()
+    if not node_id:
+        return []
+    try:
+        with open(_find_group_dir(group_id) / "metadata.json", "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    names = meta.get("agent_names", {}).get(node_id, {}) or {}
+    tags = []
+    for entry in meta.get("agents", {}).get(node_id, []) or []:
+        if isinstance(entry, str) and entry.startswith("ext:"):
+            tags.append(names.get(entry) or entry[len("ext:"):])
+    return tags
+
+
+def _identity_names(group_id: str, override=None) -> list:
+    """Names this bridge answers to: --as, else registered tags, else cc_display_name."""
+    if override:
+        return [override]
+    return _registered_tags(group_id) or [_configured_display_name()]
+
+
+def _resolve_identity(group_id: str, override=None) -> str:
+    """The single name to post under; exits 2 when several tags need --as to pick one."""
+    names = _identity_names(group_id, override)
+    if len(names) > 1:
+        print(f"[ERROR] several tags registered on this node for {group_id}: "
+              f"{', '.join(names)} — pass --as")
+        sys.exit(2)
+    return names[0]
 
 
 def _get_ws_url() -> str:
@@ -75,11 +142,13 @@ def _find_group_dir(group_id: str) -> Path:
       ~/.dpc/conversations/{group_id}/history.json           (no display name)
       ~/.dpc/conversations/{group_id}-{slug}/history.json    (with display name)
 
-    Prefer the slugged directory (backend's active write target).
+    Prefer the slugged directory (backend's active write target). metadata.json is
+    the group's identity and exists from the join; history.json only after a message.
     """
     base = DPC_HOME / "conversations"
     for d in sorted(base.iterdir()):
-        if d.is_dir() and d.name.startswith(group_id + "-") and (d / "history.json").exists():
+        if d.is_dir() and d.name.startswith(group_id + "-") and (
+                (d / "metadata.json").exists() or (d / "history.json").exists()):
             return d
     return base / group_id
 
@@ -102,26 +171,85 @@ def read_history(group_id: str, last_n: int = None) -> list:
         return []
 
 
-def find_mentions(messages: list, since_index: int = 0) -> list:
-    """Find @CC mentions after since_index. Returns [(index, msg), ...]."""
-    cc_name = _get_cc_display_name()
-    cc_lower = cc_name.lower()
+def _mention_patterns(names: list) -> list:
+    """One whole-word regex per name (@tag, not @tag2); Cyrillic @сс only when a name is CC."""
+    patterns = [re.compile(r"(?<!\w)@" + re.escape(n) + r"(?!\w)", re.IGNORECASE) for n in names]
+    if any(n.lower() == "cc" for n in names):
+        patterns.append(re.compile(r"(?<!\w)@сс(?!\w)", re.IGNORECASE))
+    return patterns
+
+
+def find_mentions(messages: list, since_index: int = 0, names: list = None) -> list:
+    """Find @<name> mentions after since_index. Returns [(index, msg), ...].
+
+    names defaults to [cc_display_name]; the CLI passes the resolved identity list.
+    """
+    if not names:
+        names = [_configured_display_name()]
+    patterns = _mention_patterns(names)
     mentions = []
     for i, msg in enumerate(messages):
         if i < since_index:
             continue
         content = msg.get("content", "") or msg.get("text", "")
         sender = msg.get("sender_name", "")
-        if sender == cc_name:
+        if sender in names:
             continue
-        content_lower = content.lower()
-        if f"@{cc_lower}" in content_lower or "@сс" in content_lower:
+        if any(p.search(content) for p in patterns):
             mentions.append((i, msg))
     return mentions
 
 
-async def send_group_message(group_id: str, text: str) -> dict:
-    """Send CC response to group chat via WebSocket."""
+def _build_send_command(group_id: str, name: str, text: str) -> dict:
+    """The send_group_agent_message command; the backend copies agent_name into sender_name."""
+    import uuid
+    return {
+        "id": str(uuid.uuid4())[:8],
+        "command": "send_group_agent_message",
+        "payload": {
+            "group_id": group_id,
+            "agent_name": name,
+            "text": text,
+        }
+    }
+
+
+def _send_outcome(reply: dict) -> tuple:
+    """(ok, text for the [SENT] line). The local API answers
+    {"status": "OK"|"ERROR", "payload": <handler return>}; a refused post is
+    {"status": "error", "message": ...} under an OK envelope, success a message_id."""
+    if not isinstance(reply, dict):
+        return False, "ERROR malformed reply"
+    outer, inner = reply.get("status"), reply.get("payload")
+    inner_msg = inner.get("message") or inner.get("error") if isinstance(inner, dict) else None
+    if outer != "OK":
+        return False, f"ERROR {inner_msg or reply.get('message') or outer or '?'}"
+    if isinstance(inner, dict) and str(inner.get("status", "")).lower() == "error":
+        return False, f"ERROR {inner_msg or '(no message given)'}"
+    return True, "OK"
+
+
+async def _await_reply(ws, command_id: str, deadline: float) -> dict:
+    """The frame answering `command_id`. The backend broadcasts events to every
+    client, this one included, and the send's own group_text_received arrives
+    before the reply — so events, other ids and unparsable frames are skipped.
+    Raises asyncio.TimeoutError once `deadline` (loop time) passes."""
+    loop = asyncio.get_running_loop()
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        try:
+            frame = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(frame, dict) and "event" not in frame and frame.get("id") == command_id:
+            return frame
+
+
+async def send_group_message(group_id: str, text: str, name: str = None) -> dict:
+    """Post `text` to the group via WebSocket, as `name` (default: resolved identity)."""
     canonical_id = _resolve_group_id(group_id)
 
     try:
@@ -130,17 +258,11 @@ async def send_group_message(group_id: str, text: str) -> dict:
         print("[ERROR] websockets not installed.")
         return {"status": "error", "message": "websockets not installed"}
 
-    import uuid
-    cc_name = _get_cc_display_name()
-    command = {
-        "id": str(uuid.uuid4())[:8],
-        "command": "send_group_agent_message",
-        "payload": {
-            "group_id": canonical_id,
-            "agent_name": cc_name,
-            "text": text,
-        }
-    }
+    if name is None:
+        name = _resolve_identity(group_id)
+    if name != _configured_display_name():
+        print(f"[INFO] posting as {name}")
+    command = _build_send_command(canonical_id, name, text)
 
     ws_token_path = DPC_HOME / ".ws_token"
     try:
@@ -168,9 +290,10 @@ async def send_group_message(group_id: str, text: str) -> dict:
 
             await ws.send(json.dumps(command))
             try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=10)
-                result = json.loads(raw)
-                print(f"[SENT] {len(text)} chars → group {group_id}: {result.get('status', '?')}")
+                deadline = asyncio.get_running_loop().time() + 10
+                result = await _await_reply(ws, command["id"], deadline)
+                _, status = _send_outcome(result)
+                print(f"[SENT] {len(text)} chars → group {group_id}: {status}")
                 return result
             except asyncio.TimeoutError:
                 print(f"[SENT] {len(text)} chars → group {group_id} (no response, timeout)")
@@ -204,9 +327,96 @@ def _resolve_group_id(group_id: str) -> str:
     return group_id
 
 
-def send_group_message_sync(group_id: str, text: str) -> dict:
+def send_group_message_sync(group_id: str, text: str, name: str = None) -> dict:
     """Sync wrapper for send_group_message."""
-    return asyncio.run(send_group_message(group_id, text))
+    return asyncio.run(send_group_message(group_id, text, name))
+
+
+def _send_exit_code(reply: dict) -> int:
+    """CLI exit for a send: 1 on a refused or failed post; a timed-out reply is not a refusal."""
+    if isinstance(reply, dict) and reply.get("status") == "sent":
+        return 0
+    return 0 if _send_outcome(reply)[0] else 1
+
+
+def _mention_for_me(frame, canonical_group_id: str, names_lower, all_tags: bool = False):
+    """Payload of a cc_group_mention frame for this group and one of our tags, else None."""
+    if not isinstance(frame, dict) or frame.get("event") != "cc_group_mention":
+        return None
+    payload = frame.get("payload")
+    if not isinstance(payload, dict) or payload.get("group_id") != canonical_group_id:
+        return None
+    tag = str(payload.get("agent_tag") or "").lower()
+    if not all_tags and tag not in names_lower:
+        return None
+    return payload
+
+
+def _format_mention(payload: dict, ts: str = None) -> str:
+    """One human line per event: first line of the text, cut at 200 chars."""
+    import time
+    first = (str(payload.get("text") or "").splitlines() or [""])[0]
+    return (f"[MENTION] {ts or time.strftime('%H:%M:%S')} {payload.get('sender_name', '?')} "
+            f"(@{payload.get('agent_tag', '?')}) in {payload.get('group_id', '?')}: {first[:200]}")
+
+
+async def listen_for_mentions(group_id: str, names: list, all_tags: bool = False,
+                              as_json: bool = False, once: bool = False) -> int:
+    """Print one line per cc_group_mention event addressed to `names`; reconnect with backoff."""
+    canonical_id = _resolve_group_id(group_id)
+    try:
+        import websockets
+    except ImportError:
+        print("[ERROR] websockets not installed.", file=sys.stderr)
+        return 1
+
+    names_lower = [n.lower() for n in names]
+    who = "any tag" if all_tags else ", ".join("@" + n for n in names)
+    print(f"[LISTEN] listening for {who} in {canonical_id}", file=sys.stderr, flush=True)
+
+    delay = 1
+    while True:
+        try:
+            # Re-read per connect: the backend rotates the token on every start.
+            auth_token = (DPC_HOME / ".ws_token").read_text(encoding="utf-8").strip()
+            async with websockets.connect(_get_ws_url()) as ws:
+                await ws.send(json.dumps({
+                    "id": "group-bridge-auth",
+                    "command": "auth",
+                    "token": auth_token,
+                }))
+                auth_result = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                if auth_result.get("status") != "OK":
+                    print(f"[ERROR] Auth rejected: {auth_result}", file=sys.stderr)
+                    return 1
+                delay = 1
+                while True:
+                    try:
+                        frame = json.loads(await ws.recv())
+                    except ValueError:
+                        continue
+                    payload = _mention_for_me(frame, canonical_id, names_lower, all_tags)
+                    if payload is None:
+                        continue
+                    print(json.dumps(payload, ensure_ascii=False) if as_json
+                          else _format_mention(payload), flush=True)
+                    if once:
+                        return 0
+        except Exception as e:  # socket closed, backend down, bad auth frame — all transient
+            reason = str(e) or type(e).__name__
+            print(f"[LISTEN] reconnecting in {delay}s ({reason})", file=sys.stderr, flush=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+
+
+def listen_sync(group_id: str, names: list, all_tags: bool = False,
+                as_json: bool = False, once: bool = False) -> int:
+    """Sync wrapper for listen_for_mentions; Ctrl-C ends it with exit 0."""
+    try:
+        return asyncio.run(listen_for_mentions(group_id, names, all_tags, as_json, once))
+    except KeyboardInterrupt:
+        print("[LISTEN] stopped", file=sys.stderr, flush=True)
+        return 0
 
 
 def format_message(i: int, msg: dict) -> str:
@@ -220,16 +430,38 @@ def format_message(i: int, msg: dict) -> str:
     return f"  [{i + 1}] {ts} {sender}: {preview}"
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CC Group Chat Bridge")
+def _build_parser() -> argparse.ArgumentParser:
+    """The CLI; factored out so tests can read its help."""
+    parser = argparse.ArgumentParser(
+        prog="cc_group_chat_bridge.py",
+        description="Group chat bridge for an external agent: read a group's history, "
+                    "scan for mentions of this bridge's tag, post under it")
     parser.add_argument("--list", action="store_true", help="List available groups")
     parser.add_argument("--group", type=str, help="Group ID to interact with")
     parser.add_argument("--last", type=int, default=10, help="Last N messages")
-    parser.add_argument("--mentions", action="store_true", help="Show @CC mentions")
-    parser.add_argument("--send", type=str, help="Send CC response text")
+    parser.add_argument("--mentions", action="store_true",
+                        help="Show mentions of this bridge's tag")
+    parser.add_argument("--send", type=str, help="Send a response as this bridge's name")
     parser.add_argument("--send-file", type=str, dest="send_file",
-                        help="Send CC response from file (backtick-safe)")
-    args = parser.parse_args()
+                        help="Send a response from file as this bridge's name (backtick-safe)")
+    parser.add_argument("--as", type=str, dest="as_name", metavar="TAG",
+                        help="Post/scan as this tag (default: the tag registered in "
+                             "Group Settings, else cc_display_name)")
+    parser.add_argument("--listen", action="store_true",
+                        help="Block and print each cc_group_mention event for this bridge's "
+                             "tag as it arrives (push, no cron); reconnects when the backend "
+                             "drops")
+    parser.add_argument("--all-tags", action="store_true", dest="all_tags",
+                        help="With --listen: print mentions of any tag in the group")
+    parser.add_argument("--json", action="store_true", dest="as_json",
+                        help="With --listen: one JSON object per line instead of [MENTION]")
+    parser.add_argument("--once", action="store_true",
+                        help="With --listen: exit 0 after the first matching mention")
+    return parser
+
+
+if __name__ == "__main__":
+    args = _build_parser().parse_args()
 
     if args.list:
         groups = list_groups()
@@ -245,9 +477,17 @@ if __name__ == "__main__":
         print("Error: --group GROUP_ID required (use --list to see available groups)")
         sys.exit(1)
 
+    if args.listen:
+        if args.send or args.send_file or args.mentions:
+            print("Error: --listen cannot be combined with --send, --send-file or --mentions",
+                  file=sys.stderr)
+            sys.exit(2)
+        sys.exit(listen_sync(args.group, _identity_names(args.group, args.as_name),
+                             args.all_tags, args.as_json, args.once))
+
     if args.send:
-        send_group_message_sync(args.group, args.send)
-        sys.exit(0)
+        name = _resolve_identity(args.group, args.as_name)
+        sys.exit(_send_exit_code(send_group_message_sync(args.group, args.send, name)))
 
     if args.send_file:
         try:
@@ -255,20 +495,18 @@ if __name__ == "__main__":
         except OSError as e:
             print(f"[ERROR] Cannot read --send-file: {e}", file=sys.stderr)
             sys.exit(1)
-        send_group_message_sync(args.group, text)
-        sys.exit(0)
+        name = _resolve_identity(args.group, args.as_name)
+        sys.exit(_send_exit_code(send_group_message_sync(args.group, text, name)))
 
     messages = read_history(args.group, last_n=args.last)
     print(f"[CC Group Bridge] {len(messages)} messages (last {args.last})\n")
 
     if args.mentions:
-        mentions = find_mentions(messages)
-        if not mentions:
-            print("No @CC mentions found.")
-        else:
-            print(f"=== {len(mentions)} @CC mention(s) ===")
-            for i, msg in mentions:
-                print(format_message(i, msg))
+        names = _identity_names(args.group, args.as_name)
+        mentions = find_mentions(messages, names=names)
+        print(_mentions_banner(names, len(mentions)))
+        for i, msg in mentions:
+            print(format_message(i, msg))
     else:
         for i, msg in enumerate(messages):
             print(format_message(i, msg))

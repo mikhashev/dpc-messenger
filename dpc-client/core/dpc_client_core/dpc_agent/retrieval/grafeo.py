@@ -81,8 +81,10 @@ def _open_grafeo(db_path: pathlib.Path):
         import grafeo
     except ImportError as e:
         raise ImportError(
-            "Grafeo retrieval requires the `grafeo` package. "
-            "Install with: uv sync --extra graph-grafeo"
+            "Grafeo retrieval requires the `grafeo` package, which no extra "
+            "installs any more: graph-grafeo was removed from pyproject.toml "
+            "on 2026-09-18. Install grafeo by hand, or drop retrieval_vector / "
+            "retrieval_text from the agent's config.json to use native FAISS."
         ) from e
     if str(db_path) == ":memory:":
         return grafeo.GrafeoDB()

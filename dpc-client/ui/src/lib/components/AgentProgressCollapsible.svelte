@@ -4,6 +4,7 @@
      * Renders from message.tool_calls (persisted) or live progress events.
      * Unified for 1:1 and group chats. Drift-style categories + human-readable labels.
      */
+    import { untrack } from 'svelte';
     import { getToolLabel, getToolArgPreview } from '$lib/utils/toolDisplay';
     import { occupancyFromSpeed, occupancyLabel, occupancyTitle } from '$lib/utils/contextOccupancy';
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
@@ -41,7 +42,10 @@
         speed?: Record<string, any> | null;
     } = $props();
 
-    let expanded = $state(isLive);
+    // Open while the run is live, and the reader owns it from then on — the run
+    // ending must not fold a block someone is reading. untrack states that the
+    // prop is read once, which is what the warning asks for.
+    let expanded = $state(untrack(() => isLive));
     let expandedTools = $state<Set<number>>(new Set());
     // Distinct round count for the header summary ("N rounds · M actions").
     let roundCount = $derived(new Set(toolCalls.map((tc) => tc.round)).size);

@@ -8,6 +8,8 @@
    * v1.4 (February 2026) - Thinking Mode Support
    */
 
+  import { untrack } from 'svelte';
+
   interface Props {
     thinking: string;
     tokenCount?: number;
@@ -15,7 +17,10 @@
   }
 
   let { thinking, tokenCount, collapsed = true }: Props = $props();
-  let isExpanded = $state(!collapsed);
+  // Seeded from the prop and owned by the reader afterwards: a later change of
+  // `collapsed` must not fold a block someone opened. untrack says that on
+  // purpose — reading a prop here otherwise warns about capturing one value.
+  let isExpanded = $state(untrack(() => !collapsed));
 </script>
 
 {#if thinking}

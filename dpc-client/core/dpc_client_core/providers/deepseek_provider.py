@@ -2,15 +2,18 @@
 
 import os
 import json
-import base64
 import asyncio
+import time
 import logging
 from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, REASONING_OFF, normalize_reasoning_effort
+from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages,
+                   configured_reasoning_default,
+                   image_base64, network_client_bounds,
+                   normalize_reasoning_effort, positive_ceiling)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,8 @@ class DeepSeekProvider(AIProvider):
       - 1313 is NOT special-cased (DeepSeek never emits it).
     """
 
+    RETRY_LABEL = "DeepSeek"
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
 
@@ -65,7 +70,8 @@ class DeepSeekProvider(AIProvider):
             raise ValueError(f"API key not found for DeepSeek provider '{self.alias}'")
 
         base_url = config.get("base_url", DEEPSEEK_DEFAULT_BASE_URL)
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url,
+                                  **network_client_bounds(config, default_retries=0))
         # Kept for the REST balance endpoint (/user/balance); the openai SDK doesn't cover it.
         self._api_key = api_key
         self._base_url = base_url
@@ -143,16 +149,43 @@ class DeepSeekProvider(AIProvider):
         _completion = getattr(u, "completion_tokens", 0) or 0
         _ctd = getattr(u, "completion_tokens_details", None)
         _reasoning = (getattr(_ctd, "reasoning_tokens", 0) or 0) if _ctd else 0
-        return {
+        # No details block: nothing is known about reasoning, and the 0 above is
+        # for the log line only. DeepSeek's documentation does not say whether
+        # `completion_tokens` includes `reasoning_tokens`; `includes` is inferred
+        # from reasoning <= completion, which an excluding vendor with short
+        # reasoning would also satisfy. The inference is held only by the invoice
+        # reconciliation, the third detector level on THE-LABEL-ON-A-USAGE-ROW-….
+        if _ctd is None:
+            convention = "unknown"
+            content = _completion
+        elif _reasoning <= _completion:
+            convention = "includes"
+            content = _completion - _reasoning
+        else:
+            convention = "excludes"
+            content = _completion
+            logger.error(
+                "completion_tokens=%d is smaller than reasoning_tokens=%d: reasoning is "
+                "no longer counted inside completion; output_includes_thinking=excludes",
+                _completion, _reasoning,
+            )
+        usage = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": _completion,
             "reasoning_tokens": _reasoning,
-            "content_tokens": max(0, _completion - _reasoning),
+            "content_tokens": content,
             "total_tokens": getattr(u, "total_tokens", 0) or 0,
             "cache_read_input_tokens": _hit or 0,
             "prompt_cache_hit_tokens": _hit or 0,
             "prompt_cache_miss_tokens": _miss or 0,
+            "output_includes_thinking": convention,
         }
+        if _reasoning:
+            # Whose number the split is. DeepSeek reports it, so it is the
+            # engine's; a subclass whose server does not overwrites this key
+            # with its own estimate. Absent where there is no reasoning.
+            usage["thinking_source"] = "engine"
+        return usage
 
     def _effort_label(self, requested: Optional[str], extra_body: Dict[str, Any]) -> str:
         """What the usage line should say this call asked for.
@@ -173,6 +206,17 @@ class DeepSeekProvider(AIProvider):
             return REASONING_OFF if self._normalize_effort(requested) == REASONING_OFF else "alias-off"
         return extra_body.get("reasoning_effort", "server-default")
 
+    def _served_effort(self, extra_body: Dict[str, Any]) -> Optional[str]:
+        """The rung this call ran on, read out of the body that was sent.
+
+        The label above keeps `off` and `alias-off` apart for a person reading
+        the burn history; a usage row wants the rung, and both of those are
+        `off`. None is «the vendor's own default ran», which is not `off`.
+        """
+        if extra_body.get("thinking", {}).get("type") == "disabled":
+            return REASONING_OFF
+        return extra_body.get("reasoning_effort")
+
     def _record_usage(
         self,
         raw_usage: Any,
@@ -181,6 +225,7 @@ class DeepSeekProvider(AIProvider):
         conversation_id: Optional[str] = None,
         tool_calls: int = 0,
         effort: Any = "server-default",
+        served_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Keep the accounting and write the one line the burn history is made of.
 
@@ -191,6 +236,8 @@ class DeepSeekProvider(AIProvider):
         usage = self._usage_from_response(raw_usage) if raw_usage is not None else None
         if usage is None:
             return {}
+        # The rung, for whoever writes the row: the label below is prose.
+        usage["served_effort"] = served_effort
         self._last_usage = usage
         logger.info(
             "DeepSeek usage: alias=%s conv=%s prompt=%d (hit=%d/miss=%d), "
@@ -240,30 +287,6 @@ class DeepSeekProvider(AIProvider):
             "APIConnectionError", "APITimeoutError", "InternalServerError",
         )
 
-    async def _retry_with_backoff(self, fn, last_error: Exception):
-        delay = 3
-        elapsed = 0
-        attempt = 0
-        while elapsed < self.max_retry_seconds:
-            attempt += 1
-            logger.warning(
-                "DeepSeek retry %d, waiting %ds (elapsed %ds/%ds): %s",
-                attempt, delay, elapsed, self.max_retry_seconds, last_error,
-            )
-            await asyncio.sleep(delay)
-            elapsed += delay
-            try:
-                return await fn()
-            except Exception as e:
-                if not self._is_retryable(e):
-                    raise
-                last_error = e
-                delay = min(delay * 2, 192)
-        raise RuntimeError(
-            f"DeepSeek provider '{self.alias}' failed after {attempt} retries "
-            f"({elapsed}s elapsed): {last_error}"
-        ) from last_error
-
     @staticmethod
     def _normalize_effort(value: Optional[str]) -> Optional[str]:
         """The shared vocabulary, so this provider and Ollama read one word the
@@ -276,6 +299,17 @@ class DeepSeekProvider(AIProvider):
         dearer effort — so the rewrite was quietly upgrading whoever asked for
         `xhigh`, not translating them."""
         return normalize_reasoning_effort(value)
+
+    def reasoning_words_served(self) -> Optional[List[str]]:
+        """The shared scale: `reasoning_effort` rides `extra_body` on every path
+        that records usage, and this vendor folds the words it does not run onto
+        the ones it does."""
+        return None
+
+    def reasoning_default_served(self) -> Optional[str]:
+        """The alias's configured `reasoning_effort` — the key `__init__` reads
+        into `_reasoning_effort` — resolved onto this alias's ladder."""
+        return configured_reasoning_default(self)
 
     def _thinking_for_call(self, reasoning_effort: Optional[str] = None) -> bool:
         """Whether this one call reasons: the header's `off` beats the alias.
@@ -360,6 +394,23 @@ class DeepSeekProvider(AIProvider):
             return self._temperature_explicit
         return 1.0
 
+    def effective_settings(self) -> Dict[str, Any]:
+        """The ceiling always, the sampling only where this API honours it.
+
+        `_sampling_params` withholds temperature and `top_p` while thinking is
+        on, so a row quoting the configured number there would advertise a dial
+        wired to nothing — the same reason the field is not sent.
+        """
+        settings: Dict[str, Any] = {}
+        ceiling = positive_ceiling(self.max_tokens)
+        if ceiling is not None:
+            settings["max_output_tokens"] = ceiling
+        if not self._thinking_for_call():
+            settings["temperature"] = self._effective_temperature()
+            if self.top_p is not None:
+                settings["top_p"] = self.top_p
+        return settings
+
     # --- plain text generation ---
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
@@ -397,6 +448,7 @@ class DeepSeekProvider(AIProvider):
                 path="plain",
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
+                served_effort=self._served_effort(extra_body),
             )
             return msg.content or ""
 
@@ -450,6 +502,7 @@ class DeepSeekProvider(AIProvider):
                         path="plain-stream",
                         conversation_id=conversation_id,
                         effort=self._effort_label(None, extra_body),
+                        served_effort=self._served_effort(extra_body),
                     )
                 if not chunk.choices:
                     continue
@@ -510,96 +563,9 @@ class DeepSeekProvider(AIProvider):
             })
         return out
 
-    @staticmethod
-    def _anthropic_to_openai_messages(
-        system: Union[str, List[Dict[str, Any]]],
-        messages: List[Dict[str, Any]],
-        reasoning_echo: bool = False,
-    ) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        if system:
-            sys_text = system if isinstance(system, str) else "".join(
-                b.get("text", "") for b in system if isinstance(b, dict)
-            )
-            if sys_text:
-                out.append({"role": "system", "content": sys_text})
-
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content")
-
-            if isinstance(content, str):
-                out.append({"role": role, "content": content})
-                continue
-
-            blocks = content if isinstance(content, list) else []
-
-            if role == "assistant":
-                text_parts: List[str] = []
-                tool_calls: List[Dict[str, Any]] = []
-                thinking_text = ""
-                for b in blocks:
-                    if not isinstance(b, dict):
-                        continue
-                    bt = b.get("type")
-                    if bt == "text":
-                        text_parts.append(b.get("text", ""))
-                    elif bt == "tool_use":
-                        tool_calls.append({
-                            "id": b.get("id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": b.get("name", ""),
-                                "arguments": json.dumps(b.get("input", {})),
-                            },
-                        })
-                    elif bt == "thinking":
-                        thinking_text += b.get("thinking", "")
-                msg: Dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
-                if tool_calls:
-                    msg["tool_calls"] = tool_calls
-                    if reasoning_echo:
-                        # DeepSeek thinking mode requires reasoning_content on every
-                        # assistant message that carries tool_calls, or replaying it
-                        # on the next round returns HTTP 400. The agent adapter drops
-                        # thinking blocks on replay, so thinking_text is normally
-                        # empty -> pad with a single space (V4 Pro rejects "").
-                        msg["reasoning_content"] = thinking_text or " "
-                out.append(msg)
-                continue
-
-            if role == "user":
-                tool_results = [
-                    b for b in blocks
-                    if isinstance(b, dict) and b.get("type") == "tool_result"
-                ]
-                if tool_results:
-                    for tr in tool_results:
-                        # Anthropic tool_result.content may be a string or a list
-                        # of content blocks; flatten the list form to text.
-                        tr_content = tr.get("content", "")
-                        if isinstance(tr_content, list):
-                            tr_content = "".join(
-                                b.get("text", "") for b in tr_content
-                                if isinstance(b, dict)
-                            )
-                        out.append({
-                            "role": "tool",
-                            "tool_call_id": tr.get("tool_use_id", ""),
-                            "content": str(tr_content),
-                        })
-                else:
-                    text_parts = [
-                        b.get("text", "") for b in blocks
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    ]
-                    out.append({"role": "user", "content": "".join(text_parts)})
-                continue
-
-            # Fallback: stringify unknown block content
-            out.append({"role": role or "user", "content": json.dumps(blocks)})
-
-        return out
+    # The shared converter: images stay in their turns, and a provider asked by
+    # `provider=` refuses one it cannot see rather than dropping it.
+    _anthropic_to_openai_messages = staticmethod(anthropic_to_openai_messages)
 
     async def generate_with_tools(
         self,
@@ -618,7 +584,7 @@ class DeepSeekProvider(AIProvider):
         self._last_thinking = None
         self._last_usage = None
         openai_messages = self._anthropic_to_openai_messages(
-            system, messages, reasoning_echo=self.thinking_enabled
+            system, messages, reasoning_echo=self.thinking_enabled, provider=self,
         )
         openai_tools = self._anthropic_to_openai_tools(tools)
 
@@ -683,6 +649,7 @@ class DeepSeekProvider(AIProvider):
                 conversation_id=conversation_id,
                 tool_calls=len(tool_calls_raw),
                 effort=self._effort_label(reasoning_effort, extra_body),
+                served_effort=self._served_effort(extra_body),
             )
             return {
                 "content": content,
@@ -707,17 +674,12 @@ class DeepSeekProvider(AIProvider):
         will not route vision here."""
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in images:
-            if "base64" in img:
-                base64_data = img["base64"]
-                if base64_data.startswith("data:"):
-                    base64_data = base64_data.split(",", 1)[1]
-            else:
-                with open(img["path"], "rb") as f:
-                    base64_data = base64.b64encode(f.read()).decode("utf-8")
             mime_type = img.get("mime_type", "image/png")
             content.append({
                 "type": "image_url",
-                "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{image_base64(img, self.alias)}"
+                },
             })
 
         async def _call():

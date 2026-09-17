@@ -12,7 +12,7 @@
 
   type VoteDetail = {
     node_id: string;
-    vote: 'approve' | 'reject' | 'request_changes';
+    vote: 'approve' | 'reject' | 'request_changes' | 'abstain';
     comment: string | null;
     is_required_dissent: boolean;
     timestamp: string;
@@ -27,7 +27,9 @@
       approve: number;
       reject: number;
       request_changes: number;
+      abstain?: number;
       total: number;
+      participants?: number;
       threshold: number;
       approval_rate: number;
     };
@@ -51,6 +53,7 @@
       case 'approve': return '✅';
       case 'reject': return '❌';
       case 'request_changes': return '📝';
+      case 'abstain': return '🤷';
       default: return '❓';
     }
   }
@@ -60,6 +63,7 @@
       case 'approve': return 'Approved';
       case 'reject': return 'Rejected';
       case 'request_changes': return 'Requested Changes';
+      case 'abstain': return 'Abstained — could not judge';
       default: return 'Unknown';
     }
   }
@@ -135,10 +139,21 @@
               <div class="tally-count">{result.vote_tally.request_changes}</div>
               <div class="tally-label">Changes</div>
             </div>
+            {#if result.vote_tally.abstain}
+              <div class="tally-item changes">
+                <div class="tally-icon">🤷</div>
+                <div class="tally-count">{result.vote_tally.abstain}</div>
+                <div class="tally-label">Abstained</div>
+              </div>
+            {/if}
           </div>
           <div class="threshold-info">
             <strong>Approval Rate:</strong> {Math.round(result.vote_tally.approval_rate * 100)}%
             (Threshold: {Math.round(result.vote_tally.threshold * 100)}%)
+            {#if result.vote_tally.participants}
+              — {result.vote_tally.approve} of {result.vote_tally.participants} participants,
+              {result.vote_tally.total} answered
+            {/if}
           </div>
         </div>
 

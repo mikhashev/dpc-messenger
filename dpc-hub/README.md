@@ -624,17 +624,14 @@ docker exec dpc-hub-db psql -U user -d dpc_hub -c "
 
 ---
 
-## 🤝 Contributing
+## 🤝 Feedback
 
-See the main [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
+External pull requests are not being accepted yet — see the root
+[README](../README.md) §Community & Support, which is the one place that states
+the project's position. Issues and discussions are welcome.
 
-Hub-specific areas:
-- 🔐 Authentication improvements
-- 🔍 Crypto validation enhancements
-- 📊 Performance optimization
-- 🧪 Test coverage
-- 📝 API documentation
-- 🔧 DevOps improvements
+Note for whenever that changes: the Hub is AGPL-3.0 where the client is
+GPL-3.0, so the two need separate wording rather than one shared sentence.
 
 ---
 

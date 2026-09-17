@@ -1,0 +1,1135 @@
+---
+adr: 041
+title: "Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by a proved peer key rather than by an API key — and give every model call one usage row on the node that ran it"
+status: accepted
+date: 2026-08-31
+axis: network, honesty
+deciders: [Mike]
+consulted: [Ark, Johnny, Warren, CC, Fable 5, GLM 5.3]
+informed: []
+depends_on: [ADR-040]
+related: [ADR-002, ADR-026, ADR-036, ADR-038]
+supersedes: []
+session: "DPC Project #82–#136, 2026-08-31 — Mike's colleague wants Qwen3.8-27B from Continue in VSCode; three internal review rounds (Ark, Johnny, Warren) and two independent adversarial reviews (Fable 5, GLM 5.3) against the prompt at ideas/dpc-research/adr-041-adversarial-review-prompt-2026-08-31.md"
+---
+
+# ADR-041: Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by a proved peer key rather than by an API key — and give every model call one usage row on the node that ran it
+
+> **Status: accepted, 2026-08-31** — Mike, after three internal review rounds and
+> two independent adversarial reviews, accepted it. The work is filed as the
+> epic `AN-OPENAI-COMPATIBLE-SURFACE-IS-THE-PRODUCTS-FIRST-OUTWARD-FACING-DOOR`
+> with six children in the shipping order of D4, and the two production defects
+> the reviews turned up are filed separately because they do not wait on this.
+>
+> A recommendation standing on measurements, in the form ADR-040 used. Every claim is marked `Observed` (read in this tree, location
+> given), `Inferred`, or `Not verified`.
+>
+> **Two outside reviews broke four of this document's supports and none of its
+> decisions** (`ideas/dpc-research/adr-041-review-fable-5.md`,
+> `…-glm5.3.md`, written independently). Where they overturned something the
+> text below says so and names the finding; where a figure of ours was an
+> estimate it has been replaced by a count. **M4 was false and D6 rested on
+> it**, so D6 is re-decided here with the option that was missing. The one
+> question that had been left for Mike was D6's vote; it was taken with the
+> reviews, for `aiohttp.web`.
+
+## Context and Problem Statement
+
+A colleague of Mike's wants our production model, `qwen3.8 27b Mythos`, from the
+Continue plugin in VSCode (#84). Continue speaks the OpenAI HTTP API. Two paths
+were proposed: expose a second `llama-server` to a network (Ark, #83), or serve
+the OpenAI API from inside DPC and let the request travel our own P2P path
+(Ark, #85, at Mike's asking).
+
+Mike then added the requirement that shapes the ledger: usage must be countable
+afterwards — how much usage and so on, for analytics, and against the day somebody
+wants to monetise this kind of sharing (#87–#89); that API-backed models should
+be shareable the same way (#102); that money must be counted when a paid
+provider is shared (#111); and that **what is shared may not be shared onward**
+(#121).
+
+The question this ADR settles is not «can we reach the model». It is **what the
+outward-facing surface of this product is**, and whether a thing that consumes
+one of our models leaves a record anyone can read afterwards.
+
+## Measurements
+
+### M1 — There is no streaming over the peer path. `Observed`
+
+`p2p_coordinator.request_inference_from_peer` mints one `request_id`, awaits one
+`asyncio.Future` through a single `asyncio.wait_for`, and returns `result`
+whole. No SSE, no chunk callback, no partial delivery. Found by Johnny (#95),
+confirmed by both outside reviewers.
+
+**And streaming is per provider type, not «local», which is narrower than D4's
+first wording** (Fable). `Observed`: `LLMManager.query` (`llm_manager.py:585`)
+has no streaming form at all; streaming exists as `generate_response_stream` on
+`llamacpp_server_provider` and `dpc_agent_provider`, reached through `hasattr`
+in `llm_adapter.py`. Ollama has none. So a streaming gateway must either bypass
+`LLMManager.query` — and with it the `return_metadata` path the `_est` counts
+come from — or `LLMManager` gains a streaming entry point.
+
+**A consequence nobody priced** (GLM): when peer routing arrives, the gateway's
+SSE is a *re-chunked buffer* — the consumer's editor renders token by token
+what arrived seconds earlier all at once. That is a support ticket forever, and
+it belongs in the shipping order rather than in a footnote.
+
+*Closed 2026-09-14* by the D4 amendment of that date: `REMOTE_INFERENCE_CHUNK`
+carries the deltas on their own frames while the future below still awaits the
+answer, so the re-chunked buffer this measurement predicted is gone. What the
+measurement observed on its own date is unchanged.
+
+*Also observed:* the peer wait carries a timeout that reaches the await —
+`asyncio.wait_for(response_future, timeout=timeout)`, 1200 s by default,
+180 s as `llm_adapter` passes it. The peer path is not among the places that
+can hang unbounded.
+
+### M2 — Usage crosses the wire; the serving node records it in one place, and that place is wrong. `Observed`
+
+`create_remote_inference_response` (`dpc-protocol/protocol.py:58`) carries
+`tokens_used`, `prompt_tokens`, `response_tokens`, `model_max_tokens`,
+`thinking_tokens`, `model` and `provider`, and `handle_inference_request` fills
+every one from `llm_manager.query(..., return_metadata=True)`. The requester
+learns what his call cost in tokens.
+
+- **The counts are ours, not the engine's** — `llm_manager.query` counts them
+  centrally for every provider alike (`llm_manager.py:694–698`, GLM checked this
+  for an M6-shaped error and found none). The log line names them
+  `prompt_tokens_est` / `response_tokens_est` for that reason.
+- **The comment this ADR quoted three times is wrong for a paid alias** (Fable
+  F5, verified here). `p2p_coordinator.py:221` says a peer's request «appears in
+  no cost series». But `deepseek_provider._log_usage` describes its own output
+  as *«the one line the burn history is made of»* (docstring, `:187`, naming
+  5 406 lines). A peer's call on a DeepSeek serving alias **writes that line** —
+  with `conv=-` and no peer field. So the money is already counted, in the
+  owner's own burn series, indistinguishable from the owner's spend. **That is
+  worse than not counting it**, and D3 must say which series is the record and
+  which is derived.
+
+### M3 — A request_id exists end to end and reaches nothing. `Observed`
+
+Minted as `str(uuid.uuid4())`, echoed in the response, used to resolve the
+future — and absent from the `Peer inference served` line and from every row.
+The identifier exists; what is missing is a destination.
+
+### M4 — **Overturned.** The client already ships an HTTP server, and already runs one. `Observed`
+
+The first writing of this measurement said the core runs no HTTP server, on the
+strength of `pyproject.toml` naming only `websockets`. Both outside reviewers
+overturned it independently, from two different directions, and both are right —
+verified here:
+
+1. **`aiohttp` 3.14.1 is in the client's own venv**, and it arrives through
+   `discord.py>=2.7.0`, which is in the **base** `dependencies` list
+   (`pyproject.toml:38`) rather than an extra. So **every client install ships a
+   full HTTP/1.1 server** — `aiohttp.web`, `StreamResponse`, chunked transfer,
+   mid-stream disconnect detection. `uv run python -c "import aiohttp.web"`
+   succeeds in the client interpreter.
+2. **The core already runs an HTTP server** (GLM). `file_server.py` is a stdlib
+   `SimpleHTTPRequestHandler` on a `TCPServer`, constructed at `service.py:188`
+   on `127.0.0.1:9998`. It is GET-only and cannot carry `text/event-stream`, so
+   it does not solve D6 — but the sentence «the core runs no HTTP server» is
+   simply false.
+3. `fastapi` is already in the client's **dev** extra (`pyproject.toml:52`), so
+   «the idiom is foreign to this client» was true of the runtime and false of
+   the repository.
+
+**How the error was made, recorded because the class matters more than the
+fact.** This ADR's own falsifier warns that `uv pip list` reads the Hub's
+virtualenv because `VIRTUAL_ENV` points there — and then the measurement
+verified the **declared** dependencies instead of the **resolved environment**.
+GLM's words: the falsifier caught the trap in one direction and walked into it
+in the other. The rule this yields: **check what is installed, not what is
+declared.**
+
+### M5 — A locally served model has no dollar cost by construction. `Observed`
+
+`compute_cost_usd('qwen3.8 27b Mythos', 1000, 1000)` → `0.0`, billing
+`subscription`; `deepseek_flash` → `0.00088`, `pay_per_use`. Reproduced
+independently by GLM in the client's environment. Monetising shared *local*
+compute cannot read `cost_usd`.
+
+### M6 — Every path is encrypted; only an inbound direct connection proves who is on the other end. `Observed`
+
+| path | encryption | authentication of the peer's identity |
+|---|---|---|
+| Direct TLS, **inbound** (a peer dials us) | TLS to the peer's self-signed certificate | **three checks, stricter than a CA chain.** `_verify_hello_identity`: cert CN equals the claimed node_id; `SHA256(public key)[:32]` equals it; an RSA-PSS signature over a fresh 32-byte nonce from `HELLO_CHALLENGE`. The identity is self-certifying, so a forged certificate fails check 2 and a stolen public certificate fails check 3 |
+| Direct TLS, **outbound** (we dial a peer) | the same TLS | **two string comparisons and no proof.** `_validate_peer_certificate` (`p2p_manager.py:923`) reads the certificate's CN, compares it to the node_id from the URI, and stops; `HELLO_ACK` is then checked against a `node_id` the peer merely states. Nothing asks the far end to prove it holds a key |
+| Volunteer relay | end-to-end AES-256-GCM + RSA-OAEP **above** the transport | **recipient and integrity only.** Nothing signs the sender: `grep sign\|signature\|verify` over `transports/relayed_connection.py` and `managers/gossip_manager.py` returns nothing. The certificate *fetch* is sound — `gossip_manager.py:449` derives the node id from the fetched certificate before trusting a `cert:<node_id>` record, so a DHT poisoner cannot substitute a key (Fable F10) |
+| Gossip | the same hybrid scheme | the same |
+| Hub | signalling only; content never passes through it | — |
+
+**A correction to this table's own correction.** An earlier revision said an
+active middle's certificate «is then persisted as the peer's». **It is not**
+(GLM): `_persist_peer_certificate` derives the node id from the public key and
+refuses — *«Refusing to cache certificate for %s: its public key hashes to %s»*
+(`p2p_manager.py:1111`). The store is not poisoned. What is true, and is Fable's
+finding: **that function's return value is ignored at the call site**
+(`p2p_manager.py:745`), so a mismatch is a log line and the connection
+continues. The impersonation on the outbound leg is real; the escalation the
+sentence implied is not. Three errors of one shape in this table's short life —
+true of the handshake, written as true of the store; true inbound, written of
+the path — which is why D2 below is phrased as a property to prove rather than a
+path to name.
+
+**The relay tier cannot deliver at all** (found here, confirmed by reading the
+whole path by both reviewers). `relay_manager.py:657` forwards with
+`"from": from_peer` unchanged; on the destination the message arrives over the
+*relay's* connection, so `relay_message_handler.py:102` refuses when
+`payload["from"] != sender_node_id` — before the client-mode branch at `:123`
+that would have dispatched it correctly. No test names `RELAY_MESSAGE`. The
+check conflates «who is on the socket» with «who authored the payload», which is
+the distinction ADR-036 exists to make. Consequence for this ADR: **the only
+working NAT traversal today is WebRTC**, whose identity is the Hub's word, so
+the direct-only rule excludes more of the world than the table suggests.
+
+### M7 — The listener that D2 puts on the internet is unguarded. `Observed`, consequence `Inferred`
+
+Fable's F3, and neither the author nor three internal reviewers saw it.
+
+- `read_message` (`dpc-protocol/protocol.py:391`): `payload_length =
+  int(header.decode())` then `await reader.readexactly(payload_length)` — **no
+  upper bound**. Ten ASCII digits allow 9 999 999 999 bytes, and `readexactly`
+  accumulates them; `asyncio.start_server`'s 64 KiB limit applies to
+  `readline`/`readuntil`, not to `readexactly`.
+- The server context requires **no client certificate**, so any TCP client that
+  completes TLS reaches `read_message` — and that read has no `wait_for`.
+- `_is_rate_limited` counts **failed** HELLOs per IP. A client that never
+  finishes one never fails one.
+
+`Inferred`, not run: an unauthenticated stranger can hold connections open
+indefinitely and make the process allocate up to the length it declares.
+
+### M8 — Peer inference is serialised, and the admitted population is a list, not the roster. `Observed`
+
+Two corrections to figures this ADR and its reviewers put out:
+
+- `p2p_coordinator.py:33` `self._peer_inference_lock = asyncio.Semaphore(1)`,
+  held around the query at `:215`. Peer inference on a serving node is
+  **serialised**. «No quota» is right about counting and wrong about throttling.
+- `can_request_inference` admits `compute.allow_nodes` and
+  `compute.allow_groups` — **explicit lists the node owner maintains**, not «any
+  roster member», which is what this ADR and Warren both wrote. Warren's own
+  correction (#134) puts it best: bounded by a list you have to remember to
+  update is bounded by discipline.
+- With the serialisation, Fable re-priced the exposure: not $0.88 per thousand
+  calls but **$80–170/day** from one grantee at 128 k prompts. `Inferred` — he
+  assumed a latency and says so.
+
+## Decision
+
+### D1 — The OpenAI surface is a component of the DPC client, on the consumer's loopback
+
+The gateway lives inside the client, listens on `127.0.0.1` **of the consuming
+machine**, and hands requests to the provider layer. Mike settled «whose
+loopback» (#101): the consumer's, because the consumer then gets a DPC node
+rather than a URL — an identity, a place in a roster, and the ability to share
+in turn.
+
+**The reason first given for it was wrong and is replaced.** D1 said «no port is
+exposed anywhere». D2 requires the direct path, and direct means the serving
+node's 8888 must be reachable from the consumer's network — for a colleague off
+the LAN, the public internet (Fable F3). What D1 actually buys is that **the
+exposed port is gated by a self-certifying identity instead of a bearer
+secret**. That is a real and better property; it is not «no port».
+
+**The null option is rejected on its merits, not on timing.** The first writing
+removed it because Mike said the colleague is not in a hurry — a reason to
+defer, not to prefer the larger design; both outside reviewers said so. The
+honest rejection is that **an API key is a bearer credential**: inherently
+re-shareable, unattributed, unrecorded. It therefore fails two of Mike's own
+stated requirements — usage countable for analytics (#87–#89) and no onward
+sharing (#121) — and no amount of Tailscale fixes that.
+
+**And it remains the right immediate step, which is a different decision**
+(Warren #134). Thirty minutes of configuration serves one colleague today; the
+gateway is the platform. This ADR decides the platform. Whether to run the
+config-level bridge in the meantime is Mike's and is not decided here — he has
+said the colleague is not waiting (#96).
+
+**The serving-side gateway is a bet declined, and should be labelled one.** A
+gateway component on the *serving* node, loopback-bound and reached over a
+tailnet, opens no port either, streams immediately (M1 does not apply), needs no
+WebRTC challenge and no consumer-side install. What it does not give is the
+consumer's identity, roster place and transitive-compute future. Choosing
+against it is a product bet, not a derivation.
+
+*(**Amendment, 2026-09-14 — what the door serves, and what it answers by
+name.** Served: `GET /v1/models`, `POST /v1/chat/completions`,
+`POST /v1/messages`. Not served, and each answered `404` with the gateway-local
+code `endpoint_not_served`, naming the route and the two that are — rather than
+aiohttp's bare 404, which a client cannot tell from a wrong port or a client
+that is down: `/v1/embeddings`, `/v1/completions`, and Anthropic's legacy
+`/v1/complete`, which is refused in the Anthropic envelope because the guard
+now chooses the shape by either Anthropic path. **Embeddings are not
+implemented, and the reason is not timing.** The only embedding model on this
+node is the agent memory index's sentence-transformer
+(`dpc_agent/memory.py: get_embedding_provider`, a singleton on the GPU): it is
+no provider alias, `LLMManager` and every provider in `providers/` have no
+`embed` entry point at all, and neither serving list can name it — so there is
+nothing for `/v1/embeddings` to route to, and pointing it at an agent's own
+index would share what was never on the menu (D5, D7). D4's deferral of the two
+routes therefore stands; what changes is that the deferral is now said to the
+client instead of being left to a bare 404. The same principle removes from
+`/v1/models` any alias whose provider type transcribes and does not chat
+(`local_whisper`, on this node's lists or a peer's rows): the list is a menu of
+what can be completed against, and a completion on such an alias is `404
+model_not_found` saying it transcribes.)*
+
+### D2 — Authorised on a connection whose peer key has been **proved**
+
+Replaces the earlier phrasing «authorised on the direct TLS path». Two reasons,
+both from outside:
+
+- **«Gateway traffic» is not a class the wire can see** (GLM). The serving node
+  receives `REMOTE_INFERENCE_REQUEST` over whatever connected the two nodes; a
+  request born in Continue and one born in an agent are the same command with
+  the same fields, and `handle_inference_request` gets `peer_id` and a payload.
+  A rule about «gateway traffic» authorises nothing implementable.
+- **«Direct TLS» is not the property being relied on** (Fable). The property is
+  that `sender_node_id` was proved, and M6 shows that holds inbound and not
+  outbound.
+
+**The rule.** Peer inference — all of it, not a gateway subset — is served only
+over a connection on which the peer's key has been proved:
+
+- **inbound** direct TLS proves it today (nonce signature and key hash);
+- **outbound** direct TLS proves it as soon as `connect_directly` derives the
+  node id from the presented certificate's public key and refuses on mismatch.
+  TLS already requires the far end to hold the private key of the certificate it
+  presents, so a key-hash check turns possession into identity. **The check
+  already exists and its result is discarded**: making `_persist_peer_certificate`'s
+  return at `p2p_manager.py:745` a refusal is the whole fix;
+- **WebRTC, relay and gossip prove no sender** and are excluded.
+
+This is a **stronger and narrower decision than the one it replaces**: it
+restricts all peer compute, not gateway traffic, and it changes today's
+behaviour for any peer reached over WebRTC. That is deliberate. Mike removed the
+Hub from the trust path (#110) — the Hub was already planned for removal, so it
+does not matter — and ROADMAP §211 says the same in writing («Hub becomes optional
+bootstrap, not architecture center»); *no board entry planning the Hub's removal
+was found.*
+
+**The outbound key check is a precondition of this ADR and a defect in
+production today.** It is filed separately, at Ark's and Johnny's insistence,
+because it should not wait on this decision.
+
+### D3 — One usage row per model call, on the node that ran it, carrying who called
+
+```
+request_id, caller, caller_kind (agent|peer|gateway), alias, model,
+route (local|peer), prompt/completion/thinking tokens, counts_source (ours|engine),
+started_at, duration_s, billing (subscription|pay_per_use), cost_usd
+```
+
+`card_seconds` was in the first draft and is deliberately absent: nothing
+measures it, and under `kv_unified` with four slots «seconds of card» is not
+defined for a single call — two calls overlapping on two slots each occupied the
+card for their whole duration and together used it once. `duration_s` is what is
+measurable.
+
+**Why the node.** The card is on the node; the vendor key is on the node; an
+agent's call, a peer's call and a gateway client's call consume the same node's
+resource.
+
+**This is a new ledger, not a migration — the first writing had it backwards.**
+Both reviewers, verified here:
+
+- `events.jsonl` is a **task-lifecycle stream**. Usage appears only as a field
+  block inside `task_complete`, aggregated over a task's rounds. **There is no
+  per-call usage row anywhere today**, so nothing that reads that file reads
+  what D3 stores, and **no reader has to change**. `events.jsonl` keeps its
+  lifecycle rows and its readers.
+- The earlier count of «five read sites» included **two writers**:
+  `dpc_agent/events.py:203` and `:255` are both `append_jsonl`. The true reader
+  count is **three** — `agent_service.py:459`, `context.py:291` via
+  `Memory.read_jsonl_tail`, `tools/core.py:875` — plus the wrapper chain
+  `get_agent_tasks` → local API → `AgentTaskBoard.svelte:196`, plus four test
+  files. GLM searched the whole tree for a further hidden reader and found none.
+- The work the first writing did not count is the other side: **eight sites
+  where per-call usage is born**, all in `dpc_agent/llm_adapter.py`
+  (`compute_cost_usd` at `:315, :343, :464, :551, :556, :768, :779, :789`), plus
+  the peer path at `p2p_coordinator.py:216`, plus the gateway.
+- **One consistency rule the design must state:** the sum of a task's per-call
+  rows equals the `task_complete.cost_usd` the burn series already carries.
+- **And one series must be named the record.** M2 shows a paid peer call already
+  lands in the `DeepSeek usage:` line the burn history is built from,
+  unattributed. The ledger either replaces that series or is written from the
+  same call site; two sources of one number is what this decision exists to
+  prevent.
+
+**Money is counted at the moment of the call, and this is a constraint on
+*when*, not only on which column.** Mike, #111. A DeepSeek price is not a
+function of its tokens: `rates_at` reads the UTC hour against
+`PEAK_WINDOWS_UTC` (01:00–04:00, 06:00–10:00, `PEAK_MULTIPLIER = 2.0`), suspends
+those windows on a *Beijing* weekend — a calendar spanning three UTC days — and
+only from `WEEKEND_OFF_PEAK_FROM = 2026-08-22 16:00 UTC`; `_peak_applies` limits
+the rule to DeepSeek, because Z.AI shares the tables and not the clock. The
+table has changed twice this month. `pricing.py:177` states the invariant in its
+own words: *«a call is priced once, when it is made, and no later repair
+reprices the line already written»*. So `cost_usd` and `billing` are written by
+the node that made the call, at the time it made it, and are never re-derived.
+`compute_cost_usd(..., at=…)` already takes the moment; only the row is missing.
+
+**The guest's copy of the number belongs in v1 of the wire format** (Warren
+#120): adding it later is a wire-format change, the one kind of addition old
+clients cannot read. The response gains an optional cost field now; whether it
+is populated stays policy.
+
+**Attribution, not price.** Johnny's objection (#95), adopted as a correction:
+the ledger records that a call happened, whose it was, and what it cost *the
+host*. What it is worth to the guest is a policy above it, and M5 is why the two
+cannot be one field.
+
+*(**Amendment, 2026-09-10 — the owner's tariff is the guest's money column set,
+the wire carries the tariff and not the host's cost, and a row freezes its
+currency.** Mike, #95 (his go-ahead on `tariff`, `free_nodes` with `free_groups`)
+and #110, after the consensus the three agents reached in #68–#109. The owner of
+a shared model sets a price for it, so «attribution, not price» becomes two
+column sets rather than one. `cost_usd` stays what the call cost the host — a
+vendor's USD, or 0 by construction for a local model (M5) — and stays on the
+host's row. Beside it: `tariff_in` and `tariff_out`, the owner's rates per 1M
+tokens as **applied values**, never a reference to a configuration that may
+have changed; `tariff_currency`, the host's `compute.currency` (ISO 4217,
+validated), frozen into the row because rows are forever and configuration is
+not; `tariff_at`, the dated tariff entry applied; and the call's amount in that
+currency, whose column name is open (`tariff_amount` proposed — `charge` is
+reserved for the act of settlement, which does not exist yet). Three states,
+distinct on purpose: `null` — no tariff declared, the v1 gift; `0` — declared
+free, which is what a member of `free_nodes` / `free_groups` gets; `>0` — paid.
+The wire (§3.4) carries the tariff fields and no longer the host's `cost_usd`;
+the guest's row copies them and writes `cost_usd = null`, because it spent
+nothing of its own and prices nothing (the `f7490460` rule, kept). `request_id`
+is minted by the caller and travels with the call, so the host's row and the
+guest's row are a double entry that joins on it. *(Amended 2026-09-15: the
+caller mints the key the host's own row is written under, so the host keeps the
+ids it is serving per peer and refuses one already in flight from that peer
+(`invalid_value`, before the queue and with no row) — two calls under one id
+would cross their chunk streams and collapse two rows into one. The pair (peer,
+id) is what must be unique; the id is free again once the answer has been sent.
+In the same pass the two words that blame the guest, `invalid_value` and
+`tools_unsupported`, moved to the two gates that mean them — the effort
+vocabulary and the tool path — because `489f47cb` set them from the type of the
+exception, and a provider's own validation raises `ValueError` too: a failure
+inside the host's call now carries no code and reaches the guest as the 502 it
+is.)* The currency is a property of
+the node, not of the protocol: «what I owe X» sums in one unit, sums across
+hosts do not, and parity between two units is the pair's own agreement,
+recorded at reconciliation, outside the protocol. Not built, and said so:
+a Merkle or transparency log; a `settlement_asset` field, which nothing would
+write; any payment rail — settlement is outside the protocol, by hand or by
+whatever the pair chooses. Stage 2, decided in shape and not in time: a prepaid
+balance per guest, derived as credits minus debits from ledger rows rather
+than kept as a counter, with a threshold or a reservation before the call;
+whether it is v1 or v2, and who tops it up, are open questions below. Adopted
+from the outside review Mike brought (#128, checked by Ark in #106–#109), in
+cost order and each as its own card: `request_id` mapped to a saved answer with
+a TTL, so a retry after a timeout does not run the card twice; `prev_row_hash`
+and a row signature, decided before the first signature is written — a signed
+field set is never crossed, the `dptp-msg-v2` rule; `max_cost`, `expires_at`
+and `tariff_version` carried in the request itself, one round rather than a
+402 and a retry, with a reservation by maximum before the queue, which also
+closes the race between the menu and the call; `model_digest`, engine and
+quant in the receipt to the guest and not in the menu; revocation of a peer's
+key beside its proved identity. The tariff's home is the `compute` block of
+`privacy_rules.json` as `serving_tariff`, dated entries per alias, with a
+validator in the same commit; `free_nodes` / `free_groups` sit beside
+`allow_nodes` / `allow_groups`, the `allow` / `send_to` pattern the
+transcription block already has.)*
+
+*(**Amendment, 2026-09-13 — the balance is v2, the caller pays, the amount
+column is `tariff_amount`, and reasoning is billable output.** Mike's call,
+2026-09-13, on four of the five questions left open above. The prepaid balance
+of stage 2 — credits minus debits from rows, as decided in shape — is v2, not
+v1. The payer is the caller: a guest funds his own balance, the host tops
+nothing up; and with the balance in v2 the top-up has no v1 form at all. v1 is
+therefore a row that names the tariff and the amount, charged per call against
+no balance, with no settlement mechanism — the honest shape, since settlement
+is the part this protocol cannot enforce. The amount column is
+`tariff_amount`, the last ledger name that had to be fixed before the first
+paid row, because after it a column changes only by migration. Reasoning is
+billable output at `tariff_out`; there is no separate thinking rate. Read from
+the vendors' own pages the same day: Anthropic, OpenAI and Google all bill
+reasoning as output tokens at the output rate and none prices it at a rate of
+its own; DeepSeek and Z.AI document nothing, so for those two the convention
+is established here by measurement (659 engine rows, thinking never above
+completion). What the decision leaves is carried by two board entries.
+THE-LABEL-ON-A-USAGE-ROW-SAYS-WHO-COUNTED-AND-THE-ARITHMETIC-NEEDS-TO-KNOW-WHAT-WAS-COUNTED
+gives the row a three-state field (proposed `output_includes_thinking`:
+includes / excludes / unknown), set where the count is made, and the formula:
+includes → `tariff_out × completion_tokens`; excludes → `tariff_out ×
+(completion_tokens + thinking_tokens)`; unknown → not billed, analytics only —
+the state of every row written so far.
+THE-GATEWAY-REPORTS-AN-OUTPUT-COUNT-THAT-EXCLUDES-REASONING-IN-TWO-FORMS-WHOSE-OWN-SPECS-INCLUDE-IT
+carries the wire's output count, exclusive until it is fixed there. The fifth
+question, the artifact hash in the receipt, is answered as well: not in v1
+(Mike's call, 2026-09-13); it returns as a v2 question beside the balance.)*
+
+*(**Amendment, 2026-09-14 — a consumed row names the host that served it, and
+the ledger reads itself by role.** Mike's ask of 2026-09-14 for usage
+statistics by role. The row gains one optional column, `served_by`: the node id
+of the host on a `route=peer` row, written beside the tariff group because the
+two answer one question together — what this call was charged and by whom.
+Until now a guest's row named the alias and nothing naming the host, so «what I
+owe and to whom» could not be read off the ledger at all: an alias is the name
+one host answers to, and two peers both serving `ollama_local` folded into one
+line. It is optional and written only when given, like `task_id`: on a row this
+node ran itself there is no other node to name, and a null there would read as
+«served by nobody» rather than «served here». `alias` is unchanged — the name
+the host was asked for. Both writers of a consumed row now write it: the
+agent's peer route (`dpc_agent/llm_adapter.py`) and the gateway's
+(`gateway.py` `_complete_via_peer`). Nothing on the wire changes — the guest
+already knows which peer it called.
+
+The reader is `node_ledger.usage_by_role`, reached from the UI as
+`CoreService.get_inference_usage` (optional `since` / `until`, and `month` as
+`YYYY-MM` to read one partition). It folds the same rows three ways and never
+into one table with a role column — Mike's call: three separate lists.
+`served` is what this node ran for peers (`route=local`, `caller_kind=peer`),
+by the peer that asked and by the alias that answered; `consumed` is what peers
+ran for this node (`route=peer`), keyed by `consumed_key` as
+`remote:<served_by>:<alias>`, and as `remote:?:<alias>` on a row written before
+the column (amended 2026-09-15: the key was the bare alias until then, which is
+the very string an own row of that name uses, so on a node that both serves and
+consumes one alias name a reader holding one map of keys merged the two into one
+line; `?` is no node id and can key no other bucket), each group echoing
+`node_id` and `alias` so no reader parses the key back apart; `own` is this
+node's own calls on its own key. The money is per
+side: `cost_usd` sums only where this node ran the call, and `tariff_amount`
+sums per `tariff_currency`, because two currencies do not add. The two states
+that are not an amount are counted and never summed as zero — `untariffed` is a
+call with no tariff declared (the v1 gift), `tariff_unpriceable` is a tariff
+applied over counts nobody could price — and `unpriced` does the same for a
+null `cost_usd`. The tab reads the current month by default, one partition per
+request.)*
+
+### D4 — Shipping order, and the colleague is served at step 4
+
+Replaces the earlier «narrow first version», which GLM showed contradicted
+itself: D1 puts the gateway on the *consumer's* node, D4 deferred peer routing,
+and the consumer has no local Mythos — so v1 as written **could not serve the
+request that caused this ADR to exist**.
+
+1. **The node ledger** (D3). Additive: usage rows are new, lifecycle rows stay,
+   no reader changes. It comes first because D5's quota needs a persistent
+   source and because a gateway shipped before it leaves exactly the nothing a
+   peer's call leaves today.
+2. **The listener hardening** (D8). It precedes any decision that puts 8888 in
+   front of a network we do not own.
+3. **The gateway serving local aliases**, plus the quota wiring and D5's two
+   lists. Streaming here is per provider type (M1), not «local».
+4. **Peer-routed gateway — the colleague is served here.** Non-streaming (M1),
+   over a proved connection only (D2), attribution keyed to the proved sender
+   (D7). The re-chunked-SSE caveat (M1) is stated to the user, not discovered by
+   him. *(Both halves of this step's narrowing are closed by the amendment of
+   2026-09-14 below: the wire streams, and it carries tools and the
+   conversation. D2 and D7 stand unchanged.)*
+5. **API-backed sharing** (D5), which does not start before its quota exists.
+
+Deferred beyond this list, explicitly: `/v1/embeddings`, which Continue wants
+for indexing; streaming over P2P; `/v1/completions` for tab autocomplete
+(`Not verified` against Continue's documentation — both reviewers flagged it
+from memory).
+
+*(**Amendment, 2026-09-10 — steps 3 and 4 ship without streaming, and the
+gateway speaks two forms.** Step 3 shipped as `1ebe8441`: `GET /v1/models` and
+`POST /v1/chat/completions` on `127.0.0.1:9997`, off by default, opened by a
+static key. `stream: true` is honoured with the whole answer in one SSE chunk
+followed by `[DONE]`, because `LLMManager.query` has no streaming form (M1) and
+bypassing it would lose the counts a usage row is made of; that narrowing is
+recorded here rather than in a chat message, as Zcode asked in review. Mike
+decided (#68 — both forms) that the gateway also speaks the Anthropic Messages
+form — `POST /v1/messages`, what Claude Code speaks — as a step of its own
+between 3 and 4, over the same listener, key, lists, quota and row writer: it
+answers with one text block and one `text_delta`, and tools sent by the client
+are accepted and ignored in v1, a named narrowing rather than an omission. Step
+4 keeps its shape — one chunk — and the re-chunked buffer is said in
+`docs/CONFIGURATION.md` under `[gateway]`.)*
+
+*(**Amendment, 2026-09-14 — the two narrowings above are closed on the local
+route.** Both forms now pass `tools` to `LLMManager.query_messages` and answer a
+call as a `tool_use` block (Anthropic form) or `tool_calls` (OpenAI form), and
+both stream through the provider's chunk callback with the cumulative usage in
+the final event equal to the usage row of the same `request_id`. What stays
+narrow, and is refused rather than dropped: forcing a tool (`tool_choice`
+`any`/`tool`/`required`, `parallel_tool_calls: false`), because every provider
+here runs `auto`; tools on the peer route, because `REMOTE_INFERENCE_REQUEST`
+carries none; and token-level deltas under a tool call, because no provider on
+this node streams while holding tools. Step 4 — the peer route — still answers
+whole. Mike's ask, 2026-09-13. *(The two peer narrowings — tools, and answering
+whole — are closed by the amendment of 2026-09-14 below; tool forcing and
+token-level deltas under a tool call stay narrow.)*)*
+
+*(**Amendment, 2026-09-14 — reasoning effort and images cross both doors.** The
+peer wire has carried both since before this gateway existed —
+`create_remote_inference_request(request_id, prompt, model, provider, images,
+reasoning_effort)` — and the door dropped them silently: a probe sending
+`"reasoning_effort": "banana"` was answered `200` with the model's text. Both
+now cross, and what cannot is refused by name, as tools already were.
+
+**Effort.** The OpenAI form reads top-level `reasoning_effort`. The Messages
+form reads `output_config.effort` — verified against
+[platform.claude.com/docs/en/api/messages](https://platform.claude.com/docs/en/api/messages)
+on 2026-09-14, which documents the optional `output_config.effort` with values
+`low | medium | high | xhigh | max`, and `thinking` as one of
+`{type: enabled, budget_tokens, display}`, `{type: disabled}` or
+`{type: adaptive, display}` — and reads `thinking: {type: disabled}` as this
+project's `REASONING_OFF`. `xhigh` folds to `high`, as
+`normalize_reasoning_effort` already folds it everywhere. `enabled` and
+`adaptive` name no depth, so they ask for the alias's own default and are
+carried as nothing; `budget_tokens` is a quantity this scale cannot express and
+is not folded into a word, as `max_tokens` and the rest of sampling stay the
+alias owner's. The vocabulary is **per alias**: where a model's own template
+named its rungs — the same `declared_reasoning_words` that puts
+`reasoning_words` / `reasoning_default` on a provider row and on a peer's menu
+— a word that reaches none of them is a `400` listing that alias's words, and
+the shared scale stands in only for an alias that named none. On the peer route
+the menu row's `reasoning_words` bound the request the same way when the row
+carries them, and where it does not the word travels and the host caps it
+(`_effort_for_peer`, unchanged: the host's own settings remain the guest's,
+the effort excepted — Mike's call, 2026-09-14). The local usage row's
+`served_effort` names the rung the call ran on, not the word that asked for it,
+and where nothing was asked it names what the alias runs at by itself — its
+configured word, or its template's default — with `null` reserved for «not
+knowable here», never for `off`.
+
+**Images.** An OpenAI `image_url` part whose URL is `data:<mime>;base64,<payload>`,
+and an Anthropic `image` block whose source is `{type: base64, media_type,
+data}`, become the two fields DPTP §3.4 requires and travel **beside** the
+prompt on both routes — the shape the peer wire has, so an image's position
+among the turns is not preserved, and the wire is unchanged by this amendment.
+Refused by name: an `http(s)` URL or a `url`/`file` source, because this node
+fetches nothing from the web on a client's behalf; an image past
+`[vision] max_image_size_mb`, `413`, on the decoded bytes, which is the cap the
+P2P door already enforces rather than a second one; tools beside an image on
+the local route, because vision goes through `generate_with_vision`, which
+holds none; an alias whose provider says it has no vision, and a peer whose
+menu row says `supports_vision: false`. `aiohttp`'s own 1 MiB body cap is
+raised to four times the image cap, or most images would have been refused
+before any handler saw them. Mike's ask, 2026-09-14.)*
+
+*(**Amendment, 2026-09-14 — the peer route is no narrower than the local one.**
+The wire was the reason for every narrowing above, so the wire changed. DPTP
+v1.7 puts four optional fields on `REMOTE_INFERENCE_REQUEST` — `messages`
+(the conversation un-flattened, Anthropic-shaped), `system`, `tools` and
+`stream` — two on the response — `tool_calls` as `tool_use` blocks and
+`finish_reason` in the providers' own vocabulary — and adds one message,
+`REMOTE_INFERENCE_CHUNK` (`request_id`, `seq`, `delta`). Board entry
+THE-PEER-WIRE-CARRIES-ONE-PROMPT-SO-A-GUEST-GETS-NO-TOOLS-NO-STREAM-AND-NO-CONVERSATION;
+Mike's verb, 2026-09-14.
+
+**What this closes.** M1's «there is no streaming over the peer path» is closed
+as a constraint: `request_inference_from_peer` still awaits one future for the
+answer, and the chunks arrive beside it on their own frames. D4 step 4's
+«non-streaming (M1)», its one-chunk shape and its re-chunked-SSE caveat are
+closed with it — a guest's editor now renders what the host is making, not what
+it made seconds ago. The 2026-09-14 amendment's two peer narrowings are closed:
+tools cross the wire, and the conversation reaches the host un-flattened.
+
+**Three invariants, adopted from Ark's reading.** A chunk is transport and the
+record is the final frame: no counter is born in a chunk, no usage row is built
+from deltas, and the terminating `REMOTE_INFERENCE_RESPONSE` still carries the
+whole answer and every count, so both nodes' rows are built exactly as they were
+(D3, unchanged). Chunks are not billed. On a broken stream the host's row is the
+record and the guest's is a mirror that may simply be missing — the two join on
+`request_id`, and the absence is expected rather than a lost call.
+
+**Compatibility is the design, not a fallback.** `prompt` stays required and
+carries the same turns flattened, from the same source, so an older host answers
+a newer guest and the four fields are absent — byte for byte — when nobody asks
+for them. An older host ignores `stream`, sends no chunk, and the guest's SSE is
+the one chunk this route always wrote. An older guest never sets `stream`, and a
+new host sends it none.
+
+**One new menu field.** `supports_tools` on the `PROVIDERS_RESPONSE` row (DPTP
+§3.5), true when the alias's provider has a native `generate_with_tools` path —
+the same predicate the local route already reads. It is an optimisation: the
+guest refuses tools by name off the menu before spending a round trip, and the
+host's refusal on the wire remains the gate. Absent reads as no.
+
+**Gates unchanged, and all of them in front of every new field.** D2's proof of
+the connection, `can_request_inference`, the serving alias, D7's onward-sharing
+refusal, `_effort_for_peer` and the peer inference lock run before a single new
+field is read, and **a refused call emits no chunk**. The host's own settings
+are still what a guest gets, the effort excepted.
+
+**What stays narrow, by name.** Forcing a tool (`tool_choice` `any`/`tool`/
+`required`, `parallel_tool_calls: false`) — unchanged, because every provider
+here runs `auto`. Token-level deltas under a tool call, on either route, because
+no provider on this node streams while holding tools. Images and tools together
+on the peer route, refused now as they already were locally, because the host's
+vision entry point is `query` and holds no tools — and for the same reason a
+request carrying both images and `messages` is served from the prompt. A request
+that does not fit one 64 MiB DPTP frame is `413` by name, raised by
+`write_message` at the origin before a byte leaves this node; tools plus a long
+conversation can reach it. Not started: `/v1/embeddings`, `/v1/completions`.)*
+
+*(**Amendment, 2026-09-17 — images and tools together cross both routes.** The
+owner's goal, Mike, 2026-09-17: Claude Code must work with any model a node
+shares, images included where the model sees them. Claude Code attaches its
+tools to every request, so one screenshot is images and tools in one call with
+the system prompt and the history intact — and both routes refused that, the
+local one by the 2026-09-14 amendment on images and the peer one by the
+amendment above. Confirmed live on the peer route: once a screenshot stood in
+the history, every later turn of the session came back `400`. Board entry
+THREE-PROVIDER-HANDLES-NEVER-GROW-TOGETHER, three steps; the two narrowings
+above are closed by them and are left as they were written.
+
+**What closes them.** The tools path learned to carry a picture in its turn
+(`35f54909`: one shared converter, and `entry_point_for` asks whether the
+provider sees). The local route keeps an image where the client put it and
+takes images beside tools to `query_messages`, refused only by that predicate
+(`e2c6a58f`). On the peer route a guest sends the turns with their `image`
+blocks, and no flat `images`, to a host whose menu row says
+`serves_images_with_tools`; the host serves them through `query_messages` and
+refuses them, by the same predicate, where its alias cannot carry both (DPTP
+§3.4, §3.5). Images without tools keep the vision entry point on both routes,
+as before.
+
+**One new menu field, and its name.** `serves_images_with_tools` (Mike accepted
+the name, 2026-09-17). A `supports_*` field says what a provider can do; a
+`serves_*` field says what this node's route will serve for a request of one
+shape. It is `entry_point_for(provider, tools=True, streaming=False,
+images=True)` — the question the host's gate and `query_messages` ask — and
+never a conjunction of `supports_vision` and `supports_tools`, which differ
+from it wherever a class carries a tools attribute that is not a callable path.
+**Fail-closed**, unlike `supports_vision`: a guest reads the field's absence as
+no, because an older host takes image blocks beside tools to a path whose
+converter may drop them without a word — the one combination this amendment
+exists to stop answering wrongly.
+
+**What the host now refuses rather than drops.** The flat `images` field beside
+`tools`: that field reaches `query`, which holds no tools, and the host used to
+answer from the prompt with the tools and the history gone. Refused with
+`tools_unsupported`, the word that already meant «your request, this alias's
+tools», and not a new code — a word an older guest does not know reads as a
+failure mid-call, a `502` where a `400` is owed.
+
+**What the logs say.** The host's request line and its served line, and the
+llama.cpp usage line, carry `images=N tools=N` — the pictures a call carried,
+in the flat field and in the turns, and the tools it offered — counted, never
+quoted; the D7 amendment's «whether images were attached» is that count now.
+Thinking and effort take no special case for images.
+
+**Compatibility.** An older guest never sends image blocks beside tools, so a
+new host serves it exactly as before, except that its flat `images` beside
+`tools` is now a named `400` instead of an answer without the tools. A new
+guest reaching an older host refuses the combination before the round trip,
+in a sentence that names `serves_images_with_tools`, and still sends images
+without tools on the flat field an older host reads. What stays narrow, by
+name: an image block in the turns *without* tools reaches `query_messages` on a
+new host, whose tools-less paths render text and refuse the picture as a
+mid-call failure. The gateway is the only guest in this tree that sends
+`messages`, and without tools it strips the top-level image blocks, so it sends
+that shape only for a picture a tool returned inside a `tool_result` in a
+request that offers no tools. And a screenshot
+travels inside the turns on every later request whose history still holds it,
+so a long session re-sends each picture per call and meets the 64 MiB frame cap
+sooner than a text session.)*
+
+*(**Amendment, 2026-09-14 — the door and the menu can be read from the UI, and
+one builder answers for the menu.** Five commands on the local API, the half of
+the Inference Sharing tab the backend could not fill:
+
+* `get_gateway_state` — `enabled` (`[gateway] enabled`, which only a restart
+  re-reads) apart from `running` (a listener actually holding the port), the
+  port, the bind, the key **masked**, the key file, the two serving lists or
+  the refusal that stopped them being classified, and `compute.enabled`.
+* `rotate_gateway_key` — a new key written over `~/.dpc/.gateway_key` (temp
+  file, `0600`, `os.replace`) and swapped into the running listener, so the old
+  key is `401` on the next request with no restart; returned once, in clear.
+  This replaces rotation-by-deletion, which `docs/CONFIGURATION.md` documented.
+* `get_gateway_client_lines` — the paste-ready configuration for Continue,
+  Cursor, Claude Code and curl, rendered by `gateway.client_config_lines`; the
+  two snippets in `docs/CONFIGURATION.md` are that function's own output and a
+  test compares them, so the page and the button cannot drift.
+* `get_peer_provider_menu(peer_id)` — the rows that peer would be sent, from
+  the function that sends them.
+* `validate_firewall_rules(rules)` — retyped from `str` to the dict
+  `ContextFirewall.validate_config` reads; it had no caller and would have
+  answered «invalid» to every input.
+
+**One builder for the menu.** `CoreService.menu_for_peer` is now the single
+selection behind both senders of `PROVIDERS_RESPONSE` — the peer's own
+`GET_PROVIDERS` and the notify after a firewall save. They disagreed: the
+notify path had no type branch, so it could never send a transcription row and
+every save silently narrowed a connected peer's menu
+([[THE-MENU-A-PEER-SEES-IS-BUILT-BY-TWO-BUILDERS-THAT-DISAGREE]]). The rule
+kept is the request path's, and the notify path now logs what it dropped and
+why, as the request path already did. A preview that disagreed with the wire
+would be one function disagreeing with itself.
+
+**Three questions, and how they were settled.** Rotation as a button behind a
+typed confirm; the peer picker offering any known node with the connected ones
+first; the paste lines carrying the key in clear inside a collapsed block —
+because they exist to be pasted into another tool's config and this socket
+already carries `.ws_token`. Recommended by CC, put to Mike on 2026-09-14 and
+not overridden by 13:00Z; implemented on that basis, and his to reverse.)*
+
+*(Amendment, 2026-09-14 — which classes forward an effort, and what the silent
+ones now report.*
+
+`served_effort` is the rung the call ran at, so a class that sends no effort
+must name none. Each provider class now declares what it can put on the wire
+(`AIProvider.reasoning_words_served`, `[]` by default and fail-closed), and both
+doors read that one declaration. As of today:
+
+| Class | Forwards an effort? | `served_effort` | Menu `reasoning_words` |
+|---|---|---|---|
+| `LlamaServerProvider` | yes — `chat_template_kwargs.reasoning_effort` / `enable_thinking` | the word in the body it built | the model's template words |
+| `DeepSeekProvider` | yes — `extra_body.reasoning_effort` | the word in the body it built | absent (the shared scale) |
+| `OllamaProvider` | yes — `think`, a level or `false` | the word `think` carried; null where it carried `true` or nothing | absent where the model can reason, `["off"]` where it cannot or the alias sets `think: false` |
+| `ZaiProvider` | only `off` — `thinking: {type: disabled}` | `off` where it disabled thinking, else null | `["off"]` |
+| `AnthropicProvider`, `OpenAICompatibleProvider`, `GeminiProvider`, `GigaChatProvider`, `GitHubModelsProvider`, `DpcAgentProvider`, `RemotePeerProvider`, `LocalWhisperProvider` | no | null | `[]` |
+
+Anthropic sends a thinking *budget* from its alias config and Z.AI a switch;
+neither is a rung a caller can choose, so neither is offered as one. The three
+that name `reasoning_effort` in a signature and do not forward it say so in the
+code, and are counted as no here.
+
+What changes for a caller: an alias whose row is `[]` refuses every effort word
+at both doors — `off` included, because a class with no effort channel has no
+way of saying no either — and its rows and wire responses carry
+`served_effort: null`, which §3.4 already defines as «no word describes the
+call». What was wrong before: the doors derived the word from the alias's
+configured `reasoning_effort`, a key six of the ten classes never read, so a
+billed row could name a rung the engine was never asked for
+([[SERVED-EFFORT-REPORTS-THE-OWNERS-INTENT-ON-AN-ALIAS-WHOSE-PROVIDER-NEVER-READS-IT]]).*
+
+### D5 — API-backed models are shareable, and the quota is a financial control
+
+Sharing a vendor-backed alias is a different act: **the node holding the key
+pays real money.**
+
+1. **Two lists, not one longer list** (Ark #108). Local aliases, whose scarce
+   resource is the card and whose refusal is «the card is busy»; vendor aliases,
+   whose scarce resource is money and whose refusal is «the budget is spent».
+   One list would put two refusal policies behind one setting, and the owner
+   could not say «share the GPU freely, the API never».
+2. **A per-caller quota, and it is a control rather than wiring** (Warren #134,
+   adopted). `firewall.py` and `p2p_coordinator.py` contain no quota, rate limit
+   or budget; the shape exists three times elsewhere (`dpc_agent/budget.py` per
+   agent and provider, `discord_coordinator.py` per user and globally,
+   `relay_manager.py` at 100 msg/s) and is wired to neither the peer nor the
+   gateway. **«Does not ship before the quota» is a sentence, and a sentence is
+   not a control.** The enforceable form, mirroring the unset-alias refusal
+   already at `p2p_coordinator.py:196`: **a vendor-class alias in the serving
+   list with no configured quota is a configuration error, refused at load with
+   a named reason.**
+3. **The quota's durability is a decision, and it is «persistent».** All three
+   existing shapes hold their counters in memory and reset on restart. A ceiling
+   that resets every boot is abuse damping, not a financial control — so the
+   quota reads the node ledger, which makes **D3 a precondition of D5**, not a
+   sibling.
+4. `cost_usd` for a pay-per-use alias is already computable (M5). The column
+   exists; the row does not.
+
+*Corroboration this ADR did not use* (GLM): the open cheque has already
+happened — `backlog.md` records that the shared path carried two requests ever
+and both were relayed to the paid `deepseek_flash`, which is the measured origin
+of ADR-040 D4-0. `Observed` as a board entry; the incident is the board's claim.
+
+*(**Amendment, 2026-09-10 — the names.** Shipped with step 3 (`1ebe8441`): the
+two lists are `compute.serving_local` and `compute.serving_vendor` in
+`privacy_rules.json`; `compute.serving_alias` is folded into `serving_local` at
+load with a deprecation warning and the P2P door serves `serving_local[0]`, so
+one truth feeds both doors; the quota is `compute.vendor_quotas`, USD per day
+**per caller** — a ceiling for each caller separately, read from the node
+ledger by `NodeLedger.spent_today`. A vendor alias with no ceiling, an alias in
+both lists, a `remote_peer` or `dpc_agent` alias in either (D7), or a type under
+the wrong list is refused at load and at save with the reason. The names were
+put to Mike on 2026-09-10 and taken as decided when the reviews converged on
+them and he did not object.)*
+
+*(**Amendment, 2026-09-14 — the peer door enforces the same ceiling.** The
+quota stood on the gateway's local route alone; the peer door
+(`P2PCoordinator.handle_inference_request`) had none, so a guest calling a
+vendor alias this node serves could spend without bound. It now asks the same
+question from the same objects: the serving lists come from the gateway's own
+`Gateway.serving_lists()` where this node has a gateway and from
+`ContextFirewall.classify_serving_lists` where `[gateway] enabled` is off,
+and a `vendor` alias is weighed against `compute.vendor_quotas` with
+`ledger.spent_today(alias, caller=peer_id, caller_kind="peer")` — the rows
+`_record_peer_call` writes under that guest's own name. The ceiling is per
+caller, so one guest's spending never binds another's, and it is persistent
+because the ledger is a file: a restarted node sums the same rows. The refusal
+comes before the inference queue, writes no usage row, and carries the code
+`insufficient_quota` — the word the gateway already refuses its own spent
+ceiling with (DPTP §3.4).*
+
+*Two things it does not do. There is **no ceiling per call**: a single
+expensive call under the day's ceiling is served whole, and what it cost is
+known only once it is priced — the per-call limit is an open decision and
+Mike's. And the lists classify the serving alias, which today is
+`serving_local[0]`: a paying alias misfiled there makes the lists a
+configuration error, and the door now refuses rather than guess the class,
+where before it served the call and paid for it. Guessing wrong spends the
+host's money, so the unknown class is refused.*
+
+*Follow-up, closed the same day: `_complete_via_peer` in `gateway.py` maps a
+host's refusal code to an HTTP status, and `insufficient_quota` landed there as
+**429** in `ab13c018`, 2026-09-14 — a guest's IDE client is told to come back
+tomorrow rather than that something broke, and the 502 is left to the codes
+nobody here can place.)*
+
+*(**Amendment, 2026-09-15 — one word was carrying three states, and they are
+now three words.** Mike's decision 01:36Z on Ark's and Zcode's reviews of
+`11b1de5c` and `91c5a073..da2be784`. `insufficient_quota` had been put on all
+three of the door's money-shaped refusals: a spent daily ceiling, a vendor
+alias this node has no rate for, and — with no code at all — serving lists that
+cannot be classified. Ark's argument is the whole of it: **429 means «come back
+tomorrow», which is true of a ceiling and false of a missing rate.** A ceiling
+refills at midnight; a rate appears only when the host's owner writes one, and
+lists are repaired only when the host's owner edits them, so a client
+auto-retrying on 429 would loop for ever against a state nothing in time
+changes. The wire therefore gains `unrated` and `misconfigured` beside
+`insufficient_quota` (DPTP §3.4, nine words), the peer door sends each at its
+own gate, and a guest's gateway answers both new words **503 without
+`Retry-After`** while `insufficient_quota` keeps its 429. The gateway's own
+local route answers its unpriced-alias check `unrated` 503 too, so one cause
+has one word and one status on both doors. Zcode's wider point stands and is
+not closed here: for `anthropic`, `gemini`, `gigachat` and `github_models`
+aliases `unrated` is the standing state rather than an edge, because
+`dpc_agent/pricing.py` rates only the DeepSeek and GLM families — whether to
+add rate tables or to say so on the tab is the open card
+`THE-UNPRICED-REFUSAL-CLOSES-EVERY-VENDOR-ALIAS-WHOSE-TYPE-PRICING-PY-DOES-NOT-RATE`.
+503 rather than 429 on the two new words was put to Mike as this session's own
+choice and is his to overturn.)*
+
+### D6 — `aiohttp.web`, declared explicitly
+
+**Re-decided.** The first writing offered two options — hand-written asyncio
+HTTP+SSE against `fastapi`+`uvicorn` — and recommended hand-written on the
+argument that a client must start on a machine with no server stack. M4 shows
+the dichotomy was false: **the machine already has one.**
+
+| option | new wheels | upfront | maintained by |
+|---|---|---|---|
+| **`aiohttp.web`** | **none** — 3.14.1 ships with every install via `discord.py` | a declaration line in `pyproject.toml` | upstream |
+| hand-written HTTP+SSE | none | 500–600 lines with tests (Johnny's estimate, #109) | us, forever |
+| `fastapi`+`uvicorn` | three runtime wheels, ASGI lifecycle, pydantic coupling | small | upstream |
+
+Both outside reviewers rank them **`aiohttp.web` > hand-written > fastapi**, and
+Warren's TCO reading (#134) agrees. The decisive argument is not the upfront
+cost: it is that a hand-written HTTP listener means owning HTTP's long tail for
+the life of the product — `Expect: 100-continue` (which curl emits, and people
+test with curl), keep-alive semantics, chunked request bodies, partial writes,
+malformed requests, request smuggling — each of which is an upstream fix under a
+library and a support ticket under ours. M7 is what that looks like on a
+protocol we did write ourselves.
+
+**Declared, not inherited.** Relying on a transitive presence is fragile: if
+`discord.py` ever leaves, the gateway leaves with it. One line in the base
+dependencies.
+
+**Decided** with the reviews rather than against them, and voted by Mike on
+2026-08-31 — «A (aiohttp)»: `aiohttp.web`, with `aiohttp` declared in the base
+dependencies so the gateway does not hang on `discord.py` staying.
+
+### D7 — What is shared may not be shared onward
+
+Mike, #121. Sharing is a permission between two nodes and does not travel.
+
+**The prior record** is a research finding, not a task:
+`ideas/cc-mike-research/2026-04-15/named-unsolved-problems.md`, Finding 16,
+«Consent propagation on re-sharing» — *«Firewall rules are pairwise… at mesh,
+re-sharing is the dominant mode. Without propagation constraints, "shared with
+150" really means "shared with the 150's 150s" = transitively public.»* Named in
+April, never filed.
+
+**The compute version is unprevented today.** `remote_peer` is a provider type
+taking a `peer_id` and a remote alias; `compute.serving_alias` is validated for
+*existence* only and nothing looks at its **type**. So B can point a
+`remote_peer` alias at A, designate it as what B serves, and C reaches A through
+B with A's ledger recording `caller = B`.
+
+**Part 1 — refuse to serve from an alias that is itself remote.** A
+`serving_alias` whose provider type is `remote_peer` or `dpc_agent` is a
+configuration error, refused at load with a named reason. Cheap, complete
+against accident, testable. **And the same type rule must extend to gateway
+routes** (GLM): part 1 guards the P2P door, and the day peer routing lifts,
+B's loopback gateway → B's `remote_peer` alias → A re-shares through the HTTP
+door while part 1 watches the other one. A second reason for part 1 (Fable):
+two nodes each serving from a `remote_peer` alias pointed at the other recurse
+under their own `Semaphore(1)` until the 1200 s timeout — a distributed
+deadlock.
+
+**Part 2 — a request may declare whom it acts for, and the declaration may only
+refuse, never subsidise.** A node declaring a third party is refused unless that
+party is itself allowed. **Attribution and quota always bind to the *proved
+sender*.** GLM found the hole the naive reading opens: if «allowed» meant the
+declared party's allowance is spent and the row attributed to him, a modified
+client would declare a large-quota member and spend the victim's quota under the
+victim's name — both instruments defeated by the honesty mechanism itself.
+
+**The impossibility claim, in its strongest form.** Both reviewers were asked to
+break it and both failed, and both independently sharpened it. On a connection
+where the sender's identity is self-certifying and possession-proved, whatever B
+sends, B sends under B's key. Therefore **with attribution and quota keyed to
+the proved sender, re-sharing reduces to B donating his own quota and wearing
+his own attribution** — it cannot increase A's exposure beyond what A granted B.
+That is a design invariant, not a hope, and it rests on exactly two things this
+ADR controls: D2's proof requirement actually enforced, and part 2's
+sender-keyed rule above. The escapes that exist are ours to close: unproved
+transports, declaration-keyed instruments, automatic roster admission.
+
+Attestation was considered and rejected: it would raise «modified client» to
+«modified client plus defeated attestation», which is DRM this product has no
+business paying for, and it fails on commodity hardware anyway. Watermarking
+detects re-sharing after the fact and prevents nothing.
+
+**What must not be claimed:** that re-sharing is prevented. Part 1 prevents it in
+our client; against a modified peer the instruments are attribution and quotas,
+and they are sufficient only in the sense above.
+
+*(**Amendment, 2026-09-14 — the trust model of shared inference is stated, not only
+engineered.** Mike's call, 2026-09-14, DPC Project group. Three decisions, read
+together with M6's table above and D2's proof gate:
+
+1. **A guest trusts the host as a person, not only as a machine.** Every path M6
+   describes is encrypted in transit, but decryption happens *at* the host, by
+   construction: the host's machine receives the prompt in plaintext, and the host
+   can read it if they choose. This application shows, stores and logs none of it on
+   its own side — `handle_inference_request` logs only the peer id, the request id
+   and whether images were attached (`p2p_coordinator.py:358`), never prompt or
+   answer text; its own usage-row write (`p2p_coordinator.py:445`) and D3's columns
+   above carry counts, duration, served effort, tariff and proof, never content.
+   `Observed`, checked empirically by Zcode on the Windows node, 2026-09-14:
+   `llama_server_supervisor.py` starts `llama-server` at default verbosity, which
+   writes only counters and timings to `~/.dpc/logs/llama-server-<alias>.log`; two
+   exceptions exist and DPC never turns them on — `-v` echoes message content, and a
+   chat template's refusal of an unrecognised effort word writes the word, not the
+   prompt. Ollama's own log records method and path only, with its own request-body
+   logging left off (the default). The boundary of that check: one machine, default
+   verbosity, one date — the engine log is append-only with no rotation this project
+   configures, and **this application cannot prove to a guest that nothing is
+   logged**; that limit is stated, not engineered around. Two-sided, so it reads the
+   same from both chairs: the node whose model you call sees your prompt in full; if
+   you serve peers, their prompts arrive on your machine and you could read them.
+2. **A host's own model settings are what a guest gets.** Weights and the build
+   behind them (`variant` on the menu row, DPTP §3.5 — a file name where the host
+   can read one, and a quantization only where that is what the host knows; reworded
+   2026-09-15, the field has never been called `quantization`),
+   chat template, context window, sampling (`max_tokens`, `temperature`, `top_p`,
+   stop sequences) and the output ceiling are the host's configuration on this node,
+   not a per-guest choice — the wire carries no `max_tokens` at all. The one
+   exception is reasoning effort, the caller's own preference, bounded by the host's
+   cap (`_effort_for_peer`; D4's 2026-09-14 amendment above already put this in
+   words: "the host's own settings remain the guest's, the effort excepted"). A
+   guest's protection against an unbounded reply is the declared tariff and the
+   host's own ceiling, not a number the guest sends.
+3. **A guest must be able to see the host's full effective settings before choosing
+   to route a request there — even the ones it cannot change.** Stated here as the
+   principle a future menu card has to satisfy; the rendering itself is a separate
+   board card, not decided here.
+
+Only peer inference over a proved direct-TLS connection reaches a host's model at
+all (D2; `PROVED_CONNECTION_TYPES = ("direct_tls",)`, `p2p_manager.py:35`, checked
+first in `p2p_coordinator.handle_inference_request` before any alias or firewall
+rule) — every other tier is refused by name before this trust model is even asked
+to hold.)*
+
+### D8 — Harden the DPTP listener before putting it in front of a network we do not own
+
+New, from M7, and it precedes D1 in the shipping order rather than following it.
+
+- A maximum frame size in `read_message`, refused rather than allocated.
+- A `wait_for` around the HELLO read.
+- Pre-HELLO connections counted per IP, not only failed HELLOs.
+
+Each is small and testable, and each guards the one port this design puts on the
+open internet. The gateway's own loopback listener is the small end of the
+exposure; 8888 is the large one.
+
+## Consequences
+
+- **The WebRTC challenge precedes wide deployment.** If peer inference is served
+  only over a proved connection, a consumer behind a NAT that only WebRTC could
+  traverse has no service at all — and M6 shows the relay tier cannot deliver
+  today, so WebRTC is the only traversal there is. For one colleague on a
+  reachable network this is no obstacle; for anything wider it is the blocking
+  item.
+- **D2 changes existing behaviour**, not only future behaviour: peers reached
+  over WebRTC stop being served compute.
+- **A declared dependency** on `aiohttp` (D6) — no new wheel, but a new promise.
+- **A new ledger and one reconciliation rule** (D3); no reader migration.
+- **The scheduling externality nobody had priced** (GLM). Peer inference is
+  serialised under one lock held across the whole call (M8), the caller's
+  default patience is 1200 s, and the owner's agents compete for the same four
+  slots with no priority. The 3 a.m. event is not «the server crashed»; it is
+  «someone else's editor hung for twenty minutes holding the card». ADR-040's
+  ONE-CARD-ONE-OWNER covers VRAM and is silent on scheduling; scheduling is what
+  pages you.
+- **Operational responsibility has an owner or it has none** (Warren #134). This
+  ADR names the requirement and not the person: whoever owns the serving node
+  carries it, and at n=1 the service level is «serialised behind the owner's
+  agents, no alerting, best effort». Written down so that it is a statement
+  rather than an omission.
+- **The consumer is not charged in v1, and that is a decision** (Warren #134,
+  GLM). Free is the default that ships, and a free default becomes a precedent;
+  the ledger is built so a price can be introduced without a schema change. At
+  more than one consumer the quota becomes the only scarcity instrument and the
+  owner's card-time is the subsidy.
+- **A standing compatibility obligation** to tools we do not control, against an
+  upstream API that moves.
+- **`_est` token counts become a published number.** Hence `counts_source`.
+
+## Open Questions
+
+None of the five from the tariff amendment of 2026-09-10 (Ark #107) remain
+open. The last, restated on 2026-09-13 — does the v1 receipt keep a digest
+of the answer that was paid for, so that later either side can prove which
+answer a charge belongs to — at the cost of the host retaining a fingerprint of
+every answer it ever served to a guest — is not in v1 (Mike's call, 2026-09-13,
+DPC Project group); back in v2 beside the balance. The other four — balance in
+v1 or v2, who tops it up, the amount column's name, whether reasoning is
+billable output — are answered in the amendment of 2026-09-13 under D3. D6 was
+closed by the two outside reviews: `aiohttp.web`, declared in the base
+dependencies.
+
+## Falsifiers
+
+- **M1:** grep the peer path for a chunk callback or an `AsyncIterator`. One
+  exists ⇒ D4 step 4 is bigger than written. *(Fired, 2026-09-14, deliberately:
+  `request_inference_from_peer` takes an `on_chunk`, and step 4 was made bigger
+  by the amendment of that date.)*
+- **M2:** run one peer inference on a DeepSeek serving alias, then grep the log
+  for `DeepSeek usage:` — the line must be there with `conv=-`. Absent ⇒ F5 is
+  wrong and the code comment stands.
+- **M3:** grep the log for that call's `request_id` — it must appear only in the
+  requester's debug line.
+- **M4, run 2026-08-31, and the obvious command is a trap in both directions.**
+  `uv run --directory dpc-client/core python -c "import aiohttp.web"` must
+  succeed — it does, 3.14.1 — and `uv pip list` will separately mislead you with
+  the Hub's virtualenv, because `VIRTUAL_ENV` points there. Ask the client's own
+  interpreter, and ask it about the *installed* set.
+- **M5, run 2026-08-31.** `0.0` / `subscription` for the local alias,
+  `0.00088` / `pay_per_use` for `deepseek_flash`.
+- **M6:** corrupt one byte of the CN in transit on an inbound connection — it
+  must be refused naming the check. Then confirm no `HELLO_CHALLENGE` is
+  exchanged over WebRTC. And confirm `_persist_peer_certificate` refuses a
+  mismatched key while the connection survives — that pair is the defect.
+- **M7:** send a 10-digit length header to 8888 from a non-DPC client and watch
+  the process's memory. Not run.
+- **M8:** two peers request inference simultaneously; the second must wait for
+  the first. Not run.
+- **D2:** ask a peer for an alias the node does not serve — the refusal must name
+  the alias (observed in production 2026-08-31, as the symptom of another
+  defect). Then, after the fix: dial a node presenting a certificate whose key
+  does not hash to the expected id — the connection must be refused, not logged.
+- **D5:** put a vendor-class alias in the serving list with no quota configured;
+  the service must refuse at load.
+- **D5, the peer door (2026-09-14):** serve a guest a vendor alias until its
+  day's rows reach the ceiling, then restart this node and let it ask again —
+  the second request must be refused with `insufficient_quota` naming what it
+  spent, and no new usage row may appear. Not run live: today
+  `compute_serving_alias` is `serving_local[0]`, so the classified-vendor path
+  is reached by the tests and not yet by a configuration.
+- **D7, the enforceable half:** point `compute.serving_alias` at a `remote_peer`
+  alias and start the service — it must refuse at load, naming the type. Today
+  it starts.
+- **D7, the unenforceable half:** there is no check distinguishing an honest
+  peer from one proxying for a third party, and there cannot be. The falsifier
+  for «we prevent re-sharing» is that it must never be written.
+- **D8:** each of the three guards has its own red-before-green test; the frame
+  cap is the one that must refuse rather than truncate.

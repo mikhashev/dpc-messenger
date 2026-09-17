@@ -169,6 +169,55 @@ they will be re-proposed:
   renders stale edges manufactures false confidence.
 - **`owner:`** — for a team this size, `origin` already names who cares.
 
+## 4a. The one field that was added anyway — `axis:`
+
+```markdown
+- **axis:** network
+- **axis:** collective, honesty      ← two is allowed, three is a smell
+```
+
+Vocabulary, five words, from VISION's three vectors plus the two loops that VISION does
+not promise but the project cannot be honest without:
+
+| token | what it serves |
+|---|---|
+| `collective` | from personal to collective — P2P, groups, identity, signatures, history |
+| `knowledge` | from passive to collaborative — memory, retrieval, the agent that works on it |
+| `network` | from local to networked — local inference, compute, cost, the gateway |
+| `honesty` | that our own numbers mean something — eval, CI, the board and its gates |
+| `reach` | that somebody outside can find and use this — docs, releases, distribution |
+
+**§4 above says a formal field is filled once and then lies, and that objection is
+correct about `depends-on:` and wrong about this one.** `depends-on` encodes a relation
+between two moving things, so both ends can drift out from under it. An axis encodes what
+the entry is *about*, which changes only when the entry is rewritten — and then the axis
+is rewritten with it. It is also falsifiable in a word, which is what `Updated:` was not:
+a reviewer who thinks an entry is `knowledge` and not `network` can say so and be right or
+wrong. And unlike `owner:`, nothing else in the entry carries it: no existing field says
+which direction the work serves.
+
+**Two values, not one.** The first real use case had two: a three-node bench serves
+`collective` and `honesty` at once, and ADR-041 serves `network` and `honesty`. A field
+that forces one value makes the author pick a favourite, and the counter then reports a
+preference rather than a fact. Three or more is warned about, not refused — an entry that
+serves everything reports nothing, and is usually two entries.
+
+**Words, not letters.** Ark's original scheme was `A / B / C` for the vectors and
+`C1 / C2` for the loops; `C` and `C1` are one keystroke apart and mean different things.
+Words cost four characters and need no legend.
+
+**Migration is the same shape as §7.** `AXIS_CUTOFF = 2026-09-01`: an entry dated on or
+after it is refused without the field, everything older warns. The unmarked count is
+printed in the check summary and is the backfill meter, exactly as the warning count is
+the language meter. The first pass marked 396 entries whose name made the direction
+unambiguous and deliberately left 130 blank — a guessed axis is worse than a missing one,
+because the meter then reports coverage it does not have.
+
+**What the counter is for.** The check prints, per axis, how many entries sit in
+`DONE — AWAITING OBSERVATION`. That number is the project's own health signal — work
+finished and never seen working — and per axis it says *which direction* is running ahead
+of its evidence.
+
 ## 5. File-level front matter
 
 Per-**entry** front matter is rejected: it doubles the structural noise, pushes metadata
@@ -308,13 +357,26 @@ them has a known false-positive shape, so they point rather than gate:
   the only signal that exists. It prints; it does not rebuild. A checker that quietly
   regenerated the board to silence its own warning would be exactly the thing the last
   paragraph of this section forbids.
+- **glossary** — `docs/GLOSSARY.md` is a table of words with a «Defined in» link each, and
+  the same pass resolves every link: a file that does not exist or a heading anchor the
+  file does not carry is a warning (content, not structure — the row still names a word),
+  and an axis token from §4a with no row is a warning too, because the board files work
+  under a word nobody has written down where a reader would look. The glossary points at
+  its sources and never defines on its own; a row without a link is not a row. Added
+  2026-09-05, on Mike's call that the project needs a glossary document. The walk itself
+  is `tools/backlog/glossary_check.py`, and the client suite runs it too
+  (`tests/test_the_glossary_points_at_headings_that_exist.py`): this check needs
+  `backlog.md`, which no clone has, so a moved heading was visible only where the
+  board is — the test is the half that reaches CI (Linus's question, same day).
 
 **Three artefacts, one pass.** The default run (no `--check`) writes `backlog.html` — the
 board, what is open — `graph.html` — what leans on what, which a flat list cannot show —
 and `graph.json`, the same graph for readers that cannot click. They are written together
-so they can never disagree about how fresh they are. The graph draws only entries with at
-least one link; the rest are listed underneath by priority, because "HIGH entries no one
-has connected to anything" is a finding of its own. ADR nodes are drawn as a second node
+so they can never disagree about how fresh they are. Entries with no link at all are drawn on a
+ring around the linked graph as hollow dots, behind a legend chip that starts off, and are
+also listed underneath by priority, because "HIGH entries no one has connected to anything"
+is a finding of its own; every legend chip — priority, section, ADR, roadmap phase, archive,
+the ring — is a filter. ADR nodes are drawn as a second node
 type: the backlog and the roadmap already speak the same language — decisions — so the join
 between the two documents costs nobody a new habit. **No `depends_on` field exists and none
 is asked for.** Every link is already in the prose, which also bounds what the picture may
@@ -377,8 +439,12 @@ the envelope would measure the wrong interval. Implementing it honestly needs a 
 written when the entry moves; until that exists, the rule stays out rather than shipping a
 number that looks like an answer.
 
-**It never rewrites a file.** Every automated classifier in this repository's history has
-documented its own false positives — including this one, on its first day: a non-nesting
+**It never rewrites a file.** The claim is about content, and two things added on
+2026-09-09 sit just outside it, so they are said here rather than left to surprise
+somebody: a `--check` run holds `backlog.md` and `backlog_closed.md` read-only between
+edits (§8a), and it copies the board into the snapshot directory when the newest copy is
+over an hour old. Neither changes a byte of the file. Every automated classifier in this
+repository's history has documented its own false positives — including this one, on its first day: a non-nesting
 regex read the envelope of the first entry written to this standard and reported a complete
 entry as missing its priority and origin, because the origin quoted Mike verbatim and the
 quote contained parentheses. Report, never auto-fix.
@@ -410,7 +476,7 @@ The full list, and the fixture that watches each rule fire, live in
 ## 8a. Writing an entry with the tool
 
 Editing the file by hand stays correct and always will — §8 is what holds the format, and
-no script can be the only way in. The four verbs exist so that the common path is right by
+no script can be the only way in. The five verbs exist so that the common path is right by
 construction, and so that a rename cannot leave its inbound references behind (ADR-039).
 
 ```bash
@@ -422,6 +488,9 @@ uv run python tools/backlog/build.py move NAME --to='IN PROGRESS' --by=CC
 uv run python tools/backlog/build.py rename OLD-NAME NEW-NAME --by=CC
 uv run python tools/backlog/build.py close NAME --session=S72 --resolution=fixed --by=CC \
     --evidence='commit abc1234, observed in the 2026-08-11 startup log'
+
+uv run python tools/backlog/build.py append NAME --text='what was seen, with a file:line' \
+    --by=CC [--date=YYYY-MM-DD]
 ```
 
 What each one guarantees, beyond typing less:
@@ -450,11 +519,143 @@ What each one guarantees, beyond typing less:
   the same edit**, and leaves a trace line carrying `<!-- no-refs -->` — quoting the dead
   name without that marker would manufacture exactly the dangling reference this tool
   reports.
+- **`append` adds one dated bullet — `- **YYYY-MM-DD, who:** …` — to the body of an entry
+  that already exists**, above the trailing `axis:` / `filed:` / `taken:` bullets, because
+  those are metadata and this is prose. It is the commonest edit there is and the tool had
+  no verb for it until 2026-09-09, which is why that edit was being made by hand-written
+  scripts — and why one of them truncated `backlog.md` to zero bytes. The text is one
+  bullet and therefore one line; a newline in it is refused, because a newline can open a
+  `###` of its own and split the entry in two.
+
+**Every write is atomic, and every verb copies the board twice — before and after.** The
+bytes are built complete and then `os.replace`d onto the target, so a failure at any point
+leaves the previous file exactly as it was rather than half-written or empty. Around that
+write a verb copies `backlog.md` — and `backlog_closed.md` when it touches it — into
+`~/.dpc/backlog-backups/<project>/` under a UTC-stamped name, skipping the copy when the
+content matches the newest snapshot already there, and keeping every snapshot for 7 days,
+then one a day for 30. A snapshot that cannot be written warns and lets the verb proceed:
+the write is already guarded by validation and by atomicity, and an unwritable `~/.dpc`
+must not make the board uneditable.
+
+**The two copies answer different questions.** The one before a write preserves the state
+that write is about to destroy — the `close` that took the wrong entry. The one after it
+preserves the state the *next* accident destroys, so the newest copy is never older than
+the last successful edit. Only the first existed until 2026-09-09, which is why a board
+edited through the tool all week was recovered from a copy five days old: every guard was
+aimed at the edit in flight and nothing captured a good state on the way past. The copy
+after the write cannot lose the edit — the bytes are already on disk when it runs — so a
+failure there warns and does nothing else; a verb that reported failure after a successful
+write would invite the operator to run it again and apply it twice. The content hash keeps
+the pair from doubling the directory: the copy before a write is skipped whenever the copy
+after the last one already holds that state, which is every verb run in a row. Retention
+is unaffected by the doubling except inside the 7-day window, where keeping everything is
+the point — 7-to-30 days keeps one copy a day whether that day held two copies or eight
+(Mike's call, 2026-09-09).
+
+**The copies live under a per-project segment, and the project comes from the
+repository.** Six projects use this script and all six boards are called `backlog.md`, so
+one flat directory gave them one stem: dedup compared this board against another
+project's copy and skipped the copy as unchanged, and the pruner thinned six histories as
+if they were one. The segment is the name of the repository the board sits in — walked up
+from the board's own location, looking for a `.git` entry rather than running `git`, since
+this script has no dependencies and must work where git is absent. **Outside a repository
+the board's own directory names the segment**, which is the case for the projects that are
+not repositories; it is never taken from a config value, which goes stale on the first
+rename with nothing to say so, and never from the current working directory.
+`DPC_BACKLOG_BACKUP_DIR` still moves the root and the segment is appended *under* it: the
+override says where the copies live, the segment says whose they are, and conditioning one
+on the other would arm the collision guard only for people who had not thought about it.
+Two clones of one repository share a segment, and the override is what separates them.
+
+**Copies taken before the segment existed stay where they are**, one level up in the root.
+They are outside `_newest_snapshot`, so the first copy under a segment is taken even
+though nothing changed — one extra copy, once — and outside the pruner, so they are kept
+for good; reaching up into the shared root to delete would put one project's pruner back
+over five other projects' files. The tool says once per run how many are sitting there.
+Hand-made copies were never touched by the pruner and still are not.
+
+Neither of those reaches the edit that actually emptied the file, because that edit never
+called the tool: a hand-written script, whose `open(p, "wb")` truncated the board at open
+and then raised, with every guard it carried sitting after the open. `append` gives that
+edit a verb. The two layers below are what stands in the way when somebody writes the
+script anyway — both Mike's call, 2026-09-09, taken after the trade-offs were put to him.
+
+**The board is read-only between edits.** `backlog.md` and `backlog_closed.md` are held
+without their write bits, and a verb clears the bit for exactly one `os.replace` and puts
+it back. It works because of what a protected file does to that exact line: `open(p, "wb")`
+raises **before it truncates**, so the incident dies loudly with the file intact —
+measured 2026-09-09 on Windows 11/NTFS (`PermissionError`, 130 bytes before and after) and
+on POSIX as a non-root owner (`EACCES`, 14 bytes before and after). Three properties of it
+are worth knowing before relying on it:
+
+- **It is re-asserted on every run** — a verb, `--check`, `--snapshot` or a render —
+  because the bit does not survive an `os.replace` on either platform: what the replace
+  leaves behind is the temp file's inode carrying the temp file's mode. That same
+  re-assertion is the answer to a process killed outright inside the one-syscall window,
+  which no `finally` survives: protection is a property of the file rather than a
+  transaction, so a kill costs it until the next run of the tool rather than for good.
+- **A board that is not protected is armed, not refused.** Every board predates this, and
+  refusing would turn a legitimate hand edit into a broken tool.
+- **It stops a write, not a rename.** On POSIX a rename is governed by the directory's
+  mode, so `os.replace` onto a protected board succeeds there (it is refused on Windows).
+  Another tool that writes atomically the way this one does is not stopped by this layer
+  on Linux. Neither is `root`, who ignores mode bits entirely.
+
+**To edit by hand, clear the bit** — `attrib -R backlog.md` on Windows, `chmod u+w
+backlog.md` on POSIX — edit, and the next run of `build.py` arms it again without
+complaining. That is the escape hatch, and it is deliberately the same code path as the
+recovery from a kill. `DPC_BACKLOG_NO_PROTECT=1` turns the layer off for one environment
+(a filesystem where the bit means nothing, a shared checkout). A protection with no
+documented way out is disabled permanently the first time it is inconvenient, so there are
+two, and this is where they are written down.
+
+**The candidate a verb validates is not the board.** A verb checks its result by
+running `--check` over a scratch copy, and that copy is also called `backlog.md` — so the
+hourly trigger fired on it and filed it under the board's own stem. Measured against the
+verb fixture on 2026-09-09: a write the checker *refused* left a copy of the refused
+content sitting among the copies of the board, indistinguishable from one, and a restore
+could not tell them apart. The validation subprocess now runs with
+`DPC_BACKLOG_NO_SNAPSHOT=1` beside the `DPC_BACKLOG_NO_PROTECT=1` it already carried, for
+the same reason: the scratch copy is not the board and must be treated as neither.
+
+**A snapshot is also taken on the clock, at most hourly**, so an edit that bypasses the
+tool is at most an hour from a copy. It reuses the same `_snapshot` and the same
+retention: the clock decides only *when to ask*, and the existing content hash decides
+whether to copy, so a due-but-unchanged board is not copied twice.
+
+*What triggers it, and why that one.* It hangs on the commands that already run whenever
+somebody is working — `--check` and the render — rather than on a scheduler. A scheduled
+task has to be installed on each of the six machines this standard serves, runs at 3am
+when the board cannot have changed, and stops silently the day somebody disables it or the
+machine sleeps; and nothing would notice. A `--snapshot` mode on its own is a scheduled
+task by another name, since something has to call it. Hanging it on the frequent commands
+costs nothing when nothing changed, needs no installation anywhere, and is visible — it
+prints the copy it took. `build.py --snapshot` exists too, so anyone who does want a
+scheduler can drive it without this project having to own one.
+
+**What the two layers still do not cover.** A hand edit is captured only when somebody
+next runs the tool, so a machine where nobody runs it is a machine with no hourly
+snapshots at all — the trigger is honest about being tied to work, not to time. An edit
+made and reverted between two runs is invisible. The window is up to an hour wide by
+design, and what a bad hand edit is recovered from is the *previous* copy, which may be an
+hour older than the edit. On POSIX the bit stops an `open()` and not another tool's
+atomic rename, and it stops nobody running as root. And a board that sits in no repository
+is filed under the name of the directory holding it, so moving that directory starts a
+second history rather than continuing the first.
 
 The verbs are watched to fire: `uv run python tools/backlog/verbs_fixture.py` builds a
-throwaway backlog, runs all four plus every refusal path, and asserts what the file says
-afterwards. Same rule as the read fixture — a rule nobody has seen fire is written down,
-not enforced.
+throwaway backlog, runs all five plus every refusal path, and asserts what the file says
+afterwards. `uv run python tools/backlog/recovery_drill.py` is the other half — it
+reproduces the truncation against a throwaway board, both unprotected and protected, then
+asserts that each verb snapshots, that a verb works against a read-only board and leaves
+it read-only, that the board stays protected when a verb refuses and that nothing the
+checker refused is left behind as a copy of the board, that a write failing part-way
+leaves the original byte-identical, that retention prunes what it should and nothing else,
+that the hourly snapshot copies a changed board and not an unchanged one, that a verb
+copies the state it wrote as well as the state it replaced while a verb that writes
+nothing copies neither, that the copies land under the project's own segment and two
+boards called `backlog.md` do not collide, and that a snapshot restores. Same rule as the read fixture — a rule nobody has seen fire
+is written down, not enforced.
 
 ## 9. Who this binds
 

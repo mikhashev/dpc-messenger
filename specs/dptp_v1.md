@@ -1,8 +1,8 @@
-# DPTP Specification: D-PC Transfer Protocol v1.6
+# DPTP Specification: D-PC Transfer Protocol v1.7
 
-**Version:** 1.6
+**Version:** 1.7
 **Status:** Draft / PoC
-**Date:** August 2026
+**Date:** September 2026
 **License:** CC0 1.0 Universal (Public Domain)
 
 ## 1. Overview
@@ -62,7 +62,7 @@ All DPTP messages follow a fixed binary framing format:
 
 - **Encoding**: UTF-8 JSON
 - **Structure**: Object with `command` or `status` field
-- **Maximum Size**: Unlimited (implementation may impose limits)
+- **Maximum Size**: 67 108 864 bytes (64 MiB) per payload — `MAX_FRAME_BYTES` in `dpc_protocol/protocol.py` (v1.7). A header declaring more is refused before any of the payload is read: the receiver logs the declared length and the cap, and closes the connection. A sender refuses to frame a larger payload at all, raising at the origin rather than failing silently at the far end. The cap must clear a whole conversation history in one `CHAT_HISTORY_RESPONSE` (3 885 616 bytes at the largest measured) and a base64-encoded image at `vision.max_image_size_mb`; the measurements behind the number are kept beside the constant, and the two move together
 
 ### Example Wire Format
 
@@ -82,9 +82,48 @@ Wire representation (example):
 
 #### HELLO
 
-Sent immediately after connection establishment to identify the remote peer.
+Identifies the remote peer. What is sent, and how it is answered, differs by tier:
 
-**Format:**
+- **Direct TLS** (IPv4/IPv6, `p2p_manager.py`): the listener sends **HELLO_CHALLENGE**
+  first; the dialling side answers with an authenticated HELLO that proves it holds the
+  private key behind the `node_id` it claims; the listener answers **HELLO_ACK**. The
+  connection is not used for anything else before this three-message exchange completes.
+- **Hub WebRTC**: identity is already established through Hub signalling before the data
+  channel opens, so HELLO here is a lighter, unauthenticated, post-connection message
+  carrying only `node_id` and `name` — a display-name exchange, read by the router's
+  `HelloHandler` (`message_handlers/hello_handler.py`), which reads `name` only. No
+  challenge, no certificate, no HELLO_ACK.
+- Volunteer relay and gossip store-and-forward carry no HELLO of their own; whatever
+  identity a relayed or gossiped frame claims was established by the tier that opened
+  the underlying connection, not re-proved per message.
+
+**HELLO_CHALLENGE** (direct TLS only, sent by the listener before it reads a HELLO):
+```json
+{
+  "command": "HELLO_CHALLENGE",
+  "payload": {
+    "nonce": "base64-encoded 32 random bytes"
+  }
+}
+```
+- `nonce` (string, required): Base64-encoded 32-byte random challenge. The dialling side
+  signs it (RSA-PSS, SHA-256, MGF1) with the private key behind its claimed `node_id` and
+  returns the signature in HELLO's `nonce_signature`.
+
+**Format (direct TLS — answering a HELLO_CHALLENGE):**
+```json
+{
+  "command": "HELLO",
+  "payload": {
+    "node_id": "dpc-node-[32 hex characters]",
+    "name": "Alice",
+    "cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+    "nonce_signature": "base64-encoded RSA-PSS signature over the challenge nonce"
+  }
+}
+```
+
+**Format (Hub WebRTC — no preceding challenge):**
 ```json
 {
   "command": "HELLO",
@@ -98,8 +137,34 @@ Sent immediately after connection establishment to identify the remote peer.
 **Fields:**
 - `node_id` (string, required): Cryptographic node identifier (format: `dpc-node-[32 hex characters]`)
 - `name` (string, optional): Human-readable display name
+- `cert_pem` (string, required on direct TLS): PEM-encoded X.509 certificate for `node_id`.
+  A direct-TLS HELLO lacking it is rejected — "sent HELLO without cert_pem or
+  nonce_signature — rejecting (peer may be running an outdated version)"
+  (`p2p_manager.py`, `_handle_direct_connection`)
+- `nonce_signature` (string, required on direct TLS): Base64-encoded RSA-PSS(SHA-256)
+  signature over the `nonce` from HELLO_CHALLENGE, made with the private key behind
+  `cert_pem`. The listener's `_verify_hello_identity` checks three things before
+  accepting the connection: the certificate's CN matches `node_id`; the certificate's
+  public key hashes to `node_id` (`generate_node_id`); the signature verifies against the
+  certificate's public key. Any failure closes the connection.
 
-**Response:** None (connection is bidirectional; both peers send HELLO)
+**HELLO_ACK** (direct TLS only — top-level frame, no `payload` wrapper):
+```json
+{
+  "command": "HELLO_ACK",
+  "status": "OK",
+  "name": "Bob",
+  "node_id": "dpc-node-[32 hex characters]"
+}
+```
+- `status` (string, required): `"OK"`
+- `name` (string, optional): The listener's own display name
+- `node_id` (string, required): The listener's own `node_id`. The dialling side checks it
+  against the `node_id` it dialled; a mismatch is treated as a possible MITM and the
+  connection is dropped.
+
+**Response:** Hub WebRTC — none, fire-and-forget. Direct TLS — HELLO_CHALLENGE precedes
+HELLO and HELLO_ACK follows it; the connection is not usable before HELLO_ACK.
 
 ---
 
@@ -135,9 +200,23 @@ Requests the peer's personal context data (subject to firewall rules).
 **Format:**
 ```json
 {
-  "command": "REQUEST_CONTEXT"
+  "command": "REQUEST_CONTEXT",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "query": "what GPU do you have",
+    "requestor_id": "dpc-node-alice-123"
+  }
 }
 ```
+
+**Fields:**
+- `request_id` (string, required): Correlates the response to this request; the requester
+  resolves a pending future by it (`context_coordinator.py`, `request_context`)
+- `query` (string, optional): Free-text query the receiver's firewall may use when
+  filtering what it shares
+- `requestor_id` (string, sent, read by nothing): The requester's own `node_id`. Sent on
+  every REQUEST_CONTEXT but not consulted by the handler or the firewall — the
+  transport-level sender identity is what is actually used to filter and to reply.
 
 **Response:** CONTEXT_RESPONSE message
 
@@ -152,22 +231,30 @@ Sends personal context data in response to REQUEST_CONTEXT or proactively.
 {
   "command": "CONTEXT_RESPONSE",
   "payload": {
-    "profile": {
-      "name": "Alice",
-      "description": "AI researcher",
-      "values": ["privacy", "transparency"]
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "context": {
+      "profile": {
+        "name": "Alice",
+        "description": "AI researcher",
+        "values": ["privacy", "transparency"]
+      },
+      "knowledge": {
+        "topics": [...]
+      }
     },
-    "knowledge": {
-      "topics": [...]
-    }
+    "query": "what GPU do you have"
   }
 }
 ```
 
 **Fields:**
-- `payload` (object, required): Filtered personal context (structure defined by Personal Context Model v2.0)
+- `request_id` (string, required): Echoes the request's `request_id`; the requester
+  resolves its pending future by this value
+- `context` (object, required): Filtered personal context (structure defined by Personal
+  Context Model v2.0) — carried under `context`, **not** sent as the payload itself
+- `query` (string, optional): Echoes the request's `query`
 
-**Note:** The actual data sent is filtered by the sender's firewall rules (see `~/.dpc/privacy_rules.json`).
+**Note:** The actual data sent is filtered by the sender's firewall rules (see `~/.dpc/privacy_rules.json`). A payload shaped like the context itself (as shown in earlier revisions of this document) is not what ships: the context is wrapped under `context`, and a peer sending the unwrapped shape fails deserialisation on receipt (`PersonalContext.from_dict` raises on `None`).
 
 ---
 
@@ -188,41 +275,89 @@ Requests the peer to execute an AI inference query using their local compute res
     "provider": "ollama",     // Optional
     "images": [               // Optional: vision queries (v0.12.0+)
       {
-        "path": "screenshot.png",
         "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg...",
         "mime_type": "image/png"
       }
     ],
-    "thinking": {             // Optional: thinking mode configuration
-      "enabled": true,
-      "budget_tokens": 10000  // For Claude Extended Thinking
-    }
+    "reasoning_effort": "low", // Optional: how deeply the guest wants the model to think (v1.7+)
+    "messages": [              // Optional: the conversation un-flattened (v1.7+)
+      {"role": "user", "content": "What is the capital of France?"}
+    ],
+    "system": "Answer in one sentence.", // Optional (v1.7+)
+    "tools": [                 // Optional: Anthropic tool definitions (v1.7+)
+      {"name": "get_weather", "description": "Current weather for a city",
+       "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}
+    ],
+    "stream": false            // Optional: ask for REMOTE_INFERENCE_CHUNK frames (v1.7+)
   }
 }
 ```
 
 **Fields:**
-- `request_id` (string, required): UUID for request/response correlation
+- `request_id` (string, required): UUID for request/response correlation. The requester
+  mints it, or passes on the id a door in front of the wire has already shown its own
+  client — the gateway's peer route does that, so the id an HTTP client reads on its
+  first streamed event is the id both nodes' usage rows are joined on. The requester
+  chooses the key the host's own row is written under, so the host refuses an id it is
+  already serving for that peer (`invalid_value`), before the call and with no row:
+  two calls under one id would cross their chunk streams and collapse two rows into
+  one. The id is the peer's again as soon as its answer has been sent, and two peers
+  may use the same id at the same time — the pair (peer, id) is what must be unique
 - `prompt` (string, required): AI query text
 - `model` (string, optional): Specific model to use
 - `provider` (string, optional): AI provider (ollama, openai, anthropic)
-- `images` (array, optional): Image objects for vision queries (v0.12.0+). Peer must support vision (`supports_vision: true` in PROVIDERS_RESPONSE).
-  - `path` (string, optional): Original filename
+- `images` (array, optional): Image objects for vision queries (v0.12.0+). Peer must support vision (`supports_vision: true` in PROVIDERS_RESPONSE). Reduced to exactly two fields before it travels (`_image_for_the_wire`, `dpc_protocol/protocol.py`) — a `path` field on the sender's side never reaches the wire, deliberately: it names a location on the sender's own filesystem, unreachable and possibly misleading on the receiver's. The field travels beside the prompt and reaches the host's vision entry point, which takes no tools, so a request carrying it **and** `tools` is refused with the error response (`tools_unsupported`) rather than answered without the tools; images beside tools travel as `image` blocks in `messages` instead.
   - `base64` (string, required): Base64-encoded image data (data URL format)
   - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
-- `thinking` (object, optional): Thinking mode configuration
-  - `enabled` (boolean): Enable extended thinking/reasoning
-  - `budget_tokens` (integer): Token budget for thinking (Claude Extended Thinking)
+- `reasoning_effort` (string, optional, v1.7+): How deeply the guest wants the model to think, one word of the shared scale `off`, `low`, `medium`, `high`, `max`, or one of the words the host's own model named for that alias (`reasoning_words` in PROVIDERS_RESPONSE). A request, not an instruction: the host may lower it to what it is willing to spend, and answers with the word it served in `served_effort`. Absent means the guest did not choose, and the host answers at its own default — which is not the same as `off`, and which `served_effort` names. A word the alias has no rung for is not guessed at and not served silently: the host answers with the error response, listing the words that alias accepts, before it runs anything.
+- `messages` (array, optional, v1.7+): The conversation un-flattened, one object per turn: `role` (`user` or `assistant`) and `content`, a string or a list of content blocks in the Anthropic shape. This is what lets a guest have a conversation rather than a single prompt, and it is the only field a host can call tools from. **`prompt` stays required beside it** and carries the same turns flattened by the sender, so a host that has never heard of this field answers the guest anyway — the compatibility rule of the whole v1.7 request half. A sender therefore renders `prompt` from `messages` and `system` and from nothing else; the two must say the same thing, pictures aside, since a prompt carries none.
+  A user turn may hold `image` blocks — `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}`, at their place among the turn's other blocks — and a `tool_result` block may hold them in its own `content`. This is how images travel beside `tools`: in the turns, where the host's tools path reads each picture in the turn it was sent in. A guest sends image blocks beside `tools` only to an alias whose menu row says `serves_images_with_tools: true` (§3.5), and sends no `images` field with them. A host serves them with the tools only where its serving alias has the path that carries both — the same predicate that sets that field on its row — and otherwise answers with the error response (`tools_unsupported`), running nothing. An older host has no such gate and may drop the pictures without a word, which is why a guest reads the field's absence as no. Without `tools`, a sender carries a user turn's images on `images` and leaves those blocks out of `messages`, as before.
+- `system` (string or array, optional, v1.7+): The system prompt that goes with `messages`; a string or a list of content blocks. Meaningless without `messages`, and already folded into `prompt` by the sender.
+- `tools` (array, optional, v1.7+): Anthropic tool definitions — `name`, `description`, `input_schema` — the model may call. Any calls it makes come back in the response's `tool_calls`; the guest runs them and sends the next request with the results in `messages`. A host whose serving alias has no native tool-calling path answers with the error response rather than answering without the tools: a text answer to a request that asked for tools breaks the caller's loop. `supports_tools` in PROVIDERS_RESPONSE (§3.5) lets a guest see that before it spends a round trip; the host's refusal here is the gate.
+- `stream` (boolean, optional, v1.7+, default false): Whether the host should send REMOTE_INFERENCE_CHUNK frames as the answer is made. A host that does not know the field sends none, and the guest receives the whole answer in the response, as it always did.
 
-**Response:** REMOTE_INFERENCE_RESPONSE message
+Fields a receiver does not recognise are ignored, never refused: a newer guest must still be answered by an older host.
 
-**Security:** Peer may reject request based on firewall rules (`privacy_rules.json` → `compute.enabled`)
+**Response:** REMOTE_INFERENCE_RESPONSE message, preceded by zero or more REMOTE_INFERENCE_CHUNK messages when `stream` was true
+
+**Security:** Peer may reject request based on firewall rules (`privacy_rules.json` → `compute.enabled`). Peer inference is served only over a connection whose key is proved — direct TLS; other tiers (WebRTC, relay, gossip) receive the error response (ADR-041 D2), because on those the requester's `node_id` is asserted by the signalling path rather than proved by the transport, and it is the name the firewall, the usage row and any quota key on.
+
+---
+
+#### REMOTE_INFERENCE_CHUNK
+
+Carries one piece of an answer that is still being made (v1.7+). Sent only when the request asked for `stream: true`, and only after every gate the host applies to the request has passed — a refused call emits no chunk.
+
+**Format:**
+```json
+{
+  "command": "REMOTE_INFERENCE_CHUNK",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "seq": 0,
+    "delta": "The capital of France"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): Matches the request UUID, and the REMOTE_INFERENCE_RESPONSE that ends the stream
+- `seq` (integer, required): Zero-based index of this piece within this request's stream. There is no `total_chunks`: the host does not know how long the answer will be, and the response is what ends the stream
+- `delta` (string, required): The text made since the previous chunk
+
+**Invariants:**
+- **A chunk is transport; the record is the final frame.** No counter is born in a chunk and no usage row is built from deltas. The terminating REMOTE_INFERENCE_RESPONSE still carries the whole `response` and every count, so both nodes' rows are built exactly as they are without streaming
+- The deltas of one `request_id`, concatenated in `seq` order, equal that response's `response` field
+- A receiver that sees a `seq` out of order, or a `request_id` it is not waiting for, drops the chunk and says so in its log; it does not reorder, buffer or reconstruct
+- **On a broken stream the host's row is the record.** The host writes its usage row when the call finishes, whatever reached the guest; the guest's row is a mirror built from the response, so a stream cut before the response leaves the guest with no row at all. The two rows join on `request_id`, and a missing guest row is expected in that case rather than a lost call
+
+**Compatibility:** `stream: true` is a request, not a guarantee. A host sends no chunks when it does not know the field — every pre-v1.7 host — and also when it serves the call by a path that has no chunk channel, which is what a host does for a request carrying `images`, or one carrying no `messages` at all. The guest therefore always builds its text from the response, and a stream of zero chunks is the whole answer arriving at once, as it always did. A guest that never asks for `stream` is sent no chunks by a host that would.
 
 ---
 
 #### REMOTE_INFERENCE_RESPONSE
 
-Returns the result of a remote inference request.
+Returns the result of a remote inference request. When the request asked for `stream: true`, this message terminates the stream of REMOTE_INFERENCE_CHUNK frames and still carries the whole answer and all of its counts.
 
 **Success Format:**
 ```json
@@ -232,12 +367,27 @@ Returns the result of a remote inference request.
     "request_id": "550e8400-e29b-41d4-a716-446655440000",
     "status": "success",
     "response": "The capital of France is Paris.",
+    "model": "llama3.1:70b",
+    "provider": "ollama",
     "tokens_used": 156,
     "prompt_tokens": 12,
     "response_tokens": 144,
     "model_max_tokens": 128000,
     "thinking": "Let me think about this question...",
-    "thinking_tokens": 50
+    "thinking_tokens": 50,
+    "output_includes_thinking": "excludes",
+    "thinking_source": "engine",
+    "tariff_in": 20.0,
+    "tariff_out": 60.0,
+    "tariff_currency": "RUB",
+    "tariff_at": "2026-09-01",
+    "tariff_amount": 0.00346,
+    "billing": "pay_per_use",
+    "served_effort": "low",
+    "tool_calls": [            // Optional: calls the model made (v1.7+)
+      {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Paris"}}
+    ],
+    "finish_reason": "tool_calls" // Optional: what the model stopped on (v1.7+)
   }
 }
 ```
@@ -249,7 +399,8 @@ Returns the result of a remote inference request.
   "payload": {
     "request_id": "550e8400-e29b-41d4-a716-446655440000",
     "status": "error",
-    "error": "Model not available"
+    "error": "Model not available",
+    "code": "model_not_found"
   }
 }
 ```
@@ -258,17 +409,67 @@ Returns the result of a remote inference request.
 - `request_id` (string, required): Matches request UUID
 - `status` (string, required): `"success"`
 - `response` (string, required): AI-generated response text
+- `model` (string, optional): The model that produced the response — sent since v0.12.0
+  (`dpc_protocol/protocol.py`, `create_remote_inference_response`), listed here for the
+  first time
+- `provider` (string, optional): The provider type that served the response — sent since
+  v0.12.0, listed here for the first time; the requester's own usage row copies `model`
+  from this field
 - `tokens_used` (integer, optional): Total tokens consumed
-- `prompt_tokens` (integer, optional): Tokens in prompt
-- `response_tokens` (integer, optional): Tokens in response
+- `prompt_tokens` (integer, optional): Tokens in prompt, as the host's engine reported them where it reported any — its count is the one the host is billed on and the one that sees the chat template and an image's tokens — and as the host's own count over the prompt text otherwise
+- `response_tokens` (integer, optional): Tokens in response, from the same source as `prompt_tokens`; `output_includes_thinking` says what is inside it
 - `model_max_tokens` (integer, optional): Model's context window size
 - `thinking` (string, optional): Thinking/reasoning content from models with extended reasoning (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
 - `thinking_tokens` (integer, optional): Tokens used for thinking/reasoning
+- `output_includes_thinking` (string, optional, v1.7+): Whether `response_tokens` already has `thinking_tokens` inside it — `includes`, `excludes` or `unknown` — as the node that produced the count knows it, so the requester can check the arithmetic on the numbers beside it rather than assume a convention. Absent from an older host, which the requester reads as `unknown`. Never sent on an error. Under `includes` the reasoning is inside the output count and never larger than it: `thinking_tokens <= response_tokens`. A count that breaks the invariant is an estimate that overflowed the total it sits inside, and a receiver writes the row with `thinking_tokens` clamped to `response_tokens` and `thinking_source` set to `estimated` rather than refusing a record of a call that was made.
+- `thinking_source` (string, optional, v1.7+): Where `thinking_tokens` came from — `engine` where the host's vendor reported the reasoning split, `estimated` where the host derived it from the reasoning text, which is what a host whose build reports no split sends. The counts beside it can be exact while the split inside them is a guess, so this is provenance, not arithmetic: `prompt_tokens` and `response_tokens` are unaffected by it, and a tariff is charged on those. Absent means the host said nothing about provenance — an older host, or a call with no reasoning at all — and is not a claim that an engine counted. Never sent on an error.
+- `tariff_in`, `tariff_out` (number, optional, v1.7+): The owner's tariff for this call, as **applied values** per 1M prompt and per 1M output tokens — never a reference to a configuration that may have changed by the time the row is read (ADR-041 D3, amendment). Reasoning is billable output at `tariff_out`, and whether `response_tokens` already holds it is what `output_includes_thinking` says. The four tariff fields are sent as one group or not at all; the group's absence means the host declared no tariff (the call is a gift), while zeros mean a tariff was declared and this requester pays nothing of it.
+- `tariff_currency` (string, optional, v1.7+): The ISO 4217 unit `tariff_in`, `tariff_out` and `tariff_amount` are in — the host's `compute.currency`, frozen into the message and into both nodes' usage rows, because rows outlive a configuration. The protocol picks no currency; parity between two nodes' units is the pair's own agreement, outside the protocol.
+- `tariff_at` (string, optional, v1.7+): The `from` day (`YYYY-MM-DD`) of the dated tariff entry that applied, so a row can name which line of the declaration priced it.
+- `tariff_amount` (number, optional, v1.7+): What the tariff came to on this call's own counts, in `tariff_currency`, computed by the host at the moment of the call and never re-derived. Rides only with the group above. Absent beside a present group means the call could not be priced — `output_includes_thinking` is `unknown`, so nothing may be billed from the counts — and is not the same as `0`, which is a price.
+- `billing` (string, optional, v1.7+): The billing model the host priced the call under, `pay_per_use` or `subscription`, so the requester's own usage row copies the host's answer instead of guessing one from the model's name. Absent when the host did not say. Never sent on an error.
+- `served_effort` (string, optional, v1.7+): The reasoning effort the host actually ran the call at — the rung its provider reports having sent, where the provider reports one, and otherwise the guest's word clamped to the host's cap, or the word the host's own configuration runs that alias at. The provider's word wins because an entry point may run a rung the configuration does not name. This is the guest's only way to check the depth it paid for against the depth it asked for; the host's usage row and the guest's carry the same word under the same `request_id`. Present on every served call the host can name a rung for, whether or not the guest asked; absent means no word describes the call — the alias has no effort channel, or its host could not read its own configured word — and is not the same as `off`. Never sent on an error.
+
+- `tool_calls` (array, optional, v1.7+): The calls the model made, as Anthropic `tool_use` blocks — `type` (always `tool_use`), `id`, `name`, `input` (an object). Absent or empty means the model called nothing. The guest runs them and sends the results back in the next request's `messages`; nothing on this wire executes a tool.
+- `finish_reason` (string, optional, v1.7+): What the host's provider said the model stopped on, in the providers' own vocabulary — `stop`, `length`, `tool_calls`. Absent means the provider said nothing, which is not `stop`: a receiver rendering a shape that must print a word chooses its own constant and knows it is choosing one. A turn that returned a `tool_calls` array stopped on it, whatever else was reported.
+
+What the call cost the *host* is not on the wire. A `cost_usd` field was added here on 2026-09-10 and removed on 2026-09-14, while v1.7 is unreleased: the host's own cost is the host's economy and stays in the host's ledger, and what the guest is asked for is the tariff above (ADR-041 D3, amendment). A requester's usage row therefore carries `cost_usd = null` — it spent nothing of its own — and the tariff fields copied from this message.
 
 **Fields (Error):**
 - `request_id` (string, required): Matches request UUID
 - `status` (string, required): `"error"`
 - `error` (string, required): Human-readable error message
+- `code` (string, optional, v1.7+): Why the host refused, in one machine-readable word. It rides beside `error` and does not replace it: the code is what a program reads and the text is what a person reads, and a host sends both. The words:
+  - `identity_unproved` — the request did not arrive over a connection whose key is proved, and this host serves peer inference only over one (§3.4 Security, ADR-041 D2)
+  - `not_allowed` — the host's firewall does not let this peer ask for inference, or not for what it asked for
+  - `model_not_found` — the host serves no alias to this peer, or not the one named: the request is off the menu (§3.5)
+  - `onward_sharing_refused` — the alias the host would have served is itself somebody else's model, and what is shared is not shared onward (ADR-041 D7 part 1)
+  - `invalid_value` — the request asked for something the host cannot take, refused at a gate before anything ran: a reasoning effort word the alias has no rung for (the text lists the words it accepts), or a `request_id` already in flight from this peer. A failure raised inside the host's own call carries no code, whatever its type: only a gate that names the guest's request sends a word that blames it
+  - `tools_unsupported` — the request carried tools and the host's serving alias has no native tool-calling path, which is refused rather than answered without them; or it carried tools beside images on a path that cannot carry both — `image` blocks in `messages` on an alias that cannot see or has no tools path, or the `images` field, whose vision entry point takes no tools. One word for both, because a receiver acts on both the same way: change the request or the alias. Since 2026-09-17
+  - `insufficient_quota` — the alias the host serves is a vendor alias, bounded by money rather than by the card, and this guest has spent its daily ceiling on it (ADR-041 D5). The ceiling is per caller and counted from the host's own usage rows, so it is the guest's own spending and not the host's total; the text names what was spent and what the ceiling is, and the call is served again after midnight UTC
+  - `unrated` — the alias the host serves is a vendor alias, and the host has no rate for its model, so what a call spends cannot be counted against the ceiling in `compute.vendor_quotas`: the meter is absent rather than slow, and the alias is refused rather than served against a ceiling that would read zero for ever. The repair is on the host and is a rate, not time — nothing about waiting makes this call succeed
+  - `misconfigured` — the host cannot classify its own serving lists, so the class of the alias it would serve is unknown, and an alias whose class is unknown is not served (a paying alias filed under `compute.serving_local` is the state that reaches this gate). The host's own configuration, repaired by editing it; this names no fault of the guest's and nothing the guest can do
+
+  The last three are one cause split into three words on 2026-09-15, while v1.7 is unreleased, because a code is read as an instruction: only `insufficient_quota` refills by itself, and answering the other two with the same word tells a client to retry a state that never changes on its own.
+
+  Absent means the host has no word for this refusal — a failure mid-call rather than a gate, or a host that predates the field — and is never itself a reason. A receiver reads an unknown word exactly as it reads an absent one, because a newer host may name a cause this one has no word for; no receiver refuses a message over its code. Sent on the error form only: a served call carries no code.
+
+  What a receiver does with the word is the receiver's own. The guest in this tree runs an OpenAI-compatible gateway (ADR-041) and answers its own HTTP clients with the status the cause deserves:
+
+  | code | status | what the client is being told |
+  |---|---|---|
+  | `invalid_value` | 400 | your request; fix it and send it again |
+  | `tools_unsupported` | 400 | your request; this alias takes no tools, or not beside these images |
+  | `model_not_found` | 404 | not on that host's menu |
+  | `not_allowed` | 403 | that host's door; ask a person |
+  | `identity_unproved` | 403 | that host's door; ask a person |
+  | `onward_sharing_refused` | 403 | that host's door; ask a person |
+  | `insufficient_quota` | 429 | your ceiling on that host, spent for today; come back tomorrow |
+  | `unrated` | 503 | that host cannot price this alias; its owner must add a rate |
+  | `misconfigured` | 503 | that host cannot read its own serving lists; its owner must fix them |
+  | unknown or absent | 502 | refused, and nothing here can say why |
+
+  The two 503s carry no `Retry-After`: neither state ends with time, and a 429 there would set an auto-retrying client looping against a host only its owner can repair. Before the code every row above was the same 502, and an IDE could not tell a request it should fix from a door it should ask a person about.
 
 ---
 
@@ -394,12 +595,45 @@ Returns a list of AI providers available on the peer's system.
       {
         "alias": "Llama 3.1 70B (Ollama)",
         "model": "llama3.1:70b",
-        "type": "ollama"
+        "type": "ollama",
+        "supports_vision": false,
+        "supports_voice": false,
+        "context_window": 131072
+      },
+      {
+        "alias": "gpt-oss-120b (llama.cpp)",
+        "model": "gpt-oss-120b",
+        "type": "llamacpp_server",
+        "supports_vision": false,
+        "supports_voice": false,
+        "supports_tools": true,
+        "serves_images_with_tools": false,
+        "context_window": 131072,
+        "reasoning_words": ["xhigh", "medium", "low"],
+        "reasoning_default": "xhigh",
+        "tariff": {
+          "in": 20.0,
+          "out": 60.0,
+          "currency": "RUB",
+          "from": "2026-09-01",
+          "unit": "per_1m_tokens",
+          "free": false
+        },
+        "settings": {
+          "temperature": 1.0,
+          "top_p": 0.95,
+          "top_k": 20,
+          "max_output_tokens": 8192,
+          "variant": "gpt-oss-120b-Q5_K_M.gguf"
+        }
       },
       {
         "alias": "GPT-4 Turbo",
         "model": "gpt-4-turbo-preview",
-        "type": "openai"
+        "type": "openai",
+        "supports_vision": true,
+        "supports_voice": false,
+        "context_window": null
       }
     ]
   }
@@ -411,6 +645,70 @@ Returns a list of AI providers available on the peer's system.
   - `alias` (string, required): Human-readable name
   - `model` (string, required): Model identifier
   - `type` (string, required): Provider type (ollama, openai, anthropic, etc.)
+  - `supports_vision` (boolean, required): Whether the provider accepts images (v0.12.0+)
+  - `supports_voice` (boolean, required): Whether the provider can transcribe audio (v0.13.0+)
+  - `supports_tools` (boolean, optional, v1.7+): Whether this alias's provider has a native
+    tool-calling path, so a REMOTE_INFERENCE_REQUEST carrying `tools` can be served. Absent
+    reads as false. An optimisation, not a permission: it saves the guest a round trip it
+    would lose, and the host's refusal on the wire (§3.4) remains the gate
+  - `serves_images_with_tools` (boolean, optional, v1.7+): Whether this host serves a
+    REMOTE_INFERENCE_REQUEST whose `messages` hold `image` blocks beside `tools` on this
+    alias — the pictures in their turns, the tools called. A `serves_*` field says what the
+    host's route will serve for a request of that shape, where a `supports_*` field says
+    what the provider can do; the two differ, and this one is not computed from
+    `supports_vision` and `supports_tools`. The sender sets it from the very predicate its
+    own gate asks before such a call, so the row cannot promise a request the host would
+    refuse. **Fail-closed**: absent reads as false, unlike `supports_vision` — a host that
+    predates the field may take image blocks beside tools to a path that drops the
+    pictures without a word, and a guest must not send them there. Like `supports_tools`, an
+    optimisation over the host's refusal (§3.4), not a permission
+  - `context_window` (integer or null, required): Context window in tokens; `null` when
+    the model is unknown to the sender, which a receiver must distinguish from a real size
+  - `reasoning_words` (array of strings, optional): The reasoning-effort words this alias
+    accepts — the words its provider can put on the wire, never a table the sender fell
+    back to. Present when the sender read them from the model's own chat template, and
+    present when the sender's provider serves fewer than the general scale. An **empty
+    array** is the alias saying it serves no reasoning effort at all: a receiver must ask
+    it for no word, `off` included, since a provider with no effort channel has no way of
+    saying no either. Absent — and only absent — means the sender fell back to the general
+    scale, which the receiver may then use
+  - `reasoning_default` (string or null, optional): The effort the host serves when none
+    is sent — the sender's *effective* default for that alias: the word its own
+    configuration runs the alias at, resolved onto the alias's ladder, and the default the
+    model's template names where nothing is configured. One word of `reasoning_words`, or
+    `null` when neither names a rung. The receiver chooses on this field, so it is the same
+    resolution the host applies to a REMOTE_INFERENCE_REQUEST that carries no
+    `reasoning_effort`, and the same word that comes back in `served_effort`. Sent with
+    `reasoning_words` and under the same condition
+  - `tariff` (object, optional, v1.7+): What **this recipient** is charged for a call on
+    this alias, resolved by the sender the way it prices the call itself, so the menu
+    quotes the rate the receipt will carry (§3.4 `tariff_in` / `tariff_out`). Its absence
+    means the sender declared no tariff — the call is a gift — and is **not** the same as
+    free: a declared zero is a price somebody chose, and a receiver must not read a
+    missing object as one. Fields:
+    - `in`, `out` (number, required): the rates, in `unit`, for prompt and for output
+      tokens. Reasoning is billable output at `out`, on the convention §3.4's
+      `output_includes_thinking` states
+    - `currency` (string, required): ISO 4217, the sender's own `compute.currency`. The
+      protocol picks no currency, and parity between two nodes' units is their agreement
+    - `from` (string, required): the `YYYY-MM-DD` day the dated entry that applied begins,
+      so a receiver can see which line of the declaration it was quoted
+    - `unit` (string, required): the unit of `in` and `out`. `per_1m_tokens` is the only
+      value v1.7 defines; a receiver that does not know the word **must not price the row**
+      rather than guess a scale
+    - `free` (boolean, required): whether this recipient pays nothing — `in` and `out` both
+      zero, whether because the sender declared the alias free or because this peer is on
+      its free list. Zero rates and `false` cannot occur together
+  - `settings` (object, optional, v1.7+): The dials a call on this alias will actually run
+    at, so a guest sees what it is choosing before it calls, the settings it cannot change
+    included. **Fail-closed**: a key the sender cannot vouch for is absent, and absent means
+    «not stated», never «none applies» — a vendor default the sender never chose still
+    applies at the vendor. The whole object is absent when the sender states nothing. Keys,
+    all optional: `temperature`, `top_p`, `top_k` (number); `max_output_tokens` (integer) —
+    the ceiling on one answer, whatever the provider's own name for it is; `variant`
+    (string) — the build behind `model` where the sender can read one, such as a GGUF file
+    name. `context_window` and `reasoning_default` stay where they are, at the top of the
+    row, and are not repeated here
 
 ---
 
@@ -518,7 +816,12 @@ Casts a vote on a knowledge commit proposal.
     "vote": "approve",
     "comment": "Looks good, captures our discussion well",
     "timestamp": "2025-12-05T10:15:00Z",
-    "is_required_dissent": false
+    "is_required_dissent": false,
+    "conversation_id": "conv-xyz789",
+    "vote_hash": "sha256:...",
+    "signature": "base64-encoded RSA-PSS signature",
+    "signer_node_id": "dpc-node-alice",
+    "vote_preimage_version": "vote-v1"
   }
 }
 ```
@@ -526,10 +829,17 @@ Casts a vote on a knowledge commit proposal.
 **Fields:**
 - `proposal_id` (string, required): Proposal identifier being voted on
 - `voter_node_id` (string, required): Node ID of voter
-- `vote` (string, required): Vote choice - `"approve"` | `"reject"` | `"request_changes"`
-- `comment` (string, optional): Optional comment/feedback
+- `vote` (string, required): Vote choice - `"approve"` | `"reject"` | `"request_changes"` | `"abstain"`
+- `comment` (string, optional; **required for `"abstain"`**): Comment/feedback. An abstention blocks the commit, so it must say why it could not be judged
 - `timestamp` (string, required): ISO 8601 timestamp of vote
 - `is_required_dissent` (boolean, required): True if voter is assigned devil's advocate
+- `conversation_id` (string, sent): The proposal's conversation, carried so a receiver can
+  relay or verify the vote without already holding the proposal (`consensus_manager.py`,
+  `cast_vote`)
+- `vote_hash`, `signature`, `signer_node_id`, `vote_preimage_version` (sent, optional):
+  Signature over the vote's content, added by `sign_vote()` (`signing.py`) alongside the
+  message signing of §4.1. Absent when this node holds no signing key, in which case the
+  receiver treats the vote as unsigned/legacy — see the same rule under VOTE_NEW_SESSION.
 
 **Response:** KNOWLEDGE_COMMIT_RESULT (when all votes collected or deadline reached)
 
@@ -601,9 +911,11 @@ Notifies all participants of voting outcome after all votes are collected or the
   - `approve` (integer): Number of approve votes
   - `reject` (integer): Number of reject votes
   - `request_changes` (integer): Number of change requests
-  - `total` (integer): Total votes received
+  - `abstain` (integer): Number of participants that answered "I cannot judge this"
+  - `total` (integer): Votes received from participants (votes from other nodes are not counted)
+  - `participants` (integer): Size of the roster the proposal names — the denominator
   - `threshold` (number): Required approval threshold (e.g., 0.75)
-  - `approval_rate` (number): Actual approval rate (approve/total)
+  - `approval_rate` (number): Actual approval rate (approve/participants)
 - `votes` (array, required): All participant votes with details
   - `node_id` (string): Voter's node ID
   - `vote` (string): Vote choice
@@ -618,10 +930,11 @@ Notifies all participants of voting outcome after all votes are collected or the
 **UI Behavior:** Shows toast notification with outcome (✅ approved, ❌ rejected, ⏱️ timeout) and optional detailed vote breakdown dialog
 
 **Voting Rules:**
-- **Approval**: Requires ≥75% of participants to vote "approve"
+- **Approval**: Requires ≥75% of **participants** to vote "approve". The denominator is the roster the proposal names, never the votes that happen to have arrived; a vote from a node outside the roster is not counted at all.
 - **Rejection**: More "reject" votes than "request_changes"
 - **Revision Needed**: More "request_changes" than "reject" votes
-- **Timeout**: Deadline reached before all votes collected (finalizes with current votes)
+- **Abstention**: A participant that cannot judge the proposal — it does not hold the messages the extraction read — answers `"abstain"` with a mandatory `comment` giving the reason. An abstention stays in the denominator, so it cannot approve and it does not pretend to; with two or three participants it is enough to stop the commit on its own.
+- **Timeout**: Deadline reached with participants still unanswered. **A timeout never approves**: the proposal ends as `"timeout"` and the knowledge is not written. Otherwise the rule above could be bypassed by waiting, which is how two commits were applied on one voice of two on 2026-09-06 and 2026-09-07.
 
 ---
 
@@ -634,9 +947,18 @@ Requests peer's device/hardware information (GPU, RAM, OS, dev tools).
 **Format:**
 ```json
 {
-  "command": "REQUEST_DEVICE_CONTEXT"
+  "command": "REQUEST_DEVICE_CONTEXT",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "requestor_id": "dpc-node-alice-123"
+  }
 }
 ```
+
+**Fields:**
+- `request_id` (string, required): Correlates the response to this request
+- `requestor_id` (string, sent, read by nothing): The requester's own `node_id`, same as
+  on REQUEST_CONTEXT — sent but not consulted (`context_coordinator.py`, `request_device_context`)
 
 **Response:** DEVICE_CONTEXT_RESPONSE message
 
@@ -653,19 +975,38 @@ Returns device context (subject to firewall rules).
 {
   "command": "DEVICE_CONTEXT_RESPONSE",
   "payload": {
-    "hardware": {
-      "gpu": {"model": "RTX 3060", "vram_gb": 12},
-      "ram_gb": 24
-    },
-    "software": {
-      "os": {"family": "Windows", "version": "10"}
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "device_context": {
+      "hardware": {
+        "gpu": {"model": "RTX 3060", "vram_gb": 12},
+        "ram_gb": 24
+      },
+      "software": {
+        "os": {"family": "Windows", "version": "10"}
+      }
     }
   }
 }
 ```
 
+**Error Format** (sender has no device context to offer):
+```json
+{
+  "command": "DEVICE_CONTEXT_RESPONSE",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "device_context": {},
+    "error": "Device context not available"
+  }
+}
+```
+
 **Fields:**
-- `payload` (object, required): Filtered device context (structure defined by device_context.json schema v1.1)
+- `request_id` (string, required): Echoes the request's `request_id`
+- `device_context` (object, required): Filtered device context (structure defined by
+  device_context.json schema v1.1), carried under `device_context` — **not** sent as the
+  payload itself; `{}` on the error path
+- `error` (string, optional): Present only when the sender has no device context to offer
 
 **Note:** Privacy-sensitive. Firewall rules control which hardware/software details are shared.
 
@@ -683,8 +1024,7 @@ Broadcasts when personal context changes, invalidates peer caches.
   "command": "CONTEXT_UPDATED",
   "payload": {
     "node_id": "dpc-node-alice123",
-    "context_hash": "a1b2c3d4...",
-    "timestamp": "2025-12-11T10:30:00Z"
+    "context_hash": "a1b2c3d4..."
   }
 }
 ```
@@ -692,7 +1032,9 @@ Broadcasts when personal context changes, invalidates peer caches.
 **Fields:**
 - `node_id` (string, required): Node that updated their context
 - `context_hash` (string, required): SHA256 hash of new context for cache invalidation
-- `timestamp` (string, required): ISO 8601 timestamp of update
+- `timestamp`: not sent by any implementation in this tree and not read by the handler
+  (`knowledge_service.py`, the broadcast; `knowledge_handler.py`, the receiver) — dropped
+  from the wire format rather than left as a required field nothing carries
 
 **Use Case:** Phase 7 peer cache invalidation - notifies peers when context changes so they can refresh cached data.
 
@@ -762,7 +1104,9 @@ Epidemic message routing for store-and-forward delivery with end-to-end encrypti
 - `source` (string, required): Original sender node ID
 - `destination` (string, required): Target recipient node ID
 - `payload` (object, required): Message content
-  - `encrypted` (string, required): Base64-encoded RSA-OAEP encrypted payload (E2E encryption)
+  - `encrypted` (string, required): Base64-encoded hybrid AES-256-GCM + RSA-OAEP encrypted
+    payload (E2E encryption) — not pure RSA-OAEP; RSA alone caps the payload at roughly
+    190 bytes, which a message this size regularly exceeds
 - `hops` (integer, required): Current hop count (increments at each forward)
 - `max_hops` (integer, required): Maximum allowed hops (default: 5)
 - `ttl` (integer, required): Time-to-live in seconds (default: 86400 = 24 hours)
@@ -783,10 +1127,16 @@ Receiver performs these checks in order:
 6. **Forward**: Otherwise, forward to N=3 random connected peers (epidemic fanout)
 
 **Security (End-to-End Encryption):**
-- Payload encrypted with recipient's RSA public key (OAEP padding)
+- Payload encrypted for the recipient with hybrid encryption: a random AES-256 key
+  encrypts the payload (AES-GCM, which also authenticates it), and that AES key is then
+  encrypted with the recipient's RSA public key (OAEP padding) — `encrypted` carries the
+  wrapped key, nonce, ciphertext and authentication tag concatenated into one blob
+  (`dpc_protocol/crypto.py`, `encrypt_with_public_key_hybrid`)
 - Only sender and recipient can decrypt message content
 - Intermediate hops see only: source, destination, TTL, hop count, encrypted blob
 - Intermediate hops **cannot** decrypt message content (privacy-preserving)
+- Forward secrecy: a fresh AES key is generated per message, so recovering one message's
+  key does not expose any other
 
 **Use Case:**
 - Last-resort fallback when all direct connections fail (Priority 6)
@@ -960,13 +1310,21 @@ Cancels an in-progress or pending file transfer.
 
 **Fields:**
 - `transfer_id` (string, required): Transfer identifier
-- `reason` (string, required): Cancellation reason
-  - `user_cancelled` - User manually cancelled
-  - `timeout` - Transfer timed out
+- `reason` (string, required): Cancellation reason. The set below is what senders in
+  this tree actually emit (`managers/file_transfer_manager.py`;
+  `message_handlers/file_offer_handler.py`); it replaces an earlier list that mixed in
+  three values nothing sends (`timeout`, `permission_denied`, `size_limit_exceeded` — a
+  rejected size is folded into `firewall_denied` instead) and omitted two the code does
+  send.
+  - `user_cancelled` - User manually cancelled (`cancel_transfer`'s default)
+  - `firewall_denied` - Receiver's firewall rejected the offer, including a transfer
+    over the receiver's size limit (`file_offer_handler.py`)
   - `hash_mismatch` - SHA256 verification failed
   - `chunk_verification_failed` - Chunk CRC32 verification failed after max retries (v0.11.1+)
-  - `permission_denied` - Firewall rejected transfer
-  - `size_limit_exceeded` - File exceeds peer's size limit
+  - `missing_chunks` - Reassembly timed out with chunks still missing
+  - `send_error` - Error occurred while sending
+  - The handler's own docstring (`file_cancel_handler.py`) additionally lists `timeout`
+    among the reasons it expects; no sender in this tree produces it
 
 **Behavior:**
 - Both sender and receiver can send FILE_CANCEL
@@ -1248,10 +1606,7 @@ Forwards an encrypted message through an established relay session.
     "from": "dpc-node-sender-123",
     "to": "dpc-node-receiver-456",
     "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "message": {
-      "command": "SEND_TEXT",
-      "payload": {"text": "Hello via relay!"}
-    }
+    "data": "base64-encoded AES-GCM+RSA-OAEP encrypted blob"
   }
 }
 ```
@@ -1260,7 +1615,11 @@ Forwards an encrypted message through an established relay session.
 - `from` (string, required): Sender node ID (must match connection identity)
 - `to` (string, required): Receiver node ID
 - `session_id` (string, required): Active relay session identifier
-- `message` (object, required): Encrypted DPTP message to forward (any command type)
+- `data` (string, required): The inner DPTP message (any command type), hybrid-encrypted
+  for `to` and base64-encoded — an opaque blob to the relay, **not** the plaintext
+  `message` object shown in earlier revisions of this document. The handler refuses
+  anything that is not a non-empty string (`relay_message_handler.py`;
+  `relayed_connection.py`).
 
 **Behavior:**
 - Relay verifies sender matches connection identity
@@ -1388,7 +1747,9 @@ Clients select relays using weighted scoring:
 > **Implementation note:** There is no separate `SEND_IMAGE` wire command. Remote vision inference
 > uses **REMOTE_INFERENCE_REQUEST** (§3.4) with the optional `images` field (added v0.12.0).
 > The peer must advertise `supports_vision: true` in PROVIDERS_RESPONSE before vision queries
-> are sent. The response uses the standard REMOTE_INFERENCE_RESPONSE format.
+> are sent. The response uses the standard REMOTE_INFERENCE_RESPONSE format. Images beside
+> `tools` do not use the `images` field: they travel as `image` blocks in `messages`, to an
+> alias whose row says `serves_images_with_tools: true` (§3.4, §3.5).
 
 **Use Cases:**
 - Screenshot analysis and OCR
@@ -1416,8 +1777,9 @@ Proposes ending current conversation and starting fresh session.
   "payload": {
     "proposal_id": "prop-abc123",
     "conversation_id": "conv-xyz789",
-    "proposer_node_id": "dpc-node-alice-123",
-    "timestamp": "2025-12-25T10:30:00Z"
+    "initiator_node_id": "dpc-node-alice-123",
+    "timestamp": "2025-12-25T10:30:00Z",
+    "participants": ["dpc-node-alice-123", "dpc-node-bob-456"]
   }
 }
 ```
@@ -1425,8 +1787,13 @@ Proposes ending current conversation and starting fresh session.
 **Fields:**
 - `proposal_id` (string, required): Unique proposal identifier
 - `conversation_id` (string, required): Conversation to reset
-- `proposer_node_id` (string, required): Node ID of proposer
+- `initiator_node_id` (string, required): Node ID of the proposer — the field carrying
+  this name on the wire has always been `initiator_node_id`, never `proposer_node_id`
+  (`session_manager.py`, `_broadcast_proposal`)
 - `timestamp` (string, required): ISO 8601 timestamp of proposal
+- `participants` (array, required): Every node the proposal names, including the
+  initiator; a receiver builds its local voting session from this list
+  (`session_manager.py`, `handle_proposal_message`)
 
 **Response:** VOTE_NEW_SESSION from each participant
 
@@ -1444,18 +1811,37 @@ Casts a vote on a session reset proposal.
   "command": "VOTE_NEW_SESSION",
   "payload": {
     "proposal_id": "prop-abc123",
+    "vote": true,
     "voter_node_id": "dpc-node-bob-456",
-    "vote": "approve",
-    "timestamp": "2025-12-25T10:31:00Z"
+    "conversation_id": "conv-xyz789",
+    "timestamp": "2025-12-25T10:31:00Z",
+    "vote_hash": "sha256:...",
+    "signature": "base64-encoded RSA-PSS signature",
+    "signer_node_id": "dpc-node-bob-456",
+    "vote_preimage_version": "vote-v1"
   }
 }
 ```
 
 **Fields:**
 - `proposal_id` (string, required): Proposal being voted on
+- `vote` (boolean, required): `true` = approve, `false` = reject — a boolean on the wire,
+  not the `"approve"`/`"reject"` string shown in earlier revisions of this document
+  (`service.py`, `vote_new_session`). The signature preimage below is computed over this
+  boolean.
 - `voter_node_id` (string, required): Node ID of voter
-- `vote` (string, required): Vote choice - `"approve"` | `"reject"`
+- `conversation_id` (string, sent): The proposal's conversation, carried so the vote can
+  be relayed and matched without the receiver already holding the proposal
 - `timestamp` (string, required): ISO 8601 timestamp of vote
+- `vote_hash`, `signature`, `signer_node_id`, `vote_preimage_version` (sent, optional):
+  Signature over the vote's content, added by `sign_vote()` (`signing.py`) alongside the
+  message signing of §4.1. **A vote relayed through an intermediate node (star topology)
+  without a signature this receiver can verify is not counted toward the tally**: only
+  the `verified` and `legacy` (directly-connected, unsigned) verdicts are counted; a
+  `legacy_relayed` verdict (unsigned and second-hand) is passed on for a
+  better-positioned node to check, not tallied here
+  (`message_handlers/__init__.py`, `_authenticate_voter`; `session_handler.py`,
+  `VoteNewSessionHandler`).
 
 **Response:** NEW_SESSION_RESULT (when all votes collected)
 
@@ -1471,23 +1857,34 @@ Notifies all participants of voting outcome.
   "command": "NEW_SESSION_RESULT",
   "payload": {
     "proposal_id": "prop-abc123",
-    "status": "approved",
-    "votes": [
-      {"node_id": "dpc-node-alice-123", "vote": "approve"},
-      {"node_id": "dpc-node-bob-456", "vote": "approve"}
-    ],
-    "timestamp": "2025-12-25T10:32:00Z"
+    "conversation_id": "conv-xyz789",
+    "result": "approved",
+    "clear_history": true,
+    "timestamp": "2025-12-25T10:32:00Z",
+    "vote_tally": {
+      "approve": 2,
+      "reject": 0,
+      "total": 2
+    }
   }
 }
 ```
 
 **Fields:**
 - `proposal_id` (string, required): Proposal identifier
-- `status` (string, required): Result - `"approved"` | `"rejected"`
-- `votes` (array, required): All participant votes
-  - `node_id` (string): Voter's node ID
-  - `vote` (string): Vote choice
+- `conversation_id` (string, required): Names the conversation the result applies to; the
+  receiver refuses a result whose `conversation_id` does not match the local session it
+  holds for `proposal_id` (`session_handler.py`, `NewSessionResultHandler._refuse_reason`)
+- `result` (string, required): `"approved"` | `"rejected"` — **not** `status`, and there
+  is no `votes[]` array on the wire; a receiver acts only on `result` and `clear_history`
+- `clear_history` (boolean, required): Whether the receiver should clear its local
+  history for `conversation_id`. History is cleared only when `result == "approved"`
+  **and** `clear_history` is true (`session_handler.py:218`) — a spec-conformant frame
+  built to the field names above is refused or is a no-op, since the code neither sends
+  nor reads `status`/`votes`
 - `timestamp` (string, required): ISO 8601 timestamp of finalization
+- `vote_tally` (object, required): `approve`, `reject`, `total` vote counts
+  (`session_manager.py`, `_finalize_proposal`)
 
 **Behavior:**
 - **Unanimous approval required**: All participants must vote "approve"
@@ -1512,6 +1909,7 @@ Requests conversation history from peer.
   "command": "REQUEST_CHAT_HISTORY",
   "payload": {
     "conversation_id": "conv-xyz789",
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
     "since_timestamp": "2025-12-25T10:00:00Z"
   }
 }
@@ -1519,7 +1917,11 @@ Requests conversation history from peer.
 
 **Fields:**
 - `conversation_id` (string, required): Conversation ID to sync
-- `since_timestamp` (string, optional): Only return messages after this timestamp (ISO 8601)
+- `request_id` (string, sent): Correlates the response to this request; the response
+  carries it back so the receiver can tell a solicited history from an unsolicited one
+  (`chat_history_handlers.py`)
+- `since_timestamp` (string, optional): Only return messages after this timestamp (ISO
+  8601) — documented, never sent, never read by any handler in this tree
 
 **Response:** CHAT_HISTORY_RESPONSE
 
@@ -1535,16 +1937,25 @@ Returns conversation history to requesting peer.
   "command": "CHAT_HISTORY_RESPONSE",
   "payload": {
     "conversation_id": "conv-xyz789",
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "total_count": 2,
     "messages": [
       {
+        "id": "msg-abc123",
         "role": "user",
-        "text": "Hello!",
+        "content": "Hello!",
         "timestamp": "2025-12-25T10:15:00Z",
-        "sender_node_id": "dpc-node-alice-123"
+        "sender_node_id": "dpc-node-alice-123",
+        "sender_name": "Alice",
+        "sender_type": "human",
+        "content_hash": "sha256:...",
+        "signature": "base64-encoded RSA-PSS signature",
+        "signer_node_id": "dpc-node-alice-123",
+        "preimage_version": "dptp-msg-v2"
       },
       {
         "role": "assistant",
-        "text": "Hi there!",
+        "content": "Hi there!",
         "timestamp": "2025-12-25T10:15:05Z"
       }
     ]
@@ -1554,11 +1965,32 @@ Returns conversation history to requesting peer.
 
 **Fields:**
 - `conversation_id` (string, required): Conversation ID
-- `messages` (array, required): List of message objects
+- `request_id` (string, sent): Echoes REQUEST_CHAT_HISTORY's `request_id`; on the build
+  read for this pass the receiver claims a response by this value, so a response missing
+  it is not matched to any pending request
+- `total_count` (integer, sent): Number of messages in `messages`
+  (`chat_history_handlers.py`)
+- `messages` (array, required): List of message objects, as produced by
+  `conversation_monitor.export_history()` and consumed by `import_history()`
   - `role` (string, required): `"user"` | `"assistant"`
-  - `text` (string, required): Message content
-  - `timestamp` (string, required): ISO 8601 timestamp
+  - `content` (string, required): Message content — the row's field is `content`, **not**
+    `text` as shown in earlier revisions of this document (`conversation_monitor.py`,
+    `export_history`/`import_history`)
+  - `timestamp` (string, optional): ISO 8601 timestamp — omitted when the local record
+    has none, rather than backfilled, because the signature fields below are computed
+    over it
   - `sender_node_id` (string, optional): Sender node ID (for user messages)
+  - `id` (string, optional): The sender's local message id, carried so a receiver's
+    history merge can deduplicate
+  - `attachments` (array, optional): File/voice attachment references, when present
+  - `sender_name` (string, optional): Sender's display name
+  - `sender_type` (string, optional): Sender's kind (e.g. human, agent)
+  - `agent_owner` (string, optional): Owning node when the sender is an agent
+  - `isAgent` (boolean, optional): Whether the sender is an agent
+  - `content_hash`, `signature`, `signer_node_id`, `preimage_version`,
+    `tool_calls_digest` (string, optional): Message-signing fields (§4.1/§4.2), sent
+    together and only when the record's `preimage_version` is the current or a legacy
+    one this node still recomputes; absent otherwise
 
 **Use Cases:**
 - **Automatic sync on reconnect**: Restore conversation after temporary disconnection
@@ -1769,7 +2201,9 @@ authority participates.
 A message signature covers a **canonical preimage**, never the message dict
 and never a locally rebuilt string.
 
-**Version tag:** `dptp-msg-v1` (constant `PREIMAGE_VERSION`)
+**Version tag:** `dptp-msg-v2` (constant `PREIMAGE_VERSION`). `dptp-msg-v1` remains
+readable for good — a verifier builds the preimage for the version the record
+declares, never for the one it happens to run (`LEGACY_PREIMAGE_VERSIONS`).
 
 **Covered fields, in this order — the order is part of the format:**
 
@@ -1784,13 +2218,24 @@ and never a locally rebuilt string.
 | 7 | `agent_owner` | not an agent message |
 | 8 | `timestamp`, canonicalised | absent |
 | 9 | `content` | empty message |
-| 10 | `tool_calls`, canonical JSON | not an agent message |
+| 10 | **v2:** `sha256` of the canonical JSON of `tool_calls`, hex — **v1:** that JSON itself | no tool calls (both spell it as empty) |
+
+**Why the digest (ADR-042).** A verifier has to hold every field it checks, so
+covering the calls themselves meant shipping them: an agent's tool inputs, full
+outputs and round reasoning were replicated to every group member and kept on
+their disks. Under v2 only the digest travels — the author still binds what its
+agent did, and the record of the doing stays on the node that ran it. A peer that
+later needs the content asks for it and checks it against the digest it holds.
+
+`tool_calls` is therefore **not** a wire field of `GROUP_TEXT` in v2; the record
+carries `tool_calls_digest` beside `content_hash`, and history export ships the
+digest and never the calls.
 
 **Encoding.** Each field is UTF-8 encoded and emitted as
 `<byte-length>":"<bytes>`, concatenated in the order above:
 
 ```
-11:dptp-msg-v1 21:group-b88b65076b85 36:c0ffee00-… …
+11:dptp-msg-v2 21:group-b88b65076b85 36:c0ffee00-… …
 ```
 (spaces shown for readability only; the wire form has none)
 
@@ -2013,7 +2458,7 @@ Every arriving record leaves verification carrying exactly one verdict:
 ### Attack Mitigation
 
 - **Message Flooding**: Implementations should rate-limit incoming messages
-- **Resource Exhaustion**: Limit maximum payload size, enforce timeouts
+- **Resource Exhaustion**: Limit maximum payload size, enforce timeouts — §2 states the cap; the reference listener also bounds its wait for HELLO after the challenge (`[connection] hello_timeout`) and counts connections still before `HELLO_ACK` per address (`max_pending_hellos_per_ip`), since a peer that never finishes a HELLO never fails one
 - **MITM Attacks**: Certificate pinning on first connection (TOFU - Trust On First Use)
 - **Gossip Attacks**:
   - Message replay prevention via vector clocks and message IDs
@@ -2084,8 +2529,202 @@ DPTP is designed to be extensible. New commands can be added by:
 
 ## 9. Changelog
 
+### v1.7 (September 2026)
+- **§3.4 REMOTE_INFERENCE_REQUEST** — optional `messages`, `system`, `tools` and
+  `stream`: the conversation un-flattened in the Anthropic shape, its system
+  prompt, the tool definitions the model may call, and whether the host should
+  stream. `prompt` stays required and carries the same turns flattened, so an
+  older host answers a newer guest; all four absent is byte-identical to the
+  request every released client sends. Added 2026-09-14 while v1.7 is
+  unreleased
+- **§3.4 REMOTE_INFERENCE_CHUNK** — a new message: `request_id`, `seq`,
+  `delta`. One piece of an answer being made, sent only for a request that
+  asked `stream: true` and only after the host's gates have passed. Transport,
+  not record: the terminating REMOTE_INFERENCE_RESPONSE still carries the whole
+  answer and all counts, and both nodes' usage rows are built from it alone
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `tool_calls` (Anthropic
+  `tool_use` blocks) and `finish_reason` (the providers' own `stop`, `length`,
+  `tool_calls`). Absent from a host that ran no tools or reported no stop word
+- **§3.4 REMOTE_INFERENCE_REQUEST `request_id`** — says who mints it: the
+  requester, or a door in front of the wire that has already named the call to
+  its own client. No wire change; it is what lets a streamed answer carry one
+  id from its first chunk to the usage rows of both nodes. Added 2026-09-14
+  while v1.7 is unreleased
+- **§3.5 PROVIDERS_RESPONSE** — optional `supports_tools` beside
+  `supports_vision`: whether the alias's provider has a native tool-calling
+  path. Absent reads as false; the host's wire refusal stays the gate
+- **Conformance pass, 2026-09-14** — the sections below were rewritten to match what the
+  implementation has sent and read all along; none of this is new wire behaviour, all of
+  it is documentation catching up (`audit/dptp-conformance-2026-09-13.md`). Sections whose
+  drift traces to a dated code change name that commit; the rest is long-standing and
+  carries none:
+  - **§3.1 HELLO** — documents the direct-TLS handshake as it has always run:
+    HELLO_CHALLENGE, `cert_pem` + `nonce_signature` on HELLO, HELLO_ACK; and the lighter,
+    unauthenticated HELLO the Hub WebRTC tier sends instead. A HELLO built to the previous
+    revision of this section is refused by a direct-TLS listener
+  - **§3.3/§3.8 REQUEST_CONTEXT, CONTEXT_RESPONSE, REQUEST_DEVICE_CONTEXT,
+    DEVICE_CONTEXT_RESPONSE** — documents the `{request_id, context|device_context, ...}`
+    wrapping both responses have always used (a payload shaped like the context itself
+    fails deserialisation), and the `requestor_id` field both requests send and no reader
+    consults
+  - **§3.7 VOTE_KNOWLEDGE_COMMIT, §3.15 PROPOSE_NEW_SESSION / VOTE_NEW_SESSION /
+    NEW_SESSION_RESULT** — documents the vote-signing fields (`vote_hash`, `signature`,
+    `signer_node_id`, `vote_preimage_version`, `conversation_id`) both vote commands
+    carry and the rule that an unsigned relayed vote is not counted; renames
+    `proposer_node_id` to the `initiator_node_id` the wire has always used; types
+    VOTE_NEW_SESSION's `vote` as the boolean it is, not a string; and replaces
+    NEW_SESSION_RESULT's `status`/`votes[]` with the `result`/`clear_history`/
+    `vote_tally`/`conversation_id` shape the code sends and the only shape the handler
+    acts on
+  - **§3.13 RELAY_MESSAGE** — the field is `data`, an opaque base64 string, not the
+    `message` object the previous revision of this section named; a spec-conformant
+    sender following the old text is refused by the handler
+  - **§3.16 REQUEST_CHAT_HISTORY, CHAT_HISTORY_RESPONSE** — the response row field is
+    `content`, not `text`; adds the row's `id`, `attachments`, `sender_name`,
+    `sender_type`, `agent_owner`, `isAgent` and the message-signing fields
+    (`content_hash`, `signature`, `signer_node_id`, `preimage_version`,
+    `tool_calls_digest`) that §4.1/§4.2 define but this section never listed; adds
+    `request_id` on the request and `request_id`/`total_count` on the response
+  - **§3.5 PROVIDERS_RESPONSE** — `reasoning_words`, `reasoning_default`, the
+    `context_window: null` semantics and required `supports_voice` were added to the
+    spec body in `f5eccf4d` (2026-09-09) and are named in this changelog for the first
+    time
+  - **§3.7 KNOWLEDGE_COMMIT_RESULT** — the `"abstain"` vote value and `vote_tally.abstain`
+    / `.participants` were added to the spec body in `6522de1e` (2026-09-07) and are
+    named in this changelog for the first time
+  - **§3.4 REMOTE_INFERENCE_REQUEST** — `images[].path` is removed from the request
+    example and field list; the sender stopped putting it on the wire in `75d8b851`
+    (2026-09-09) and the text was not updated with it
+  - **§3.4 REMOTE_INFERENCE_RESPONSE** — `model` and `provider` are added to the success
+    field list; both have shipped since v0.12.0 (older than this changelog's per-entry
+    granularity) and are named here for the first time. The requester's own usage row
+    copies `model` from this field
+  - **§3.9 CONTEXT_UPDATED** — `timestamp` is dropped from the format: no implementation
+    in this tree has ever sent it, and the handler never reads it
+  - **§3.11 FILE_CANCEL** — the `reason` enum is replaced with the set senders in this
+    tree actually emit (adds `firewall_denied`, `missing_chunks`, `send_error`; drops
+    `timeout`, `permission_denied`, `size_limit_exceeded`, none of which any sender here
+    produces)
+  - **§3.10 GOSSIP_MESSAGE** — the encryption prose is corrected to hybrid AES-256-GCM +
+    RSA-OAEP; the field shape and forwarding behaviour were already correct and are
+    unchanged (hybrid encryption has been the implementation since v0.10.2)
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — the tariff fields replace `cost_usd`:
+  optional `tariff_in`, `tariff_out`, `tariff_currency`, `tariff_at` and
+  `tariff_amount`, sent as one group or not at all, carry the owner's price for
+  the call; `cost_usd`, added on 2026-09-10, is removed. The host's own cost is
+  its economy and stays in its ledger, and the guest's row keeps `cost_usd`
+  null (ADR-041 D3, amendment). Changed 2026-09-14 while v1.7 is unreleased, so
+  no released client ever read the field. `billing` stays: it names the meter,
+  not the sum
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `output_includes_thinking`
+  (`includes` | `excludes` | `unknown`): whether `response_tokens` already
+  contains `thinking_tokens`, stated by the node that counted. Added
+  2026-09-13 while v1.7 is unreleased, beside the fields it qualifies
+- **§3.4 REMOTE_INFERENCE_REQUEST** — optional `reasoning_effort`: one word of
+  the shared scale `off`/`low`/`medium`/`high`/`max`, which the host may lower
+  to its own cap; absent means the guest did not choose. Shipped in the
+  implementation on 2026-09-08 (`1f240f17`) and listed here only now
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `served_effort`: the word the
+  host actually ran at after its clamp, so the guest can check the depth it
+  paid for; absent means no effort control was applied. Added 2026-09-14
+- **§3.4 REMOTE_INFERENCE_REQUEST/RESPONSE** — the host names the rung on every
+  served call, the guest's clamped word or its own configured one, and absent
+  now means only that no word describes the call; a word the serving alias has
+  no rung for is refused with the error response listing the words it accepts,
+  instead of being served at the model's default. The request may also carry
+  one of the alias's own words, which its menu row advertises. Changed
+  2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — `prompt_tokens` and `response_tokens` are the
+  host engine's own counts where it reported any, and the host's count over the text
+  only where it did not. The recount used to replace them: an image call the engine
+  counted at 38/2 travelled as 13/0 on 2026-09-14, which is what a tariff would have
+  been charged on. Changed 2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — `served_effort` is the rung the host's
+  provider reports having sent, where it reports one, and only otherwise the word
+  the door derived from the request or the configuration. The two disagreed on
+  2026-09-14: a vision call on an alias configured `low` ran with thinking off and
+  both nodes' rows said `low`. Changed 2026-09-14 while v1.7 is unreleased
+- **§3.5 PROVIDERS_RESPONSE** — `reasoning_default` is the effort the host serves
+  when none is sent, not the one its model's template names: the configured word
+  resolved onto the alias's ladder where one is configured. The two were separate
+  sentences and disagreed — a row promising `xhigh` beside a door serving the
+  configured `low`, which the guest had no way to see. Changed 2026-09-14 while
+  v1.7 is unreleased
+- **§3.5 PROVIDERS_RESPONSE** — `reasoning_words` is the words the alias's *provider*
+  can send, not only the words its model's template named, and an empty array is the
+  alias saying it serves no effort at all — `off` included. Absent keeps its old
+  meaning, the general scale. Until now a provider that sends no effort word looked
+  the same on the wire as one that speaks the whole scale, and the host answered
+  `served_effort` with the word its own configuration carried and nobody read.
+  Changed 2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `thinking_source` (`engine` |
+  `estimated`): where `thinking_tokens` came from, beside the
+  `output_includes_thinking` it qualifies, and with it the invariant that under
+  `includes` the thinking count never exceeds `response_tokens`. An estimate made
+  over the reasoning text is not bounded by the engine's exact total on its own:
+  a host reported 24 thinking tokens inside a 22-token completion on 2026-09-14.
+  Added 2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `code` on the error form: one
+  machine-readable word for why a host refused — `identity_unproved`,
+  `not_allowed`, `model_not_found`, `onward_sharing_refused`, `invalid_value`,
+  `tools_unsupported` — beside the prose `error`, which is unchanged. Absent
+  means the host predates it or has no word for this refusal, and an unknown
+  word is read like an absent one. Every host refusal used to reach a guest's
+  gateway as prose and leave it as the same 502, so an unknown effort word (the
+  client's own 400) and a firewall rule (a 403) were one status. Added
+  2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — `insufficient_quota` joins the code list:
+  the peer door now weighs a vendor alias against the same daily per-caller
+  ceiling the gateway enforces, read from the node ledger (ADR-041 D5). A guest
+  in this tree answers it with 429 — "come back tomorrow" rather than "something
+  broke" — since 2026-09-14, the same day the word was added. Added 2026-09-14
+  while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — `unrated` and `misconfigured` join the
+  code list, splitting off `insufficient_quota` what that word was carrying but
+  does not mean: a vendor alias the host has no rate for, and serving lists the
+  host cannot classify. A code is read as an instruction, and only a spent
+  ceiling refills by itself — under one word an auto-retrying client was told to
+  come back tomorrow to a host whose state only its owner can change. A guest in
+  this tree answers both with 503 and no `Retry-After`; the status table for
+  every word is in §3.4. The unclassifiable-lists gate sent no code at all until
+  now, so that refusal reached a guest's gateway as the 502 the code was added
+  to remove. Added 2026-09-15 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_REQUEST** — the tier the host requires is stated:
+  served only over a connection whose key is proved — direct TLS; other tiers
+  receive the error response (ADR-041 D2). Added 2026-09-14 with the host-side
+  refusal
+- **§3.4 REMOTE_INFERENCE_REQUEST** — the `thinking {enabled, budget_tokens}`
+  object of v1.4 is removed from the text: never emitted or read by any
+  implementation since it was written. `reasoning_effort` is the channel it
+  described
+- **§2 Payload Format** — the frame cap is stated: 64 MiB per payload, refused
+  before it is read rather than allocated, and refused at the sender too
+  (ADR-041 D8). Was «Unlimited (implementation may impose limits)»; the
+  implementation now does, and says so
+- **§3.5 PROVIDERS_RESPONSE** — optional `tariff` and `settings` on a provider
+  row: what this recipient is charged for the alias, in rates per 1M tokens
+  whose `unit` the row states, and the dials the call will run at. A guest could
+  learn a price only from the answer that had already cost it, and could not
+  learn the temperature, the output ceiling or the quantisation at all. Both are
+  fail-closed — an absent tariff means none is declared, which is not free, and
+  an absent setting means the host does not state it, not that none applies.
+  Added 2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_REQUEST, §3.5 PROVIDERS_RESPONSE** — images travel beside
+  tools. A user turn in `messages` may hold `image` blocks, and a `tool_result` block
+  may hold them in its content; a guest sends them beside `tools` only to an alias whose
+  row carries the new optional `serves_images_with_tools: true`, and with no `images`
+  field. The field is the host's own predicate for that request shape, not a product of
+  `supports_vision` and `supports_tools`, and it is fail-closed — absent reads as false,
+  because a host that predates it may drop the pictures silently. The `images` field
+  beside `tools` is now refused with `tools_unsupported`, which also covers image blocks
+  beside tools on an alias that cannot carry both; no new code, because an unknown word
+  reads as a mid-call failure. Before, a host answered images and tools together from
+  the prompt, the tools and the history gone without a word, and a guest refused the
+  combination outright — so Claude Code, which attaches its tools to every request, could
+  not show a peer's model a screenshot. Added 2026-09-17 while v1.7 is unreleased
+
 ### v1.6 (August 2026)
-- **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v1`), added with
+- **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v2`; `v1` still read), added with
   the implementation in `d92f5012` and listed here only now
 - **§4.2 Verdicts on receipt (new)** — the four verdicts and the rules that
   follow: the verdict belongs to the receiver, absence of a signature is

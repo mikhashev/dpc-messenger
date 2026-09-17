@@ -8,9 +8,10 @@
   import FileTransferUI from '$lib/components/FileTransferUI.svelte';
   import VoiceRecorder from '$lib/components/VoiceRecorder.svelte';
   import TokenWarningBanner from '$lib/components/TokenWarningBanner.svelte';
+  import ProviderRetryBanner from '$lib/components/ProviderRetryBanner.svelte';
   import IntegrityWarningBanner from '$lib/components/IntegrityWarningBanner.svelte';
   import AgentTaskBoard from '$lib/components/AgentTaskBoard.svelte';
-  import { votingConversationId } from '$lib/services/knowledge';
+  import { votingConversationId, knowledgeVoteStatus } from '$lib/services/knowledge';
   import {
     connectionStatus,
     nodeStatus,
@@ -40,6 +41,7 @@
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
   import { confirmAsync } from '$lib/utils/dialog';
+  import { appendToChatDraft, switchChatDraft } from '$lib/utils/chatDraftInputs';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
 
   type AIChatMeta = {
@@ -100,6 +102,7 @@
     showAgentBoard = $bindable(false),
     currentInput = $bindable(''),
     isSleeping = false,
+    onOpenVote = null,
   }: {
     activeChatId: string;
     chatHistories: Writable<Map<string, Message[]>>;
@@ -130,7 +133,21 @@
     chatPanelHeight?: number;
     showAgentBoard?: boolean;
     currentInput?: string;
+    onOpenVote?: (() => void) | null;
   } = $props();
+
+  // Where a recording can actually go. An AI or agent chat has no node to
+  // send audio to, and a group of one routes to dictation (ADR-032 Part B) —
+  // in both the "Send" button would quietly do the other thing.
+  function voiceAudioSinkExists(chatId: string): boolean {
+    if (!chatId || chatId === 'local_ai' || chatId.startsWith('ai_') || chatId.startsWith('agent_')) {
+      return false;
+    }
+    if (chatId.startsWith('group-')) {
+      return (get(groupChats).get(chatId)?.members?.length ?? 1) > 1;
+    }
+    return true;
+  }
 
   // Expose input value for GroupPanel's handleMentionSelect
   export function getInputValue(): string { return currentInput; }
@@ -239,9 +256,9 @@
       return;
     }
     if (currentChat !== previousChatId) {
-      chatDraftInputs = new Map(chatDraftInputs).set(previousChatId, currentInput);
-      const draft = chatDraftInputs.get(currentChat);
-      currentInput = draft !== undefined ? draft : '';
+      const next = switchChatDraft({ drafts: chatDraftInputs, currentInput }, previousChatId, currentChat);
+      chatDraftInputs = next.drafts;
+      currentInput = next.currentInput;
       if (pendingImage !== null) pendingImage = null;
       if (voicePreview !== null) voicePreview = null;
       previousChatId = currentChat;
@@ -915,27 +932,46 @@
 
   async function handleTranscribeVoiceMessage() {
     if (!voicePreview) return;
+    // The chat and the recording this press belongs to. Switching chats while Whisper
+    // runs re-points currentInput and clears voicePreview, so neither is trusted after
+    // the await: the words go to the draft of the chat they were recorded in.
+    const originChatId = activeChatId;
+    const preview = voicePreview;
     isTranscribing = true;
     try {
       fileOfferToastMessage = 'Transcribing voice message...';
       showFileOfferToast = true;
       const selectedProviderId = selectedVoiceProvider || selectedTextProvider;
       let transcribeArgs: Record<string, string>;
-      if (voicePreview.filePath) {
-        transcribeArgs = { file_path: voicePreview.filePath, mime_type: voicePreview.blob.type || 'audio/wav', provider_alias: selectedProviderId };
+      if (preview.filePath) {
+        transcribeArgs = { file_path: preview.filePath, mime_type: preview.blob.type || 'audio/wav', provider_alias: selectedProviderId };
       } else {
-        transcribeArgs = { audio_base64: await _blobToBase64(voicePreview.blob), mime_type: voicePreview.blob.type || 'audio/webm', provider_alias: selectedProviderId };
+        transcribeArgs = { audio_base64: await _blobToBase64(preview.blob), mime_type: preview.blob.type || 'audio/webm', provider_alias: selectedProviderId };
       }
       const response = await sendCommand('transcribe_audio', transcribeArgs);
       if (response.error) throw new Error(response.error);
       const transcription = response.text || '';
-      if (transcription) currentInput = currentInput + (currentInput ? ' ' : '') + transcription;
+      const inputOwnerChatId = previousChatId || activeChatId;
+      const next = appendToChatDraft({ drafts: chatDraftInputs, currentInput }, inputOwnerChatId, originChatId, transcription);
+      chatDraftInputs = next.drafts;
+      currentInput = next.currentInput;
 
-      const tempFilePath = voicePreview?.filePath;
+      const tempFilePath = preview.filePath;
       if (tempFilePath) {
         try { const { remove } = await import('@tauri-apps/plugin-fs'); await remove(tempFilePath); } catch { /* ignore */ }
       }
-      voicePreview = null;
+      if (voicePreview === preview) voicePreview = null;
+
+      if (originChatId !== inputOwnerChatId) {
+        if (transcription) {
+          fileOfferToastMessage = 'Transcription added to the draft of the chat it was recorded in';
+          showFileOfferToast = true;
+          setTimeout(() => (showFileOfferToast = false), 5000);
+        } else {
+          showFileOfferToast = false;
+        }
+        return;
+      }
       showFileOfferToast = false;
 
       const textarea = document.getElementById('message-input') as HTMLTextAreaElement;
@@ -1064,7 +1100,9 @@
     onSendVoiceMessage={handleSendVoiceMessage}
     onTranscribeVoiceMessage={handleTranscribeVoiceMessage}
     {isTranscribing}
-    isLocalAIChat={activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
+    isLocalAIChat={activeChatId === 'local_ai' || activeChatId.startsWith('ai_')
+      || activeChatId.startsWith('agent_')}
+    canSendAudio={voiceAudioSinkExists(activeChatId)}
     showFileOfferDialog={showFileOfferDialog}
     currentFileOffer={currentFileOffer}
     onAcceptFile={handleAcceptFile}
@@ -1086,6 +1124,10 @@
   />
 
   <div class="input-row">
+    <!-- A provider waiting out a backoff. Not per-chat: the wait belongs to the
+         provider, and whoever is watching is the one sitting at the input. -->
+    <ProviderRetryBanner />
+
     {#if $integrityWarnings && $integrityWarnings.count > 0 && !$integrityWarnings.dismissed}
       <IntegrityWarningBanner
         count={$integrityWarnings.count}
@@ -1107,6 +1149,14 @@
       <div class="voting-notice" role="status">
         A knowledge commit is being voted on. Messages written now are not part
         of it — they will go into the next one.
+        {#if $knowledgeVoteStatus && $knowledgeVoteStatus.conversation_id === activeChatId && $knowledgeVoteStatus.status !== 'success'}
+          <div class="vote-held">
+            <span>{$knowledgeVoteStatus.message}</span>
+            {#if onOpenVote}
+              <button type="button" onclick={onOpenVote}>Open the vote</button>
+            {/if}
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -1188,6 +1238,24 @@
 
 <style>
   @import "./panels.css";
+
+  .vote-held {
+    margin-top: 0.4rem;
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+
+  .vote-held button {
+    background: none;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    padding: 0.1rem 0.5rem;
+  }
 
   .voting-notice {
     margin: 0 0 0.5rem;

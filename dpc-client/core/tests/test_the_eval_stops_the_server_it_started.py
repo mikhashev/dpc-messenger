@@ -57,7 +57,7 @@ def _args(**over):
 
 def _outcome():
     return {
-        "task_id": "t1", "gold": "7", "answer": "FINAL ANSWER: 7", "correct": True,
+        "task_id": "t1", "gold_sha256": "abc", "answer": "FINAL ANSWER: 7", "correct": True,
         "error": None, "had_attachment": False, "seconds": 1.0,
         "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12,
                   "rounds": 1, "cost_usd": 0.0,
@@ -152,7 +152,7 @@ def test_the_agent_logs_survive_the_cleanup(harness, monkeypatch, tmp_path):
     out = tmp_path / "run.json"
     assert asyncio.run(gaia.main_async(_args(json=str(out)))) == 0
 
-    kept = tmp_path / "run.agent-logs" / "tools.jsonl"
+    kept = tmp_path / "run.agent-logs" / "task-001" / "tools.jsonl"
     assert kept.is_file(), "the ledger went out with the workdir"
     assert '"phase": "attempt"' in kept.read_text(encoding="utf-8")
 

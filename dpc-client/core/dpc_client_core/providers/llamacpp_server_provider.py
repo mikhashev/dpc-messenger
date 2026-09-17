@@ -24,7 +24,6 @@ dictionary comes from the model's jinja file.
 """
 
 import asyncio
-import base64
 import json
 import logging
 from pathlib import Path
@@ -33,11 +32,13 @@ from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, REASONING_OFF
+from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_base64,
+                   image_blocks_in_turns, positive_ceiling)
 from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
 from ..managers.llama_server_supervisor import LlamaServerSupervisor
+from ..managers.llama_server_supervisor import gguf_effort_dictionary
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,31 @@ def _flags_of(config: Dict[str, Any]) -> tuple:
     return tuple(merged.get(k) for k in _FLAG_KEYS)
 
 
+def _timings_from_response(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The child's own per-request timings, in this file's vocabulary.
+
+    llama-server puts them in the response body, so they belong to the call
+    that asked — the shared log cannot say that about anything.
+    """
+    if not raw:
+        return None
+    out: Dict[str, Any] = {}
+    if raw.get("prompt_per_second") is not None:
+        out["prefill_tok_s"] = int(raw["prompt_per_second"])
+    if raw.get("predicted_per_second") is not None:
+        out["decode_tok_s"] = int(raw["predicted_per_second"])
+    if raw.get("prompt_n") is not None:
+        out["engine_prompt_tokens"] = int(raw["prompt_n"])
+    if raw.get("predicted_n") is not None:
+        out["engine_gen_tokens"] = int(raw["predicted_n"])
+    if raw.get("cache_n") is not None:
+        out["engine_cached_tokens"] = int(raw["cache_n"])
+    drafted = raw.get("draft_n")
+    if drafted:
+        out["draft_acceptance"] = round(raw.get("draft_n_accepted", 0) / drafted, 3)
+    return out if "prefill_tok_s" in out and "decode_tok_s" in out else None
+
+
 class LlamaServerProvider(DeepSeekProvider):
     """Local `llama-server` behind the OpenAI-compatible face.
 
@@ -87,6 +113,8 @@ class LlamaServerProvider(DeepSeekProvider):
     child. Nothing is listening until the first call, so loading this provider
     costs nothing on a box that never routes to it.
     """
+
+    RETRY_LABEL = "llama-server"
 
     def __init__(self, alias: str, config: Dict[str, Any]):
         # AIProvider directly, not DeepSeekProvider.__init__: there is no API
@@ -167,6 +195,23 @@ class LlamaServerProvider(DeepSeekProvider):
         # The configured effort stays raw: `xhigh` is legal here and must not
         # be folded to `high` on its way in.
         self._reasoning_effort_raw = config.get("reasoning_effort")
+        # The words this model's own chat template accepts, read from the file
+        # rather than from a table measured against one pin. The constants stay
+        # as the fallback for a GGUF whose template does not guard the value.
+        self._template_efforts = TEMPLATE_EFFORTS
+        self._template_default: Optional[str] = None
+        # Whether the words above came from this model or from the table. The UI
+        # may only quote them as the model's when they were read from it.
+        self._template_efforts_source = "fallback"
+        dictionary = gguf_effort_dictionary(config.get("gguf_path") or "")
+        if dictionary:
+            self._template_efforts, template_default = dictionary
+            self._template_default = template_default
+            self._template_efforts_source = "model"
+            logger.info(
+                "llamacpp_server '%s': the model's template accepts %s (default %s)",
+                alias, "/".join(self._template_efforts), template_default or "unset",
+            )
         self._reasoning_budget = config.get("reasoning_budget_tokens")
         self._mmproj = config.get("mmproj")
         self.top_p = config.get("top_p")
@@ -289,17 +334,26 @@ class LlamaServerProvider(DeepSeekProvider):
         word = (raw or "").strip().lower()
         if word == REASONING_OFF:
             return REASONING_OFF
-        if word in TEMPLATE_EFFORTS:
+        if word in self._template_efforts:
             return word
         if word in FLEET_TO_TEMPLATE:
             mapped = FLEET_TO_TEMPLATE[word]
+            # A fold onto a rung this model does not have would be the one thing
+            # the template refuses outright, so it is dropped instead.
+            if mapped not in self._template_efforts:
+                logger.warning(
+                    "llamacpp_server '%s': effort '%s' folds to '%s', which this "
+                    "model's template does not accept (%s) — sending nothing",
+                    self.alias, word, mapped, "/".join(self._template_efforts),
+                )
+                return None
             if not self._effort_translation_logged:
                 self._effort_translation_logged = True
                 logger.info(
                     "llamacpp_server '%s': effort '%s' -> '%s' — the template's "
                     "dictionary is %s and refuses other words with HTTP 500 "
                     "(measured 2026-08-19)",
-                    self.alias, word, mapped, "/".join(TEMPLATE_EFFORTS),
+                    self.alias, word, mapped, "/".join(self._template_efforts),
                 )
             return mapped
         return None
@@ -368,6 +422,28 @@ class LlamaServerProvider(DeepSeekProvider):
             return REASONING_OFF
         return kwargs.get("reasoning_effort", "server-default")
 
+    def _served_effort(self, extra_body: Dict[str, Any]) -> Optional[str]:
+        """The rung this call ran on, read out of the body that was sent.
+
+        Not `_effort_label` beside it, which is written for a person reading the
+        burn history and says `server-default` where nobody asked — a word of no
+        ladder. This one is written for the usage row: a word this model's
+        template accepts, `off`, or None where no word describes the call.
+
+        The body and the request differ, which is why this reads the body: a
+        door deriving the word from the alias's configuration names a rung the
+        entry point did not run.
+        """
+        kwargs = extra_body.get("chat_template_kwargs", {})
+        if kwargs.get("enable_thinking") is False:
+            return REASONING_OFF
+        word = kwargs.get("reasoning_effort")
+        if word:
+            return word
+        # The template's own default ran. Named only where it was read from the
+        # model: a fallback table must not reach a row wearing the model's name.
+        return declared_reasoning_words(self)[1]
+
     def _sampling_params(
         self,
         temperature_override: Optional[float] = None,
@@ -421,6 +497,27 @@ class LlamaServerProvider(DeepSeekProvider):
         if self._temperature_explicit is not None:
             return self._temperature_explicit
         return 1.0
+
+    def effective_settings(self) -> Dict[str, Any]:
+        """Every dial this server is actually sent, and the file behind the name.
+
+        A temperature always: `_sampling_params` sends one on every call, the
+        1.0 nobody configured included. `variant` is the GGUF's file name — the
+        quantisation a guest is choosing between lives in it, and the directory
+        it sits in is this machine's business and stays off the row.
+        """
+        settings: Dict[str, Any] = {"temperature": self._effective_temperature()}
+        if self.top_p is not None:
+            settings["top_p"] = self.top_p
+        if self.top_k is not None:
+            settings["top_k"] = self.top_k
+        ceiling = positive_ceiling(self.max_tokens)
+        if ceiling is not None:
+            settings["max_output_tokens"] = ceiling
+        variant = Path(self.config.get("gguf_path") or "").name
+        if variant:
+            settings["variant"] = variant
+        return settings
 
     @staticmethod
     def _is_retryable(error: Exception) -> bool:
@@ -485,12 +582,16 @@ class LlamaServerProvider(DeepSeekProvider):
         path: str,
         conversation_id: Optional[str] = None,
         tool_calls: int = 0,
+        images: int = 0,
+        tools: int = 0,
         effort: Any = "server-default",
+        served_effort: Optional[str] = None,
         reasoning_text: Optional[str] = None,
         elapsed_s: Optional[float] = None,
         t_first_chunk_s: Optional[float] = None,
         finish_reason: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        engine_timings: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Same accounting as the parent, under this provider's own name — the
         burn history is grepped by that prefix, and a local box joining the
@@ -507,15 +608,39 @@ class LlamaServerProvider(DeepSeekProvider):
         estimate is script-blind by design (Cyrillic undercounts ~3-4x,
         TOKEN-ESTIMATE-IS-BLIND-TO-SCRIPT): the total `completion_tokens`
         stays exact so burn cost is never distorted, and the marker says
-        what is estimated."""
+        what is estimated.
+
+        The estimate is bounded by that exact total, because the convention
+        here is `includes` and a part cannot exceed the whole it is inside —
+        unbounded, chars/4 read 24 tokens of thinking inside a 22-token
+        completion on both nodes on 2026-09-14. `thinking_source` carries which
+        of the two made the number, so a reader is not left inferring it from a
+        log marker.
+
+        `images` and `tools` are what the call carried — pictures sent, tools
+        offered — beside the `tool_calls` the model made: a screenshot beside
+        the tools and a text-only call cost differently, and the line is where
+        the burn history tells them apart. Counted, never quoted."""
         usage = self._usage_from_response(raw_usage) if raw_usage is not None else None
         if usage is None:
             return {}
-        estimated = False
+        estimated = clamped = False
         if not usage.get("reasoning_tokens") and reasoning_text:
-            usage["reasoning_tokens"] = max(1, len(reasoning_text) // 4)
-            usage["content_tokens"] = max(0, usage["completion_tokens"] - usage["reasoning_tokens"])
+            exact = usage["completion_tokens"]
+            guess = max(1, len(reasoning_text) // 4)
+            clamped = guess > exact
+            usage["reasoning_tokens"] = min(guess, exact)
+            usage["content_tokens"] = exact - usage["reasoning_tokens"]
+            if usage["reasoning_tokens"]:
+                usage["thinking_source"] = "estimated"
             estimated = True
+        # The server's `completion_tokens` counts every decoded token and the
+        # reasoning block is parsed out of that same text (the subtraction
+        # above depends on it): a missing split is not a missing convention.
+        if usage.get("output_includes_thinking") == "unknown":
+            usage["output_includes_thinking"] = "includes"
+        # The rung, for whoever writes the row: the label below is prose.
+        usage["served_effort"] = served_effort
         # Why the caller gets to see it: `length` is the only signal that
         # separates "the model was cut at the ceiling" from "the model
         # finished on its own", and the two need opposite repairs. It sits on
@@ -539,10 +664,12 @@ class LlamaServerProvider(DeepSeekProvider):
             )
             # The engine's own per-task timings give every path the phase
             # split, not just the streaming one: the agents' tools path has no
-            # first-chunk boundary, but the child's print_timing lines carry
-            # exact prompt-eval and eval rates for the finished task.
-            timings = None
-            if hasattr(self.supervisor, "last_task_timings"):
+            # first-chunk boundary. The response carries them for the call that
+            # asked, so there is nothing to attribute; the log scrape stays as a
+            # fallback for a build that does not send them, and it is the one
+            # that cannot tell two concurrent tasks apart.
+            timings = _timings_from_response(engine_timings)
+            if timings is None and hasattr(self.supervisor, "last_task_timings"):
                 try:
                     timings = self.supervisor.last_task_timings()
                 except Exception:
@@ -553,16 +680,55 @@ class LlamaServerProvider(DeepSeekProvider):
                     "decode_tok_s": timings["decode_tok_s"],
                     "speed_source": "engine",
                 })
+                # What the engine re-evaluated against what we sent. The
+                # response states the reused count outright; from the log it can
+                # only be derived, because the child logs a prompt-cache load
+                # solely when it FAILS (server-context.cpp:328, b10809).
+                prefilled = timings.get("engine_prompt_tokens")
+                if prefilled is not None and usage["prompt_tokens"] > 0:
+                    usage["prefilled_tokens"] = prefilled
+                    reused = timings.get("engine_cached_tokens")
+                    usage["cached_tokens"] = (
+                        reused if reused is not None
+                        else max(0, usage["prompt_tokens"] - prefilled)
+                    )
+                # Speculation was measured once, on one synthetic prompt, and the
+                # figure decided a default. The child has been printing its own
+                # counters per task all along; carrying them here makes the knob
+                # answerable from production instead of from a probe.
+                for key in ("draft_acceptance", "draft_tokens_per_pass", "draft_n_max"):
+                    if key in timings:
+                        speed[key] = timings[key]
             usage["speed"] = speed
+        # A refused restore is not ours to prevent — nothing in this package
+        # asks for one; the engine tries it on its own prompt-cache lookup and
+        # only logs the failure, into a file nobody reads. Saying it here is
+        # what turns a silent re-prefill into a named event.
+        if hasattr(self.supervisor, "log_restore_refusals"):
+            try:
+                self.supervisor.log_restore_refusals()
+            except Exception:
+                logger.debug("restore-refusal scan failed", exc_info=True)
+        cached = usage.get("cached_tokens")
+        spd = usage.get("speed") or {}
         logger.info(
             "llamacpp usage: alias=%s conv=%s prompt=%d, completion=%d "
-            "(reasoning=%d/content=%d%s), tool_calls=%d, effort=%s, path=%s"
-            "%s",
+            "(reasoning=%d/content=%d%s), images=%d tools=%d, tool_calls=%d, effort=%s, path=%s"
+            "%s%s%s",
             self.alias, conversation_id or "-", usage["prompt_tokens"],
             usage["completion_tokens"], usage["reasoning_tokens"],
-            usage["content_tokens"], ", split=estimated" if estimated else "",
-            tool_calls, effort, path,
+            usage["content_tokens"],
+            ", split=estimated (clamped to completion)" if clamped
+            else ", split=estimated" if estimated else "",
+            images, tools, tool_calls, effort, path,
             f", finish={finish_reason}" if finish_reason else "",
+            "" if cached is None else
+            f", prefilled={usage['prefilled_tokens']} of {usage['prompt_tokens']}"
+            f" (reuse={100 * cached / usage['prompt_tokens']:.1f}%)",
+            "" if "draft_acceptance" not in spd else
+            f", draft={100 * spd['draft_acceptance']:.1f}% at n={spd.get('draft_n_max', '?')}"
+            + ("" if "draft_tokens_per_pass" not in spd
+               else f" ({spd['draft_tokens_per_pass']:.2f} tok/pass)"),
         )
         return usage
 
@@ -629,10 +795,12 @@ class LlamaServerProvider(DeepSeekProvider):
                 path="plain",
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
+                served_effort=self._served_effort(extra_body),
                 reasoning_text=self._last_thinking,
                 elapsed_s=_time.perf_counter() - _t0,
                 finish_reason=getattr(_choice, "finish_reason", None),
                 max_tokens=_eff_max,
+                engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
             )
             return msg.content or ""
 
@@ -701,11 +869,15 @@ class LlamaServerProvider(DeepSeekProvider):
                             path="plain-stream",
                             conversation_id=conversation_id,
                             effort=self._effort_label(None, extra_body),
+                            served_effort=self._served_effort(extra_body),
                             # The local accumulator, not self._last_thinking:
                             # usage arrives on the terminal chunk, before the
                             # post-loop assignment — the field is still None
                             # here, and the estimate would silently read 0.
                             reasoning_text=thinking_text or None,
+                            engine_timings=(
+                                getattr(chunk, "model_extra", None) or {}
+                            ).get("timings"),
                             elapsed_s=_time.perf_counter() - _t0,
                             t_first_chunk_s=_t_first,
                             finish_reason=finish_reason,
@@ -767,7 +939,7 @@ class LlamaServerProvider(DeepSeekProvider):
         """Native tool calling, Anthropic-shape in and out, on the local server."""
         self._last_thinking = None
         self._last_usage = None
-        openai_messages = self._anthropic_to_openai_messages(system, messages)
+        openai_messages = self._anthropic_to_openai_messages(system, messages, provider=self)
         openai_tools = self._anthropic_to_openai_tools(tools)
         # No reasoning_content padding on replay: the HTTP-400-if-absent rule is
         # DeepSeek's, not the template's — qwen3.8's template accepts an
@@ -817,11 +989,15 @@ class LlamaServerProvider(DeepSeekProvider):
                 path="tools",
                 conversation_id=conversation_id,
                 tool_calls=len(tool_calls_raw),
+                images=image_blocks_in_turns(messages),
+                tools=len(tools or []),
                 effort=self._effort_label(reasoning_effort, extra_body),
+                served_effort=self._served_effort(extra_body),
                 reasoning_text=self._last_thinking,
                 elapsed_s=_time.perf_counter() - _t0,
                 finish_reason=getattr(_choice, "finish_reason", None),
                 max_tokens=self.max_tokens,
+                engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
             )
             return {
                 "content": content,
@@ -845,32 +1021,28 @@ class LlamaServerProvider(DeepSeekProvider):
         blocks on the same OpenAI-compatible call, the projector comes from
         the alias's mmproj (--mmproj on the child). Probed 2026-08-19: a
         screenshot read accurately at full 262 144 with q4_0 KV; the first
-        probe run also showed why thinking stays off unless asked — the
-        template's own default (xhigh) spent a whole 300-token window
-        thinking and answered nothing."""
+        probe run also showed why the template's own default (xhigh) is not
+        let onto this path — it spent a whole 300-token window thinking and
+        answered nothing. A rung the caller or the alias names is served, and
+        `get_last_usage()['served_effort']` is the one that ran."""
         self._last_thinking = None
         self._last_usage = None
 
+        # Built before `_call`, so a refusal is about the request and is not
+        # reported as the server having failed. An image with no base64 stops
+        # the whole call: the alternative this replaced dropped it and answered
+        # text-only, which answers a question about a picture as though none had
+        # been asked about, and reached for `path` — the sender's filename, which
+        # DPTP §3.4 promises the receiver nothing about — to avoid doing so.
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in images:
-            b64 = img.get("base64") or self._read_image_as_base64(img.get("path"))
-            if not b64:
-                # A dropped image is a silent text-only answer unless someone
-                # says so here — the caller asked about a picture it will not
-                # receive (review note, 2026-08-20).
-                logging.getLogger(__name__).warning(
-                    "llamacpp_server '%s': vision call dropped an unreadable image "
-                    "(path=%s) — answering text-only",
-                    self.alias, img.get("path"),
-                )
-                continue
-            if b64.startswith("data:"):
-                content.append({"type": "image_url", "image_url": {"url": b64}})
-            else:
-                mime = img.get("mime_type") or "image/png"
-                content.append(
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-                )
+            mime = img.get("mime_type") or "image/png"
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime};base64,{image_base64(img, self.alias)}"
+                },
+            })
 
         async def _call():
             client = await self._ensure()
@@ -878,14 +1050,13 @@ class LlamaServerProvider(DeepSeekProvider):
             _t0 = _time.perf_counter()  # after ensure: cold start stays out of the number
             effort = kwargs.get("reasoning_effort")
             per_call_budget = kwargs.get("reasoning_budget_tokens")
-            if effort is None and per_call_budget is None:
+            if effort is None and per_call_budget is None and not self._reasoning_effort_raw:
                 # A background read, not a reasoning task: thinking off when
-                # the caller didn't ask. The ALIAS budget is deliberately not
-                # consulted here — it caps thinking for text turns, and
-                # letting it fill extra_body would silently re-enable xhigh
-                # thinking on every image (the alias carries 10000, so the
-                # "empty body" form of this default never fired on production
-                # — caught at review, 2026-08-20).
+                # neither the caller nor the alias asked for a rung. What stays
+                # out is the TEMPLATE's default (`xhigh` here) and the alias
+                # budget that would carry it — thinking a whole 8192 window away
+                # on every image. A word the alias names is the owner's own
+                # choice and is served, on this path as on the others.
                 extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
             else:
                 extra_body = self._build_extra_body(
@@ -908,11 +1079,14 @@ class LlamaServerProvider(DeepSeekProvider):
                 getattr(resp, "usage", None),
                 path="vision",
                 conversation_id=kwargs.get("conversation_id"),
+                images=len(images),
                 effort=self._effort_label(effort, extra_body),
+                served_effort=self._served_effort(extra_body),
                 reasoning_text=self._last_thinking,
                 elapsed_s=_time.perf_counter() - _t0,
                 finish_reason=getattr(_choice, "finish_reason", None),
                 max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
             )
             return msg.content or ""
 
@@ -925,15 +1099,6 @@ class LlamaServerProvider(DeepSeekProvider):
                 f"llamacpp_server vision failed for '{self.alias}': "
                 f"{type(e).__name__}: {e}"
             ) from e
-
-    @staticmethod
-    def _read_image_as_base64(path: Optional[str]) -> Optional[str]:
-        if not path:
-            return None
-        try:
-            return base64.b64encode(Path(path).read_bytes()).decode("ascii")
-        except OSError:
-            return None
 
     def _model_name(self) -> str:
         """The server serves exactly one -m model and ignores this field, but
