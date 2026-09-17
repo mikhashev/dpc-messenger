@@ -6,9 +6,10 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { connectionStatus, sendCommand } from '$lib/coreService';
-  import { mapBackendMessage } from '$lib/utils/messageMapper';
+  import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import { mergeBackfillWithLive } from '$lib/utils/liveMessageIdentity';
   import { onMount, untrack } from 'svelte';
+  import type { Message } from '$lib/types.js';
 
   // ---------------------------------------------------------------------------
   // Props
@@ -101,7 +102,7 @@
                 // See HistorySyncPanel: an undated record borrows the time of
                 // the one before it rather than the clock.
                 let previousTimestamp: number | undefined;
-                const loadedMessages = result.messages.map((msg: any, index: number) => {
+                const loadedMessages: Message[] = result.messages.map((msg: any, index: number) => {
                   if (index === 0) console.log(`[ChatHistory] DIAG first msg keys:`, Object.keys(msg), `tool_calls:`, msg.tool_calls?.length, `sender_type:`, msg.sender_type, `msg_index:`, msg.msg_index);
                   const fallbackSender = msg.sender_node_id || (msg.role === 'user' ? 'user' : reqChatId);
                   const fallbackName = msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(reqChatId));
@@ -121,11 +122,22 @@
                   }
                   return mapped;
                 });
-                const agentMsgs = loadedMessages.filter((m: any) => m.isAgent);
-                const withTools = loadedMessages.filter((m: any) => m.tool_calls?.length > 0);
-                console.log(`[ChatHistory] DIAG mapped: total=${loadedMessages.length}, agents=${agentMsgs.length}, withToolCalls=${withTools.length}, firstAgent:`, agentMsgs[0] ? {sender: agentMsgs[0].sender, isAgent: agentMsgs[0].isAgent, tool_calls_len: agentMsgs[0].tool_calls?.length, msg_index: agentMsgs[0].msg_index} : 'none');
+                // The backend batch is not trusted to be clean: a repeated id
+                // reaches the keyed {#each ... (msg.id)} block and Svelte 5
+                // throws each_key_duplicate in production, with no boundary
+                // around this panel to catch it. mergeBackfillWithLive below
+                // only checks membership against `loaded`'s ids — it does not
+                // collapse a duplicate already inside `loaded` itself.
+                const { kept: dedupedLoadedMessages, droppedCount: loadedDropped, conflictCount: loadedConflicts } =
+                  dedupeMessagesById(loadedMessages);
+                if (loadedDropped > 0) {
+                  console.warn(`[ChatHistory] Dropped ${formatDedupeDrop(loadedDropped, loadedConflicts)} in loaded history for ${reqChatId}`);
+                }
+                const agentMsgs = dedupedLoadedMessages.filter((m: any) => m.isAgent);
+                const withTools = dedupedLoadedMessages.filter((m: any) => m.tool_calls?.length > 0);
+                console.log(`[ChatHistory] DIAG mapped: total=${dedupedLoadedMessages.length}, agents=${agentMsgs.length}, withToolCalls=${withTools.length}, firstAgent:`, agentMsgs[0] ? {sender: agentMsgs[0].sender, isAgent: agentMsgs[0].isAgent, tool_calls_len: agentMsgs[0].tool_calls?.length, msg_index: agentMsgs[0].msg_index} : 'none');
                 // Populate processedMessageIds so real-time events for these messages are deduped
-                loadedMessages.forEach((m: any) => {
+                dedupedLoadedMessages.forEach((m: any) => {
                   if (m.id && !m.id.startsWith('backend-')) processedMessageIds.add(m.id);
                 });
                 // Anything already on screen that the backend snapshot does not
@@ -133,10 +145,10 @@
                 // while this fetch was in flight, or before the chat was opened.
                 // Replacing outright would drop it, which never happened before
                 // only because a chat with messages was never backfilled at all.
-                const merged = mergeBackfillWithLive(loadedMessages, map.get(reqChatId) || []);
+                const merged = mergeBackfillWithLive(dedupedLoadedMessages, map.get(reqChatId) || []);
                 newMap.set(reqChatId, merged);
-                const kept = merged.length - loadedMessages.length;
-                console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages` +
+                const kept = merged.length - dedupedLoadedMessages.length;
+                console.log(`[ChatHistory] Updated chatHistories with ${dedupedLoadedMessages.length} messages` +
                             (kept ? ` + ${kept} kept from the live stream` : ''));
                 return newMap;
               });

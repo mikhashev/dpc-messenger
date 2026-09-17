@@ -10,6 +10,7 @@
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
   import { agentLiveTools } from '$lib/coreService';
   import { agentsList } from '$lib/services/agents';
+  import { dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import type { Message, Mention } from '$lib/types.js';
 
   // Whose agent ran these calls. A tool call carries its input, its full
@@ -56,6 +57,25 @@
     selfNodeId?: string;
     selfName?: string;
   } = $props();
+
+  // Last wall before the keyed {#each} below: the seven batch guards upstream
+  // (HistorySyncPanel, ChatHistorySyncPanel, +page.svelte, AgentPanel) catch a
+  // repeated id in a history batch, but a single append can also repeat one —
+  // Telegram ids keyed on Date.now(), an agent tick, a bubble re-keyed to a
+  // resp.message_id, a localStorage restore. Whatever reaches `messages`, this
+  // is the list actually rendered, so every index/order-dependent read below
+  // uses it too, not the raw prop.
+  let deduped = $derived(dedupeMessagesById(messages));
+  let displayMessages = $derived(deduped.kept);
+
+  let lastWarnedDropped = 0;
+  $effect(() => {
+    const { droppedCount, conflictCount } = deduped;
+    if (droppedCount > 0 && droppedCount !== lastWarnedDropped) {
+      console.warn(`[ChatMessageList] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in messages for ${conversationId}`);
+    }
+    lastWarnedDropped = droppedCount;
+  });
 
   // A sender counts as "AI" if it's the canonical 'ai' string (direct DPC queries),
   // starts with 'agent_' (Telegram-bridged, history-loaded, or proactively-fetched agent messages),
@@ -141,8 +161,8 @@
 </script>
 
 <div class="chat-window" bind:this={chatWindowElement}>
-  {#if messages.length > 0}
-    {#each messages as msg, i (msg.id)}
+  {#if displayMessages.length > 0}
+    {#each displayMessages as msg, i (msg.id)}
       <div id="msg-{i}" class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'} class:error={msg.isError}>
         <div class="message-header">
           <strong>

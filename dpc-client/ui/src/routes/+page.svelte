@@ -8,7 +8,7 @@
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
-  import { mapBackendMessage } from "$lib/utils/messageMapper";
+  import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from "$lib/utils/messageMapper";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -288,7 +288,7 @@
               const newMap = new Map(map);
               const agentName = $agentsList?.find((a: any) => a.agent_id === state.agent_id)?.name || state.agent_id;
               let previousTimestamp: number | undefined;
-              const msgs = result.messages.map((msg: any, index: number) => {
+              const msgs: Message[] = result.messages.map((msg: any, index: number) => {
                 const mapped = mapBackendMessage(msg, {
                   index,
                   totalCount: result.messages.length,
@@ -298,7 +298,11 @@
                 previousTimestamp = mapped.timestamp;
                 return mapped;
               });
-              newMap.set(state.agent_id, msgs);
+              const { kept: dedupedMsgs, droppedCount, conflictCount } = dedupeMessagesById(msgs);
+              if (droppedCount > 0) {
+                console.warn(`[AgentWake] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in reloaded history for ${state.agent_id}`);
+              }
+              newMap.set(state.agent_id, dedupedMsgs);
               return newMap;
             });
           }
@@ -521,7 +525,7 @@
             const localHistory: any[] = newMap.get(activeChatId) || [];
             const localById = new Map(localHistory.map((m: any) => [m.id, m]));
             let previousTimestamp: number | undefined;
-            const msgs = result.messages.map((msg: any, index: number) => {
+            const msgs: Message[] = result.messages.map((msg: any, index: number) => {
               const local = localById.get(msg.id);
               const mapped = mapBackendMessage(msg, {
                 index,
@@ -533,7 +537,11 @@
               previousTimestamp = mapped.timestamp;
               return mapped;
             });
-            newMap.set(activeChatId, msgs);
+            const { kept: dedupedMsgs, droppedCount, conflictCount } = dedupeMessagesById(msgs);
+            if (droppedCount > 0) {
+              console.warn(`[ActiveChat] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in reloaded history for ${activeChatId}`);
+            }
+            newMap.set(activeChatId, dedupedMsgs);
             return newMap;
           });
         }
