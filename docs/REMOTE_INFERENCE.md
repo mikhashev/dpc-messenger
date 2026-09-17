@@ -421,11 +421,6 @@ the project's position. What is welcome:
 - **Feature requests:** [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues)
 - **Bug reports:** [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues) — include logs from both host and requestor
 
-This section invited PRs and pointed at a `CONTRIBUTING.md` that has never
-existed in the index, while the front page said contributions were not
-accepted. Three documents, three answers, and the first one a reader met was
-the invitation (Mike's call, 2026-09-18).
-
 ---
 
 ## References

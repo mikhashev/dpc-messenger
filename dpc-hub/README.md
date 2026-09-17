@@ -630,11 +630,8 @@ External pull requests are not being accepted yet — see the root
 [README](../README.md) §Community & Support, which is the one place that states
 the project's position. Issues and discussions are welcome.
 
-This section pointed at a `CONTRIBUTING.md` that has never existed in the index
-and listed six areas to contribute to, while the front page said contributions
-were not accepted. Note also that the Hub is AGPL-3.0 where the client is
-GPL-3.0: if the door is opened later, the two need separate wording, not one
-shared sentence (Mike's call, 2026-09-18).
+Note for whenever that changes: the Hub is AGPL-3.0 where the client is
+GPL-3.0, so the two need separate wording rather than one shared sentence.
 
 ---
 
