@@ -1919,8 +1919,13 @@ if "--check" in sys.argv:
     tail = [e for e in entries
             if e["pri"] == "—" and not (bool(e["when"]) and e["when"] >= CUTOFF)
             and gate_scope(e)]
+    # Broken down by section, not just totalled: a bare figure is a number without a window,
+    # and the reader cannot tell which sections `canonical` folded into `open` (the
+    # decomposition queue is one of them).
+    burn_by_sec = Counter(e["section"] for e in burning)
     print("\n-- release gate (rule 19) --")
-    print(f"  burning       {len(burning)} CRITICAL/HIGH open or in progress")
+    print(f"  burning       {len(burning)} CRITICAL/HIGH open or in progress"
+          f"  [{' · '.join(f'{s} {n}' for s, n in sorted(burn_by_sec.items()))}]")
     print(f"  awaiting obs  {len(shelf)} on the shelf, {len(shelf_hi)} of them CRITICAL/HIGH")
     print(f"  unclassified  {len(tail)} open pre-{CUTOFF} entries with no priority "
           f"— counted in neither line above")
