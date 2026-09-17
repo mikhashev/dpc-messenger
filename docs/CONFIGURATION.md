@@ -1,7 +1,7 @@
 # DPC-Client Configuration Guide
 
 > **Version:** 0.29.0
-> **Last Updated:** 2026-08-10 — reconciled against `settings.py`; the key
+> **Last Updated:** 2026-09-18 — reconciled against `settings.py`; the key
 > reference below that date line is generated, not hand-maintained
 
 ## Overview
@@ -61,7 +61,7 @@ mv ~/.dpc/.dpc_access.json ~/.dpc/privacy_rules.json
 
 ## Default Configuration
 
-On first run the client writes **24 sections and 147 keys** into `~/.dpc/config.ini`.
+On first run the client writes **26 sections and 155 keys** into `~/.dpc/config.ini`.
 The four below are the ones most people touch; the rest are in
 [the complete reference](#complete-reference-every-key-the-code-writes), which is
 generated from the code rather than maintained by hand.
@@ -638,12 +638,9 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `enabled` | `false` | Serve /v1/models and /v1/chat/completions to local tools (ADR-041). This node's own aliases need `compute.enabled` in `privacy_rules.json` too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone |
+| `enabled` | `false` | Serve /v1/models and /v1/chat/completions to local tools (ADR-041). This node's own aliases need `compute.enabled` in privacy_rules.json too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone |
 | `port` | `9997` | 9998 is the file server, 9999 the local API |
 | `host` | `127.0.0.1` | Not configurable: any other value is refused at start (ADR-041 D1) |
-
-The gateway has no image cap of its own: an image at either door is bounded by
-`[vision] max_image_size_mb`, the same setting the P2P door enforces.
 
 #### `[gossip]`
 
@@ -766,7 +763,7 @@ The gateway has no image cap of its own: an image at either door is bounded by
 | `auto_collect_device_info` | `true` | Automatically collect device/system info for AI context |
 | `collect_hardware_specs` | `true` | Collect hardware tiers (RAM, CPU, disk, GPU) |
 | `collect_dev_tools` | `true` | Collect installed dev tools and versions |
-| `collect_ai_models` | `false` | Collect locally available AI models (opt-in for inference-sharing) |
+| `collect_ai_models` | `false` | Collect locally available AI models (opt-in for compute-sharing) |
 
 #### `[telegram]`
 
@@ -842,6 +839,17 @@ The gateway has no image cap of its own: an image at either door is bounded by
 | `stun_servers` | `stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:global.stun.twilio.com:3478,stun:stun.rtc.yandex.net:3478,stun:74.125.250.129:19302,stun:74.125.250.127:19302` |  |
 
 <!-- END GENERATED CONFIG REFERENCE -->
+
+### Notes that do not belong to a single key
+
+**The gateway has no image cap of its own:** an image at either door is bounded
+by `[vision] max_image_size_mb`, the same setting the P2P door enforces.
+
+*Anything written between the markers above is replaced by
+`tools/config_reference.py`, which builds the tables from the inline comments in
+`settings.py`. Prose about one key goes in that comment; prose about more than
+one goes here, below the markers, or the next regeneration deletes it silently —
+which is how the paragraph above was lost once already.*
 
 ## Using Environment Variables
 
@@ -1158,7 +1166,7 @@ chmod 600 ~/.dpc/config.ini
 ## Reference: Environment Variables
 
 **Every key in every section has one.** The name is built mechanically —
-`DPC_<SECTION>_<KEY>`, upper case — so all 147 keys in the reference above can be set
+`DPC_<SECTION>_<KEY>`, upper case — so all 155 keys in the reference above can be set
 from the environment without appearing in any list. That includes the secrets this page
 tells you to keep out of version control: `DPC_TELEGRAM_BOT_TOKEN`, `DPC_TURN_USERNAME`,
 `DPC_TURN_CREDENTIAL`.

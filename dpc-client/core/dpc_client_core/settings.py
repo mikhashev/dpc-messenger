@@ -76,7 +76,7 @@ class Settings:
         # The OpenAI-compatible gateway (ADR-041 D1): a second loopback listener
         # for tools on this machine, off until asked for because it is a new port.
         self._config['gateway'] = {
-            'enabled': 'false',  # Serve /v1/models and /v1/chat/completions to local tools (ADR-041)
+            'enabled': 'false',  # Serve /v1/models and /v1/chat/completions to local tools (ADR-041). This node's own aliases need `compute.enabled` in privacy_rules.json too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone
             'port': '9997',  # 9998 is the file server, 9999 the local API
             'host': '127.0.0.1'  # Not configurable: any other value is refused at start (ADR-041 D1)
         }
