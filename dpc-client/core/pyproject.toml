@@ -46,7 +46,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["fastapi"]
 # PDF text, page geometry and per-character font attribution for read_document.
 # One self-contained wheel bundling PDFium, no transitive dependencies,
 # BSD-3-Clause OR Apache-2.0 — the licence matters because the client is
@@ -78,9 +77,6 @@ browser = [
 ]
 graph-ner = [
     "gliner>=0.2.20",
-]
-graph-grafeo = [
-    "grafeo>=0.5.42",
 ]
 
 [dependency-groups]

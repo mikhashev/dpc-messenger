@@ -92,16 +92,25 @@ uv run pytest --cov=dpc_client_core  # Run with coverage
 > ⚠️ **`uv sync` is declarative, not additive.** It makes the environment match
 > exactly what the command asks for, so a bare `uv sync` **uninstalls** every
 > optional extra installed earlier — `browser` (camoufox, playwright),
-> `graph-ner` (gliner), `graph-grafeo` (grafeo), `pdf` (pypdfium2). Re-syncing an environment that
-> uses extras must repeat the full list in one command:
+> `graph-ner` (gliner), `pdf` (pypdfium2), `mlx` (Apple Silicon only).
+> Re-syncing an environment that uses extras asks the package rather than a
+> memory:
 >
 > ```bash
-> uv sync --extra browser --extra graph-ner --extra graph-grafeo --extra pdf
+> uv sync --all-extras
 > ```
+>
+> This replaced a hand-written list of `--extra` flags on 2026-09-18. The list
+> had fallen behind `pyproject.toml` — it named three extras where six were
+> declared, so running it as written removed `pypdfium2` and took document
+> reading away in silence. `--all-extras` cannot fall behind, and it is safe on
+> every platform only because **each extra carries its own platform markers**:
+> add one without them and this command breaks on an untested OS.
 >
 > The same applies to `uv sync --extra X` on its own: it keeps `X` and drops the
 > others. Check with `uv sync --dry-run` before running it on a live environment
-> — it prints exactly what would be uninstalled.
+> — it prints exactly what would be uninstalled. An extra that is not declared
+> is not ignored: uv refuses with `Extra \`X\` is not defined`.
 >
 > **To add one extra without touching the rest, pass `--inexact`** — it leaves
 > alone anything the command did not name: `uv sync --extra pdf --inexact`.
@@ -126,8 +135,9 @@ uv sync --extra mlx
 
 > These two are alternatives, not steps — and `--extra mlx` alone drops any
 > other extras (see the `uv sync` warning above). On a machine that also uses
-> `browser`/`graph-ner`/`graph-grafeo`/`pdf`, list them together:
-> `uv sync --extra mlx --extra browser --extra graph-ner --extra graph-grafeo --extra pdf`.
+> `browser`/`graph-ner`/`pdf`, take them all at once with `uv sync --all-extras`:
+> `mlx` carries `sys_platform == 'darwin' and platform_machine == 'arm64'`, so
+> the same command installs it on Apple Silicon and skips it everywhere else.
 
 **Technical Details:**
 - **Dependencies**: `mlx>=0.4.0`, `mlx-whisper>=0.2.0`
