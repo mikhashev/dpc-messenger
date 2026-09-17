@@ -1886,6 +1886,50 @@ if "--check" in sys.argv:
           f" · {len(dangling)} stale references · {len(short_refs)} shortened"
           f" · {dep_all} dependencies · {no_axis} without axis · {bad_axis} bad axis")
 
+    # Protocol 13 rule 19 asks two questions before a tag: what is burning, and what was
+    # marked done and never watched. Both numbers were already computed — for the HTML
+    # board, and nowhere else — so the pre-tag sweep had to open a gitignored page that
+    # goes stale in silence, while the person doing the sweep was in a terminal running
+    # this check. Printed here they cost nothing.
+    #
+    # Not enforcement: nothing invokes `--check` against the real board — the tests run this
+    # script against `fixture.md`, and `backlog.md` is gitignored. The runner is a person.
+    #
+    # The CRITICAL entries are named rather than counted, because two is a number you act
+    # on and a count is a number you note. The shelf is not named: 172 lines would bury
+    # everything above them, and the board already lists it by axis.
+    # `canonical` maps IDEAS and the decomposition queue to `open` too, which is right for
+    # the board and wrong here: IDEAS rows are, in the section's own words, "headings not
+    # yet decomposed" — a track name is not a defect anybody can be asked to clear before a
+    # tag. Excluded by section name rather than by status, because it is the section that
+    # says what its rows are.
+    def gate_scope(e):
+        return (canonical(e["section"]) in ("open", "in-progress")
+                and not e["section"].upper().startswith("IDEAS"))
+
+    burning = [e for e in entries if e["pri"] in ("CRITICAL", "HIGH") and gate_scope(e)]
+    shelf = [e for e in entries
+             if canonical(e["section"]) == "done-awaiting-observation"]
+    shelf_hi = [e for e in shelf if e["pri"] in ("CRITICAL", "HIGH")]
+    # The legacy tail, lifted out of the warning list. It is warned about entry by entry
+    # already (§7 makes the envelope new-entries-only, so a pre-cutoff entry missing its
+    # priority is legal), but one warning among two hundred is not a list anybody can work
+    # through. What makes it release business is that these entries are invisible to the
+    # two counts above: no priority means neither burning nor quiet, just unclassified.
+    tail = [e for e in entries
+            if e["pri"] == "—" and not (bool(e["when"]) and e["when"] >= CUTOFF)
+            and gate_scope(e)]
+    print("\n-- release gate (rule 19) --")
+    print(f"  burning       {len(burning)} CRITICAL/HIGH open or in progress")
+    print(f"  awaiting obs  {len(shelf)} on the shelf, {len(shelf_hi)} of them CRITICAL/HIGH")
+    print(f"  unclassified  {len(tail)} open pre-{CUTOFF} entries with no priority "
+          f"— counted in neither line above")
+    for e in burning:
+        if e["pri"] == "CRITICAL":
+            print(f"  CRITICAL      {SRC.name}:{e['line']}  {e['name']}")
+    for e in tail:
+        print(f"  no priority   {SRC.name}:{e['line']}  {e['name']}")
+
     # The backfill meter (§4a). Printed as a distribution rather than a total, because the
     # useful question is not "how many are unmarked" but "does any direction hold nothing" —
     # an axis with no entries is either finished or forgotten, and the two look identical
