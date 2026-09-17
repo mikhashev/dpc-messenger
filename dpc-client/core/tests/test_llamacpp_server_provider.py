@@ -1332,3 +1332,145 @@ class TestTheResponseIsTheSourceOfItsOwnTimings:
         out = p._record_usage(self._usage(), path="tools", elapsed_s=10.0)
 
         assert out["speed"]["prefill_tok_s"] == 111
+
+
+SHOT_1 = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+SHOT_2 = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBBB"}}
+PART_1 = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+PART_2 = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBBB"}}
+A_TOOL = [{"name": "read_file", "description": "", "input_schema": {"type": "object"}}]
+
+
+class TestImagesTravelInTheTurnsOnTheToolsPath:
+    """Claude Code attaches its tools to every request, so a screenshot reaches
+    this node as images and tools in one call, with the history around it.
+    Probed live on b10964 (qwen3.8 27b, --mmproj, --jinja): `image_url` parts
+    beside `tools` answer with correct tool calls. What is pinned here is that
+    the converter puts each picture where the conversation had it, instead of
+    dropping it as every copy of the converter used to."""
+
+    @staticmethod
+    async def _sent(p, messages):
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp())
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+        await p.generate_with_tools(messages, A_TOOL, system="be brief")
+        return completions.bodies[0]["messages"]
+
+    @pytest.mark.asyncio
+    async def test_an_image_is_sent_inside_its_own_user_turn_between_the_texts_around_it(self):
+        sent = await self._sent(_provider(mmproj="mm.gguf"), [
+            {"role": "user", "content": [
+                {"type": "text", "text": "before"}, SHOT_1, {"type": "text", "text": "after"},
+            ]},
+        ])
+
+        assert sent == [
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": [
+                {"type": "text", "text": "before"}, PART_1, {"type": "text", "text": "after"},
+            ]},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_two_screenshots_in_two_turns_stay_in_their_own_turns(self):
+        sent = await self._sent(_provider(mmproj="mm.gguf"), [
+            {"role": "user", "content": [SHOT_1, {"type": "text", "text": "first"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "seen"}]},
+            {"role": "user", "content": [{"type": "text", "text": "second"}, SHOT_2]},
+        ])
+
+        assert sent[1:] == [
+            {"role": "user", "content": [PART_1, {"type": "text", "text": "first"}]},
+            {"role": "assistant", "content": "seen"},
+            {"role": "user", "content": [{"type": "text", "text": "second"}, PART_2]},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_text_and_an_image_beside_tool_results_follow_the_tool_messages_instead_of_vanishing(self):
+        sent = await self._sent(_provider(mmproj="mm.gguf"), [
+            {"role": "user", "content": "look at the page"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "read_file", "input": {"path": "a"}},
+                {"type": "tool_use", "id": "tu_2", "name": "read_file", "input": {"path": "b"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "body a"},
+                {"type": "tool_result", "tool_use_id": "tu_2", "content": "body b"},
+                {"type": "text", "text": "<reminder>"},
+                SHOT_1,
+            ]},
+        ])
+
+        assert [m["role"] for m in sent] == ["system", "user", "assistant", "tool", "tool", "user"]
+        # The tool messages directly follow the assistant's calls, or the
+        # OpenAI shape is invalid; the rest of the turn comes after them.
+        assert [m.get("tool_call_id") for m in sent[3:5]] == ["tu_1", "tu_2"]
+        assert sent[5] == {"role": "user", "content": [{"type": "text", "text": "<reminder>"}, PART_1]}
+
+    @pytest.mark.asyncio
+    async def test_an_image_a_tool_returned_rides_in_the_user_message_after_the_tool_message(self):
+        sent = await self._sent(_provider(mmproj="mm.gguf"), [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "screenshot", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1",
+                 "content": [{"type": "text", "text": "shot taken"}, SHOT_1]},
+            ]},
+        ])
+
+        assert sent[2] == {"role": "tool", "tool_call_id": "tu_1", "content": "shot taken"}
+        assert sent[3] == {"role": "user", "content": [PART_1]}
+
+    @pytest.mark.asyncio
+    async def test_an_alias_without_a_projector_refuses_the_image_before_any_call_is_made(self):
+        p = _provider()
+        assert not p.supports_vision()
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp())
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        with pytest.raises(ValueError) as refused:
+            await p.generate_with_tools(
+                [{"role": "user", "content": [{"type": "text", "text": "what is this"}, SHOT_1]}],
+                A_TOOL,
+            )
+
+        assert "local_qwen38" in str(refused.value) and "vision" in str(refused.value)
+        assert completions.bodies == [], "a picture was sent on to a model that cannot see it"
+
+    @pytest.mark.asyncio
+    async def test_the_image_bearing_tools_call_still_passes_the_real_sdk_signature(self):
+        """What `test_every_entry_point_builds_params_the_real_sdk_accepts`
+        pins, for the image-bearing tools call. The SDK checks kwargs, not the
+        inside of `messages`, so this guards the call's shape and no more."""
+        from openai import AsyncOpenAI
+        import openai
+
+        from dpc_client_core.managers.llama_server_supervisor import LlamaServerSupervisor
+
+        p = _provider(mmproj="mm.gguf", max_retry_seconds=0)
+        p.supervisor = LlamaServerSupervisor("local_qwen38", {"gguf_path": GGUF})
+        dead = AsyncOpenAI(api_key="local", base_url="http://127.0.0.1:1/v1", max_retries=0)
+
+        async def _ensure():
+            return dead
+
+        p._ensure = _ensure
+
+        with pytest.raises((RuntimeError, openai.APIConnectionError)) as ei:
+            await p.generate_with_tools(
+                [{"role": "user", "content": [{"type": "text", "text": "hi"}, SHOT_1]}], A_TOOL,
+            )
+        assert not isinstance(ei.value.__cause__, TypeError), (
+            f"the image-bearing call sends a kwarg the real SDK refuses: {ei.value.__cause__}"
+        )

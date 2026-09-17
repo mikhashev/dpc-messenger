@@ -150,22 +150,29 @@ def flatten_messages(messages: List[Dict[str, Any]], system: Any = "") -> str:
     return messages_to_prompt(OllamaProvider._anthropic_to_openai_messages(system, messages))
 
 
-def entry_point_for(provider: Any, *, tools: bool, streaming: bool) -> Tuple[str, Any]:
+def entry_point_for(provider: Any, *, tools: bool, streaming: bool, images: bool = False) -> Tuple[str, Any]:
     """`(name, bound method or None)`: the one provider entry point
     `query_messages` calls for a request shaped like this.
 
     The three-way choice lives here rather than in the `if` below so that a
     caller standing in front of the door — the gateway, which refuses by name
     what it cannot carry — asks about the same path that will actually run.
-    None is «this provider has no such entry point»: for tools that is the
-    refusal `query_messages` already raised, and the other two exist on
-    `AIProvider` itself.
+    None is «this provider has no entry point for this request»: for tools that
+    is the refusal `query_messages` already raised.
+
+    `images` is image blocks inside the turns. Only `generate_with_tools` takes
+    the turns un-flattened, so only it can carry them, and only for a provider
+    whose `supports_vision()` says yes; the two prompt paths render text and
+    would lose the picture, so with images they answer None as well.
     """
     if tools:
-        return "generate_with_tools", getattr(provider, "generate_with_tools", None)
+        method = getattr(provider, "generate_with_tools", None)
+        if images and method is not None and not provider.supports_vision():
+            method = None
+        return "generate_with_tools", method
     if streaming and hasattr(provider, "generate_response_stream"):
-        return "generate_response_stream", provider.generate_response_stream
-    return "generate_response", getattr(provider, "generate_response", None)
+        return "generate_response_stream", None if images else provider.generate_response_stream
+    return "generate_response", None if images else getattr(provider, "generate_response", None)
 
 
 def accepts_reasoning_effort(entry_point: Any) -> bool:
@@ -895,14 +902,34 @@ class LLMManager:
 
         tool_calls: List[Dict[str, Any]] = []
         path_usage: Dict[str, Any] = {}
+        # Image blocks in the turns, including those a tool returned inside its result.
+        image_count = 0
+        for m in messages:
+            content = m.get("content") if isinstance(m, dict) else None
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                inner = block.get("content") if block.get("type") == "tool_result" else None
+                image_count += sum(
+                    1 for b in [block, *(inner if isinstance(inner, list) else [])]
+                    if isinstance(b, dict) and b.get("type") == "image"
+                )
         path, entry_point = entry_point_for(
-            provider, tools=bool(tools), streaming=on_chunk is not None,
+            provider, tools=bool(tools), streaming=on_chunk is not None, images=image_count > 0,
         )
-        if tools and entry_point is None:
+        if tools and getattr(provider, "generate_with_tools", None) is None:
             raise ValueError(
                 f"Provider '{alias_to_use}' (model: {provider.model}) has no native "
                 f"tool-calling path, and {len(tools)} tool(s) were asked for. Use an "
                 "alias whose provider implements generate_with_tools."
+            )
+        if image_count and entry_point is None:
+            raise ValueError(
+                f"Provider '{alias_to_use}' (model: {provider.model}) cannot take the "
+                f"{image_count} image(s) in this conversation on its {path} path: images "
+                "travel in the turns only through generate_with_tools, to a provider "
+                "whose supports_vision() is true. Use a vision-capable alias with tools, "
+                "or send the conversation without images."
             )
         effort_kwargs: Dict[str, Any] = {}
         if reasoning_effort is not None:
@@ -985,7 +1012,7 @@ class LLMManager:
                 "prompt_tokens": prompt_tokens,
                 "response_tokens": response_tokens,
                 "model_max_tokens": self.get_context_window(provider.model),
-                "vision_used": False,  # images stay on `query`; this door carries none
+                "vision_used": image_count > 0,  # a refusal above leaves no other way here
                 "thinking": thinking_content,
                 "thinking_tokens": thinking_tokens,
                 "thinking_source": thinking_source,  # `query`'s rule, same two copies

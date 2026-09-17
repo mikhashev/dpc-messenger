@@ -2,6 +2,7 @@
 # Base class, shared exceptions, shared constants, and shared utilities for all AI providers.
 
 import itertools
+import json
 import math
 import logging
 from typing import Dict, Any, Optional, List, Tuple
@@ -456,6 +457,156 @@ def image_base64(img: Dict[str, Any], alias: str) -> str:
             f"the sender's original filename, not a file this machine may open."
         )
     return data.split(",", 1)[1] if data.startswith("data:") else data
+
+
+# --- Shared Anthropic -> OpenAI conversation ---
+
+
+def anthropic_to_openai_messages(
+    system: Any,
+    messages: List[Dict[str, Any]],
+    reasoning_echo: bool = False,
+    *,
+    provider: Any = None,
+) -> List[Dict[str, Any]]:
+    """The Anthropic Messages conversation as OpenAI chat messages: the one
+    converter behind DeepSeek, Z.AI and llama-server, and, reshaped onto its
+    native wire, Ollama.
+
+    An `image` block stays in its own turn at its own position: that turn
+    becomes an array of text and `image_url` parts; a turn with no image keeps
+    its joined string. Beside `tool_result` blocks, the `role: tool` messages
+    come first — the OpenAI shape wants them directly after the assistant's
+    tool calls — and the rest of the turn follows as one `role: user` message.
+
+    `reasoning_echo` pads `reasoning_content` onto replayed tool-call turns
+    (DeepSeek thinking mode). `provider`, when given, is asked
+    `supports_vision()` at the first image, and a no refuses rather than
+    sending the turn with the picture gone. Without it nobody is asked:
+    `flatten_messages` renders text and sends no picture anywhere.
+    """
+    alias = getattr(provider, "alias", None) or "unknown"
+    vision_confirmed = provider is None
+
+    def image_part(block: Dict[str, Any], where: str) -> Dict[str, Any]:
+        nonlocal vision_confirmed
+        if not vision_confirmed:
+            if not provider.supports_vision():
+                raise ValueError(
+                    f"Provider '{alias}' (model: {getattr(provider, 'model', 'unknown')}) has no "
+                    f"vision path, and {where} is an image; send the conversation to a "
+                    "vision-capable alias, or without the image."
+                )
+            vision_confirmed = True
+        source = block.get("source")
+        kind = source.get("type") if isinstance(source, dict) else None
+        data = source.get("data") if kind == "base64" else None
+        if not data:
+            # A url or file source would have this node fetch on a caller's behalf.
+            raise ValueError(
+                f"Provider '{alias}' was given {where} whose source is not "
+                f"{{type: base64, media_type, data}} (source type: {kind!r})."
+            )
+        media_type = source.get("media_type") or "image/png"
+        return {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}}
+
+    out: List[Dict[str, Any]] = []
+    if system:
+        sys_text = system if isinstance(system, str) else "".join(
+            b.get("text", "") for b in system if isinstance(b, dict)
+        )
+        if sys_text:
+            out.append({"role": "system", "content": sys_text})
+
+    for position, m in enumerate(messages):
+        role = m.get("role")
+        content = m.get("content")
+
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+            continue
+
+        blocks = content if isinstance(content, list) else []
+
+        if role == "assistant":
+            text_parts: List[str] = []
+            tool_calls: List[Dict[str, Any]] = []
+            thinking_text = ""
+            for b in blocks:
+                if not isinstance(b, dict):
+                    continue
+                bt = b.get("type")
+                if bt == "text":
+                    text_parts.append(b.get("text", ""))
+                elif bt == "tool_use":
+                    tool_calls.append({
+                        "id": b.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": b.get("name", ""),
+                            "arguments": json.dumps(b.get("input", {})),
+                        },
+                    })
+                elif bt == "thinking":
+                    thinking_text += b.get("thinking", "")
+            msg: Dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+                if reasoning_echo:
+                    # DeepSeek thinking mode requires reasoning_content on every
+                    # assistant message that carries tool_calls, or replaying it
+                    # on the next round returns HTTP 400. The agent adapter drops
+                    # thinking blocks on replay, so thinking_text is normally
+                    # empty -> pad with a single space (V4 Pro rejects "").
+                    msg["reasoning_content"] = thinking_text or " "
+            out.append(msg)
+            continue
+
+        if role == "user":
+            tool_messages: List[Dict[str, Any]] = []
+            parts: List[Dict[str, Any]] = []  # text and image parts, in block order
+            for index, b in enumerate(blocks):
+                if not isinstance(b, dict):
+                    continue
+                bt = b.get("type")
+                where = f"messages[{position}] content[{index}]"
+                if bt == "tool_result":
+                    tr_content = b.get("content", "")
+                    if isinstance(tr_content, list):
+                        # `role: tool` carries only a string in the OpenAI shape, so
+                        # an image a tool returned rides in the user message after.
+                        for inner_index, inner in enumerate(tr_content):
+                            if isinstance(inner, dict) and inner.get("type") == "image":
+                                parts.append(image_part(inner, f"{where} content[{inner_index}]"))
+                        tr_content = "".join(
+                            inner.get("text", "") for inner in tr_content
+                            if isinstance(inner, dict)
+                        )
+                    tool_messages.append({
+                        "role": "tool",
+                        "tool_call_id": b.get("tool_use_id", ""),
+                        "content": str(tr_content),
+                    })
+                elif bt == "text":
+                    parts.append({"type": "text", "text": b.get("text", "")})
+                elif bt == "image":
+                    parts.append(image_part(b, where))
+            out.extend(tool_messages)
+            if any(p["type"] == "image_url" for p in parts):
+                out.append({"role": "user", "content": [
+                    p for p in parts if p["type"] == "image_url" or p["text"]
+                ]})
+            else:
+                text = "".join(p["text"] for p in parts)
+                # No empty user turn after tool results: a chat template may refuse one.
+                if not tool_messages or text.strip():
+                    out.append({"role": "user", "content": text})
+            continue
+
+        # Fallback: stringify unknown block content
+        out.append({"role": role or "user", "content": json.dumps(blocks)})
+
+    return out
 
 
 # --- Shared network bounds ---

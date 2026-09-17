@@ -12,7 +12,8 @@ from typing import Dict, Any, Optional, List, Union
 import httpx
 import ollama
 
-from .base import (AIProvider, REASONING_OFF, image_base64, normalize_reasoning_effort,
+from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, image_base64,
+                   normalize_reasoning_effort,
                    numeric_setting, positive_ceiling)
 
 logger = logging.getLogger(__name__)
@@ -707,64 +708,45 @@ class OllamaProvider(AIProvider):
         return out
 
     @staticmethod
-    def _anthropic_to_openai_messages(system: Any, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _anthropic_to_openai_messages(
+        system: Any, messages: List[Dict[str, Any]], *, provider: Any = None,
+    ) -> List[Dict[str, Any]]:
+        """The shared converter's output, reshaped onto Ollama's native /api/chat.
+
+        The differences are the wire's, not a second reading of the conversation:
+        `content` is a string, so a turn's images ride in its own `images` list
+        (base64 without the data-URL prefix) and their position inside the turn
+        is lost, though not their turn; tool-call `arguments` are an object, not
+        a JSON string; and calls and results carry no ids — Ollama matches them
+        by order.
+        """
         out: List[Dict[str, Any]] = []
-        if system:
-            sys_text = system if isinstance(system, str) else "".join(
-                b.get("text", "") for b in system if isinstance(b, dict)
-            )
-            if sys_text:
-                out.append({"role": "system", "content": sys_text})
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content")
-            if isinstance(content, str):
-                out.append({"role": role, "content": content})
-                continue
-            blocks = content if isinstance(content, list) else []
+        for m in anthropic_to_openai_messages(system, messages, provider=provider):
+            role, content = m.get("role"), m.get("content")
             if role == "assistant":
-                text_parts: List[str] = []
-                tool_calls: List[Dict[str, Any]] = []
-                for b in blocks:
-                    if not isinstance(b, dict):
-                        continue
-                    bt = b.get("type")
-                    if bt == "text":
-                        text_parts.append(b.get("text", ""))
-                    elif bt == "tool_use":
-                        tool_calls.append({
-                            "type": "function",
-                            "function": {
-                                "name": b.get("name", ""),
-                                "arguments": b.get("input", {}),
-                            },
-                        })
-                msg: Dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
-                if tool_calls:
-                    msg["tool_calls"] = tool_calls
-                out.append(msg)
-                continue
-            if role == "user":
-                tool_results = [
-                    b for b in blocks
-                    if isinstance(b, dict) and b.get("type") == "tool_result"
-                ]
-                if tool_results:
-                    for tr in tool_results:
-                        tr_content = tr.get("content", "")
-                        if isinstance(tr_content, list):
-                            tr_content = "".join(
-                                b.get("text", "") for b in tr_content if isinstance(b, dict)
-                            )
-                        out.append({"role": "tool", "content": str(tr_content)})
-                else:
-                    text_parts = [
-                        b.get("text", "") for b in blocks
-                        if isinstance(b, dict) and b.get("type") == "text"
+                msg: Dict[str, Any] = {"role": "assistant", "content": content or ""}
+                if m.get("tool_calls"):
+                    msg["tool_calls"] = [
+                        {"type": "function", "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": json.loads(tc["function"]["arguments"]),
+                        }}
+                        for tc in m["tool_calls"]
                     ]
-                    out.append({"role": "user", "content": "".join(text_parts)})
-                continue
-            out.append({"role": role or "user", "content": json.dumps(blocks)})
+                out.append(msg)
+            elif role == "tool":
+                out.append({"role": "tool", "content": content})
+            elif isinstance(content, list):
+                out.append({
+                    "role": role,
+                    "content": "".join(p["text"] for p in content if p["type"] == "text"),
+                    "images": [
+                        p["image_url"]["url"].split(",", 1)[1]
+                        for p in content if p["type"] == "image_url"
+                    ],
+                })
+            else:
+                out.append(m)
         return out
 
     async def generate_with_tools(
@@ -777,7 +759,7 @@ class OllamaProvider(AIProvider):
         **kwargs,
     ) -> Dict[str, Any]:
         self._last_thinking = None
-        ollama_messages = self._anthropic_to_openai_messages(system, messages)
+        ollama_messages = self._anthropic_to_openai_messages(system, messages, provider=self)
         ollama_tools = self._anthropic_to_openai_tools(tools)
 
         options = self._build_options(**kwargs)

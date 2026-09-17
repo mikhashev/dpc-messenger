@@ -284,3 +284,80 @@ async def test_a_tool_round_carries_its_own_stop_reason(tmp_path):
     result = await manager.query_messages(MESSAGES, system=SYSTEM, tools=TOOLS, return_metadata=True)
 
     assert result["finish_reason"] == "tool_calls"
+
+
+# --- (7) images in the turns ---------------------------------------------------
+
+SHOT = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+IMAGE_MESSAGES = MESSAGES[:-1] + [
+    {"role": "user", "content": [{"type": "text", "text": "and this?"}, SHOT]},
+]
+
+
+class _Seeing(_WithTools):
+    def supports_vision(self):
+        return True
+
+
+def test_the_images_axis_names_the_tools_path_only_for_a_provider_that_can_see():
+    from dpc_client_core.llm_manager import entry_point_for
+
+    seeing = _Seeing()
+    assert entry_point_for(seeing, tools=True, streaming=False, images=True) == (
+        "generate_with_tools", seeing.generate_with_tools)
+    assert entry_point_for(_WithTools(), tools=True, streaming=False, images=True) == ("generate_with_tools", None)
+    assert entry_point_for(_Plain(), tools=True, streaming=False, images=True) == ("generate_with_tools", None)
+    # The prompt paths render text: with images they have no door either.
+    assert entry_point_for(_Streaming(), tools=False, streaming=True, images=True) == (
+        "generate_response_stream", None)
+    assert entry_point_for(_Plain(), tools=False, streaming=False, images=True) == ("generate_response", None)
+    # And the axis left at its default changes nothing for a caller that never names it.
+    assert entry_point_for(_WithTools(), tools=True, streaming=False)[1] is not None
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_with_an_image_reaches_a_seeing_provider_whole_and_says_vision_was_used(tmp_path):
+    provider = _Seeing()
+    manager = _manager(tmp_path, provider)
+
+    result = await manager.query_messages(IMAGE_MESSAGES, system=SYSTEM, tools=TOOLS, return_metadata=True)
+
+    (seen,) = provider.seen
+    assert seen["messages"] == IMAGE_MESSAGES, "the image did not reach the provider inside its turn"
+    assert result["vision_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_image_counts_as_vision_when_a_tool_returned_it(tmp_path):
+    provider = _Seeing()
+    manager = _manager(tmp_path, provider)
+    messages = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "tu_1", "name": "read_file", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": [SHOT]}]},
+    ]
+
+    result = await manager.query_messages(messages, tools=TOOLS, return_metadata=True)
+
+    assert result["vision_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_text_conversation_still_says_vision_was_not_used(tmp_path):
+    manager = _manager(tmp_path, _Seeing())
+
+    result = await manager.query_messages(MESSAGES, system=SYSTEM, tools=TOOLS, return_metadata=True)
+
+    assert result["vision_used"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider, tools", [(_WithTools(), TOOLS), (_Plain(), None)],
+                         ids=["tools but no vision", "no tools path at all"])
+async def test_an_image_the_path_cannot_carry_is_refused_by_name_and_reaches_no_provider(tmp_path, provider, tools):
+    manager = _manager(tmp_path, provider)
+
+    with pytest.raises(ValueError) as refused:
+        await manager.query_messages(IMAGE_MESSAGES, system=SYSTEM, tools=tools)
+
+    assert ALIAS in str(refused.value) and "image" in str(refused.value)
+    assert getattr(provider, "seen", []) == [] and provider.prompts == []

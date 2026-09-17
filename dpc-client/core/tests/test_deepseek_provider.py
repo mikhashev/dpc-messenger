@@ -773,3 +773,58 @@ def test_no_split_at_all_is_unknown_not_zero_reasoning_asserted():
         prompt_tokens=10, completion_tokens=100, total_tokens=110,
     ))
     assert usage["output_includes_thinking"] == "unknown"
+
+
+# --- images: carried by the shared converter, refused where the model cannot see ---
+
+SHOT = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+
+
+def test_deepseek_and_its_subclasses_speak_the_one_shared_converter():
+    from dpc_client_core.providers.base import anthropic_to_openai_messages
+    from dpc_client_core.providers.llamacpp_server_provider import LlamaServerProvider
+
+    assert DeepSeekProvider._anthropic_to_openai_messages is anthropic_to_openai_messages
+    assert LlamaServerProvider._anthropic_to_openai_messages is anthropic_to_openai_messages
+
+
+def test_a_text_only_conversation_converts_exactly_as_it_did_before_images_were_carried():
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tu_1", "name": "x", "input": {"k": 1}},
+        ]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "r"}]},
+    ]
+    out = DeepSeekProvider._anthropic_to_openai_messages("sys", messages)
+    assert out == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "ab"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "tu_1", "type": "function", "function": {"name": "x", "arguments": '{"k": 1}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "tu_1", "content": "r"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deepseek_refuses_an_image_by_name_rather_than_answering_as_if_none_were_sent():
+    """V4 is text-only. The copy this replaced dropped the block and sent the
+    question on, and the answer came back about a picture nobody showed it."""
+    p = _make()
+    p.client.chat.completions.create = AsyncMock()
+
+    with pytest.raises(ValueError) as refused:
+        await p.generate_with_tools(
+            messages=[{"role": "user", "content": [{"type": "text", "text": "what is this"}, SHOT]}],
+            tools=[{"name": "t", "description": "", "input_schema": {"type": "object"}}],
+        )
+
+    assert "deepseek_test" in str(refused.value) and "vision" in str(refused.value)
+    p.client.chat.completions.create.assert_not_called()
+
+
+def test_an_image_block_whose_source_is_not_base64_is_refused_rather_than_fetched_or_dropped():
+    url_shot = {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}}
+    with pytest.raises(ValueError, match="base64"):
+        DeepSeekProvider._anthropic_to_openai_messages("", [{"role": "user", "content": [url_shot]}])

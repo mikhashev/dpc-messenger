@@ -504,3 +504,79 @@ class TestReasoningIsNotAnAnswer:
 
         p.client = SimpleNamespace(chat=fake_chat)
         assert await p.generate_response("hello") == "thinking out loud"
+
+
+# --- images on the native wire ---
+
+SHOT_1 = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+SHOT_2 = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBBB"}}
+
+
+def test_each_turns_images_ride_in_that_turns_own_images_list_on_the_native_wire():
+    """`Message.content` is a string in the ollama SDK, so a picture cannot sit
+    between two texts; it can still sit in the turn that showed it."""
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "first"}, SHOT_1]},
+        {"role": "assistant", "content": [{"type": "text", "text": "seen"}]},
+        {"role": "user", "content": [SHOT_2, {"type": "text", "text": "second"}]},
+    ]
+    out = OllamaProvider._anthropic_to_openai_messages("", messages)
+    assert out == [
+        {"role": "user", "content": "first", "images": ["AAAA"]},
+        {"role": "assistant", "content": "seen"},
+        {"role": "user", "content": "second", "images": ["BBBB"]},
+    ]
+
+
+def test_an_image_a_tool_returned_follows_the_tool_message_in_a_user_turn():
+    messages = [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tu_1", "name": "screenshot", "input": {"full": True}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu_1",
+             "content": [{"type": "text", "text": "shot taken"}, SHOT_1]},
+            {"type": "text", "text": "and now?"},
+        ]},
+    ]
+    out = OllamaProvider._anthropic_to_openai_messages("", messages)
+    assert out == [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"type": "function", "function": {"name": "screenshot", "arguments": {"full": True}}},
+        ]},
+        {"role": "tool", "content": "shot taken"},
+        {"role": "user", "content": "and now?", "images": ["AAAA"]},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_model_the_daemon_does_not_call_vision_refuses_the_image_on_the_tools_path():
+    p = _make()
+    assert p.supports_vision() is False  # no daemon in this file
+    p.client.chat = AsyncMock()
+
+    with pytest.raises(ValueError) as refused:
+        await p.generate_with_tools(
+            messages=[{"role": "user", "content": [{"type": "text", "text": "what is this"}, SHOT_1]}],
+            tools=[{"name": "t", "description": "", "input_schema": {"type": "object"}}],
+        )
+
+    assert "ollama_test" in str(refused.value)
+    p.client.chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_vision_model_receives_the_image_beside_the_tools_on_the_native_wire(monkeypatch):
+    p = _make({"model": "qwen3-vl:8b"})
+    monkeypatch.setattr(p, "supports_vision", lambda: True)
+    fake_msg = SimpleNamespace(content="a cat", thinking=None, tool_calls=[])
+    p.client.chat = AsyncMock(return_value=_Resp(fake_msg, prompt_eval_count=10, eval_count=2))
+
+    await p.generate_with_tools(
+        messages=[{"role": "user", "content": [{"type": "text", "text": "what is this"}, SHOT_1]}],
+        tools=[{"name": "t", "description": "", "input_schema": {"type": "object"}}],
+    )
+
+    _, kwargs = p.client.chat.call_args
+    assert kwargs["messages"] == [{"role": "user", "content": "what is this", "images": ["AAAA"]}]
+    assert kwargs["tools"][0]["function"]["name"] == "t"

@@ -444,3 +444,47 @@ def test_a_level_this_api_cannot_express_is_not_invented():
         assert body == {"thinking": {"type": "enabled"}}
         assert "reasoning_effort" not in body
 
+
+
+# --- images on the tools path ---
+
+SHOT = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+IMAGE_TURN = [{"role": "user", "content": [{"type": "text", "text": "what is this"}, SHOT]}]
+A_TOOL = [{"name": "t", "description": "", "input_schema": {"type": "object"}}]
+
+
+def test_zai_speaks_the_one_shared_converter():
+    from dpc_client_core.providers.base import anthropic_to_openai_messages
+
+    assert ZaiProvider._anthropic_to_openai_messages is anthropic_to_openai_messages
+
+
+@pytest.mark.asyncio
+async def test_a_glm_text_model_refuses_an_image_on_the_tools_path_before_the_api_is_called():
+    p = _make()  # glm-5.2: not a V model
+    p.client.chat.completions.create = AsyncMock()
+
+    with pytest.raises(ValueError) as refused:
+        await p.generate_with_tools(messages=IMAGE_TURN, tools=A_TOOL)
+
+    assert "zai_test" in str(refused.value)
+    p.client.chat.completions.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_glm_v_model_receives_the_image_as_an_image_url_part_beside_the_tools():
+    p = _make({"model": "glm-4.6v"})
+    fake_resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="a cat", reasoning_content=None, tool_calls=None))],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+    )
+    p.client.chat.completions.create = AsyncMock(return_value=fake_resp)
+
+    await p.generate_with_tools(messages=IMAGE_TURN, tools=A_TOOL)
+
+    _, kwargs = p.client.chat.completions.create.call_args
+    assert kwargs["messages"] == [{"role": "user", "content": [
+        {"type": "text", "text": "what is this"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]}]
+    assert kwargs["tools"][0]["function"]["name"] == "t"

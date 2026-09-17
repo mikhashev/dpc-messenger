@@ -11,7 +11,8 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, REASONING_OFF, image_base64, network_client_bounds
+from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, image_base64,
+                   network_client_bounds)
 
 logger = logging.getLogger(__name__)
 
@@ -400,85 +401,9 @@ class ZaiProvider(AIProvider):
             })
         return out
 
-    @staticmethod
-    def _anthropic_to_openai_messages(
-        system: Union[str, List[Dict[str, Any]]],
-        messages: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        if system:
-            sys_text = system if isinstance(system, str) else "".join(
-                b.get("text", "") for b in system if isinstance(b, dict)
-            )
-            if sys_text:
-                out.append({"role": "system", "content": sys_text})
-
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content")
-
-            if isinstance(content, str):
-                out.append({"role": role, "content": content})
-                continue
-
-            blocks = content if isinstance(content, list) else []
-
-            if role == "assistant":
-                text_parts: List[str] = []
-                tool_calls: List[Dict[str, Any]] = []
-                for b in blocks:
-                    if not isinstance(b, dict):
-                        continue
-                    bt = b.get("type")
-                    if bt == "text":
-                        text_parts.append(b.get("text", ""))
-                    elif bt == "tool_use":
-                        tool_calls.append({
-                            "id": b.get("id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": b.get("name", ""),
-                                "arguments": json.dumps(b.get("input", {})),
-                            },
-                        })
-                msg: Dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
-                if tool_calls:
-                    msg["tool_calls"] = tool_calls
-                out.append(msg)
-                continue
-
-            if role == "user":
-                tool_results = [
-                    b for b in blocks
-                    if isinstance(b, dict) and b.get("type") == "tool_result"
-                ]
-                if tool_results:
-                    for tr in tool_results:
-                        # Anthropic tool_result.content may be a string or a list
-                        # of content blocks; flatten the list form to text.
-                        tr_content = tr.get("content", "")
-                        if isinstance(tr_content, list):
-                            tr_content = "".join(
-                                b.get("text", "") for b in tr_content
-                                if isinstance(b, dict)
-                            )
-                        out.append({
-                            "role": "tool",
-                            "tool_call_id": tr.get("tool_use_id", ""),
-                            "content": str(tr_content),
-                        })
-                else:
-                    text_parts = [
-                        b.get("text", "") for b in blocks
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    ]
-                    out.append({"role": "user", "content": "".join(text_parts)})
-                continue
-
-            # Fallback: stringify unknown block content
-            out.append({"role": role or "user", "content": json.dumps(blocks)})
-
-        return out
+    # The shared converter: images stay in their turns, and a provider asked by
+    # `provider=` refuses one it cannot see rather than dropping it.
+    _anthropic_to_openai_messages = staticmethod(anthropic_to_openai_messages)
 
     async def generate_with_tools(
         self,
@@ -494,7 +419,7 @@ class ZaiProvider(AIProvider):
         as consumed by llm_adapter._chat_native_tools.
         """
         self._last_thinking = None
-        openai_messages = self._anthropic_to_openai_messages(system, messages)
+        openai_messages = self._anthropic_to_openai_messages(system, messages, provider=self)
         openai_tools = self._anthropic_to_openai_tools(tools)
 
         async def _call():

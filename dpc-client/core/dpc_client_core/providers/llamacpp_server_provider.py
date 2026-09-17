@@ -932,7 +932,7 @@ class LlamaServerProvider(DeepSeekProvider):
         """Native tool calling, Anthropic-shape in and out, on the local server."""
         self._last_thinking = None
         self._last_usage = None
-        openai_messages = self._anthropic_to_openai_messages(system, messages)
+        openai_messages = self._anthropic_to_openai_messages(system, messages, provider=self)
         openai_tools = self._anthropic_to_openai_tools(tools)
         # No reasoning_content padding on replay: the HTTP-400-if-absent rule is
         # DeepSeek's, not the template's — qwen3.8's template accepts an
