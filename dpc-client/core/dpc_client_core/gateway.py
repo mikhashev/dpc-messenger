@@ -69,14 +69,19 @@ adaptive without an effort word asks for the alias's effective default — the
 rung its menu row advertises (`effective_reasoning_default`) — which is not a
 degradation and is said nowhere. **Images**: a `data:` URL in an
 OpenAI `image_url` part, or an Anthropic `image` block whose source is
-base64, becomes the two fields DPTP §3.4 requires and travels *beside* the
-prompt — that is the shape of the peer wire, so an image's position among
-the turns is not preserved on either route. What this node will not do it
-refuses by name: fetching an `http(s)` URL, an image past
-`[vision] max_image_size_mb` (413, the same cap the P2P door enforces),
-tools beside an image on the local route, an alias or a peer that says it
-has no vision, and a peer alias whose menu row lists the effort words its
-model knows and not the one that was asked for.
+base64, stays an `image` block in its own user turn and is also copied as the
+two fields DPTP §3.4 requires onto a flat list beside the prompt. On the local
+route a request with tools hands the turns, images in place, to the tools
+path — a screenshot in a Claude Code session, which always attaches tools,
+and every later turn whose history still holds it — and a request without
+tools takes the vision entry point with the flat list. The peer route still
+carries only the flat list, so an image's position among the turns is not
+preserved there. What this node will not do it refuses by name: fetching an
+`http(s)` URL, an image past `[vision] max_image_size_mb` (413, the same cap
+the P2P door enforces), images beside tools on a local alias whose provider
+has no tool path or cannot see, and on any peer alias, an alias or a peer
+that says it has no vision, and a peer alias whose menu row lists the effort
+words its model knows and not the one that was asked for.
 
 A third kind of name, `remote:<node_id>:<alias>`, is a connected peer's
 alias as that peer serves it to this node (D4 step 4): `/v1/models` lists
@@ -809,10 +814,14 @@ class Gateway:
         that and nothing else.
 
         `images` are the wire's image dicts (`base64`, `mime_type` — DPTP
-        §3.4), carried beside the prompt on both routes because that is the
-        only place the peer wire has for them; on the local route they take
-        `LLMManager.query`, whose vision entry point holds no tools, so tools
-        beside an image are refused here rather than dropped.
+        §3.4), the flat copy of the `image` blocks that stand in the user turns
+        of `messages`. On the local route a request without tools takes
+        `LLMManager.query` with them, the vision entry point, which answers
+        whole; a request with tools takes `query_messages` with the turns,
+        images in place, which is the one path that carries both — refused
+        here, by the predicate that call will ask, when the alias's provider
+        has no tool path or cannot see. The peer route still carries them
+        beside the prompt only, and refuses them beside tools.
         `reasoning_effort` is the word the client wrote, unfolded: the alias is
         resolved first and the word is then checked against *that* alias's
         vocabulary — the menu row's `reasoning_words` on the peer route, this
@@ -855,7 +864,9 @@ class Gateway:
         # which would fail after the caller had chosen it.
         refuse_a_transcription_alias(alias, (getattr(providers[alias], "config", None) or {}).get("type"))
         if images:
-            self._refuse_images_the_alias_cannot_take(alias, providers[alias], images, tools)
+            self._refuse_images_the_alias_cannot_take(
+                alias, providers[alias], images, tools, streaming=on_chunk is not None,
+            )
         if reasoning_effort is not None:
             # The vocabulary first, the path second: the word this alias knows
             # is what the refusal about the path should name, and what the
@@ -943,15 +954,28 @@ class Gateway:
 
     def _refuse_images_the_alias_cannot_take(
         self, alias: str, provider: Any, images: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],
+        *, streaming: bool,
     ) -> None:
         """An image on this node's own alias: the provider must say it does
-        vision, and nothing may ask for tools in the same breath."""
+        vision, and beside tools it must also have the one entry point that
+        carries both. That second question is `entry_point_for`'s, the one
+        `query_messages` asks before the call, so the door and the call cannot
+        disagree about which requests go through."""
         if tools:
+            _, entry_point = entry_point_for(provider, tools=True, streaming=streaming, images=True)
+            if entry_point is not None:
+                return
+            provider_type = (getattr(provider, "config", None) or {}).get("type") or "unknown"
+            if getattr(provider, "generate_with_tools", None) is None:
+                missing = (f"its provider type '{provider_type}' has no native tool-calling path "
+                           "(generate_with_tools)")
+            else:
+                missing = (f"its provider type '{provider_type}' calls tools, but says it cannot see "
+                           "images (supports_vision)")
             raise GatewayError(
                 400,
-                f"the request carries {len(images)} image(s) and {len(tools)} tool(s): vision on this node "
-                "goes through generate_with_vision, which takes no tools, so the call cannot be made as "
-                "asked; send the images without tools, or the tools without images",
+                f"model '{alias}' cannot take {len(images)} image(s) and {len(tools)} tool(s) in one call: "
+                f"{missing}; send it to an alias that does both, or the request without one of them",
                 "tools_unsupported",
             )
         supports_vision = getattr(provider, "supports_vision", None)
@@ -972,10 +996,11 @@ class Gateway:
         together, and a word the path cannot carry is refused rather than
         dropped. Which words the alias knows was settled before this by
         `_effort_the_alias_knows` — one check, one list."""
-        if images:
+        if images and not tools:
             path, entry_point = "generate_with_vision", getattr(provider, "generate_with_vision", None)
         else:
-            path, entry_point = entry_point_for(provider, tools=tools, streaming=streaming)
+            # Beside tools the images ride in the turns, on the tools path.
+            path, entry_point = entry_point_for(provider, tools=tools, streaming=streaming, images=images)
         if accepts_reasoning_effort(entry_point):
             return
         provider_type = (getattr(provider, "config", None) or {}).get("type") or "unknown"
@@ -1035,10 +1060,12 @@ class Gateway:
         clock = time.monotonic()
         effort_kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
         try:
-            if images:
-                # `query` is the only door with a vision entry point, and it
-                # answers whole: a stream over this route is the one chunk the
-                # shape layer writes from the finished text.
+            if images and not tools:
+                # Without tools an image takes `query`, the door with the
+                # vision entry point, and it answers whole: a stream over this
+                # route is the one chunk the shape layer writes from the
+                # finished text. Beside tools it takes `query_messages` below,
+                # the images standing in the turns.
                 result = await self._core.llm_manager.query(
                     prompt, provider_alias=alias, return_metadata=True, images=images, **effort_kwargs,
                 )
@@ -1220,7 +1247,12 @@ class Gateway:
             result = await self._core.p2p_coordinator.request_inference_from_peer(
                 peer_id, prompt, provider=remote_alias, images=images or None,
                 reasoning_effort=reasoning_effort, timeout=timeout,
-                messages=messages or None, system=system or None, tools=tools or None,
+                # The images travel once, on `images`, and the turns go as
+                # every host so far reads them — without image blocks. The
+                # next step of THREE-PROVIDER-HANDLES-NEVER-GROW-TOGETHER
+                # changes what this route sends.
+                messages=_turns_without_images(messages) if messages else None,
+                system=system or None, tools=tools or None,
                 on_chunk=on_chunk, request_id=request_id,
             )
         except ConnectionError as e:
@@ -1695,11 +1727,12 @@ def _text_of(content: Any, *, what: str, images: Optional[List[Dict[str, Any]]] 
              max_image_bytes: int = 0) -> str:
     """The text of an OpenAI `content`: a string, `null`, or an array of parts.
 
-    `text` parts make the text. An `image_url` part is taken out of the turn
-    and appended to `images`, to travel beside the prompt as the peer wire
-    carries it; where `images` is None no image may stand — a system turn and
-    a tool result have nowhere to put one — and the refusal says so. Every
-    other part type is refused by name.
+    `text` parts make the text. An `image_url` part is checked and appended to
+    `images`, the flat list the vision entry point and the peer wire carry
+    beside the prompt; the user turn it stood in is rebuilt around it by
+    `_openai_user_blocks`. Where `images` is None no image may stand — a system
+    turn and a tool result have nowhere to put one — and the refusal says so.
+    Every other part type is refused by name.
     """
     if content is None:
         return ""
@@ -1734,6 +1767,58 @@ def _text_of(content: Any, *, what: str, images: Optional[List[Dict[str, Any]]] 
     return "\n\n".join(p for p in parts if p)
 
 
+def _openai_user_blocks(content: List[Dict[str, Any]], images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A user turn's parts, already checked by `_text_of`, as Anthropic blocks
+    in the order they were written: each text part a `text` block, each
+    `image_url` part the `image` block the providers' converter reads, built
+    from the checked image `_text_of` appended for it. `images` is those
+    images, one per `image_url` part, in order. An empty text part is left out:
+    it says nothing, and a text block with nothing in it is refused by some
+    wires."""
+    blocks: List[Dict[str, Any]] = []
+    pictures = iter(images)
+    for part in content:
+        if part.get("type") == "image_url":
+            image = next(pictures)
+            blocks.append({"type": "image", "source": {
+                "type": "base64", "media_type": image["mime_type"], "data": image["base64"],
+            }})
+        elif part.get("text"):
+            blocks.append({"type": "text", "text": str(part["text"])})
+    return blocks
+
+
+def _turns_without_images(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The turns with every top-level `image` block taken out: what the text
+    renderer and the peer wire were given before images stayed in their turns.
+
+    A turn that loses an image and keeps exactly one block, or keeps any block
+    that is not text, keeps what is left as the client wrote it. A turn left
+    with no block or with several text blocks becomes one text block, the
+    non-empty texts joined as `_text_of` joins an OpenAI turn's parts. On the
+    OpenAI form that is the very turn the parser built before; on the Messages
+    form it differs in two cases only — a turn that was nothing but images is
+    one empty text block rather than no block, which renders the same, and
+    several text blocks beside an image are separated where the renderer used
+    to glue them into one word. An image a tool returned inside its `tool_result` is
+    not top-level and is not touched, as before.
+    """
+    out: List[Dict[str, Any]] = []
+    for turn in turns:
+        content = turn.get("content")
+        if not isinstance(content, list) or not any(
+            isinstance(block, dict) and block.get("type") == "image" for block in content
+        ):
+            out.append(turn)
+            continue
+        kept = [block for block in content if not (isinstance(block, dict) and block.get("type") == "image")]
+        if len(kept) != 1 and all(isinstance(block, dict) and block.get("type") == "text" for block in kept):
+            kept = [{"type": "text", "text": "\n\n".join(block.get("text") or "" for block in kept
+                                                         if block.get("text"))}]
+        out.append(dict(turn, content=kept))
+    return out
+
+
 def _tool_use_from_openai(call: Any, position: int) -> Dict[str, Any]:
     """An OpenAI `tool_calls` entry as the `tool_use` block inside. The
     arguments string must parse: one that does not is the client's error,
@@ -1764,7 +1849,9 @@ def _tool_use_from_openai(call: Any, position: int) -> Dict[str, Any]:
 def _openai_messages(messages: Any, *, max_image_bytes: int = 0
                      ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
     """The request's `messages` as `(system, turns, images)` in the Anthropic
-    shape the door takes, or a 400 saying what is wrong with them.
+    shape the door takes, or a 400 saying what is wrong with them. An image
+    is in both: an `image` block at its place in its user turn, and the wire's
+    image dict on the flat `images` list.
 
     Mirrors `DpcLlmAdapter._convert_messages_to_anthropic`, the in-house
     consumer of the same shapes: `system` and `developer` turns become the
@@ -1791,8 +1878,14 @@ def _openai_messages(messages: Any, *, max_image_bytes: int = 0
             if isinstance(content, str):
                 turns.append({"role": "user", "content": content})
             else:
+                before = len(images)
                 text = _text_of(content, what=what, images=images, max_image_bytes=max_image_bytes)
-                turns.append({"role": "user", "content": [{"type": "text", "text": text}]})
+                if len(images) == before:
+                    turns.append({"role": "user", "content": [{"type": "text", "text": text}]})
+                else:
+                    # The image stays in its turn as well as on the flat list: the
+                    # tools path hands the turns to a provider that sees them there.
+                    turns.append({"role": "user", "content": _openai_user_blocks(content, images[before:])})
         elif role == "assistant":
             if "function_call" in message:
                 raise GatewayError(
@@ -2136,8 +2229,9 @@ class GatewayServer:
         tools = _openai_tools(body)
         effort = _openai_effort(body)
         # The flattened turns both routes carry: what an older host reads on
-        # the peer wire, and the emptiness test below.
-        prompt = flatten_messages(messages, system)
+        # the peer wire, and the emptiness test below. Rendered from the turns
+        # the peer wire carries, so the prompt and the turns beside it agree.
+        prompt = flatten_messages(_turns_without_images(messages), system)
         if not prompt and not images:
             raise GatewayError(400, "no message carries text", "invalid_request_error")
         # Sampling parameters (temperature, max_tokens, ...) are the alias's own
@@ -2234,8 +2328,9 @@ class GatewayServer:
         tools = _anthropic_tools(body)
         effort = _anthropic_effort(body)
         # The flattened turns both routes carry: what an older host reads on
-        # the peer wire, and the emptiness test below.
-        prompt = flatten_messages(messages, system)
+        # the peer wire, and the emptiness test below. Rendered from the turns
+        # the peer wire carries, so the prompt and the turns beside it agree.
+        prompt = flatten_messages(_turns_without_images(messages), system)
         if not prompt and not images:
             raise GatewayError(400, "no message carries text", "invalid_request_error")
         # `max_tokens` is required by the Messages API and read by nobody here:
@@ -2472,12 +2567,15 @@ def _folded_system(system: Any, lifted: List[Any]) -> Any:
 def _anthropic_request(body: Dict[str, Any], *, max_image_bytes: int = 0, path: str = ""
                        ) -> Tuple[Any, List[Dict[str, Any]], List[Dict[str, Any]]]:
     """The request's `system`, `messages` and images, or a 400 saying what is
-    wrong with them. Shape only, with one exception: the turns travel to the
-    provider un-flattened and whoever cannot take them that way renders them,
-    but an `image` block is lifted out of its turn here — every renderer under
-    this door drops it, and the wire carries images beside the prompt.
+    wrong with them. Shape only: the turns travel to the provider un-flattened
+    and whoever cannot take them that way renders them. An `image` block in a
+    user turn is checked here and stays where it stands, because the tools
+    path hands the turns to a provider whose converter carries it in its turn;
+    it is also copied onto the flat `images` list, which is what the vision
+    entry point and the peer wire carry beside the prompt. An image a tool
+    returned inside a `tool_result` is neither checked nor copied here.
 
-    A `role: "system"` message is lifted the same way, into the top-level
+    A `role: "system"` message is lifted out of `messages`, into the top-level
     `system`, rather than refused: the Claude Code VS Code extension sends its
     environment block there and the CLI sends none, and one door serves both.
     Only `system` is lifted — any other role outside {user, assistant} keeps
@@ -2528,16 +2626,13 @@ def _anthropic_request(body: Dict[str, Any], *, max_image_bytes: int = 0, path: 
                 "gateway in a user turn only",
                 "invalid_request_error",
             )
-        kept: List[Any] = []
         for index, block in enumerate(content):
             if isinstance(block, dict) and block.get("type") == "image":
                 images.append(_image_from_anthropic_source(
                     block.get("source"), what=f"messages[{position}] content[{index}]",
                     max_bytes=max_image_bytes,
                 ))
-            else:
-                kept.append(block)
-        turns.append(dict(message, content=kept))
+        turns.append(message)
     if lifted:
         folded = _folded_system(system, lifted)
         # Counted, never quoted: a diagnostic line and not a transcript.

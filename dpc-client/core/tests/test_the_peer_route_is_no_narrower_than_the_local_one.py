@@ -222,9 +222,12 @@ async def test_a_menu_row_without_supports_tools_refuses_tools_before_the_round_
 
 
 @pytest.mark.asyncio
-async def test_tools_beside_an_image_are_refused_on_the_peer_route_as_on_the_local_one(tmp_path):
-    """The host's vision door takes no tools either, so the combination is
-    refused rather than answered without the tools."""
+async def test_tools_beside_an_image_are_still_refused_on_the_peer_route(tmp_path):
+    """The host's vision door takes no tools, and the wire carries the image
+    beside the prompt rather than in its turn, so the combination is refused
+    rather than answered without the tools. The local route now serves it
+    (test_a_screenshot_crosses_the_gateway_beside_the_tools_in_its_own_turn.py);
+    this route is the next step of the same card."""
     service = _tool_serving_peer(tmp_path)
     image = {"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                          "data": "iVBORw0KGgo="}}

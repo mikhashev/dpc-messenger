@@ -14,9 +14,10 @@ listing the words; a known word reaches the provider on the local route and
 the host on the peer route; `thinking: {type: disabled}` is `off`, and
 `enabled` names no depth and so asks for the alias's own default. A `data:`
 image becomes the two fields DPTP §3.4 requires and travels beside the
-prompt; an `http` URL, an oversized image, tools beside an image, an alias
-or a peer with no vision path, and a peer whose menu lists other effort
-words are each refused by name before anything is sent.
+prompt, and without tools that is how it reaches the local door; an `http`
+URL, an oversized image, tools beside an image on an alias that cannot take
+both, an alias or a peer with no vision path, and a peer whose menu lists
+other effort words are each refused by name before anything is sent.
 
 The stand-in service, the running listener and the key are the OpenAI-shape
 test file's; the provider doubles for the door's own three paths are the
@@ -563,16 +564,35 @@ async def test_an_alias_with_no_vision_path_is_refused_by_name(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tools_beside_an_image_are_refused_rather_than_one_of_them_dropped(tmp_path):
-    service = _echoing_service(tmp_path)
+async def test_tools_beside_an_image_are_served_together_or_refused_rather_than_one_of_them_dropped(tmp_path):
+    """An alias whose provider calls tools and sees takes both in one call, the
+    image in its turn; one that cannot see is refused by name, never answered
+    with the picture or the tools quietly gone. The rest of this rule is in
+    test_a_screenshot_crosses_the_gateway_beside_the_tools_in_its_own_turn.py."""
+    class _Blind(_Provider):
+        def supports_vision(self):
+            return False
+
     tools = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
+    service = _echoing_service(tmp_path)
     async with _running(tmp_path, service) as (server, _):
         status, text = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path),
                                       body=_chat_with_image(LOCAL, tools=tools))
+        assert status == 200, text
+        (call,) = service.calls
+        assert "prompt" not in call, "images beside tools took the vision door, which holds no tools"
+        assert [block["type"] for block in call["messages"][0]["content"]] == ["text", "image"]
+        assert [tool["name"] for tool in call["kwargs"]["tools"]] == ["read_file"]
+
+    blind = _echoing_service(tmp_path, providers=dict(_providers(), **{LOCAL: _Blind("ollama", "qwen3:8b")}))
+    async with _running(tmp_path, blind) as (server, _):
+        status, text = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path),
+                                      body=_chat_with_image(LOCAL, tools=tools))
         assert status == 400, text
-        message = _openai_error(text)["message"]
-        assert "image" in message and "tool" in message
-        assert service.calls == []
+        error = _openai_error(text)
+        assert error["code"] == "tools_unsupported"
+        assert "image" in error["message"] and "tool" in error["message"]
+        assert blind.calls == []
 
 
 @pytest.mark.asyncio

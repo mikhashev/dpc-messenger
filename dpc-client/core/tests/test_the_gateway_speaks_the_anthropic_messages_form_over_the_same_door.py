@@ -264,8 +264,8 @@ async def test_tools_and_a_tool_result_in_the_history_reach_the_door_as_sent_and
         "tools": [{"name": "read_file", "description": "read", "input_schema": {"type": "object", "properties": {}}}],
         "tool_choice": {"type": "auto"},
         "messages": [
-            # No image block here any more: an image is lifted out of its turn
-            # and refused beside tools, which is its own test file's subject.
+            # No image block here: an image beside tools is its own test file's
+            # subject (test_a_screenshot_crosses_the_gateway_beside_the_tools_in_its_own_turn.py).
             {"role": "user", "content": [{"type": "text", "text": "read a.txt"}]},
             {"role": "assistant", "content": [
                 {"type": "text", "text": "reading"},
@@ -497,8 +497,8 @@ async def test_the_fold_leaves_one_debug_line_naming_the_path_and_the_count_and_
 
 @pytest.mark.asyncio
 async def test_an_image_in_a_lifted_system_turn_is_refused_rather_than_dropped(tmp_path):
-    """`system` has nowhere to put an image and every renderer under this door
-    drops one, so the fold refuses it in the words the other door uses."""
+    """`system` has nowhere to put an image — the providers' converter reads
+    only its text — so the fold refuses it in the words the other door uses."""
     service = _service(tmp_path, BOTH_LISTS)
     body = {"model": LOCAL, "max_tokens": 1, "system": SYSTEM, "messages": [
         {"role": "user", "content": "hi"},
