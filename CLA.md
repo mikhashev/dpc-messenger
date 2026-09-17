@@ -97,6 +97,29 @@ A specific governing law and jurisdiction will be designated upon formal entity 
 
 When you open your first pull request, the **CLA Assistant bot** will prompt you to agree. Click "I agree" and you're done. The bot will remember for all future contributions.
 
+> **How to check that this is true rather than trusting the sentence above.** The
+> bot is not a workflow in `.github/` — it is [cla-assistant.io](https://cla-assistant.io)
+> reached by a repository webhook, which is why it cannot be found by reading the
+> tree. What is configured on the GitHub side is readable with:
+>
+> ```bash
+> gh api repos/mikhashev/dpc-messenger/hooks \
+>   --jq '.[] | {active, events, url: .config.url, last_response}'
+> ```
+>
+> **Measured 2026-09-18 by CC:** the hook exists (created 2026-03-01), is
+> `active`, and is subscribed to `issue_comment`, `pull_request` and
+> `merge_group` — the first two being what the bot needs. But its
+> `last_response.status` is `unused` and its delivery list is empty, although
+> Dependabot opened five pull requests on 2026-08-22, months after the hook was
+> created. So the gate is configured and has never fired. Two things this command
+> cannot see, and nothing in this repository records them: whether
+> cla-assistant.io still has this repository registered, and where the register of
+> signatures actually lives. Both are answered only by signing in to that service.
+>
+> Until a real external pull request has been through it, treat the paragraph
+> above as the intended flow rather than an observed one, and use Manual Signing.
+
 ### Manual Signing
 
 If CLA Assistant is unavailable or you prefer manual signing:
