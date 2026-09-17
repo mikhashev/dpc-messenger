@@ -664,6 +664,69 @@ that does not fit one 64 MiB DPTP frame is `413` by name, raised by
 `write_message` at the origin before a byte leaves this node; tools plus a long
 conversation can reach it. Not started: `/v1/embeddings`, `/v1/completions`.)*
 
+*(**Amendment, 2026-09-17 — images and tools together cross both routes.** The
+owner's goal, Mike, 2026-09-17: Claude Code must work with any model a node
+shares, images included where the model sees them. Claude Code attaches its
+tools to every request, so one screenshot is images and tools in one call with
+the system prompt and the history intact — and both routes refused that, the
+local one by the 2026-09-14 amendment on images and the peer one by the
+amendment above. Confirmed live on the peer route: once a screenshot stood in
+the history, every later turn of the session came back `400`. Board entry
+THREE-PROVIDER-HANDLES-NEVER-GROW-TOGETHER, three steps; the two narrowings
+above are closed by them and are left as they were written.
+
+**What closes them.** The tools path learned to carry a picture in its turn
+(`35f54909`: one shared converter, and `entry_point_for` asks whether the
+provider sees). The local route keeps an image where the client put it and
+takes images beside tools to `query_messages`, refused only by that predicate
+(`e2c6a58f`). On the peer route a guest sends the turns with their `image`
+blocks, and no flat `images`, to a host whose menu row says
+`serves_images_with_tools`; the host serves them through `query_messages` and
+refuses them, by the same predicate, where its alias cannot carry both (DPTP
+§3.4, §3.5). Images without tools keep the vision entry point on both routes,
+as before.
+
+**One new menu field, and its name.** `serves_images_with_tools` (Mike accepted
+the name, 2026-09-17). A `supports_*` field says what a provider can do; a
+`serves_*` field says what this node's route will serve for a request of one
+shape. It is `entry_point_for(provider, tools=True, streaming=False,
+images=True)` — the question the host's gate and `query_messages` ask — and
+never a conjunction of `supports_vision` and `supports_tools`, which differ
+from it wherever a class carries a tools attribute that is not a callable path.
+**Fail-closed**, unlike `supports_vision`: a guest reads the field's absence as
+no, because an older host takes image blocks beside tools to a path whose
+converter may drop them without a word — the one combination this amendment
+exists to stop answering wrongly.
+
+**What the host now refuses rather than drops.** The flat `images` field beside
+`tools`: that field reaches `query`, which holds no tools, and the host used to
+answer from the prompt with the tools and the history gone. Refused with
+`tools_unsupported`, the word that already meant «your request, this alias's
+tools», and not a new code — a word an older guest does not know reads as a
+failure mid-call, a `502` where a `400` is owed.
+
+**What the logs say.** The host's request line and its served line, and the
+llama.cpp usage line, carry `images=N tools=N` — the pictures a call carried,
+in the flat field and in the turns, and the tools it offered — counted, never
+quoted; the D7 amendment's «whether images were attached» is that count now.
+Thinking and effort take no special case for images.
+
+**Compatibility.** An older guest never sends image blocks beside tools, so a
+new host serves it exactly as before, except that its flat `images` beside
+`tools` is now a named `400` instead of an answer without the tools. A new
+guest reaching an older host refuses the combination before the round trip,
+in a sentence that names `serves_images_with_tools`, and still sends images
+without tools on the flat field an older host reads. What stays narrow, by
+name: an image block in the turns *without* tools reaches `query_messages` on a
+new host, whose tools-less paths render text and refuse the picture as a
+mid-call failure. The gateway is the only guest in this tree that sends
+`messages`, and without tools it strips the top-level image blocks, so it sends
+that shape only for a picture a tool returned inside a `tool_result` in a
+request that offers no tools. And a screenshot
+travels inside the turns on every later request whose history still holds it,
+so a long session re-sends each picture per call and meets the 64 MiB frame cap
+sooner than a text session.)*
+
 *(**Amendment, 2026-09-14 — the door and the menu can be read from the UI, and
 one builder answers for the menu.** Five commands on the local API, the half of
 the Inference Sharing tab the backend could not fill:

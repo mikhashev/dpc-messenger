@@ -16,8 +16,17 @@ compatibility rule the whole design rests on); a request with messages reaches
 deltas concatenate into the final response; a refusal emits none; and a field
 from a newer guest that this node has never heard of is ignored rather than
 refused.
+
+Images beside tools (THREE-PROVIDER-HANDLES-NEVER-GROW-TOGETHER, third step):
+image blocks in the turns reach `query_messages` with the tools and the system
+on an alias that sees and calls tools, and are refused `tools_unsupported` on
+one that does not, by the predicate the menu row states; the flat `images`
+field beside tools is refused rather than answered without them, and without
+tools it keeps `query` as it always did. The log lines say how many pictures
+and tools a call carried, never what they were.
 """
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -139,9 +148,10 @@ async def test_a_conversation_that_called_nothing_carries_neither_new_field(tmp_
 
 
 @pytest.mark.asyncio
-async def test_a_request_carrying_images_keeps_the_prompt_door_that_owns_vision(tmp_path):
-    """`query` holds the only vision entry point, so images and a conversation
-    together are answered from the prompt — what the local route does too."""
+async def test_the_images_field_without_tools_keeps_the_prompt_door_that_owns_vision(tmp_path):
+    """The flat `images` field is what every older guest sends, and `query`'s
+    vision entry point answers it from the prompt, a conversation beside it or
+    not — what the local route does without tools too."""
     coord, svc = _host(tmp_path)
     images = [{"base64": "aGk=", "mime_type": "image/png"}]
 
@@ -151,6 +161,148 @@ async def test_a_request_carrying_images_keeps_the_prompt_door_that_owns_vision(
 
     svc.llm_manager.query_messages.assert_not_awaited()
     assert svc.llm_manager.query.await_args.kwargs["images"] == images
+    assert _answer(svc)["status"] == "success"
+
+
+# --- (2b) images beside tools: in the turns, by the predicate the menu row states -----
+
+SHOT = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}
+WIRE_SHOT = {"base64": "aGk=", "mime_type": "image/png"}
+SYSTEM = "you are a coding agent"
+# The incident's two forms: the screenshot in the turn being asked, and the
+# screenshot only in the history with a text turn asked after it.
+SHOT_IN_THE_LAST_TURN = [
+    {"role": "user", "content": [{"type": "text", "text": "what is wrong here?"}, SHOT]},
+]
+SHOT_IN_THE_HISTORY = [
+    {"role": "user", "content": [{"type": "text", "text": "what is wrong on this screen?"}, SHOT]},
+    {"role": "assistant", "content": [{"type": "text", "text": "the button is cut off"}]},
+    {"role": "user", "content": [{"type": "text", "text": "fix it"}]},
+]
+
+
+class _Provider:
+    """A serving alias whose two capabilities a test sets: eyes, and a tools path."""
+
+    def __init__(self, *, vision, tools=True):
+        self.config = {"type": "llamacpp_server"}
+        self.model = "qwen3.8-27b"
+        self._vision = vision
+        if tools:
+            self.generate_with_tools = self._generate_with_tools
+
+    def supports_vision(self):
+        return self._vision
+
+    async def _generate_with_tools(self, *args, **kwargs):
+        raise AssertionError("the host speaks to the manager, never to the provider")
+
+
+def _seeing_host(tmp_path, **provider):
+    coord, svc = _host(tmp_path)
+    svc.llm_manager.providers = {"ollama_local": _Provider(**provider)}
+    return coord, svc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turns", [SHOT_IN_THE_LAST_TURN, SHOT_IN_THE_HISTORY],
+                         ids=["screenshot asked about", "screenshot in the history"])
+async def test_image_blocks_in_the_turns_beside_tools_reach_query_messages_with_the_system_and_the_tools(
+        tmp_path, turns):
+    coord, svc = _seeing_host(tmp_path, vision=True)
+
+    await coord.handle_inference_request(
+        "peer-1", "req-1", "flattened", messages=turns, system=SYSTEM, tools=TOOLS,
+    )
+
+    svc.llm_manager.query.assert_not_awaited()
+    call = svc.llm_manager.query_messages.await_args
+    assert call.args[0] == turns, "the turns did not reach the door with their image blocks"
+    assert call.kwargs["tools"] == TOOLS and call.kwargs["system"] == SYSTEM
+    assert _answer(svc)["status"] == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", [{"vision": False}, {"vision": True, "tools": False}],
+                         ids=["calls tools but cannot see", "sees but calls no tools"])
+async def test_image_blocks_beside_tools_on_an_alias_that_cannot_take_both_are_refused_and_nothing_runs(
+        tmp_path, provider):
+    coord, svc = _seeing_host(tmp_path, **provider)
+
+    await coord.handle_inference_request(
+        "peer-1", "req-1", "flattened", messages=SHOT_IN_THE_HISTORY, system=SYSTEM, tools=TOOLS,
+    )
+
+    payload = _answer(svc)
+    assert payload["status"] == "error" and payload["code"] == "tools_unsupported"
+    assert "1 image(s)" in payload["error"] and "serves_images_with_tools" in payload["error"]
+    svc.llm_manager.query_messages.assert_not_awaited()
+    svc.llm_manager.query.assert_not_awaited()
+    assert list(coord._ledger.rows()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("messages", [SHOT_IN_THE_HISTORY, None], ids=["beside turns", "beside a prompt"])
+async def test_the_images_field_beside_tools_is_refused_rather_than_answered_without_the_tools(tmp_path, messages):
+    """`query` holds no tools. The host used to take this request there and
+    answer from the prompt, the tools and the history gone without a word."""
+    coord, svc = _seeing_host(tmp_path, vision=True)
+
+    await coord.handle_inference_request(
+        "peer-1", "req-1", "flattened", images=[WIRE_SHOT], messages=messages, tools=TOOLS,
+    )
+
+    payload = _answer(svc)
+    assert payload["status"] == "error" and payload["code"] == "tools_unsupported"
+    assert "must travel in the turns" in payload["error"]
+    svc.llm_manager.query.assert_not_awaited()
+    svc.llm_manager.query_messages.assert_not_awaited()
+    assert list(coord._ledger.rows()) == []
+
+
+# --- (2c) the log lines count what a call carried, and quote none of it ---------------
+
+
+def _lines(caplog, prefix):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith(prefix)]
+
+
+@pytest.mark.asyncio
+async def test_both_host_lines_count_the_images_in_the_turns_and_inside_a_tool_result_and_the_tools(
+        tmp_path, caplog):
+    coord, svc = _seeing_host(tmp_path, vision=True)
+    turns = [
+        *SHOT_IN_THE_HISTORY[:2],
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "get_weather",
+                                           "input": {"city": "Paris"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01",
+                                      "content": [{"type": "text", "text": "the page"}, SHOT]}]},
+    ]
+    two_tools = TOOLS + [dict(TOOLS[0], name="read_file")]
+
+    with caplog.at_level(logging.DEBUG, logger="dpc_client_core.p2p_coordinator"):
+        await coord.handle_inference_request(
+            "peer-1", "req-1", "flattened", messages=turns, system=SYSTEM, tools=two_tools,
+        )
+
+    (handling,) = _lines(caplog, "Handling inference request")
+    (served,) = _lines(caplog, "Peer inference served")
+    for line in (handling, served):
+        assert "images=2 tools=2" in line, line
+        assert "aGk=" not in line and "the page" not in line, "counted, never quoted"
+    assert "images: " not in handling
+
+
+@pytest.mark.asyncio
+async def test_the_images_field_counts_on_the_lines_of_a_request_that_carries_no_tools(tmp_path, caplog):
+    coord, svc = _host(tmp_path)
+
+    with caplog.at_level(logging.DEBUG, logger="dpc_client_core.p2p_coordinator"):
+        await coord.handle_inference_request("peer-1", "req-1", "flattened", images=[WIRE_SHOT, WIRE_SHOT])
+
+    (handling,) = _lines(caplog, "Handling inference request")
+    (served,) = _lines(caplog, "Peer inference served")
+    assert "images=2 tools=0" in handling and "images=2 tools=0" in served
 
 
 # --- (3) the stream ------------------------------------------------------------------

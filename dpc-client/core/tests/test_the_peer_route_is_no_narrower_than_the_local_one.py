@@ -222,13 +222,17 @@ async def test_a_menu_row_without_supports_tools_refuses_tools_before_the_round_
 
 
 @pytest.mark.asyncio
-async def test_tools_beside_an_image_are_still_refused_on_the_peer_route(tmp_path):
-    """The host's vision door takes no tools, and the wire carries the image
-    beside the prompt rather than in its turn, so the combination is refused
-    rather than answered without the tools. The local route now serves it
-    (test_a_screenshot_crosses_the_gateway_beside_the_tools_in_its_own_turn.py);
-    this route is the next step of the same card."""
+@pytest.mark.parametrize("says", [None, False], ids=["row says nothing", "row says no"])
+async def test_tools_beside_an_image_are_refused_where_the_row_does_not_say_serves_images_with_tools(
+        tmp_path, says):
+    """Fail-closed: a row without the field is an older host, and an older host
+    takes image blocks beside tools to a converter that drops them silently.
+    A row that says it is served — test_a_screenshot_crosses_the_gateway_beside_
+    the_tools_in_its_own_turn.py — is sent the turns with the images in them."""
     service = _tool_serving_peer(tmp_path)
+    if says is not None:
+        for row in service.peer_metadata[PEER]["providers"]:
+            row["serves_images_with_tools"] = says
     image = {"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                          "data": "iVBORw0KGgo="}}
     body = _messages_body(REMOTE_MODEL, [{"role": "user", "content": [image, {"type": "text", "text": "hi"}]}],
@@ -236,7 +240,10 @@ async def test_tools_beside_an_image_are_still_refused_on_the_peer_route(tmp_pat
     async with _running(tmp_path, service) as (server, ledger):
         status, text = await _post_messages(server, body, key=_key(tmp_path))
         assert status == 400, text
-        assert "image" in text and "tool" in text
+        error = json.loads(text)["error"]
+        assert error["type"] == "invalid_request_error"
+        assert "serves_images_with_tools" in error["message"] and REMOTE_ALIAS in error["message"]
+        assert "1 image(s) and 1 tool(s)" in error["message"]
         assert service.peer_calls == [] and _rows(ledger) == []
 
 

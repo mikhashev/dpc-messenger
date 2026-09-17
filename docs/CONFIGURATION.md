@@ -218,10 +218,16 @@ gateway carries two more things the peer wire under it already had (ADR-041 D4, 
   the rung the call ran on.
 - **Images.** An OpenAI `image_url` part carrying a `data:<mime>;base64,<payload>` URL, or
   an Anthropic `image` block with a `{"type": "base64", "media_type", "data"}` source.
-  They travel beside the prompt, so their position among the turns is not kept. Refused by
-  name: an `http(s)` URL or a `url` source (the gateway fetches nothing from the web); an
-  image past `[vision] max_image_size_mb`, answered `413`; tools sent beside an image; an
-  alias or a peer that says it has no vision path.
+  Without tools they travel beside the prompt, so their position among the turns is not
+  kept. Beside tools — Claude Code attaches its tools to every request, so every
+  screenshot is this case — each image stays in the turn it was sent in, history
+  included, and reaches the tools path of the model that runs the call: on a peer's alias
+  only when that peer's menu row says `serves_images_with_tools`, which a host that
+  predates the field does not (2026-09-17). Refused by name: an `http(s)` URL or a `url`
+  source (the gateway fetches nothing from the web); an image past
+  `[vision] max_image_size_mb`, answered `413`; images beside tools on an alias that
+  cannot see or call tools, or on a peer's alias whose row does not say it serves both
+  (`tools_unsupported`); an alias or a peer that says it has no vision path.
 
 Sampling — `max_tokens`, `temperature`, `top_p`, `stop_sequences` — stays the alias
 owner's configuration on this node and is not read from the request.
@@ -460,7 +466,8 @@ person, not only as a machine (Mike's call, 2026-09-14; ADR-041 D7, amendment
   happens *at* the host, whichever encrypted path (direct TLS, WebRTC/DTLS, or the
   relay/gossip hybrid scheme) carried it — and the host can read it if they choose.
   This application shows, stores and logs none of it: `handle_inference_request`
-  logs only the peer id, the request id and `images: yes/no`, and the usage row above
+  logs only the peer id, the request id and `images=N tools=N` — how many pictures and tools
+  the call carried, counted and never quoted — and the usage row above
   carries counts, duration, served effort, tariff and proof — never prompt or answer
   text. Checked on the engine side too (Zcode, 2026-09-14, one machine, default
   verbosity): `llama-server` and Ollama write counters and timings, not content,

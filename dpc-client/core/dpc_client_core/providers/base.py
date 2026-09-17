@@ -609,6 +609,29 @@ def anthropic_to_openai_messages(
     return out
 
 
+def image_blocks_in_turns(messages: Any) -> int:
+    """How many `image` blocks the Anthropic-shaped turns hold: those standing
+    in a turn, and those a tool returned inside its `tool_result`.
+
+    One count for every reader that decides on it — `query_messages` and the
+    predicate it asks, the host's gate in front of that call, the guest's check
+    of a peer's menu row, and the log lines that say what a call carried — so
+    that none of them can see a picture another missed. Anything that is not a
+    list of dicts counts nothing."""
+    count = 0
+    for turn in messages if isinstance(messages, list) else []:
+        content = turn.get("content") if isinstance(turn, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            inner = block.get("content") if block.get("type") == "tool_result" else None
+            count += sum(
+                1 for b in [block, *(inner if isinstance(inner, list) else [])]
+                if isinstance(b, dict) and b.get("type") == "image"
+            )
+    return count
+
+
 # --- Shared network bounds ---
 
 # The openai and anthropic SDKs default to read=600 with two automatic retries;

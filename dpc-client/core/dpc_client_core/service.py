@@ -32,7 +32,7 @@ from .firewall import ContextFirewall
 from . import node_ledger
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
-from .llm_manager import LLMManager, PROVIDER_MAP
+from .llm_manager import LLMManager, PROVIDER_MAP, entry_point_for
 from . import provider_alias_refs
 from .providers.base import (
     REASONING_EFFORTS,
@@ -2418,6 +2418,14 @@ class CoreService:
         guest a round trip it would lose; the host's refusal on the wire is
         still the gate.
 
+        `serves_images_with_tools` says what this node's route will serve, not
+        what the provider can do: a request whose turns hold images beside
+        tools. It is `entry_point_for`'s answer for that shape — the predicate
+        the host's gate and `query_messages` ask before the call — and never a
+        conjunction of the two flags above, so the row cannot promise a
+        request the door would refuse. A guest reads it absent as no: an older
+        host may take such a request to a converter that drops the pictures.
+
         `tariff` and `settings` are what the guest decides on: the price this
         peer is charged and the dials the call will run at, even the ones it
         cannot change (Mike's rule, 2026-09-14). Both are fail-closed — a
@@ -2433,6 +2441,9 @@ class CoreService:
             "supports_vision": provider.supports_vision(),
             "supports_voice": self._provider_supports_voice(provider),
             "supports_tools": hasattr(provider, "generate_with_tools"),
+            "serves_images_with_tools": entry_point_for(
+                provider, tools=True, streaming=False, images=True,
+            )[1] is not None,
             "context_window": self.llm_manager.lookup_context_window(provider.model),
         }
 

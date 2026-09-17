@@ -306,11 +306,12 @@ Requests the peer to execute an AI inference query using their local compute res
 - `prompt` (string, required): AI query text
 - `model` (string, optional): Specific model to use
 - `provider` (string, optional): AI provider (ollama, openai, anthropic)
-- `images` (array, optional): Image objects for vision queries (v0.12.0+). Peer must support vision (`supports_vision: true` in PROVIDERS_RESPONSE). Reduced to exactly two fields before it travels (`_image_for_the_wire`, `dpc_protocol/protocol.py`) — a `path` field on the sender's side never reaches the wire, deliberately: it names a location on the sender's own filesystem, unreachable and possibly misleading on the receiver's.
+- `images` (array, optional): Image objects for vision queries (v0.12.0+). Peer must support vision (`supports_vision: true` in PROVIDERS_RESPONSE). Reduced to exactly two fields before it travels (`_image_for_the_wire`, `dpc_protocol/protocol.py`) — a `path` field on the sender's side never reaches the wire, deliberately: it names a location on the sender's own filesystem, unreachable and possibly misleading on the receiver's. The field travels beside the prompt and reaches the host's vision entry point, which takes no tools, so a request carrying it **and** `tools` is refused with the error response (`tools_unsupported`) rather than answered without the tools; images beside tools travel as `image` blocks in `messages` instead.
   - `base64` (string, required): Base64-encoded image data (data URL format)
   - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
 - `reasoning_effort` (string, optional, v1.7+): How deeply the guest wants the model to think, one word of the shared scale `off`, `low`, `medium`, `high`, `max`, or one of the words the host's own model named for that alias (`reasoning_words` in PROVIDERS_RESPONSE). A request, not an instruction: the host may lower it to what it is willing to spend, and answers with the word it served in `served_effort`. Absent means the guest did not choose, and the host answers at its own default — which is not the same as `off`, and which `served_effort` names. A word the alias has no rung for is not guessed at and not served silently: the host answers with the error response, listing the words that alias accepts, before it runs anything.
-- `messages` (array, optional, v1.7+): The conversation un-flattened, one object per turn: `role` (`user` or `assistant`) and `content`, a string or a list of content blocks in the Anthropic shape. This is what lets a guest have a conversation rather than a single prompt, and it is the only field a host can call tools from. **`prompt` stays required beside it** and carries the same turns flattened by the sender, so a host that has never heard of this field answers the guest anyway — the compatibility rule of the whole v1.7 request half. A sender therefore renders `prompt` from `messages` and `system` and from nothing else; the two must say the same thing.
+- `messages` (array, optional, v1.7+): The conversation un-flattened, one object per turn: `role` (`user` or `assistant`) and `content`, a string or a list of content blocks in the Anthropic shape. This is what lets a guest have a conversation rather than a single prompt, and it is the only field a host can call tools from. **`prompt` stays required beside it** and carries the same turns flattened by the sender, so a host that has never heard of this field answers the guest anyway — the compatibility rule of the whole v1.7 request half. A sender therefore renders `prompt` from `messages` and `system` and from nothing else; the two must say the same thing, pictures aside, since a prompt carries none.
+  A user turn may hold `image` blocks — `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}`, at their place among the turn's other blocks — and a `tool_result` block may hold them in its own `content`. This is how images travel beside `tools`: in the turns, where the host's tools path reads each picture in the turn it was sent in. A guest sends image blocks beside `tools` only to an alias whose menu row says `serves_images_with_tools: true` (§3.5), and sends no `images` field with them. A host serves them with the tools only where its serving alias has the path that carries both — the same predicate that sets that field on its row — and otherwise answers with the error response (`tools_unsupported`), running nothing. An older host has no such gate and may drop the pictures without a word, which is why a guest reads the field's absence as no. Without `tools`, a sender carries a user turn's images on `images` and leaves those blocks out of `messages`, as before.
 - `system` (string or array, optional, v1.7+): The system prompt that goes with `messages`; a string or a list of content blocks. Meaningless without `messages`, and already folded into `prompt` by the sender.
 - `tools` (array, optional, v1.7+): Anthropic tool definitions — `name`, `description`, `input_schema` — the model may call. Any calls it makes come back in the response's `tool_calls`; the guest runs them and sends the next request with the results in `messages`. A host whose serving alias has no native tool-calling path answers with the error response rather than answering without the tools: a text answer to a request that asked for tools breaks the caller's loop. `supports_tools` in PROVIDERS_RESPONSE (§3.5) lets a guest see that before it spends a round trip; the host's refusal here is the gate.
 - `stream` (boolean, optional, v1.7+, default false): Whether the host should send REMOTE_INFERENCE_CHUNK frames as the answer is made. A host that does not know the field sends none, and the guest receives the whole answer in the response, as it always did.
@@ -444,7 +445,7 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
   - `model_not_found` — the host serves no alias to this peer, or not the one named: the request is off the menu (§3.5)
   - `onward_sharing_refused` — the alias the host would have served is itself somebody else's model, and what is shared is not shared onward (ADR-041 D7 part 1)
   - `invalid_value` — the request asked for something the host cannot take, refused at a gate before anything ran: a reasoning effort word the alias has no rung for (the text lists the words it accepts), or a `request_id` already in flight from this peer. A failure raised inside the host's own call carries no code, whatever its type: only a gate that names the guest's request sends a word that blames it
-  - `tools_unsupported` — the request carried tools and the host's serving alias has no native tool-calling path, which is refused rather than answered without them
+  - `tools_unsupported` — the request carried tools and the host's serving alias has no native tool-calling path, which is refused rather than answered without them; or it carried tools beside images on a path that cannot carry both — `image` blocks in `messages` on an alias that cannot see or has no tools path, or the `images` field, whose vision entry point takes no tools. One word for both, because a receiver acts on both the same way: change the request or the alias. Since 2026-09-17
   - `insufficient_quota` — the alias the host serves is a vendor alias, bounded by money rather than by the card, and this guest has spent its daily ceiling on it (ADR-041 D5). The ceiling is per caller and counted from the host's own usage rows, so it is the guest's own spending and not the host's total; the text names what was spent and what the ceiling is, and the call is served again after midnight UTC
   - `unrated` — the alias the host serves is a vendor alias, and the host has no rate for its model, so what a call spends cannot be counted against the ceiling in `compute.vendor_quotas`: the meter is absent rather than slow, and the alias is refused rather than served against a ceiling that would read zero for ever. The repair is on the host and is a rate, not time — nothing about waiting makes this call succeed
   - `misconfigured` — the host cannot classify its own serving lists, so the class of the alias it would serve is unknown, and an alias whose class is unknown is not served (a paying alias filed under `compute.serving_local` is the state that reaches this gate). The host's own configuration, repaired by editing it; this names no fault of the guest's and nothing the guest can do
@@ -458,7 +459,7 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
   | code | status | what the client is being told |
   |---|---|---|
   | `invalid_value` | 400 | your request; fix it and send it again |
-  | `tools_unsupported` | 400 | your request; this alias takes no tools |
+  | `tools_unsupported` | 400 | your request; this alias takes no tools, or not beside these images |
   | `model_not_found` | 404 | not on that host's menu |
   | `not_allowed` | 403 | that host's door; ask a person |
   | `identity_unproved` | 403 | that host's door; ask a person |
@@ -606,6 +607,7 @@ Returns a list of AI providers available on the peer's system.
         "supports_vision": false,
         "supports_voice": false,
         "supports_tools": true,
+        "serves_images_with_tools": false,
         "context_window": 131072,
         "reasoning_words": ["xhigh", "medium", "low"],
         "reasoning_default": "xhigh",
@@ -649,6 +651,17 @@ Returns a list of AI providers available on the peer's system.
     tool-calling path, so a REMOTE_INFERENCE_REQUEST carrying `tools` can be served. Absent
     reads as false. An optimisation, not a permission: it saves the guest a round trip it
     would lose, and the host's refusal on the wire (§3.4) remains the gate
+  - `serves_images_with_tools` (boolean, optional, v1.7+): Whether this host serves a
+    REMOTE_INFERENCE_REQUEST whose `messages` hold `image` blocks beside `tools` on this
+    alias — the pictures in their turns, the tools called. A `serves_*` field says what the
+    host's route will serve for a request of that shape, where a `supports_*` field says
+    what the provider can do; the two differ, and this one is not computed from
+    `supports_vision` and `supports_tools`. The sender sets it from the very predicate its
+    own gate asks before such a call, so the row cannot promise a request the host would
+    refuse. **Fail-closed**: absent reads as false, unlike `supports_vision` — a host that
+    predates the field may take image blocks beside tools to a path that drops the
+    pictures without a word, and a guest must not send them there. Like `supports_tools`, an
+    optimisation over the host's refusal (§3.4), not a permission
   - `context_window` (integer or null, required): Context window in tokens; `null` when
     the model is unknown to the sender, which a receiver must distinguish from a real size
   - `reasoning_words` (array of strings, optional): The reasoning-effort words this alias
@@ -1734,7 +1747,9 @@ Clients select relays using weighted scoring:
 > **Implementation note:** There is no separate `SEND_IMAGE` wire command. Remote vision inference
 > uses **REMOTE_INFERENCE_REQUEST** (§3.4) with the optional `images` field (added v0.12.0).
 > The peer must advertise `supports_vision: true` in PROVIDERS_RESPONSE before vision queries
-> are sent. The response uses the standard REMOTE_INFERENCE_RESPONSE format.
+> are sent. The response uses the standard REMOTE_INFERENCE_RESPONSE format. Images beside
+> `tools` do not use the `images` field: they travel as `image` blocks in `messages`, to an
+> alias whose row says `serves_images_with_tools: true` (§3.4, §3.5).
 
 **Use Cases:**
 - Screenshot analysis and OCR
@@ -2694,6 +2709,19 @@ DPTP is designed to be extensible. New commands can be added by:
   fail-closed — an absent tariff means none is declared, which is not free, and
   an absent setting means the host does not state it, not that none applies.
   Added 2026-09-14 while v1.7 is unreleased
+- **§3.4 REMOTE_INFERENCE_REQUEST, §3.5 PROVIDERS_RESPONSE** — images travel beside
+  tools. A user turn in `messages` may hold `image` blocks, and a `tool_result` block
+  may hold them in its content; a guest sends them beside `tools` only to an alias whose
+  row carries the new optional `serves_images_with_tools: true`, and with no `images`
+  field. The field is the host's own predicate for that request shape, not a product of
+  `supports_vision` and `supports_tools`, and it is fail-closed — absent reads as false,
+  because a host that predates it may drop the pictures silently. The `images` field
+  beside `tools` is now refused with `tools_unsupported`, which also covers image blocks
+  beside tools on an alias that cannot carry both; no new code, because an unknown word
+  reads as a mid-call failure. Before, a host answered images and tools together from
+  the prompt, the tools and the history gone without a word, and a guest refused the
+  combination outright — so Claude Code, which attaches its tools to every request, could
+  not show a peer's model a screenshot. Added 2026-09-17 while v1.7 is unreleased
 
 ### v1.6 (August 2026)
 - **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v2`; `v1` still read), added with

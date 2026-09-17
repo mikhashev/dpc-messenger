@@ -33,7 +33,7 @@ from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 from openai import AsyncOpenAI
 
 from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_base64,
-                   positive_ceiling)
+                   image_blocks_in_turns, positive_ceiling)
 from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
@@ -582,6 +582,8 @@ class LlamaServerProvider(DeepSeekProvider):
         path: str,
         conversation_id: Optional[str] = None,
         tool_calls: int = 0,
+        images: int = 0,
+        tools: int = 0,
         effort: Any = "server-default",
         served_effort: Optional[str] = None,
         reasoning_text: Optional[str] = None,
@@ -613,7 +615,12 @@ class LlamaServerProvider(DeepSeekProvider):
         unbounded, chars/4 read 24 tokens of thinking inside a 22-token
         completion on both nodes on 2026-09-14. `thinking_source` carries which
         of the two made the number, so a reader is not left inferring it from a
-        log marker."""
+        log marker.
+
+        `images` and `tools` are what the call carried — pictures sent, tools
+        offered — beside the `tool_calls` the model made: a screenshot beside
+        the tools and a text-only call cost differently, and the line is where
+        the burn history tells them apart. Counted, never quoted."""
         usage = self._usage_from_response(raw_usage) if raw_usage is not None else None
         if usage is None:
             return {}
@@ -706,14 +713,14 @@ class LlamaServerProvider(DeepSeekProvider):
         spd = usage.get("speed") or {}
         logger.info(
             "llamacpp usage: alias=%s conv=%s prompt=%d, completion=%d "
-            "(reasoning=%d/content=%d%s), tool_calls=%d, effort=%s, path=%s"
+            "(reasoning=%d/content=%d%s), images=%d tools=%d, tool_calls=%d, effort=%s, path=%s"
             "%s%s%s",
             self.alias, conversation_id or "-", usage["prompt_tokens"],
             usage["completion_tokens"], usage["reasoning_tokens"],
             usage["content_tokens"],
             ", split=estimated (clamped to completion)" if clamped
             else ", split=estimated" if estimated else "",
-            tool_calls, effort, path,
+            images, tools, tool_calls, effort, path,
             f", finish={finish_reason}" if finish_reason else "",
             "" if cached is None else
             f", prefilled={usage['prefilled_tokens']} of {usage['prompt_tokens']}"
@@ -982,6 +989,8 @@ class LlamaServerProvider(DeepSeekProvider):
                 path="tools",
                 conversation_id=conversation_id,
                 tool_calls=len(tool_calls_raw),
+                images=image_blocks_in_turns(messages),
+                tools=len(tools or []),
                 effort=self._effort_label(reasoning_effort, extra_body),
                 served_effort=self._served_effort(extra_body),
                 reasoning_text=self._last_thinking,
@@ -1070,6 +1079,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 getattr(resp, "usage", None),
                 path="vision",
                 conversation_id=kwargs.get("conversation_id"),
+                images=len(images),
                 effort=self._effort_label(effort, extra_body),
                 served_effort=self._served_effort(extra_body),
                 reasoning_text=self._last_thinking,

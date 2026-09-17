@@ -74,14 +74,18 @@ two fields DPTP §3.4 requires onto a flat list beside the prompt. On the local
 route a request with tools hands the turns, images in place, to the tools
 path — a screenshot in a Claude Code session, which always attaches tools,
 and every later turn whose history still holds it — and a request without
-tools takes the vision entry point with the flat list. The peer route still
-carries only the flat list, so an image's position among the turns is not
-preserved there. What this node will not do it refuses by name: fetching an
-`http(s)` URL, an image past `[vision] max_image_size_mb` (413, the same cap
-the P2P door enforces), images beside tools on a local alias whose provider
-has no tool path or cannot see, and on any peer alias, an alias or a peer
-that says it has no vision, and a peer alias whose menu row lists the effort
-words its model knows and not the one that was asked for.
+tools takes the vision entry point with the flat list. The peer route does the
+same across the hop: beside tools the turns travel with their image blocks and
+no flat list, to a host whose menu row says `serves_images_with_tools`; without
+tools the flat list travels beside turns stripped of their images, so an
+image's position among the turns is not preserved there. What this node will
+not do it refuses by name: fetching an `http(s)` URL, an image past
+`[vision] max_image_size_mb` (413, the same cap the P2P door enforces), images
+beside tools on a local alias whose provider has no tool path or cannot see,
+and on a peer alias whose menu row does not say `serves_images_with_tools` —
+absent included, because an older host may drop the pictures — an alias or a
+peer that says it has no vision, and a peer alias whose menu row lists the
+effort words its model knows and not the one that was asked for.
 
 A third kind of name, `remote:<node_id>:<alias>`, is a connected peer's
 alias as that peer serves it to this node (D4 step 4): `/v1/models` lists
@@ -137,6 +141,7 @@ from .providers.base import (
     REASONING_OFF,
     declared_reasoning_words,
     effective_reasoning_default,
+    image_blocks_in_turns,
     normalize_reasoning_effort,
     reasoning_word_for,
 )
@@ -820,8 +825,10 @@ class Gateway:
         whole; a request with tools takes `query_messages` with the turns,
         images in place, which is the one path that carries both — refused
         here, by the predicate that call will ask, when the alias's provider
-        has no tool path or cannot see. The peer route still carries them
-        beside the prompt only, and refuses them beside tools.
+        has no tool path or cannot see. The peer route sends them the same
+        way: beside tools in their turns and nowhere else, only to a host
+        whose menu row says `serves_images_with_tools`; without tools on the
+        flat list, the turns stripped of them.
         `reasoning_effort` is the word the client wrote, unfolded: the alias is
         resolved first and the word is then checked against *that* alias's
         vocabulary — the menu row's `reasoning_words` on the peer route, this
@@ -1198,15 +1205,23 @@ class Gateway:
         # permission (`service.menu_for_peer`). Only the first answers a chat
         # completion, and the row says which it is.
         refuse_a_transcription_alias(name, row.get("type"), served_by=peer_id)
-        if images and tools:
-            # The host's vision door is `query`, which holds no tools, exactly
-            # as this node's own is: the combination is refused on both routes
-            # rather than answered without the tools on either.
+        # Every picture in the turns, a tool's returned screenshot included:
+        # beside tools each of them rides in its turn, and a host that cannot
+        # carry that drops any of them alike.
+        images_in_turns = image_blocks_in_turns(messages)
+        if tools and images_in_turns and row.get("serves_images_with_tools") is not True:
+            # Fail-closed, unlike `supports_vision` below: a row that says
+            # nothing is an older host, and an older host may take image blocks
+            # beside tools to a converter that drops them without a word. The
+            # sentence differs from the one this refusal used to carry, so a
+            # reader can tell which guest refused.
             raise GatewayError(
                 400,
-                f"the request carries {len(images)} image(s) and {len(tools)} tool(s): vision on the "
-                "peer route travels beside the prompt and reaches the host's vision entry point, which "
-                "takes no tools; send the images without tools, or the tools without images",
+                f"peer {peer_id} does not say it serves '{remote_alias}' with images beside tools — its "
+                f"menu row does not say serves_images_with_tools (an older host, or an alias that "
+                f"cannot see or call tools) — and the request carries {images_in_turns} image(s) and "
+                f"{len(tools)} tool(s); ask that peer for an alias whose row says it, or send the "
+                "request without one of them",
                 "tools_unsupported",
             )
         if tools and not row.get("supports_tools"):
@@ -1243,15 +1258,22 @@ class Gateway:
         # Clocked before the send: the row's duration is the round trip as this node saw it.
         started_at = datetime.now(timezone.utc)
         clock = time.monotonic()
+        if tools and images_in_turns:
+            # Beside tools the pictures stay in their turns and travel nowhere
+            # else: the host's tools path reads them there, and the flat field
+            # beside tools is what a host refuses.
+            wire_turns, wire_images = messages, None
+        else:
+            # Without tools the images travel once, on `images`, to the host's
+            # vision entry point, and the turns go as every host reads them —
+            # without image blocks.
+            wire_turns = _turns_without_images(messages) if messages else None
+            wire_images = images or None
         try:
             result = await self._core.p2p_coordinator.request_inference_from_peer(
-                peer_id, prompt, provider=remote_alias, images=images or None,
+                peer_id, prompt, provider=remote_alias, images=wire_images,
                 reasoning_effort=reasoning_effort, timeout=timeout,
-                # The images travel once, on `images`, and the turns go as
-                # every host so far reads them — without image blocks. The
-                # next step of THREE-PROVIDER-HANDLES-NEVER-GROW-TOGETHER
-                # changes what this route sends.
-                messages=_turns_without_images(messages) if messages else None,
+                messages=wire_turns or None,
                 system=system or None, tools=tools or None,
                 on_chunk=on_chunk, request_id=request_id,
             )

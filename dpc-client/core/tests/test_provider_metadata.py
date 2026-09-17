@@ -30,6 +30,13 @@ class FakeProvider:
         return self._vision
 
 
+class _ToolCalling(FakeProvider):
+    """A provider with a native tools path."""
+
+    async def generate_with_tools(self, messages, tools, system="", **kwargs):
+        raise AssertionError("a menu row calls nothing")
+
+
 class TestLookupContextWindow:
     def test_known_model_returns_value(self):
         lm = _llm_manager_with({})
@@ -68,6 +75,7 @@ class TestBuildP2PProviderInfo:
             "supports_vision": True,
             "supports_voice": False,
             "supports_tools": False,
+            "serves_images_with_tools": False,
             "context_window": 204800,
         }
 
@@ -77,6 +85,59 @@ class TestBuildP2PProviderInfo:
         stub = self._service_stub(lm)
         info = CoreService.build_p2p_provider_info(stub, "p", provider)
         assert info["context_window"] is None
+
+    # `serves_images_with_tools` is what the route serves, asked of the one
+    # predicate the host's gate and `query_messages` ask — not a product of the
+    # two `supports_*` flags beside it.
+
+    def _row(self, provider):
+        stub = self._service_stub(_llm_manager_with({"p": provider}))
+        return CoreService.build_p2p_provider_info(stub, "p", provider)
+
+    def test_a_provider_that_sees_and_calls_tools_serves_images_with_tools(self):
+        provider = _ToolCalling("qwen3.8-vl", ptype="llamacpp_server", vision=True)
+        row = self._row(provider)
+        assert row["supports_vision"] is True and row["supports_tools"] is True
+        assert row["serves_images_with_tools"] is True
+
+    def test_a_provider_that_calls_tools_but_cannot_see_does_not(self):
+        row = self._row(_ToolCalling("qwen3:8b", vision=False))
+        assert row["supports_tools"] is True
+        assert row["serves_images_with_tools"] is False
+
+    def test_a_provider_that_sees_but_calls_no_tools_does_not(self):
+        row = self._row(FakeProvider("llava:13b", vision=True))
+        assert row["supports_vision"] is True
+        assert row["serves_images_with_tools"] is False
+
+    def test_a_tools_attribute_that_is_none_is_no_path_though_the_two_flags_say_yes(self):
+        """Where the two flags and the predicate part: `supports_tools` asks
+        `hasattr`, and a class that switches its tools path off by setting it to
+        None still has the attribute. `entry_point_for` asks for a callable, and
+        so does `query_messages` — a row multiplying the flags would promise
+        this alias a call the door refuses."""
+        provider = FakeProvider("switched-off", vision=True)
+        provider.generate_with_tools = None
+        row = self._row(provider)
+        assert row["supports_vision"] is True and row["supports_tools"] is True
+        assert row["serves_images_with_tools"] is False
+
+    def test_the_field_is_the_answer_of_entry_point_for_asked_about_images_beside_tools(self):
+        """The row follows the predicate whichever way it answers, and asks it
+        about the request shape the field names."""
+        asked = []
+
+        def predicate(provider, *, tools, streaming, images=False):
+            asked.append({"tools": tools, "streaming": streaming, "images": images})
+            return "generate_with_tools", answer
+
+        provider = _ToolCalling("qwen3.8-vl", vision=True)
+        with patch("dpc_client_core.service.entry_point_for", side_effect=predicate):
+            answer = None
+            assert self._row(provider)["serves_images_with_tools"] is False
+            answer = object()
+            assert self._row(FakeProvider("no-tools-no-eyes"))["serves_images_with_tools"] is True
+        assert asked == [{"tools": True, "streaming": False, "images": True}] * 2
 
 
 class TestPeerProviderContextWindow:

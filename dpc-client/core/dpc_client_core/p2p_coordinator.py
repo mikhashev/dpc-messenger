@@ -554,10 +554,14 @@ class P2PCoordinator:
         `messages`, `system`, `tools` and `stream` are the DPTP v1.7 half: with
         `messages` the call goes to `query_messages`, which sees the turns
         un-flattened and can call tools and stream; without it the flattened
-        `prompt` takes `query`, as every released guest's request does. Images
-        keep `query` either way — it owns the only vision entry point — so a
-        request carrying both is answered from the prompt, as the gateway's own
-        local route answers it.
+        `prompt` takes `query`, as every released guest's request does. Image
+        blocks standing in `messages` go with the turns to `query_messages`,
+        tools or not — the one path that carries images beside tools, and the
+        one this node's menu row answers for in `serves_images_with_tools`.
+        The flat `images` field keeps `query`, the vision entry point, which
+        holds no tools: beside `tools` it is refused with `tools_unsupported`
+        rather than answered without them, and without tools it is served from
+        the prompt as every older guest's request always was.
 
         None of this is read before the gates below have passed, and a refused
         call emits no chunk.
@@ -574,7 +578,17 @@ class P2PCoordinator:
         )
         from .p2p_manager import peer_proof
 
-        logger.debug("Handling inference request from %s (request_id: %s, images: %s)", peer_id, request_id, "yes" if images else "no")
+        # Counted, never quoted: the flat field and the blocks in the turns are
+        # one number, because either is a picture this call carries.
+        from .providers.base import image_blocks_in_turns
+
+        images_in_turns = image_blocks_in_turns(messages)
+        image_count = len(images or []) + images_in_turns
+        tool_count = len(tools or [])
+        logger.debug(
+            "Handling inference request from %s (request_id: %s, images=%d tools=%d)",
+            peer_id, request_id, image_count, tool_count,
+        )
 
         # Identity before every other gate (ADR-041 D2). `peer_id` is the name
         # the firewall admits on, the ledger writes under and a quota counts
@@ -704,19 +718,40 @@ class P2PCoordinator:
             return
 
         # Tools the serving alias has no path for: the guest's own request, and
-        # the gate that means `tools_unsupported`. The predicate is
-        # `entry_point_for`'s own, and the condition is the one the call below
-        # runs under - images take `query`, which carries no tools.
+        # the gate that means `tools_unsupported`. The flat `images` field
+        # reaches `query`, whose vision entry point holds no tools, so beside
+        # tools it is refused here rather than answered without them; images
+        # beside tools travel in the turns. For the turns the predicate is
+        # `entry_point_for`'s own, asked with the images they hold — the one
+        # `query_messages` asks before the call and the menu row states.
         from .llm_manager import entry_point_for
 
-        if tools and messages and not images and entry_point_for(
-            self._provider_for_alias(serving_alias), tools=True, streaming=False,
-        )[1] is None:
+        refused = None
+        if tools and images:
             refused = (
-                f"This node's serving alias '{serving_alias}' has no native tool-calling path, "
-                f"and {len(tools)} tool(s) were asked for. Send the request without tools, or to "
-                "a node whose serving alias implements generate_with_tools."
+                f"The request carries {len(images)} image(s) on the images field and "
+                f"{len(tools)} tool(s): that field reaches this node's vision entry point, which "
+                "takes no tools. Images beside tools must travel in the turns, as image blocks "
+                "in messages, to an alias whose menu row says serves_images_with_tools."
             )
+        elif tools and messages and entry_point_for(
+            self._provider_for_alias(serving_alias), tools=True, streaming=stream,
+            images=images_in_turns > 0,
+        )[1] is None:
+            if images_in_turns:
+                refused = (
+                    f"This node's serving alias '{serving_alias}' cannot take the "
+                    f"{images_in_turns} image(s) in these turns beside {len(tools)} tool(s): it "
+                    "has no native tool-calling path, or it cannot see. Send the request without "
+                    "one of them, or to an alias whose menu row says serves_images_with_tools."
+                )
+            else:
+                refused = (
+                    f"This node's serving alias '{serving_alias}' has no native tool-calling path, "
+                    f"and {len(tools)} tool(s) were asked for. Send the request without tools, or to "
+                    "a node whose serving alias implements generate_with_tools."
+                )
+        if refused:
             logger.warning("Peer inference refused for %s: %s", peer_id, refused)
             error_response = create_remote_inference_response(
                 request_id=request_id, error=refused, code=REFUSAL_TOOLS_UNSUPPORTED,
@@ -779,6 +814,9 @@ class P2PCoordinator:
                 # the price depends on the hour the call is made (ADR-041 D3).
                 started_at = datetime.now(timezone.utc)
                 clock = time.monotonic()
+                # The turns, image blocks and all, take `query_messages`; only
+                # the flat `images` field keeps `query`, and beside tools that
+                # field was refused above, so no tool is dropped on this branch.
                 if messages and not images:
                     result = await self.service.llm_manager.query_messages(
                         messages, system=system or "", tools=tools or None,
@@ -813,8 +851,9 @@ class P2PCoordinator:
             # our own recount sees the visible text alone.
             logger.info(
                 "Peer inference served: peer=%s alias=%s model=%s effort=%s "
-                "prompt_tokens=%s response_tokens=%s counts=%s",
+                "images=%d tools=%d prompt_tokens=%s response_tokens=%s counts=%s",
                 peer_id, serving_alias, actual_model, ran_effort or "unnamed",
+                image_count, tool_count,
                 result.get("prompt_tokens"), result.get("response_tokens"),
                 result.get("counts_source", "ours"),
             )

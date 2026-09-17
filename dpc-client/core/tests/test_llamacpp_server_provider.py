@@ -12,6 +12,7 @@ and close() drains.
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 
 from dpc_client_core.providers import llamacpp_server_provider
@@ -1474,3 +1475,63 @@ class TestImagesTravelInTheTurnsOnTheToolsPath:
         assert not isinstance(ei.value.__cause__, TypeError), (
             f"the image-bearing call sends a kwarg the real SDK refuses: {ei.value.__cause__}"
         )
+
+
+class TestTheUsageLineCountsThePicturesAndTheToolsACallCarried:
+    """`images=N tools=N` beside `tool_calls=`: what the call was sent, beside
+    what the model made of it. A screenshot beside ~27 tools and a text turn
+    cost differently, and this line is the burn history. Counted, never quoted."""
+
+    @staticmethod
+    def _wired(p):
+        p.supervisor = _FakeSupervisor()
+        client, _ = _fake_client(_chat_resp())
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+        return p
+
+    @staticmethod
+    def _line(caplog):
+        (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("llamacpp usage:")]
+        return line
+
+    @pytest.mark.asyncio
+    async def test_the_tools_path_counts_images_in_the_turns_and_inside_a_tool_result_and_the_tools_offered(
+            self, caplog):
+        p = self._wired(_provider(mmproj="mm.gguf"))
+        messages = [
+            {"role": "user", "content": [{"type": "text", "text": "look"}, SHOT_1]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "tu_1", "name": "read_file", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_1",
+                                          "content": [{"type": "text", "text": "shot taken"}, SHOT_2]}]},
+        ]
+        two_tools = A_TOOL + [dict(A_TOOL[0], name="write_file")]
+
+        with caplog.at_level(logging.INFO):
+            await p.generate_with_tools(messages, two_tools, system="be brief")
+
+        line = self._line(caplog)
+        assert "images=2 tools=2, tool_calls=0" in line and "path=tools" in line
+        assert "AAAA" not in line and "shot taken" not in line
+
+    @pytest.mark.asyncio
+    async def test_the_vision_path_counts_its_images_and_offers_no_tools(self, caplog):
+        p = self._wired(_provider(mmproj="mm.gguf"))
+
+        with caplog.at_level(logging.INFO):
+            await p.generate_with_vision("what is this", [{"base64": "AAAA", "mime_type": "image/png"}])
+
+        line = self._line(caplog)
+        assert "images=1 tools=0" in line and "path=vision" in line
+
+    @pytest.mark.asyncio
+    async def test_a_plain_call_says_it_carried_neither(self, caplog):
+        p = self._wired(_provider())
+
+        with caplog.at_level(logging.INFO):
+            await p.generate_response("hi")
+
+        assert "images=0 tools=0, tool_calls=0" in self._line(caplog)

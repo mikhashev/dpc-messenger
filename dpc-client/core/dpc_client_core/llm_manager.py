@@ -19,7 +19,7 @@ from .providers import (
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
 from .node_ledger import OUTPUT_INCLUDES_THINKING, THINKING_SOURCES
-from .providers.base import normalize_reasoning_effort
+from .providers.base import image_blocks_in_turns, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -902,18 +902,9 @@ class LLMManager:
 
         tool_calls: List[Dict[str, Any]] = []
         path_usage: Dict[str, Any] = {}
-        # Image blocks in the turns, including those a tool returned inside its result.
-        image_count = 0
-        for m in messages:
-            content = m.get("content") if isinstance(m, dict) else None
-            for block in content if isinstance(content, list) else []:
-                if not isinstance(block, dict):
-                    continue
-                inner = block.get("content") if block.get("type") == "tool_result" else None
-                image_count += sum(
-                    1 for b in [block, *(inner if isinstance(inner, list) else [])]
-                    if isinstance(b, dict) and b.get("type") == "image"
-                )
+        # Image blocks in the turns, including those a tool returned inside its
+        # result: the same count the host's gate in front of this call reads.
+        image_count = image_blocks_in_turns(messages)
         path, entry_point = entry_point_for(
             provider, tools=bool(tools), streaming=on_chunk is not None, images=image_count > 0,
         )
