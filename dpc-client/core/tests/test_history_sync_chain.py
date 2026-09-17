@@ -226,6 +226,10 @@ def test_an_import_followed_by_the_same_merge_adds_nothing(tmp_path):
     assert len(receiver.message_history) == len(exported)
 
 
+def _invariant_holds(monitor):
+    return monitor.message_ids == {m.get("id") for m in monitor.message_history if m.get("id")}
+
+
 def test_the_dedup_set_tracks_the_history_after_every_shape_change(tmp_path):
     """The wide invariant: the set equals the history's ids, or dedup lies.
 
@@ -236,11 +240,40 @@ def test_the_dedup_set_tracks_the_history_after_every_shape_change(tmp_path):
 
     for text in ("one", "two", "three"):
         receiver.add_message(role="user", content=text, sender_node_id="n1", sender_name="Mike")
+    assert _invariant_holds(receiver)
+
     receiver.clear_history(preserve=False)
+    assert _invariant_holds(receiver)
+
     for text in ("fresh", "and new"):
         receiver.add_message(role="user", content=text, sender_node_id="n1", sender_name="Mike")
+    assert _invariant_holds(receiver)
 
-    exported = _sender(tmp_path).export_history()
+    # Same conversation id as the sender, like the neighbouring import tests —
+    # otherwise the import is refused whole (`_verify_incoming` rejects a
+    # history signed for another room) and the rebuild it exercises never runs.
+    exported = _sender(tmp_path, "group-invariant").export_history()
     receiver.import_history(exported)
 
-    assert receiver.message_ids == {m.get("id") for m in receiver.message_history if m.get("id")}
+    assert _invariant_holds(receiver)
+
+
+def test_the_dedup_set_tracks_the_history_after_clear_before_drops_records(tmp_path):
+    """clear_before slices message_history directly (a session-boundary reset
+    applied to this node, ADR-038 Q3); the rebuild after the slice is what
+    keeps the set honest.
+
+    This only checks the set/history invariant. What a later merge does with
+    the ids `clear_before` dropped — whether it can re-add a record the reset
+    just removed — is a separate, open question and is not asserted here.
+    """
+    receiver = _monitor(tmp_path, "group-clear-before")
+    receiver.add_message(role="user", content="old", sender_node_id="n1", sender_name="Mike",
+                          timestamp="2026-01-01T00:00:00Z")
+    receiver.add_message(role="user", content="new", sender_node_id="n1", sender_name="Mike",
+                          timestamp="2026-06-01T00:00:00Z")
+
+    dropped = receiver.clear_before("2026-03-01T00:00:00Z")
+
+    assert dropped == 1
+    assert _invariant_holds(receiver)

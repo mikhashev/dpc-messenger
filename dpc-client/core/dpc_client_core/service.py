@@ -6296,6 +6296,7 @@ class CoreService:
 
         # Mutate in place
         monitor.message_history[:] = [m for m in history if m not in to_delete]
+        monitor.rebuild_message_ids()
         monitor.save_history()
 
         # Notify UI to remove from view. Include sender + content_prefix hint so
