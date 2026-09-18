@@ -418,6 +418,56 @@ class LocalWhisperProvider(AIProvider):
         except Exception:
             return 0.0
 
+    @staticmethod
+    def _segments_from_chunks(chunks: Any, duration_seconds: float) -> List[Dict[str, Any]]:
+        """Normalise HF pipeline chunks into {start, end, text} segments.
+
+        The pipeline hands back ``{"timestamp": (start, end), "text": ...}`` per
+        chunk and leaves ``end`` as None on the last one; that chunk runs to the
+        end of the audio, so it gets the measured duration.
+        """
+        segments: List[Dict[str, Any]] = []
+        if not chunks:
+            return segments
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            timestamp = chunk.get("timestamp") or (None, None)
+            try:
+                start, end = timestamp[0], timestamp[1]
+            except (TypeError, IndexError):
+                start, end = None, None
+            if start is None:
+                start = segments[-1]["end"] if segments else 0.0
+            if end is None:
+                end = duration_seconds
+            text = (chunk.get("text") or "").strip()
+            if not text:
+                continue
+            segments.append({"start": float(start), "end": float(end), "text": text})
+        return segments
+
+    @staticmethod
+    def _segments_from_mlx(raw_segments: Any, duration_seconds: float) -> List[Dict[str, Any]]:
+        """Normalise mlx_whisper segments into the same {start, end, text} shape."""
+        segments: List[Dict[str, Any]] = []
+        if not raw_segments:
+            return segments
+        for segment in raw_segments:
+            if not isinstance(segment, dict):
+                continue
+            text = (segment.get("text") or "").strip()
+            if not text:
+                continue
+            start = segment.get("start")
+            end = segment.get("end")
+            if start is None:
+                start = segments[-1]["end"] if segments else 0.0
+            if end is None:
+                end = duration_seconds
+            segments.append({"start": float(start), "end": float(end), "text": text})
+        return segments
+
     async def transcribe(self, audio_path: str) -> Dict[str, Any]:
         if not self.model_loaded:
             async with self._load_lock:
@@ -463,7 +513,10 @@ class LocalWhisperProvider(AIProvider):
                     "text": text,
                     "language": detected_language,
                     "duration": duration_seconds,
-                    "provider": "local_whisper_mlx"
+                    "provider": "local_whisper_mlx",
+                    "segments": self._segments_from_mlx(
+                        result.get("segments"), duration_seconds
+                    ),
                 }
 
             # PyTorch path (CUDA/MPS/CPU)
@@ -497,10 +550,14 @@ class LocalWhisperProvider(AIProvider):
                     adaptive_batch_size = max(1, self.batch_size // 2)
                     logger.info(f"Medium audio ({duration_seconds:.0f}s), reducing batch_size: {self.batch_size} → {adaptive_batch_size}")
 
+                # return_timestamps is passed at call time (the standard place for
+                # it); the pipeline itself is built once and shared. Segment-level
+                # timestamps give chunks of {"timestamp": (start, end), "text": ...}.
                 result = await asyncio.to_thread(
                     self.pipeline,
                     audio_array,
-                    batch_size=adaptive_batch_size
+                    batch_size=adaptive_batch_size,
+                    return_timestamps=True
                 )
 
                 elapsed = asyncio.get_event_loop().time() - start_time
@@ -508,10 +565,17 @@ class LocalWhisperProvider(AIProvider):
 
                 detected_language = "unknown"
                 chunks = result.get("chunks")
+                chunks_list: List[Any] = []
                 if chunks:
-                    chunks_list = list(chunks) if hasattr(chunks, '__iter__') else chunks
-                    if len(chunks_list) > 0:
-                        detected_language = chunks_list[0].get("language", "unknown")
+                    chunks_list = list(chunks) if hasattr(chunks, '__iter__') else [chunks]
+                    for chunk in chunks_list:
+                        if isinstance(chunk, dict) and chunk.get("language"):
+                            detected_language = chunk["language"]
+                            break
+                if detected_language == "unknown" and isinstance(result.get("language"), str):
+                    detected_language = result["language"]
+
+                segments = self._segments_from_chunks(chunks_list, duration_seconds)
 
                 logger.info(f"Local transcription completed in {elapsed:.1f}s ({duration_seconds/elapsed:.1f}x real-time): {len(text)} chars")
 
@@ -526,7 +590,8 @@ class LocalWhisperProvider(AIProvider):
                     "text": text,
                     "language": detected_language,
                     "duration": duration_seconds,
-                    "provider": "local_whisper"
+                    "provider": "local_whisper",
+                    "segments": segments,
                 }
 
         except Exception as e:
