@@ -67,6 +67,13 @@ def _paginate_content(content: str, path: str, offset: int | None, limit: int | 
     return content
 
 
+def _dpc_home() -> Path:
+    """$DPC_HOME, else ~/.dpc: the home the shared-knowledge read gate and
+    get_dpc_context both resolve (2026-09-18: one answer, not two)."""
+    import os
+    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+
+
 def _is_shared_knowledge_read(ctx: ToolContext, path: str) -> bool:
     """Is this a read of the shared human knowledge layer the agent already indexes?
 
@@ -88,9 +95,7 @@ def _is_shared_knowledge_read(ctx: ToolContext, path: str) -> bool:
     """
     if not ctx.firewall:
         return False
-    import os
-    dpc_home = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
-    knowledge_dir = (dpc_home / "knowledge").resolve()
+    knowledge_dir = (_dpc_home() / "knowledge").resolve()
     try:
         resolved = Path(path).expanduser().resolve()
         resolved.relative_to(knowledge_dir)
@@ -964,10 +969,22 @@ def get_task_board(ctx: ToolContext) -> str:
 # DPC Integration Tools
 # ---------------------------------------------------------------------------
 
-# Sections of personal.json that are counted and pointed at, not returned.
+# Sections of personal.json that are counted, not returned.
 _DPC_PERSONAL_SUMMARISED = ("knowledge", "commit_history")
 # Below loop.TOOL_RESULT_CHAR_CAP (15000) so the notes after the JSON survive.
 _DPC_CONTEXT_BUDGET_CHARS = 12000
+_DPC_NOT_READABLE = ("not readable from this agent's sandbox; the human can grant it "
+                     "in Agent Permissions, or ask them for what you need")
+
+
+def _read_file_would_open(ctx: ToolContext, path: Path) -> bool:
+    """Would read_file open this path for this agent? Asks the resolver read_file
+    itself uses, so a pointer offered here cannot drift from the gate."""
+    try:
+        _resolve_file_path(ctx, str(path))
+        return True
+    except Exception:
+        return False
 
 
 def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
@@ -982,7 +999,11 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
         context_type: Type of context - 'personal' or 'device'
 
     Returns:
-        Context content
+        The file as indented JSON; personal without knowledge and
+        commit_history, which are counted in notes. Above
+        _DPC_CONTEXT_BUDGET_CHARS the JSON is clipped head+tail by clip_text,
+        no longer parses, and a note says so. A note names a path only when
+        read_file would open it for this agent.
     """
     try:
         # Check firewall if available via DPC service (per-agent profile if set)
@@ -999,7 +1020,7 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
             if context_type == "device" and not firewall.can_agent_access_context("device", profile_name=_profile):
                 return "⚠️ Device context access is disabled via firewall rules"
 
-        dpc_dir = Path.home() / ".dpc"
+        dpc_dir = _dpc_home()
 
         if context_type == "personal":
             path = dpc_dir / "personal.json"
@@ -1018,30 +1039,44 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
         except json.JSONDecodeError:
             return f"⚠️ Invalid JSON in {path}"
 
-        header = f"DPC {context_type} context (file: {path}):"
+        # 2026-09-18: this tool reads the file itself; read_file usually cannot
+        # (~/.dpc is outside the sandbox). So a path is named only when read_file
+        # would open it, and otherwise the note says it is out of reach.
+        file_readable = _read_file_would_open(ctx, path)
+        header = f"DPC {context_type} context ({path.name}):"
         notes: List[str] = []
         if context_type == "personal" and isinstance(data, dict):
-            # 2026-09-18: knowledge and commit_history are ~99 % of personal.json
-            # (707k chars here); the old head-slice returned invalid JSON made of
-            # them and never reached the profile. Name them instead of pasting.
+            # knowledge and commit_history are ~99 % of personal.json (707k
+            # chars here); the old head-slice returned invalid JSON made of
+            # them and never reached the profile. Count them instead.
             data = dict(data)
             for key in _DPC_PERSONAL_SUMMARISED:
                 if key not in data:
                     continue
                 value = data.pop(key)
                 count = len(value) if isinstance(value, (dict, list)) else 0
-                where = f'the "{key}" field of {path}'
                 if key == "knowledge":
-                    where += (f"; each topic's text is also a markdown file under "
-                              f"{dpc_dir / 'knowledge'} (its markdown_file field)")
-                notes.append(f"- {key}: {count} entries, not shown. Read them from {where}.")
+                    kdir = dpc_dir / "knowledge"
+                    # The shared-knowledge gate admits top-level .md files only.
+                    if _read_file_would_open(ctx, kdir / "topic.md"):
+                        where = (f"One topic per top-level .md file in {kdir}; "
+                                 f"read them with read_file.")
+                    else:
+                        where = f"The knowledge files are {_DPC_NOT_READABLE}."
+                elif file_readable:
+                    where = f'Read the "{key}" field of {path} with read_file.'
+                else:
+                    where = f"{path.name} is {_DPC_NOT_READABLE}."
+                notes.append(f"- {key}: {count} entries, not shown. {where}")
 
         formatted = json.dumps(data, indent=2, ensure_ascii=False)
         # Clip head+tail with a counted marker, never a bare slice; the loop
         # would cut anything past TOOL_RESULT_CHAR_CAP from the head anyway.
         if len(formatted) > _DPC_CONTEXT_BUDGET_CHARS:
             formatted = clip_text(formatted, _DPC_CONTEXT_BUDGET_CHARS)
-            notes.append(f"- The JSON above is clipped; the whole file is {path}.")
+            whole = (f"the whole file is {path}, which read_file can open" if file_readable
+                     else f"the whole {path.name} is {_DPC_NOT_READABLE}")
+            notes.append(f"- The JSON above is clipped and does not parse; {whole}.")
 
         out = f"{header}\n\n{formatted}"
         if notes:
@@ -2135,7 +2170,7 @@ def get_tools() -> List[ToolEntry]:
             name="get_dpc_context",
             schema={
                 "name": "get_dpc_context",
-                "description": "Read the user's DPC personal context (profile, preferences; knowledge and commit history are counted, with where to read them) or device context. Neither is in your prompt; this tool is how you see them.",
+                "description": "Read the user's DPC personal context (profile, preferences; knowledge and commit history are counted, with where to read them when you may) or device context, as JSON clipped with a marker when too long. Neither is in your prompt; this tool is how you see them.",
                 "parameters": {
                     "type": "object",
                     "properties": {

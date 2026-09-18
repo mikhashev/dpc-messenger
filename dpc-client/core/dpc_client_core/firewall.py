@@ -1333,9 +1333,10 @@ class ContextFirewall:
                 allowed.add(tool_name)
 
         # Per-profile overrides mirroring get_allowed_agent_tools()
-        personal_access = profile.get('personal_context_access', self.dpc_agent_personal_context_access)
-        device_access = profile.get('device_context_access', self.dpc_agent_device_context_access)
-        if not (personal_access or device_access):
+        # 2026-09-18: ask the check get_dpc_context itself runs, so an explicit
+        # null in the profile falls back to global here exactly as it does there.
+        if not (self.can_agent_access_context('personal', profile_name=profile_name)
+                or self.can_agent_access_context('device', profile_name=profile_name)):
             allowed.discard('get_dpc_context')
 
         profile_skills = profile.get('skills', {})

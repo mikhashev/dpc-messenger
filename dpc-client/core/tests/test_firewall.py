@@ -906,6 +906,19 @@ class TestGetDpcContextToolGate:
         })
         assert 'get_dpc_context' in fw.get_allowed_agent_tools_for_profile('agent_x')
 
+    def test_per_profile_null_falls_back_to_global_like_the_runtime_check(self, tmp_path):
+        """An explicit null reads as absent in can_agent_access_context; the
+        gate must agree, or the tool vanishes while the check would allow it."""
+        fw = self._fw(tmp_path, {
+            "dpc_agent": {"enabled": True, "personal_context_access": False,
+                          "device_context_access": True},
+            "agent_profiles": {"agent_x": {"enabled": True,
+                                           "personal_context_access": None,
+                                           "device_context_access": None}},
+        })
+        assert fw.can_agent_access_context('device', profile_name='agent_x') is True
+        assert 'get_dpc_context' in fw.get_allowed_agent_tools_for_profile('agent_x')
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

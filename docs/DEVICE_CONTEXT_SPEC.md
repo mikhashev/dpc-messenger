@@ -420,7 +420,7 @@ Device context is stored separately from `personal.json` and referenced via `met
 
 ## AI Prompt Integration
 
-When device context is included in AI prompts, it appears in a separate `<DEVICE_CONTEXT>` block with special instructions as a preamble:
+When device context is included in AI prompts, it appears in a separate `<DEVICE_CONTEXT>` block with special instructions as a preamble. This is the AI-chat path (the chat's context checkbox). Embedded agents never receive this block: since 2026-09-18 they read the file through the `get_dpc_context` tool when their Device Context Access switch allows.
 
 ```xml
 <DEVICE_CONTEXT source="local">

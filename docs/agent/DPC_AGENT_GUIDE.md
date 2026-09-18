@@ -384,7 +384,7 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 | `get_dpc_context` | Get DPC personal/device context | ⛔ opt-in |
 | `chat_history` | Read the current conversation history | ✅ |
 
-> `get_dpc_context` has `default_enabled=True` on its registration, but the firewall removes it from an agent's allowed set unless `personal_context_access` is granted (default-deny since S204). Net default: **disabled**. Same pattern: `import_skill_from_agent` requires `accept_peer_skills`.
+> `get_dpc_context` has `default_enabled=True` on its registration, but the firewall removes it from an agent's allowed set unless `personal_context_access` or `device_context_access` is granted (both default-deny since S204). Net default: **disabled**. The tool then checks the switch for the type asked, so an agent with only Device access gets device context and a refusal for personal. Since 2026-09-18 this tool is the only way an agent sees either context: nothing is injected into its prompt, whatever the chat's context checkbox says. Personal comes back without `knowledge` and `commit_history`, which are counted; a path to read them is named only when the agent's own `read_file` gates would open it. Same pattern: `import_skill_from_agent` requires `accept_peer_skills`.
 
 ### Web Fetch Tools
 

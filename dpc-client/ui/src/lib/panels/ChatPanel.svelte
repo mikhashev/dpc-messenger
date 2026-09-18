@@ -198,6 +198,12 @@
   // ---------------------------------------------------------------------------
   // Derived state
   // ---------------------------------------------------------------------------
+  // 2026-09-18: mirrors service.py's is_agent_conversation. An agent never gets
+  // context injected (nor ai_scope), so the checkbox would promise nothing there.
+  let isAgentChat = $derived(
+    $chatProviders.get(activeChatId) === 'dpc_agent' ||
+    (agentChatToAgentId.get(activeChatId) ?? activeChatId).startsWith('agent_')
+  );
   let currentTokenUsage = $derived(tokenUsageMap.get(activeChatId) || { used: 0, limit: 0 });
   let effectiveTokenUsage = $derived({
     used: currentTokenUsage.used,
@@ -1019,6 +1025,9 @@
       </button>
 
       {#if !contextPanelCollapsed}
+        {#if isAgentChat}
+          <span class="context-hint">This agent reads your personal and device context itself, as its Context Access switches allow.</span>
+        {:else}
         <label class="context-checkbox">
           <input id="include-personal-context" name="include-personal-context" type="checkbox" bind:checked={includePersonalContext} />
           <span>
@@ -1029,8 +1038,9 @@
         {#if !includePersonalContext}
           <span class="context-hint">⚠️ AI won't know your preferences or device specs</span>
         {/if}
+        {/if}
 
-        {#if includePersonalContext && availableAIScopes.length > 0}
+        {#if !isAgentChat && includePersonalContext && availableAIScopes.length > 0}
           <div class="ai-scope-selector">
             <label for="ai-scope-select">AI Context Mode:</label>
             <select id="ai-scope-select" bind:value={selectedAIScope}>
