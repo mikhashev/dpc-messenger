@@ -473,7 +473,10 @@ def build_llm_messages(
         memory: Memory instance for scratchpad/identity/logs
         task: Task dict with id, type, text, etc.
         system_prompt: Optional custom system prompt
-        dpc_context: Optional DPC context (personal, device)
+        dpc_context: Ignored. Kept so old callers do not break: since
+            2026-09-18 personal/device context is read through the
+            get_dpc_context tool, never pasted into a tail that is replayed
+            byte-for-byte every later turn.
         session_state: Optional session state from ConversationMonitor
                       (tokens_used, tokens_limit, usage_percent, etc.)
         conversation_history: Optional list of previous message dicts from
@@ -669,12 +672,6 @@ def build_llm_messages(
     turn_parts.append(
         _build_runtime_section(agent_root, task, session_state, billing_model=billing_model))
     turn_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
-
-    # DPC context (personal, device)
-    if dpc_context:
-        dpc_context_text = _build_dpc_context_section(dpc_context)
-        if dpc_context_text:
-            turn_parts.append(dpc_context_text)
 
     # Context breakdown for UI tooltip (token estimates per component)
     def _section_name(text: str) -> str:
@@ -872,21 +869,6 @@ def _prune_turn_parts_to_cap(
             estimated = _total(parts)
     info["estimated_tokens_after"] = estimated
     return parts, info
-
-
-def _build_dpc_context_section(dpc_context: Dict[str, Any]) -> str:
-    """Build DPC personal/device context section."""
-    parts = []
-
-    if dpc_context.get("personal"):
-        parts.append(f"<PERSONAL_CONTEXT>\n{dpc_context['personal']}\n</PERSONAL_CONTEXT>")
-
-    if dpc_context.get("device"):
-        parts.append(f"<DEVICE_CONTEXT>\n{dpc_context['device']}\n</DEVICE_CONTEXT>")
-
-    if parts:
-        return "## DPC Context\n\n" + "\n\n".join(parts)
-    return ""
 
 
 # There is deliberately no «How to Use Tools» section in the prompt below, and the

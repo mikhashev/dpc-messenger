@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 from ..memory import _BACKFILL_SKIP
-from ..utils import auto_commit_agent_change
+from ..utils import auto_commit_agent_change, clip_text
 
 log = logging.getLogger(__name__)
 
@@ -964,6 +964,12 @@ def get_task_board(ctx: ToolContext) -> str:
 # DPC Integration Tools
 # ---------------------------------------------------------------------------
 
+# Sections of personal.json that are counted and pointed at, not returned.
+_DPC_PERSONAL_SUMMARISED = ("knowledge", "commit_history")
+# Below loop.TOOL_RESULT_CHAR_CAP (15000) so the notes after the JSON survive.
+_DPC_CONTEXT_BUDGET_CHARS = 12000
+
+
 def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
     """
     Read DPC personal or device context with firewall checks.
@@ -1007,18 +1013,40 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
 
         content = path.read_text(encoding="utf-8")
 
-        # Parse and pretty-print JSON
         try:
             data = json.loads(content)
-            formatted = json.dumps(data, indent=2, ensure_ascii=False)
-
-            # Truncate if too large
-            if len(formatted) > 20000:
-                formatted = formatted[:20000] + "\n\n... (truncated)"
-
-            return f"DPC {context_type} context:\n\n{formatted}"
         except json.JSONDecodeError:
             return f"⚠️ Invalid JSON in {path}"
+
+        header = f"DPC {context_type} context (file: {path}):"
+        notes: List[str] = []
+        if context_type == "personal" and isinstance(data, dict):
+            # 2026-09-18: knowledge and commit_history are ~99 % of personal.json
+            # (707k chars here); the old head-slice returned invalid JSON made of
+            # them and never reached the profile. Name them instead of pasting.
+            data = dict(data)
+            for key in _DPC_PERSONAL_SUMMARISED:
+                if key not in data:
+                    continue
+                value = data.pop(key)
+                count = len(value) if isinstance(value, (dict, list)) else 0
+                where = f'the "{key}" field of {path}'
+                if key == "knowledge":
+                    where += (f"; each topic's text is also a markdown file under "
+                              f"{dpc_dir / 'knowledge'} (its markdown_file field)")
+                notes.append(f"- {key}: {count} entries, not shown. Read them from {where}.")
+
+        formatted = json.dumps(data, indent=2, ensure_ascii=False)
+        # Clip head+tail with a counted marker, never a bare slice; the loop
+        # would cut anything past TOOL_RESULT_CHAR_CAP from the head anyway.
+        if len(formatted) > _DPC_CONTEXT_BUDGET_CHARS:
+            formatted = clip_text(formatted, _DPC_CONTEXT_BUDGET_CHARS)
+            notes.append(f"- The JSON above is clipped; the whole file is {path}.")
+
+        out = f"{header}\n\n{formatted}"
+        if notes:
+            out += "\n\n" + "\n".join(notes)
+        return out
 
     except Exception as e:
         return f"⚠️ Error reading DPC context: {e}"
@@ -2107,7 +2135,7 @@ def get_tools() -> List[ToolEntry]:
             name="get_dpc_context",
             schema={
                 "name": "get_dpc_context",
-                "description": "Read DPC personal or device context for context-aware assistance",
+                "description": "Read the user's DPC personal context (profile, preferences; knowledge and commit history are counted, with where to read them) or device context. Neither is in your prompt; this tool is how you see them.",
                 "parameters": {
                     "type": "object",
                     "properties": {

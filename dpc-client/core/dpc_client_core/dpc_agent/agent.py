@@ -269,7 +269,8 @@ class DpcAgent:
         Args:
             message: User's message text
             conversation_id: Unique ID for this conversation
-            dpc_context: Optional DPC context (personal, device)
+            dpc_context: Ignored since 2026-09-18 (see build_llm_messages);
+                the agent reads context through get_dpc_context
             system_prompt: Optional custom system prompt
             emit_progress: Optional callback for progress updates
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
@@ -1082,7 +1083,6 @@ class DpcAgent:
             result = await self.process(
                 text,
                 conversation_id=reply_conversation_id,
-                dpc_context=task.data.get("dpc_context"),
                 reply_telegram_chat_id=reply_telegram_chat_id,
             )
 
@@ -1108,7 +1108,6 @@ class DpcAgent:
             result = await self.process(
                 text,
                 conversation_id=reply_conversation_id,
-                dpc_context=task.data.get("dpc_context"),
                 reply_telegram_chat_id=task.data.get("_reply_telegram_chat_id"),
                 check_back_depth=depth,
             )

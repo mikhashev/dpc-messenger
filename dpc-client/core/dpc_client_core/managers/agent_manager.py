@@ -1005,7 +1005,9 @@ class DpcAgentManager:
         Args:
             message: User's message text
             conversation_id: Unique ID for this conversation
-            include_context: Whether to include DPC personal/device context
+            include_context: Accepted for the UI and service.py; since 2026-09-18
+                an agent never gets the context injected, it reads it through
+                the get_dpc_context tool when its switches allow.
             on_stream_chunk: Optional async callback for streaming text chunks: await on_stream_chunk(chunk, conversation_id)
             image_base64: Optional base64-encoded image data for vision queries
             image_mime: MIME type of the image (default: image/png)
@@ -1075,11 +1077,6 @@ class DpcAgentManager:
         # header when agent responds without tool calls).
         self._emit_progress("thinking", conversation_id)
 
-        # Get DPC context if requested
-        dpc_context = None
-        if include_context:
-            dpc_context = self._get_dpc_context()
-
         try:
             # Process through agent with progress callback that includes conversation_id
             def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None, speed=None):
@@ -1139,7 +1136,6 @@ class DpcAgentManager:
                 response = await agent.process(
                     message=message,
                     conversation_id=conversation_id,
-                    dpc_context=dpc_context,
                     emit_progress=emit_progress_with_context,
                     on_stream_chunk=emit_stream_chunk,
                     session_state=session_state,
@@ -1292,42 +1288,6 @@ class DpcAgentManager:
             # Clear progress indicator on failure too
             self._emit_progress_clear(conversation_id)
             raise
-
-    def _get_dpc_context(self) -> Dict[str, Any]:
-        """Get DPC personal and device context with firewall checks."""
-        context = {}
-        dpc_dir = pathlib.Path.home() / ".dpc"
-
-        # Check if agent is enabled via firewall (per-agent profile takes precedence)
-        if self.firewall and not self.firewall.get_agent_enabled(self.agent_id):
-            log.debug("DPC Agent is disabled via firewall rules (profile=%s)", self.agent_id or 'global')
-            return context
-
-        # Load personal context (with firewall check)
-        if self.firewall is None or self.firewall.can_agent_access_context('personal', profile_name=self.agent_id):
-            personal_path = dpc_dir / "personal.json"
-            if personal_path.exists():
-                try:
-                    personal = json.loads(personal_path.read_text(encoding="utf-8"))
-                    context["personal"] = json.dumps(personal, indent=2, ensure_ascii=False)
-                except Exception as e:
-                    log.debug(f"Failed to load personal context: {e}")
-        else:
-            log.debug("Personal context access denied by firewall")
-
-        # Load device context (with firewall check)
-        if self.firewall is None or self.firewall.can_agent_access_context('device', profile_name=self.agent_id):
-            device_path = dpc_dir / "device_context.json"
-            if device_path.exists():
-                try:
-                    device = json.loads(device_path.read_text(encoding="utf-8"))
-                    context["device"] = json.dumps(device, indent=2, ensure_ascii=False)
-                except Exception as e:
-                    log.debug(f"Failed to load device context: {e}")
-        else:
-            log.debug("Device context access denied by firewall")
-
-        return context
 
     def _get_or_create_agent_monitor(self, conversation_id: str) -> ConversationMonitor:
         """

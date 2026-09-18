@@ -1209,8 +1209,11 @@ class ContextFirewall:
             if is_enabled:
                 allowed.add(tool_name)
 
-        # Override: get_dpc_context requires personal_context_access
-        if not self.dpc_agent_personal_context_access:
+        # get_dpc_context serves both personal and device and checks each
+        # switch itself; drop it only when both are off (2026-09-18: it is now
+        # the only way an agent sees either context).
+        if not (self.dpc_agent_personal_context_access
+                or self.dpc_agent_device_context_access):
             allowed.discard('get_dpc_context')
 
         # Override: import_skill_from_agent requires accept_peer_skills
@@ -1331,7 +1334,8 @@ class ContextFirewall:
 
         # Per-profile overrides mirroring get_allowed_agent_tools()
         personal_access = profile.get('personal_context_access', self.dpc_agent_personal_context_access)
-        if not personal_access:
+        device_access = profile.get('device_context_access', self.dpc_agent_device_context_access)
+        if not (personal_access or device_access):
             allowed.discard('get_dpc_context')
 
         profile_skills = profile.get('skills', {})

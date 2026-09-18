@@ -116,7 +116,6 @@ BUILTIN_TASK_TYPES = {
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "The message to process"},
-                "dpc_context": {"type": "object", "description": "Optional DPC context"},
             },
             "required": ["text"],
         },

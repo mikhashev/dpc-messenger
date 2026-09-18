@@ -854,6 +854,59 @@ class TestAgentContextDefaultDeny:
         assert fw.can_agent_access_context('device', profile_name='agent_allowed') is True
 
 
+class TestGetDpcContextToolGate:
+    """2026-09-18: get_dpc_context is the only way an agent sees either context,
+    so it stays while *either* switch is on. The live agents are personal=false,
+    device=true; gating on personal alone left them no device access at all."""
+
+    CASES = [
+        (False, True, True),
+        (True, False, True),
+        (True, True, True),
+        (False, False, False),
+    ]
+
+    @staticmethod
+    def _fw(tmp_path, rules):
+        import json
+        rules_file = tmp_path / "privacy_rules.json"
+        rules_file.write_text(json.dumps(rules))
+        return ContextFirewall(rules_file)
+
+    @pytest.mark.parametrize("personal,device,kept", CASES)
+    def test_global(self, tmp_path, personal, device, kept):
+        fw = self._fw(tmp_path, {"dpc_agent": {
+            "enabled": True,
+            "personal_context_access": personal,
+            "device_context_access": device,
+        }})
+        assert ('get_dpc_context' in fw.get_allowed_agent_tools()) is kept
+
+    @pytest.mark.parametrize("personal,device,kept", CASES)
+    def test_per_profile(self, tmp_path, personal, device, kept):
+        # Global switches point the other way, so a profile value that is not
+        # read would flip the answer.
+        fw = self._fw(tmp_path, {
+            "dpc_agent": {"enabled": True,
+                          "personal_context_access": not personal,
+                          "device_context_access": not device},
+            "agent_profiles": {"agent_x": {
+                "enabled": True,
+                "personal_context_access": personal,
+                "device_context_access": device,
+            }},
+        })
+        assert ('get_dpc_context' in fw.get_allowed_agent_tools_for_profile('agent_x')) is kept
+
+    def test_per_profile_device_falls_back_to_global(self, tmp_path):
+        fw = self._fw(tmp_path, {
+            "dpc_agent": {"enabled": True, "device_context_access": True},
+            "agent_profiles": {"agent_x": {"enabled": True,
+                                           "personal_context_access": False}},
+        })
+        assert 'get_dpc_context' in fw.get_allowed_agent_tools_for_profile('agent_x')
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
