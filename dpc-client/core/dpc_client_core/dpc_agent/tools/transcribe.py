@@ -24,6 +24,8 @@ log = logging.getLogger(__name__)
 
 _WHISPER_PROVIDER_TYPE = "local_whisper"
 _PREVIEW_CHARS = 300
+_FORMATS = ("txt", "srt", "json")
+_FORMAT_SUFFIX = {"txt": ".txt", "srt": ".srt", "json": ".json"}
 
 
 def _whisper_providers(ctx: ToolContext) -> dict:
@@ -59,13 +61,61 @@ def _pick_provider(ctx: ToolContext, model: Optional[str]) -> tuple[Optional[Any
     return None, f"No Whisper provider matches '{model}'. Available: {available}"
 
 
-def _output_target(ctx: ToolContext, audio_path: Path, output_path: Optional[str]) -> Path:
+def _output_target(
+    ctx: ToolContext,
+    audio_path: Path,
+    output_path: Optional[str],
+    fmt: str = "txt",
+) -> Path:
     if output_path:
         target = _resolve_file_path(ctx, output_path, require_write=True)
     else:
-        target = ctx.repo_path(f"transcripts/{audio_path.stem}.txt")
+        suffix = _FORMAT_SUFFIX.get(fmt, ".txt")
+        target = ctx.repo_path(f"transcripts/{audio_path.stem}{suffix}")
     target.parent.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def _srt_time(seconds: float) -> str:
+    """Format seconds as the SubRip stamp HH:MM:SS,mmm."""
+    if seconds < 0:
+        seconds = 0.0
+    total_ms = int(round(seconds * 1000))
+    hours, rest = divmod(total_ms, 3600_000)
+    minutes, rest = divmod(rest, 60_000)
+    secs, millis = divmod(rest, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _render_srt(segments: List[dict], text: str, duration: float) -> str:
+    """Render segments as SubRip. No segments — one cue holding the whole text."""
+    cues = segments or [{"start": 0.0, "end": duration or 0.0, "text": text.strip()}]
+    blocks = []
+    for index, cue in enumerate(cues, start=1):
+        start = _srt_time(float(cue.get("start", 0.0) or 0.0))
+        end = _srt_time(float(cue.get("end", 0.0) or 0.0))
+        cue_text = (cue.get("text") or "").strip()
+        blocks.append(f"{index}\n{start} --> {end}\n{cue_text}\n")
+    return "\n".join(blocks)
+
+
+def _normalise_segments(raw: Any) -> List[dict]:
+    """Keep only well-formed {start, end, text} segments from a provider result."""
+    segments: List[dict] = []
+    if not raw:
+        return segments
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        item_text = (item.get("text") or "").strip()
+        if not item_text:
+            continue
+        segments.append({
+            "start": float(item.get("start") or 0.0),
+            "end": float(item.get("end") or 0.0),
+            "text": item_text,
+        })
+    return segments
 
 
 async def transcribe_audio_file(
@@ -74,6 +124,7 @@ async def transcribe_audio_file(
     model: Optional[str] = None,
     language: Optional[str] = None,
     output_path: Optional[str] = None,
+    format: str = "txt",
 ) -> str:
     """
     Transcribe an audio file with the local Whisper model.
@@ -88,12 +139,19 @@ async def transcribe_audio_file(
                local_whisper provider.
         language: ISO code (e.g. "ru", "en"). Default: provider config,
                   usually auto-detect.
-        output_path: Where to write the .txt. Default: transcripts/<name>.txt
-                     in the agent sandbox.
+        output_path: Where to write the transcript. Default:
+                     transcripts/<name>.<format> in the agent sandbox.
+        format: "txt" (default, plain text), "srt" (SubRip cues built from the
+                Whisper segment timestamps) or "json" (text plus segments).
 
     Returns:
-        JSON string with output_path, language, duration_seconds, chars, preview
+        JSON string with output_path, language, duration_seconds, chars,
+        format, segments (count) and preview
     """
+    fmt = (format or "txt").lower()
+    if fmt not in _FORMATS:
+        return f"⚠️ Unknown format '{format}'. Use one of: {', '.join(_FORMATS)}."
+
     try:
         source = _resolve_file_path(ctx, audio_path, require_write=False)
     except PermissionError as e:
@@ -128,9 +186,25 @@ async def transcribe_audio_file(
     if not text.strip():
         return "⚠️ Transcription produced no text — the file may contain no speech."
 
+    segments = _normalise_segments((result or {}).get("segments"))
+    duration = round((result or {}).get("duration", 0) or 0, 1)
+
+    if fmt == "srt":
+        payload = _render_srt(segments, text, duration)
+    elif fmt == "json":
+        payload = json.dumps({
+            "text": text,
+            "language": result.get("language", "unknown"),
+            "duration_seconds": duration,
+            "model": getattr(provider, "model_name", "unknown"),
+            "segments": segments,
+        }, ensure_ascii=False, indent=2)
+    else:
+        payload = text
+
     try:
-        target = _output_target(ctx, source, output_path)
-        target.write_text(text, encoding="utf-8")
+        target = _output_target(ctx, source, output_path, fmt)
+        target.write_text(payload, encoding="utf-8")
     except PermissionError as e:
         return f"⚠️ Access denied writing transcript: {e}"
     except OSError as e:
@@ -139,8 +213,10 @@ async def transcribe_audio_file(
     return json.dumps({
         "output_path": str(target),
         "language": result.get("language", "unknown"),
-        "duration_seconds": round(result.get("duration", 0) or 0, 1),
+        "duration_seconds": duration,
         "chars": len(text),
+        "format": fmt,
+        "segments": len(segments),
         "model": getattr(provider, "model_name", "unknown"),
         "preview": text[:_PREVIEW_CHARS],
     }, ensure_ascii=False)
@@ -162,7 +238,9 @@ def get_tools() -> List[ToolEntry]:
                     "using the local Whisper model. Runs offline on the GPU, no API "
                     "cost. Writes the transcript to a .txt file and returns its path "
                     "plus a short preview — the full text is NOT returned inline "
-                    "(a 30-minute recording is ~18 KB). Read the returned path with "
+                    "(a 30-minute recording is ~18 KB). Pass format='srt' or "
+                    "format='json' to keep the per-segment timestamps instead of "
+                    "plain text. Read the returned path with "
                     "read_file to work with the text. "
                     "Note: on non-speech stretches (pauses, silence, applause) Whisper "
                     "hallucinates filler — subtitle credits ('Субтитры создавал …') and "
@@ -199,8 +277,20 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": (
                                 "Where to write the transcript. Defaults to "
-                                "transcripts/<name>.txt in the agent sandbox. An "
+                                "transcripts/<name>.<format> in the agent sandbox. An "
                                 "absolute path requires extended-path write access."
+                            ),
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": ["txt", "srt", "json"],
+                            "description": (
+                                "Output format. 'txt' (default) writes plain text; "
+                                "'srt' writes SubRip cues from the Whisper segment "
+                                "timestamps; 'json' writes text, language, duration "
+                                "and the segment list. When the provider returns no "
+                                "segments, 'srt' falls back to one cue covering the "
+                                "whole recording."
                             ),
                         },
                     },

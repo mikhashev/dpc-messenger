@@ -16,17 +16,28 @@ from dpc_client_core.dpc_agent.tools.transcribe import get_tools, transcribe_aud
 
 
 class FakeWhisperProvider:
-    def __init__(self, model_name="openai/whisper-large-v3-turbo", text="привет мир", language="ru"):
+    def __init__(self, model_name="openai/whisper-large-v3-turbo", text="привет мир", language="ru",
+                 segments=None):
         self.config = {"type": "local_whisper"}
         self.model_name = model_name
         self.language = "auto"
         self.calls = []
         self._text = text
         self._language = language
+        self._segments = segments
 
     async def transcribe(self, audio_path):
         self.calls.append({"audio_path": audio_path, "language": self.language})
-        return {"text": self._text, "language": self._language, "duration": 1816.28}
+        result = {"text": self._text, "language": self._language, "duration": 1816.28}
+        if self._segments is not None:
+            result["segments"] = self._segments
+        return result
+
+
+TWO_SEGMENTS = [
+    {"start": 0.0, "end": 2.5, "text": "привет"},
+    {"start": 2.5, "end": 3661.004, "text": "мир"},
+]
 
 
 class FakeNonWhisperProvider:
@@ -237,6 +248,102 @@ class TestFailures:
         assert not (agent_root / "transcripts").exists()
 
 
+class TestTimestampFormats:
+    @pytest.mark.asyncio
+    async def test_srt_file_content_is_exact(self, agent_root, audio_file):
+        provider = FakeWhisperProvider(text="привет мир", segments=TWO_SEGMENTS)
+        ctx = make_ctx(agent_root, {"whisper": provider})
+
+        result = json.loads(await transcribe_audio_file(ctx, "voice.ogg", format="srt"))
+
+        written = pathlib.Path(result["output_path"])
+        assert written == agent_root / "transcripts" / "voice.srt"
+        assert written.read_text(encoding="utf-8") == (
+            "1\n"
+            "00:00:00,000 --> 00:00:02,500\n"
+            "привет\n"
+            "\n"
+            "2\n"
+            "00:00:02,500 --> 01:01:01,004\n"
+            "мир\n"
+        )
+        assert result["format"] == "srt"
+        assert result["segments"] == 2
+
+    @pytest.mark.asyncio
+    async def test_json_file_shape(self, agent_root, audio_file):
+        provider = FakeWhisperProvider(segments=TWO_SEGMENTS)
+        ctx = make_ctx(agent_root, {"whisper": provider})
+
+        result = json.loads(await transcribe_audio_file(ctx, "voice.ogg", format="json"))
+
+        written = pathlib.Path(result["output_path"])
+        assert written == agent_root / "transcripts" / "voice.json"
+        payload = json.loads(written.read_text(encoding="utf-8"))
+        assert set(payload) == {"text", "language", "duration_seconds", "model", "segments"}
+        assert payload["text"] == "привет мир"
+        assert payload["language"] == "ru"
+        assert payload["duration_seconds"] == 1816.3
+        assert payload["model"] == "openai/whisper-large-v3-turbo"
+        assert payload["segments"] == TWO_SEGMENTS
+
+    @pytest.mark.asyncio
+    async def test_txt_is_unchanged_even_with_segments(self, agent_root, audio_file):
+        provider = FakeWhisperProvider(segments=TWO_SEGMENTS)
+        ctx = make_ctx(agent_root, {"whisper": provider})
+
+        result = json.loads(await transcribe_audio_file(ctx, "voice.ogg"))
+
+        written = pathlib.Path(result["output_path"])
+        assert written == agent_root / "transcripts" / "voice.txt"
+        assert written.read_text(encoding="utf-8") == "привет мир"
+        assert result["format"] == "txt"
+
+    @pytest.mark.asyncio
+    async def test_unknown_format_rejected(self, agent_root, audio_file):
+        ctx = make_ctx(agent_root, {"whisper": FakeWhisperProvider()})
+
+        result = await transcribe_audio_file(ctx, "voice.ogg", format="vtt")
+
+        assert result.startswith("⚠️")
+        assert "vtt" in result
+        assert not (agent_root / "transcripts").exists()
+
+    @pytest.mark.asyncio
+    async def test_srt_falls_back_to_one_cue_without_segments(self, agent_root, audio_file):
+        ctx = make_ctx(agent_root, {"whisper": FakeWhisperProvider()})
+
+        result = json.loads(await transcribe_audio_file(ctx, "voice.ogg", format="srt"))
+
+        assert pathlib.Path(result["output_path"]).read_text(encoding="utf-8") == (
+            "1\n"
+            "00:00:00,000 --> 00:30:16,300\n"
+            "привет мир\n"
+        )
+        assert result["segments"] == 0
+
+    @pytest.mark.asyncio
+    async def test_json_without_segments_says_empty_list(self, agent_root, audio_file):
+        ctx = make_ctx(agent_root, {"whisper": FakeWhisperProvider()})
+
+        result = json.loads(await transcribe_audio_file(ctx, "voice.ogg", format="json"))
+
+        payload = json.loads(pathlib.Path(result["output_path"]).read_text(encoding="utf-8"))
+        assert payload["segments"] == []
+        assert result["segments"] == 0
+
+    @pytest.mark.asyncio
+    async def test_explicit_output_path_wins_over_format_suffix(self, agent_root, audio_file):
+        ctx = make_ctx(agent_root, {"whisper": FakeWhisperProvider(segments=TWO_SEGMENTS)})
+
+        result = json.loads(
+            await transcribe_audio_file(ctx, "voice.ogg", output_path="out/cues.txt", format="srt")
+        )
+
+        assert pathlib.Path(result["output_path"]) == agent_root / "out" / "cues.txt"
+        assert "-->" in pathlib.Path(result["output_path"]).read_text(encoding="utf-8")
+
+
 class TestRegistration:
     def test_tool_is_opt_in_with_long_timeout(self):
         entry = get_tools()[0]
@@ -250,5 +357,10 @@ class TestRegistration:
 
         assert schema["parameters"]["required"] == ["audio_path"]
         assert set(schema["parameters"]["properties"]) == {
-            "audio_path", "model", "language", "output_path",
+            "audio_path", "model", "language", "output_path", "format",
         }
+
+    def test_schema_lists_the_three_formats(self):
+        schema = get_tools()[0].schema
+
+        assert schema["parameters"]["properties"]["format"]["enum"] == ["txt", "srt", "json"]
