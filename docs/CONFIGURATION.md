@@ -275,7 +275,8 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   `llamacpp_server`, `local_whisper`). The card is the scarce resource: a request queues
   behind peer inference on the same lock, and one that would wait longer than
   `[connection] remote_inference_timeout` is answered `503` (the card is busy). The
-  first entry is also what the P2P door serves peers from; the older `serving_alias`
+  whole list is also what the P2P door serves peers from — every entry, the first being
+  what a request naming no provider is served from (amendment 2026-09-18); the older `serving_alias`
   key is still read and folded into this list with a warning, and a file carrying both
   keys with different values is refused at load. A `local_whisper` alias belongs in this
   list — that is how the P2P door offers transcription to a peer who holds the

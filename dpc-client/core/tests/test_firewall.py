@@ -978,6 +978,31 @@ class TestComputeServingAlias:
         assert firewall_serving.can_request_inference(
             "dpc-node-alice-123", provider="deepseek_flash") is False
 
+    @pytest.fixture
+    def firewall_two_local(self, tmp_path):
+        """Two aliases marked served over P2P — Mike's call, 2026-09-18."""
+        import json
+        rules_file = tmp_path / ".dpc_access.json"
+        rules_file.write_text(json.dumps({
+            "compute": {
+                "enabled": True,
+                "allow_nodes": ["dpc-node-alice-123"],
+                "serving_local": ["ollama_local", "bonsai"],
+            }
+        }))
+        return ContextFirewall(rules_file)
+
+    def test_every_alias_in_serving_local_passes_the_gate(self, firewall_two_local):
+        # Before 2026-09-18 the gate compared with serving_local[0], so the
+        # second shared local model was refused at the door.
+        for alias in ("ollama_local", "bonsai"):
+            assert firewall_two_local.can_request_inference(
+                "dpc-node-alice-123", provider=alias) is True
+
+    def test_an_alias_off_the_list_is_still_refused(self, firewall_two_local):
+        assert firewall_two_local.can_request_inference(
+            "dpc-node-alice-123", provider="deepseek_pro") is False
+
     def test_a_named_provider_is_refused_even_with_no_model(self, firewall_without_serving):
         # Johnny's case verbatim: provider named, model omitted. Before D4-0 the
         # gate saw model=None, examined nothing and returned True.

@@ -614,6 +614,46 @@ async def test_both_senders_of_the_menu_produce_the_same_rows(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_two_served_local_aliases_reach_the_peer_on_both_senders(tmp_path):
+    """Mike's call, 2026-09-18: the owner marks any number of local models as
+    served over P2P, and the P2P door serves every one.
+
+    The card this closes: a second alias added to `What I share` was listed as
+    shared on the host and never appeared on a peer, because both senders
+    admitted only `serving_local[0]`.
+    """
+    from dpc_client_core.p2p_coordinator import P2PCoordinator
+
+    second = "bonsai"
+    service = _sharing_service(
+        tmp_path,
+        compute={"serving_local": [LOCAL, second]},
+        transcription={"enabled": False},
+        providers={
+            LOCAL: _Provider("ollama", "gemma3:27b"),
+            second: _Provider("ollama", "bonsai:4b"),
+            "deepseek_pro": _Provider("deepseek", "deepseek-v4-pro"),
+        },
+        peers={PEER: object()},
+    )
+    service.p2p_manager.send_message_to_peer = AsyncMock()
+    service._pending_providers_requests = {}
+    service.local_api = SimpleNamespace(broadcast_event=AsyncMock())
+    service._notify_peers_of_provider_changes = (
+        CoreService._notify_peers_of_provider_changes.__get__(service, SimpleNamespace)
+    )
+
+    await P2PCoordinator(service).handle_get_providers_request(PEER)
+    on_request = service.p2p_manager.send_message_to_peer.call_args[0][1]["payload"]["providers"]
+    await service._notify_peers_of_provider_changes()
+    on_save = service.p2p_manager.send_message_to_peer.call_args[0][1]["payload"]["providers"]
+
+    assert [row["alias"] for row in on_request] == [LOCAL, second]
+    assert [row["alias"] for row in on_save] == [LOCAL, second]
+    assert "deepseek_pro" not in json.dumps(on_save), "an unlisted alias is still not named"
+
+
+@pytest.mark.asyncio
 async def test_a_free_peer_and_a_paying_peer_differ_only_in_the_tariff(tmp_path):
     blocks = {"node_groups": {GROUP: [PEER, STRANGER]}}
     service = _sharing_service(

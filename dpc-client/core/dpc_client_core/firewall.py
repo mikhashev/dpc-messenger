@@ -324,11 +324,12 @@ class ContextFirewall:
 
     @property
     def compute_serving_alias(self) -> Optional[str]:
-        """The one alias the P2P door serves peers from: the first local entry.
+        """The default alias the P2P door serves when a peer names none.
 
-        The two doors read one list. A one-entry `serving_local` — which is
-        what a folded `serving_alias` produces — leaves the peer path exactly
-        as it was.
+        The two doors read one list. Since 2026-09-18 (Mike's call, ADR-041
+        amendment) every entry in `serving_local` is served over P2P, not only
+        this one; this stays the default for a request that carries no
+        provider, and the state line reads it.
         """
         return self.compute_serving_local[0] if self.compute_serving_local else None
 
@@ -596,23 +597,26 @@ class ContextFirewall:
                 "serving_alias unset) — peer inference requests will be refused. Name the alias "
                 "this node should serve peers from in privacy_rules.json under compute.serving_local."
             )
-        elif known_aliases is not None and self.compute_serving_alias not in set(known_aliases):
+        elif known_aliases is not None and (
+                unknown := [a for a in self.compute_serving_local if a not in set(known_aliases)]):
             # A name that resolves to nothing used to read like a name that
             # works: the line below would announce it, the peer-facing provider
             # list would filter to it and come out empty, and the failure would
             # arrive only when a peer asked. Observed 2026-08-21 with
             # `serving_alias` still naming an Ollama alias deleted hours before.
             logger.warning(
-                "Compute sharing is enabled and compute.serving_local names '%s' first, which is "
-                "not a configured provider — peers are told this node offers nothing, and a "
-                "request that does arrive is refused on the missing alias. Point it at a "
-                "live alias in privacy_rules.json, or turn compute.enabled off.",
-                self.compute_serving_alias,
+                "Compute sharing is enabled and compute.serving_local names %s, which is not a "
+                "configured provider — peers are not offered it, and a request that does arrive "
+                "is refused on the missing alias. Point it at a live alias in "
+                "privacy_rules.json, or turn compute.enabled off.",
+                ", ".join(repr(a) for a in unknown),
             )
         else:
+            # Every listed alias is served since 2026-09-18, so the line names
+            # them all; the first is only what a request naming none gets.
             logger.info(
-                "Compute sharing: enabled, serving peers from '%s' (%d node(s), %d group(s) allowed)",
-                self.compute_serving_alias,
+                "Compute sharing: enabled, serving peers from %s (%d node(s), %d group(s) allowed)",
+                ", ".join(repr(a) for a in self.compute_serving_local),
                 len(self.compute_allowed_nodes), len(self.compute_allowed_groups),
             )
 
@@ -1440,7 +1444,7 @@ class ContextFirewall:
                     "allow_nodes": [],
                     "_allowed_models": "Empty = every model. Since the host designates serving_alias, this list can only refuse a peer that names a model; it never chooses one. A non-empty list that does not contain the serving alias's own model makes this node advertise nothing and refuse everything.",
                     "allowed_models": [],
-                    "_serving_alias": "Deprecated single form of serving_local, still read. What this node serves is serving_local (aliases on this machine; the first is what peers get) and serving_vendor (paid APIs, each needing a USD-per-day ceiling in vendor_quotas). Empty = share nothing (the opposite of allowed_models, where empty = all).",
+                    "_serving_alias": "Deprecated single form of serving_local, still read. What this node serves is serving_local (aliases on this machine; every one of them is served to peers, the first being what a request naming none gets) and serving_vendor (paid APIs, each needing a USD-per-day ceiling in vendor_quotas). Empty = share nothing (the opposite of allowed_models, where empty = all).",
                     "serving_alias": None,
                     "_currency": "ISO 4217 code of the unit the tariff below is priced in, e.g. \"USD\" or \"RUB\". Null = no tariff declared: every call served is a gift, whatever serving_tariff says.",
                     "currency": None,
@@ -1920,8 +1924,8 @@ class ContextFirewall:
         Args:
             requester_node_id: The node_id of the requesting peer
             model: Optional model name to check if allowed
-            provider: Optional provider alias the peer named. Only the alias
-                this node designates in `compute.serving_alias` is accepted;
+            provider: Optional provider alias the peer named. Only an alias
+                this node lists in `compute.serving_local` is accepted;
                 anything else is refused, including when no model is given.
 
         Returns:
@@ -1935,12 +1939,16 @@ class ContextFirewall:
         # alias travelled straight from the wire to the router while this check
         # was handed only the model, so `provider: "deepseek_pro"` with no model
         # passed a check that had nothing to look at. Note this refuses the
-        # named alias even when serving_alias is unset — nothing designated,
-        # nothing served.
-        if provider is not None and provider != self.compute_serving_alias:
+        # named alias even when serving_local is empty — nothing designated,
+        # nothing served. Since 2026-09-18 the owner may list any number of
+        # local aliases and every one of them is served (Mike's call, ADR-041
+        # amendment), so this is a membership test, not an equality one.
+        if provider is not None and provider not in self.compute_serving_local:
             logger.warning(
-                "Compute denied for %s: named provider '%s' is not this node's serving alias (%s)",
-                requester_node_id, provider, self.compute_serving_alias or "unset",
+                "Compute denied for %s: named provider '%s' is in none of this node's served "
+                "aliases (%s)",
+                requester_node_id, provider,
+                ", ".join(self.compute_serving_local) or "none",
             )
             return False
 

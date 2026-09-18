@@ -896,6 +896,28 @@ add rate tables or to say so on the tab is the open card
 503 rather than 429 on the two new words was put to Mike as this session's own
 choice and is his to overturn.)*
 
+*(**Amendment, 2026-09-18 — the P2P door serves every alias in
+`serving_local`, not the first.** Mike's call, 2026-09-18: the UI is
+where the owner marks which local models are served over P2P, and marking two
+or three of them is the point — the owner marks any number of local aliases as
+served, and the peer door serves each of them.
+The 2026-09-10 amendment above pinned the door to `serving_local[0]`, so a
+second model added to *What I share* was listed as shared on the host and never
+reached a peer: the menu (`CoreService.menu_for_peer`) admitted one row and the
+gate (`ContextFirewall.can_request_inference`) compared the peer's named
+provider with that one alias. Both now read the list: a row per served alias
+that passes `compute.allowed_models`, and a membership test at the gate.
+`compute_serving_alias` survives as the **default** — what a request naming no
+provider is served from, and what the state line reads — because a guest that
+names nothing must still be answered from one alias. Whisper rows are
+unchanged, and the vendor list, the quotas and the onward-sharing refusal (D7)
+are untouched: what is served widened, what may be served did not. Whether the
+marked aliases fit on the node's cards is not this door's question but the
+arbiter's
+(`THE-INTERFACE-LETS-EVERY-AGENT-PICK-ITS-OWN-LOCAL-MODEL-AND-THE-CARD-CAN-HOLD-ONE`);
+a node may also have several GPUs, so «two served aliases» is not by itself two
+models on one card.)*
+
 ### D6 — `aiohttp.web`, declared explicitly
 
 **Re-decided.** The first writing offered two options — hand-written asyncio

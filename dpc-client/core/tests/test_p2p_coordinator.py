@@ -126,7 +126,7 @@ async def test_a_peer_naming_a_model_is_still_served_by_the_designated_alias():
 
 
 @pytest.mark.asyncio
-async def test_the_alias_a_peer_names_goes_to_the_gate_and_never_to_the_router():
+async def test_the_alias_a_peer_names_goes_to_the_gate_and_then_to_the_router():
     coord, svc = make_coordinator()
     svc.firewall.can_request_inference.return_value = True
     svc.llm_manager.query = AsyncMock(return_value={"response": "ok", "model": "m"})
@@ -135,7 +135,21 @@ async def test_the_alias_a_peer_names_goes_to_the_gate_and_never_to_the_router()
 
     # The gate is handed the alias — before D4-0 it was handed only the model.
     assert svc.firewall.can_request_inference.call_args[1]["provider"] == "deepseek_pro"
-    # And whatever the peer named, the router uses the host's own alias.
+    # Since 2026-09-18 every alias in compute.serving_local is served, so a
+    # name the gate admits is what runs; a name off the list never reaches
+    # here, because the gate refuses it (test_firewall).
+    assert svc.llm_manager.query.call_args[1]["provider_alias"] == "deepseek_pro"
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_names_no_alias_falls_to_the_first_served_one():
+    """The default is unchanged: no provider on the wire, first local entry."""
+    coord, svc = make_coordinator()
+    svc.firewall.can_request_inference.return_value = True
+    svc.llm_manager.query = AsyncMock(return_value={"response": "ok", "model": "m"})
+
+    await coord.handle_inference_request("peer-1", "req-1", "hi")
+
     assert svc.llm_manager.query.call_args[1]["provider_alias"] == "ollama_local"
 
 
@@ -398,7 +412,36 @@ async def test_request_inference_timeout():
 
 
 @pytest.mark.asyncio
-async def test_only_the_designated_alias_is_offered_to_a_peer():
+async def test_every_designated_local_alias_is_offered_to_a_peer():
+    """Two aliases in compute.serving_local, two rows on the wire.
+
+    Mike's call, 2026-09-18: the owner marks any number of local models as
+    served over P2P, and the P2P door serves every one — before that the menu
+    admitted only `serving_local[0]`, so a second shared model was listed as
+    shared on the host and never appeared on a peer.
+    """
+    coord, svc = make_coordinator()
+    svc.firewall.can_request_inference.return_value = True
+    svc.firewall.can_request_transcription.return_value = False
+    svc.firewall.compute_serving_local = ["ollama_local", "bonsai"]
+
+    infos = {
+        "ollama_local": {"alias": "ollama_local", "model": "gemma3:27b", "type": "ollama"},
+        "bonsai": {"alias": "bonsai", "model": "bonsai:4b", "type": "ollama"},
+        "deepseek_pro": {"alias": "deepseek_pro", "model": "deepseek-v4-pro", "type": "deepseek"},
+    }
+    svc.llm_manager.providers = {k: MagicMock() for k in infos}
+    svc.build_p2p_provider_info = MagicMock(side_effect=lambda alias, provider, **_: infos[alias])
+
+    await coord.handle_get_providers_request("peer-1")
+
+    sent = svc.p2p_manager.send_message_to_peer.call_args[0][1]
+    offered = [p["alias"] for p in sent["payload"]["providers"]]
+    assert offered == ["ollama_local", "bonsai"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_designated_aliases_are_offered_to_a_peer():
     """We advertised every provider we had, paid ones included (ADR-040 D4-0).
 
     Serving and advertising have to agree: a peer that is offered an alias will
@@ -409,7 +452,7 @@ async def test_only_the_designated_alias_is_offered_to_a_peer():
     coord, svc = make_coordinator()
     svc.firewall.can_request_inference.return_value = True
     svc.firewall.can_request_transcription.return_value = False
-    svc.firewall.compute_serving_alias = "ollama_local"
+    svc.firewall.compute_serving_local = ["ollama_local"]
 
     infos = {
         "ollama_local": {"alias": "ollama_local", "model": "gemma3:27b", "type": "ollama"},
@@ -430,7 +473,7 @@ async def test_a_node_with_no_designated_alias_offers_no_compute():
     coord, svc = make_coordinator()
     svc.firewall.can_request_inference.return_value = True
     svc.firewall.can_request_transcription.return_value = False
-    svc.firewall.compute_serving_alias = None
+    svc.firewall.compute_serving_local = []
 
     info = {"alias": "ollama_local", "model": "gemma3:27b", "type": "ollama"}
     svc.llm_manager.providers = {"ollama_local": MagicMock()}

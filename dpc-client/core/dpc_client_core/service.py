@@ -2467,9 +2467,12 @@ class CoreService:
         One selection for both paths that send that message: the peer's own
         GET_PROVIDERS and the notify after a firewall save. A `local_whisper`
         row needs transcription permission on its own model; any other row
-        needs inference permission on its model and must be the one alias this
-        node designates. The second element is the sentence a log line or a
-        preview card says when the list is shorter than the owner expects.
+        needs inference permission on its model and must be one of the aliases
+        this node lists in compute.serving_local — every one of them is served
+        since 2026-09-18 (Mike's call, ADR-041 amendment), so a second shared
+        local model reaches the peer too. The second element is the sentence a
+        log line or a preview card says when the list is shorter than the owner
+        expects.
         """
         firewall = self.firewall
         has_compute = firewall.can_request_inference(peer_id)
@@ -2481,6 +2484,7 @@ class CoreService:
                 "(transcription.allow_nodes / allow_groups)"
             )
 
+        served_local = list(getattr(firewall, "compute_serving_local", None) or [])
         rows: List[Dict[str, Any]] = []
         for alias, provider in self.llm_manager.providers.items():
             info = self.build_p2p_provider_info(alias, provider, peer_id=peer_id)
@@ -2488,20 +2492,20 @@ class CoreService:
                 if has_transcription and firewall.can_request_transcription(peer_id, info["model"]):
                     rows.append(info)
             elif (has_compute
-                    and alias == firewall.compute_serving_alias
+                    and alias in served_local
                     and firewall.can_request_inference(peer_id, info["model"])):
                 rows.append(info)
 
         if rows:
             return rows, None
-        if has_compute and not firewall.compute_serving_alias:
+        if has_compute and not served_local:
             return rows, (
                 "inference sharing is on and this peer is allowed, but no alias is designated "
                 "in compute.serving_local, so there is nothing to offer"
             )
         return rows, (
-            "no configured provider passes this peer's permissions: the designated alias "
-            "(compute.serving_local) and compute.allowed_models decide the inference row, "
+            "no configured provider passes this peer's permissions: the designated aliases "
+            "(compute.serving_local) and compute.allowed_models decide the inference rows, "
             "and the transcription permissions decide a transcription one"
         )
 

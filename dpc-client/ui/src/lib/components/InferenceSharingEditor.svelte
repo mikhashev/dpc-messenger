@@ -410,11 +410,12 @@
           {/if}
           <strong>Share my models with peers</strong>
         </label>
-        <p class="help-text-small">
+        <p class="help-text-small">Lets peers run inference on this node's models.</p>
+        <details class="why"><summary>why</summary>
           Using a peer's model does not need this. Serving one does: peers' prompts arrive on
           this machine in plaintext, and this application shows, stores and logs none of them
           (ADR-041 D7, amendment 2026-09-14).
-        </p>
+        </details>
       </div>
 
       {#if refusedWith.length > 0}
@@ -457,19 +458,26 @@
         <div class="subsection">
           <h4>1. What I share</h4>
           <p class="help-text-small">
-            Two lists, by what an alias spends. A <strong>local</strong> alias (Ollama, llama.cpp) spends this
-            card; the first one is what peers are served from over P2P. A <strong>vendor</strong> alias spends
-            money and needs a daily ceiling per caller, in USD. A remote peer's model and an agent are never
-            offered: what is shared is not shared onward (ADR-041 D7). Whisper is shared under Transcription Sharing.
+            The aliases this node serves &mdash; every local one is served over P2P, and
+            <strong>a vendor alias needs a daily ceiling</strong>.
           </p>
+          <details class="why"><summary>why</summary>
+            Two lists, by what an alias spends. A <strong>local</strong> alias (Ollama, llama.cpp) spends this
+            card; every one listed is served to peers over P2P (Mike's call, 2026-09-18), the first being what
+            a request naming no alias gets. A <strong>vendor</strong> alias spends money, so its ceiling is
+            per caller, in USD per day. A remote peer's model and an agent are never offered: what is shared is
+            not shared onward (ADR-041 D7). Whisper is shared under Transcription Sharing.
+          </details>
 
           <h5>Local (spends this card)</h5>
           <div class="rule-list">
-            {#each view.serving_local ?? [] as alias, index (alias)}
+            {#each view.serving_local ?? [] as alias (alias)}
               <div class="rule-row">
                 <span class="alias-cell">
                   <code class="rule-path">{alias}</code>
-                  {#if index === 0}<span class="badge badge-first">served over P2P</span>{/if}
+                  <!-- Every listed alias is served over P2P since 2026-09-18 (Mike's
+                       call), so the badge is on every row, not on the first. -->
+                  <span class="badge badge-first">served over P2P</span>
                   {#if providerByAlias.has(alias)}
                     <span class="muted">({providerByAlias.get(alias)?.model})</span>
                   {:else}
@@ -548,11 +556,13 @@
 
           <h5>1b. Models this door will accept</h5>
           <p class="help-text-small">
-            A filter on what a caller may ask for, not a third list of what is served.
-            <strong>An empty list accepts every model</strong> &mdash; the opposite of the two lists above,
+            A filter on what a caller may ask for. <strong>An empty list accepts every model</strong>.
+          </p>
+          <details class="why"><summary>why</summary>
+            Not a third list of what is served: empty here is the opposite of the two lists above,
             where an empty list serves nobody. Name one model and only that one may be asked for, on any
             alias shared above.
-          </p>
+          </details>
           <div class="rule-list">
             {#each view.allowed_models ?? [] as model (model)}
               <div class="rule-row">
@@ -603,13 +613,16 @@
         <div class="subsection">
           <h4>2. Who may call &mdash; and who calls for free</h4>
           <p class="help-text-small">
-            Peers and groups admitted to the aliases above. <strong>Free</strong> marks an admitted caller who
-            gets the tariff at zero; it distinguishes, it does not admit &mdash; removing a caller removes the
-            mark with it (ADR-041 D3). Groups are the ones on the Node Groups tab.
+            Peers and groups admitted to the aliases above; <strong>free</strong> puts an admitted
+            caller's tariff at zero.
             {#if !view.currency}
               <em>No tariff is declared, so today every call is a gift whatever the mark says.</em>
             {/if}
           </p>
+          <details class="why"><summary>why</summary>
+            The mark distinguishes, it does not admit &mdash; removing a caller removes the mark with it
+            (ADR-041 D3). Groups are the ones on the Node Groups tab.
+          </details>
 
           <h5>Nodes</h5>
           <div class="rule-list">
@@ -723,11 +736,13 @@
         <div class="subsection">
           <h4>3. Tariff</h4>
           <p class="help-text-small">
-            Rates per 1M tokens in and out, in this node's currency, dated per alias. The newest line on or
-            before the day of the call applies (UTC). Three states: <em>not declared</em> &mdash; the call is a
-            gift; <em>declared 0</em> &mdash; free by decision; above zero &mdash; paid. A line once written is
-            not edited: add a new one from a later date.
+            Rates per 1M tokens in and out, dated per alias, in this node's currency.
           </p>
+          <details class="why"><summary>why</summary>
+            The newest line on or before the day of the call applies (UTC). Three states:
+            <em>not declared</em> &mdash; the call is a gift; <em>declared 0</em> &mdash; free by decision;
+            above zero &mdash; paid. A line once written is not edited: add a new one from a later date.
+          </details>
 
           <div class="rule-row currency-row">
             <span class="alias-cell"><strong>Currency</strong> <span class="muted">(ISO 4217)</span></span>
@@ -835,12 +850,15 @@
         <h4>5. IDE door</h4>
         <p class="help-text-small">
           An OpenAI-compatible listener for the clients on this machine &mdash; Continue, Cursor,
-          Claude Code, curl. It is switched, bound and ported by <code>[gateway]</code> in
-          <code>config.ini</code>, which is read once at start, so there is no switch here: what a
-          restart would change is shown, not offered. The serving lists close this node's own
-          aliases only: a call to <code>remote:&lt;peer&gt;:&lt;alias&gt;</code> is carried to the
-          peer that serves it whatever those lists hold.
+          Claude Code, curl.
         </p>
+        <details class="why"><summary>why</summary>
+          It is switched, bound and ported by <code>[gateway]</code> in <code>config.ini</code>, which is
+          read once at start, so there is no switch here: what a restart would change is shown, not
+          offered. The serving lists close this node's own aliases only: a call to
+          <code>remote:&lt;peer&gt;:&lt;alias&gt;</code> is carried to the peer that serves it whatever
+          those lists hold.
+        </details>
 
         <div class="rule-list">
           <div class="rule-row">
@@ -1051,6 +1069,11 @@
   .section h3 { margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #333; }
   .help-text { color: #666; font-size: 0.9rem; margin: 0 0 1rem 0; }
   .help-text-small { color: #666; font-size: 0.85rem; margin: 0.25rem 0 0.5rem 0; }
+  /* The rationale each block used to print in full: kept, folded away
+     (Mike's call, 2026-09-18 — the tab read like the ADR that designed it). */
+  .why { color: #666; font-size: 0.85rem; margin: 0 0 0.5rem 0; }
+  .why summary { cursor: pointer; color: #888; }
+  .why > :global(*) { margin-top: 0.25rem; }
   .compute-settings { display: flex; flex-direction: column; gap: 1rem; }
   .setting-item { display: flex; align-items: center; gap: 0.5rem; }
   .subsection { margin-top: 1rem; padding-left: 1rem; border-left: 3px solid #e0e0e0; }

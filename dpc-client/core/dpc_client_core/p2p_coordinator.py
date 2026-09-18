@@ -643,7 +643,12 @@ class P2PCoordinator:
         # Unset means we serve nobody: refused out loud, rather than falling back
         # to whatever the router would have picked — which on a box with a paid
         # default_provider means the host pays for a stranger's tokens.
-        serving_alias = self.service.firewall.compute_serving_alias
+        # Since 2026-09-18 every alias in compute.serving_local is served
+        # (Mike's call, ADR-041 amendment), so a peer that names one gets that
+        # one — the gate above has already refused any alias not on the list,
+        # which is why the name may be trusted here. A request naming none
+        # falls to the first entry, as it always did.
+        serving_alias = provider or self.service.firewall.compute_serving_alias
         if not serving_alias:
             logger.warning(
                 "Peer inference refused for %s: this node designates no compute.serving_alias", peer_id

@@ -254,17 +254,40 @@ describe('the models this door accepts', () => {
   // Vitest runs in `environment: 'node'` here and the repo carries no DOM
   // harness, so this reads the component source rather than rendering it
   // (the same bargain approvalCardContrast.test.ts strikes).
-  it('says in the tab itself that an empty list accepts every model', () => {
+  function tabSource(): string {
     const sources = import.meta.glob('./InferenceSharingEditor.svelte', {
       query: '?raw',
       import: 'default',
       eager: true,
     }) as Record<string, string>;
-    const tab = Object.values(sources)[0];
+    return Object.values(sources)[0];
+  }
+
+  it('says in the tab itself that an empty list accepts every model', () => {
+    const tab = tabSource();
     expect(tab).toBeTruthy();
     expect(tab).toContain('<strong>An empty list accepts every model</strong>');
     expect(tab).toContain('No model named &mdash; every model this node serves is accepted.');
     expect(tab).toContain('matches no configured provider');
+  });
+
+  // Mike's call, 2026-09-18: every alias marked served over P2P is served, so
+  // the badge is on every row — the index===0 special case is the defect.
+  it('badges every served local alias, not the first one only', () => {
+    const tab = tabSource();
+    expect(tab).not.toContain('{#if index === 0}<span class="badge badge-first">served over P2P</span>{/if}');
+    expect(tab).toContain('<span class="badge badge-first">served over P2P</span>');
+    expect(tab).not.toContain('the first one is what peers are served from over P2P');
+  });
+
+  // Mike's call, 2026-09-18: the tab read like the ADR that designed it. The
+  // rationale is folded away, not deleted, and the sentences that change an
+  // action stay in the open line.
+  it('keeps each block to one line of copy with the rationale folded behind details', () => {
+    const tab = tabSource();
+    expect(tab.match(/<details class="why">/g)?.length ?? 0).toBeGreaterThanOrEqual(5);
+    expect(tab).toContain('ADR-041 D7, amendment 2026-09-14');
+    expect(tab).toContain('a vendor alias needs a daily ceiling');
   });
 });
 

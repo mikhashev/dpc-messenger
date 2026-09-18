@@ -45,9 +45,10 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
     "request_id": "uuid-here",
     "prompt": "What are some creative quest ideas for...",
     "model": "llama3-70b",  // optional
-    "provider": "ollama_text"  // optional, and advisory only since 2026-08-18:
-                               // the host serves from its own compute.serving_alias
-                               // and refuses any other name (ADR-040 D4-0)
+    "provider": "ollama_text"  // optional: the host serves it only if it stands in
+                               // the host's own compute.serving_local, and refuses any
+                               // other name (ADR-040 D4-0, ADR-041 amendment 2026-09-18);
+                               // naming none is served from the first entry
   }
 }
 ```
@@ -73,15 +74,16 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
     "allow_groups": ["friends"],
     "allow_nodes": ["dpc-node-alice-123"],
     "allowed_models": ["llama3.1:8b", "llama3-70b"],
-    "serving_alias": "ollama_local"
+    "serving_local": ["ollama_local", "bonsai"]
   }
 }
 ```
 
 **Permission Checks:**
 - `can_request_inference(node_id, model, provider)` - Check if peer can request inference.
-  An empty `allowed_models` means *all* models, as the UI says; `serving_alias` is the opposite —
-  unset means nothing is served, and a `provider` naming anything but that alias is refused.
+  An empty `allowed_models` means *all* models, as the UI says; `serving_local` is the opposite —
+  empty means nothing is served, and a `provider` naming an alias off that list is refused.
+  Every alias on the list is served over P2P (Mike's call, 2026-09-18).
 - `get_available_models_for_peer(node_id)` - List models peer can use
 
 ### Service Layer
@@ -122,8 +124,8 @@ Edit `~/.dpc/privacy_rules.json` to enable inference sharing:
     "allow_groups": ["friends", "colleagues"],
     "allow_nodes": ["dpc-node-alice-abc123"],
     "allowed_models": ["llama3.1:8b", "llama3-70b"],
-    "_serving_alias": "Which provider alias peers are served from. Unset = share nothing.",
-    "serving_alias": "ollama_local"
+    "_serving_local": "Which provider aliases peers are served from; every one of them is served. Empty = share nothing.",
+    "serving_local": ["ollama_local"]
   },
   "node_groups": {
     "friends": ["dpc-node-alice-abc123", "dpc-node-bob-def456"],
