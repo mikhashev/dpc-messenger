@@ -18,6 +18,7 @@ from dpc_client_core.dpc_agent.tools.vision import get_tools, describe_image
 class FakeLLMManager:
     def __init__(self, text="A blue brain-with-circuits icon.", model="qwen3-vl:8b"):
         self.calls = []
+        self.providers = {}
         self._text = text
         self._model = model
 
@@ -118,6 +119,89 @@ class TestProviderSelection:
     async def test_default_auto_selects_vision_provider(self, agent_root, image_file):
         llm = FakeLLMManager()
         ctx = make_ctx(agent_root, llm)
+
+        await describe_image(ctx, "render.png")
+
+        assert llm.calls[0]["provider_alias"] is None
+
+
+class FakeProvider:
+    def __init__(self, vision: bool):
+        self._vision = vision
+
+    def supports_vision(self) -> bool:
+        return self._vision
+
+
+class FakeAdapter:
+    def __init__(self, alias, compute_host=""):
+        self._alias = alias
+        self._compute_host = compute_host
+
+    def _get_agent_provider_alias(self):
+        return self._alias
+
+
+class FakeAgent:
+    def __init__(self, adapter):
+        self.llm = adapter
+
+
+def make_agent_ctx(agent_root, llm_manager, alias, compute_host=""):
+    """A tool context as the agent builds it: `_agent` carries the LLM adapter."""
+    ctx = make_ctx(agent_root, llm_manager)
+    ctx._agent = FakeAgent(FakeAdapter(alias, compute_host))
+    return ctx
+
+
+class TestAgentModelGetsTheImage:
+    """Mike's rule, 2026-09-18: the agent's own model sees the image when it can."""
+
+    @pytest.mark.asyncio
+    async def test_agent_alias_with_vision_is_used(self, agent_root, image_file):
+        llm = FakeLLMManager()
+        llm.providers = {"bonsai-2": FakeProvider(True)}
+        ctx = make_agent_ctx(agent_root, llm, "bonsai-2")
+
+        await describe_image(ctx, "render.png")
+
+        assert llm.calls[0]["provider_alias"] == "bonsai-2"
+
+    @pytest.mark.asyncio
+    async def test_blind_agent_alias_falls_back_to_global(self, agent_root, image_file):
+        llm = FakeLLMManager()
+        llm.providers = {"text-only": FakeProvider(False)}
+        ctx = make_agent_ctx(agent_root, llm, "text-only")
+
+        await describe_image(ctx, "render.png")
+
+        assert llm.calls[0]["provider_alias"] is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_model_overrides_the_agent_alias(self, agent_root, image_file):
+        llm = FakeLLMManager()
+        llm.providers = {"bonsai-2": FakeProvider(True)}
+        ctx = make_agent_ctx(agent_root, llm, "bonsai-2")
+
+        await describe_image(ctx, "render.png", model="qwen3-vl:8b")
+
+        assert llm.calls[0]["provider_alias"] == "qwen3-vl:8b"
+
+    @pytest.mark.asyncio
+    async def test_remote_agent_falls_back_to_global(self, agent_root, image_file):
+        llm = FakeLLMManager()
+        llm.providers = {"bonsai-2": FakeProvider(True)}
+        ctx = make_agent_ctx(agent_root, llm, "bonsai-2", compute_host="dpc-node-abc")
+
+        await describe_image(ctx, "render.png")
+
+        assert llm.calls[0]["provider_alias"] is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_agent_alias_falls_back_to_global(self, agent_root, image_file):
+        llm = FakeLLMManager()
+        llm.providers = {}
+        ctx = make_agent_ctx(agent_root, llm, "gone")
 
         await describe_image(ctx, "render.png")
 

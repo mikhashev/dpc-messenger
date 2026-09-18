@@ -642,6 +642,12 @@
   // Reactive: Check if current chat is an AI chat (excluding Telegram which are stored in aiChats for sidebar)
   // Telegram chats are in $aiChats for sidebar display but are NOT AI chats
   let isActuallyAIChat = $derived($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-'));
+  // 2026-09-18: same test ChatPanel applies — an agent chat's vision model is
+  // decided by the backend, so the header states it instead of offering it.
+  let isAgentChatHeader = $derived(
+    $chatProviders.get(activeChatId) === 'dpc_agent' ||
+    (agentChatToAgentId.get(activeChatId) ?? activeChatId).startsWith('agent_')
+  );
 
   // Reactive: Check if current chat is a group chat (v0.19.0)
   let isGroupChat = $derived(activeChatId.startsWith('group-'));
@@ -1209,6 +1215,7 @@
             nodeStatus={$nodeStatus}
             defaultProviders={$defaultProviders}
             agentLlmProvider={$aiChats.get(activeChatId)?.llm_provider || ""}
+            isAgentChat={isAgentChatHeader}
           />
           {/if}
 

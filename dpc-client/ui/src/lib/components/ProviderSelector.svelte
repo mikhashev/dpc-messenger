@@ -3,6 +3,7 @@
 
 <script lang="ts">
   import { menuSummary, priceLine, settingsLines, type MenuRow } from './peerMenu';
+  import { effectiveAgentVisionModel } from './agentVisionModel';
 
   // Provider type definition: one row of PROVIDERS_RESPONSE (DPTP §3.5), which
   // since `ec686608` carries `tariff` and `settings` beside the capabilities.
@@ -52,7 +53,11 @@
     defaultProviders = null,
 
     // For agent chats with remote compute host: the LLM provider alias used by the agent
-    agentLlmProvider = ""
+    agentLlmProvider = "",
+
+    // An agent chat picks its own vision model (see agentVisionModel.ts), so the
+    // dropdown becomes a read-only statement of what will happen.
+    isAgentChat = false
   }: {
     selectedComputeHost?: string;
     selectedTextProvider?: string;
@@ -66,6 +71,7 @@
     nodeStatus?: { peer_info?: PeerInfo[] } | null;
     defaultProviders?: DefaultProviders | null;
     agentLlmProvider?: string;
+    isAgentChat?: boolean;
   } = $props();
 
   // Merged provider lists (Phase 2: combines local + remote providers)
@@ -108,6 +114,12 @@
   const mergedTextProviders = $derived(() => mergedProviders());
   const mergedVisionProviders = $derived(() => mergedProviders().filter(p => p.supports_vision));
   const mergedVoiceProviders = $derived(() => mergedProviders().filter(p => p.supports_voice));
+
+  const agentVision = $derived(() => effectiveAgentVisionModel(
+    agentLlmProvider,
+    providersList || [],
+    defaultProviders?.vision_provider || ''
+  ));
 
   // What the guest is about to call on someone else's machine. A local alias
   // needs no such panel — the settings are this node's own and the call is
@@ -197,14 +209,28 @@
 
       <!-- Vision Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
       <div class="provider-row-header">
-        <label for="vision-provider-header">Vision:</label>
-        <select id="vision-provider-header" bind:value={selectedVisionProvider}>
-          {#each mergedVisionProviders() as provider}
-            <option value={provider.uniqueId}>
-              {provider.displayText}
-            </option>
-          {/each}
-        </select>
+        {#if isAgentChat}
+          <span class="provider-row-label">Vision:</span>
+          <!-- 2026-09-18: the backend routes an agent's images by the agent's own
+               model, never by this header, so state the outcome. -->
+          <span
+            class="vision-effective"
+            title={agentVision().isGlobal
+              ? "This agent's model has no vision, so images go to the global vision provider."
+              : "This agent's own model supports vision, so images go to it."}
+          >
+            {agentVision().label}
+          </span>
+        {:else}
+          <label for="vision-provider-header">Vision:</label>
+          <select id="vision-provider-header" bind:value={selectedVisionProvider}>
+            {#each mergedVisionProviders() as provider}
+              <option value={provider.uniqueId}>
+                {provider.displayText}
+              </option>
+            {/each}
+          </select>
+        {/if}
       </div>
 
       <!-- Voice Provider Selector (v0.13.0+) -->
@@ -288,6 +314,21 @@
     display: flex;
     align-items: center;
     gap: 0.4rem;
+  }
+
+  .provider-row-header .provider-row-label {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #666;
+    white-space: nowrap;
+  }
+
+  /* 2026-09-18: reads as a statement, not a control — an agent chat has no choice here. */
+  .vision-effective {
+    font-size: 0.85rem;
+    color: #333;
+    padding: 0.4rem 0.2rem;
+    white-space: nowrap;
   }
 
   .provider-row-header label {

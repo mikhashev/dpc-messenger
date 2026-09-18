@@ -32,6 +32,44 @@ _MAX_IMAGE_MB = 20
 _SUPPORTED_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 
+def _resolve_vision_alias(ctx: ToolContext, llm_manager) -> Optional[str]:
+    """Which provider gets the picture when the caller named no model.
+
+    Mike's rule, 2026-09-18: if the model the agent runs can see, the image goes
+    to it; otherwise to the global vision_provider. None means "global".
+    A remote agent (compute_host or a dpc_agent peer) also returns None — this
+    tool reads a local file and calls locally, and a peer's alias is not in the
+    local registry.
+    """
+    adapter = getattr(getattr(ctx, "_agent", None), "llm", None)
+    if adapter is None:
+        return None
+
+    dpc_agent_provider = getattr(llm_manager, "providers", {}).get("dpc_agent")
+    if getattr(adapter, "_compute_host", None) or (
+        dpc_agent_provider is not None and getattr(dpc_agent_provider, "peer_id", None)
+    ):
+        log.info("describe_image: agent runs on a remote peer, using the global vision provider")
+        return None
+
+    try:
+        alias = adapter._get_agent_provider_alias()
+        provider = llm_manager.providers.get(alias) if alias else None
+        can_see = bool(provider and hasattr(provider, "supports_vision") and provider.supports_vision())
+    except Exception as e:
+        log.warning("describe_image: cannot read the agent's provider (%s); using the global one", e)
+        return None
+
+    if can_see:
+        log.info("describe_image: agent provider '%s' supports vision, sending the image to it", alias)
+        return alias
+    log.info(
+        "describe_image: agent provider '%s' has no vision, using the global vision provider",
+        alias or "(none)",
+    )
+    return None
+
+
 def _guess_mime(path: Path) -> str:
     mime, _ = mimetypes.guess_type(str(path))
     if mime and mime.startswith("image/"):
@@ -60,7 +98,8 @@ async def describe_image(
         ctx: Tool context
         image_path: Relative (sandbox) or absolute (firewall-checked) path
         question: Optional specific question. Omit for a full description.
-        model: Vision provider alias. Default: configured vision provider.
+        model: Vision provider alias. Default: the agent's own model if it
+            supports vision, else the global vision provider.
 
     Returns:
         JSON string with image_path, model, question, description
@@ -112,10 +151,13 @@ async def describe_image(
 
     ctx.emit_progress(f"Looking at {source.name}...")
 
+    # An explicit `model` is the caller's override; without one, 2026-09-18's rule applies.
+    alias = model if model else _resolve_vision_alias(ctx, llm_manager)
+
     try:
         meta = await llm_manager.query(
             prompt=prompt,
-            provider_alias=model,  # None → auto-select the vision provider
+            provider_alias=alias,  # None → auto-select the global vision provider
             images=[{"base64": image_b64, "mime_type": mime_type}],
             return_metadata=True,
         )
@@ -183,8 +225,9 @@ def get_tools() -> List[ToolEntry]:
                         "model": {
                             "type": "string",
                             "description": (
-                                "Optional vision provider alias. Defaults to the configured "
-                                "vision provider (auto-selected)."
+                                "Optional vision provider alias override. By default the "
+                                "image goes to your own model if it supports vision, "
+                                "otherwise to the globally configured vision provider."
                             ),
                         },
                     },
