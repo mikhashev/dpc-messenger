@@ -705,6 +705,65 @@ def _unreadable_wrapper_note(segment: str) -> str:
     )
 
 
+# What opens a command body this gate does not read, in one table so the rule
+# does not depend on which construct was written. `for` and `while` open a
+# header, not a body: what follows it arrives with `do` or `{`, both here.
+_BODY_KEYWORDS = {
+    "do", "then", "else", "if",
+    "-exec", "-execdir", "-ok",
+    "foreach", "foreach-object",
+}
+
+
+def _opens_a_body(token: str) -> Optional[str]:
+    """What this token puts in front of the body it opens, or None for nothing.
+
+    A keyword puts nothing there. `(` and `{` may put the body's first word
+    there, because cmd writes `if exist x (taskkill …)` with no space. `{}` is
+    `find`'s placeholder and opens nothing, so of the braces only a bare `{`
+    counts — which is also the script block that `ForEach-Object`'s `%` alias
+    is reached through, `%` being cmd's variable sigil as well.
+    """
+    if token.lower() in _BODY_KEYWORDS:
+        return ""
+    if token.startswith("(") or token == "{":
+        return token[1:]
+    return None
+
+
+def _command_bodies(segment: str) -> list:
+    """Every command body this segment opens, as text."""
+    tokens = _tokens(segment)
+    bodies = []
+    for i, token in enumerate(tokens):
+        head = _opens_a_body(token)
+        if head is None:
+            continue
+        body = " ".join(([head] if head else []) + list(tokens[i + 1:])).strip()
+        if body:
+            bodies.append(body)
+    return bodies
+
+
+def _kill_inside_an_unread_body(segment: str) -> str:
+    """A kill word, and a construct whose body the gate does not read.
+
+    The second trigger of the last-resort net, and it stops at Tier 1: only the
+    rules that can name what dies decide Tier 2. Both halves are required, as
+    in the wrapper note above, and the keyword has to be a *token* — `_tokens`
+    keeps a quoted string whole, so `echo "do not kill it"` carries neither.
+    """
+    if not _KILL_WORD_RE.search(segment):
+        return ""
+    if not _command_bodies(segment):
+        return ""
+    return (
+        "A kill cannot be ruled out: this segment opens a body the gate does not "
+        "read — a loop, a conditional or an -exec — and the gate has not identified "
+        "what the kill word inside it would signal"
+    )
+
+
 def _kill_scan_segments(segment: str) -> list:
     """This segment and every command nested inside it, depth-bounded."""
     out, seen = [], set()
@@ -721,6 +780,21 @@ def _kill_scan_segments(segment: str) -> list:
                     seen.add(piece)
                     frontier.append((piece, inner_shell, depth + 1))
     return out
+
+
+def _refusal_pieces(segment: str) -> list:
+    """What the refusal path reads: this segment, what is nested in it, and the
+    bodies it opens.
+
+    The bodies are read here and nowhere else. Reading one can add a refusal of
+    ourselves and can never add noise to a dialog, while the sentence a person
+    reads must keep saying that a body went unread: a verb found inside a loop
+    is not the whole of what the loop does with it.
+    """
+    pieces = list(_kill_scan_segments(segment))
+    for body in _command_bodies(segment):
+        pieces.extend(_kill_scan_segments(body))
+    return pieces
 
 
 def _add_pid(raw: str, pids: list, unresolved: list) -> None:
@@ -973,7 +1047,7 @@ def _kill_of_this_service(segment: str) -> str:
     offer: nothing in `service.py`, `local_api.py` or `run_service.py` exposes
     one.
     """
-    for piece in _kill_scan_segments(segment):
+    for piece in _refusal_pieces(segment):
         targets = _kill_targets(piece.text)
         if not targets.verb:
             continue
@@ -1016,20 +1090,23 @@ def _kill_of_this_service(segment: str) -> str:
                 f"Name the specific PIDs you mean instead; each one is identified in the "
                 f"approval dialog."
             )
-    return _kill_word_beside_a_protected_pid(segment)
+    return _kill_word_beside_a_protected_token(segment)
 
 
 _KILL_WORD_RE = re.compile(r"\b(?:taskkill|tskill|pkill|killall|stop-process|spps|kill)\b", re.I)
 _STANDALONE_NUMBER_RE = re.compile(r"(?<![\w.])(\d+)(?![\w.])")
 
 
-def _kill_word_beside_a_protected_pid(segment: str) -> str:
+def _kill_word_beside_a_protected_token(segment: str) -> str:
     """The coarse net under the parser, because spellings are endless.
 
-    A kill word and this service's own pid in one segment is refused without
-    parsing either — `for /f %i in ('echo <pid>') do taskkill /PID %i` reaches
-    no parser we are going to write. The price is that text merely carrying
-    both is refused too, which is the trade this file has already made twice.
+    A kill word and something that names this service in one segment is refused
+    without parsing either. Two forms reach no parser we are going to write:
+    `for /f %i in ('echo <pid>') do taskkill /PID %i`, where the pid is a
+    literal in a loop header, and `for %i in (1) do kill $PPID`, where the
+    target is the variable naming the process above this shell. The price is
+    that text merely carrying both is refused too, which is the trade this file
+    has already made twice.
     """
     if not _KILL_WORD_RE.search(segment):
         return ""
@@ -1045,6 +1122,11 @@ def _kill_word_beside_a_protected_pid(segment: str) -> str:
                 f"Refusing rather than guessing. Ask the person to restart the service "
                 f"themselves."
             )
+    flavour = _shell_of(segment, "")
+    for token in _tokens(segment):
+        mine = _self_target_reason(token, flavour, me)
+        if mine:
+            return mine
     return ""
 
 
@@ -1060,6 +1142,7 @@ def _kill_needs_a_person(segment: str) -> str:
             "A kill cannot be ruled out: this command is encoded and the gate "
             "cannot read what it runs"
         )
+    parsed_a_kill = False
     for piece in _kill_scan_segments(segment):
         blind_wrapper = _unreadable_wrapper_note(piece.text)
         if blind_wrapper:
@@ -1067,6 +1150,7 @@ def _kill_needs_a_person(segment: str) -> str:
         targets = _kill_targets(piece.text)
         if not targets.verb:
             continue
+        parsed_a_kill = True
         if targets.pids:
             described = [f"{pid}: {_describe_pid(pid)}" for pid in targets.pids[:4]]
             notes.append(
@@ -1095,6 +1179,12 @@ def _kill_needs_a_person(segment: str) -> str:
                 f"Kills a process the gate could not identify: {targets.verb} names "
                 f"no literal target"
             )
+    # Ahead of the rest, and not at all when the parser has already said what
+    # dies in this segment: the two sentences would be one fact told twice.
+    if not parsed_a_kill:
+        body = _kill_inside_an_unread_body(segment)
+        if body:
+            notes.insert(0, body)
     seen, unique = set(), []
     for note in notes:
         if note not in seen:

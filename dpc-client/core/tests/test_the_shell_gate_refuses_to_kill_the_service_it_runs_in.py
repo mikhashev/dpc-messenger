@@ -1341,3 +1341,190 @@ def test_what_the_matrix_does_not_reach(service, command, fragment):
 
     assert verdict is not None and verdict[0] == "tier1", (command, verdict)
     assert fragment in verdict[1], (command, verdict[1])
+
+
+# --- the target lives inside a body nobody reads ----------------------------
+
+_SAYS_A_BODY = "body the gate does not read"
+
+_BODY_ROWS = [
+    "for /f %i in (pid.txt) do taskkill /PID %i /F",
+    "for /f \"tokens=2\" %i in ('tasklist ^| findstr python') do taskkill /PID %i /F",
+    "find . -name '*.pid' -exec kill {} +",
+    "Get-Content pid.txt | ForEach-Object { Stop-Process -Id $_ }",
+    "cat pids.txt | while read p; do kill $p; done",
+    "if exist run.pid (taskkill /F /IM notepad.exe)",
+    "if x; then kill $p; fi",
+    # No braces: the keyword alone has to open the body here.
+    "Get-Process notepad | ForEach-Object -MemberName Kill",
+]
+
+
+@pytest.mark.parametrize("command", _BODY_ROWS)
+def test_a_kill_inside_a_body_the_gate_does_not_read_is_a_question(service, command):
+    """Every row was measured tier0 — SILENT — on f9431bbb, the incident's own
+    reconnaissance turned into a loop among them.
+
+    `do` is not a segment operator, so the `for` line is one segment, and
+    `_kill_verb` walks it from the left and gives up at `for`: the first token
+    that is neither a verb nor a wrapper. The last-resort net caught only the
+    variant that spells a protected pid out in the line. The answer is a second
+    trigger for that net rather than a grammar for each construct — a kill word
+    plus something that opens a body is Tier 1.
+    """
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert _SAYS_A_BODY in verdict[1], (command, verdict[1])
+    assert verdict[1].startswith("A kill cannot be ruled out"), (command, verdict[1])
+
+
+def test_the_escaped_pipe_does_not_cut_the_loop_in_half(service):
+    """`^|` is cmd's escape and `_split_segments` has never heard of it. It does
+    not have to: the `^|` in the incident's reconnaissance sits inside single
+    quotes, which the splitter honours, so the whole loop stays one segment.
+    The unquoted spelling is cut at the `|` — and the half carrying `do` and the
+    kill word is still Tier 1, which is why the rule sits on the body keyword
+    rather than on the loop header."""
+    quoted = "for /f %i in ('tasklist ^| findstr python') do taskkill /PID %i /F"
+    assert shell._split_segments(quoted) == [quoted]
+
+    unquoted = "for /f %i in (tasklist ^| findstr python) do taskkill /PID %i /F"
+    assert len(shell._split_segments(unquoted)) == 2
+    assert tier_of(unquoted) == "tier1"
+    assert _SAYS_A_BODY in reason_of(unquoted)
+
+
+# --- and the rules that can name us still outrank it ------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "for /f %%i in ('echo %d') do taskkill /PID %%i /F" % SERVICE.own_pid,
+    "for %i in (1) do kill $PPID",
+    "while true; do pkill python; done",
+])
+def test_a_body_does_not_downgrade_a_kill_that_names_this_service(service, command):
+    """Tier 2 keeps coming from the rules that can say what dies: the
+    last-resort net's literal pid, the self-naming variable it now also holds,
+    and our own image name — which the refusal path reaches because it reads
+    the body, while the naming path stops at the keyword."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+    assert _SAYS_A_BODY not in verdict[1], (command, verdict[1])
+
+
+def test_the_self_naming_variable_is_a_protected_token_of_the_net_too(service):
+    """The net's second trigger, independent of the body reader: a standalone
+    `$PPID` or `$$` beside a kill word is this service, however unparseable the
+    line around them is. It carries the price the literal pid next door does —
+    text merely holding both is refused — and quoting is what stops it, because
+    a quoted string is one token and not the variable."""
+    assert tier_of("echo kill $PPID") == "tier2"
+    assert tier_of("echo kill $$") == "tier2"
+    assert tier_of('echo "kill $PPID"') == "tier0"
+
+
+# --- a small matrix: every construct against every verb ---------------------
+
+_BODY_CONSTRUCTS = [
+    "for /f %i in (pid.txt) do {cmd}",
+    "cat pids.txt | while read p; do {cmd}; done",
+    "if x; then {cmd}; fi",
+    "if exist run.pid ({cmd})",
+    "find . -name '*.pid' -exec {cmd} +",
+    "Get-Content pid.txt | ForEach-Object {{ {cmd} }}",
+    "Get-Content pid.txt | % {{ {cmd} }}",
+    "foreach ($p in $pids) {{ {cmd} }}",
+]
+
+_BODY_KILLS = [
+    "taskkill /PID %i /F",
+    "kill $p",
+    "Stop-Process -Id $_",
+    "killall $n",
+]
+
+
+@pytest.mark.parametrize("construct", _BODY_CONSTRUCTS)
+@pytest.mark.parametrize("verb", _BODY_KILLS)
+def test_every_construct_around_every_verb_asks(service, construct, verb):
+    """The generator further up multiplies wrappers by ways of naming us, and a
+    body is neither — it is the case where nothing names anything. So it gets
+    its own table, multiplied for the same reason: the construct nobody has
+    typed yet is covered by the table, not by a row."""
+    command = construct.format(cmd=verb)
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert _SAYS_A_BODY in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("construct", _BODY_CONSTRUCTS)
+def test_the_same_constructs_around_ordinary_work_stay_where_they_were(service, construct):
+    """The control table: a body is not a finding. Only a kill word inside one
+    is, and `type` carries none."""
+    assert tier_of(construct.format(cmd="type %f")) == "tier0", construct
+
+
+# --- the negative controls, each measured before the rule was written -------
+
+
+@pytest.mark.parametrize("command,tier,fragment", [
+    ("echo taskkill", "tier0", ""),
+    ('git commit -m "kill the bug"', "tier0", ""),
+    ("echo done", "tier0", ""),
+    ("for %f in (*.txt) do type %f", "tier0", ""),
+    ("kill 4243", "tier1", "Kills process 4243: notepad.exe draft.txt"),
+    ("cat pids.txt | xargs -I{} kill {}", "tier1", "could not identify"),
+    ("ps aux | grep python | awk '{print $2}' | xargs kill", "tier1", "could not identify"),
+    ("find . -name '*.log' -exec rm {} +", "tier1", "Requires approval"),
+    # `{}` is find's placeholder, not a script block: with a word after it and
+    # no other opener, reading it as one would turn this into a question.
+    ("echo kill {} now", "tier0", ""),
+    # The parser has already said what dies, so the body sentence would be the
+    # same fact told twice.
+    ("kill 4243 -exec true", "tier1", "Kills process 4243: notepad.exe draft.txt"),
+])
+def test_the_body_rule_leaves_these_exactly_as_they_were(service, command, tier, fragment):
+    """`xargs` is the reason `xargs -I` is not in the construct table: it is
+    already a wrapper the parser walks through, so the new sentence would be
+    suppressed as a duplicate in every line that could carry it."""
+    verdict = _validate_command(command)
+
+    assert (verdict[0] if verdict else "tier0") == tier, (command, verdict)
+    if fragment:
+        assert fragment in verdict[1], (command, verdict[1])
+    if verdict:
+        assert _SAYS_A_BODY not in verdict[1], (command, verdict[1])
+
+
+def test_the_price_of_the_body_rule(service):
+    """Named as a price, like the unanchored HARDLINE pattern and the
+    last-resort net before it.
+
+    The keyword has to be a *token* of the command, which `_tokens` gives for
+    free: it strips quotes and keeps a quoted string whole, so
+    `echo "do not kill it"` has no token `do` and stays where it was. Written
+    without the quotes it has one, and it is Tier 1 — a sentence about a body
+    that is not there. That is the trade this file has now made three times."""
+    assert tier_of('echo "do not kill it"') == "tier0"
+    assert tier_of("echo do not kill it") == "tier1"
+    assert _SAYS_A_BODY in reason_of("echo do not kill it")
+
+
+def test_a_whitelisted_loop_waives_the_body_finding(service, tmp_path):
+    """The per-agent whitelist semantics are unchanged, and unchanged means
+    this: the finding is Tier 1, so an agent configured with `for` waives it —
+    prefix-matched on the segment, exactly as `taskkill` waives an ordinary
+    kill. Only the Tier 2 refusals are beyond configuration, and a loop that
+    names this service stays one."""
+    ctx = _Ctx(tmp_path, whitelist=["for"])
+
+    assert _validate_command(
+        "for /f %i in (pid.txt) do taskkill /PID %i /F", ctx, str(tmp_path)
+    ) is None
+
+    verdict = _validate_command("while true; do pkill python; done", ctx, str(tmp_path))
+    assert verdict is not None and verdict[0] == "tier2", verdict
