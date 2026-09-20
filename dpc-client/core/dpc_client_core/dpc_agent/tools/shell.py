@@ -96,14 +96,28 @@ HARDLINE_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bwsl\b", re.I),
 ]
 
+# A wrapper's own switches stand between its name and the switch that
+# introduces the command it runs: `cmd /s /c`, `cmd /d /s /c`, `bash -lc`,
+# `bash --norc -c`, `sh -ec`, `zsh -ic`. Every rule in this file used to want
+# `-c` or `/c` to follow the name immediately, and each spelling above was
+# measured tier0 — silent — with a kill of this service inside it on
+# 2026-09-21. The command switch may also be the last letter of a short-option
+# cluster, which is what `-lc`, `-ec`, `-ic` and `-xec` are; PowerShell's rule
+# already tolerated switches in between, and is left alone.
+_SHELL_NAMES = r"bash|sh|zsh|fish|dash|ksh"
+_POSIX_C = r"(?:\s+--?[A-Za-z][\w-]*)*\s+-[A-Za-z]*c"
+_CMD_C = r"(?:\s+/[A-Za-z](?::\S+)?)*\s+/[ck]"
+
 # Tier 1 / Tier 2 in v1 — dangerous patterns (blocked in v1, approval in v2)
 DANGEROUS_PATTERNS: list[re.Pattern] = [
     # Privilege escalation
     re.compile(r"\b(sudo|su|runas|gsudo|pkexec)\b", re.I),
-    # Subshell invocation (arbitrary code execution)
-    re.compile(r"\b(bash|sh|zsh|fish)\s+-c\b", re.I),
+    # Subshell invocation (arbitrary code execution). `dash` and `ksh` are the
+    # same wrapper and were missing; so was `bash.exe`, which is how the shell
+    # is spelled on the fleet's own platform.
+    re.compile(rf"\b({_SHELL_NAMES})(?:\.exe)?{_POSIX_C}\b", re.I),
     # `cmd.exe` is the same wrapper, and `/k` is it with the window left open.
-    re.compile(r"\bcmd(?:\.exe)?\s+/[ck]\b", re.I),
+    re.compile(rf"\bcmd(?:\.exe)?{_CMD_C}\b", re.I),
     re.compile(r"\b(python|python3|py)\s+-c\b", re.I),
     re.compile(r"\bnode\s+-e\b", re.I),
     # PowerShell's inline-code wrapper. Every other shell's had a rule and this
@@ -423,15 +437,71 @@ def _name_stem(name: str) -> str:
     return bare[:-4] if bare.endswith(".exe") else bare
 
 
-def _count_processes_named(pattern: str) -> Optional[int]:
-    """How wide the net is, or None when the machine will not say."""
+# How wide a pattern reaches depends on the verb that carries it, and the verbs
+# disagree: `pkill` compiles an extended regular expression, `killall` matches a
+# name exactly (a regex only under `-r`), and `taskkill /IM` takes a wildcard.
+# Reading all three as a substring said "Kills every process named pytho
+# (0 running)" for a command that would have killed this service — the tier and
+# the count both wrong, measured 2026-09-21.
+_PATTERN_LENGTH_LIMIT = 200
+
+
+def _pattern_covers(pattern: str, target: str, match: str) -> bool:
+    """Does this pattern reach `target`, read the way its verb reads it?
+
+    Fail closed twice, because a pattern the gate cannot evaluate cannot be
+    shown safe: one too long to be worth compiling, and one that does not
+    compile at all, both count as covering. No timeout — the length cap is what
+    keeps a catastrophic pattern out of `re`.
+    """
+    if match not in ("regex", "regex-exact"):
+        return False
+    if len(pattern) > _PATTERN_LENGTH_LIMIT:
+        return True
+    expression = f"^(?:{pattern})$" if match == "regex-exact" else pattern
+    try:
+        return bool(re.search(expression, target, re.I))
+    except re.error:
+        return True
+
+
+def _pattern_is_unreadable(pattern: str, match: str) -> str:
+    """Why this pattern could not be evaluated, or "" when it could be."""
+    if match not in ("regex", "regex-exact"):
+        return ""
+    if len(pattern) > _PATTERN_LENGTH_LIMIT:
+        return f"it is longer than the {_PATTERN_LENGTH_LIMIT}-character limit this gate reads"
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        return f"it is not a valid regular expression ({exc})"
+    return ""
+
+
+def _name_would_be_killed(pattern: str, name: str, match: str) -> bool:
+    """One process name, tested the way the verb that carries the pattern tests it."""
+    if not name:
+        return False
+    if _pattern_covers(pattern, name, match):
+        return True
+    if _pattern_covers(pattern, _name_stem(name), match):
+        return True
+    return fnmatch.fnmatch(_name_stem(name), _name_stem(pattern))
+
+
+def _count_processes_named(pattern: str, match: str = "wildcard") -> Optional[int]:
+    """How wide the net is, or None when the machine will not say.
+
+    The count goes into the sentence a person reads, so it has to use the same
+    matching the verb does — a number that contradicts the verb is a false
+    statement, not a rounding error.
+    """
     try:
         import psutil
 
-        stem = _name_stem(pattern)
         return sum(
             1 for proc in psutil.process_iter(["name"])
-            if fnmatch.fnmatch(_name_stem(proc.info.get("name") or ""), stem)
+            if _name_would_be_killed(pattern, proc.info.get("name") or "", match)
         )
     except Exception:
         return None
@@ -445,6 +515,7 @@ class _KillTargets(NamedTuple):
     unresolved: tuple = ()      # arguments that are not literal numbers
     names: tuple = ()           # image names and patterns
     whole_command_line: bool = False   # pkill -f: the pattern is not a name
+    match: str = "wildcard"     # wildcard | exact | regex | regex-exact
 
 
 _KILL_VERBS = {"taskkill", "tskill", "kill", "pkill", "killall", "stop-process", "spps", "wmic"}
@@ -529,14 +600,26 @@ def _kill_verb(tokens: list) -> Tuple[str, list]:
 # A shell handed a command as a string. The verb-first reader sees the wrapper
 # and stops, so the string is taken out and read as a command in its own right.
 _WRAPPER_DEPTH = 3
-_INNER_COMMAND_PATTERNS: list[re.Pattern] = [
-    re.compile(r"\bcmd(?:\.exe)?\s+/[ck]\s+(.+)$", re.I),
-    re.compile(
-        r"\b(?:powershell|pwsh)(?:\.exe)?\b.*?\s-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?\b\s+(.+)$",
-        re.I,
+# (which shell reads it, how to take the string out). The shell matters for one
+# thing only: `$PID` is the host's own pid in PowerShell and an ordinary
+# variable in `sh`.
+_INNER_COMMAND_PATTERNS: list = [
+    ("cmd", re.compile(rf"\bcmd(?:\.exe)?{_CMD_C}\s+(.+)$", re.I)),
+    (
+        "powershell",
+        re.compile(
+            r"\b(?:powershell|pwsh)(?:\.exe)?\b.*?\s-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?\b\s+(.+)$",
+            re.I,
+        ),
     ),
-    re.compile(r"\b(?:bash|sh|zsh|fish|dash)(?:\.exe)?\s+-c\s+(.+)$", re.I),
+    ("posix", re.compile(rf"\b(?:{_SHELL_NAMES})(?:\.exe)?{_POSIX_C}\s+(.+)$", re.I)),
 ]
+# Shells this gate knows by name, for the case where it can see the wrapper and
+# not the command inside it.
+_SHELL_WRAPPERS = {"cmd", "bash", "sh", "zsh", "fish", "dash", "ksh", "powershell", "pwsh"}
+_POWERSHELL_FLAVOUR_RE = re.compile(
+    r"\b(?:stop-process|spps|get-process|powershell|pwsh)\b", re.I
+)
 _ENCODED_COMMAND_RE = re.compile(r"\b(?:powershell|pwsh)\b.*\s-e(?:nc(?:odedcommand)?)?\b", re.I)
 
 
@@ -548,32 +631,95 @@ def _unquote(text: str) -> str:
 
 
 def _inner_command_strings(segment: str) -> list:
-    """The command strings this segment hands to another shell to run."""
+    """(shell, command string) for every command this segment hands to a shell."""
     found = []
-    for pat in _INNER_COMMAND_PATTERNS:
+    for shell_name, pat in _INNER_COMMAND_PATTERNS:
         match = pat.search(segment)
         if match:
             inner = _unquote(match.group(1))
             if inner:
-                found.append(inner)
+                found.append((shell_name, inner))
     return found
+
+
+class _Piece(NamedTuple):
+    """One command the gate reads, and whose shell's language it is written in."""
+
+    text: str
+    shell: str = ""     # "" unknown | posix | cmd | powershell
+
+
+def _shell_of(text: str, inherited: str) -> str:
+    """Which shell's variables this piece uses.
+
+    A cmdlet is the marker, not the wrapper: `Stop-Process -Id $PID` arrives
+    with no wrapper at all when the gate's own shell is PowerShell.
+    """
+    if _POWERSHELL_FLAVOUR_RE.search(text):
+        return "powershell"
+    return inherited
+
+
+def _shell_wrapper_named(segment: str) -> str:
+    """The shell this segment's verb is, or "".
+
+    Verb-first, like `_kill_verb`, and for the same reason: `cat kill.sh` and
+    `grep -r "bash" notes.txt` carry the words without handing anything to a
+    shell.
+    """
+    titles = 0
+    for token in _tokens(segment):
+        verb = _verb_of(token)
+        if verb in _SHELL_WRAPPERS:
+            return verb
+        if verb in _KILL_WRAPPERS:
+            titles += 1 if verb in _TITLE_TAKING_WRAPPERS else 0
+            continue
+        if token.startswith(("-", "/")):
+            continue
+        if titles > 0:
+            titles -= 1
+            continue
+        return ""
+    return ""
+
+
+def _unreadable_wrapper_note(segment: str) -> str:
+    """A shell the gate can see and a command inside it that it cannot read.
+
+    Both halves are required. A wrapper alone is ordinary work — `bash script.sh`
+    has always been allowed — and a kill word alone is a word. Together they are
+    a kill that cannot be ruled out, which is Tier 1: only the rules that can
+    name what dies decide Tier 2.
+    """
+    wrapper = _shell_wrapper_named(segment)
+    if not wrapper:
+        return ""
+    if not _KILL_WORD_RE.search(segment):
+        return ""
+    if _inner_command_strings(segment):
+        return ""
+    return (
+        f"A kill cannot be ruled out: this segment hands work to {wrapper} and the "
+        f"gate could not read the command string inside it"
+    )
 
 
 def _kill_scan_segments(segment: str) -> list:
     """This segment and every command nested inside it, depth-bounded."""
     out, seen = [], set()
-    frontier = [(segment, 0)]
+    frontier = [(segment, "", 0)]
     while frontier:
-        text, depth = frontier.pop()
-        out.append(text)
+        text, inherited, depth = frontier.pop()
+        out.append(_Piece(text, _shell_of(text, inherited)))
         if depth >= _WRAPPER_DEPTH:
             continue
-        for inner in _inner_command_strings(text):
+        for inner_shell, inner in _inner_command_strings(text):
             for piece in _split_segments(inner):
                 piece = piece.strip()
                 if piece and piece not in seen:
                     seen.add(piece)
-                    frontier.append((piece, depth + 1))
+                    frontier.append((piece, inner_shell, depth + 1))
     return out
 
 
@@ -665,9 +811,25 @@ def _tskill_targets(rest: list) -> _KillTargets:
     return _KillTargets("tskill")
 
 
+def _pattern_match_kind(verb: str, exact: bool, regexp: bool) -> str:
+    """How this verb reads its pattern.
+
+    `pkill` compiles an extended regular expression and `-x` anchors it;
+    `killall` matches a whole name and reaches for a regex only under `-r`.
+    Case is ignored on both sides regardless, which over-blocks `pkill` on
+    POSIX by exactly one thing: a name that differs only in case.
+    """
+    if verb == "pkill":
+        return "regex-exact" if exact else "regex"
+    if regexp:
+        return "regex"
+    return "exact"
+
+
 def _pattern_kill_targets(verb: str, rest: list) -> _KillTargets:
-    """`pkill` and `killall`: one pattern, and `-f` says what it is matched on."""
+    """`pkill` and `killall`: one pattern, and the switches say how it is read."""
     names, unresolved, whole = [], [], False
+    exact, regexp = False, False
     i = 0
     while i < len(rest):
         token = rest[i]
@@ -675,6 +837,12 @@ def _pattern_kill_targets(verb: str, rest: list) -> _KillTargets:
         low = token.lower()
         if low in ("-f", "--full"):
             whole = True
+            continue
+        if low in ("-x", "--exact"):
+            exact = True
+            continue
+        if low in ("-r", "--regexp"):
+            regexp = True
             continue
         if low in _PKILL_PARAM_WITH_VALUE:
             i += 1
@@ -686,7 +854,10 @@ def _pattern_kill_targets(verb: str, rest: list) -> _KillTargets:
         else:
             names.append(token)
         break
-    return _KillTargets(verb, (), tuple(unresolved), tuple(names), whole)
+    return _KillTargets(
+        verb, (), tuple(unresolved), tuple(names), whole,
+        _pattern_match_kind(verb, exact, regexp),
+    )
 
 
 def _wmic_targets(segment: str) -> _KillTargets:
@@ -719,18 +890,79 @@ def _kill_targets(segment: str) -> _KillTargets:
 
 
 def _name_matches_this_service(pattern: str, whole_command_line: bool,
-                               me: "_ServiceIdentity") -> str:
-    """What of ours this name or pattern would take down, or "" for nothing."""
+                               me: "_ServiceIdentity", match: str = "wildcard") -> str:
+    """What of ours this name or pattern would take down, or "" for nothing.
+
+    The substring and wildcard tests are kept beside the regex one rather than
+    replaced by it: each is a positive on its own, and the union is what fails
+    closed.
+    """
     pattern = str(pattern).strip().strip("\"'")
     if not pattern:
         return ""
-    if whole_command_line and pattern.lower() in me.cmdline.lower():
-        return _one_line(me.cmdline, 80)
+    if whole_command_line:
+        if pattern.lower() in me.cmdline.lower():
+            return _one_line(me.cmdline, 80)
+        if _pattern_covers(pattern, me.cmdline, match):
+            return _one_line(me.cmdline, 80)
     stem = _name_stem(pattern)
     for name in me.names:
         if fnmatch.fnmatch(_name_stem(name), stem) or fnmatch.fnmatch(name.lower(), pattern.lower()):
             return name
+        if _name_would_be_killed(pattern, name, match):
+            return name
     return ""
+
+
+# `$PPID`, `$$` and PowerShell's `$PID` are not ids the gate failed to read:
+# each one names a process we already know. In the shell this tool spawns,
+# `$PPID` is the process that started it — the D-PC service — and `$$` is the
+# shell itself, whose death takes the command with it. Measured tier1 "could not
+# identify" on 2026-09-21, which is one click from the incident.
+_SELF_TARGETS: dict = {
+    "$ppid": (
+        "the target is $PPID — the process that started this shell, which is the D-PC "
+        "service itself (pid {own}). Killing it kills the process running this command, "
+        "so it could never report back. Ask the person to restart the service themselves."
+    ),
+    "$$": (
+        "the target is $$ — this shell itself, the one the D-PC service (pid {own}) "
+        "spawned for this command. Killing it takes the command with it, so it could "
+        "never report back. Name the specific PIDs you mean instead."
+    ),
+    "$pid": (
+        "the target is $PID — the PowerShell host running this command, which is the "
+        "process the D-PC service (pid {own}) spawned for it, or the service itself when "
+        "PowerShell is the shell it started. Killing it aborts the command before it can "
+        "report back. Name the specific PIDs you mean instead."
+    ),
+}
+
+
+def _self_target_key(token: str) -> str:
+    """`${PPID}` and `$ppid` are one token to this rule; `${$}` is `$$`.
+
+    The braces are dropped rather than matched, because by the time a token
+    reaches here `_strip_grouping` may already have eaten the closing one —
+    `kill ${PPID}` arrives as `kill ${PPID`.
+
+    Case is folded although a POSIX shell would not fold it: `$ppid` is an unset
+    variable there and refusing it costs a command nobody writes, while reading
+    `$PPID` as unknown cost the service once already.
+    """
+    bare = str(token).strip().strip("\"'").lower()
+    return re.sub(r"[{}]", "", bare)
+
+
+def _self_target_reason(token: str, shell_flavour: str, me: "_ServiceIdentity") -> str:
+    """Why this non-literal target is us, or "" when it is merely unreadable."""
+    key = _self_target_key(token)
+    if key == "$pid" and shell_flavour != "powershell":
+        # In `sh` this is an ordinary variable, usually unset — not the shell's
+        # own pid, which is `$$`. It stays a named question.
+        return ""
+    template = _SELF_TARGETS.get(key)
+    return template.format(own=me.own_pid) if template else ""
 
 
 def _kill_of_this_service(segment: str) -> str:
@@ -742,7 +974,7 @@ def _kill_of_this_service(segment: str) -> str:
     one.
     """
     for piece in _kill_scan_segments(segment):
-        targets = _kill_targets(piece)
+        targets = _kill_targets(piece.text)
         if not targets.verb:
             continue
         me = _service_identity()
@@ -761,15 +993,29 @@ def _kill_of_this_service(segment: str) -> str:
                     f"Killing it takes this shell with it. Ask the person to restart the "
                     f"service themselves."
                 )
+        for token in targets.unresolved:
+            mine = _self_target_reason(token, piece.shell, me)
+            if mine:
+                return mine
         for pattern in targets.names:
-            hit = _name_matches_this_service(pattern, targets.whole_command_line, me)
-            if hit:
+            hit = _name_matches_this_service(pattern, targets.whole_command_line,
+                                            me, targets.match)
+            if not hit:
+                continue
+            blind = _pattern_is_unreadable(pattern, targets.match)
+            if blind:
                 return (
-                    f"\"{_one_line(pattern, 60)}\" includes the D-PC service itself — it "
-                    f"matches {hit}, which is what this shell runs inside (pid {me.own_pid}). "
-                    f"Name the specific PIDs you mean instead; each one is identified in the "
-                    f"approval dialog."
+                    f"\"{_one_line(pattern, 60)}\" is a pattern this gate cannot evaluate — "
+                    f"{blind} — so it cannot be shown not to match the D-PC service itself "
+                    f"(pid {me.own_pid}). Refusing rather than guessing. Name the specific "
+                    f"PIDs you mean instead."
                 )
+            return (
+                f"\"{_one_line(pattern, 60)}\" includes the D-PC service itself — it "
+                f"matches {hit}, which is what this shell runs inside (pid {me.own_pid}). "
+                f"Name the specific PIDs you mean instead; each one is identified in the "
+                f"approval dialog."
+            )
     return _kill_word_beside_a_protected_pid(segment)
 
 
@@ -815,7 +1061,10 @@ def _kill_needs_a_person(segment: str) -> str:
             "cannot read what it runs"
         )
     for piece in _kill_scan_segments(segment):
-        targets = _kill_targets(piece)
+        blind_wrapper = _unreadable_wrapper_note(piece.text)
+        if blind_wrapper:
+            notes.append(blind_wrapper)
+        targets = _kill_targets(piece.text)
         if not targets.verb:
             continue
         if targets.pids:
@@ -830,9 +1079,12 @@ def _kill_needs_a_person(segment: str) -> str:
                     f"Kills every process whose command line matches {_one_line(pattern, 60)}"
                 )
                 continue
-            running = _count_processes_named(pattern)
+            running = _count_processes_named(pattern, targets.match)
             counted = f" ({running} running)" if running is not None else ""
-            notes.append(f"Kills every process named {_one_line(pattern, 60)}{counted}")
+            # `pkill` is handed a pattern, not a name, and saying "named" of one
+            # invites the reader to check it against a name.
+            reads = "matching" if targets.match.startswith("regex") else "named"
+            notes.append(f"Kills every process {reads} {_one_line(pattern, 60)}{counted}")
         for token in targets.unresolved[:3]:
             notes.append(
                 "Kills a process the gate could not identify: the id is "

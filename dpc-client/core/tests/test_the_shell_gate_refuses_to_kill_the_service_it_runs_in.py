@@ -187,7 +187,9 @@ def test_killing_somebody_elses_process_asks_rather_than_refuses(service, templa
     "kill -9 $pid",
     "kill $(cat run.pid)",
     "kill `cat run.pid`",
-    "Stop-Process -Id $pid",
+    # `Stop-Process -Id $pid` left this list on 2026-09-21: in PowerShell `$PID`
+    # is the host running the command, not an unset variable, so it is a
+    # refusal now — test_the_powershell_host_variable_is_refused_too.
 ])
 def test_a_pid_the_gate_cannot_read_is_a_question_not_a_pass(service, command):
     """Fail closed: an argument that is not a literal number cannot be shown safe."""
@@ -967,3 +969,375 @@ def test_this_process_cannot_be_asked_to_kill_itself():
 
     assert verdict is not None and verdict[0] == "tier2", verdict
     assert str(os.getpid()) in verdict[1], verdict[1]
+
+
+# ===========================================================================
+# 2026-09-21, the follow-up. Three classes the first round left open, each one
+# measured on the committed gate before it was written down here.
+# ===========================================================================
+
+
+# --- F3: a wrapper is a wrapper with switches in front of its `-c` ----------
+# `\b(bash|sh|zsh|fish)\s+-c\b` and `\bcmd(?:\.exe)?\s+/[ck]\b` want the command
+# switch to follow the name immediately. Every spelling below was measured
+# tier0 — SILENT — with a kill of this service inside it.
+
+_SWITCHY_WRAPPERS = [
+    'cmd /s /c "{cmd}"',
+    'cmd /d /s /c "{cmd}"',
+    'cmd.exe /v:on /c "{cmd}"',
+    'bash -lc "{cmd}"',
+    'bash -l -c "{cmd}"',
+    'bash --norc -c "{cmd}"',
+    'bash --login -c "{cmd}"',
+    "sh -ec '{cmd}'",
+    'zsh -ic "{cmd}"',
+    'bash -xec "{cmd}"',
+]
+
+
+@pytest.mark.parametrize("wrapper", _SWITCHY_WRAPPERS)
+def test_a_switch_between_the_shell_and_its_command_does_not_hide_a_kill(service, wrapper):
+    command = wrapper.format(cmd="taskkill /IM python.exe /F")
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("wrapper", _SWITCHY_WRAPPERS)
+def test_a_switchy_wrapper_around_ordinary_work_is_its_plain_form(service, wrapper):
+    """`bash -lc "ls"` must be no worse than `bash -c "ls"` — and no better.
+    The plain form has been Tier 1 since ADR-030; recognising one more spelling
+    of the same wrapper must not promote it past that."""
+    verdict = _validate_command(wrapper.format(cmd="ls -la"))
+
+    assert verdict is not None and verdict[0] == "tier1", (wrapper, verdict)
+    assert "Kills" not in verdict[1], verdict[1]
+
+
+@pytest.mark.parametrize("command", [
+    'bash -o pipefail -c "pkill python"',   # a switch with a value: `-c` is never reached
+    "bash -s kill 12345",                   # the program arrives on stdin
+    "sh -s -- taskkill /IM python.exe",
+    "powershell -File tidy.ps1 taskkill",
+])
+def test_a_wrapper_the_gate_cannot_open_says_so_rather_than_passing(service, command):
+    """The fail-closed half of F3. A known shell, a kill word, and no command
+    string the gate could extract: it cannot be shown safe, so it is asked — and
+    the sentence says the gate could not read inside the wrapper rather than
+    inventing a target."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1].startswith("A kill cannot be ruled out"), verdict[1]
+    assert "could not read" in verdict[1], verdict[1]
+
+
+@pytest.mark.parametrize("command", [
+    "bash -s ls",                 # a wrapper, no kill word: unchanged
+    "bash script.sh",
+    "cat kill.sh",                # a kill word and a `.sh`, but the verb is `cat`
+    'git commit -m "fix bash kill handling"',
+])
+def test_the_fail_closed_wrapper_rule_needs_both_halves(service, command):
+    """Not every unparsed wrapper is a question: it takes a shell in verb
+    position *and* a kill word in the same segment."""
+    assert tier_of(command) == "tier0", command
+
+
+# --- F2: `$PPID` and `$$` are not unreadable ids — they are this service ----
+# In the shell this gate spawns, `$PPID` is the process that started it, which
+# is the D-PC service, and `$$` is the shell whose death takes the command with
+# it. Both were measured tier1 "could not identify", one click from the
+# incident.
+
+_SELF_VARIABLES = ["$PPID", "${PPID}", "$$", "${$}"]
+
+
+@pytest.mark.parametrize("token", _SELF_VARIABLES)
+@pytest.mark.parametrize("template", [
+    "kill {t}",
+    "kill -9 {t}",
+    "kill -s KILL {t}",
+    "kill -- {t}",
+    'bash -lc "kill {t}"',
+    'sh -c "kill -9 {t}"',
+    "taskkill /PID {t} /F",
+])
+def test_the_variable_that_names_this_service_is_refused(service, token, template):
+    command = template.format(t=token)
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+    assert str(SERVICE.own_pid) in verdict[1], (command, verdict[1])
+
+
+def test_the_refusal_says_which_process_the_variable_is(service):
+    """Naming the token is not enough: the person has to be told what it means."""
+    ppid = reason_of("kill $PPID")
+    assert "$PPID" in ppid and "started this shell" in ppid, ppid
+
+    itself = reason_of("kill $$")
+    assert "$$" in itself and "this shell itself" in itself, itself
+
+
+@pytest.mark.parametrize("command", [
+    "Stop-Process -Id $PID",
+    "Stop-Process -Id $pid -Force",
+    "Stop-Process -Id ${PID}",
+    'powershell -Command "Stop-Process -Id $PID"',
+    'powershell -NoProfile -Command "kill $PID"',
+    'pwsh -c "Stop-Process -Id $pid"',
+])
+def test_the_powershell_host_variable_is_refused_too(service, command):
+    """`$PID` is the PowerShell host. For `powershell -Command` that host is the
+    child this gate spawned, so killing it aborts the command before it can
+    report anything back; when the gate's own shell is the host, it is this
+    service. Refused either way, and the sentence says which."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "PowerShell host" in verdict[1], (command, verdict[1])
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("command,token", [
+    # POSIX has no `$pid`: it is an ordinary variable, usually unset. The
+    # PowerShell reading above is decided by the shell the piece belongs to.
+    ("kill -9 $pid", "$pid"),
+    ('bash -lc "kill $pid"', "$pid"),
+    ("kill $(cat run.pid)", "$(cat"),
+    ("kill `cat run.pid`", "`cat"),
+    ("taskkill /PID %PID% /F", "%PID%"),
+    # cmd.exe has no built-in `%PPID%`, so it stays an unresolved id.
+    ("taskkill /PID %PPID% /F", "%PPID%"),
+    ("Stop-Process -Id $p", "$p"),
+])
+def test_every_other_non_literal_target_stays_a_named_question(service, command, token):
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert token in verdict[1], (command, verdict[1])
+
+
+# --- F1: pkill reads an extended regular expression, not a substring -------
+
+
+@pytest.mark.parametrize("command", [
+    "pkill pytho",              # a prefix reaches the name: pkill matches anywhere
+    "pkill ^pyth",
+    "pkill pyth.n",
+    "pkill 'python|node'",
+    "pkill -f run.serv",        # the dot the substring test could never match
+    "pkill -f 'run_servic.'",
+    "pkill -f '^C:.dpc'",
+    "pkill -x python.exe",      # -x is exact, and this one is exactly us
+    "pkill -x python",          # the stem is the same name without its `.exe`
+    "pkill -x pytho.",          # an anchored regex that fits the stem and not `python.exe`
+])
+def test_a_pkill_pattern_reaches_this_service_the_way_pkill_would(service, command):
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("command", [
+    "pkill -x pytho",           # anchored: a prefix no longer reaches us
+    "pkill ^ython",
+    "pkill notepad",
+    "killall pytho",            # killall matches a whole name, not a pattern
+    "killall -x pytho",
+])
+def test_the_regex_reading_does_not_widen_past_what_the_verb_does(service, command):
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert "D-PC service" not in verdict[1], (command, verdict[1])
+
+
+def test_killall_reads_a_regex_only_when_it_is_asked_to(service):
+    assert tier_of("killall pytho") == "tier1"
+    assert tier_of("killall -r pytho") == "tier2"
+    assert tier_of("killall python.exe") == "tier2"
+
+
+@pytest.mark.parametrize("command,tier", [
+    ("taskkill /IM pytho", "tier1"),        # /IM takes a wildcard, never a regex
+    ("taskkill /IM pyth.n /F", "tier1"),
+    ("taskkill /IM python* /F", "tier2"),
+    ("taskkill /IM python.exe /F", "tier2"),
+])
+def test_taskkill_by_image_name_stays_a_wildcard(service, command, tier):
+    assert tier_of(command) == tier, command
+
+
+def test_a_pattern_the_gate_cannot_compile_is_refused_not_ignored(service):
+    """Fail closed: a pattern that does not compile cannot be shown not to match
+    us, and pkill's own reader may well accept what `re` rejects."""
+    verdict = _validate_command("pkill '['")
+
+    assert verdict is not None and verdict[0] == "tier2", verdict
+    assert "D-PC service" in verdict[1], verdict[1]
+    assert "regular expression" in verdict[1], verdict[1]
+
+
+def test_a_pattern_too_long_to_read_is_refused_as_well(service):
+    """The guard against a catastrophic pattern is a length cap, not a timeout:
+    over the cap the gate stops reading and refuses."""
+    long_pattern = "a|" * 100 + "z"          # 201 characters
+
+    verdict = _validate_command("pkill '%s'" % long_pattern)
+
+    assert verdict is not None and verdict[0] == "tier2", verdict
+    assert "D-PC service" in verdict[1], verdict[1]
+    assert "200" in verdict[1], verdict[1]
+
+
+class _Proc:
+    def __init__(self, name):
+        self.info = {"name": name}
+
+
+@pytest.fixture
+def running(monkeypatch):
+    """The machine's process list, replaced by one this test can state."""
+    psutil = pytest.importorskip("psutil")
+
+    def install(*names):
+        monkeypatch.setattr(psutil, "process_iter",
+                            lambda attrs=None: [_Proc(n) for n in names])
+    return install
+
+
+def test_the_count_in_the_dialog_uses_the_verbs_own_matching(service, monkeypatch, running):
+    """«Kills every process named pytho (0 running)» was a false statement to the
+    person: pkill would have killed two. A wrong count in the dialog is the same
+    defect class as the incident's wrong reason."""
+    monkeypatch.setattr(
+        shell, "_service_identity",
+        lambda: SERVICE._replace(names=frozenset({"nodejs.exe"}),
+                                 cmdline="nodejs.exe server.js"),
+        raising=False,
+    )
+    running("python.exe", "python.exe", "notepad.exe")
+
+    assert "(2 running)" in reason_of("pkill pytho"), reason_of("pkill pytho")
+    assert "(0 running)" in reason_of("taskkill /IM pytho"), reason_of("taskkill /IM pytho")
+    assert "(2 running)" in reason_of("killall python"), reason_of("killall python")
+
+
+def test_on_posix_the_protected_name_carries_its_version(monkeypatch):
+    """The consequence the reviewer raised, pinned. On Linux the name is
+    `python3.12`, so `pkill python3` and `pkill python` both reach the service —
+    and `killall python3`, which matches the whole name, does not."""
+    monkeypatch.setattr(
+        shell, "_service_identity",
+        lambda: SERVICE._replace(names=frozenset({"python3.12"}),
+                                 cmdline="/usr/bin/python3.12 run_service.py"),
+        raising=False,
+    )
+    monkeypatch.setattr(shell, "_describe_pid",
+                        lambda pid: "python3.12 run_service.py", raising=False)
+
+    assert tier_of("pkill python3") == "tier2"
+    assert tier_of("pkill python") == "tier2"
+    assert tier_of("pkill -f run_service") == "tier2"
+    assert tier_of("killall python3") == "tier1"
+    assert tier_of("pkill node") == "tier1"
+
+
+# --- a generator, not a list ------------------------------------------------
+# The fourteen wrapped spellings in `_WRAPPED` are the ones somebody thought
+# of. These tables are multiplied instead, so a spelling nobody typed is
+# covered too; the cost is that the tables, not the rows, are what a reader has
+# to keep honest.
+
+_WRAPPERS = [
+    "{cmd}",                                 # no wrapper at all
+    'cmd /c "{cmd}"',
+    'cmd.exe /c "{cmd}"',
+    'cmd /s /c "{cmd}"',
+    'cmd /d /s /c "{cmd}"',
+    'cmd /k "{cmd}"',
+    'bash -c "{cmd}"',
+    'bash -lc "{cmd}"',
+    'bash -l -c "{cmd}"',
+    'bash --norc -c "{cmd}"',
+    "sh -ec '{cmd}'",
+    'zsh -ic "{cmd}"',
+    'powershell -Command "{cmd}"',
+    'pwsh -NoProfile -Command "{cmd}"',
+    'sudo bash -lc "{cmd}"',
+]
+
+_BY_PID_VERBS = [
+    "taskkill /PID {t} /F",
+    "kill -9 {t}",
+    "Stop-Process -Id {t}",
+    "tskill {t}",
+]
+_BY_NAME_VERBS = [
+    "taskkill /IM {t} /F",
+    "pkill {t}",
+    "killall {t}",
+    "Stop-Process -Name {t}",
+]
+
+# Every way this suite can name the service, against the verb that can take it.
+_NAMES_US = (
+    [(verb, str(SERVICE.own_pid)) for verb in _BY_PID_VERBS]
+    + [(verb, str(SERVICE.ancestors[0])) for verb in _BY_PID_VERBS]
+    + [(verb, "$PPID") for verb in _BY_PID_VERBS]
+    + [(verb, "python.exe") for verb in _BY_NAME_VERBS]
+)
+
+
+@pytest.mark.parametrize("wrapper", _WRAPPERS)
+@pytest.mark.parametrize("verb,target", _NAMES_US)
+def test_every_wrapper_around_every_way_of_naming_us(service, wrapper, verb, target):
+    command = wrapper.format(cmd=verb.format(t=target))
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("wrapper", _WRAPPERS)
+@pytest.mark.parametrize("verb", _BY_PID_VERBS)
+def test_the_same_wrappers_around_somebody_elses_pid_ask_and_name_the_victim(
+    service, wrapper, verb
+):
+    """The control matrix: the wrappers must not turn an ordinary kill into a
+    refusal, and what dies still has to be the head of the sentence."""
+    command = wrapper.format(cmd=verb.format(t=UNRELATED))
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1].startswith("Kills process %d: notepad.exe draft.txt" % UNRELATED), (
+        command, verdict[1],
+    )
+
+
+@pytest.mark.parametrize("command,fragment", [
+    ("set P=%d && taskkill /PID %%P%% /F" % SERVICE.own_pid, "%P%"),
+    ('bash -o pipefail -c "pkill python"', "could not read"),
+    ("taskkill /PID $(cat run.pid) /F", "$(cat"),
+])
+def test_what_the_matrix_does_not_reach(service, command, fragment):
+    """Three boundaries of the generator above, written down rather than implied.
+
+    It multiplies *spellings*; it cannot reach a target the gate has no way to
+    evaluate. Each row is Tier 1 — a question with the reason named — and none
+    is Tier 2: a target computed at run time, a target inside a wrapper whose
+    command string the gate could not extract, and a target set in an earlier
+    segment of the same line. A regex containing `(`, `$` or `%` falls in the
+    first of those: `pkill '(py|no)thon'` reads as an id the gate cannot resolve
+    and asks, rather than being tested as the pattern it is.
+    """
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert fragment in verdict[1], (command, verdict[1])
