@@ -1,0 +1,969 @@
+"""An agent asked to tidy up killed the service it was running inside.
+
+2026-09-21 00:56 local. An agent looked for "lingering python", ran
+`tasklist | findstr /i "python.exe"`, then
+`taskkill /PID 6520 /F & …`. **Pid 6520 was the D-PC backend itself** —
+`python.exe run_service.py`, the process the agent lives in. The log ends at
+`spawned pid …`.
+
+Two separate defects met:
+
+1. Nothing in the gate knew what a kill is. `HARDLINE_PATTERNS` covers disk
+   format and shutdown/reboot; killing a process by pid or by image name had
+   no rule at any tier, and `os.getpid()` appeared nowhere under
+   `dpc_agent/tools/`.
+2. The only reason the command reached a person at all was a **false** one:
+   `Command accesses path outside sandbox: /PID`. Branch 2 of `PATH_PATTERNS`
+   reads a Windows switch as a POSIX path
+   ([[THE-SANDBOX-PATH-RULE-READS-A-WINDOWS-SWITCH-AS-A-PATH]]). The three
+   harmless commands before it had asked with the same false reason (`/i`,
+   `/b`), so the operator had just clicked yes three times and answered the
+   fourth in 1.5 seconds.
+
+The two halves have to land together: repairing the parser alone deletes the
+accident that saved nothing — the command would then fall through to
+«allowed» with no question at all. `test_the_kill_rule_does_not_lean_on_the_path_scan`
+is that dependency written down.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from collections import namedtuple
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from dpc_client_core.dpc_agent.tools import process as process_tool  # noqa: E402
+from dpc_client_core.dpc_agent.tools import shell  # noqa: E402
+from dpc_client_core.dpc_agent.tools.shell import _validate_command, run_shell  # noqa: E402
+
+
+# --- the service this test pretends to be -----------------------------------
+# Never the real pids: a test that reads `os.getpid()` passes for the wrong
+# reason on the machine that wrote it and cannot express «an ancestor» at all.
+
+_Identity = namedtuple("_Identity", "own_pid ancestors names cmdline")
+
+SERVICE = _Identity(
+    own_pid=6520,                          # python.exe run_service.py — the incident's pid
+    ancestors=(4242, 77),                  # the venv launcher, and what started it
+    names=frozenset({"python.exe"}),
+    cmdline=r"C:\dpc\.venv\Scripts\python.exe run_service.py",
+)
+
+OTHER = 47676          # somebody else's process — a question, not a refusal
+UNRELATED = 4243       # and one an agent has an ordinary reason to kill
+_KNOWN = {
+    6520: "python.exe run_service.py",
+    4242: "python.exe -m uv run",
+    77: "cmd.exe",
+    OTHER: "python.exe qwen21_verify.py",
+    UNRELATED: "notepad.exe draft.txt",
+}
+
+
+@pytest.fixture
+def service(monkeypatch):
+    """Both providers the kill rules read, and nothing else."""
+    monkeypatch.setattr(shell, "_service_identity", lambda: SERVICE, raising=False)
+    monkeypatch.setattr(
+        shell, "_describe_pid", lambda pid: _KNOWN.get(pid, "not found"), raising=False
+    )
+    return SERVICE
+
+
+def tier_of(command, ctx=None, cwd=""):
+    verdict = _validate_command(command, ctx, cwd)
+    return verdict[0] if verdict else "tier0"
+
+
+def reason_of(command, ctx=None, cwd=""):
+    verdict = _validate_command(command, ctx, cwd)
+    return verdict[1] if verdict else ""
+
+
+def _says_it_is_us(reason: str, pid: int) -> bool:
+    return "D-PC service" in reason and str(pid) in reason
+
+
+# --- Part 1: the command from the incident ----------------------------------
+
+
+def test_the_incident_command_is_refused_outright(service):
+    verdict = _validate_command("taskkill /PID 6520 /F")
+
+    assert verdict is not None, "the command that killed the service was allowed"
+    assert verdict[0] == "tier2", "a kill of this service must not be approvable"
+    assert _says_it_is_us(verdict[1], 6520), verdict[1]
+    assert "python.exe run_service.py" in verdict[1], (
+        "the refusal has to say what the process is, in plain words"
+    )
+
+
+def test_a_harmless_segment_in_front_does_not_hide_it(service):
+    assert tier_of('echo checking for lingering python & taskkill /PID 6520 /F') == "tier2"
+
+
+def test_a_tier1_match_earlier_in_the_line_does_not_hide_it(service):
+    """The file's tier-major ordering: every segment is checked for a hard block
+    before any of them is checked for a soft one."""
+    verdict = _validate_command("sudo ls && taskkill /PID 6520 /F")
+
+    assert verdict is not None and verdict[0] == "tier2", verdict
+    assert _says_it_is_us(verdict[1], 6520), verdict[1]
+
+
+def test_the_whole_incident_line_including_the_ampersand_chain(service):
+    assert tier_of("taskkill /PID 6520 /F & echo done & dir") == "tier2"
+
+
+# --- Part 1: every spelling of a kill by pid --------------------------------
+
+_BY_PID = [
+    "taskkill /PID {pid} /F",
+    "taskkill /F /PID {pid}",
+    "taskkill /f /t /pid {pid}",
+    "taskkill /PID:{pid} /F",
+    "taskkill /PID 999999 /PID {pid} /F",
+    'taskkill /FI "PID eq {pid}" /F',
+    "tskill {pid}",
+    "kill {pid}",
+    "kill -9 {pid}",
+    "kill -KILL {pid}",
+    "kill -s SIGKILL {pid}",
+    "kill -n 9 {pid}",
+    "kill 1234 {pid}",
+    "Stop-Process -Id {pid}",
+    "Stop-Process -Id {pid} -Force",
+    "Stop-Process -Id:{pid}",
+    "Stop-Process -Id 1,{pid},3",
+    "Stop-Process {pid}",
+    "spps -Id {pid}",
+    "stop-process -id {pid} -force",
+    "wmic process where processid={pid} delete",
+    'wmic process where "processid={pid}" call terminate',
+    "sudo kill -9 {pid}",
+]
+
+
+@pytest.mark.parametrize("template", _BY_PID)
+def test_killing_this_services_own_pid_is_refused(service, template):
+    command = template.format(pid=SERVICE.own_pid)
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert _says_it_is_us(verdict[1], SERVICE.own_pid), (command, verdict[1])
+
+
+@pytest.mark.parametrize("template", _BY_PID)
+def test_killing_an_ancestor_of_this_service_is_refused(service, template):
+    """On Windows the venv launcher and the real interpreter are one service."""
+    command = template.format(pid=SERVICE.ancestors[0])
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert _says_it_is_us(verdict[1], SERVICE.ancestors[0]), (command, verdict[1])
+
+
+@pytest.mark.parametrize("template", _BY_PID)
+def test_killing_somebody_elses_process_asks_rather_than_refuses(service, template):
+    command = template.format(pid=OTHER)
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert str(OTHER) in verdict[1] and "qwen21_verify.py" in verdict[1], (
+        "the dialog must say which process is about to die"
+    )
+    assert "D-PC service" not in verdict[1], "it is not us; do not claim it is"
+
+
+@pytest.mark.parametrize("command", [
+    "taskkill /PID %PID% /F",
+    "taskkill /PID %errorlevel% /F",
+    "kill -9 $pid",
+    "kill $(cat run.pid)",
+    "kill `cat run.pid`",
+    "Stop-Process -Id $pid",
+])
+def test_a_pid_the_gate_cannot_read_is_a_question_not_a_pass(service, command):
+    """Fail closed: an argument that is not a literal number cannot be shown safe."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert "could not" in verdict[1] or "cannot" in verdict[1], verdict[1]
+
+
+@pytest.mark.parametrize("command,token", [
+    ("taskkill /PID %PID% /F", "%PID%"),
+    ("kill $pid", "$pid"),
+    ("kill $(cat run.pid)", "$(cat"),
+    ("Stop-Process -Id $p", "$p"),
+])
+def test_the_dialog_says_which_id_it_could_not_read(service, command, token):
+    """The tier is not the whole property. Dropping the unreadable token still
+    leaves Tier 1 — the fallback note covers it — but the person is then told
+    only that *something* could not be read, which is the incident's dialog
+    again: true, and about nothing they can act on.
+    """
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert token in verdict[1], (command, verdict[1])
+
+
+# --- Part 1: the same kill with a wider net, by image name ------------------
+
+
+@pytest.mark.parametrize("command", [
+    "taskkill /IM python.exe",
+    "taskkill /IM python.exe /F",
+    "taskkill /im python*",
+    'taskkill /FI "IMAGENAME eq python.exe" /F',
+    "taskkill /IM:python.exe",
+    "pkill python",
+    "pkill -9 python",
+    "killall python",
+    "killall -9 python",
+    "Stop-Process -Name python",
+    "Stop-Process -Name python -Force",
+    "tskill python",
+])
+def test_killing_by_the_name_this_service_runs_under_is_refused(service, command):
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+def test_a_pattern_matched_against_the_whole_command_line(service):
+    """`pkill -f run_service` names no process — it names what we are running."""
+    verdict = _validate_command("pkill -f run_service")
+
+    assert verdict is not None and verdict[0] == "tier2", verdict
+    assert "D-PC service" in verdict[1], verdict[1]
+
+
+@pytest.mark.parametrize("command", [
+    "taskkill /IM chrome.exe /F",
+    "taskkill /IM pythonw.exe /F",   # a different executable, not ours
+    "pkill node",
+    "killall firefox",
+    "Stop-Process -Name ollama",
+    "pkill -f comfyui",
+])
+def test_killing_by_a_name_that_is_not_ours_asks_rather_than_refuses(service, command):
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert "D-PC service" not in verdict[1], (command, verdict[1])
+
+
+def test_the_name_rule_follows_the_executable_this_service_actually_runs(monkeypatch):
+    """The set is read at call time, so a pythonw service protects pythonw."""
+    monkeypatch.setattr(
+        shell, "_service_identity",
+        lambda: SERVICE._replace(names=frozenset({"pythonw.exe"})),
+        raising=False,
+    )
+    monkeypatch.setattr(shell, "_describe_pid", lambda pid: "pythonw.exe", raising=False)
+
+    assert tier_of("taskkill /IM pythonw.exe /F") == "tier2"
+    assert tier_of("taskkill /IM python.exe /F") == "tier1"
+
+
+# --- Part 1: the same on every platform -------------------------------------
+
+
+@pytest.mark.parametrize("osname", ["nt", "posix"])
+@pytest.mark.parametrize("command", [
+    "taskkill /PID 6520 /F",
+    "kill -9 6520",
+    "pkill -f run_service",
+    "taskkill /IM python.exe /F",
+])
+def test_the_protected_set_is_not_a_windows_rule(service, monkeypatch, osname, command):
+    """POSIX `start_new_session` stops a tree kill from climbing to us; an
+    explicit `kill <pid>` or `pkill -f run_service` reaches us regardless."""
+    monkeypatch.setattr(os, "name", osname)
+    monkeypatch.setattr(shell, "_on_windows", lambda: osname == "nt", raising=False)
+
+    assert tier_of(command) == "tier2", (osname, command)
+
+
+# --- Part 1: and a legitimate kill has to keep working ----------------------
+
+
+@pytest.mark.parametrize("command", [
+    f"taskkill /PID {UNRELATED} /F",
+    f"kill {UNRELATED}",
+    f"kill -9 {UNRELATED}",
+])
+def test_an_ordinary_kill_is_asked_and_named(service, command):
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1] == f"Kills process {UNRELATED}: notepad.exe draft.txt", verdict[1]
+
+
+def test_an_approved_kill_runs(service, tmp_path, monkeypatch):
+    """A suite of refusals would pass while breaking the person who asked."""
+    spawned = []
+    monkeypatch.setattr(shell, "_execute_shell_command",
+                        lambda command, cwd, timeout: spawned.append(command) or "SUCCESS")
+    granted = []
+
+    def _approve(ctx, command, reason, cwd, timeout):
+        granted.append(reason)
+        return shell._execute_shell_command(command, cwd or str(ctx.agent_root), timeout)
+
+    monkeypatch.setattr(shell, "_request_approval", _approve)
+
+    answer = run_shell(_Ctx(tmp_path), f"taskkill /PID {UNRELATED} /F")
+
+    assert answer == "SUCCESS", answer
+    assert spawned == [f"taskkill /PID {UNRELATED} /F"]
+    assert granted == [f"Kills process {UNRELATED}: notepad.exe draft.txt"]
+
+
+# --- the hard block for «every process I own» -------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "kill -9 -1",
+    "kill -s KILL -1",
+    "kill -KILL -1",
+    "kill -TERM -1",
+    "kill -- -1",
+])
+def test_signalling_every_process_the_user_owns_is_a_hard_block(service, command):
+    """The rule wanted a literal `-9`, so every other spelling of the same
+    signal walked past it — and each one takes the service with it."""
+    assert tier_of(command) == "tier2", command
+
+
+@pytest.mark.parametrize("command", [
+    f"kill -1 {UNRELATED}",     # -1 is SIGHUP here, and the target is a pid
+    f"kill {UNRELATED}",
+])
+def test_a_signal_number_is_not_a_target(service, command):
+    assert tier_of(command) == "tier1", command
+
+
+def test_the_price_of_leaving_that_pattern_unanchored(service):
+    """Measured rather than assumed, like the `rm -rf /` case next door.
+
+    The pattern is unanchored, as every HARDLINE pattern is, so a command that
+    merely carries the word and ends in `-1` is blocked. Anchoring it at the
+    verb would fix that and would simultaneously unblock
+    `echo "kill -9 -1"`, which is blocked today — this is the direction the
+    file has already chosen twice.
+    """
+    assert tier_of('git log --grep "kill" -1') == "tier2"
+    assert tier_of('echo "kill -9 -1"') == "tier2"
+    assert tier_of("git log -1") == "tier0"
+
+
+# --- Part 1: what must not be swept up --------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "echo taskkill",
+    "type killer.txt",
+    "cat notes-about-kill.txt",
+    'git commit -m "kill the bug"',
+    'git log --grep "pkill"',
+    "grep -r taskkill .",
+    "python make_killer.py",
+    "ls",
+])
+def test_a_word_is_not_a_verb(service, command):
+    assert tier_of(command) == "tier0", command
+
+
+def test_the_services_own_tree_kill_does_not_pass_through_this_gate():
+    """`process.py` kills what the runtime itself spawned, with an argument
+    list and no shell — an agent may signal only what its runtime started, and
+    that path never reaches `_validate_command`."""
+    source = Path(process_tool.__file__).read_text(encoding="utf-8")
+
+    assert "_validate_command" not in source
+    assert "from .shell import" not in source and "import shell" not in source
+    assert '["taskkill", "/PID", str(pid), "/T", "/F"]' in source, (
+        "the tree kill is still a list argv, not a shell string"
+    )
+
+
+# --- the same kill, handed to another shell ---------------------------------
+# A verb-first parser reads the wrapper and stops. Every row below was measured
+# tier0 or tier1-naming-the-wrapper before this change, and a dialog that names
+# `cmd /c` to somebody who has been clicking yes is the incident in a new coat.
+
+_WRAPPED = [
+    'cmd.exe /c "taskkill /PID {pid} /F"',
+    "cmd /c taskkill /PID {pid} /F",
+    "cmd /k taskkill /PID {pid} /F",
+    'cmd /c "echo hi && taskkill /PID {pid} /F"',
+    "start /b taskkill /PID {pid} /F",
+    'start "a job" taskkill /PID {pid} /F',
+    "call taskkill /PID {pid} /F",
+    "@taskkill /PID {pid} /F",
+    'powershell -Command "Stop-Process -Id {pid} -Force"',
+    'pwsh -c "kill {pid}"',
+    'bash -c "kill -9 {pid}"',
+    "sh -c 'kill {pid}'",
+    'zsh -c "pkill -f run_service"',
+    "echo x | xargs kill {pid}",
+]
+
+
+@pytest.mark.parametrize("template", _WRAPPED)
+def test_a_kill_handed_to_another_shell_is_still_a_kill(service, template):
+    command = template.format(pid=SERVICE.own_pid)
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("template", _WRAPPED)
+def test_a_wrapped_kill_of_an_ancestor_is_refused_too(service, template):
+    if "run_service" in template:
+        pytest.skip("that row is a name pattern, not a pid")
+    command = template.format(pid=SERVICE.ancestors[0])
+
+    assert tier_of(command) == "tier2", command
+
+
+@pytest.mark.parametrize("osname", ["nt", "posix"])
+@pytest.mark.parametrize("template", [
+    'cmd /c "taskkill /PID {pid} /F"',
+    'bash -c "kill -9 {pid}"',
+])
+def test_the_wrapper_rule_is_not_a_windows_rule(service, monkeypatch, osname, template):
+    monkeypatch.setattr(os, "name", osname)
+    monkeypatch.setattr(shell, "_on_windows", lambda: osname == "nt", raising=False)
+
+    assert tier_of(template.format(pid=SERVICE.own_pid)) == "tier2", (osname, template)
+
+
+@pytest.mark.parametrize("command,wrapper", [
+    (f'cmd /c "taskkill /PID {OTHER} /F"', "cmd"),
+    (f'powershell -Command "Stop-Process -Id {OTHER}"', "powershell"),
+    (f'bash -c "kill -9 {OTHER}"', "bash"),
+])
+def test_the_kill_is_named_in_front_of_the_wrapper(service, command, wrapper):
+    """The reason has to open with what dies, not with which shell was used."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1].startswith(f"Kills process {OTHER}: python.exe qwen21_verify.py"), verdict[1]
+    assert "Requires approval:" in verdict[1], verdict[1]
+
+
+def test_a_pid_arriving_on_stdin_cannot_be_shown_safe(service):
+    """`echo <pid> | xargs kill` — the target is in another segment, so the
+    kill itself names none and fails closed."""
+    verdict = _validate_command(f"echo {SERVICE.own_pid} | xargs kill")
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert "could not identify" in verdict[1], verdict[1]
+
+
+def test_an_encoded_command_says_the_gate_is_blind(service):
+    verdict = _validate_command("powershell -enc VABhAHMAawBrAGkAbABs")
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert verdict[1].startswith("A kill cannot be ruled out"), verdict[1]
+
+
+@pytest.mark.parametrize("command", [
+    "cmd /c dir",
+    "cmd.exe /c dir",
+    "cmd /k dir",
+    "cmd.exe /k dir",
+])
+def test_every_spelling_of_the_cmd_wrapper_needs_approval(service, command):
+    """`\\bcmd\\s+/c\\b` missed `cmd.exe` and missed `/k`, which is the same
+    wrapper with the window left open."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+
+
+@pytest.mark.parametrize("command", [
+    "cmd /c echo hi",
+    'bash -c "ls -la"',
+    "dir",
+])
+def test_a_wrapper_around_ordinary_work_is_no_worse_than_before(service, command):
+    """`cmd /c` and `bash -c` were always Tier 1; looking inside must not
+    promote them, and `dir` must stay free."""
+    verdict = _validate_command(command)
+    if command == "dir":
+        assert verdict is None
+    else:
+        assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+        assert "Kills" not in verdict[1], verdict[1]
+
+
+# --- the last resort, and what it costs -------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "for /f %i in ('echo {pid}') do taskkill /PID %i /F",
+    'python -c "import os; os.kill({pid}, 9)"',
+    # the idiomatic PowerShell pipeline kill: the pid and the verb sit in
+    # different halves of a pipe that quoting keeps in one segment
+    'powershell -Command "Get-Process -Id {pid} | Stop-Process -Force"',
+])
+def test_a_command_the_gate_cannot_parse_but_can_read_is_refused(service, command):
+    """Spellings are endless, so the net is coarse: a kill verb and this
+    service's own pid in one segment is refused without parsing either."""
+    verdict = _validate_command(command.format(pid=SERVICE.own_pid))
+
+    assert verdict is not None and verdict[0] == "tier2", verdict
+    assert str(SERVICE.own_pid) in verdict[1], verdict[1]
+
+
+def test_arbitrary_code_remains_the_recorded_boundary(service):
+    """ADR-030 answers `python -c` with Tier 1 and does not parse it. That is
+    unchanged for every string but one: a *protected pid* beside a kill word is
+    caught by the last-resort check above, not by reading the Python."""
+    verdict = _validate_command('python -c "print(1)"')
+    assert verdict is not None and verdict[0] == "tier1"
+
+    verdict = _validate_command(f'python -c "import os; os.kill({OTHER}, 9)"')
+    assert verdict is not None and verdict[0] == "tier1", verdict
+
+
+def test_the_limit_of_the_last_resort_check(service):
+    """It reads one segment, so a pid parked in a variable in an earlier
+    segment is out of its reach. That is the same boundary the `xargs` row
+    needs — widening this to the whole line would refuse
+    `echo <pid> | xargs kill`, which must stay a question. Still not silent:
+    the kill itself has no literal target, so it asks."""
+    verdict = _validate_command(f"set P={SERVICE.own_pid} && taskkill /PID %P% /F")
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert "could not identify" in verdict[1], verdict[1]
+
+
+def test_the_price_of_the_last_resort_check(service):
+    """Named as a price, like the unanchored pattern next door: text that
+    merely carries a kill word and the pid is refused as well."""
+    assert tier_of(f"echo taskkill /PID {SERVICE.own_pid} /F") == "tier2"
+    assert tier_of(f"echo the service is pkill-proof, pid {SERVICE.own_pid}") == "tier2"
+    assert tier_of(f"echo pid {SERVICE.own_pid}") == "tier0"
+    assert tier_of("echo taskkill") == "tier0"
+
+
+# --- Part 1: it is a hard block, and configuration cannot waive it ----------
+
+
+class _Firewall:
+    def __init__(self, whitelist):
+        self._whitelist = whitelist
+
+    def get_tool_setting(self, *args, **kwargs):
+        return self._whitelist
+
+
+class _Ctx:
+    """A sandbox that is one directory, which is what the real one resolves to."""
+
+    def __init__(self, sandbox, whitelist=None):
+        self.firewall = _Firewall(whitelist or [])
+        self.agent_root = str(sandbox)
+        self._sandbox = Path(sandbox).resolve()
+
+    def validate_extended_path(self, path):
+        resolved = Path(os.path.expanduser(str(path)))
+        try:
+            resolved = resolved.resolve()
+        except OSError:
+            pass
+        if self._sandbox not in resolved.parents and resolved != self._sandbox:
+            raise PermissionError(f"{path} is outside {self._sandbox}")
+        return True
+
+
+def test_a_whitelist_cannot_waive_a_kill_of_this_service(service, tmp_path):
+    ctx = _Ctx(tmp_path, whitelist=["taskkill"])
+
+    verdict = _validate_command("taskkill /PID 6520 /F", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier2", verdict
+
+
+def test_a_whitelist_still_waives_an_ordinary_kill(service, tmp_path):
+    """The existing semantics, unchanged: a soft finding is whitelistable."""
+    ctx = _Ctx(tmp_path, whitelist=["taskkill"])
+
+    assert _validate_command(f"taskkill /PID {OTHER} /F", ctx, str(tmp_path)) is None
+
+
+def test_the_spawn_is_never_reached_for_a_kill_of_this_service(service, tmp_path, monkeypatch):
+    ran = []
+    asked = []
+    monkeypatch.setattr(shell, "_execute_shell_command",
+                        lambda *a, **k: ran.append(a) or "RAN")
+    monkeypatch.setattr(shell, "_request_approval",
+                        lambda *a, **k: asked.append(a) or "ASKED")
+
+    answer = run_shell(_Ctx(tmp_path), "taskkill /PID 6520 /F")
+
+    assert ran == [], "the service's own kill reached the subprocess"
+    assert asked == [], "a kill of this service must not even be offered for approval"
+    assert answer.startswith("⛔"), answer
+    assert "D-PC service" in answer, answer
+
+
+# --- the dependency between the two halves ----------------------------------
+
+
+def test_the_kill_rule_does_not_lean_on_the_path_scan(service, tmp_path, monkeypatch):
+    """Part 3 alone would have made the incident SILENT.
+
+    The only thing that stopped `taskkill /PID 6520 /F` in front of a person
+    was the parser bug that read `/PID` as a path. With that repaired and no
+    kill rule, the same command carries no path-like token at all and falls
+    through to «allowed».
+    """
+    monkeypatch.setattr(shell, "_on_windows", lambda: True, raising=False)
+    monkeypatch.setattr(shell, "_names_at_drive_root",
+                        lambda drive: frozenset({"users", "windows"}), raising=False)
+    ctx = _Ctx(tmp_path)
+
+    # Nothing here is a path any more — the verdict is the kill rule's alone.
+    assert "outside sandbox" not in reason_of(f"taskkill /PID {OTHER} /F", ctx, str(tmp_path))
+    assert tier_of(f"taskkill /PID {OTHER} /F", ctx, str(tmp_path)) == "tier1"
+    assert tier_of("taskkill /PID 6520 /F", ctx, str(tmp_path)) == "tier2"
+
+
+def test_both_halves_of_the_incidents_shape_reach_the_dialog(service, tmp_path, monkeypatch):
+    """Reasons accumulate. A truthful reason that hides the dangerous half is
+    worse than a false one, and the kill is the half that has to be read first."""
+    monkeypatch.setattr(shell, "_on_windows", lambda: True, raising=False)
+    monkeypatch.setattr(shell, "_names_at_drive_root",
+                        lambda drive: frozenset({"users", "windows"}), raising=False)
+    ctx = _Ctx(tmp_path)
+
+    reason = reason_of(
+        rf"taskkill /PID {OTHER} /F & cd /d C:\outside\sandbox & python x.py",
+        ctx, str(tmp_path),
+    )
+
+    assert reason.startswith("Kills "), reason
+    assert str(OTHER) in reason and "qwen21_verify.py" in reason, reason
+    assert "outside sandbox" in reason and r"C:\outside\sandbox" in reason, reason
+    assert "\n" not in reason and "\r" not in reason, "the dialog renders one line"
+
+
+# --- Part 3: a Windows switch is not a path ---------------------------------
+# The falsifier of [[THE-SANDBOX-PATH-RULE-READS-A-WINDOWS-SWITCH-AS-A-PATH]],
+# encoded: of the 52 recorded «outside sandbox» reasons, the 36 switch matches
+# and the URL fragment must stop firing; /tmp, /dev/null and the C:\ paths must
+# still fire. A change that also drops one of those nine has narrowed too far.
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    monkeypatch.setattr(shell, "_on_windows", lambda: True, raising=False)
+    monkeypatch.setattr(
+        shell, "_names_at_drive_root",
+        lambda drive: frozenset({"users", "windows", "programdata", "perflogs"}),
+        raising=False,
+    )
+
+
+@pytest.fixture
+def posix(monkeypatch):
+    monkeypatch.setattr(shell, "_on_windows", lambda: False, raising=False)
+    monkeypatch.setattr(shell, "_names_at_drive_root",
+                        lambda drive: frozenset(), raising=False)
+
+
+# The switch tokens the UI log recorded, one command each. `cd /d C:\sandbox`
+# keeps a real branch-1 path on purpose: the switch must stop firing while the
+# path beside it still does.
+_RECORDED_SWITCHES = [
+    ("cd /d C:\\sandbox", "/d"),
+    ("dir /b", "/b"),
+    ("sort /n numbers.txt", "/n"),
+    ('tasklist /FI "IMAGENAME eq python.exe"', "/FI"),
+    ("sort /N numbers.txt", "/N"),
+    ("dir /s", "/s"),
+    ("xcopy a b /Y", "/Y"),
+    ('findstr /i "x" notes.txt', "/i"),
+    ("xcopy a b /y", "/y"),
+    ('findstr /R "x" notes.txt', "/R"),
+    ("more /c notes.txt", "/c"),
+    ("dir /od", "/od"),
+    ("robocopy a b /MIR", "/MIR"),
+]
+
+
+@pytest.mark.parametrize("command,switch", _RECORDED_SWITCHES)
+def test_a_windows_switch_no_longer_reads_as_a_path(windows, tmp_path, command, switch):
+    reason = reason_of(command, _Ctx(tmp_path), str(tmp_path))
+
+    assert f"outside sandbox: {switch}" not in reason, (command, reason)
+
+
+def test_a_switch_beside_a_real_path_leaves_the_path_firing(windows, tmp_path):
+    """The control for the case above: narrowing branch 2 must not reach branch 1."""
+    reason = reason_of("cd /d C:\\sandbox", _Ctx(tmp_path), str(tmp_path))
+
+    assert reason == "Command accesses path outside sandbox: C:\\sandbox", reason
+
+
+@pytest.mark.parametrize("command", [
+    "curl https://api.github.com/repos/anthropics/claude-code/releases",
+    "curl -s https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "wget https://en.wikipedia.org/w/index.php?title=Mercury",
+    "curl http://journals.le.ac.uk/index.php/jist",
+])
+def test_the_inside_of_a_url_is_not_a_path_on_either_platform(tmp_path, command, monkeypatch):
+    """`https://host/path` leaves `/host/path`, which branch 2 read as absolute.
+    About half of every eval refusal was the agent stopped from fetching a page."""
+    for on_windows in (True, False):
+        monkeypatch.setattr(shell, "_on_windows", lambda: on_windows, raising=False)
+        monkeypatch.setattr(shell, "_names_at_drive_root",
+                            lambda drive: frozenset(), raising=False)
+        reason = reason_of(command, _Ctx(tmp_path), str(tmp_path))
+        assert "outside sandbox" not in reason, (command, on_windows, reason)
+
+
+@pytest.mark.parametrize("command,fragment", [
+    ("python /tmp/j_shell_old.py", "/tmp/j_shell_old.py"),
+    ("echo hi > /dev/null", "/dev/null"),
+    ("type /Users/someone/secret.txt", "/Users/someone/secret.txt"),
+    ("type /Windows/win.ini", "/Windows/win.ini"),
+    ("dir /Users", "/Users"),                       # exists at the drive root
+    ("echo x > /evil", "/evil"),                    # a redirect target, never a switch
+    (r"type C:\Users\mikha\.dpc\node.key", r"C:\Users\mikha\.dpc\node.key"),
+    (r"dir C:\Users\mikha\.dpc\agents", r"C:\Users\mikha\.dpc\agents"),
+])
+def test_a_real_path_still_fires_on_windows(windows, tmp_path, command, fragment):
+    reason = reason_of(command, _Ctx(tmp_path), str(tmp_path))
+
+    assert "outside sandbox" in reason, (command, reason)
+    assert fragment in reason, (command, reason)
+
+
+def test_the_msys_spelling_still_fires_because_that_half_was_not_done(windows, tmp_path):
+    """Recorded honestly rather than claimed: the board's first step (b) —
+    teaching `validate_extended_path` that `/c/Users/…` is `C:\\Users\\…` — is
+    not in this change, so those six fires are still there."""
+    reason = reason_of("cat /c/Users/mikha/Documents/dpc-messenger/README.md",
+                       _Ctx(tmp_path), str(tmp_path))
+
+    assert "outside sandbox" in reason, reason
+
+
+@pytest.mark.parametrize("command,fragment", [
+    ("cat /etc/passwd", "/etc/passwd"),
+    ("ls /etc", "/etc"),
+    ("cat /tmp", "/tmp"),
+    ("ls /dev", "/dev"),
+    ("ls /usr", "/usr"),
+    ("ls /var", "/var"),
+    ("ls /bin", "/bin"),
+    ("dir /b", "/b"),
+    ("sort /n numbers.txt", "/n"),
+])
+def test_posix_behaviour_is_exactly_what_it_was(posix, tmp_path, command, fragment):
+    """The switch exemption is Windows-only. On POSIX `/b` is a path that does
+    not exist, and it was Tier 1 before this change — it still is."""
+    reason = reason_of(command, _Ctx(tmp_path), str(tmp_path))
+
+    assert "outside sandbox" in reason, (command, reason)
+    assert fragment in reason, (command, reason)
+
+
+# Each of the three conditions on top of the board's ≤3-letter rule has to be
+# the deciding one somewhere, or it is decoration that a mutation deletes for
+# free. `/Users` and `/Windows` above are five letters and nine — the length
+# rule already keeps them, so they prove nothing about the guards.
+
+
+@pytest.fixture
+def short_names_at_root(monkeypatch):
+    """A drive whose root really does hold one-to-three-letter entries."""
+    monkeypatch.setattr(shell, "_on_windows", lambda: True, raising=False)
+    monkeypatch.setattr(shell, "_names_at_drive_root",
+                        lambda drive: frozenset({"tmp", "dev", "c", "bin"}), raising=False)
+
+
+@pytest.mark.parametrize("command,fragment", [
+    ("type /tmp", "/tmp"),
+    ("dir /dev", "/dev"),
+    ("cd /c", "/c"),
+    ("more /bin", "/bin"),
+])
+def test_a_short_name_that_exists_at_the_drive_root_is_still_a_path(
+    short_names_at_root, tmp_path, command, fragment
+):
+    """The condition the length rule cannot cover: `C:\\tmp` and `C:\\c` exist on
+    real machines — measured on this one, whose root holds `c`, `dev` and `tmp`.
+    """
+    reason = reason_of(command, _Ctx(tmp_path), str(tmp_path))
+
+    assert "outside sandbox" in reason, (command, reason)
+    assert fragment in reason, (command, reason)
+
+
+def test_a_short_name_absent_from_the_root_is_the_switch_it_looks_like(
+    short_names_at_root, tmp_path
+):
+    """The control: `/b` is not at that root, so it is still a switch."""
+    assert reason_of("dir /b", _Ctx(tmp_path), str(tmp_path)) == ""
+
+
+@pytest.mark.parametrize("command,fragment", [
+    ("dir /b", "/b"),
+    ("type /tmp", "/tmp"),
+    ("findstr /i x f", "/i"),
+])
+def test_an_unreadable_drive_root_keeps_the_old_verdict(tmp_path, monkeypatch, command, fragment):
+    """Unreadable is not «nothing is there». With no answer from the disk the
+    gate must not start exempting tokens it cannot check."""
+    monkeypatch.setattr(shell, "_on_windows", lambda: True, raising=False)
+    monkeypatch.setattr(shell, "_names_at_drive_root", lambda drive: None, raising=False)
+
+    reason = reason_of(command, _Ctx(tmp_path), str(tmp_path))
+
+    assert "outside sandbox" in reason, (command, reason)
+    assert fragment in reason, (command, reason)
+
+
+@pytest.mark.parametrize("command,fragment", [
+    ("echo x > /ev", "/ev"),
+    ("echo x >> /o", "/o"),
+    ("type nul > /a", "/a"),
+    ("sort < /in", "/in"),
+    ("echo x 2> /er", "/er"),
+])
+def test_a_redirect_target_is_never_a_switch(short_names_at_root, tmp_path, command, fragment):
+    """`> /evil` is four letters, so the length rule hid this one: a file being
+    written to is a path whatever its name is short enough to look like."""
+    reason = reason_of(command, _Ctx(tmp_path), str(tmp_path))
+
+    assert "outside sandbox" in reason, (command, reason)
+    assert fragment in reason, (command, reason)
+
+
+def test_a_switch_before_a_redirect_is_still_a_switch(short_names_at_root, tmp_path):
+    """The control: only the target of the redirect is affected."""
+    assert reason_of("dir /b > out.txt", _Ctx(tmp_path), str(tmp_path)) == ""
+
+
+@pytest.mark.parametrize("command,fragment", [
+    ("sfc /scannow", "/scannow"),
+    ("msiexec /quiet", "/quiet"),
+    ("cl /nologo", "/nologo"),
+    ("robocopy a b /MIRR", "/MIRR"),
+])
+def test_a_switch_longer_than_three_letters_still_asks(short_names_at_root, tmp_path,
+                                                      command, fragment):
+    """A recorded cost of the board's rule, not an oversight.
+
+    The narrowing agreed on the board is «a one-to-three-letter token»: it was
+    measured against the 36 switches the UI log actually recorded, every one of
+    which fits. Longer switches — `/scannow`, `/quiet`, `/nologo`, and anything
+    with a `:value` — still reach the operator with a reason that calls them a
+    path. Widening the rule is a separate decision with its own falsifier; this
+    pins where the boundary currently is so it cannot drift by accident.
+    """
+    reason = reason_of(command, _Ctx(tmp_path), str(tmp_path))
+
+    assert "outside sandbox" in reason, (command, reason)
+    assert fragment in reason, (command, reason)
+
+
+def test_the_three_letter_boundary_itself(short_names_at_root, tmp_path):
+    """The pair that fixes the length: `/MIR` is exempt, `/MIRR` is not."""
+    assert reason_of("robocopy a b /MIR", _Ctx(tmp_path), str(tmp_path)) == ""
+    assert "outside sandbox" in reason_of("robocopy a b /MIRR", _Ctx(tmp_path), str(tmp_path))
+
+
+def test_ordinary_work_inside_the_sandbox_stays_ungated(windows, tmp_path):
+    inside = tmp_path / "work"
+    inside.mkdir()
+
+    assert _validate_command(f"cd /d {inside}", _Ctx(tmp_path), str(tmp_path)) is None
+    assert _validate_command("dir /b", _Ctx(tmp_path), str(tmp_path)) is None
+
+
+# --- the providers themselves, on this machine ------------------------------
+
+
+def test_only_our_own_kind_of_ancestor_lends_its_name(monkeypatch):
+    """A developer's box has Explorer, a terminal and an editor above the
+    service. Their PIDs are protected; their NAMES are not — `taskkill /IM
+    explorer.exe` is a question, not a hard block. What does lend its name is
+    the launcher/interpreter pair, which is the same executable twice.
+    """
+    monkeypatch.setattr(shell, "_ancestor_processes", lambda pid: [
+        (4242, "python.exe"), (77, "explorer.exe"), (78, "bash.exe"), (79, "uv.exe"),
+    ], raising=False)
+    monkeypatch.setattr(shell, "_SERVICE_IDENTITY", None, raising=False)
+
+    identity = shell._service_identity()
+
+    assert "python.exe" in identity.names
+    assert "explorer.exe" not in identity.names
+    assert "bash.exe" not in identity.names
+    assert "uv.exe" not in identity.names
+    assert identity.ancestors == (4242, 77, 78, 79), "their pids stay protected"
+
+    monkeypatch.setattr(shell, "_SERVICE_IDENTITY", None, raising=False)
+
+
+@pytest.mark.parametrize("command", [
+    "taskkill /IM explorer.exe /F",
+    "taskkill /IM bash.exe /F",
+    "pkill -9 code",
+])
+def test_an_ancestors_name_is_a_question_not_a_refusal(service, command):
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert "running)" in verdict[1], (command, verdict[1])
+
+
+def test_the_service_identity_names_this_process():
+    """The one place the real provider is exercised: everything else patches it."""
+    identity = shell._service_identity()
+
+    assert identity.own_pid == os.getpid()
+    assert os.path.basename(sys.executable).lower() in {n.lower() for n in identity.names}
+    assert isinstance(identity.ancestors, tuple)
+    assert os.getpid() not in identity.ancestors, "a process is not its own ancestor"
+
+
+def test_a_pid_can_be_described_and_a_missing_one_says_so():
+    described = shell._describe_pid(os.getpid())
+    assert "python" in described.lower(), described
+    assert "\n" not in described and len(described) <= 200
+
+    absent = 2 ** 22 - 3
+    try:
+        import psutil
+        missing = not psutil.pid_exists(absent)
+    except Exception:
+        missing = True
+    if missing:
+        assert shell._describe_pid(absent) in ("not found", "unreadable")
+
+
+def test_this_process_cannot_be_asked_to_kill_itself():
+    """No patching at all — the real provider, the real pid."""
+    verdict = _validate_command(f"taskkill /PID {os.getpid()} /F")
+
+    assert verdict is not None and verdict[0] == "tier2", verdict
+    assert str(os.getpid()) in verdict[1], verdict[1]

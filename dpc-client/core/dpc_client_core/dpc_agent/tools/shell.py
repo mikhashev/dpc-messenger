@@ -14,11 +14,13 @@ Safety guardrails (ADR-030): 3-tier command classification.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 import unicodedata
@@ -85,8 +87,11 @@ HARDLINE_PATTERNS: list[re.Pattern] = [
     # Shutdown / reboot
     re.compile(r"\b(shutdown|reboot|halt|poweroff)\b", re.I),
     re.compile(r"\binit\s+[06]\b"),
-    # Kill all
-    re.compile(r"\bkill\b.*\s+-9\s+-1\b"),
+    # Kill all. `-1` is the *target* only when it is the last argument — as a
+    # first one it is SIGHUP, and `kill -1 1234` is an ordinary signal. The
+    # signal may be spelled any of the ways `kill` accepts, so it is not
+    # required to be `-9`.
+    re.compile(r"""\bkill\b.*\s-1\s*["']?\s*$"""),
     # WSL escape (Windows → Linux breakout)
     re.compile(r"\bwsl\b", re.I),
 ]
@@ -97,7 +102,8 @@ DANGEROUS_PATTERNS: list[re.Pattern] = [
     re.compile(r"\b(sudo|su|runas|gsudo|pkexec)\b", re.I),
     # Subshell invocation (arbitrary code execution)
     re.compile(r"\b(bash|sh|zsh|fish)\s+-c\b", re.I),
-    re.compile(r"\bcmd\s+/c\b", re.I),
+    # `cmd.exe` is the same wrapper, and `/k` is it with the window left open.
+    re.compile(r"\bcmd(?:\.exe)?\s+/[ck]\b", re.I),
     re.compile(r"\b(python|python3|py)\s+-c\b", re.I),
     re.compile(r"\bnode\s+-e\b", re.I),
     # PowerShell's inline-code wrapper. Every other shell's had a rule and this
@@ -244,10 +250,713 @@ def _is_whitelisted(command: str, whitelist: list[str]) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Killing a process, and never this one
+# ---------------------------------------------------------------------------
+
+
+class _ServiceIdentity(NamedTuple):
+    """Who «this service» is, in the terms a kill command can name it."""
+
+    own_pid: int
+    ancestors: tuple          # pids above this one, nearest first
+    names: frozenset          # lowercase executable basenames, ours and theirs
+    cmdline: str              # what this process was started with
+
+
+_SERVICE_IDENTITY: Optional[_ServiceIdentity] = None
+_ANCESTOR_LIMIT = 16
+_DESCRIPTION_LIMIT = 120
+
+
+def _service_identity() -> _ServiceIdentity:
+    """This process, the processes above it, and the names they run under.
+
+    The first check in this gate that asks the operating system a question
+    rather than matching a string, so it carries two boundaries. Parent links
+    and executable names resolve per-platform — psutil, else `/proc`, else this
+    process alone. And `os.getpid()` is the *service's* pid only because agents
+    run inside the service process; move them out and this stops recognising
+    what it protects. `single_instance.py`, `tool_ledger.py` and
+    `process.py:_kill_process_tree` are the other three answers to «this is
+    me», and the invariant they share is that an agent may signal only what its
+    runtime started.
+
+    One cached provider, so a test can answer for a service it invents.
+    """
+    global _SERVICE_IDENTITY
+    if _SERVICE_IDENTITY is None:
+        ancestors = _ancestor_processes(os.getpid())
+        names = {os.path.basename(sys.executable), _own_process_name()}
+        # Only an ancestor of our own kind lends its name: the venv launcher
+        # and the interpreter it starts are one service under one name. The
+        # terminal, the editor and Explorer above them are not — their pids
+        # stay protected, their names are an ordinary question.
+        stems = {_name_stem(n) for n in names if n}
+        names.update(name for _pid, name in ancestors if name and _name_stem(name) in stems)
+        _SERVICE_IDENTITY = _ServiceIdentity(
+            own_pid=os.getpid(),
+            ancestors=tuple(pid for pid, _name in ancestors),
+            names=frozenset(n.lower() for n in names if n),
+            cmdline=" ".join(sys.argv),
+        )
+    return _SERVICE_IDENTITY
+
+
+def _own_process_name() -> str:
+    """What the OS calls this process, which is not always `sys.executable`."""
+    try:
+        import psutil
+
+        return psutil.Process(os.getpid()).name()
+    except Exception:
+        return _proc_status(os.getpid())[1]
+
+
+def _ancestor_processes(pid: int) -> list:
+    """(pid, name) for every process above this one, nearest first.
+
+    On Windows a venv launcher and the interpreter it starts are one service
+    wearing two pids; on POSIX the shell above us is not an agent's to signal.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return _ancestors_from_proc(pid)
+    found: list = []
+    seen = {pid}
+    try:
+        proc = psutil.Process(pid)
+        for _ in range(_ANCESTOR_LIMIT):
+            proc = proc.parent()
+            if proc is None or proc.pid in seen or proc.pid <= 0:
+                break
+            seen.add(proc.pid)
+            try:
+                name = proc.name()
+            except Exception:
+                name = ""
+            found.append((proc.pid, name))
+    except Exception as exc:
+        log.debug("could not walk the parents of %s: %s", pid, exc)
+        return found or _ancestors_from_proc(pid)
+    return found
+
+
+def _proc_status(pid: int) -> Tuple[int, str]:
+    """(ppid, name) from /proc, or (0, "") where there is no /proc."""
+    path = os.path.join(os.sep, "proc", str(pid), "status")
+    parent, name = 0, ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("PPid:"):
+                    parent = int(line.split()[1])
+                elif line.startswith("Name:"):
+                    fields = line.split(None, 1)
+                    name = fields[1].strip() if len(fields) > 1 else ""
+    except (OSError, ValueError, IndexError):
+        return 0, ""
+    return parent, name
+
+
+def _ancestors_from_proc(pid: int) -> list:
+    found: list = []
+    seen = {pid}
+    current = pid
+    for _ in range(_ANCESTOR_LIMIT):
+        parent, _name = _proc_status(current)
+        if parent <= 0 or parent in seen:
+            break
+        seen.add(parent)
+        found.append((parent, _proc_status(parent)[1]))
+        current = parent
+    return found
+
+
+def _one_line(text: str, limit: int = _DESCRIPTION_LIMIT) -> str:
+    """One line, bounded: the reason travels into a dialog and into Telegram."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _describe_pid(pid: int) -> str:
+    """What this pid is, for the sentence a person reads. Never raises.
+
+    "not found" and "unreadable" are answers: a gate that cannot see says so
+    rather than failing the classification of the command around it.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return _describe_pid_from_proc(pid)
+    try:
+        proc = psutil.Process(pid)
+    except Exception as exc:
+        return "not found" if "NoSuchProcess" in type(exc).__name__ else "unreadable"
+    try:
+        name = proc.name()
+    except Exception:
+        name = ""
+    try:
+        argv = [arg for arg in proc.cmdline()[1:] if arg]
+    except Exception:
+        argv = []
+    return _one_line(" ".join([part for part in [name, *argv] if part])) or "unreadable"
+
+
+def _describe_pid_from_proc(pid: int) -> str:
+    try:
+        with open(os.path.join(os.sep, "proc", str(pid), "cmdline"), "rb") as fh:
+            raw = fh.read().replace(b"\0", b" ").decode("utf-8", "replace")
+        if raw.strip():
+            return _one_line(raw)
+    except OSError:
+        pass
+    name = _proc_status(pid)[1]
+    return _one_line(name) if name else "not found"
+
+
+def _name_stem(name: str) -> str:
+    """`C:\\x\\Python.EXE` and `python` are the same name to a kill command."""
+    bare = str(name).strip().strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return bare[:-4] if bare.endswith(".exe") else bare
+
+
+def _count_processes_named(pattern: str) -> Optional[int]:
+    """How wide the net is, or None when the machine will not say."""
+    try:
+        import psutil
+
+        stem = _name_stem(pattern)
+        return sum(
+            1 for proc in psutil.process_iter(["name"])
+            if fnmatch.fnmatch(_name_stem(proc.info.get("name") or ""), stem)
+        )
+    except Exception:
+        return None
+
+
+class _KillTargets(NamedTuple):
+    """What one segment would signal, as much of it as is readable statically."""
+
+    verb: str = ""
+    pids: tuple = ()
+    unresolved: tuple = ()      # arguments that are not literal numbers
+    names: tuple = ()           # image names and patterns
+    whole_command_line: bool = False   # pkill -f: the pattern is not a name
+
+
+_KILL_VERBS = {"taskkill", "tskill", "kill", "pkill", "killall", "stop-process", "spps", "wmic"}
+# Words that stand in front of a verb without changing what it does. Their own
+# flags are skipped, `-` and `/` alike; a flag that takes a value (`sudo -u
+# root kill 1`) is a named limit — the verb is not found and the command stays
+# Tier 1 on `sudo` alone.
+_KILL_WRAPPERS = {
+    "sudo", "doas", "nohup", "env", "command", "exec", "time", "runas",
+    "start", "call", "xargs",
+}
+# `start` takes a window title before the command, and a title is an ordinary
+# word once the quotes are off, so exactly one unrecognised token may be
+# stepped over after it.
+_TITLE_TAKING_WRAPPERS = {"start"}
+
+_TASKKILL_SWITCH_RE = re.compile(r"^/(pid|im|fi)(?::(.*))?$", re.I)
+_TASKKILL_FILTER_RE = re.compile(r"\s*(imagename|pid)\s+eq\s+(\S+)", re.I)
+_PS_PARAM_RE = re.compile(r"^-(id|name|processname)(?::(.*))?$", re.I)
+_PS_PARAM_WITH_VALUE = {"-s", "-n", "--signal", "-erroraction", "-inputobject"}
+_PKILL_PARAM_WITH_VALUE = {"-u", "--user", "-g", "--group", "-s", "--signal", "-t", "--older"}
+_WMIC_PID_RE = re.compile(r"processid\s*=\s*['\"]?([^\s'\",]+)", re.I)
+_WMIC_NAME_RE = re.compile(r"\bname\s*=\s*['\"]?([^\s'\",]+)", re.I)
+# `%PID%`, `$pid`, `$(cat run.pid)`, a backtick: a pid nobody can read here.
+_UNREADABLE_PID = re.compile(r"[%$`(){}*?!]")
+
+
+def _tokens(segment: str) -> list:
+    """One segment's arguments, quotes honoured and stripped."""
+    out, buf, quote = [], [], ""
+    for ch in segment:
+        if quote:
+            if ch == quote:
+                quote = ""
+            else:
+                buf.append(ch)
+            continue
+        if ch in "\"'":
+            quote = ch
+            continue
+        if ch.isspace():
+            if buf:
+                out.append("".join(buf))
+                buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        out.append("".join(buf))
+    return out
+
+
+def _verb_of(token: str) -> str:
+    """The command a token names, without its path, its `.exe` or cmd's `@`."""
+    return _name_stem(token.lstrip("@"))
+
+
+def _kill_verb(tokens: list) -> Tuple[str, list]:
+    """(verb, its arguments), or ("", []) when this segment kills nothing.
+
+    Verb-first on purpose: `echo taskkill`, a file called `killer.txt` and
+    `git commit -m "kill the bug"` all carry the word and none of them is one.
+    """
+    titles = 0
+    wrapped = False
+    for i, token in enumerate(tokens):
+        verb = _verb_of(token)
+        if verb in _KILL_VERBS:
+            return verb, list(tokens[i + 1:])
+        if verb in _KILL_WRAPPERS:
+            wrapped = True
+            titles += 1 if verb in _TITLE_TAKING_WRAPPERS else 0
+            continue
+        if wrapped and token.startswith(("-", "/")):
+            continue
+        if titles > 0:
+            titles -= 1
+            continue
+        return "", []
+    return "", []
+
+
+# A shell handed a command as a string. The verb-first reader sees the wrapper
+# and stops, so the string is taken out and read as a command in its own right.
+_WRAPPER_DEPTH = 3
+_INNER_COMMAND_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\bcmd(?:\.exe)?\s+/[ck]\s+(.+)$", re.I),
+    re.compile(
+        r"\b(?:powershell|pwsh)(?:\.exe)?\b.*?\s-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?\b\s+(.+)$",
+        re.I,
+    ),
+    re.compile(r"\b(?:bash|sh|zsh|fish|dash)(?:\.exe)?\s+-c\s+(.+)$", re.I),
+]
+_ENCODED_COMMAND_RE = re.compile(r"\b(?:powershell|pwsh)\b.*\s-e(?:nc(?:odedcommand)?)?\b", re.I)
+
+
+def _unquote(text: str) -> str:
+    text = text.strip()
+    if len(text) > 1 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+def _inner_command_strings(segment: str) -> list:
+    """The command strings this segment hands to another shell to run."""
+    found = []
+    for pat in _INNER_COMMAND_PATTERNS:
+        match = pat.search(segment)
+        if match:
+            inner = _unquote(match.group(1))
+            if inner:
+                found.append(inner)
+    return found
+
+
+def _kill_scan_segments(segment: str) -> list:
+    """This segment and every command nested inside it, depth-bounded."""
+    out, seen = [], set()
+    frontier = [(segment, 0)]
+    while frontier:
+        text, depth = frontier.pop()
+        out.append(text)
+        if depth >= _WRAPPER_DEPTH:
+            continue
+        for inner in _inner_command_strings(text):
+            for piece in _split_segments(inner):
+                piece = piece.strip()
+                if piece and piece not in seen:
+                    seen.add(piece)
+                    frontier.append((piece, depth + 1))
+    return out
+
+
+def _add_pid(raw: str, pids: list, unresolved: list) -> None:
+    """A pid argument, split on commas for PowerShell's `-Id 1,2,3`.
+
+    Fail closed: anything that is not a literal number cannot be shown safe,
+    so it is recorded as unresolved rather than dropped.
+    """
+    for part in str(raw).split(","):
+        part = part.strip().strip("\"'")
+        if not part:
+            continue
+        if part.isdigit():
+            pids.append(int(part))
+        else:
+            unresolved.append(part)
+
+
+def _taskkill_targets(rest: list) -> _KillTargets:
+    pids, unresolved, names = [], [], []
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        i += 1
+        switch = _TASKKILL_SWITCH_RE.match(token)
+        if not switch:
+            continue
+        key, inline = switch.group(1).lower(), switch.group(2)
+        if inline:
+            value = inline
+        else:
+            value = rest[i] if i < len(rest) else ""
+            i += 1
+        if not value:
+            continue
+        if key == "pid":
+            _add_pid(value, pids, unresolved)
+        elif key == "im":
+            names.append(value)
+        else:
+            found = _TASKKILL_FILTER_RE.match(value)
+            if found and found.group(1).lower() == "pid":
+                _add_pid(found.group(2), pids, unresolved)
+            elif found:
+                names.append(found.group(2))
+    return _KillTargets("taskkill", tuple(pids), tuple(unresolved), tuple(names), False)
+
+
+def _signal_kill_targets(verb: str, rest: list) -> _KillTargets:
+    """`kill` and `Stop-Process` at once: `kill` is both a program and
+    PowerShell's alias for the cmdlet, so one segment can be either."""
+    pids, unresolved, names = [], [], []
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        i += 1
+        param = _PS_PARAM_RE.match(token)
+        if param:
+            key, inline = param.group(1).lower(), param.group(2)
+            if inline:
+                value = inline
+            else:
+                value = rest[i] if i < len(rest) else ""
+                i += 1
+            if key == "id":
+                _add_pid(value, pids, unresolved)
+            else:
+                names.extend(part.strip() for part in value.split(",") if part.strip())
+            continue
+        if token.lower() in _PS_PARAM_WITH_VALUE:
+            i += 1                      # `-s SIGKILL`, `-n 9`
+            continue
+        if token.startswith("-"):
+            continue                    # -9, -SIGKILL, -Force, -Confirm:$false
+        _add_pid(token, pids, unresolved)
+    return _KillTargets(verb, tuple(pids), tuple(unresolved), tuple(names), False)
+
+
+def _tskill_targets(rest: list) -> _KillTargets:
+    for token in rest:
+        if token.startswith(("/", "-")):
+            continue
+        if token.isdigit():
+            return _KillTargets("tskill", (int(token),), (), (), False)
+        if _UNREADABLE_PID.search(token):
+            return _KillTargets("tskill", (), (token,), (), False)
+        return _KillTargets("tskill", (), (), (token,), False)
+    return _KillTargets("tskill")
+
+
+def _pattern_kill_targets(verb: str, rest: list) -> _KillTargets:
+    """`pkill` and `killall`: one pattern, and `-f` says what it is matched on."""
+    names, unresolved, whole = [], [], False
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        i += 1
+        low = token.lower()
+        if low in ("-f", "--full"):
+            whole = True
+            continue
+        if low in _PKILL_PARAM_WITH_VALUE:
+            i += 1
+            continue
+        if token.startswith("-"):
+            continue
+        if _UNREADABLE_PID.search(token.replace("*", "").replace("?", "")):
+            unresolved.append(token)
+        else:
+            names.append(token)
+        break
+    return _KillTargets(verb, (), tuple(unresolved), tuple(names), whole)
+
+
+def _wmic_targets(segment: str) -> _KillTargets:
+    if not re.search(r"\bprocess\b", segment, re.I):
+        return _KillTargets()
+    if not re.search(r"\b(delete|terminate)\b", segment, re.I):
+        return _KillTargets()
+    pids, unresolved, names = [], [], []
+    for found in _WMIC_PID_RE.finditer(segment):
+        _add_pid(found.group(1), pids, unresolved)
+    for found in _WMIC_NAME_RE.finditer(segment):
+        names.append(found.group(1))
+    return _KillTargets("wmic", tuple(pids), tuple(unresolved), tuple(names), False)
+
+
+def _kill_targets(segment: str) -> _KillTargets:
+    """Everything this segment would signal, by whichever spelling it uses."""
+    verb, rest = _kill_verb(_tokens(segment))
+    if not verb:
+        return _KillTargets()
+    if verb == "taskkill":
+        return _taskkill_targets(rest)
+    if verb == "wmic":
+        return _wmic_targets(segment)
+    if verb in ("pkill", "killall"):
+        return _pattern_kill_targets(verb, rest)
+    if verb == "tskill":
+        return _tskill_targets(rest)
+    return _signal_kill_targets(verb, rest)
+
+
+def _name_matches_this_service(pattern: str, whole_command_line: bool,
+                               me: "_ServiceIdentity") -> str:
+    """What of ours this name or pattern would take down, or "" for nothing."""
+    pattern = str(pattern).strip().strip("\"'")
+    if not pattern:
+        return ""
+    if whole_command_line and pattern.lower() in me.cmdline.lower():
+        return _one_line(me.cmdline, 80)
+    stem = _name_stem(pattern)
+    for name in me.names:
+        if fnmatch.fnmatch(_name_stem(name), stem) or fnmatch.fnmatch(name.lower(), pattern.lower()):
+            return name
+    return ""
+
+
+def _kill_of_this_service(segment: str) -> str:
+    """The reason this segment must be refused outright, or "" for none.
+
+    The agent reads this, and the person may well have asked it to restart the
+    service, so it says what to do instead. There is no restart command to
+    offer: nothing in `service.py`, `local_api.py` or `run_service.py` exposes
+    one.
+    """
+    for piece in _kill_scan_segments(segment):
+        targets = _kill_targets(piece)
+        if not targets.verb:
+            continue
+        me = _service_identity()
+        for pid in targets.pids:
+            if pid == me.own_pid:
+                return (
+                    f"the target is the D-PC service this shell runs inside — pid {pid} "
+                    f"({_describe_pid(pid)}). Killing it kills the process running this "
+                    f"command, so it could never report back. Ask the person to restart "
+                    f"the service themselves."
+                )
+            if pid in me.ancestors:
+                return (
+                    f"the target is the process the D-PC service runs inside — pid {pid} "
+                    f"({_describe_pid(pid)}), an ancestor of this service (pid {me.own_pid}). "
+                    f"Killing it takes this shell with it. Ask the person to restart the "
+                    f"service themselves."
+                )
+        for pattern in targets.names:
+            hit = _name_matches_this_service(pattern, targets.whole_command_line, me)
+            if hit:
+                return (
+                    f"\"{_one_line(pattern, 60)}\" includes the D-PC service itself — it "
+                    f"matches {hit}, which is what this shell runs inside (pid {me.own_pid}). "
+                    f"Name the specific PIDs you mean instead; each one is identified in the "
+                    f"approval dialog."
+                )
+    return _kill_word_beside_a_protected_pid(segment)
+
+
+_KILL_WORD_RE = re.compile(r"\b(?:taskkill|tskill|pkill|killall|stop-process|spps|kill)\b", re.I)
+_STANDALONE_NUMBER_RE = re.compile(r"(?<![\w.])(\d+)(?![\w.])")
+
+
+def _kill_word_beside_a_protected_pid(segment: str) -> str:
+    """The coarse net under the parser, because spellings are endless.
+
+    A kill word and this service's own pid in one segment is refused without
+    parsing either — `for /f %i in ('echo <pid>') do taskkill /PID %i` reaches
+    no parser we are going to write. The price is that text merely carrying
+    both is refused too, which is the trade this file has already made twice.
+    """
+    if not _KILL_WORD_RE.search(segment):
+        return ""
+    me = _service_identity()
+    protected = {me.own_pid, *me.ancestors}
+    for match in _STANDALONE_NUMBER_RE.finditer(segment):
+        pid = int(match.group(1))
+        if pid in protected:
+            mine = "this service" if pid == me.own_pid else f"an ancestor of pid {me.own_pid}"
+            return (
+                f"this command could not be parsed, but it names a kill and the number "
+                f"{pid}, which is {mine} — the D-PC service this shell runs inside. "
+                f"Refusing rather than guessing. Ask the person to restart the service "
+                f"themselves."
+            )
+    return ""
+
+
+def _kill_needs_a_person(segment: str) -> str:
+    """Killing a process is dangerous under its own name, not under a switch's.
+
+    What dies goes in the reason: the incident's dialog said «Command accesses
+    path outside sandbox: /PID», which is false and about the wrong thing.
+    """
+    notes: list = []
+    if _ENCODED_COMMAND_RE.search(segment):
+        notes.append(
+            "A kill cannot be ruled out: this command is encoded and the gate "
+            "cannot read what it runs"
+        )
+    for piece in _kill_scan_segments(segment):
+        targets = _kill_targets(piece)
+        if not targets.verb:
+            continue
+        if targets.pids:
+            described = [f"{pid}: {_describe_pid(pid)}" for pid in targets.pids[:4]]
+            notes.append(
+                ("Kills process " if len(described) == 1 else "Kills processes ")
+                + "; ".join(described)
+            )
+        for pattern in targets.names[:3]:
+            if targets.whole_command_line:
+                notes.append(
+                    f"Kills every process whose command line matches {_one_line(pattern, 60)}"
+                )
+                continue
+            running = _count_processes_named(pattern)
+            counted = f" ({running} running)" if running is not None else ""
+            notes.append(f"Kills every process named {_one_line(pattern, 60)}{counted}")
+        for token in targets.unresolved[:3]:
+            notes.append(
+                "Kills a process the gate could not identify: the id is "
+                f"{_one_line(token, 40)}"
+            )
+        if not (targets.pids or targets.names or targets.unresolved):
+            notes.append(
+                f"Kills a process the gate could not identify: {targets.verb} names "
+                f"no literal target"
+            )
+    seen, unique = set(), []
+    for note in notes:
+        if note not in seen:
+            seen.add(note)
+            unique.append(note)
+    return _one_line("; ".join(unique), 400)
+
+
 PATH_PATTERNS: list[re.Pattern] = [
     re.compile(r'\b([A-Z]:\\[^\s"\'<>|&;]+)'),
     re.compile(r'(?<!\w)(/[a-zA-Z][^\s"\'<>|&;]*)'),
 ]
+
+# Branch 2 matches a Windows switch, and the tail of a URL, exactly as it
+# matches a POSIX path — THE-SANDBOX-PATH-RULE-READS-A-WINDOWS-SWITCH-AS-A-PATH
+# holds the count. The two narrowings below are deliberately NOT the rule
+# `_reads_as_a_filesystem_path` uses: that one reads inside a file, this one a
+# command line, and one change should not quietly satisfy two falsifiers.
+_SWITCH_TOKEN_RE = re.compile(r"^/[A-Za-z]{1,3}$")
+_URL_PREFIX_RE = re.compile(r"https?:/$", re.I)
+_DRIVE_ROOT_NAMES: dict = {}
+
+
+def _on_windows() -> bool:
+    """The switch exemption is Windows-only: on POSIX `/PID` can be a path."""
+    return os.name == "nt"
+
+
+def _drive_root_of(base: str) -> str:
+    try:
+        drive = os.path.splitdrive(os.path.abspath(base or os.getcwd()))[0]
+    except Exception:
+        drive = ""
+    return (drive + os.sep) if drive else os.sep
+
+
+def _names_at_drive_root(drive: str):
+    """What sits at the root of this drive, lowercased; None when unreadable.
+
+    `/Users`, `/Windows` and `/ProgramData` stay paths this way. Unreadable is
+    not «nothing is there»: None keeps the old verdict.
+    """
+    if drive in _DRIVE_ROOT_NAMES:
+        return _DRIVE_ROOT_NAMES[drive]
+    try:
+        names = frozenset(name.lower() for name in os.listdir(drive))
+    except OSError as exc:
+        log.debug("could not list %s to tell a switch from a path: %s", drive, exc)
+        names = None
+    _DRIVE_ROOT_NAMES[drive] = names
+    return names
+
+
+def _is_url_interior(segment: str, match: "re.Match") -> bool:
+    """`https://host/path` leaves `/host/path`, which branch 2 read as absolute."""
+    return bool(_URL_PREFIX_RE.search(segment[: match.start(1)]))
+
+
+def _stands_alone(segment: str, start: int) -> bool:
+    """A switch is an argument of its own: `--out=/tmp` is not one."""
+    return start == 0 or segment[start - 1] in " \t\"'"
+
+
+def _follows_a_redirect(segment: str, start: int) -> bool:
+    i = start - 1
+    while i >= 0 and segment[i] in " \t\"'":
+        i -= 1
+    return i >= 0 and segment[i] in "><"
+
+
+def _is_windows_switch(segment: str, match: "re.Match", drive: str) -> bool:
+    """One to three letters, nothing after them, and three conditions on top.
+
+    Without the three, the same rule waves through `ls /etc`, `cat /tmp` and
+    `echo x > /ev`: a false «needs approval» is a nuisance, a false «allowed»
+    is a hole.
+    """
+    if not _on_windows():
+        return False
+    token = match.group(1)
+    if not _SWITCH_TOKEN_RE.match(token):
+        return False
+    if not _stands_alone(segment, match.start(1)):
+        return False
+    if _follows_a_redirect(segment, match.start(1)):
+        return False
+    at_root = _names_at_drive_root(drive)
+    if at_root is None:
+        return False
+    return token[1:].lower() not in at_root
+
+
+def _path_outside_sandbox(segments: list, ctx: "ToolContext", drive: str) -> str:
+    """The first path in this command that leaves the sandbox, or "".
+
+    Per segment, because the path that leaves the sandbox is in one segment and
+    only that segment may be waived by the whitelist.
+    """
+    whitelist = _get_tier1_whitelist(ctx)
+    for segment in segments:
+        for pat in PATH_PATTERNS:
+            for match in pat.finditer(segment):
+                extracted = match.group(1)
+                if _is_url_interior(segment, match):
+                    continue
+                if _is_windows_switch(segment, match, drive):
+                    continue
+                try:
+                    ctx.validate_extended_path(extracted)
+                except PermissionError:
+                    if whitelist and _is_whitelisted(segment, whitelist):
+                        break
+                    return f"Command accesses path outside sandbox: {extracted}"
+    return ""
 
 # An interpreter invoked on a script file. `-c` and `-e` have their own Tier 1
 # rules; running a file had none.
@@ -488,6 +1197,10 @@ def _validate_command(
     segments = [segment.strip() for segment in _split_segments(normalized)]
 
     for segment in segments:
+        # Before the pattern list, because this one can name what it refuses.
+        refusal = _kill_of_this_service(segment)
+        if refusal:
+            return ("tier2", refusal)
         for pattern in HARDLINE_PATTERNS:
             if pattern.search(segment):
                 return ("tier2", f"Blocked by HARDLINE pattern: {pattern.pattern}")
@@ -498,36 +1211,42 @@ def _validate_command(
     # command whose second half was the part that mattered.
     dangerous: list[str] = []
     flagged: list[str] = []
+    kills: list[str] = []
     for segment in segments:
+        note = _kill_needs_a_person(segment)
+        if note:
+            if note not in kills:
+                kills.append(note)
+            if segment not in flagged:
+                flagged.append(segment)
         for pattern in DANGEROUS_PATTERNS:
             if pattern.search(segment):
                 if pattern.pattern not in dangerous:
                     dangerous.append(pattern.pattern)
                 if segment not in flagged:
                     flagged.append(segment)
-    if dangerous:
+    base_dir = os.path.expanduser(cwd) if cwd else str(getattr(ctx, "agent_root", "") or "")
+    if dangerous or kills:
         whitelist = _get_tier1_whitelist(ctx)
         # Every flagged segment must be whitelisted on its own.
         if whitelist and all(_is_whitelisted(seg, whitelist) for seg in flagged):
             return None
-        return ("tier1", "Requires approval: " + "; ".join(dangerous))
+        # What dies comes first: a person reads the head of this sentence.
+        reasons = list(kills)
+        if dangerous:
+            reasons.append("Requires approval: " + "; ".join(dangerous))
+        if ctx:
+            outside = _path_outside_sandbox(segments, ctx, _drive_root_of(base_dir))
+            if outside:
+                reasons.append(outside)
+        return ("tier1", "; ".join(reasons))
 
     if ctx:
         whitelist = _get_tier1_whitelist(ctx)
-        # Per segment, for the same reason: the path that leaves the sandbox is
-        # in one segment, and only that segment may be waived.
-        for segment in segments:
-            for pat in PATH_PATTERNS:
-                for match in pat.finditer(segment):
-                    extracted = match.group(1)
-                    try:
-                        ctx.validate_extended_path(extracted)
-                    except PermissionError:
-                        if whitelist and _is_whitelisted(segment, whitelist):
-                            break
-                        return ("tier1", f"Command accesses path outside sandbox: {extracted}")
+        outside = _path_outside_sandbox(segments, ctx, _drive_root_of(base_dir))
+        if outside:
+            return ("tier1", outside)
 
-        base_dir = os.path.expanduser(cwd) if cwd else str(getattr(ctx, "agent_root", "") or "")
         if base_dir:
             # The cwd travels with the command. It used to be fixed once here and
             # applied to every segment, so `cd sub && python steal.py` resolved the
