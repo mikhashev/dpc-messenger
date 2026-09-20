@@ -1134,15 +1134,30 @@ _A11Y_DOM_SNAPSHOT_JS = """
     const role = getRole(el);
     const name = getName(el);
     const valueInfo = getValue(el);
+    // A select is the one control whose secret sits in its children rather
+    // than in its value: an option is a node of its own, named by its text,
+    // and on a card picker that text is the last four digits. Withholding
+    // the value while printing the list withholds nothing.
+    // Decided on the predicate and not on whether something is selected: an
+    // untouched card picker lists the same cards. What survives is a count,
+    // so the agent still knows there is a choice here. Ordinary selects keep
+    // their options — the snapshot mirrors the screen.
+    const optionsWithheld =
+      el.tagName.toLowerCase() === 'select' && isSecretField(el);
     const children = [];
-    for (const child of el.children) {
-      const sub = walk(child);
-      if (sub) children.push(sub);
-    }
-    if (el.shadowRoot) {
-      for (const child of el.shadowRoot.children) {
+    // Counted with a descendant query, since <optgroup> puts a level between.
+    const optionCount = optionsWithheld
+      ? el.querySelectorAll('option').length : 0;
+    if (!optionsWithheld) {
+      for (const child of el.children) {
         const sub = walk(child);
         if (sub) children.push(sub);
+      }
+      if (el.shadowRoot) {
+        for (const child of el.shadowRoot.children) {
+          const sub = walk(child);
+          if (sub) children.push(sub);
+        }
       }
     }
     if (!role && !name && children.length === 0) {
@@ -1161,6 +1176,8 @@ _A11Y_DOM_SNAPSHOT_JS = """
       name: name,
       value: valueInfo.value,
       withheld: valueInfo.withheld,
+      optionsWithheld: optionsWithheld,
+      optionCount: optionCount,
       hidden: false,
       children: children,
       el: elId,
@@ -1266,6 +1283,13 @@ _A11Y_SKIP_WRAPPER_ROLES: frozenset[str] = frozenset({
 _A11Y_WITHHELD_VALUE = "[withheld]"
 
 
+def _a11y_option_count(count: int) -> str:
+    """Stands where a withheld select's options would. The agent needs
+    "there is a list here and it is not yours to read" — a bare
+    `[withheld]` combobox reads as a field to type into."""
+    return f"({count} option{'' if count == 1 else 's'})"
+
+
 def _build_a11y_tree(root: dict) -> tuple[str, dict]:
     """Render `root` (Playwright accessibility snapshot) as
     (tree_text, refs_map). Hidden + aria-hidden nodes are dropped;
@@ -1305,8 +1329,16 @@ def _build_a11y_tree(root: dict) -> tuple[str, dict]:
                 line += f" = {_A11Y_WITHHELD_VALUE}"
             elif value:
                 line += f' = "{value}"'
+        options_withheld = bool(node.get("optionsWithheld"))
+        if options_withheld:
+            line += f" {_a11y_option_count(int(node.get('optionCount') or 0))}"
         line += ref_tag
         lines.append(line)
+        if options_withheld:
+            # Read before the children, for the same reason the marker is
+            # read before the value: a node that says its options are secret
+            # must not print them, whoever handed them over.
+            return
         for child in children:
             walk(child, depth + 1)
 
