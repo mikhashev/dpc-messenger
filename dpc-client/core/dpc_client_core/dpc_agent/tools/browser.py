@@ -995,12 +995,117 @@ _A11Y_DOM_SNAPSHOT_JS = """
     }
     return '';
   }
+  // Printing an input's value is opt-in, by type. The snapshot is assembled
+  // into the agent's prompt and travels from there to a model provider, so a
+  // type this list does not name — password, file, hidden, or whatever HTML
+  // adds next — must read as a secret rather than as plain text. What stays
+  // is the set whose content a form shows the person typing it anyway.
+  const VALUE_INPUT_TYPES = new Set([
+    'text', 'search', 'email', 'url', 'tel', 'number', 'range',
+    'date', 'time', 'datetime-local', 'month', 'week', 'color',
+  ]);
+  // A secret is not always typed into type=password: a one-time code and a
+  // card number go into ordinary fields — of any tag, since a card expiry is
+  // usually a select — and `autocomplete` is one of the things on the page
+  // that says so. Tokens, because the attribute is a list.
+  const SECRET_AUTOCOMPLETE = new Set([
+    'current-password', 'new-password', 'one-time-code',
+    'cc-number', 'cc-csc',
+  ]);
+  function isSecretAutocomplete(el) {
+    const tokens = (el.getAttribute('autocomplete') || '')
+      .toLowerCase().trim().split(/\\s+/);
+    return tokens.some(
+      (t) => SECRET_AUTOCOMPLETE.has(t) || t.indexOf('cc-exp') === 0
+    );
+  }
+  // Most forms never set `autocomplete`; what they do set is a telling name.
+  // Boundaries are lookarounds rather than \\b, because JS counts `_` as a
+  // word character — \\bpin\\b walks straight past user_pin and sms_otp. The
+  // two sides are deliberately unequal: a letter on either side makes an
+  // ordinary word (pinball, sultan), but a digit on the right is how forms
+  // number a serial field — otp1, cvv2, ssn1 — so only the left side refuses
+  // digits. A digit on the left stays open, which keeps every id ending in a
+  // number printable. Left out on purpose: iban, account/routing number, pan.
+  // Those are identifiers people read aloud, and catching them would blind
+  // the agent to ordinary banking forms.
+  const SECRET_NAME_RE = new RegExp([
+    '(?<![a-z0-9])(otp|pin|csc|ssn|cvv|cvc|2fa|mfa|tan)(?![a-z])',
+    'passw|pwd|passcode|passphrase|secret|token|api.?key',
+    'one.?time|security.?code|verification.?code|verify.?code',
+    'card.?(num|no(?![a-z]))',
+    'cc.?(num|no(?![a-z])|csc|cvc|cvv|exp)',
+  ].join('|'));
+  const SECRET_NAME_ATTRS = ['name', 'id', 'aria-label', 'placeholder'];
+  function isSecretName(el) {
+    // Each attribute is read straight off the element and tested on its own:
+    // getName() stops at the first one it finds, so a placeholder="Search"
+    // would talk the walk out of a name="otp" sitting right beside it.
+    // Lowercased, because the markup keeps the author's capitals.
+    for (const attr of SECRET_NAME_ATTRS) {
+      const v = (el.getAttribute(attr) || '').toLowerCase();
+      if (v && SECRET_NAME_RE.test(v)) return true;
+    }
+    // The resolved name, on top of those four and never instead of them: it
+    // is what carries title, alt and the text an aria-labelledby points at,
+    // and it is the string the model reads beside the value. On its own it
+    // could be masked, since it stops at its first source; as one more
+    // disjunct it can only add secrecy.
+    const resolved = (getName(el) || '').toLowerCase();
+    if (resolved && SECRET_NAME_RE.test(resolved)) return true;
+    // A <label for> or a wrapping <label> — the commonest way a real form
+    // names a field, and nothing above reads one. `labels` is absent on
+    // anything that is not a labelable control, hence the guard.
+    const labels = el.labels;
+    if (labels && labels.length) {
+      for (let i = 0; i < labels.length; i++) {
+        const label = labels[i];
+        if (!label) continue;
+        const text = (label.textContent || '')
+          .trim().toLowerCase().slice(0, 200);
+        if (text && SECRET_NAME_RE.test(text)) return true;
+      }
+    }
+    return false;
+  }
+  function isMaskedByCss(el) {
+    // -webkit-text-security turns an ordinary text input into a row of dots.
+    // The page is hiding that content from the person in front of it, so it
+    // is not ours to forward. An engine without the property reports
+    // undefined, and getPropertyValue answers '' there rather than throwing.
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    const masking = typeof style.webkitTextSecurity === 'string'
+      ? style.webkitTextSecurity
+      : style.getPropertyValue('-webkit-text-security');
+    return typeof masking === 'string' && masking !== '' && masking !== 'none';
+  }
+  // A disjunction, and never a chain of early returns: a channel may only add
+  // secrecy, so no attribute a page happens to set can mask another.
+  function isSecretField(el) {
+    return isSecretAutocomplete(el) || isSecretName(el) || isMaskedByCss(el);
+  }
+  // {value, withheld}: `withheld` says the field is filled without saying
+  // with what, so the agent knows whether it still has to type there. Never
+  // a length — that narrows the secret for free.
   function getValue(el) {
     const tag = el.tagName.toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || tag === 'select') {
-      return (el.value || '').toString().slice(0, 200);
+    if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') {
+      return {value: '', withheld: false};
     }
-    return '';
+    const raw = (el.value || '').toString();
+    // Asked once, ahead of every per-tag branch: a card number lands in a
+    // select as readily as in an input, and a one-time code in a textarea.
+    if (isSecretField(el)) {
+      return {value: '', withheld: raw.length > 0};
+    }
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      if (!VALUE_INPUT_TYPES.has(t)) {
+        return {value: '', withheld: raw.length > 0};
+      }
+    }
+    return {value: raw.slice(0, 200), withheld: false};
   }
   function isHidden(el) {
     if (el.getAttribute('aria-hidden') === 'true') return true;
@@ -1028,7 +1133,7 @@ _A11Y_DOM_SNAPSHOT_JS = """
     nodeCount += 1;
     const role = getRole(el);
     const name = getName(el);
-    const value = getValue(el);
+    const valueInfo = getValue(el);
     const children = [];
     for (const child of el.children) {
       const sub = walk(child);
@@ -1048,13 +1153,14 @@ _A11Y_DOM_SNAPSHOT_JS = """
           if (t) directText += (directText ? ' ' : '') + t;
         }
       }
-      if (directText) return {role: 'generic', name: directText.slice(0, 200), value: '', hidden: false, children: [], el: elId};
+      if (directText) return {role: 'generic', name: directText.slice(0, 200), value: '', withheld: false, hidden: false, children: [], el: elId};
       return null;
     }
     return {
       role: role || 'generic',
       name: name,
-      value: value,
+      value: valueInfo.value,
+      withheld: valueInfo.withheld,
       hidden: false,
       children: children,
       el: elId,
@@ -1154,6 +1260,10 @@ _A11Y_VALUE_ROLES: frozenset[str] = frozenset({
 _A11Y_SKIP_WRAPPER_ROLES: frozenset[str] = frozenset({
     "generic", "presentation", "none",
 })
+# Stands where the value would, for a field the walk refused to read. The
+# agent needs "filled, not yours to see" — without it a password field with
+# a password in it is indistinguishable from an empty one.
+_A11Y_WITHHELD_VALUE = "[withheld]"
 
 
 def _build_a11y_tree(root: dict) -> tuple[str, dict]:
@@ -1186,8 +1296,15 @@ def _build_a11y_tree(root: dict) -> tuple[str, dict]:
         if name:
             line += f' "{name}"'
         value = node.get("value", "")
-        if value and role in _A11Y_VALUE_ROLES:
-            line += f' = "{value}"'
+        if role in _A11Y_VALUE_ROLES:
+            # The marker is asked for first, so that a node carrying both
+            # cannot print the value: otherwise the rule that one excludes
+            # the other would hold in the JS alone, and every later producer
+            # of these dicts would have to be trusted to keep it.
+            if node.get("withheld"):
+                line += f" = {_A11Y_WITHHELD_VALUE}"
+            elif value:
+                line += f' = "{value}"'
         line += ref_tag
         lines.append(line)
         for child in children:

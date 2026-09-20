@@ -30,9 +30,8 @@ jobs:
           enable-cache: true
       # Extras rather than skip-if-missing: 31 of the 35 failures on 2026-08-27
       # were these packages missing, and a skip would hide 31 tests that run
-      # here perfectly well. camoufox needs its Firefox build only for the
-      # browser-launching tests, which this suite does not contain. mlx stays
-      # out — Apple Silicon only.
+      # here perfectly well. camoufox's Firefox build is not fetched: no test
+      # here launches it. mlx stays out — Apple Silicon only.
       #
       # This stays a hand-written list where the release form is `--all-extras`,
       # and the difference is the point: the release describes a whole
@@ -45,6 +44,13 @@ jobs:
       - name: Sync (with the extras whose tests exist here)
         working-directory: dpc-client/core
         run: uv sync --extra browser --extra pdf
+      # The extra brings the playwright package and no browser. The snapshot
+      # secret-field tests run the real walk in Chromium and skip cleanly
+      # without a binary — which here would mean ~60 skips under a green run,
+      # and a leak guard that exists only on a developer's machine.
+      - name: Chromium for the tests that run the snapshot walk
+        working-directory: dpc-client/core
+        run: uv run playwright install --with-deps chromium
       # Baseline measured on Windows 2026-08-20: 4 failed · 2086 passed · 3 skipped (160s).
       # The four are deselected by name, not hidden by a bare `|| true`, and each one has a
       # backlog entry (CI-BASELINE-FOUR-TESTS-FAIL-BEFORE-THE-FIRST-RUN). A gate that is red
