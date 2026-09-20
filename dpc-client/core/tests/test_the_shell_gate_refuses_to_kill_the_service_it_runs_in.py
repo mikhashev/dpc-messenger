@@ -1021,6 +1021,9 @@ def test_a_switchy_wrapper_around_ordinary_work_is_its_plain_form(service, wrapp
     "bash -s kill 12345",                   # the program arrives on stdin
     "sh -s -- taskkill /IM python.exe",
     "powershell -File tidy.ps1 taskkill",
+    # the eighth verb, which this note could not see until `_carries_a_kill_word`
+    # became its one reader — measured tier0 on fdf7514a.
+    "bash -s wmic process where ProcessId=12345 delete",
 ])
 def test_a_wrapper_the_gate_cannot_open_says_so_rather_than_passing(service, command):
     """The fail-closed half of F3. A known shell, a kill word, and no command
@@ -1513,6 +1516,15 @@ def test_the_price_of_the_body_rule(service):
     assert tier_of("echo do not kill it") == "tier1"
     assert _SAYS_A_BODY in reason_of("echo do not kill it")
 
+    # One word apart from the control row in the table above
+    # (`for %f in (*.txt) do type %f`, tier0): a loop over text files is ordinary
+    # work until a kill word appears in its body, and then it is a question even
+    # though `echo` is all that would run. The boundary is the word, and it is
+    # declared here rather than left to be discovered.
+    assert tier_of("for %f in (*.txt) do type %f") == "tier0"
+    assert tier_of("for %f in (*.txt) do echo kill") == "tier1"
+    assert _SAYS_A_BODY in reason_of("for %f in (*.txt) do echo kill")
+
 
 def test_a_whitelisted_loop_waives_the_body_finding(service, tmp_path):
     """The per-agent whitelist semantics are unchanged, and unchanged means
@@ -1528,3 +1540,98 @@ def test_a_whitelisted_loop_waives_the_body_finding(service, tmp_path):
 
     verdict = _validate_command("while true; do pkill python; done", ctx, str(tmp_path))
     assert verdict is not None and verdict[0] == "tier2", verdict
+
+
+# --- «what is a kill verb» was written twice --------------------------------
+# `_KILL_VERBS`, which the parser walks, holds eight; the plain-word regex the
+# three wordy rules were gated on — the unreadable-wrapper note, the unread-body
+# rule and the last-resort net — was a second, hand-written list of seven. The
+# one it lacked was `wmic`, so a wmic kill the parser cannot reach tripped
+# nothing at all. Both rows below were measured tier0 on fdf7514a.
+
+_WMIC_IN_AN_UNREAD_BODY = [
+    "for /f %i in (pid.txt) do wmic process where ProcessId=%i delete",
+    "for /f %i in (pid.txt) do wmic process where ProcessId=%i call terminate",
+    "Get-Content p.txt | ForEach-Object { wmic process where ProcessId=$_ delete }",
+]
+
+
+@pytest.mark.parametrize("command", _WMIC_IN_AN_UNREAD_BODY)
+def test_a_wmic_kill_inside_a_body_the_gate_does_not_read_is_a_question(service, command):
+    """The target comes out of a file, so no rule can name what dies — which is
+    exactly the case the body rule exists for, and it never saw these."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1].startswith("A kill cannot be ruled out"), (command, verdict[1])
+    assert _SAYS_A_BODY in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("command", [
+    "wmic process get ProcessId,Name",
+    "wmic cpu get name",
+    "for %i in (1) do wmic cpu get name",
+    "echo 6520 & wmic os get caption",
+])
+def test_a_wmic_that_kills_nothing_is_not_a_kill_word(service, command):
+    """The price of the fix, kept at zero. `wmic` is a broad word — listing
+    processes, reading the cpu, reading the OS caption — so adding it to the
+    plain words would turn every such line inside a loop into a question, and
+    would have the last-resort net refuse `echo 6520 & wmic os get caption`
+    because this service's pid stands beside it. It counts as a kill word only
+    under the condition that already decides a wmic kill: the `process` class
+    and a `delete` or `terminate`.
+    """
+    assert tier_of(command) == "tier0", command
+
+
+@pytest.mark.parametrize("command,tier", [
+    # the parser reaches this one on its own, and always did
+    (f"wmic process where ProcessId={UNRELATED} delete", "tier1"),
+    # and the refusal path reads bodies, so these two were never silent
+    (f"for %i in (1) do wmic process where ProcessId={SERVICE.own_pid} delete", "tier2"),
+    ('for %i in (1) do wmic process where name="python.exe" delete', "tier2"),
+])
+def test_the_wmic_rows_that_already_decided_keep_their_tier(service, command, tier):
+    assert tier_of(command) == tier, command
+
+
+def test_the_dialog_still_names_the_victim_of_an_ordinary_wmic_kill(service):
+    """The control for the row above: one producer must not cost the sentence."""
+    assert reason_of(f"wmic process where ProcessId={UNRELATED} delete") == (
+        f"Kills process {UNRELATED}: notepad.exe draft.txt"
+    )
+
+
+# One minimal killing spelling per verb. The table is the point: it is compared
+# against `_KILL_VERBS` itself, so a verb added to the set without a row here
+# turns this test red rather than quietly leaving the wordy rules blind — which
+# is the defect this section exists for.
+_A_KILLING_SPELLING = {
+    "taskkill": "taskkill /PID 12345 /F",
+    "tskill": "tskill 12345",
+    "kill": "kill 12345",
+    "pkill": "pkill notepad",
+    "killall": "killall notepad",
+    "stop-process": "Stop-Process -Id 12345",
+    "spps": "spps -Id 12345",
+    "wmic": "wmic process where ProcessId=12345 delete",
+}
+
+
+def test_every_kill_verb_the_parser_knows_is_a_kill_word_to_the_wordy_rules():
+    assert set(_A_KILLING_SPELLING) == set(shell._KILL_VERBS), (
+        "a verb was added to _KILL_VERBS without a row here — the rules that look "
+        "for a kill word without parsing one would not see it"
+    )
+    for verb, spelling in sorted(_A_KILLING_SPELLING.items()):
+        assert shell._carries_a_kill_word(spelling), (verb, spelling)
+
+
+def test_the_qualified_verb_is_not_a_kill_word_on_its_own():
+    """The other half of the guard: `wmic` is in the set and is deliberately
+    *not* in the plain words, so the reader must be asked, not the regex."""
+    assert not shell._KILL_WORD_RE.search("wmic process where ProcessId=1 delete")
+    assert shell._carries_a_kill_word("wmic process where ProcessId=1 delete")
+    assert not shell._carries_a_kill_word("wmic cpu get name")
+    assert not shell._carries_a_kill_word("wmic process get ProcessId,Name")

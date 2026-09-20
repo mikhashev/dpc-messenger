@@ -543,6 +543,53 @@ _WMIC_NAME_RE = re.compile(r"\bname\s*=\s*['\"]?([^\s'\",]+)", re.I)
 _UNREADABLE_PID = re.compile(r"[%$`(){}*?!]")
 
 
+def _wmic_kills(segment: str) -> bool:
+    """Is this `wmic` a kill at all? The bare word is not one.
+
+    `wmic process get ProcessId,Name` lists, `wmic cpu get name` reads a
+    datasheet; it takes the `process` class *and* a `delete` or `terminate`.
+    Written once and read by both of wmic's readers — the parser's
+    `_wmic_targets` and the word test below — so the two cannot drift.
+    """
+    if not re.search(r"\bprocess\b", segment, re.I):
+        return False
+    return bool(re.search(r"\b(delete|terminate)\b", segment, re.I))
+
+
+# Verbs whose bare word does not mean a kill, each with the test that says it
+# does. They are kept out of the plain-word regex and asked separately.
+_QUALIFIED_KILL_VERBS: dict = {"wmic": _wmic_kills}
+# The plain words come from `_KILL_VERBS` itself rather than a second list.
+# They were two lists until 2026-09-21, the second one short by `wmic`, and a
+# wmic kill the parser could not reach — inside a loop body, its target read
+# from a file — therefore tripped nothing at all.
+_KILL_WORD_RE = re.compile(
+    r"\b(?:%s)\b" % "|".join(
+        re.escape(verb) for verb in sorted(_KILL_VERBS - set(_QUALIFIED_KILL_VERBS))
+    ),
+    re.I,
+)
+
+
+def _carries_a_kill_word(segment: str) -> bool:
+    """Does this text carry a word that could signal a process?
+
+    The one producer for the three rules that look for a kill word without
+    parsing one: the unreadable-wrapper note, the unread-body rule and the
+    last-resort net. Whole-word and case-insensitive, as the hand-written regex
+    was. It answers «a kill cannot be ruled out here», not «this is a kill»,
+    which is why a broad verb has to qualify: gating those rules on the bare
+    word `wmic` would make `for %i in (1) do wmic cpu get name` a question and
+    would have the net refuse `echo <our pid> & wmic os get caption`.
+    """
+    if _KILL_WORD_RE.search(segment):
+        return True
+    return any(
+        re.search(rf"\b{re.escape(verb)}\b", segment, re.I) and qualifies(segment)
+        for verb, qualifies in _QUALIFIED_KILL_VERBS.items()
+    )
+
+
 def _tokens(segment: str) -> list:
     """One segment's arguments, quotes honoured and stripped."""
     out, buf, quote = [], [], ""
@@ -695,7 +742,7 @@ def _unreadable_wrapper_note(segment: str) -> str:
     wrapper = _shell_wrapper_named(segment)
     if not wrapper:
         return ""
-    if not _KILL_WORD_RE.search(segment):
+    if not _carries_a_kill_word(segment):
         return ""
     if _inner_command_strings(segment):
         return ""
@@ -753,7 +800,7 @@ def _kill_inside_an_unread_body(segment: str) -> str:
     in the wrapper note above, and the keyword has to be a *token* — `_tokens`
     keeps a quoted string whole, so `echo "do not kill it"` carries neither.
     """
-    if not _KILL_WORD_RE.search(segment):
+    if not _carries_a_kill_word(segment):
         return ""
     if not _command_bodies(segment):
         return ""
@@ -935,9 +982,7 @@ def _pattern_kill_targets(verb: str, rest: list) -> _KillTargets:
 
 
 def _wmic_targets(segment: str) -> _KillTargets:
-    if not re.search(r"\bprocess\b", segment, re.I):
-        return _KillTargets()
-    if not re.search(r"\b(delete|terminate)\b", segment, re.I):
+    if not _wmic_kills(segment):
         return _KillTargets()
     pids, unresolved, names = [], [], []
     for found in _WMIC_PID_RE.finditer(segment):
@@ -1093,7 +1138,6 @@ def _kill_of_this_service(segment: str) -> str:
     return _kill_word_beside_a_protected_token(segment)
 
 
-_KILL_WORD_RE = re.compile(r"\b(?:taskkill|tskill|pkill|killall|stop-process|spps|kill)\b", re.I)
 _STANDALONE_NUMBER_RE = re.compile(r"(?<![\w.])(\d+)(?![\w.])")
 
 
@@ -1108,7 +1152,7 @@ def _kill_word_beside_a_protected_token(segment: str) -> str:
     that text merely carrying both is refused too, which is the trade this file
     has already made twice.
     """
-    if not _KILL_WORD_RE.search(segment):
+    if not _carries_a_kill_word(segment):
         return ""
     me = _service_identity()
     protected = {me.own_pid, *me.ancestors}
