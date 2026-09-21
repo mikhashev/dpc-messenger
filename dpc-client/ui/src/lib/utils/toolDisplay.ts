@@ -91,6 +91,7 @@ const TOOL_DISPLAY: Record<string, ToolDisplayEntry> = {
     browser_scroll:    { label: 'Scroll',          category: 'browser' },
     browser_click:     { label: 'Click',           category: 'browser' },
     browser_fill:      { label: 'Fill field',      category: 'browser' },
+    browser_select:    { label: 'Choose option',   category: 'browser' },
     browser_wait_for:  { label: 'Wait for',        category: 'browser' },
     browser_extract:   { label: 'Extract data',    category: 'browser' },
     browser_screenshot:{ label: 'Screenshot',      category: 'browser' },

@@ -67,6 +67,7 @@
         { key: 'browser_scroll', label: 'Scroll', desc: 'Scroll page up/down' },
         { key: 'browser_click', label: 'Click', desc: 'Click element on page' },
         { key: 'browser_fill', label: 'Fill', desc: 'Fill input field with text' },
+        { key: 'browser_select', label: 'Select', desc: 'Choose an option of a native <select> dropdown' },
         { key: 'browser_wait_for', label: 'Wait For', desc: 'Wait for element or condition' },
         { key: 'browser_extract', label: 'Extract', desc: 'Extract data from page elements' },
         { key: 'browser_screenshot', label: 'Screenshot', desc: 'Take screenshot of current page' },

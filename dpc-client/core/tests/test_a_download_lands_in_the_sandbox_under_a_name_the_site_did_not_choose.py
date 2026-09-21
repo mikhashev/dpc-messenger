@@ -14,7 +14,9 @@ any engine — inside the directory, no separators, no device name, bounded.
 """
 
 import hashlib
+import inspect
 import json
+import math
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,6 +65,7 @@ _PAGE = """<!doctype html>
   <a id="wall" href="/wall.pdf">a wall under a pdf name</a>
   <a id="big" href="/big.bin">big</a>
   <a id="plain" href="/other.html">An ordinary link</a>
+  <button id="inert" type="button">A button that starts nothing</button>
 </body></html>
 """
 
@@ -496,6 +499,119 @@ def test_an_ordinary_link_says_no_download_started_and_names_the_page(
     assert "other.html" in answer
     downloads = _agent_root / "downloads"
     assert not downloads.exists() or _tree(downloads) == []
+
+
+def test_a_click_that_started_nothing_names_both_urls_and_the_tab_count(
+    _session, _agent_root,
+):
+    """The facts the owner asked for after the first live use, and no guess.
+
+    The old answer said the element "may be an ordinary link" — on the live
+    run the button was the right one and the network was down, so the guess
+    sent the agent looking in the wrong place.
+    """
+    answer = _download(_session, _Ctx(_agent_root), "#plain", timeout_seconds=3)
+    assert "No download started within 3s" in answer
+    # Before the click and now, and whether that is a change.
+    assert "page.html" in answer
+    assert "other.html" in answer
+    assert "changed" in answer
+    # A file opened in a new tab is the other reading of a silent click.
+    assert "1 tab" in answer
+    # What the timeout does and does not bound.
+    assert "start" in answer.lower()
+    assert "transfer" in answer
+    assert "ordinary link" not in answer
+    assert "may be" not in answer
+
+
+def test_a_click_that_changed_nothing_says_the_url_did_not_change(
+    _session, _agent_root,
+):
+    answer = _download(_session, _Ctx(_agent_root), "#inert", timeout_seconds=3)
+    assert "No download started within 3s" in answer
+    assert "did not change" in answer
+    assert "1 tab" in answer
+
+
+def test_the_start_timeout_defaults_to_the_owners_three_minutes_everywhere():
+    """One source for the number: the schema, the handler and the session
+    method all read the same constant."""
+    assert browser_mod._DOWNLOAD_TIMEOUT_DEFAULT == 180
+    handler_default = inspect.signature(
+        browser_mod.browser_download
+    ).parameters["timeout_seconds"].default
+    assert handler_default == browser_mod._DOWNLOAD_TIMEOUT_DEFAULT
+    session_default = inspect.signature(
+        AuthBrowser.download
+    ).parameters["timeout"].default
+    assert session_default == browser_mod._DOWNLOAD_TIMEOUT_DEFAULT * 1000
+    entry = next(
+        t for t in browser_mod.get_tools() if t.name == "browser_download"
+    )
+    schema = entry.schema["parameters"]["properties"]["timeout_seconds"]
+    assert schema["default"] == browser_mod._DOWNLOAD_TIMEOUT_DEFAULT
+    assert "180" in schema["description"]
+    assert "start" in schema["description"].lower()
+    assert "transfer" in schema["description"]
+
+
+def test_the_transfer_allowance_is_the_cap_at_one_named_rate():
+    rate = browser_mod._DOWNLOAD_RATE_BYTES_PER_SEC
+    assert browser_mod._DOWNLOAD_SAVE_TIMEOUT_SEC == math.ceil(
+        browser_mod.DOWNLOAD_MAX_BYTES / rate
+    )
+    # 512 MiB at the rate measured live on 2026-09-21 is seven-odd minutes.
+    assert 7 * 60 <= browser_mod._DOWNLOAD_SAVE_TIMEOUT_SEC <= 9 * 60
+
+
+def test_the_tool_ceiling_outlasts_the_longest_start_plus_that_transfer():
+    """The ToolEntry ceiling must not fire first: the session's own timeout
+    answers with a sentence, TOOL_TIMEOUT answers with a number."""
+    entry = next(
+        t for t in browser_mod.get_tools() if t.name == "browser_download"
+    )
+    longest_session_wait = (
+        browser_mod._DOWNLOAD_TIMEOUT_MAX + browser_mod._DOWNLOAD_SAVE_TIMEOUT_SEC
+    )
+    assert entry.timeout_sec > longest_session_wait
+    assert browser_mod._DOWNLOAD_TIMEOUT_MAX >= browser_mod._DOWNLOAD_TIMEOUT_DEFAULT
+
+
+def test_the_session_call_gets_the_start_wait_plus_the_transfer_allowance(
+    _session, _agent_root,
+):
+    """The wrapper's own budget, so a slow transfer is not cut by the wait
+    for the start."""
+    import asyncio
+    from unittest.mock import patch
+
+    seen: dict = {}
+
+    async def _spy(sess, verb, *args, **kwargs):
+        seen["args"] = args
+        seen["timeout"] = kwargs.get("_timeout")
+        return {
+            "status": "no_download", "page_url": "about:blank",
+            "url_before": "about:blank", "tab_count": 1,
+            "timeout_ms": args[2], "error": "TimeoutError",
+        }
+
+    with patch.object(
+        browser_mod, "_get_session_or_error", lambda _id: _session,
+    ), patch.object(
+        browser_mod, "_get_session_lock", lambda _id: asyncio.Lock(),
+    ), patch.object(browser_mod, "_run_in_session", _spy):
+        _step_to_completion(
+            browser_mod.browser_download(
+                _Ctx(_agent_root), "#book", timeout_seconds=1000,
+            )
+        )
+    # Clamped to the upper bound, and the transfer allowance on top of it.
+    assert seen["args"][2] == browser_mod._DOWNLOAD_TIMEOUT_MAX * 1000
+    assert seen["timeout"] == (
+        browser_mod._DOWNLOAD_TIMEOUT_MAX + browser_mod._DOWNLOAD_SAVE_TIMEOUT_SEC
+    )
 
 
 def test_a_login_page_under_a_pdf_name_is_named_as_one_in_the_first_line(

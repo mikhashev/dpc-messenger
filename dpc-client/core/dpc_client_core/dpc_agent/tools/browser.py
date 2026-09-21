@@ -960,35 +960,12 @@ def _get_session_lock(agent_id: str) -> asyncio.Lock:
     return lock
 
 
-_A11Y_DOM_SNAPSHOT_JS = """
-(serial) => {
-  const TAG_TO_ROLE = {
-    'a': 'link', 'button': 'button',
-    'input': 'textbox', 'textarea': 'textbox',
-    'select': 'combobox', 'option': 'option',
-    'h1': 'heading', 'h2': 'heading', 'h3': 'heading',
-    'h4': 'heading', 'h5': 'heading', 'h6': 'heading',
-    'nav': 'navigation', 'main': 'main', 'header': 'banner',
-    'footer': 'contentinfo', 'aside': 'complementary',
-    'form': 'form', 'section': 'region',
-    'ul': 'list', 'ol': 'list', 'li': 'listitem',
-    'table': 'table', 'tr': 'row', 'td': 'cell', 'th': 'columnheader',
-    'img': 'img',
-  };
-  function getRole(el) {
-    const r = el.getAttribute('role');
-    if (r) return r;
-    const tag = el.tagName.toLowerCase();
-    if (tag === 'input') {
-      const t = (el.getAttribute('type') || 'text').toLowerCase();
-      if (t === 'checkbox') return 'checkbox';
-      if (t === 'radio') return 'radio';
-      if (t === 'button' || t === 'submit' || t === 'reset') return 'button';
-      if (t === 'search') return 'searchbox';
-      return 'textbox';
-    }
-    return TAG_TO_ROLE[tag] || '';
-  }
+# The rules that decide a field is a secret, and the name resolution one of
+# them reads. Its own string because `browser_select` asks the same question
+# of the same element: a select this predicate withholds is the one the
+# snapshot prints as `(N options)`, and a second copy of the rules is how the
+# two would come to disagree.
+_SECRET_FIELD_JS = """
   function getName(el) {
     const aria = el.getAttribute('aria-label');
     if (aria) return aria.trim().slice(0, 200);
@@ -1015,15 +992,6 @@ _A11Y_DOM_SNAPSHOT_JS = """
     }
     return '';
   }
-  // Printing an input's value is opt-in, by type. The snapshot is assembled
-  // into the agent's prompt and travels from there to a model provider, so a
-  // type this list does not name — password, file, hidden, or whatever HTML
-  // adds next — must read as a secret rather than as plain text. What stays
-  // is the set whose content a form shows the person typing it anyway.
-  const VALUE_INPUT_TYPES = new Set([
-    'text', 'search', 'email', 'url', 'tel', 'number', 'range',
-    'date', 'time', 'datetime-local', 'month', 'week', 'color',
-  ]);
   // A secret is not always typed into type=password: a one-time code and a
   // card number go into ordinary fields — of any tag, since a card expiry is
   // usually a select — and `autocomplete` is one of the things on the page
@@ -1105,6 +1073,48 @@ _A11Y_DOM_SNAPSHOT_JS = """
   function isSecretField(el) {
     return isSecretAutocomplete(el) || isSecretName(el) || isMaskedByCss(el);
   }
+"""
+
+
+_A11Y_DOM_SNAPSHOT_JS = """
+(serial) => {
+  const TAG_TO_ROLE = {
+    'a': 'link', 'button': 'button',
+    'input': 'textbox', 'textarea': 'textbox',
+    'select': 'combobox', 'option': 'option',
+    'h1': 'heading', 'h2': 'heading', 'h3': 'heading',
+    'h4': 'heading', 'h5': 'heading', 'h6': 'heading',
+    'nav': 'navigation', 'main': 'main', 'header': 'banner',
+    'footer': 'contentinfo', 'aside': 'complementary',
+    'form': 'form', 'section': 'region',
+    'ul': 'list', 'ol': 'list', 'li': 'listitem',
+    'table': 'table', 'tr': 'row', 'td': 'cell', 'th': 'columnheader',
+    'img': 'img',
+  };
+  function getRole(el) {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      if (t === 'checkbox') return 'checkbox';
+      if (t === 'radio') return 'radio';
+      if (t === 'button' || t === 'submit' || t === 'reset') return 'button';
+      if (t === 'search') return 'searchbox';
+      return 'textbox';
+    }
+    return TAG_TO_ROLE[tag] || '';
+  }
+""" + _SECRET_FIELD_JS + """
+  // Printing an input's value is opt-in, by type. The snapshot is assembled
+  // into the agent's prompt and travels from there to a model provider, so a
+  // type this list does not name — password, file, hidden, or whatever HTML
+  // adds next — must read as a secret rather than as plain text. What stays
+  // is the set whose content a form shows the person typing it anyway.
+  const VALUE_INPUT_TYPES = new Set([
+    'text', 'search', 'email', 'url', 'tel', 'number', 'range',
+    'date', 'time', 'datetime-local', 'month', 'week', 'color',
+  ]);
   // {value, withheld}: `withheld` says the field is filled without saying
   // with what, so the agent knows whether it still has to type there. Never
   // a length — that narrows the secret for free.
@@ -1204,6 +1214,54 @@ _A11Y_DOM_SNAPSHOT_JS = """
     };
   }
   return walk(document.body) || {role: 'generic', name: '', children: [], el: ''};
+}
+"""
+
+
+_SELECT_PROBE_JS = "(el) => {\n" + _SECRET_FIELD_JS + """
+  const tag = el.tagName.toLowerCase();
+  if (tag !== 'select') {
+    return {tag: tag, type: (el.getAttribute('type') || '').toLowerCase()};
+  }
+  const secret = isSecretField(el);
+  // Counted with a descendant query, since <optgroup> puts a level between —
+  // the same list the snapshot counts for `(N options)`, so an index read off
+  // one addresses the same option in the other.
+  const all = el.querySelectorAll('option');
+  const options = [];
+  // A withheld select's options do not leave the page at all: the walk
+  // collects none either, and what is never read cannot be printed by
+  // mistake further down.
+  if (!secret) {
+    for (let i = 0; i < all.length; i++) {
+      const group = all[i].parentElement;
+      const inDisabledGroup = !!(
+        group && group.tagName === 'OPTGROUP' && group.disabled
+      );
+      options.push({
+        index: i,
+        value: all[i].value,
+        label: (all[i].label || all[i].textContent || '').trim().slice(0, 200),
+        disabled: !!all[i].disabled || inDisabledGroup,
+      });
+    }
+  }
+  return {
+    tag: tag, secret: secret, multiple: !!el.multiple,
+    disabled: !!el.disabled, optionCount: all.length, options: options,
+  };
+}
+"""
+
+
+_SELECT_CHOSEN_JS = "(el) => {\n" + _SECRET_FIELD_JS + """
+  if (isSecretField(el)) return {secret: true};
+  const opt = el.selectedOptions && el.selectedOptions[0];
+  return {
+    secret: false,
+    value: opt ? opt.value : el.value,
+    label: opt ? (opt.label || opt.textContent || '').trim().slice(0, 200) : '',
+  };
 }
 """
 
@@ -1625,6 +1683,31 @@ class _PinnedThread:
 # save, so this is enforced on the saved bytes.
 DOWNLOAD_MAX_BYTES = 512 * 1024 * 1024
 
+# How long the click may wait for a download to START, and the ceiling the
+# tool clamps `timeout_seconds` to. Three minutes because a real site led
+# through two navigations and a host probe before the transfer began, and a
+# minute of that was a network outage on our own side (Mike's call). Five
+# minutes as the bound: a site that has begun nothing by then is not slow,
+# and every waiting second is one the agent's round is holding.
+_DOWNLOAD_TIMEOUT_DEFAULT = 180
+_DOWNLOAD_TIMEOUT_MAX = 300
+
+# The transfer the START timeout must not eat. Measured 1.2 MB/s on the live
+# run of 2026-09-21; assumed here as the floor a saved file moves at, so the
+# allowance follows the cap rather than a number somebody has to remember to
+# raise with it.
+_DOWNLOAD_RATE_BYTES_PER_SEC = 1_200_000
+_DOWNLOAD_SAVE_TIMEOUT_SEC = -(-DOWNLOAD_MAX_BYTES // _DOWNLOAD_RATE_BYTES_PER_SEC)
+
+# Whichever timeout fires first decides what the agent reads: the session
+# call's own gives it a sentence naming the page, the ToolEntry ceiling gives
+# it `TOOL_TIMEOUT` and a number. So the ceiling sits above the longest
+# session wait this tool can ask for, by a margin the clock cannot close.
+_DOWNLOAD_CEILING_MARGIN_SEC = 30
+_DOWNLOAD_TOOL_TIMEOUT_SEC = (
+    _DOWNLOAD_TIMEOUT_MAX + _DOWNLOAD_SAVE_TIMEOUT_SEC + _DOWNLOAD_CEILING_MARGIN_SEC
+)
+
 # Room for a title and an extension, with the dedup suffix and the sandbox
 # path still inside the 255-byte limit filesystems here enforce.
 _DOWNLOAD_NAME_MAX = 120
@@ -1780,6 +1863,56 @@ def _type_contradicts_extension(detected: str, name: str) -> bool:
     if not ext or allowed is None:
         return False
     return ext not in allowed
+
+
+# ─────────────────────────────────────────────────────────────
+# Selecting one option of a native <select>
+# ─────────────────────────────────────────────────────────────
+
+_SELECT_CRITERIA = ("value", "label", "index")
+
+# Playwright's own wait for the select to be actionable, the way `click` has
+# one. Short, because a select the snapshot just listed is on the page.
+_SELECT_TIMEOUT_MS = 15000
+
+# How long to wait for a URL the change handler is on its way to. A handler
+# that navigates starts the navigation inside the dispatch, so what has not
+# committed within this has not been started by it; a slower one is the next
+# snapshot's news, and every call that does not navigate pays this once.
+_SELECT_URL_SETTLE_MS = 750
+
+# What a refusal may list: enough to choose from, and bounded because option
+# text is the site's own and it travels into the transcript.
+_SELECT_OPTIONS_SHOWN = 20
+_SELECT_OPTION_LIMIT = 80
+
+
+def _match_select_option(
+    options: List[dict], by: str, named: Any,
+) -> Optional[dict]:
+    """The option a criterion names, or None.
+
+    `index` is 0-based over every `<option>` in document order, disabled
+    placeholders included — the list `select_option` counts and the list the
+    snapshot's `(N options)` counts, so one number means one option in both.
+    """
+    if by == "index":
+        try:
+            wanted = int(named)
+        except (TypeError, ValueError):
+            return None
+        return options[wanted] if 0 <= wanted < len(options) else None
+    key = "value" if by == "value" else "label"
+    target = str(named)
+    for option in options:
+        if str(option.get(key, "")) == target:
+            return option
+    # Playwright trims before it compares, so a label differing only by
+    # surrounding space is the same option there and must be here too.
+    for option in options:
+        if str(option.get(key, "")).strip() == target.strip():
+            return option
+    return None
 
 
 class AuthBrowser:
@@ -2882,7 +3015,7 @@ class AuthBrowser:
         self,
         ref_or_selector: str,
         directory: str,
-        timeout: int = 30000,
+        timeout: int = _DOWNLOAD_TIMEOUT_DEFAULT * 1000,
         max_bytes: Optional[int] = None,
     ) -> dict:
         """Click `ref_or_selector` and save what it downloads into
@@ -2913,16 +3046,25 @@ class AuthBrowser:
         except Exception as exc:
             if _is_session_dead(exc):
                 raise
-            # An ordinary link and an element that never moved both arrive
-            # here as a timeout; the click's own audit row says which.
+            # An ordinary link, an element that never moved, and a network
+            # that was down for the minute all arrive here as one timeout, so
+            # nothing here says which: what goes back is where the page was,
+            # where it is, and how many tabs there are — a site that opens the
+            # file in a new tab is the other reading of a silent click.
             now = self._page.url
+            try:
+                tab_count = len(self._context.pages)
+            except Exception:
+                tab_count = 0
             self._audit_action(
                 "download", url, "failed",
                 selector=ref_or_selector, reason="no_download",
-                timeout=timeout, page_url=now, error=type(exc).__name__,
+                timeout=timeout, page_url=now, url_before=url,
+                tab_count=tab_count, error=type(exc).__name__,
             )
             return {
-                "status": "no_download", "page_url": now,
+                "status": "no_download", "page_url": now, "url_before": url,
+                "tab_count": tab_count,
                 "timeout_ms": timeout, "error": type(exc).__name__,
             }
 
@@ -3018,6 +3160,144 @@ class AuthBrowser:
             "fill", url, "ok",
             selector=ref_or_selector, mode=mode, text_length=text_length,
         )
+
+    def select(
+        self,
+        ref_or_selector: str,
+        by: str,
+        named: Any,
+        timeout: int = _SELECT_TIMEOUT_MS,
+    ) -> dict:
+        """Choose one option of a native `<select>`, named by `by` — one of
+        `value`, `label`, `index` — and `named`.
+
+        Returns a status dict — `ok`, `not_a_select`, `select_disabled`,
+        `multiple`, `no_such_option`, `option_disabled`, `failed` — the way
+        `download` does; the tool writes the sentence. The choosing is
+        Playwright's `select_option`, so the page's own `input` and `change`
+        handlers fire and the wait for actionability is the one `click` and
+        `fill` get; ref staleness is `_resolve_ref`'s.
+
+        For a select the snapshot withholds, the value is still set — the
+        agent may have been given a card expiry to fill — but no option's
+        label, value or count of siblings comes back through here.
+        """
+        self._require_open()
+        url = self._page.url
+        mode = "ref" if ref_or_selector.startswith("@e") else "css"
+        locator = self._resolve_ref(ref_or_selector)
+        probe = locator.evaluate(_SELECT_PROBE_JS) or {}
+        row = {"selector": ref_or_selector, "mode": mode, "by": by}
+        tag = str(probe.get("tag") or "")
+        if tag != "select":
+            self._audit_action(
+                "select", url, "failed",
+                reason="not_a_select", tag=tag, **row,
+            )
+            return {
+                "status": "not_a_select", "tag": tag,
+                "input_type": str(probe.get("type") or ""),
+            }
+        secret = bool(probe.get("secret"))
+        row["secret"] = secret
+        option_count = int(probe.get("optionCount") or 0)
+        if probe.get("disabled"):
+            self._audit_action(
+                "select", url, "failed", reason="select_disabled", **row,
+            )
+            return {"status": "select_disabled"}
+        if probe.get("multiple"):
+            self._audit_action(
+                "select", url, "failed", reason="multiple", **row,
+            )
+            return {"status": "multiple"}
+        # Empty for a withheld select: the page was never asked for them.
+        options = list(probe.get("options") or [])
+        chosen = None
+        if not secret:
+            chosen = _match_select_option(options, by, named)
+            if chosen is None:
+                self._audit_action(
+                    "select", url, "failed",
+                    reason="no_such_option", option_count=option_count, **row,
+                )
+                return {
+                    "status": "no_such_option", "secret": False, "by": by,
+                    "named": named, "options": options,
+                    "option_count": option_count,
+                }
+            if chosen.get("disabled"):
+                self._audit_action(
+                    "select", url, "failed", reason="option_disabled", **row,
+                )
+                return {
+                    "status": "option_disabled", "secret": False,
+                    "value": chosen.get("value", ""),
+                    "label": chosen.get("label", ""),
+                }
+        try:
+            if by == "value":
+                locator.select_option(value=str(named), timeout=timeout)
+            elif by == "label":
+                locator.select_option(label=str(named), timeout=timeout)
+            else:
+                locator.select_option(index=int(named), timeout=timeout)
+        except Exception as exc:
+            if _is_session_dead(exc):
+                raise
+            self._audit_action(
+                "select", url, "failed", **row, **_audit_error(exc),
+            )
+            if secret:
+                # Nothing was pre-checked here, so Playwright's own failure is
+                # all there is to go on — and it says no more than that.
+                return {
+                    "status": "no_such_option", "secret": True, "by": by,
+                    "options": [], "option_count": option_count,
+                }
+            return {"status": "failed", "reason": str(exc)}
+
+        # Read before the URL is waited on: a change handler that navigates
+        # takes the element with it, and then what the probe matched is the
+        # last true statement about what was chosen.
+        after: dict = {}
+        try:
+            after = locator.evaluate(_SELECT_CHOSEN_JS) or {}
+        except Exception:
+            after = {}
+        if not secret and not after:
+            after = {
+                "value": (chosen or {}).get("value", ""),
+                "label": (chosen or {}).get("label", ""),
+            }
+        navigated = self._page.url != url
+        if not navigated:
+            try:
+                self._page.wait_for_url(
+                    lambda current: current != url,
+                    timeout=_SELECT_URL_SETTLE_MS,
+                )
+                navigated = True
+            except Exception:
+                navigated = False
+        try:
+            url_after = self._page.url
+        except Exception:
+            url_after = url
+        if not secret:
+            row["chose"] = _one_line(
+                str(after.get("value") or ""), _SELECT_OPTION_LIMIT,
+            )
+        self._audit_action(
+            "select", url, "ok",
+            navigated=navigated, page_url=url_after, **row,
+        )
+        return {
+            "status": "ok", "secret": secret,
+            "value": "" if secret else str(after.get("value") or ""),
+            "label": "" if secret else str(after.get("label") or ""),
+            "url_before": url, "url_after": url_after, "navigated": navigated,
+        }
 
     def screenshot(
         self, full_page: bool = False, save_to: str | None = None
@@ -4530,6 +4810,126 @@ async def browser_fill(
     return f"Filled {ref_or_selector} ({len(text)} chars)"
 
 
+def _select_url_sentence(result: dict) -> str:
+    if result.get("navigated"):
+        return f"The page URL changed to {_one_line(result.get('url_after') or '')}."
+    return "The page URL did not change."
+
+
+def _select_option_list(result: dict) -> str:
+    """The options an ordinary select holds, so a misread label costs one
+    call and not a second snapshot. Never reached for a withheld select —
+    its options are not in `result` at all."""
+    options = result.get("options") or []
+    shown = [
+        f'"{_one_line(str(o.get("label") or ""), _SELECT_OPTION_LIMIT)}"'
+        f' (value "{_one_line(str(o.get("value") or ""), _SELECT_OPTION_LIMIT)}")'
+        + (", disabled" if o.get("disabled") else "")
+        for o in options[:_SELECT_OPTIONS_SHOWN]
+    ]
+    more = len(options) - len(shown)
+    tail = f", and {more} more" if more > 0 else ""
+    return "; ".join(shown) + tail
+
+
+def _select_answer(ref: str, result: dict) -> str:
+    """What was selected and whether the page moved — and for a select the
+    snapshot withholds, neither the option nor its siblings."""
+    status = (result or {}).get("status")
+    secret = bool((result or {}).get("secret"))
+    if status == "not_a_select":
+        tag = result.get("tag") or "unknown element"
+        return (
+            f"⚠️ {ref} is a <{tag}>, not a <select>, and nothing was changed. "
+            f"browser_select drives native selects only — browser_fill types "
+            f"into a text field, browser_click presses a button or a link and "
+            f"opens a dropdown built from divs."
+        )
+    if status == "select_disabled":
+        return f"⚠️ The select {ref} is disabled; nothing was changed."
+    if status == "multiple":
+        return (
+            f"⚠️ {ref} is a <select multiple>; nothing was changed. "
+            f"browser_select sets one option and does not drive multi-selects."
+        )
+    if status == "option_disabled":
+        return (
+            f'⚠️ The option "{_one_line(result.get("label") or "", _SELECT_OPTION_LIMIT)}"'
+            f' (value "{_one_line(result.get("value") or "", _SELECT_OPTION_LIMIT)}")'
+            f" in {ref} is disabled; nothing was changed."
+        )
+    if status == "no_such_option":
+        if secret:
+            return (
+                f"⚠️ Nothing was selected: {ref} has no enabled option "
+                f"matching what you named. This select is a secret field, so "
+                f"its options are not listed here; it has "
+                f"{result.get('option_count', 0)} of them."
+            )
+        return (
+            f"⚠️ Nothing was selected: {ref} has no option whose "
+            f"{result.get('by')} is "
+            f'"{_one_line(str(result.get("named")), _SELECT_OPTION_LIMIT)}". '
+            f"Its options are: {_select_option_list(result)}."
+        )
+    if status == "failed":
+        return (
+            f"⚠️ Nothing was selected: "
+            f"{_one_line(result.get('reason') or 'unknown')}"
+        )
+    if secret:
+        return (
+            f"Selected the option you named in {ref}. This select is a secret "
+            f"field, so its label, its value and its other options are "
+            f"withheld. {_select_url_sentence(result)}"
+        )
+    label = _one_line(result.get("label") or "", _SELECT_OPTION_LIMIT)
+    value = _one_line(result.get("value") or "", _SELECT_OPTION_LIMIT)
+    named = f'"{label}" (value "{value}")' if label else f'value "{value}"'
+    return f"Selected {named} in {ref}. {_select_url_sentence(result)}"
+
+
+async def browser_select(
+    ctx: ToolContext,
+    ref_or_selector: str,
+    value: Optional[str] = None,
+    label: Optional[str] = None,
+    index: Optional[int] = None,
+) -> str:
+    """Choose one option of a native <select> by its value, its visible label
+    or its 0-based index. Answers with the option now selected and whether the
+    page URL changed; it does not submit the form."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    named_by = {"value": value, "label": label, "index": index}
+    given = [name for name in _SELECT_CRITERIA if named_by[name] is not None]
+    if len(given) != 1:
+        return (
+            "⚠️ Give exactly one of value, label or index — "
+            + ("none was given" if not given else f"{' and '.join(given)} were given")
+            + ". value is the option's value attribute, label its visible "
+            "text, index its 0-based position among all the options."
+        )
+    by = given[0]
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            result = await _run_in_session(
+                session, "select", ref_or_selector, by, named_by[by],
+            )
+        except ValueError as e:
+            return f"⚠️ {e}"
+        except Exception as e:
+            log.warning(
+                "select failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
+            return f"⚠️ Select failed: {type(e).__name__}: {e}"
+    return _select_answer(ref_or_selector, result)
+
+
 async def browser_wait_for(
     ctx: ToolContext, ref_or_selector: str, timeout: int = 30000,
 ) -> str:
@@ -4640,11 +5040,6 @@ async def browser_screenshot(
 
 
 _DOWNLOAD_DIR_DEFAULT = "downloads"
-_DOWNLOAD_TIMEOUT_DEFAULT = 30
-_DOWNLOAD_TIMEOUT_MAX = 120
-# `timeout_seconds` bounds the wait for a download to START; this bounds the
-# transfer that follows, so a stalled save cannot hold the session thread.
-_DOWNLOAD_SAVE_TIMEOUT_SEC = 240
 _DOWNLOAD_NOTE_LIMIT = 300
 
 
@@ -4713,11 +5108,21 @@ def _download_answer(
     status = (result or {}).get("status")
     if status == "no_download":
         waited = int((result.get("timeout_ms") or 0) / 1000)
+        before = _one_line(result.get("url_before") or "<unknown>")
+        now = _one_line(result.get("page_url") or "<unknown>")
+        tabs = int(result.get("tab_count") or 0)
+        # Facts only. The sentence that used to stand here guessed the element
+        # was an ordinary link; on the live run the button was the right one
+        # and the network was down, so the guess cost a turn.
         return (
             f"No download started within {waited}s of the click "
-            f"({result.get('error', 'TimeoutError')}). The page is now "
-            f"{_one_line(result.get('page_url') or '<unknown>')} — the element"
-            f" may be an ordinary link; take a fresh browser_snapshot."
+            f"({result.get('error', 'TimeoutError')}).\n"
+            f"The page was {before} before the click and is {now} now — "
+            f"{'the URL changed' if before != now else 'the URL did not change'}.\n"
+            f"The browser context has {tabs} tab(s).\n"
+            f"timeout_seconds bounds the wait for a download to START, not the "
+            f"transfer that follows: raising it helps only when the site is "
+            f"slow to begin one."
         )
     if status == "too_large":
         return (
@@ -5306,6 +5711,60 @@ def get_tools() -> List[ToolEntry]:
         ),
 
         ToolEntry(
+            name="browser_select",
+            schema={
+                "name": "browser_select",
+                "description": (
+                    "Choose one option of a native <select> — the one control"
+                    " browser_click and browser_fill cannot work: a closed"
+                    " native dropdown draws its options outside the page, so a"
+                    " click on an option matches nothing, and fill only types"
+                    " into text fields. Call browser_snapshot first and pass"
+                    " the @eN ref of the combobox. Give exactly one of value"
+                    " (the option's value attribute), label (its visible text)"
+                    " or index (0-based over every option in document order,"
+                    " the same list the snapshot counts in '(N options)')."
+                    " Playwright's select_option does the choosing, so the"
+                    " page's own input and change handlers fire — including one"
+                    " that navigates. The answer names the option now selected"
+                    " and says whether the page URL changed; the form is NOT"
+                    " submitted, so click its submit button after this. Native"
+                    " <select> only: a dropdown built from divs is driven with"
+                    " browser_click, and a <select multiple> is refused. For a"
+                    " select the snapshot treats as a secret field — a card"
+                    " number, a card expiry, a security code — the value is"
+                    " still set, but the answer repeats no label, no value and"
+                    " no option list."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ref_or_selector": {
+                            "type": "string",
+                            "description": "@eN ref from the last browser_snapshot, or a CSS selector",
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "The value attribute of the option to choose",
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "The visible text of the option to choose",
+                        },
+                        "index": {
+                            "type": "integer",
+                            "description": "0-based position of the option among all the options of this select",
+                        },
+                    },
+                    "required": ["ref_or_selector"],
+                },
+            },
+            handler=browser_select,
+            timeout_sec=45,
+            default_enabled=False,
+        ),
+
+        ToolEntry(
             name="browser_wait_for",
             schema={
                 "name": "browser_wait_for",
@@ -5396,7 +5855,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": f"How long to wait for the download to start after the click (default {_DOWNLOAD_TIMEOUT_DEFAULT}, max {_DOWNLOAD_TIMEOUT_MAX}). If it never starts you get a message naming the page, not a hang.",
+                            "description": f"How long to wait for the download to START after the click (default {_DOWNLOAD_TIMEOUT_DEFAULT}, max {_DOWNLOAD_TIMEOUT_MAX}). A real site can lead through two navigations and a host probe first. It does NOT bound the transfer — that is allowed for separately, so a big file is not cut off — and raising it helps only when the site is slow to begin. If nothing starts you get a message naming both URLs and the tab count, not a hang.",
                             "default": _DOWNLOAD_TIMEOUT_DEFAULT,
                         },
                         "note": {
@@ -5408,9 +5867,9 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             handler=browser_download,
-            # The wait for the start is bounded by timeout_seconds; this has
-            # to cover the transfer of a book on top of it.
-            timeout_sec=420,
+            # Above the longest wait the session call itself can make, so the
+            # answer is a sentence and not TOOL_TIMEOUT — see the constant.
+            timeout_sec=_DOWNLOAD_TOOL_TIMEOUT_SEC,
             default_enabled=False,
         ),
 

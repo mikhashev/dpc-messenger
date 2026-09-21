@@ -408,6 +408,7 @@ Interactive headed/headless browser driven via Camoufox + Playwright. Disabled b
 | `browser_scroll` | Scroll the page / a scrollable container (real wheel events) | ⛔ opt-in |
 | `browser_click` | Click an element by ref or selector | ⛔ opt-in |
 | `browser_fill` | Fill an input field | ⛔ opt-in |
+| `browser_select` | Choose one option of a native `<select>` by value, visible label or 0-based index (what `browser_click` and `browser_fill` cannot do); fires the page's own `input`/`change` handlers, reports a URL change, does not submit the form, and sets a secret select without echoing its option | ⛔ opt-in |
 | `browser_wait_for` | Wait for an element/condition | ⛔ opt-in |
 | `browser_extract` | Extract structured content from the page | ⛔ opt-in |
 | `browser_screenshot` | Capture a screenshot | ⛔ opt-in |
