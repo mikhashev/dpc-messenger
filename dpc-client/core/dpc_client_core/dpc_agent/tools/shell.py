@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import unicodedata
+import warnings
 from typing import List, NamedTuple, Optional, Tuple
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
@@ -445,22 +446,63 @@ def _name_stem(name: str) -> str:
 # the count both wrong, measured 2026-09-21.
 _PATTERN_LENGTH_LIMIT = 200
 
+# Python's `re` has no POSIX bracket classes: `[[:alpha:]]ython` reads as a
+# nested set, matches nothing and warns, so the gate said "(0 running)" about a
+# pattern pkill would have matched. Translated before compiling; a class with no
+# entry here fails closed, like a pattern that does not compile.
+_POSIX_CLASSES = {
+    "alpha": "a-zA-Z",
+    "alnum": "a-zA-Z0-9",
+    "digit": "0-9",
+    "lower": "a-z",
+    "upper": "A-Z",
+    "space": r"\s",
+    "punct": r"!-/:-@\[-`{-~",
+    "xdigit": "0-9A-Fa-f",
+}
+_POSIX_CLASS_RE = re.compile(r"\[:(\w+):\]")
+
+
+def _as_python_regex(pattern: str) -> Tuple[str, str]:
+    """(an expression `re` can read, why it cannot be read) — one is always empty."""
+    missing: list = []
+
+    def swap(found: "re.Match") -> str:
+        body = _POSIX_CLASSES.get(found.group(1).lower())
+        if body is None:
+            missing.append(found.group(0))
+            return found.group(0)
+        return body
+
+    expression = _POSIX_CLASS_RE.sub(swap, pattern)
+    if missing:
+        return "", f"it uses {missing[0]}, which python's regex reader does not know"
+    return expression, ""
+
 
 def _pattern_covers(pattern: str, target: str, match: str) -> bool:
     """Does this pattern reach `target`, read the way its verb reads it?
 
-    Fail closed twice, because a pattern the gate cannot evaluate cannot be
-    shown safe: one too long to be worth compiling, and one that does not
-    compile at all, both count as covering. No timeout — the length cap is what
-    keeps a catastrophic pattern out of `re`.
+    Fail closed three times, because a pattern the gate cannot evaluate cannot
+    be shown safe: one too long to be worth compiling, one carrying a POSIX
+    class with no python spelling, and one that does not compile at all. No
+    timeout — the length cap is what keeps a catastrophic pattern out of `re`.
     """
     if match not in ("regex", "regex-exact"):
         return False
     if len(pattern) > _PATTERN_LENGTH_LIMIT:
         return True
-    expression = f"^(?:{pattern})$" if match == "regex-exact" else pattern
+    expression, blind = _as_python_regex(pattern)
+    if blind:
+        return True
+    if match == "regex-exact":
+        expression = f"^(?:{expression})$"
     try:
-        return bool(re.search(expression, target, re.I))
+        with warnings.catch_warnings():
+            # A nested-set warning from a pattern somebody typed is noise in the
+            # log a person reads to find out why a command was refused.
+            warnings.simplefilter("ignore", FutureWarning)
+            return bool(re.search(expression, target, re.I))
     except re.error:
         return True
 
@@ -471,8 +513,13 @@ def _pattern_is_unreadable(pattern: str, match: str) -> str:
         return ""
     if len(pattern) > _PATTERN_LENGTH_LIMIT:
         return f"it is longer than the {_PATTERN_LENGTH_LIMIT}-character limit this gate reads"
+    expression, blind = _as_python_regex(pattern)
+    if blind:
+        return blind
     try:
-        re.compile(pattern)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            re.compile(expression)
     except re.error as exc:
         return f"it is not a valid regular expression ({exc})"
     return ""
@@ -541,6 +588,16 @@ _WMIC_PID_RE = re.compile(r"processid\s*=\s*['\"]?([^\s'\",]+)", re.I)
 _WMIC_NAME_RE = re.compile(r"\bname\s*=\s*['\"]?([^\s'\",]+)", re.I)
 # `%PID%`, `$pid`, `$(cat run.pid)`, a backtick: a pid nobody can read here.
 _UNREADABLE_PID = re.compile(r"[%$`(){}*?!]")
+# The same question asked of a *pattern*, which is a different question: for
+# `pkill` and `killall -r` the argument is a regular expression by definition, so
+# `( ) | ^ $ ? * + [ ] { } .` are its alphabet and not a sigil. The character
+# class above was applied to it anyway, which sent every such regex to
+# "unreadable id" before the pattern reader saw it — measured on dd1a5661, and
+# four of the four spellings tried would have killed this service. Shape decides
+# instead: `$` at the end of a pattern or before `)` or `|` is an anchor, while
+# `$name`, `${name}`, `$(…)`, `$$`, `$_`, a backtick and cmd's `%i` / `%name%`
+# are values the shell computes and this gate cannot know.
+_SHELL_EXPANSION_RE = re.compile(r"`|\$\$|\$[A-Za-z_{(]|%[A-Za-z_]")
 
 
 def _wmic_kills(segment: str) -> bool:
@@ -951,6 +1008,7 @@ def _pattern_kill_targets(verb: str, rest: list) -> _KillTargets:
     """`pkill` and `killall`: one pattern, and the switches say how it is read."""
     names, unresolved, whole = [], [], False
     exact, regexp = False, False
+    pattern = ""
     i = 0
     while i < len(rest):
         token = rest[i]
@@ -970,15 +1028,21 @@ def _pattern_kill_targets(verb: str, rest: list) -> _KillTargets:
             continue
         if token.startswith("-"):
             continue
-        if _UNREADABLE_PID.search(token.replace("*", "").replace("?", "")):
-            unresolved.append(token)
-        else:
-            names.append(token)
+        pattern = token
         break
-    return _KillTargets(
-        verb, (), tuple(unresolved), tuple(names), whole,
-        _pattern_match_kind(verb, exact, regexp),
-    )
+    kind = _pattern_match_kind(verb, exact, regexp)
+    if pattern and not _SHELL_EXPANSION_RE.search(pattern):
+        names.append(pattern)
+    elif pattern:
+        # An expansion is an id nobody here can read, and that is the sentence it
+        # gets. It is *also* handed to the pattern reader when it reads as a
+        # pattern, because `_tokens` has thrown the quotes away and `'$x|python'`
+        # is both — but only then: `$(cat` does not compile, and the fail-closed
+        # branch for an unreadable pattern would turn a question into a refusal.
+        unresolved.append(pattern)
+        if not _pattern_is_unreadable(pattern, kind):
+            names.append(pattern)
+    return _KillTargets(verb, (), tuple(unresolved), tuple(names), whole, kind)
 
 
 def _wmic_targets(segment: str) -> _KillTargets:
@@ -1202,6 +1266,10 @@ def _kill_needs_a_person(segment: str) -> str:
                 + "; ".join(described)
             )
         for pattern in targets.names[:3]:
+            if pattern in targets.unresolved:
+                # A value the shell computes is not a net this gate can describe;
+                # the unreadable-id note below is that token's one sentence.
+                continue
             if targets.whole_command_line:
                 notes.append(
                     f"Kills every process whose command line matches {_one_line(pattern, 60)}"

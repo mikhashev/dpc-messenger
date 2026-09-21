@@ -311,8 +311,20 @@ def test_an_ordinary_kill_is_asked_and_named(service, command):
     assert verdict[1] == f"Kills process {UNRELATED}: notepad.exe draft.txt", verdict[1]
 
 
-def test_an_approved_kill_runs(service, tmp_path, monkeypatch):
-    """A suite of refusals would pass while breaking the person who asked."""
+@pytest.mark.parametrize("on_windows", [True, False])
+def test_an_approved_kill_runs(service, tmp_path, monkeypatch, on_windows):
+    """A suite of refusals would pass while breaking the person who asked.
+
+    The target is spelled `kill <pid>` rather than `taskkill /PID <pid> /F`
+    because the switch exemption is Windows-only by design: off Windows this row
+    collected a second, false «outside sandbox: /PID» reason beside the kill and
+    failed, which is the incident's own dialog turning up inside its own test.
+    Only `_on_windows` is patched, not `os.name`: `_Ctx` builds a `Path`, and a
+    `PosixPath` cannot be instantiated on this box.
+    """
+    monkeypatch.setattr(shell, "_on_windows", lambda: on_windows, raising=False)
+    monkeypatch.setattr(shell, "_names_at_drive_root",
+                        lambda drive: frozenset(), raising=False)
     spawned = []
     monkeypatch.setattr(shell, "_execute_shell_command",
                         lambda command, cwd, timeout: spawned.append(command) or "SUCCESS")
@@ -324,10 +336,10 @@ def test_an_approved_kill_runs(service, tmp_path, monkeypatch):
 
     monkeypatch.setattr(shell, "_request_approval", _approve)
 
-    answer = run_shell(_Ctx(tmp_path), f"taskkill /PID {UNRELATED} /F")
+    answer = run_shell(_Ctx(tmp_path), f"kill {UNRELATED}")
 
     assert answer == "SUCCESS", answer
-    assert spawned == [f"taskkill /PID {UNRELATED} /F"]
+    assert spawned == [f"kill {UNRELATED}"]
     assert granted == [f"Kills process {UNRELATED}: notepad.exe draft.txt"]
 
 
@@ -909,7 +921,14 @@ def test_only_our_own_kind_of_ancestor_lends_its_name(monkeypatch):
     service. Their PIDs are protected; their NAMES are not — `taskkill /IM
     explorer.exe` is a question, not a hard block. What does lend its name is
     the launcher/interpreter pair, which is the same executable twice.
+
+    The service this row reasons about is stated rather than inherited from
+    whichever interpreter runs the suite: on a Linux node `sys.executable` is
+    `python3`, so the stem set was `{python3}` and the `python.exe` ancestor
+    below lent nothing (CI 35536703944).
     """
+    monkeypatch.setattr(sys, "executable", r"C:\dpc\.venv\Scripts\python.exe")
+    monkeypatch.setattr(shell, "_own_process_name", lambda: "python.exe", raising=False)
     monkeypatch.setattr(shell, "_ancestor_processes", lambda pid: [
         (4242, "python.exe"), (77, "explorer.exe"), (78, "bash.exe"), (79, "uv.exe"),
     ], raising=False)
@@ -922,6 +941,25 @@ def test_only_our_own_kind_of_ancestor_lends_its_name(monkeypatch):
     assert "bash.exe" not in identity.names
     assert "uv.exe" not in identity.names
     assert identity.ancestors == (4242, 77, 78, 79), "their pids stay protected"
+
+    monkeypatch.setattr(shell, "_SERVICE_IDENTITY", None, raising=False)
+
+
+def test_the_same_rule_on_a_posix_node(monkeypatch):
+    """The twin of the row above, in the shape the other node runs: `python3`
+    launched by `python3`, under `uv` under a shell. The launcher lends its name;
+    `uv` and `bash` lend only their pids, exactly as on Windows."""
+    monkeypatch.setattr(sys, "executable", "/home/mike/dpc/.venv/bin/python3")
+    monkeypatch.setattr(shell, "_own_process_name", lambda: "python3", raising=False)
+    monkeypatch.setattr(shell, "_ancestor_processes", lambda pid: [
+        (4242, "python3"), (77, "uv"), (78, "bash"),
+    ], raising=False)
+    monkeypatch.setattr(shell, "_SERVICE_IDENTITY", None, raising=False)
+
+    identity = shell._service_identity()
+
+    assert identity.names == frozenset({"python3"}), identity.names
+    assert identity.ancestors == (4242, 77, 78), "their pids stay protected"
 
     monkeypatch.setattr(shell, "_SERVICE_IDENTITY", None, raising=False)
 
@@ -1252,6 +1290,180 @@ def test_on_posix_the_protected_name_carries_its_version(monkeypatch):
     assert tier_of("pkill node") == "tier1"
 
 
+# --- F1 again: the pattern reader was never reached by a pattern -------------
+# `_UNREADABLE_PID` was written for a *pid* token that is a shell expansion —
+# `$p`, `%i`, `$(cat f)` — and `_pattern_kill_targets` applied it to an argument
+# that for `pkill` and `killall -r` is a regular expression by definition. So
+# every regex carrying `(`, `|`, `^` or `$` was filed as an id nobody could read
+# and asked with that sentence, while pkill would have killed this service.
+# Every row below was measured tier1 "could not identify" on dd1a5661.
+
+_A_REGEX_THAT_REACHES_US = [
+    "pkill '(py|no)thon'",
+    "pkill '^python$'",
+    'pkill "^python$"',
+    "pkill -f 'run_(service|x)'",
+    "killall -r '(py|no)thon'",
+    "pkill -x '(python|node)'",
+    r"pkill -f '^.*run_service\.py$'",
+    'bash -c "pkill \'(py|no)thon\'"',
+    "for p in 1; do pkill '^python$'; done",
+]
+
+
+@pytest.mark.parametrize("command", _A_REGEX_THAT_REACHES_US)
+def test_a_regex_the_verb_would_match_us_with_is_refused(service, command):
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("command,pattern", [
+    ("pkill '^sleep$'", "^sleep$"),
+    ("pkill '(foo|bar)baz'", "(foo|bar)baz"),
+    ("killall -r '^note(pad)?$'", "^note(pad)?$"),
+])
+def test_a_regex_that_misses_us_asks_with_the_pattern_reason(service, command, pattern):
+    """The tier was not the only thing wrong: a person told «the id is
+    (foo|bar)baz» has been handed the gate's confusion instead of the fact that a
+    net is about to be cast, and the count that says how wide it is went missing
+    with it."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1].startswith(f"Kills every process matching {pattern}"), verdict[1]
+    assert "could not identify" not in verdict[1], verdict[1]
+
+
+@pytest.mark.parametrize("command,token", [
+    ("pkill $p", "$p"),
+    ('pkill "$NAME"', "$NAME"),
+    ("pkill $(cat name.txt)", "$(cat"),
+    ("pkill ${p}", "${p"),              # `_strip_grouping` has eaten the `}`
+    ("pkill $_", "$_"),
+    ("pkill %NAME%", "%NAME%"),         # cmd's spelling of the same unknown
+    ("pkill %i", "%i"),
+])
+def test_a_pattern_that_is_a_shell_expansion_is_still_an_unreadable_id(service, command, token):
+    """The window this change must not close. A value the gate cannot know is not
+    a pattern it can test, so the id sentence stays — and stays alone: a second
+    note calling the same token a pattern would be the gate guessing out loud.
+    """
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1] == (
+        f"Kills a process the gate could not identify: the id is {token}"
+    ), verdict[1]
+
+
+@pytest.mark.parametrize("command", [
+    "pkill '$x|python'",
+    "pkill 'run_$name|python'",
+    "pkill '%i|python'",
+])
+def test_a_token_that_is_both_an_expansion_and_a_pattern_still_refuses(service, command):
+    """Where the two readings disagree, the refusal wins. `_tokens` has thrown the
+    quotes away, and in single quotes nothing expands on POSIX — so a token the
+    gate reads as a value is tested as a pattern as well, whenever it is one.
+    `pkill '$x|sleep'`, the same shape reaching nothing of ours, stays the
+    question below."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+def test_the_same_shape_that_reaches_nothing_of_ours_is_the_id_question(service):
+    assert reason_of("pkill '$x|sleep'") == (
+        "Kills a process the gate could not identify: the id is $x|sleep"
+    )
+
+
+def test_a_cmd_variable_in_a_loop_body_keeps_the_bodys_own_sentence(service):
+    """Measured, against the expectation that it would say «could not identify»:
+    `_kill_verb` gives up on the `for` header, so the parser never sees `pkill`
+    here at all and the body rule is what speaks. `%i` is an expansion either
+    way, so no pattern is invented for it."""
+    verdict = _validate_command("for /f %i in (n.txt) do pkill %i")
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert _SAYS_A_BODY in verdict[1], verdict[1]
+    assert "matching %i" not in verdict[1], verdict[1]
+
+
+@pytest.mark.parametrize("command", [
+    "pgrep '(py|no)thon'",
+    "echo '^python$'",
+])
+def test_a_regex_outside_a_kill_verb_is_still_nothing(service, command):
+    assert tier_of(command) == "tier0", command
+
+
+def test_a_posix_bracket_class_is_translated_rather_than_silently_missed(service):
+    """`re` has no `[[:alpha:]]`: it read a nested set, matched nothing and said
+    "(0 running)" for a pattern pkill would have matched — with a FutureWarning
+    beside it. The eight common classes are rewritten before compiling."""
+    verdict = _validate_command("pkill '[[:alpha:]]ython'")
+
+    assert verdict is not None and verdict[0] == "tier2", verdict
+    assert "D-PC service" in verdict[1], verdict[1]
+
+
+def test_a_posix_class_this_gate_has_no_translation_for_fails_closed(service):
+    verdict = _validate_command("pkill '[[:nope:]]ython'")
+
+    assert verdict is not None and verdict[0] == "tier2", verdict
+    assert "[:nope:]" in verdict[1], verdict[1]
+
+
+def test_reading_a_pattern_warns_about_nothing(service, recwarn):
+    """A warning on stderr from inside the gate is noise in a log somebody reads
+    to find out why a command was refused."""
+    assert tier_of("pkill '[[:alpha:]]ython'") == "tier2"
+    assert tier_of("pkill '[[:digit:]]'") == "tier1"
+    # No POSIX class to translate away, and `re` still calls it a nested set.
+    assert tier_of("pkill '[[ab]]ython'") == "tier1"
+
+    assert [str(w.message) for w in recwarn.list if w.category is FutureWarning] == []
+
+
+@pytest.fixture
+def posix_service(monkeypatch):
+    """The same service on Linux, where the executable carries no `.exe`."""
+    identity = SERVICE._replace(
+        names=frozenset({"python3"}),
+        cmdline="/home/mike/dpc/.venv/bin/python3 run_service.py",
+    )
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(shell, "_on_windows", lambda: False, raising=False)
+    monkeypatch.setattr(shell, "_service_identity", lambda: identity, raising=False)
+    monkeypatch.setattr(shell, "_describe_pid",
+                        lambda pid: "python3 run_service.py", raising=False)
+    return identity
+
+
+@pytest.mark.parametrize("command", [
+    "pkill '(py|no)thon3'",
+    "pkill '^python3$'",
+    "killall -r '(py|no)thon3'",
+    "pkill -f 'run_(service|x)'",
+])
+def test_the_same_regexes_reach_a_posix_service(posix_service, command):
+    """The shape this box cannot be: `python3`, no `.exe`, and the pattern the
+    other node's CI would have had to survive."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+def test_a_posix_service_still_asks_about_a_regex_that_misses_it(posix_service):
+    assert tier_of("pkill '^sleep$'") == "tier1"
+    assert "could not identify" not in reason_of("pkill '^sleep$'")
+
+
 # --- a generator, not a list ------------------------------------------------
 # The fourteen wrapped spellings in `_WRAPPED` are the ones somebody thought
 # of. These tables are multiplied instead, so a spelling nobody typed is
@@ -1336,9 +1548,9 @@ def test_what_the_matrix_does_not_reach(service, command, fragment):
     evaluate. Each row is Tier 1 — a question with the reason named — and none
     is Tier 2: a target computed at run time, a target inside a wrapper whose
     command string the gate could not extract, and a target set in an earlier
-    segment of the same line. A regex containing `(`, `$` or `%` falls in the
-    first of those: `pkill '(py|no)thon'` reads as an id the gate cannot resolve
-    and asks, rather than being tested as the pattern it is.
+    segment of the same line. A pkill *pattern* used to fall in the first of
+    those and no longer does — `pkill '(py|no)thon'` is read as the regular
+    expression it is, and refused.
     """
     verdict = _validate_command(command)
 
