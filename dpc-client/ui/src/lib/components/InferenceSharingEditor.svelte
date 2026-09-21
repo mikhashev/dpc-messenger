@@ -982,6 +982,10 @@
                 <h5>{clientLabel(line.client)}</h5>
                 <button class="btn-small" on:click={() => copy(line.text, clientLabel(line.client))}>Copy</button>
               </div>
+              <!-- Outside the body on purpose: what Copy hands over is the
+                   block itself, and a JSON one would stop parsing if a note
+                   were written into it. -->
+              {#if line.note}<p class="help-text-small">{line.note}</p>{/if}
               <pre>{line.text}</pre>
             </div>
           {:else}

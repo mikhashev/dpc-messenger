@@ -5133,7 +5133,8 @@ class CoreService:
         }
 
     async def get_gateway_client_lines(self, selected_id: Optional[str] = None) -> Dict[str, Any]:
-        """The paste-ready lines for Continue, Cursor, Claude Code and curl,
+        """The paste-ready lines for Continue, Cursor, Claude Code — shell
+        exports and the settings JSON it can be launched from — and curl,
         with the key in clear (Mike's call, 2026-09-14): they are pasted into
         another tool's config, and this socket already carries `.ws_token`.
 

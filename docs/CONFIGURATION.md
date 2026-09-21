@@ -332,7 +332,8 @@ listener is actually holding the port — the two differ whenever the door refus
 lists, the refusal that stopped them being classified where there is one, and
 `compute.enabled`. `rotate_gateway_key` is the rotation described above.
 `get_gateway_client_lines` returns the paste-ready configuration for Continue, Cursor,
-Claude Code and curl with the key in clear — the two examples on this page are that
+Claude Code (twice: the shell exports and the settings JSON) and curl with the key in
+clear — the three examples on this page are that
 command's own output, compared by a test so the page and the button cannot drift. It
 answers with the same menu `/v1/models` lists, a proved peer's `remote:<node id>:<alias>`
 models included and not this node's serving lists alone, as `menu` — one entry per model,
@@ -433,6 +434,38 @@ node's own alias. Where nobody states a window the line is **absent** rather tha
 guessed, and the client keeps its own assumption.
 Not verified against a live Claude Code run at the time of writing; the shape is
 verified by the test suite.
+
+**Example** (Claude Code, `~/.claude/dpc-settings.json`):
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "<contents of ~/.dpc/.gateway_key>",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:9997",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ollama_local",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "ollama_local",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "ollama_local",
+    "CLAUDE_CODE_TOTAL_TOKENS_REMINDER": "off",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "215040"
+  }
+}
+```
+Saved under that name, it is read by `claude --settings ~/.claude/dpc-settings.json`.
+A settings file works unchanged on Windows, Linux and macOS, while the `export` block
+above is POSIX shell only. The same door, the same key and the same model as that block:
+the key is under the `ANTHROPIC_AUTH_TOKEN` name (sent as `Authorization: Bearer`), the
+base URL carries no `/v1`, and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is present on the same
+condition and with the same number — absent where nobody states a window. All three tier
+pins name the one selected model, because that client sends its background and subagent
+calls to the small and the large tier, and a tier left unpinned would name a model this
+door does not serve. The other three values are the owner's working configuration rather
+than this client's documentation: a long `API_TIMEOUT_MS` for a local model that answers
+slowly, no non-essential traffic out of a loopback door, and the token reminder off
+because the window is stated above it. Every value is a JSON string, the numeric ones
+included, and no value is shell-quoted — an alias with a space (`qwen3.8 27b Mythos`)
+goes in as it is. JSON carries no comment, so the menu note the `export` block writes
+after a `#` stands beside this block in the UI rather than inside it.
 
 **A peer's model, through your own gateway.** After the two local lists, `/v1/models`
 shows one row per alias each connected peer serves to this node, named

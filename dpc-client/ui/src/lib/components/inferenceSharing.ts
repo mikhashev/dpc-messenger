@@ -639,10 +639,14 @@ export function gatewayVerdict(
 export const SERVES_NO_LOCAL_ALIAS =
   "no alias of this node's own — calls to local aliases are refused; peers' models are served";
 
-/** One paste-ready block, as `gateway.client_config_lines` renders it. */
+/** One paste-ready block, as `gateway.client_config_lines` renders it.
+ *  `note` is the prose a block cannot hold inside its own body — the settings
+ *  JSON carries the menu note and its launch line there, since JSON has no
+ *  comment; the blocks whose syntax does carry one send none. */
 export interface ClientLine {
   client: string;
   text: string;
+  note?: string | null;
 }
 
 /**
@@ -817,6 +821,7 @@ const CLIENT_LABELS: Record<string, string> = {
   continue: 'Continue',
   cursor: 'Cursor',
   claude_code: 'Claude Code',
+  claude_code_settings: 'Claude Code — settings JSON',
   curl: 'curl',
 };
 

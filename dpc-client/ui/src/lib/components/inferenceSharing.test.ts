@@ -7,6 +7,7 @@ import {
   addTariffEntry,
   callerPriceBadge,
   classifyProviderType,
+  clientLabel,
   computeBlockErrors,
   computeErrorsOf,
   contextWindowLine,
@@ -452,6 +453,23 @@ describe('the header of the client blocks carries the masked key only', () => {
       .toBe('zed — no key has been written yet; start the gateway once');
     expect(maskedHeader({ lines: [], key_masked: 'wtHZ…opY4' })).toBe('nothing to paste yet; the key is wtHZ…opY4');
     expect(maskedHeader(null)).toBe('nothing to paste yet, and no key has been written');
+  });
+
+  it('names the settings JSON as its own block, and keeps its note out of what Copy hands over', () => {
+    // Two blocks for one client: the exports, and the file `claude --settings`
+    // reads. The note carries the menu note and the launch line, which JSON
+    // cannot hold inside itself, so it is rendered beside the body and never
+    // copied with it.
+    expect(clientLabel('claude_code_settings')).toBe('Claude Code — settings JSON');
+    const sources = import.meta.glob('./InferenceSharingEditor.svelte', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+    const tab = Object.values(sources)[0];
+    expect(tab).toBeTruthy();
+    expect(tab).toContain('{#if line.note}');
+    expect(tab).toMatch(/copy\(line\.text, clientLabel\(line\.client\)\)/);
   });
 });
 

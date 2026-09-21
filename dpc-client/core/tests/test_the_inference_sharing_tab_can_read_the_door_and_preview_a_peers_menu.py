@@ -33,6 +33,8 @@ import pytest
 
 from dpc_client_core.firewall import ContextFirewall
 from dpc_client_core.gateway import (
+    CLAUDE_CODE_FIXED_ENV,
+    CLAUDE_CODE_SETTINGS_FILE,
     GATEWAY_HOST,
     GATEWAY_KEY_NAME,
     GatewayServer,
@@ -255,7 +257,7 @@ async def test_the_client_lines_carry_the_key_and_the_served_aliases(tmp_path):
     answer = await service.get_gateway_client_lines()
 
     clients = {row["client"]: row["text"] for row in answer["lines"]}
-    assert set(clients) == {"continue", "cursor", "claude_code", "curl"}
+    assert set(clients) == {"continue", "cursor", "claude_code", "claude_code_settings", "curl"}
     for text in clients.values():
         assert "sekrit-key-1234" in text, "these lines exist to be pasted (Mike's call)"
     assert LOCAL in clients["continue"] and LOCAL in clients["claude_code"]
@@ -281,6 +283,9 @@ def test_the_documented_snippets_are_this_functions_own_output():
     assert with_window["claude_code"] in doc, "the Claude Code example has drifted from the command"
     assert with_window["claude_code"] != rendered["claude_code"], (
         "the documented block is the one that carries the window"
+    )
+    assert with_window["claude_code_settings"] in doc, (
+        "the settings-JSON example has drifted from the command"
     )
 
 
@@ -324,6 +329,101 @@ def test_the_shell_block_round_trips_through_a_real_shell(alias):
     assert done.returncode == 0, done.stderr
     assert done.stdout == f"{alias}:k3y"
     assert done.stderr == "", "a shell that set the variables says nothing"
+
+
+# --- The settings JSON beside the exports ------------------------------------
+
+SETTINGS = "claude_code_settings"
+BACKSLASHED = "qwen3.8\\27b"  # a backslash is JSON's own escape, so it is a round trip too
+
+
+def _settings_env(lines) -> dict:
+    """The `env` object of the settings block, read back out of the text the
+    Copy button hands over: a body that does not parse is not a settings file,
+    whatever it says."""
+    (block,) = [row for row in lines if row["client"] == SETTINGS]
+    return json.loads(block["text"])["env"]
+
+
+def test_the_settings_block_is_a_settings_file_and_says_where_to_put_it():
+    """`claude --settings <file>` reads a JSON document, and JSON carries no
+    comment: the menu note the export block writes after a `#`, and the line
+    that launches the client, stand beside the body rather than inside it."""
+    (block,) = [row for row in client_config_lines(9997, "k3y", [_entry(LOCAL)])
+                if row["client"] == SETTINGS]
+
+    env = json.loads(block["text"])["env"]
+    assert env["ANTHROPIC_BASE_URL"] == f"http://{GATEWAY_HOST}:9997", "no /v1 on this one"
+    assert "#" not in block["text"] and "export " not in block["text"]
+    # Saved under one name and launched with the same one, or the note sends
+    # the reader to a file the launch line never reads.
+    assert block["note"].count(CLAUDE_CODE_SETTINGS_FILE) == 2
+    assert f"claude --settings {CLAUDE_CODE_SETTINGS_FILE}" in block["note"]
+    assert "/v1/models lists" in block["note"]
+    assert CLAUDE_CODE_FIXED_ENV.items() <= env.items()
+
+
+@pytest.mark.parametrize("asked", [LOCAL, "second_alias"])
+def test_the_three_tier_pins_name_the_selected_model_and_move_together(asked):
+    """Claude Code sends its background and subagent calls to the small and the
+    large tier, so a single `ANTHROPIC_MODEL` would leave those calls naming a
+    model this door does not serve (the owner's working configuration)."""
+    rows = [_entry(LOCAL), _entry("second_alias")]
+
+    env = _settings_env(client_config_lines(9997, "k3y", rows, asked))
+
+    assert [env["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+            env["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+            env["ANTHROPIC_DEFAULT_OPUS_MODEL"]] == [asked, asked, asked]
+
+
+def test_the_settings_block_states_the_window_where_the_export_block_states_one():
+    """Both blocks read the same `stated_context_window`: a number in one and
+    silence in the other would be two answers where there is one source."""
+    stated = client_config_lines(9997, "k3y", [_entry(LOCAL, context_window=LOCAL_WINDOW)])
+    silent = client_config_lines(9997, "k3y", [_entry(LOCAL)])
+
+    assert _settings_env(stated)["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == str(LOCAL_WINDOW)
+    assert _exported_window(stated) == str(LOCAL_WINDOW)
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in _settings_env(silent)
+    assert _exported_window(silent) is None
+
+
+def test_the_settings_block_carries_the_key_the_export_block_carries():
+    """One key, under the other name that door accepts: `ANTHROPIC_AUTH_TOKEN`
+    is sent as `Authorization: Bearer`, `ANTHROPIC_API_KEY` as `x-api-key`."""
+    lines = client_config_lines(9997, "sekrit-key-1234", [_entry(LOCAL)])
+    (shell,) = [row["text"] for row in lines if row["client"] == "claude_code"]
+
+    assert _settings_env(lines)["ANTHROPIC_AUTH_TOKEN"] == "sekrit-key-1234"
+    assert "export ANTHROPIC_API_KEY=sekrit-key-1234\n" in shell
+
+
+@pytest.mark.parametrize("alias", [SPACED, QUOTED, BACKSLASHED])
+def test_the_settings_block_leaves_an_alias_exactly_as_it_is(alias):
+    """JSON quotes its own values, so `shlex.quote` here would write the
+    shell's apostrophes into the model id and name a model no door serves."""
+    (block,) = [row for row in client_config_lines(9997, "k3y", [_entry(alias)])
+                if row["client"] == SETTINGS]
+
+    env = json.loads(block["text"])["env"]
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == alias
+    assert shlex.quote(alias) not in block["text"], "a shell quoting artefact reached the JSON"
+
+
+def test_the_export_block_is_byte_for_byte_what_it_was_before_the_settings_block():
+    """The new block stands beside the old one and changes nothing in it: this
+    text is what `docs/CONFIGURATION.md` and the tests above compare against."""
+    (shell,) = [row["text"] for row in
+                client_config_lines(9997, "k3y", [_entry(LOCAL, context_window=LOCAL_WINDOW)])
+                if row["client"] == "claude_code"]
+
+    assert shell == (
+        "export ANTHROPIC_BASE_URL=http://127.0.0.1:9997\n"
+        "export ANTHROPIC_API_KEY=k3y\n"
+        "export ANTHROPIC_MODEL=ollama_local        # the one model /v1/models lists\n"
+        "export CLAUDE_CODE_MAX_CONTEXT_TOKENS=215040"
+    )
 
 
 PEER_ROWS = [

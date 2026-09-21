@@ -311,6 +311,25 @@ def stated_context_window(row: Dict[str, Any]) -> Optional[int]:
 # than a blank card.
 EMPTY_MENU_ID = "<alias>"
 
+# Where the settings block suggests its file goes, and what starts the client
+# with it. One name for both, so the note cannot send the reader to a file the
+# launch line does not read.
+CLAUDE_CODE_SETTINGS_FILE = "~/.claude/dpc-settings.json"
+
+# The three values the settings block carries beside the door's own address,
+# key and model. Variable names and values are the owner's working
+# configuration (Mike, 2026-09-21), not read off that client's documentation:
+# a local model answers slowly, so the client's own timeout has to outlast it
+# (3000000 ms = 50 minutes); a door on loopback wants no telemetry or update
+# traffic going out beside it; and the token reminder counts against a window
+# this door states itself under CLAUDE_CODE_MAX_CONTEXT_TOKENS, so it would be
+# a second, worse answer to a question already answered.
+CLAUDE_CODE_FIXED_ENV = {
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_TOTAL_TOKENS_REMINDER": "off",
+}
+
 
 def default_menu_id(entries: Sequence[Dict[str, Any]]) -> Optional[str]:
     """Which entry a client is configured for when nobody has chosen: this
@@ -373,7 +392,15 @@ def client_config_lines(
     syntax; the curl line names no alias and holds its key inside double
     quotes already.
 
-    The Claude Code block exports `CLAUDE_CODE_MAX_CONTEXT_TOKENS` when the
+    Claude Code gets two blocks, because the owner launches it from a file:
+    the `export` lines, and the settings JSON `claude --settings <file>`
+    reads, which is also the only one of the two a Windows or PowerShell
+    prompt can use at all. The JSON has nowhere to put a comment, so the
+    menu note and the launch line ride in that row's `note`, beside the body
+    the Copy button hands over rather than inside it — `note` is on that row
+    alone, and a client that has none renders as it always did.
+
+    The Claude Code blocks state `CLAUDE_CODE_MAX_CONTEXT_TOKENS` when the
     chosen entry states a window, and no such line at all when it does not:
     that binary, given a model name it does not know, announces it keeps the
     session within 200k — a guess, and below this node's own 215040 — so a
@@ -407,6 +434,35 @@ def client_config_lines(
         claude_code.append(
             f"export CLAUDE_CODE_MAX_CONTEXT_TOKENS={shlex.quote(str(window))}"
         )
+    # The same door, the same key and the same model, as the file that client
+    # is launched with: `export` is POSIX shell only, so the block above is
+    # unpastable on Windows `cmd` and PowerShell, while a settings file is read
+    # the same on all three. Nothing here is quoted for a shell — JSON quotes
+    # its own values, and `shlex.quote` would write apostrophes into an alias
+    # that carries a space. The window is the one `window` above already read.
+    settings_env = {
+        "ANTHROPIC_AUTH_TOKEN": key,
+        "ANTHROPIC_BASE_URL": base,
+        "API_TIMEOUT_MS": CLAUDE_CODE_FIXED_ENV["API_TIMEOUT_MS"],
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":
+            CLAUDE_CODE_FIXED_ENV["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+        # One model on all three tiers: that client sends its background and
+        # subagent calls to the small and the large tier, and a tier left
+        # unpinned names a model this door does not serve.
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": chosen_id,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": chosen_id,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": chosen_id,
+        "CLAUDE_CODE_TOTAL_TOKENS_REMINDER":
+            CLAUDE_CODE_FIXED_ENV["CLAUDE_CODE_TOTAL_TOKENS_REMINDER"],
+    }
+    if window is not None:
+        settings_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+    settings_note = (
+        f"The model on all three tier pins is {note}."
+        f" JSON carries no comment, so this line stands outside the block:"
+        f" save the body as {CLAUDE_CODE_SETTINGS_FILE} and start the client"
+        f" with `claude --settings {CLAUDE_CODE_SETTINGS_FILE}`."
+    )
     blocks = [
         f'    "title": "DPC {entry.get("label") or entry["id"]}",\n'
         f'    "provider": "openai",\n'
@@ -426,6 +482,9 @@ def client_config_lines(
             f"       # {note}"
         )},
         {"client": "claude_code", "text": "\n".join(claude_code)},
+        {"client": "claude_code_settings",
+         "text": json.dumps({"env": settings_env}, indent=2),
+         "note": settings_note},
         {"client": "curl", "text": (
             f'curl {base}/v1/models -H "Authorization: Bearer {key}"'
         )},
