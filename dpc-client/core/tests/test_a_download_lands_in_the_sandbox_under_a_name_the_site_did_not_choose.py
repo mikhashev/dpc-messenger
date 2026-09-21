@@ -28,6 +28,7 @@ from dpc_client_core.dpc_agent.tools import browser as browser_mod
 from dpc_client_core.dpc_agent.tools.browser import (
     AuthBrowser,
     DOWNLOAD_LEDGER_NAME,
+    _DOWNLOAD_DIR_DEFAULT,
     _DOWNLOAD_NAME_MAX,
     _WINDOWS_DEVICE_NAMES,
     _new_context_kwargs,
@@ -36,6 +37,7 @@ from dpc_client_core.dpc_agent.tools.browser import (
     _type_contradicts_extension,
     _unique_download_path,
 )
+from dpc_client_core.dpc_agent.tools.registry import ToolContext
 
 _BOOK = b"%PDF-1.4\n" + b"chapter one, and it goes on\n" * 64
 _LONG_STEM = "a" * 400
@@ -74,6 +76,69 @@ _OTHER = (
     "<body>ordinary page</body></html>"
 )
 
+# A host that is not the server's, and never navigated to: what is under test
+# is which links the page carries, not what they answer.
+_FILE_HOST = "http://files.example.com"
+_FALLBACK_TEXT = "If the download did not start, use this link"
+_LONG_QUERY = "q=" + "z" * 400
+
+_FALLBACK_PAGE = f"""<!doctype html>
+<html><head><title>The button and its fallback</title></head><body>
+  <button id="inert" type="button">A button that starts nothing</button>
+  <a href="{_FILE_HOST}/book.pdf">{_FALLBACK_TEXT}</a>
+  <a href="/other.html">An ordinary link</a>
+  <a href="javascript:void(0)">runs a script</a>
+  <a href="mailto:someone@example.com">write to us</a>
+  <a href="ftp://ftp.example.org/book.pdf">an ftp mirror</a>
+</body></html>
+"""
+
+_SAME_HOST_PAGE = """<!doctype html>
+<html><head><title>Its own links only</title></head><body>
+  <button id="inert" type="button">A button that starts nothing</button>
+  <a href="/other.html">An ordinary link</a>
+  <a href="/book.pdf">Download the book</a>
+</body></html>
+"""
+
+# Seven hosts and one repeat of the first: the repeat must not take a slot,
+# or the fifth host named would be the fourth.
+_MANY_HOSTS_PAGE = """<!doctype html>
+<html><head><title>Many mirrors</title></head><body>
+  <button id="inert" type="button">A button that starts nothing</button>
+  <a href="http://mirror1.example.com/book.pdf">mirror one</a>
+  <a href="http://mirror1.example.com/book.pdf">mirror one again</a>
+""" + "".join(
+    f'  <a href="http://mirror{i}.example.com/book.pdf">mirror {i}</a>\n'
+    for i in range(2, 8)
+) + """</body></html>
+"""
+
+_LONG_QUERY_PAGE = f"""<!doctype html>
+<html><head><title>One very long href</title></head><body>
+  <button id="inert" type="button">A button that starts nothing</button>
+  <a href="{_FILE_HOST}/book.pdf?{_LONG_QUERY}">the long one</a>
+</body></html>
+"""
+
+_LONG_TEXT = "word " * 80
+
+_LONG_TEXT_PAGE = f"""<!doctype html>
+<html><head><title>One very long link text</title></head><body>
+  <button id="inert" type="button">A button that starts nothing</button>
+  <a href="{_FILE_HOST}/book.pdf">{_LONG_TEXT}</a>
+</body></html>
+"""
+
+
+_LINK_PAGES = {
+    "/fallback.html": _FALLBACK_PAGE,
+    "/samehost.html": _SAME_HOST_PAGE,
+    "/manyhosts.html": _MANY_HOSTS_PAGE,
+    "/longquery.html": _LONG_QUERY_PAGE,
+    "/longtext.html": _LONG_TEXT_PAGE,
+}
+
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - http.server's own spelling
@@ -82,6 +147,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/other.html":
             self._send(_OTHER.encode("utf-8"), "text/html", None)
+            return
+        page = _LINK_PAGES.get(self.path)
+        if page is not None:
+            self._send(page.encode("utf-8"), "text/html", None)
             return
         route = _ROUTES.get(self.path)
         if route is None:
@@ -148,32 +217,35 @@ def _audit(monkeypatch):
     return rows
 
 
-class _Ctx:
-    """The slice of ToolContext the download path reads."""
+class _Firewall:
+    """The two questions the resolver asks about an absolute path: is extended
+    write on for this agent, and is this path one of its grants."""
 
-    def __init__(self, agent_root: Path):
-        self.agent_root = agent_root
-        self.firewall = None
+    def __init__(self, granted=()):
+        self._granted = [Path(p).resolve() for p in granted]
 
-    def repo_path(self, rel: str) -> Path:
-        from dpc_client_core.dpc_agent.utils import (
-            is_path_in_sandbox, safe_relpath,
+    def get_extended_write_enabled(self, profile_name=None):
+        return True
+
+    def get_extended_read_enabled(self, profile_name=None):
+        return True
+
+    def is_extended_path_allowed(self, path, require_write=False, profile_name=None):
+        target = Path(path)
+        return any(
+            root == target or root in target.parents for root in self._granted
         )
 
-        resolved = (self.agent_root / safe_relpath(rel)).resolve()
-        if not is_path_in_sandbox(resolved, self.agent_root):
-            raise PermissionError(f"Sandbox violation: {rel!r}")
-        return resolved
 
-    def validate_extended_path(self, path: str, require_write: bool = False) -> Path:
-        from dpc_client_core.dpc_agent.utils import is_path_in_sandbox
+def _ctx(agent_root: Path, granted=()) -> ToolContext:
+    """A real ToolContext with a faked grant list.
 
-        resolved = Path(path).expanduser().resolve()
-        if is_path_in_sandbox(resolved, self.agent_root):
-            return resolved
-        raise PermissionError(
-            f"Sandbox violation: path {path!r} is not in agent directory"
-        )
+    The download path resolves its directory through `_resolve_file_path`, and
+    a test that re-implemented sandbox and grant checks here would decide the
+    refusals itself and prove nothing about that resolver. Only Agent
+    Permissions → Extended Paths is faked; the rest is production code.
+    """
+    return ToolContext(agent_root=agent_root, firewall=_Firewall(granted))
 
 
 @pytest.fixture()
@@ -375,7 +447,7 @@ def test_every_context_this_module_opens_accepts_a_download():
 def test_a_clicked_download_lands_in_the_sandbox_with_its_size_and_hash(
     _session, _agent_root, _audit,
 ):
-    answer = _download(_session, _Ctx(_agent_root), "#book")
+    answer = _download(_session, _ctx(_agent_root), "#book")
     saved = _agent_root / "downloads" / "book.pdf"
     assert saved.is_file(), answer
     assert saved.read_bytes() == _BOOK
@@ -397,7 +469,7 @@ def test_a_ref_from_the_snapshot_reaches_the_same_file(_session, _agent_root):
         r for r, node in refs.items()
         if (node.get("name") or "").startswith("Download the book")
     )
-    answer = _download(_session, _Ctx(_agent_root), ref)
+    answer = _download(_session, _ctx(_agent_root), ref)
     assert (_agent_root / "downloads" / "book.pdf").is_file(), answer
 
 
@@ -405,7 +477,7 @@ def test_a_ref_from_the_snapshot_reaches_the_same_file(_session, _agent_root):
 def test_a_traversing_filename_cannot_write_outside_the_download_folder(
     _session, _agent_root, tmp_path, selector,
 ):
-    answer = _download(_session, _Ctx(_agent_root), selector)
+    answer = _download(_session, _ctx(_agent_root), selector)
     downloads = _agent_root / "downloads"
     inside = _tree(downloads)
     assert inside, answer
@@ -423,7 +495,7 @@ def test_a_traversing_filename_cannot_write_outside_the_download_folder(
 def test_a_device_name_is_not_the_name_the_file_is_saved_under(
     _session, _agent_root,
 ):
-    answer = _download(_session, _Ctx(_agent_root), "#device")
+    answer = _download(_session, _ctx(_agent_root), "#device")
     saved = _saved_files(_agent_root)
     assert len(saved) == 1, answer
     stem = saved[0].name.rpartition(".")[0] or saved[0].name
@@ -433,7 +505,7 @@ def test_a_device_name_is_not_the_name_the_file_is_saved_under(
 def test_a_four_hundred_character_name_is_capped_and_keeps_its_extension(
     _session, _agent_root,
 ):
-    answer = _download(_session, _Ctx(_agent_root), "#long")
+    answer = _download(_session, _ctx(_agent_root), "#long")
     saved = _saved_files(_agent_root)
     assert len(saved) == 1, answer
     assert len(saved[0].name) <= _DOWNLOAD_NAME_MAX
@@ -443,7 +515,7 @@ def test_a_four_hundred_character_name_is_capped_and_keeps_its_extension(
 def test_a_download_with_no_filename_still_gets_a_usable_one(
     _session, _agent_root,
 ):
-    answer = _download(_session, _Ctx(_agent_root), "#nameless")
+    answer = _download(_session, _ctx(_agent_root), "#nameless")
     saved = _saved_files(_agent_root)
     assert len(saved) == 1, answer
     assert saved[0].name
@@ -454,8 +526,8 @@ def test_a_download_with_no_filename_still_gets_a_usable_one(
 def test_the_same_file_twice_is_two_files_and_the_first_is_untouched(
     _session, _agent_root,
 ):
-    _download(_session, _Ctx(_agent_root), "#book")
-    second = _download(_session, _Ctx(_agent_root), "#book")
+    _download(_session, _ctx(_agent_root), "#book")
+    second = _download(_session, _ctx(_agent_root), "#book")
     downloads = _agent_root / "downloads"
     assert (downloads / "book.pdf").read_bytes() == _BOOK
     assert (downloads / "book-1.pdf").read_bytes() == _BOOK
@@ -466,7 +538,7 @@ def test_a_file_over_the_cap_is_refused_and_leaves_nothing_behind(
     _session, _agent_root, monkeypatch,
 ):
     monkeypatch.setattr(browser_mod, "DOWNLOAD_MAX_BYTES", 100)
-    answer = _download(_session, _Ctx(_agent_root), "#big")
+    answer = _download(_session, _ctx(_agent_root), "#big")
     assert "Refused" in answer and "4,096 bytes" in answer
     assert "100-byte cap" in answer
     assert _tree(_agent_root / "downloads") == []
@@ -476,25 +548,58 @@ def test_a_file_over_the_cap_is_refused_and_leaves_nothing_behind(
 def test_a_directory_outside_the_sandbox_is_refused_before_any_click(
     _session, _agent_root, tmp_path, directory,
 ):
-    answer = _download(_session, _Ctx(_agent_root), "#book", directory=directory)
+    answer = _download(_session, _ctx(_agent_root), "#book", directory=directory)
     assert "refused" in answer.lower(), answer
     assert _tree(tmp_path) == [], _tree(tmp_path)
 
 
-def test_an_absolute_directory_is_refused(_session, _agent_root, tmp_path):
+def test_an_absolute_directory_outside_the_grants_is_refused(
+    _session, _agent_root, tmp_path,
+):
+    """Extended write is on for this agent and this path is still not its:
+    what refuses is the grant list, not the shape of the path."""
     outside = tmp_path / "elsewhere"
     answer = _download(
-        _session, _Ctx(_agent_root), "#book", directory=str(outside),
+        _session, _ctx(_agent_root), "#book", directory=str(outside),
     )
     assert "refused" in answer.lower(), answer
     assert not outside.exists()
     assert _tree(tmp_path) == []
 
 
+def test_an_absolute_directory_inside_a_granted_path_is_where_the_file_lands(
+    _session, _agent_root, tmp_path,
+):
+    """The twin the schema now describes. Observed live on 2026-09-21: a
+    library folder granted in Agent Permissions took the file, and the
+    sentence that called every absolute path refused was the thing wrong."""
+    library = tmp_path / "library"
+    library.mkdir()
+    target = library / "raw" / "command-and-decision"
+    answer = _download(
+        _session, _ctx(_agent_root, granted=[library]), "#book",
+        directory=str(target),
+    )
+    saved = target / "book.pdf"
+    assert saved.read_bytes() == _BOOK, answer
+    assert str(saved) in answer
+    assert hashlib.sha256(_BOOK).hexdigest() in answer
+    records = [
+        json.loads(line)
+        for line in (target / DOWNLOAD_LEDGER_NAME)
+        .read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 1
+    assert records[0]["sha256"] == hashlib.sha256(_BOOK).hexdigest()
+    # Nothing was written into the sandbox on the way.
+    assert _tree(_agent_root) == []
+
+
 def test_an_ordinary_link_says_no_download_started_and_names_the_page(
     _session, _agent_root,
 ):
-    answer = _download(_session, _Ctx(_agent_root), "#plain", timeout_seconds=3)
+    answer = _download(_session, _ctx(_agent_root), "#plain", timeout_seconds=3)
     assert "No download started within 3s" in answer
     assert "other.html" in answer
     downloads = _agent_root / "downloads"
@@ -510,7 +615,7 @@ def test_a_click_that_started_nothing_names_both_urls_and_the_tab_count(
     run the button was the right one and the network was down, so the guess
     sent the agent looking in the wrong place.
     """
-    answer = _download(_session, _Ctx(_agent_root), "#plain", timeout_seconds=3)
+    answer = _download(_session, _ctx(_agent_root), "#plain", timeout_seconds=3)
     assert "No download started within 3s" in answer
     # Before the click and now, and whether that is a change.
     assert "page.html" in answer
@@ -521,14 +626,137 @@ def test_a_click_that_started_nothing_names_both_urls_and_the_tab_count(
     # What the timeout does and does not bound.
     assert "start" in answer.lower()
     assert "transfer" in answer
+    # What the page offers, and here it offers nothing off its own host.
+    assert "This page has no links to other hosts." in answer
     assert "ordinary link" not in answer
     assert "may be" not in answer
+
+
+def _links_line(answer: str) -> str:
+    return next(
+        line for line in answer.splitlines()
+        if line.startswith("Links on this page to other hosts:")
+    )
+
+
+def test_a_page_that_started_nothing_names_the_links_it_carries_to_other_hosts(
+    _session, _agent_root, _server, _audit,
+):
+    """The fallback link a site puts beside a button that does nothing.
+
+    Observed live on 2026-09-21: the page said "if the download did not start,
+    use this link" and pointed at the file host, while the answer looked only
+    at the address bar and the agent went looking elsewhere.
+    """
+    _session._page.goto(f"{_server}/fallback.html")
+    answer = _download(_session, _ctx(_agent_root), "#inert", timeout_seconds=3)
+    line = _links_line(answer)
+    assert _FALLBACK_TEXT in line
+    assert f"{_FILE_HOST}/book.pdf" in line
+    # Its own host is not a lead, and neither is a scheme that fetches nothing.
+    assert "other.html" not in line
+    assert "javascript:" not in answer
+    assert "mailto:" not in answer
+    # `javascript:` and `mailto:` have no host and fall to the host check;
+    # an ftp link HAS one, so only the scheme filter keeps it out.
+    assert "ftp:" not in answer
+    # The guess that was removed stays removed.
+    assert "ordinary link" not in answer
+    assert "may be" not in answer
+    rows = [r for r in _audit if r.get("action") == "download"]
+    assert rows[-1]["cross_host_links"] == 1
+    assert _FILE_HOST not in json.dumps(rows[-1])
+
+
+def test_a_page_whose_links_are_all_its_own_says_there_are_none(
+    _session, _agent_root, _server,
+):
+    _session._page.goto(f"{_server}/samehost.html")
+    answer = _download(_session, _ctx(_agent_root), "#inert", timeout_seconds=3)
+    assert "This page has no links to other hosts." in answer
+
+
+def test_a_page_of_mirrors_names_five_of_them_and_each_href_once(
+    _session, _agent_root, _server, _audit,
+):
+    _session._page.goto(f"{_server}/manyhosts.html")
+    answer = _download(_session, _ctx(_agent_root), "#inert", timeout_seconds=3)
+    line = _links_line(answer)
+    assert line.count(" -> ") == browser_mod._NO_DOWNLOAD_LINKS_MAX == 5
+    # The repeated href did not take a slot from the fifth host.
+    assert "mirror5.example.com" in line
+    assert "mirror6.example.com" not in answer
+    rows = [r for r in _audit if r.get("action") == "download"]
+    assert rows[-1]["cross_host_links"] == 5
+
+
+def test_the_page_side_cap_holds_without_the_python_one(_session, _server):
+    """Two caps, and either hides the other's absence from a test that goes
+    through both: this is the page's own."""
+    _session._page.goto(f"{_server}/manyhosts.html")
+    raw = _session._page.evaluate(browser_mod._CROSS_HOST_LINKS_JS, 5)
+    assert len(raw) == 5, raw
+
+
+def test_the_python_side_cap_holds_when_the_page_hands_over_more(
+    _session, _agent_root, _server, monkeypatch,
+):
+    nine = ", ".join(
+        f"{{href: 'http://m{i}.example.com/f', text: 'm{i}'}}" for i in range(9)
+    )
+    monkeypatch.setattr(
+        browser_mod, "_CROSS_HOST_LINKS_JS", f"(max) => [{nine}]",
+    )
+    _session._page.goto(f"{_server}/fallback.html")
+    answer = _download(_session, _ctx(_agent_root), "#inert", timeout_seconds=3)
+    assert _links_line(answer).count(" -> ") == 5, answer
+
+
+def test_a_link_text_longer_than_its_bound_arrives_cut(
+    _session, _agent_root, _server,
+):
+    _session._page.goto(f"{_server}/longtext.html")
+    answer = _download(_session, _ctx(_agent_root), "#inert", timeout_seconds=3)
+    line = _links_line(answer)
+    shown = line.split('"')[1]
+    assert len(shown) <= browser_mod._NO_DOWNLOAD_LINK_TEXT_LIMIT, shown
+    assert shown.endswith("…"), shown
+
+
+def test_a_href_longer_than_the_bound_arrives_cut_not_whole(
+    _session, _agent_root, _server,
+):
+    _session._page.goto(f"{_server}/longquery.html")
+    answer = _download(_session, _ctx(_agent_root), "#inert", timeout_seconds=3)
+    line = _links_line(answer)
+    assert "…" in line
+    assert _LONG_QUERY not in line
+    assert len(line) <= 200 + len("Links on this page to other hosts: ") + 40
+
+
+def test_a_page_that_cannot_be_asked_answers_with_the_four_facts_and_no_guess(
+    _session, _agent_root, _server, monkeypatch,
+):
+    """A page gone or navigating is a page with no answer, not an exception —
+    and not a claim that it carries no links either."""
+    monkeypatch.setattr(
+        browser_mod, "_CROSS_HOST_LINKS_JS", "(max) => { throw new Error('x'); }",
+    )
+    _session._page.goto(f"{_server}/fallback.html")
+    answer = _download(_session, _ctx(_agent_root), "#inert", timeout_seconds=3)
+    lines = answer.splitlines()
+    assert len(lines) == 4, answer
+    assert "No download started within 3s" in lines[0]
+    assert "did not change" in lines[1]
+    assert "1 tab" in lines[2]
+    assert "transfer" in lines[3]
+    assert "links" not in answer.lower()
 
 
 def test_a_click_that_changed_nothing_says_the_url_did_not_change(
     _session, _agent_root,
 ):
-    answer = _download(_session, _Ctx(_agent_root), "#inert", timeout_seconds=3)
+    answer = _download(_session, _ctx(_agent_root), "#inert", timeout_seconds=3)
     assert "No download started within 3s" in answer
     assert "did not change" in answer
     assert "1 tab" in answer
@@ -604,7 +832,7 @@ def test_the_session_call_gets_the_start_wait_plus_the_transfer_allowance(
     ), patch.object(browser_mod, "_run_in_session", _spy):
         _step_to_completion(
             browser_mod.browser_download(
-                _Ctx(_agent_root), "#book", timeout_seconds=1000,
+                _ctx(_agent_root), "#book", timeout_seconds=1000,
             )
         )
     # Clamped to the upper bound, and the transfer allowance on top of it.
@@ -617,7 +845,7 @@ def test_the_session_call_gets_the_start_wait_plus_the_transfer_allowance(
 def test_a_login_page_under_a_pdf_name_is_named_as_one_in_the_first_line(
     _session, _agent_root,
 ):
-    answer = _download(_session, _Ctx(_agent_root), "#wall")
+    answer = _download(_session, _ctx(_agent_root), "#wall")
     first = answer.split("\n")[0]
     assert "HTML page, not a file" in first, answer
     assert ".pdf" in first
@@ -625,7 +853,7 @@ def test_a_login_page_under_a_pdf_name_is_named_as_one_in_the_first_line(
 
 
 def test_a_stale_ref_is_refused_rather_than_waited_out(_session, _agent_root):
-    answer = _download(_session, _Ctx(_agent_root), "@e9999")
+    answer = _download(_session, _ctx(_agent_root), "@e9999")
     assert "unknown ref" in answer
     assert "a11y_snapshot" in answer
 
@@ -642,8 +870,8 @@ def _ledger(agent_root: Path) -> list[dict]:
 def test_every_saved_file_gets_one_ledger_line_with_its_hash_and_origin(
     _session, _agent_root,
 ):
-    _download(_session, _Ctx(_agent_root), "#book", note="Volume I, cat 42")
-    _download(_session, _Ctx(_agent_root), "#book")
+    _download(_session, _ctx(_agent_root), "#book", note="Volume I, cat 42")
+    _download(_session, _ctx(_agent_root), "#book")
     records = _ledger(_agent_root)
     assert len(records) == 2
     for rec in records:
@@ -668,16 +896,16 @@ def test_every_saved_file_gets_one_ledger_line_with_its_hash_and_origin(
 def test_the_ledger_records_what_the_bytes_were_not_what_the_name_claimed(
     _session, _agent_root,
 ):
-    _download(_session, _Ctx(_agent_root), "#wall")
+    _download(_session, _ctx(_agent_root), "#wall")
     rec = _ledger(_agent_root)[-1]
     assert rec["detected_type"] == "html"
     assert rec["saved_path"] == "downloads/wall.pdf"
 
 
 def test_the_answer_ends_with_what_the_folder_now_holds(_session, _agent_root):
-    first = _download(_session, _Ctx(_agent_root), "#book")
+    first = _download(_session, _ctx(_agent_root), "#book")
     assert "holds 1 record(s), 1 of them saved today" in first
-    second = _download(_session, _Ctx(_agent_root), "#book")
+    second = _download(_session, _ctx(_agent_root), "#book")
     assert "holds 2 record(s), 2 of them saved today" in second
 
 
@@ -685,8 +913,8 @@ def test_a_refused_or_failed_download_records_nothing(
     _session, _agent_root, monkeypatch,
 ):
     monkeypatch.setattr(browser_mod, "DOWNLOAD_MAX_BYTES", 100)
-    _download(_session, _Ctx(_agent_root), "#big")
-    _download(_session, _Ctx(_agent_root), "#plain", timeout_seconds=3)
+    _download(_session, _ctx(_agent_root), "#big")
+    _download(_session, _ctx(_agent_root), "#plain", timeout_seconds=3)
     assert not (_agent_root / "downloads" / DOWNLOAD_LEDGER_NAME).exists()
 
 
@@ -697,7 +925,7 @@ def test_a_ledger_that_cannot_be_written_does_not_cost_the_file(
         browser_mod, "_append_download_record",
         lambda directory, record: "OSError: disk is full",
     )
-    answer = _download(_session, _Ctx(_agent_root), "#book")
+    answer = _download(_session, _ctx(_agent_root), "#book")
     assert (_agent_root / "downloads" / "book.pdf").read_bytes() == _BOOK
     assert "disk is full" in answer
     assert "The file is saved" in answer
@@ -716,3 +944,15 @@ def test_the_tool_is_registered_and_off_until_someone_turns_it_on():
     assert set(entry.schema["parameters"]["properties"]) == {
         "ref_or_selector", "directory", "timeout_seconds", "note",
     }
+
+
+def test_the_directory_description_says_what_the_resolver_actually_does():
+    """`_resolve_file_path` sends an absolute path to the extended-path write
+    gate; the schema used to call every one of them refused."""
+    entry = next(
+        t for t in browser_mod.get_tools() if t.name == "browser_download"
+    )
+    desc = entry.schema["parameters"]["properties"]["directory"]["description"]
+    assert "Extended Paths" in desc
+    assert _DOWNLOAD_DIR_DEFAULT in desc
+    assert "An absolute path, '..' or a drive letter is refused" not in desc

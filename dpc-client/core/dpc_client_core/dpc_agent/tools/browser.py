@@ -1729,6 +1729,36 @@ _DOWNLOAD_SNIFF_BYTES = 64
 
 _DOWNLOAD_SHOWN_LIMIT = 200
 
+# When a click starts nothing, what the page itself offers. Live on
+# 2026-09-21 the file sat behind "if the download did not start, use this
+# link", on the file host rather than the page's — a fact the answer did not
+# carry because it looked only at the address bar.
+_NO_DOWNLOAD_LINKS_MAX = 5
+_NO_DOWNLOAD_LINK_TEXT_LIMIT = 60
+
+_CROSS_HOST_LINKS_JS = """
+(max) => {
+  const here = location.host;
+  const seen = new Set();
+  const out = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    let href = '';
+    try { href = a.href || ''; } catch (e) { continue; }
+    if (!/^https?:/i.test(href)) continue;
+    let host = '';
+    try { host = new URL(href).host; } catch (e) { continue; }
+    if (!host || host === here || seen.has(href)) continue;
+    seen.add(href);
+    out.push({
+      href: href,
+      text: (a.textContent || '').trim().replace(/\\s+/g, ' '),
+    });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+"""
+
 
 def _one_line(text: str, limit: int = _DOWNLOAD_SHOWN_LIMIT) -> str:
     """One bounded line. What a site called a file is the site's own text and
@@ -3011,6 +3041,35 @@ class AuthBrowser:
             "click", url, "ok", selector=ref_or_selector, mode=mode,
         )
 
+    def _cross_host_links(self) -> Optional[List[dict]]:
+        """The current page's links to a host other than its own, bounded.
+
+        Named, never followed: clicking stays the only way this tool obtains a
+        file, so the agent's next move is a fresh snapshot and
+        `browser_download` on that link's ref. None means the page could not
+        be asked — a page that navigated away or died says nothing here rather
+        than turning a no-download answer into an exception.
+        """
+        try:
+            raw = self._page.evaluate(
+                _CROSS_HOST_LINKS_JS, _NO_DOWNLOAD_LINKS_MAX
+            )
+        except Exception as exc:
+            log.debug("cross-host link scan failed: %s", exc)
+            return None
+        links: List[dict] = []
+        for item in (raw or [])[:_NO_DOWNLOAD_LINKS_MAX]:
+            href = _one_line(str((item or {}).get("href") or ""))
+            if not href:
+                continue
+            links.append({
+                "href": href,
+                "text": _one_line(
+                    str(item.get("text") or ""), _NO_DOWNLOAD_LINK_TEXT_LIMIT
+                ),
+            })
+        return links
+
     def download(
         self,
         ref_or_selector: str,
@@ -3019,8 +3078,8 @@ class AuthBrowser:
         max_bytes: Optional[int] = None,
     ) -> dict:
         """Click `ref_or_selector` and save what it downloads into
-        `directory`, an absolute path the caller has resolved against the
-        sandbox already.
+        `directory`, an absolute path the caller has already resolved and had
+        the firewall accept — the sandbox, or a granted extended path.
 
         Returns a status dict — `ok`, `no_download`, `too_large`, `failed` —
         the way `collect` does; the tool writes the sentence. The click is
@@ -3056,15 +3115,19 @@ class AuthBrowser:
                 tab_count = len(self._context.pages)
             except Exception:
                 tab_count = 0
+            links = self._cross_host_links()
             self._audit_action(
                 "download", url, "failed",
                 selector=ref_or_selector, reason="no_download",
                 timeout=timeout, page_url=now, url_before=url,
                 tab_count=tab_count, error=type(exc).__name__,
+                # The count, not the hrefs: the row is a ledger of what the
+                # tool did, and the links themselves are in the answer.
+                cross_host_links=None if links is None else len(links),
             )
             return {
                 "status": "no_download", "page_url": now, "url_before": url,
-                "tab_count": tab_count,
+                "tab_count": tab_count, "cross_host_links": links,
                 "timeout_ms": timeout, "error": type(exc).__name__,
             }
 
@@ -5114,16 +5177,32 @@ def _download_answer(
         # Facts only. The sentence that used to stand here guessed the element
         # was an ordinary link; on the live run the button was the right one
         # and the network was down, so the guess cost a turn.
-        return (
+        lines = [
             f"No download started within {waited}s of the click "
-            f"({result.get('error', 'TimeoutError')}).\n"
+            f"({result.get('error', 'TimeoutError')}).",
             f"The page was {before} before the click and is {now} now — "
-            f"{'the URL changed' if before != now else 'the URL did not change'}.\n"
-            f"The browser context has {tabs} tab(s).\n"
-            f"timeout_seconds bounds the wait for a download to START, not the "
-            f"transfer that follows: raising it helps only when the site is "
-            f"slow to begin one."
+            f"{'the URL changed' if before != now else 'the URL did not change'}.",
+            f"The browser context has {tabs} tab(s).",
+        ]
+        # What the page itself offers off its own host — a site's own fallback
+        # link is the usual answer to a button that starts nothing. A page
+        # that could not be asked (None) says nothing rather than claiming it
+        # carries none.
+        links = result.get("cross_host_links")
+        if links:
+            named = "; ".join(
+                f'"{link.get("text") or ""}" -> {link.get("href") or ""}'
+                for link in links
+            )
+            lines.append(f"Links on this page to other hosts: {named}")
+        elif links is not None:
+            lines.append("This page has no links to other hosts.")
+        lines.append(
+            "timeout_seconds bounds the wait for a download to START, not the "
+            "transfer that follows: raising it helps only when the site is "
+            "slow to begin one."
         )
+        return "\n".join(lines)
     if status == "too_large":
         return (
             f"⚠️ Refused: the file is {result['size']:,} bytes, over the "
@@ -5206,8 +5285,9 @@ async def browser_download(
     note: str = "",
 ) -> str:
     """Click an element and save the file it downloads into the agent's
-    sandbox. Answers with where it landed, what the bytes say it is, its size
-    and its sha256 — never its content."""
+    sandbox, or into an extended path the firewall grants it. Answers with
+    where it landed, what the bytes say it is, its size and its sha256 —
+    never its content."""
     agent_id = ctx.agent_root.name
     session = _get_session_or_error(agent_id)
     if session is None:
@@ -5826,7 +5906,9 @@ def get_tools() -> List[ToolEntry]:
                 "name": "browser_download",
                 "description": (
                     "Click an element that downloads a file and save the file"
-                    " into the agent's own sandbox. Call browser_snapshot first"
+                    " into the agent's own sandbox, or into a folder the"
+                    " firewall grants it — see `directory`. Call"
+                    " browser_snapshot first"
                     " and pass the @eN ref of the download link. The answer"
                     " gives the path, the size, the sha256 and what the FIRST"
                     " BYTES say the file is (pdf, djvu, zip container, rar, 7z,"
@@ -5850,7 +5932,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "directory": {
                             "type": "string",
-                            "description": "Folder inside the agent sandbox to save into, relative to the agent root (default 'downloads'). An absolute path, '..' or a drive letter is refused.",
+                            "description": f"Folder to save into. A relative path resolves inside the agent sandbox, relative to the agent root (default '{_DOWNLOAD_DIR_DEFAULT}'); one that climbs out of the sandbox with '..' is refused. An absolute path is accepted only where Agent Permissions → Extended Paths grants this agent write access to it, and refused anywhere else.",
                             "default": _DOWNLOAD_DIR_DEFAULT,
                         },
                         "timeout_seconds": {
