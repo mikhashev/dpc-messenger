@@ -13,6 +13,7 @@ to keep dependencies minimal. These tools use simple HTTP requests.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html as html_module
 import json
 import logging
@@ -23,6 +24,7 @@ import ssl
 import time
 import queue
 import threading
+import uuid
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -526,6 +528,24 @@ def _camoufox_launch_kwargs() -> Dict[str, Any]:
     cam_os = _CAMOUFOX_OS_MAP.get(platform.system())
     if cam_os:
         kwargs["os"] = cam_os
+    return kwargs
+
+
+def _new_context_kwargs(headed: bool) -> Dict[str, Any]:
+    """What every browser context this module opens is made with.
+
+    Without `accept_downloads` the browser cancels a download instead of
+    producing a file. With it the bytes land in a temp directory the context
+    deletes at close, so `browser_download` copies them into the sandbox
+    before returning. No `downloads_path`: one path set for the whole context
+    would land outside the sandbox, and the tool resolves a directory per
+    call instead.
+
+    `no_viewport` for a visible window only — see `_open`.
+    """
+    kwargs: Dict[str, Any] = {"accept_downloads": True}
+    if headed:
+        kwargs["no_viewport"] = True
     return kwargs
 
 
@@ -1596,6 +1616,172 @@ class _PinnedThread:
         self._queue.put(None)
 
 
+# ─────────────────────────────────────────────────────────────
+# Downloads — the name, the size, the family, the ledger
+# ─────────────────────────────────────────────────────────────
+
+# Generous on purpose: the tool exists to fetch what a person asked for, and
+# a scanned book is an ordinary one. Playwright hands over no size before the
+# save, so this is enforced on the saved bytes.
+DOWNLOAD_MAX_BYTES = 512 * 1024 * 1024
+
+# Room for a title and an extension, with the dedup suffix and the sandbox
+# path still inside the 255-byte limit filesystems here enforce.
+_DOWNLOAD_NAME_MAX = 120
+_DOWNLOAD_EXT_MAX = 16
+_DOWNLOAD_NAME_ATTEMPTS = 1000
+
+# Windows refuses these whatever the extension, and a file saved on Linux is
+# one sync away from a Windows disk — so the rule runs on every OS.
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+DOWNLOAD_LEDGER_NAME = "downloads.jsonl"
+
+# Enough to reach every signature below past a BOM and some whitespace.
+_DOWNLOAD_SNIFF_BYTES = 64
+
+_DOWNLOAD_SHOWN_LIMIT = 200
+
+
+def _one_line(text: str, limit: int = _DOWNLOAD_SHOWN_LIMIT) -> str:
+    """One bounded line. What a site called a file is the site's own text and
+    it travels into the agent's transcript, so it arrives flattened."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _safe_download_name(suggested: Optional[str]) -> str:
+    """The name a file is saved under, built from the one the site chose.
+
+    `Content-Disposition` is a field the other side writes, and it has
+    carried `../`, a drive letter, a NUL and `CON.txt`. Everything that could
+    decide a path or name a device is removed here, in one place, so a caller
+    only ever joins a plain name onto a directory it resolved itself.
+    """
+    name = re.split(r"[\\/]", str(suggested or ""))[-1]
+    name = re.sub(r"^[A-Za-z]:", "", name)
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+    name = re.sub(r'[<>:"|?*]', "_", name)
+    # Windows drops trailing dots and spaces, so two names differing only in
+    # them are one file there.
+    name = name.strip().rstrip(". ")
+    # `.` and `..` are not names; a dot-led name is also a file nobody sees.
+    name = name.lstrip(".")
+    if not name:
+        return "download"
+
+    stem, dot, ext = name.rpartition(".")
+    if not dot or len(ext) > _DOWNLOAD_EXT_MAX:
+        stem, ext = name, ""
+    if stem.upper() in _WINDOWS_DEVICE_NAMES:
+        stem = f"_{stem}"
+    suffix = f".{ext}" if ext else ""
+    if len(stem) + len(suffix) > _DOWNLOAD_NAME_MAX:
+        stem = stem[: max(1, _DOWNLOAD_NAME_MAX - len(suffix))]
+    return f"{stem}{suffix}" or "download"
+
+
+def _unique_download_path(directory: Path, name: str) -> Path:
+    """Claim a free name beside the files already there; never overwrite.
+
+    Claimed by creating the file exclusively rather than by asking whether it
+    exists: two downloads of one page a moment apart would both find
+    `book.pdf` free.
+    """
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    suffix = f".{ext}" if ext else ""
+    for n in range(_DOWNLOAD_NAME_ATTEMPTS):
+        candidate = directory / (name if n == 0 else f"{stem}-{n}{suffix}")
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate
+    raise OSError(
+        f"{_DOWNLOAD_NAME_ATTEMPTS} files in {directory.name} are already "
+        f"named like {name!r}"
+    )
+
+
+def _file_sha256(path: Path) -> str:
+    """SHA-256 a megabyte at a time — a book is not read into memory to be
+    hashed."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+# What a file IS, from its first bytes. A site can answer a download click
+# with a login page or an HTML error and call it `book.pdf`, so the extension
+# is the site's claim and this is the check.
+_FILE_SIGNATURES: Tuple[Tuple[bytes, str], ...] = (
+    (b"%PDF", "pdf"),
+    (b"AT&T", "djvu"),
+    (b"PK\x03\x04", "zip container"),
+    (b"Rar!", "rar"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"\x1f\x8b", "gzip"),
+    (b"\xd0\xcf\x11\xe0", "ole"),
+)
+
+_BYTE_ORDER_MARKS = (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")
+
+
+def _sniff_file_type(head: bytes) -> str:
+    """The family the first bytes name, never the one the extension claims."""
+    for magic, family in _FILE_SIGNATURES:
+        if head.startswith(magic):
+            return family
+    text = bytes(head)
+    for bom in _BYTE_ORDER_MARKS:
+        if text.startswith(bom):
+            text = text[len(bom):]
+            break
+    text = text.lstrip(b" \t\r\n")
+    if text.startswith(b"<"):
+        lowered = text.lower()
+        if lowered.startswith(b"<!doctype html") or lowered.startswith(b"<html"):
+            return "html"
+        return "markup"
+    return "unknown"
+
+
+# The extensions each family is an honest answer for. A family with no row is
+# a pair nobody has weighed, and stays silent rather than crying mismatch.
+_TYPE_EXTENSIONS: Dict[str, frozenset] = {
+    "pdf": frozenset({"pdf"}),
+    "djvu": frozenset({"djvu", "djv"}),
+    "zip container": frozenset({
+        "zip", "epub", "docx", "xlsx", "pptx", "odt", "ods", "odp",
+        "cbz", "fb2", "jar", "apk",
+    }),
+    "rar": frozenset({"rar", "cbr"}),
+    "7z": frozenset({"7z"}),
+    "gzip": frozenset({"gz", "tgz", "tar", "fb2", "svgz"}),
+    "ole": frozenset({"doc", "xls", "ppt", "msi", "msg"}),
+    "html": frozenset({"html", "htm", "xhtml"}),
+    "markup": frozenset({"html", "htm", "xhtml", "xml", "svg", "fb2", "opf"}),
+}
+
+
+def _type_contradicts_extension(detected: str, name: str) -> bool:
+    """True when the bytes and the name disagree about what this file is."""
+    ext = name.rpartition(".")[2].lower() if "." in name else ""
+    allowed = _TYPE_EXTENSIONS.get(detected)
+    if not ext or allowed is None:
+        return False
+    return ext not in allowed
+
+
 class AuthBrowser:
     """Restricted Camoufox wrapper for authenticated browser sessions
     (ADR-028 T4, extended for ADR-029 Task 002).
@@ -1907,7 +2093,7 @@ class AuthBrowser:
         # `browser_screenshot` and the page snapshots — which is only
         # comparable between runs while the page size cannot move.
         self._context = self._browser.new_context(
-            **({"no_viewport": True} if self._headed else {})
+            **_new_context_kwargs(self._headed)
         )
         self._install_domain_route_handler()
 
@@ -2691,6 +2877,126 @@ class AuthBrowser:
         self._audit_action(
             "click", url, "ok", selector=ref_or_selector, mode=mode,
         )
+
+    def download(
+        self,
+        ref_or_selector: str,
+        directory: str,
+        timeout: int = 30000,
+        max_bytes: Optional[int] = None,
+    ) -> dict:
+        """Click `ref_or_selector` and save what it downloads into
+        `directory`, an absolute path the caller has resolved against the
+        sandbox already.
+
+        Returns a status dict — `ok`, `no_download`, `too_large`, `failed` —
+        the way `collect` does; the tool writes the sentence. The click is
+        `self.click`, so actionability, ref staleness and the audit row are
+        `browser_click`'s and not a second copy of them. The saved file is
+        hashed and its first bytes are read; nothing parses or runs it.
+        """
+        self._require_open()
+        target_dir = Path(directory)
+        # Read now, not as a default: the cap is a module-level setting and a
+        # value frozen at definition would ignore every later change to it.
+        cap = DOWNLOAD_MAX_BYTES if max_bytes is None else max_bytes
+        url = self._page.url
+        try:
+            title = self._page.title()
+        except Exception:
+            title = ""
+        try:
+            with self._page.expect_download(timeout=timeout) as pending:
+                self.click(ref_or_selector, timeout=timeout)
+        except ValueError:
+            raise  # a ref the snapshot no longer answers
+        except Exception as exc:
+            if _is_session_dead(exc):
+                raise
+            # An ordinary link and an element that never moved both arrive
+            # here as a timeout; the click's own audit row says which.
+            now = self._page.url
+            self._audit_action(
+                "download", url, "failed",
+                selector=ref_or_selector, reason="no_download",
+                timeout=timeout, page_url=now, error=type(exc).__name__,
+            )
+            return {
+                "status": "no_download", "page_url": now,
+                "timeout_ms": timeout, "error": type(exc).__name__,
+            }
+
+        download = pending.value
+        suggested = download.suggested_filename or ""
+        try:
+            source_url = download.url or ""
+        except Exception:
+            source_url = ""
+        failure = download.failure()
+        if failure:
+            self._audit_action(
+                "download", source_url or url, "failed",
+                selector=ref_or_selector, reason=_one_line(failure),
+            )
+            return {
+                "status": "failed", "reason": failure,
+                "suggested": suggested, "source_url": source_url,
+            }
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = target_dir / f".dpc-download-{uuid.uuid4().hex}.part"
+        final_path: Optional[Path] = None
+        try:
+            download.save_as(str(temp_path))
+            size = temp_path.stat().st_size
+            if size > cap:
+                temp_path.unlink(missing_ok=True)
+                self._audit_action(
+                    "download", source_url or url, "denied",
+                    selector=ref_or_selector, byte_size=size, max_bytes=cap,
+                )
+                return {
+                    "status": "too_large", "size": size,
+                    "max_bytes": cap, "suggested": suggested,
+                    "source_url": source_url,
+                }
+            final_path = _unique_download_path(
+                target_dir, _safe_download_name(suggested)
+            )
+            os.replace(temp_path, final_path)
+        except Exception:
+            # No partial file left behind, under either name.
+            temp_path.unlink(missing_ok=True)
+            if final_path is not None:
+                final_path.unlink(missing_ok=True)
+            raise
+
+        digest = _file_sha256(final_path)
+        with open(final_path, "rb") as fh:
+            detected = _sniff_file_type(fh.read(_DOWNLOAD_SNIFF_BYTES))
+        log.info(
+            "browser_download saved %s (%d bytes, sha256=%s, type=%s) agent=%s",
+            final_path, size, digest, detected, self._agent_id,
+        )
+        self._audit_action(
+            "download", source_url or url, "ok",
+            selector=ref_or_selector, saved=str(final_path),
+            byte_size=size, sha256=digest, detected_type=detected,
+        )
+        return {
+            "status": "ok",
+            "path": str(final_path),
+            "size": size,
+            "sha256": digest,
+            "detected_type": detected,
+            "type_mismatch": _type_contradicts_extension(
+                detected, final_path.name
+            ),
+            "suggested": suggested,
+            "source_url": source_url,
+            "page_url": url,
+            "page_title": title,
+        }
 
     def fill(self, ref_or_selector: str, text: str) -> None:
         """Fill an input element. Accepts a `@eN` ref or CSS selector.
@@ -4333,6 +4639,199 @@ async def browser_screenshot(
         return f"Saved screenshot to {path}"
 
 
+_DOWNLOAD_DIR_DEFAULT = "downloads"
+_DOWNLOAD_TIMEOUT_DEFAULT = 30
+_DOWNLOAD_TIMEOUT_MAX = 120
+# `timeout_seconds` bounds the wait for a download to START; this bounds the
+# transfer that follows, so a stalled save cannot hold the session thread.
+_DOWNLOAD_SAVE_TIMEOUT_SEC = 240
+_DOWNLOAD_NOTE_LIMIT = 300
+
+
+def _resolve_download_dir(ctx: ToolContext, directory: str) -> Path:
+    """Where a download may land: the resolver every other file tool uses, so
+    a grant and a refusal read the same here as there."""
+    from .core import _resolve_file_path
+
+    target = _resolve_file_path(
+        ctx, directory or _DOWNLOAD_DIR_DEFAULT, require_write=True,
+    )
+    if target.exists() and not target.is_dir():
+        raise NotADirectoryError(f"{directory!r} is a file, not a directory")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _append_download_record(directory: Path, record: dict) -> Optional[str]:
+    """One JSON line per saved file, in the directory the files are in.
+
+    Beside the files rather than in the agent's state, so a folder copied
+    elsewhere still says where each file came from. Returns None, or the
+    reason the line was not written — a ledger that failed must not cost the
+    file it describes.
+    """
+    try:
+        with open(
+            directory / DOWNLOAD_LEDGER_NAME, "a", encoding="utf-8",
+        ) as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return None
+    except Exception as exc:
+        log.warning("download ledger write failed in %s: %s", directory, exc)
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _download_ledger_tally(directory: Path) -> Tuple[int, int]:
+    """(records, records dated today in UTC). Some sites meter downloads and
+    charge for each, and that charge cannot be given back, so the count is
+    part of the answer rather than something to go and look up."""
+    total = 0
+    today_count = 0
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        text = (directory / DOWNLOAD_LEDGER_NAME).read_text(encoding="utf-8")
+    except OSError:
+        return 0, 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        total += 1
+        try:
+            saved_at = json.loads(line).get("saved_at", "")
+        except ValueError:
+            continue
+        if str(saved_at).startswith(today):
+            today_count += 1
+    return total, today_count
+
+
+def _download_answer(
+    ctx: ToolContext, directory: Path, result: dict, note: str,
+) -> str:
+    """The saved file stated as what it is, then where it came from, then
+    what the ledger in that directory now holds."""
+    status = (result or {}).get("status")
+    if status == "no_download":
+        waited = int((result.get("timeout_ms") or 0) / 1000)
+        return (
+            f"No download started within {waited}s of the click "
+            f"({result.get('error', 'TimeoutError')}). The page is now "
+            f"{_one_line(result.get('page_url') or '<unknown>')} — the element"
+            f" may be an ordinary link; take a fresh browser_snapshot."
+        )
+    if status == "too_large":
+        return (
+            f"⚠️ Refused: the file is {result['size']:,} bytes, over the "
+            f"{result['max_bytes']:,}-byte cap. Nothing was saved and nothing "
+            f"was recorded."
+        )
+    if status == "failed":
+        return (
+            f"⚠️ The download did not finish: "
+            f"{_one_line(result.get('reason') or 'unknown')}. Nothing was "
+            f"saved and nothing was recorded."
+        )
+
+    path = Path(result["path"])
+    try:
+        shown = path.relative_to(ctx.agent_root).as_posix()
+    except ValueError:
+        shown = str(path)
+    detected = result.get("detected_type", "unknown")
+
+    lines: List[str] = []
+    if result.get("type_mismatch"):
+        # First line, because the model plans on this: a login page under a
+        # `.pdf` name is not the file that was asked for.
+        claimed = path.suffix.lstrip(".") or "no extension"
+        if detected == "html":
+            lines.append(
+                f"⚠️ This is an HTML page, not a file — the bytes say html, "
+                f"the name says .{claimed}. Kept as evidence at {shown}; do "
+                f"not count it as what you asked for."
+            )
+        else:
+            lines.append(
+                f"⚠️ The bytes say {detected}, the name says .{claimed} — kept "
+                f"at {shown}, but it is not what its name claims."
+            )
+    lines.append(
+        f"Saved {shown} — {detected}, {result['size']:,} bytes, "
+        f"sha256 {result['sha256']}"
+    )
+    lines.append(
+        f'The site suggested the name "{_one_line(result.get("suggested") or "")}"'
+    )
+    if result.get("source_url"):
+        lines.append(f"It came from {_one_line(result['source_url'])}")
+    if note:
+        lines.append(f"Your note: {note}")
+
+    record = {
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "saved_path": shown,
+        "bytes": result["size"],
+        "sha256": result["sha256"],
+        "detected_type": detected,
+        "suggested_filename": result.get("suggested") or "",
+        "url": result.get("source_url") or "",
+        "page_url": result.get("page_url") or "",
+        "page_title": _one_line(result.get("page_title") or ""),
+        "note": note,
+    }
+    ledger_error = _append_download_record(directory, record)
+    if ledger_error:
+        lines.append(
+            f"⚠️ The file is saved, but {DOWNLOAD_LEDGER_NAME} could not be "
+            f"written: {ledger_error}"
+        )
+    total, today = _download_ledger_tally(directory)
+    lines.append(
+        f"{DOWNLOAD_LEDGER_NAME} in that folder now holds {total} record(s), "
+        f"{today} of them saved today (UTC)."
+    )
+    return "\n".join(lines)
+
+
+async def browser_download(
+    ctx: ToolContext,
+    ref_or_selector: str,
+    directory: str = _DOWNLOAD_DIR_DEFAULT,
+    timeout_seconds: int = _DOWNLOAD_TIMEOUT_DEFAULT,
+    note: str = "",
+) -> str:
+    """Click an element and save the file it downloads into the agent's
+    sandbox. Answers with where it landed, what the bytes say it is, its size
+    and its sha256 — never its content."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    try:
+        target_dir = _resolve_download_dir(ctx, directory)
+    except (PermissionError, ValueError, OSError) as e:
+        return f"⚠️ Download directory refused: {e}"
+    timeout_ms = max(1, min(int(timeout_seconds), _DOWNLOAD_TIMEOUT_MAX)) * 1000
+    note = _one_line(note or "", _DOWNLOAD_NOTE_LIMIT)
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            result = await _run_in_session(
+                session, "download",
+                ref_or_selector, str(target_dir), timeout_ms,
+                _timeout=timeout_ms / 1000 + _DOWNLOAD_SAVE_TIMEOUT_SEC,
+            )
+        except ValueError as e:
+            return f"⚠️ {e}"
+        except Exception as e:
+            log.warning(
+                "download failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
+            return f"⚠️ Download failed: {type(e).__name__}: {e}"
+    return _download_answer(ctx, target_dir, result, note)
+
+
 async def browser_switch_tab(ctx: ToolContext, index: int) -> str:
     """Switch the active page to tab at `index` in the browser
     context (0-based)."""
@@ -4357,6 +4856,91 @@ async def browser_switch_tab(ctx: ToolContext, index: int) -> str:
     return f"Switched to tab {index} ({url})"
 
 
+COLLECT_LIMIT_DEFAULT = 40
+COLLECT_LIMIT_MAX = 200
+# What the header, the window line and the next-call hint need, so the items
+# get the rest of the tool-result cap instead of being cut by it.
+_COLLECT_ANSWER_MARGIN = 3000
+_COLLECT_TEXT_LIMIT = 300
+
+
+def _collect_item_line(number: int, item: dict) -> str:
+    """One item on one line, its link first.
+
+    The link leads because it is the part that cannot be recovered: a shape
+    that printed each item's text above its own link lost every link below a
+    cut and kept every title, which reads as a complete list of titles.
+    """
+    fields: List[str] = []
+    href = str(item.get("href") or "")
+    if href:
+        fields.append(href)
+    text = _one_line(str(item.get("text") or ""), _COLLECT_TEXT_LIMIT)
+    if text:
+        fields.append(text)
+    for key, value in item.items():
+        if key in ("href", "text"):
+            continue
+        fields.append(f"{key}={_one_line(str(value), _COLLECT_TEXT_LIMIT)}")
+    return f"{number}. " + " | ".join(fields)
+
+
+def _collect_window(
+    items: List[dict], offset: int, limit: int, budget: int,
+) -> Tuple[List[str], int]:
+    """The lines that fit, and the offset the next call starts at.
+
+    Two bounds: `limit` is what the caller asked for, `budget` is what a tool
+    result can carry — so a page of long titles returns fewer items rather
+    than a window something downstream cuts. At least one line always comes
+    back, otherwise a single oversized item would stall the walk.
+    """
+    lines: List[str] = []
+    spent = 0
+    index = offset
+    while index < len(items) and len(lines) < limit:
+        line = _collect_item_line(index + 1, items[index])
+        if lines and spent + len(line) + 1 > budget:
+            break
+        lines.append(line)
+        spent += len(line) + 1
+        index += 1
+    return lines, index
+
+
+def _collect_window_line(
+    items: List[dict], offset: int, next_offset: int, limit: int,
+    container: str, item_selector: str, cap: int,
+) -> str:
+    """Which items these are, out of how many, and the call that gets the
+    rest. Stated always: an answer that shows part of a list and says nothing
+    is read as the whole list."""
+    held = len(items)
+    if not held:
+        return "No items to show."
+    if offset >= held:
+        return (
+            f"offset={offset} is past the end — items 1–{held} of {held} are "
+            f"in hand; call again with a smaller offset."
+        )
+    line = f"items {offset + 1}–{next_offset} of {held}"
+    shown = next_offset - offset
+    if shown < min(limit, held - offset):
+        line += (
+            f" (this window stopped at {shown} items to stay under the "
+            f"{cap}-char tool-result cap)"
+        )
+    if next_offset < held:
+        line += (
+            f" — {held - next_offset} more; next: browser_collect("
+            f'container="{container}", item_selector="{item_selector}", '
+            f"offset={next_offset})"
+        )
+    else:
+        line += " — this is the last window"
+    return line
+
+
 async def browser_collect(
     ctx: ToolContext,
     container: str,
@@ -4365,9 +4949,12 @@ async def browser_collect(
     max_scrolls: int = 30,
     scroll_pause_ms: int = 1000,
     dedup_by: str = "text",
+    offset: int = 0,
+    limit: int | None = None,
 ) -> str:
     """Scroll a container and collect all matching items via CSS selectors.
-    Returns a JSON summary with all extracted items, deduped and guarded."""
+    Returns one line per item, the link first, in windows of `limit` starting
+    at `offset`, and always says which items those are out of how many."""
     agent_id = ctx.agent_root.name
     session = _get_session_or_error(agent_id)
     if session is None:
@@ -4386,7 +4973,7 @@ async def browser_collect(
                 agent_id, type(e).__name__, str(e).split(chr(10))[0],
             )
             return f"⚠️ Collect failed: {type(e).__name__}: {e}"
-    import json as _json
+    from ..loop import TOOL_RESULT_CHAR_CAP as cap
     if isinstance(result, dict) and result.get("error"):
         return f"⚠️ {result['error']}"
     total = result.get("total", 0)
@@ -4415,8 +5002,21 @@ async def browser_collect(
         header += f" — INCOMPLETE: scrolling stopped early ({reason})"
     if result.get("warning"):
         header += f"\n⚠️ {result['warning']}"
-    items_json = _json.dumps(result.get("items", []), ensure_ascii=False, indent=2)
-    return f"{header}\n\n{items_json}"
+
+    items = result.get("items") or []
+    offset = max(0, int(offset or 0))
+    limit = (
+        COLLECT_LIMIT_DEFAULT if limit is None
+        else max(1, min(int(limit), COLLECT_LIMIT_MAX))
+    )
+    lines, next_offset = _collect_window(
+        items, offset, limit, cap - _COLLECT_ANSWER_MARGIN,
+    )
+    window = _collect_window_line(
+        items, offset, next_offset, limit, container, item_selector, cap,
+    )
+    body = "\n".join(lines)
+    return f"{header}\n{window}\n\n{body}" if body else f"{header}\n{window}"
 
 
 async def browser_close(ctx: ToolContext) -> str:
@@ -4762,6 +5362,59 @@ def get_tools() -> List[ToolEntry]:
         ),
 
         ToolEntry(
+            name="browser_download",
+            schema={
+                "name": "browser_download",
+                "description": (
+                    "Click an element that downloads a file and save the file"
+                    " into the agent's own sandbox. Call browser_snapshot first"
+                    " and pass the @eN ref of the download link. The answer"
+                    " gives the path, the size, the sha256 and what the FIRST"
+                    " BYTES say the file is (pdf, djvu, zip container, rar, 7z,"
+                    " gzip, ole, html, markup, unknown) — when that contradicts"
+                    " the extension the first line says so, and a site that"
+                    " answered with a login or error page instead of the file is"
+                    " reported as 'this is an HTML page, not a file'. The file is"
+                    " never opened beyond its header, never parsed and never run."
+                    " Every saved file gets one line in downloads.jsonl beside"
+                    " the files, and the answer ends with how many records that"
+                    " folder holds and how many were saved today: some sites"
+                    " charge per download — the count is here so you can keep the"
+                    " budget."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ref_or_selector": {
+                            "type": "string",
+                            "description": "@eN ref from the last browser_snapshot, or a CSS selector",
+                        },
+                        "directory": {
+                            "type": "string",
+                            "description": "Folder inside the agent sandbox to save into, relative to the agent root (default 'downloads'). An absolute path, '..' or a drive letter is refused.",
+                            "default": _DOWNLOAD_DIR_DEFAULT,
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": f"How long to wait for the download to start after the click (default {_DOWNLOAD_TIMEOUT_DEFAULT}, max {_DOWNLOAD_TIMEOUT_MAX}). If it never starts you get a message naming the page, not a hang.",
+                            "default": _DOWNLOAD_TIMEOUT_DEFAULT,
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "Free text stored with this file in downloads.jsonl — a title, a catalogue id, why you fetched it. One line.",
+                        },
+                    },
+                    "required": ["ref_or_selector"],
+                },
+            },
+            handler=browser_download,
+            # The wait for the start is bounded by timeout_seconds; this has
+            # to cover the transfer of a book on top of it.
+            timeout_sec=420,
+            default_enabled=False,
+        ),
+
+        ToolEntry(
             name="browser_switch_tab",
             schema={
                 "name": "browser_switch_tab",
@@ -4783,7 +5436,7 @@ def get_tools() -> List[ToolEntry]:
             name="browser_collect",
             schema={
                 "name": "browser_collect",
-                "description": "Scroll a container and collect all matching items. Use CSS selectors for container and items (discover them from browser_snapshot's scrollable-container hints or browser_extract's raw HTML). Scrolls the container, extracts items matching item_selector, deduplicates, and repeats until no new items appear or max_scrolls is reached. Returns JSON array of all collected items. Ideal for infinite-scroll lists (orders, search results, product catalogs).",
+                "description": f"Scroll a container and collect all matching items. Use CSS selectors for container and items (discover them from browser_snapshot's scrollable-container hints or browser_extract's raw HTML). Scrolls the container, extracts items matching item_selector, deduplicates, and repeats until no new items appear or max_scrolls is reached. Ideal for infinite-scroll lists (orders, search results, product catalogs). Pass extract=[\"text\",\"href\"] to get the links — one item per line with its link first, so nothing separates an item from its URL. The whole list is collected in one pass and handed back one window at a time: the answer states `items X-Y of N` and, while items remain, the exact next call to make (offset=Y). Do NOT repeat the same call to see more — walk with offset, which is also the only thing that changes between windows.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -4815,6 +5468,16 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "Which extracted attribute to use for deduplication",
                             "default": "text",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "First item of the collected list to show (0-based). Use the offset the previous answer named.",
+                            "default": 0,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": f"Items per window (default {COLLECT_LIMIT_DEFAULT}, max {COLLECT_LIMIT_MAX}). A window also stops early when the lines would outgrow the tool-result cap, and says so.",
+                            "default": COLLECT_LIMIT_DEFAULT,
                         },
                     },
                     "required": ["container", "item_selector"],

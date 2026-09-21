@@ -96,6 +96,7 @@ const TOOL_DISPLAY: Record<string, ToolDisplayEntry> = {
     browser_screenshot:{ label: 'Screenshot',      category: 'browser' },
     browser_switch_tab:{ label: 'Switch tab',      category: 'browser' },
     browser_collect:   { label: 'Collect data',    category: 'browser' },
+    browser_download:  { label: 'Download file',   category: 'browser' },
     browser_close:     { label: 'Close browser',   category: 'browser' },
 
     comfyui_submit:       { label: 'ComfyUI submit',   category: 'comfyui' },

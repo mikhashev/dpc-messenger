@@ -1,0 +1,602 @@
+"""A download the agent clicks lands inside its sandbox, under a name the
+site did not choose, and the answer says what the bytes are.
+
+Chromium against a local `http.server`, the way the snapshot tests do: only a
+real engine says whether a context accepts a download, what
+`suggested_filename` holds after the engine has had its say, and what
+`expect_download` does when the click merely navigates. Camoufox/Firefox, the
+production engine, is NOT exercised here.
+
+Chromium sanitizes `suggested_filename` itself, so the exact mapping for a
+hostile `Content-Disposition` is asserted against `_safe_download_name`
+directly; through the browser the assertions are the invariants that hold on
+any engine — inside the directory, no separators, no device name, bounded.
+"""
+
+import hashlib
+import json
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+from dpc_client_core.dpc_agent.tools import browser as browser_mod
+from dpc_client_core.dpc_agent.tools.browser import (
+    AuthBrowser,
+    DOWNLOAD_LEDGER_NAME,
+    _DOWNLOAD_NAME_MAX,
+    _WINDOWS_DEVICE_NAMES,
+    _new_context_kwargs,
+    _safe_download_name,
+    _sniff_file_type,
+    _type_contradicts_extension,
+    _unique_download_path,
+)
+
+_BOOK = b"%PDF-1.4\n" + b"chapter one, and it goes on\n" * 64
+_LONG_STEM = "a" * 400
+
+# What a site answers with when the click reached a login wall, not the file.
+_WALL = b"<!DOCTYPE html>\n<html><body>Please sign in to download.</body></html>"
+
+_ROUTES: dict[str, tuple[str, bytes]] = {
+    "/book.pdf": ('attachment; filename="book.pdf"', _BOOK),
+    "/slash": ('attachment; filename="../../evil.exe"', b"slash body"),
+    "/backslash": ("attachment; filename=..\\..\\evil.exe", b"backslash body"),
+    "/device": ('attachment; filename="CON.txt"', b"device body"),
+    "/long": (f'attachment; filename="{_LONG_STEM}.pdf"', b"long body"),
+    "/nameless": ('attachment; filename=""', b"nameless body"),
+    "/wall.pdf": ('attachment; filename="wall.pdf"', _WALL),
+    "/big.bin": ('attachment; filename="big.bin"', b"x" * 4096),
+}
+
+_PAGE = """<!doctype html>
+<html><head><title>The download page</title></head><body>
+  <a id="book" href="/book.pdf">Download the book</a>
+  <a id="slash" href="/slash">slash traversal</a>
+  <a id="backslash" href="/backslash">backslash traversal</a>
+  <a id="device" href="/device">device name</a>
+  <a id="long" href="/long">long name</a>
+  <a id="nameless" href="/nameless">no name at all</a>
+  <a id="wall" href="/wall.pdf">a wall under a pdf name</a>
+  <a id="big" href="/big.bin">big</a>
+  <a id="plain" href="/other.html">An ordinary link</a>
+</body></html>
+"""
+
+_OTHER = (
+    "<!doctype html><html><head><title>Somewhere else</title></head>"
+    "<body>ordinary page</body></html>"
+)
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802 - http.server's own spelling
+        if self.path in ("/", "/page.html"):
+            self._send(_PAGE.encode("utf-8"), "text/html", None)
+            return
+        if self.path == "/other.html":
+            self._send(_OTHER.encode("utf-8"), "text/html", None)
+            return
+        route = _ROUTES.get(self.path)
+        if route is None:
+            self.send_error(404)
+            return
+        disposition, body = route
+        self._send(body, "application/octet-stream", disposition)
+
+    def _send(self, body: bytes, content_type: str, disposition):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if disposition:
+            self.send_header("Content-Disposition", disposition)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture(scope="module")
+def _server():
+    """A local origin: `page.set_content` leaves relative hrefs pointing
+    nowhere, and the headers are what is under test."""
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_port}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture(scope="module")
+def _chromium():
+    """A real browser, or a clean skip: playwright is an extra, and an
+    installed package still has no binary until `playwright install` ran."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:  # pragma: no cover - no browser extra
+        pytest.skip(f"playwright not installed: {exc}")
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except Exception as exc:  # pragma: no cover - no browser binary
+            pytest.skip(f"no chromium binary for playwright: {exc}")
+        try:
+            yield browser
+        finally:
+            browser.close()
+
+
+@pytest.fixture()
+def _audit(monkeypatch):
+    """The audit rows in memory: the real writer appends under the user's own
+    ~/.dpc, which a test may not touch."""
+    rows: list[dict] = []
+    from dpc_client_core import web_auth
+
+    monkeypatch.setattr(web_auth, "log_browser_action", lambda **f: rows.append(f))
+    return rows
+
+
+class _Ctx:
+    """The slice of ToolContext the download path reads."""
+
+    def __init__(self, agent_root: Path):
+        self.agent_root = agent_root
+        self.firewall = None
+
+    def repo_path(self, rel: str) -> Path:
+        from dpc_client_core.dpc_agent.utils import (
+            is_path_in_sandbox, safe_relpath,
+        )
+
+        resolved = (self.agent_root / safe_relpath(rel)).resolve()
+        if not is_path_in_sandbox(resolved, self.agent_root):
+            raise PermissionError(f"Sandbox violation: {rel!r}")
+        return resolved
+
+    def validate_extended_path(self, path: str, require_write: bool = False) -> Path:
+        from dpc_client_core.dpc_agent.utils import is_path_in_sandbox
+
+        resolved = Path(path).expanduser().resolve()
+        if is_path_in_sandbox(resolved, self.agent_root):
+            return resolved
+        raise PermissionError(
+            f"Sandbox violation: path {path!r} is not in agent directory"
+        )
+
+
+@pytest.fixture()
+def _agent_root(tmp_path):
+    root = tmp_path / "agents" / "agent_test"
+    root.mkdir(parents=True)
+    return root
+
+
+@pytest.fixture()
+def _session(_chromium, _server, _audit):
+    """An AuthBrowser driving a real Chromium page. `_open` launches Camoufox,
+    which no test here has a binary for, so the context is built with the
+    production kwargs and handed to the same object."""
+    context = _chromium.new_context(**_new_context_kwargs(headed=False))
+    session = AuthBrowser(agent_id="agent_test")
+    session._context = context
+    session._page = context.new_page()
+    session._page.goto(f"{_server}/page.html")
+    try:
+        yield session
+    finally:
+        context.close()
+
+
+def _step_to_completion(coro):
+    """Run a coroutine whose every await completes without yielding.
+
+    Playwright's sync API holds a running loop in this thread, so
+    `asyncio.run` refuses outright; and with `_run_in_session` replaced by a
+    direct call, nothing in the tool has anything to wait for. An await that
+    does need a loop surfaces here rather than as a hang.
+    """
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    coro.close()
+    raise AssertionError("browser_download awaited something needing a loop")
+
+
+def _download(session, ctx, selector, **kwargs):
+    """`browser_download` with the session wired in and the pinned executor
+    out of the way: the Chromium page belongs to this thread."""
+    import asyncio
+    from unittest.mock import patch
+
+    async def _direct(sess, verb, *args, **kw):
+        kw.pop("_timeout", None)
+        return getattr(sess, verb)(*args)
+
+    with patch.object(browser_mod, "_get_session_or_error", lambda _id: session), \
+         patch.object(browser_mod, "_get_session_lock", lambda _id: asyncio.Lock()), \
+         patch.object(browser_mod, "_run_in_session", _direct):
+        return _step_to_completion(
+            browser_mod.browser_download(ctx, selector, **kwargs)
+        )
+
+
+def _tree(root: Path) -> list[Path]:
+    return [p for p in root.rglob("*") if p.is_file()]
+
+
+def _saved_files(agent_root: Path) -> list[Path]:
+    return [
+        p for p in _tree(agent_root / "downloads")
+        if p.name != DOWNLOAD_LEDGER_NAME
+    ]
+
+
+@pytest.mark.parametrize(
+    "suggested,expected",
+    [
+        ("book.pdf", "book.pdf"),
+        ("../../evil.exe", "evil.exe"),
+        ("..\\..\\evil.exe", "evil.exe"),
+        ("/etc/passwd", "passwd"),
+        ("C:\\Windows\\System32\\evil.dll", "evil.dll"),
+        ("\\\\server\\share\\report.bin", "report.bin"),
+        ("CON.txt", "_CON.txt"),
+        ("con", "_con"),
+        ("nul.pdf", "_nul.pdf"),
+        ("COM1", "_COM1"),
+        ("LPT9.log", "_LPT9.log"),
+        ("aux.tar.gz", "aux.tar.gz"),
+        ("", "download"),
+        (None, "download"),
+        (".", "download"),
+        ("..", "download"),
+        ("...", "download"),
+        ("   ", "download"),
+        ("/", "download"),
+        ("book.pdf...  ", "book.pdf"),
+        ("book.pdf ", "book.pdf"),
+        ("bo\x00ok\x1f\x7f.pdf", "book.pdf"),
+        ("re:po|rt?.pdf", "re_po_rt_.pdf"),
+        (".hidden.pdf", "hidden.pdf"),
+    ],
+)
+def test_the_name_a_site_chose_is_reduced_to_one_it_cannot_abuse(
+    suggested, expected,
+):
+    assert _safe_download_name(suggested) == expected
+
+
+def test_a_very_long_name_keeps_its_extension_inside_the_cap():
+    out = _safe_download_name(_LONG_STEM + ".pdf")
+    assert out.endswith(".pdf")
+    assert len(out) <= _DOWNLOAD_NAME_MAX
+    assert out.startswith("aaa")
+
+
+def test_no_device_name_survives_whatever_the_extension():
+    for device in sorted(_WINDOWS_DEVICE_NAMES):
+        for candidate in (device, f"{device}.txt", device.lower()):
+            out = _safe_download_name(candidate)
+            stem = out.rpartition(".")[0] or out
+            assert stem.upper() not in _WINDOWS_DEVICE_NAMES, candidate
+
+
+def test_a_sanitized_name_never_carries_a_separator_or_a_control_char():
+    for hostile in ("../../x", "..\\..\\x", "a/b\\c", "\x00\x01", "C:x", "  ..  "):
+        out = _safe_download_name(hostile)
+        assert "/" not in out and "\\" not in out, hostile
+        assert not re.search(r"[\x00-\x1f\x7f]", out), hostile
+        assert out and out not in (".", ".."), hostile
+
+
+def test_a_taken_name_is_not_overwritten_but_numbered(tmp_path):
+    first = _unique_download_path(tmp_path, "book.pdf")
+    first.write_bytes(b"one")
+    second = _unique_download_path(tmp_path, "book.pdf")
+    second.write_bytes(b"two")
+    third = _unique_download_path(tmp_path, "book.pdf")
+    assert first.name == "book.pdf"
+    assert second.name == "book-1.pdf"
+    assert third.name == "book-2.pdf"
+    assert first.read_bytes() == b"one"
+
+
+def test_a_name_without_an_extension_is_numbered_too(tmp_path):
+    (tmp_path / "README").write_bytes(b"x")
+    assert _unique_download_path(tmp_path, "README").name == "README-1"
+
+
+@pytest.mark.parametrize(
+    "head,expected",
+    [
+        (b"%PDF-1.7\n...", "pdf"),
+        (b"AT&TFORM\x00", "djvu"),
+        (b"PK\x03\x04\x14\x00", "zip container"),
+        (b"Rar!\x1a\x07\x00", "rar"),
+        (b"7z\xbc\xaf\x27\x1c", "7z"),
+        (b"\x1f\x8b\x08\x00", "gzip"),
+        (b"\xd0\xcf\x11\xe0\xa1\xb1", "ole"),
+        (b"<!DOCTYPE html><html>", "html"),
+        (b"<!doctype HTML>", "html"),
+        (b"<html lang=en>", "html"),
+        (b"\n\n  <!doctype html>", "html"),
+        (b"\xef\xbb\xbf<!doctype html>", "html"),
+        (b"<?xml version='1.0'?>", "markup"),
+        (b"<svg xmlns=", "markup"),
+        (b"just some prose", "unknown"),
+        (b"", "unknown"),
+    ],
+)
+def test_the_first_bytes_name_the_family(head, expected):
+    assert _sniff_file_type(head) == expected
+
+
+@pytest.mark.parametrize(
+    "detected,name,contradicts",
+    [
+        ("pdf", "book.pdf", False),
+        ("html", "book.pdf", True),
+        ("markup", "book.pdf", True),
+        ("zip container", "book.epub", False),
+        ("zip container", "book.pdf", True),
+        ("html", "page.html", False),
+        ("unknown", "book.pdf", False),
+        ("pdf", "bookwithnoextension", False),
+    ],
+)
+def test_a_family_that_disagrees_with_the_extension_is_reported(
+    detected, name, contradicts,
+):
+    assert _type_contradicts_extension(detected, name) is contradicts
+
+
+def test_every_context_this_module_opens_accepts_a_download():
+    """A bare context has the browser cancel the download before any tool can
+    see a file."""
+    assert _new_context_kwargs(headed=False)["accept_downloads"] is True
+    assert _new_context_kwargs(headed=True)["accept_downloads"] is True
+    assert _new_context_kwargs(headed=True)["no_viewport"] is True
+    assert "no_viewport" not in _new_context_kwargs(headed=False)
+
+
+def test_a_clicked_download_lands_in_the_sandbox_with_its_size_and_hash(
+    _session, _agent_root, _audit,
+):
+    answer = _download(_session, _Ctx(_agent_root), "#book")
+    saved = _agent_root / "downloads" / "book.pdf"
+    assert saved.is_file(), answer
+    assert saved.read_bytes() == _BOOK
+    assert "downloads/book.pdf" in answer
+    assert f"{len(_BOOK):,} bytes" in answer
+    assert hashlib.sha256(_BOOK).hexdigest() in answer
+    assert "pdf" in answer
+    assert 'suggested the name "book.pdf"' in answer
+    rows = [r for r in _audit if r.get("action") == "download"]
+    assert rows and rows[-1]["result"] == "ok"
+    assert rows[-1]["sha256"] == hashlib.sha256(_BOOK).hexdigest()
+    assert rows[-1]["byte_size"] == len(_BOOK)
+
+
+def test_a_ref_from_the_snapshot_reaches_the_same_file(_session, _agent_root):
+    """The click tool's own ref, not a second addressing scheme."""
+    _tree_text, refs = _session.a11y_snapshot()
+    ref = next(
+        r for r, node in refs.items()
+        if (node.get("name") or "").startswith("Download the book")
+    )
+    answer = _download(_session, _Ctx(_agent_root), ref)
+    assert (_agent_root / "downloads" / "book.pdf").is_file(), answer
+
+
+@pytest.mark.parametrize("selector", ["#slash", "#backslash"])
+def test_a_traversing_filename_cannot_write_outside_the_download_folder(
+    _session, _agent_root, tmp_path, selector,
+):
+    answer = _download(_session, _Ctx(_agent_root), selector)
+    downloads = _agent_root / "downloads"
+    inside = _tree(downloads)
+    assert inside, answer
+    outside = [p for p in _tree(tmp_path) if downloads not in p.parents]
+    assert not outside, f"files written outside the download folder: {outside}"
+    for path in inside:
+        # Chromium mangles the separators itself, so the name can still read
+        # `_.._evil.exe` — harmless as long as it stays one basename in one
+        # folder, which is the invariant. `_safe_download_name` is what maps
+        # the raw header to `evil.exe`, and it is asserted on directly above.
+        assert "/" not in path.name and "\\" not in path.name
+        assert path.resolve().parent == downloads.resolve()
+
+
+def test_a_device_name_is_not_the_name_the_file_is_saved_under(
+    _session, _agent_root,
+):
+    answer = _download(_session, _Ctx(_agent_root), "#device")
+    saved = _saved_files(_agent_root)
+    assert len(saved) == 1, answer
+    stem = saved[0].name.rpartition(".")[0] or saved[0].name
+    assert stem.upper() not in _WINDOWS_DEVICE_NAMES, saved[0].name
+
+
+def test_a_four_hundred_character_name_is_capped_and_keeps_its_extension(
+    _session, _agent_root,
+):
+    answer = _download(_session, _Ctx(_agent_root), "#long")
+    saved = _saved_files(_agent_root)
+    assert len(saved) == 1, answer
+    assert len(saved[0].name) <= _DOWNLOAD_NAME_MAX
+    assert saved[0].suffix == ".pdf"
+
+
+def test_a_download_with_no_filename_still_gets_a_usable_one(
+    _session, _agent_root,
+):
+    answer = _download(_session, _Ctx(_agent_root), "#nameless")
+    saved = _saved_files(_agent_root)
+    assert len(saved) == 1, answer
+    assert saved[0].name
+    assert "/" not in saved[0].name and "\\" not in saved[0].name
+    assert saved[0].name.strip(". ") == saved[0].name
+
+
+def test_the_same_file_twice_is_two_files_and_the_first_is_untouched(
+    _session, _agent_root,
+):
+    _download(_session, _Ctx(_agent_root), "#book")
+    second = _download(_session, _Ctx(_agent_root), "#book")
+    downloads = _agent_root / "downloads"
+    assert (downloads / "book.pdf").read_bytes() == _BOOK
+    assert (downloads / "book-1.pdf").read_bytes() == _BOOK
+    assert "book-1.pdf" in second
+
+
+def test_a_file_over_the_cap_is_refused_and_leaves_nothing_behind(
+    _session, _agent_root, monkeypatch,
+):
+    monkeypatch.setattr(browser_mod, "DOWNLOAD_MAX_BYTES", 100)
+    answer = _download(_session, _Ctx(_agent_root), "#big")
+    assert "Refused" in answer and "4,096 bytes" in answer
+    assert "100-byte cap" in answer
+    assert _tree(_agent_root / "downloads") == []
+
+
+@pytest.mark.parametrize("directory", ["../outside", "..", "a/../../b"])
+def test_a_directory_outside_the_sandbox_is_refused_before_any_click(
+    _session, _agent_root, tmp_path, directory,
+):
+    answer = _download(_session, _Ctx(_agent_root), "#book", directory=directory)
+    assert "refused" in answer.lower(), answer
+    assert _tree(tmp_path) == [], _tree(tmp_path)
+
+
+def test_an_absolute_directory_is_refused(_session, _agent_root, tmp_path):
+    outside = tmp_path / "elsewhere"
+    answer = _download(
+        _session, _Ctx(_agent_root), "#book", directory=str(outside),
+    )
+    assert "refused" in answer.lower(), answer
+    assert not outside.exists()
+    assert _tree(tmp_path) == []
+
+
+def test_an_ordinary_link_says_no_download_started_and_names_the_page(
+    _session, _agent_root,
+):
+    answer = _download(_session, _Ctx(_agent_root), "#plain", timeout_seconds=3)
+    assert "No download started within 3s" in answer
+    assert "other.html" in answer
+    downloads = _agent_root / "downloads"
+    assert not downloads.exists() or _tree(downloads) == []
+
+
+def test_a_login_page_under_a_pdf_name_is_named_as_one_in_the_first_line(
+    _session, _agent_root,
+):
+    answer = _download(_session, _Ctx(_agent_root), "#wall")
+    first = answer.split("\n")[0]
+    assert "HTML page, not a file" in first, answer
+    assert ".pdf" in first
+    assert (_agent_root / "downloads" / "wall.pdf").read_bytes() == _WALL
+
+
+def test_a_stale_ref_is_refused_rather_than_waited_out(_session, _agent_root):
+    answer = _download(_session, _Ctx(_agent_root), "@e9999")
+    assert "unknown ref" in answer
+    assert "a11y_snapshot" in answer
+
+
+def _ledger(agent_root: Path) -> list[dict]:
+    path = agent_root / "downloads" / DOWNLOAD_LEDGER_NAME
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_every_saved_file_gets_one_ledger_line_with_its_hash_and_origin(
+    _session, _agent_root,
+):
+    _download(_session, _Ctx(_agent_root), "#book", note="Volume I, cat 42")
+    _download(_session, _Ctx(_agent_root), "#book")
+    records = _ledger(_agent_root)
+    assert len(records) == 2
+    for rec in records:
+        for field in (
+            "saved_at", "saved_path", "bytes", "sha256", "detected_type",
+            "suggested_filename", "url", "page_url", "page_title", "note",
+        ):
+            assert field in rec, field
+        assert rec["sha256"] == hashlib.sha256(_BOOK).hexdigest()
+        assert rec["bytes"] == len(_BOOK)
+        assert rec["detected_type"] == "pdf"
+        assert rec["suggested_filename"] == "book.pdf"
+        assert rec["url"].endswith("/book.pdf")
+        assert rec["page_url"].endswith("/page.html")
+        assert rec["page_title"] == "The download page"
+    assert records[0]["note"] == "Volume I, cat 42"
+    assert records[1]["note"] == ""
+    assert records[0]["saved_path"] == "downloads/book.pdf"
+    assert records[1]["saved_path"] == "downloads/book-1.pdf"
+
+
+def test_the_ledger_records_what_the_bytes_were_not_what_the_name_claimed(
+    _session, _agent_root,
+):
+    _download(_session, _Ctx(_agent_root), "#wall")
+    rec = _ledger(_agent_root)[-1]
+    assert rec["detected_type"] == "html"
+    assert rec["saved_path"] == "downloads/wall.pdf"
+
+
+def test_the_answer_ends_with_what_the_folder_now_holds(_session, _agent_root):
+    first = _download(_session, _Ctx(_agent_root), "#book")
+    assert "holds 1 record(s), 1 of them saved today" in first
+    second = _download(_session, _Ctx(_agent_root), "#book")
+    assert "holds 2 record(s), 2 of them saved today" in second
+
+
+def test_a_refused_or_failed_download_records_nothing(
+    _session, _agent_root, monkeypatch,
+):
+    monkeypatch.setattr(browser_mod, "DOWNLOAD_MAX_BYTES", 100)
+    _download(_session, _Ctx(_agent_root), "#big")
+    _download(_session, _Ctx(_agent_root), "#plain", timeout_seconds=3)
+    assert not (_agent_root / "downloads" / DOWNLOAD_LEDGER_NAME).exists()
+
+
+def test_a_ledger_that_cannot_be_written_does_not_cost_the_file(
+    _session, _agent_root, monkeypatch,
+):
+    monkeypatch.setattr(
+        browser_mod, "_append_download_record",
+        lambda directory, record: "OSError: disk is full",
+    )
+    answer = _download(_session, _Ctx(_agent_root), "#book")
+    assert (_agent_root / "downloads" / "book.pdf").read_bytes() == _BOOK
+    assert "disk is full" in answer
+    assert "The file is saved" in answer
+
+
+def test_the_tool_is_registered_and_off_until_someone_turns_it_on():
+    entry = next(
+        t for t in browser_mod.get_tools() if t.name == "browser_download"
+    )
+    assert entry.default_enabled is False
+    assert entry.handler is browser_mod.browser_download
+    desc = entry.schema["description"]
+    assert "sandbox" in desc
+    assert "charge per download" in desc
+    assert "browser_snapshot" in desc
+    assert set(entry.schema["parameters"]["properties"]) == {
+        "ref_or_selector", "directory", "timeout_seconds", "note",
+    }

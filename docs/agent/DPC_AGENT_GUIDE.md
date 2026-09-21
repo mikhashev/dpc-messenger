@@ -412,7 +412,8 @@ Interactive headed/headless browser driven via Camoufox + Playwright. Disabled b
 | `browser_extract` | Extract structured content from the page | ⛔ opt-in |
 | `browser_screenshot` | Capture a screenshot | ⛔ opt-in |
 | `browser_switch_tab` | Switch between open tabs | ⛔ opt-in |
-| `browser_collect` | Collect items from infinite-scroll / paginated lists | ⛔ opt-in |
+| `browser_collect` | Collect items from infinite-scroll / paginated lists, one line per item with its link, handed back in `offset`/`limit` windows | ⛔ opt-in |
+| `browser_download` | Click a download link and save the file into the agent's sandbox (`downloads/` by default): sanitized filename, size cap, sha256, signature check against the extension, and one provenance line per file in `downloads.jsonl` | ⛔ opt-in |
 | `browser_close` | Close the browser session | ⛔ opt-in |
 
 ### Shell Tool (ADR-030)

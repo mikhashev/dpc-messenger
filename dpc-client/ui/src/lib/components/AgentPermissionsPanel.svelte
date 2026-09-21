@@ -72,6 +72,7 @@
         { key: 'browser_screenshot', label: 'Screenshot', desc: 'Take screenshot of current page' },
         { key: 'browser_switch_tab', label: 'Switch Tab', desc: 'Switch between browser tabs' },
         { key: 'browser_collect', label: 'Collect', desc: 'Collect structured data from page' },
+        { key: 'browser_download', label: 'Download', desc: 'Save a file the page downloads into the agent sandbox' },
         { key: 'browser_close', label: 'Close', desc: 'Close browser session' },
       ]
     },
