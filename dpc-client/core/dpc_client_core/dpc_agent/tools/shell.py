@@ -563,6 +563,7 @@ class _KillTargets(NamedTuple):
     names: tuple = ()           # image names and patterns
     whole_command_line: bool = False   # pkill -f: the pattern is not a name
     match: str = "wildcard"     # wildcard | exact | regex | regex-exact
+    pidfiles: tuple = ()        # pkill -F: the pid is in this file, unread here
 
 
 _KILL_VERBS = {"taskkill", "tskill", "kill", "pkill", "killall", "stop-process", "spps", "wmic"}
@@ -583,7 +584,17 @@ _TASKKILL_SWITCH_RE = re.compile(r"^/(pid|im|fi)(?::(.*))?$", re.I)
 _TASKKILL_FILTER_RE = re.compile(r"\s*(imagename|pid)\s+eq\s+(\S+)", re.I)
 _PS_PARAM_RE = re.compile(r"^-(id|name|processname)(?::(.*))?$", re.I)
 _PS_PARAM_WITH_VALUE = {"-s", "-n", "--signal", "-erroraction", "-inputobject"}
-_PKILL_PARAM_WITH_VALUE = {"-u", "--user", "-g", "--group", "-s", "--signal", "-t", "--older"}
+_PKILL_PARAM_WITH_VALUE = {
+    "-u", "--user", "-g", "--group", "-s", "--signal", "-t", "--older",
+    # `-P ppid` selects by parent, and the ppid was read as the pattern — so
+    # `pkill -P 1 python` never reached `python`, the name that covers us.
+    "-p", "--parent",
+}
+# procps reads `-F file` and `--pidfile file` as «the pid is in this file», one
+# capital letter away from `-f`, «match the whole command line». The switch loop
+# folds case, so the two were the same switch and the dialog described a net
+# that is not one. Matched before the fold, with the case procps requires.
+_PKILL_PIDFILE_RE = re.compile(r"^(?:-F|--pidfile)(?:=?(.+))?$")
 _WMIC_PID_RE = re.compile(r"processid\s*=\s*['\"]?([^\s'\",]+)", re.I)
 _WMIC_NAME_RE = re.compile(r"\bname\s*=\s*['\"]?([^\s'\",]+)", re.I)
 # `%PID%`, `$pid`, `$(cat run.pid)`, a backtick: a pid nobody can read here.
@@ -628,6 +639,39 @@ _KILL_WORD_RE = re.compile(
 )
 
 
+# The spellings of «end a process» that are not commands: a method on an object,
+# and a cmdlet that reaches the same method by name. They sit beside
+# `_KILL_VERBS` rather than in it because `_kill_verb` would read one as a verb
+# and parse its switches — `Invoke-WmiMethod -Name Terminate` would come back as
+# a kill of a process named Terminate. Only `_carries_a_kill_word` asks them,
+# which is the question they can answer. `.Kill()` was refused and
+# `.Terminate()` was not, on the accident that `\bkill\b` matches the first.
+_METHOD_KILL_PATTERNS: dict = {
+    # End of text counts as the parenthesis: `_strip_grouping` eats a trailing
+    # `()`, so a bare `(Get-Process -Id 6520).Terminate()` arrives here without
+    # the call it is. The price is a segment that ends in `.kill` or `.terminate`.
+    "a .kill() or .terminate() call": re.compile(
+        r"\.\s*(?:kill|terminate)(?=\s*(?:\(|$))", re.I
+    ),
+    "an Invoke-WmiMethod or Invoke-CimMethod that names Terminate": re.compile(
+        r"\bInvoke-(?:Wmi|Cim)Method\b(?=.*\bTerminate\b)", re.I
+    ),
+}
+
+
+def _method_kill_spelling(segment: str) -> str:
+    """The method spelling of a kill in this text, or "" when it holds none.
+
+    Qualified like `wmic`, and for the same reason: `Invoke-CimMethod
+    -MethodName Create` starts a process, so the bare cmdlet is not a kill word.
+    """
+    for pattern in _METHOD_KILL_PATTERNS.values():
+        found = pattern.search(segment)
+        if found:
+            return found.group(0)
+    return ""
+
+
 def _carries_a_kill_word(segment: str) -> bool:
     """Does this text carry a word that could signal a process?
 
@@ -640,6 +684,8 @@ def _carries_a_kill_word(segment: str) -> bool:
     would have the net refuse `echo <our pid> & wmic os get caption`.
     """
     if _KILL_WORD_RE.search(segment):
+        return True
+    if _method_kill_spelling(segment):
         return True
     return any(
         re.search(rf"\b{re.escape(verb)}\b", segment, re.I) and qualifies(segment)
@@ -868,6 +914,23 @@ def _kill_inside_an_unread_body(segment: str) -> str:
     )
 
 
+def _a_kill_spelled_as_a_method(segment: str) -> str:
+    """A call that ends a process, with no command in it for the parser to read.
+
+    The third trigger of the last-resort net, and it stops at Tier 1 like the
+    two above: `(Get-Process -Id 4243).Terminate()` carries its target in a
+    property this gate does not evaluate, so it can say a kill is here and not
+    what it would signal.
+    """
+    spelling = _method_kill_spelling(segment)
+    if not spelling:
+        return ""
+    return (
+        f"A kill cannot be ruled out: this segment calls {_one_line(spelling, 40)}, "
+        f"which ends a process, and the gate has not identified which process that is"
+    )
+
+
 def _kill_scan_segments(segment: str) -> list:
     """This segment and every command nested inside it, depth-bounded."""
     out, seen = [], set()
@@ -1007,12 +1070,22 @@ def _pattern_match_kind(verb: str, exact: bool, regexp: bool) -> str:
 def _pattern_kill_targets(verb: str, rest: list) -> _KillTargets:
     """`pkill` and `killall`: one pattern, and the switches say how it is read."""
     names, unresolved, whole = [], [], False
+    pidfiles: list = []
     exact, regexp = False, False
     pattern = ""
     i = 0
     while i < len(rest):
         token = rest[i]
         i += 1
+        # `killall` has no pidfile switch, so its `-F` keeps its own reading.
+        found = _PKILL_PIDFILE_RE.match(token) if verb == "pkill" else None
+        if found:
+            attached = found.group(1)
+            value = attached if attached else (rest[i] if i < len(rest) else "")
+            i += 0 if attached else 1
+            if value:
+                pidfiles.append(value.strip("\"'"))
+            continue
         low = token.lower()
         if low in ("-f", "--full"):
             whole = True
@@ -1042,7 +1115,8 @@ def _pattern_kill_targets(verb: str, rest: list) -> _KillTargets:
         unresolved.append(pattern)
         if not _pattern_is_unreadable(pattern, kind):
             names.append(pattern)
-    return _KillTargets(verb, (), tuple(unresolved), tuple(names), whole, kind)
+    return _KillTargets(verb, (), tuple(unresolved), tuple(names), whole, kind,
+                        tuple(pidfiles))
 
 
 def _wmic_targets(segment: str) -> _KillTargets:
@@ -1122,6 +1196,13 @@ _SELF_TARGETS: dict = {
 }
 
 
+# A token is one of the names above when it *begins* with it: `$PID).Terminate()`
+# is the variable with a call hanging off it. Reading the name anywhere in the
+# token instead would make `echo "kill $PPID"` a refusal, and that quoted string
+# is one token on purpose.
+_SELF_TARGET_HEAD_RE = re.compile(r"^\$\{?(?:\$|[A-Za-z_]\w*)\}?")
+
+
 def _self_target_key(token: str) -> str:
     """`${PPID}` and `$ppid` are one token to this rule; `${$}` is `$$`.
 
@@ -1133,8 +1214,9 @@ def _self_target_key(token: str) -> str:
     variable there and refusing it costs a command nobody writes, while reading
     `$PPID` as unknown cost the service once already.
     """
-    bare = str(token).strip().strip("\"'").lower()
-    return re.sub(r"[{}]", "", bare)
+    bare = str(token).strip().strip("\"'").lstrip("(").lower()
+    head = _SELF_TARGET_HEAD_RE.match(bare)
+    return re.sub(r"[{}]", "", head.group(0) if head else bare)
 
 
 def _self_target_reason(token: str, shell_flavour: str, me: "_ServiceIdentity") -> str:
@@ -1156,7 +1238,8 @@ def _kill_of_this_service(segment: str) -> str:
     offer: nothing in `service.py`, `local_api.py` or `run_service.py` exposes
     one.
     """
-    for piece in _refusal_pieces(segment):
+    pieces = _refusal_pieces(segment)
+    for piece in pieces:
         targets = _kill_targets(piece.text)
         if not targets.verb:
             continue
@@ -1199,13 +1282,20 @@ def _kill_of_this_service(segment: str) -> str:
                 f"Name the specific PIDs you mean instead; each one is identified in the "
                 f"approval dialog."
             )
-    return _kill_word_beside_a_protected_token(segment)
+    # Every piece, not only the whole segment: a wrapper's quotes make its
+    # command string one token, so `powershell -Command "(Get-Process -Id
+    # $PID).Kill()"` offered the net no token that was the variable.
+    for piece in pieces:
+        mine = _kill_word_beside_a_protected_token(piece.text, piece.shell)
+        if mine:
+            return mine
+    return ""
 
 
 _STANDALONE_NUMBER_RE = re.compile(r"(?<![\w.])(\d+)(?![\w.])")
 
 
-def _kill_word_beside_a_protected_token(segment: str) -> str:
+def _kill_word_beside_a_protected_token(segment: str, shell_flavour: str = "") -> str:
     """The coarse net under the parser, because spellings are endless.
 
     A kill word and something that names this service in one segment is refused
@@ -1230,7 +1320,7 @@ def _kill_word_beside_a_protected_token(segment: str) -> str:
                 f"Refusing rather than guessing. Ask the person to restart the service "
                 f"themselves."
             )
-    flavour = _shell_of(segment, "")
+    flavour = _shell_of(segment, shell_flavour)
     for token in _tokens(segment):
         mine = _self_target_reason(token, flavour, me)
         if mine:
@@ -1286,17 +1376,27 @@ def _kill_needs_a_person(segment: str) -> str:
                 "Kills a process the gate could not identify: the id is "
                 f"{_one_line(token, 40)}"
             )
-        if not (targets.pids or targets.names or targets.unresolved):
+        for path in targets.pidfiles[:3]:
+            # The file is not opened: it may not exist yet, the segment before
+            # may be what writes it, and it may sit outside the sandbox.
+            notes.append(
+                "Kills a process the gate could not identify: the id is in "
+                f"{_one_line(path, 40)}, a file the gate does not read"
+            )
+        if not (targets.pids or targets.names or targets.unresolved or targets.pidfiles):
             notes.append(
                 f"Kills a process the gate could not identify: {targets.verb} names "
                 f"no literal target"
             )
     # Ahead of the rest, and not at all when the parser has already said what
     # dies in this segment: the two sentences would be one fact told twice.
+    # The method note wins where both fit, because `(Get-Process -Id 4243)
+    # .Terminate()` opens no body at all — it is one expression, and the body
+    # sentence would name a loop that is not there.
     if not parsed_a_kill:
-        body = _kill_inside_an_unread_body(segment)
-        if body:
-            notes.insert(0, body)
+        blind = _a_kill_spelled_as_a_method(segment) or _kill_inside_an_unread_body(segment)
+        if blind:
+            notes.insert(0, blind)
     seen, unique = set(), []
     for note in notes:
         if note not in seen:

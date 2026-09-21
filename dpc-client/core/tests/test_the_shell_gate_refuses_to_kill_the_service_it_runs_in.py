@@ -29,6 +29,7 @@ is that dependency written down.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections import namedtuple
 from pathlib import Path
@@ -1847,3 +1848,348 @@ def test_the_qualified_verb_is_not_a_kill_word_on_its_own():
     assert shell._carries_a_kill_word("wmic process where ProcessId=1 delete")
     assert not shell._carries_a_kill_word("wmic cpu get name")
     assert not shell._carries_a_kill_word("wmic process get ProcessId,Name")
+
+
+# --- a kill that is a method call, not a command ----------------------------
+
+_A_METHOD_KILL = [
+    "(Get-Process -Id {t}).Kill()",
+    "(Get-Process -Id {t}).Terminate()",
+    "(Get-Process -Id {t}).kill ()",
+    "(Get-WmiObject Win32_Process -Filter 'ProcessId={t}').Terminate()",
+    "Get-WmiObject Win32_Process -Filter 'ProcessId={t}' | Invoke-WmiMethod -Name Terminate",
+    "Get-CimInstance Win32_Process -Filter 'ProcessId={t}' | Invoke-CimMethod -MethodName Terminate",
+]
+
+
+@pytest.mark.parametrize("template", _A_METHOD_KILL)
+def test_a_kill_spelled_as_a_method_call_names_this_service(service, template):
+    """`.Kill()` was refused and `.Terminate()` was not, and the whole
+    difference was English: `\\bkill\\b` happens to match `.Kill(`. The same
+    call, the same literal pid in the same string — and the reason the second
+    one got was word for word the one `powershell -Command "Get-Date"` gets."""
+    command = 'powershell -Command "%s"' % template.format(t=SERVICE.own_pid)
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+    assert str(SERVICE.own_pid) in verdict[1], (command, verdict[1])
+
+
+def test_a_method_call_with_no_wrapper_at_all_was_the_silent_one(service):
+    """Found while measuring: with no `powershell -Command` in front of it the
+    expression is the whole segment, `_strip_grouping` eats the trailing `()`,
+    and nothing in the gate saw a kill — tier0, silent. The gate's own shell on
+    this platform is one that would run it."""
+    assert tier_of("(Get-Process -Id %d).Terminate()" % SERVICE.own_pid) == "tier2"
+    assert tier_of("(Get-Process -Id %d).Terminate()" % SERVICE.ancestors[0]) == "tier2"
+    assert tier_of("(Get-Process -Id %d).Terminate()" % UNRELATED) == "tier1"
+
+
+@pytest.mark.parametrize("template", _A_METHOD_KILL)
+def test_a_method_call_on_an_ancestor_is_refused_too(service, template):
+    command = 'powershell -Command "%s"' % template.format(t=SERVICE.ancestors[0])
+
+    assert tier_of(command) == "tier2", command
+
+
+@pytest.mark.parametrize("template", _A_METHOD_KILL[:3])
+def test_the_powershell_host_variable_beside_a_method_call_is_refused(service, template):
+    """`$PID` is the host running the command. The net reads tokens, and
+    `$PID).Terminate()` is one token — the variable with a call hanging off it,
+    which is still the variable."""
+    command = 'powershell -Command "%s"' % template.format(t="$PID")
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "PowerShell host" in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("template", _A_METHOD_KILL)
+def test_a_method_call_on_somebody_elses_pid_says_a_kill_first(service, template):
+    """Tier 1, and the sentence opens with the kill rather than with the shell:
+    a bare wrapper reason is what a command that kills nothing gets."""
+    command = 'powershell -Command "%s"' % template.format(t=UNRELATED)
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1].startswith("A kill cannot be ruled out"), (command, verdict[1])
+    assert "Requires approval:" in verdict[1], (command, verdict[1])
+
+
+def test_the_wrapper_reason_alone_still_means_a_command_that_kills_nothing(service):
+    """The negative control, byte for byte: these are the reasons the method
+    kills used to share, and they must keep belonging to `Get-Date` alone."""
+    plain = reason_of('powershell -Command "Get-Date"')
+
+    assert plain.startswith("Requires approval:"), plain
+    assert "kill" not in plain.lower(), plain
+    assert reason_of('powershell -Command "Get-Process"') == plain
+    assert reason_of('python -c "print(\'terminate\')"').startswith("Requires approval:")
+    assert "kill" not in reason_of('python -c "print(\'terminate\')"').lower()
+
+    killing = reason_of('powershell -Command "(Get-Process -Id %d).Terminate()"' % UNRELATED)
+    assert killing != plain, killing
+    assert plain in killing, "the wrapper reason is still told — after the kill"
+
+
+def test_os_kill_and_a_psutil_terminate_are_read_the_same_way(service):
+    """Measured before the rule: `os.kill(6520, 9)` was already Tier 2, because
+    the last-resort net reads `kill`, while the same call spelled
+    `psutil.Process(6520).terminate()` was Tier 1 with the `python -c` wrapper
+    reason and nothing else. One call, two verdicts, decided by spelling."""
+    for call in ("import os; os.kill(%d, 9)", "import psutil; psutil.Process(%d).terminate()"):
+        assert tier_of('python -c "%s"' % (call % SERVICE.own_pid)) == "tier2", call
+
+        foreign = reason_of('python -c "%s"' % (call % UNRELATED))
+        assert foreign.startswith("A kill cannot be ruled out"), (call, foreign)
+        assert "Requires approval:" in foreign, (call, foreign)
+
+
+def test_the_same_python_method_kill_on_a_posix_service(posix_service):
+    assert tier_of('python3 -c "import psutil; psutil.Process(%d).terminate()"'
+                   % SERVICE.own_pid) == "tier2"
+    assert tier_of('python3 -c "import psutil; psutil.Process(%d).terminate()"'
+                   % UNRELATED) == "tier1"
+
+
+def test_a_cim_method_that_is_not_terminate_is_not_a_kill_word(service):
+    """The price of the fix, kept at zero the way `wmic` keeps it. The cmdlet is
+    broad — `Invoke-CimMethod -MethodName Create` starts a process — so reading
+    the bare word as a kill would have the last-resort net refuse a line that
+    merely carries this service's pid beside it."""
+    assert not shell._carries_a_kill_word(
+        "Invoke-CimMethod -MethodName Create -ClassName Win32_Process"
+    )
+    assert tier_of(
+        "Invoke-CimMethod -MethodName Create -ClassName Win32_Process %d" % SERVICE.own_pid
+    ) == "tier0"
+    assert tier_of(
+        "Invoke-CimMethod -MethodName Terminate -InputObject $p %d" % SERVICE.own_pid
+    ) == "tier2"
+
+
+def test_the_price_of_reading_a_method_call_as_a_kill_word(service):
+    """Named as a price, like the three before it in this file.
+
+    A call is a kill word wherever it stands, so text that merely carries one is
+    a question — `echo .terminate()` was Tier 0 and is Tier 1 now. The words
+    themselves are still words: it takes the dot and the parenthesis.
+    """
+    assert tier_of("echo .terminate()") == "tier1"
+    assert reason_of("echo .terminate()").startswith("A kill cannot be ruled out")
+
+    assert tier_of("echo terminate") == "tier0"
+    assert tier_of('git commit -m "terminate the session"') == "tier0"
+    assert tier_of("grep -r terminate .") == "tier0"
+    assert tier_of("type terminate.txt") == "tier0"
+
+
+def test_a_method_call_is_not_a_command_verb(service):
+    """`_kill_verb` must not start parsing one: `Invoke-WmiMethod -Name
+    Terminate` read as a verb would produce «Kills every process named
+    Terminate», which is the wrong-reason defect this file exists for."""
+    for spelling in _A_METHOD_KILL:
+        text = spelling.format(t=UNRELATED)
+        assert shell._kill_verb(shell._tokens(text)) == ("", []), text
+        assert "named Terminate" not in reason_of('powershell -Command "%s"' % text)
+        assert "matching Terminate" not in reason_of('powershell -Command "%s"' % text)
+
+
+# One minimal killing spelling per method word, for the same reason as the verb
+# table above: a spelling added to the module without a row here would never be
+# exercised, and one deleted from the module turns this red.
+_A_KILLING_METHOD_SPELLING = {
+    "a .kill() or .terminate() call": "(Get-Process -Id 12345).Terminate()",
+    "an Invoke-WmiMethod or Invoke-CimMethod that names Terminate":
+        "Get-WmiObject Win32_Process | Invoke-WmiMethod -Name Terminate",
+}
+
+
+def test_every_method_spelling_of_a_kill_is_a_kill_word_to_the_wordy_rules():
+    assert set(_A_KILLING_METHOD_SPELLING) == set(shell._METHOD_KILL_PATTERNS), (
+        "a spelling was added to _METHOD_KILL_PATTERNS without a row here — the "
+        "rules that look for a kill word without parsing one decide on this table"
+    )
+    for name, spelling in sorted(_A_KILLING_METHOD_SPELLING.items()):
+        assert shell._carries_a_kill_word(spelling), (name, spelling)
+
+
+def test_the_powershell_flavour_words_cannot_drift_from_the_kill_verbs(service):
+    """A verb added to `_KILL_VERBS` with a PowerShell spelling and not added to
+    `_POWERSHELL_FLAVOUR_RE` would leave `$PID` read as an ordinary variable in
+    a piece that carries no explicit wrapper.
+
+    `kill` is that case already — PowerShell's own alias for Stop-Process, a
+    member of the set, deliberately absent from the flavour regex. Harmless
+    today because every PowerShell piece this gate reads inherits its flavour
+    from an explicit `powershell`/`pwsh` wrapper; the last two rows pin both
+    that fact and what the absence costs. Nothing here changes behaviour.
+    """
+    body = re.search(r"\(\?:([^)]*)\)", shell._POWERSHELL_FLAVOUR_RE.pattern)
+    named = set(body.group(1).split("|"))
+
+    assert named == {"stop-process", "spps", "get-process", "powershell", "pwsh"}
+    assert named & shell._KILL_VERBS == {"stop-process", "spps"}
+    assert shell._KILL_VERBS - named == {
+        "taskkill", "tskill", "kill", "pkill", "killall", "wmic"
+    }, "a kill verb was added — decide here whether PowerShell can spell it"
+
+    assert tier_of("kill $PID") == "tier1"          # no wrapper, no flavour
+    assert tier_of('powershell -Command "kill $PID"') == "tier2"
+
+
+# --- Part 2: `-F` is a pidfile, and the gate does not read files ------------
+
+_PIDFILE_SPELLINGS = [
+    "pkill -F run.pid",
+    "pkill -Frun.pid",
+    "pkill --pidfile run.pid",
+    "pkill --pidfile=run.pid",
+]
+
+_SAYS_A_PIDFILE = (
+    "Kills a process the gate could not identify: the id is in run.pid, "
+    "a file the gate does not read"
+)
+
+
+@pytest.mark.parametrize("command", _PIDFILE_SPELLINGS)
+def test_a_pidfile_is_not_a_name_pattern(service, command):
+    """procps reads `-F file` and `--pidfile file` as «the pid is in this
+    file». The switch loop folded case, so `-F` arrived as `-f` — match the
+    whole command line — and `--pidfile` was unknown, so its argument fell
+    through as the pattern. Both reasons were false, and the file may well hold
+    this service's own pid."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1] == _SAYS_A_PIDFILE, (command, verdict[1])
+
+
+@pytest.mark.parametrize("command", _PIDFILE_SPELLINGS)
+def test_the_pidfile_reads_the_same_on_a_posix_service(posix_service, command):
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert verdict[1] == _SAYS_A_PIDFILE, (command, verdict[1])
+
+
+@pytest.mark.parametrize("command", _PIDFILE_SPELLINGS)
+def test_the_false_sentences_the_pidfile_used_to_get(service, command):
+    """Measured on c2d7cd20: «Kills every process whose command line matches
+    run.pid», «Kills every process matching run.pid (0 running)», and — for the
+    two attached spellings — «pkill names no literal target». The count is the
+    worst of them: it states how wide a net is, of a net that is not one."""
+    reason = reason_of(command)
+
+    assert "whose command line matches" not in reason, reason
+    assert "running)" not in reason, reason
+    assert "names no literal target" not in reason, reason
+
+
+def test_lowercase_f_still_means_the_whole_command_line(service):
+    """The switch one capital away, unchanged. Case-sensitive here and nowhere
+    else in that loop, because this is the pair whose meanings differ."""
+    assert tier_of("pkill -f run_service") == "tier2"
+    assert tier_of("pkill --full run_service") == "tier2"
+    assert reason_of("pkill -f run.pid") == (
+        "Kills every process whose command line matches run.pid"
+    )
+
+
+@pytest.mark.parametrize("command", [
+    "pkill -F run.pid python",
+    "pkill -Frun.pid python",
+    "pkill --pidfile run.pid python",
+    "pkill --pidfile=run.pid python",
+])
+def test_a_pidfile_beside_a_pattern_that_covers_us_still_refuses(service, command):
+    """Consuming the switch's argument is what lets the pattern be read at all:
+    `python` used to sit behind the file name and never be reached."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier2", (command, verdict)
+    assert "D-PC service" in verdict[1], (command, verdict[1])
+
+
+@pytest.mark.parametrize("command", [
+    "pgrep -F run.pid",
+    "pgrep --pidfile run.pid",
+    "pgrep python",
+    "pgrep -f run_service",
+])
+def test_pgrep_kills_nothing_and_stays_where_it_was(service, command):
+    assert tier_of(command) == "tier0", command
+
+
+def test_killall_has_no_pidfile_switch(service):
+    """Pinned rather than extended: `-F` is pkill's, and killall's own reading
+    of the argument is what it was — this gate does not invent a switch for a
+    verb that has none."""
+    assert reason_of("killall -F run.pid") == (
+        "Kills every process whose command line matches run.pid"
+    )
+
+
+def test_the_parent_switch_takes_a_value_like_the_user_and_group_ones(service):
+    """`-P ppid` selects by parent, and the gate read the ppid as the name — so
+    `python`, the pattern that covers this service, was never reached. `-U`/`-u`
+    and `-G`/`-g` differ only by case and take a value either way, which is why
+    folding those costs nothing."""
+    assert tier_of("pkill -P 1 python") == "tier2"
+    assert tier_of("pkill --parent 1 python") == "tier2"
+    assert tier_of("pkill -U root python") == "tier2"
+    assert tier_of("pkill -u root python") == "tier2"
+    assert tier_of("pkill -G 0 python") == "tier2"
+    assert tier_of("pkill -g 0 python") == "tier2"
+
+
+@pytest.mark.parametrize("command,token", [
+    ("kill $(cat run.pid)", "$(cat"),
+    ("kill `cat run.pid`", "`cat"),
+])
+def test_an_id_read_from_a_file_by_the_older_spelling_is_unchanged(service, command, token):
+    """The unreadable-id rule already answers these, and the pidfile sentence
+    must not reach for them: nothing here names a switch."""
+    verdict = _validate_command(command)
+
+    assert verdict is not None and verdict[0] == "tier1", (command, verdict)
+    assert "could not identify" in verdict[1], (command, verdict[1])
+    assert token in verdict[1], (command, verdict[1])
+    assert "a file the gate does not read" not in verdict[1], verdict[1]
+
+
+def test_a_wrapped_method_call_gets_the_method_sentence_not_the_bodys(service):
+    """The unquoted inner command begins with `(`, which also opens a body; the
+    body sentence would name a loop, a conditional or an -exec that is not
+    there, so the method sentence is the one that leads."""
+    reason = reason_of('powershell -Command "(Get-Process -Id 4243).Terminate()"')
+
+    assert reason.startswith("A kill cannot be ruled out: this segment calls .Terminate"), reason
+    assert "opens a body" not in reason, reason
+
+
+def test_the_host_variable_is_read_in_the_flavour_the_wrapper_gave_it(service):
+    """`gps` is an alias no flavour word names, so the inner piece alone says
+    nothing about its shell: PowerShell's `$PID` is refused only because the
+    wrapper's flavour travels down with the piece."""
+    assert tier_of('pwsh -c "(gps -Id $PID).Terminate()"') == "tier2"
+    assert tier_of('bash -c "(gps -Id $PID).Terminate()"') == "tier1"
+
+
+@pytest.mark.parametrize("command", [
+    'echo "kill $PPID"',
+    'echo "please kill $PPID now"',
+])
+def test_a_protected_variable_inside_a_quoted_sentence_is_not_a_target(service, command):
+    """A self target is a token that *begins* with the variable. Read anywhere
+    in the token, a quoted sentence that mentions one would be refused."""
+    assert _validate_command(command) is None, command
+
+
+def test_a_file_whose_name_ends_in_a_method_word_asks(service):
+    """A price, named: end of text stands for the parenthesis `_strip_grouping`
+    ate, so `cat notes.kill` reads as a call."""
+    assert tier_of("cat notes.kill") == "tier1"
+    assert tier_of("cat notes.killed") == "tier0"
