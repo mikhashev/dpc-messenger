@@ -738,3 +738,112 @@ def test_a_missing_pdf_reader_says_how_to_get_it(ctx, tiny, monkeypatch):
         "a bare `uv sync --extra pdf` removes every other extra — measured at 17 "
         "packages on the developer machine — so the message must not hand one out"
     )
+
+
+# ------------------------------------------ a layer that is only a header
+
+def test_a_header_only_layer_beside_images_is_named_a_facsimile(
+    ctx, tiny, tmp_path, monkeypatch
+):
+    """Observed 2026-09-22: pages carrying 34 characters of running header and
+    ten image objects came back as route=text with nothing said about the page
+    underneath. The routing stays as it is — auto must not spend a shared GPU
+    on a book being leafed through — so the answer has to say what it sees."""
+    monkeypatch.setattr(D, "_page_fonts_and_images", lambda page: (set(), 10))
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "1", mode="auto")
+    page = out["per_page"][0]
+
+    assert page["route"] == "text" and vision.calls == [], "auto rerouted the page"
+    assert out["thin_layer_pages"] == [1]
+    assert "only 14 characters of text layer beside 10 image objects" in page["note"]
+    assert "likely a scan or facsimile" in page["note"]
+    assert "the page itself was not read" in page["note"]
+    assert "mode='vision' reads it" in page["note"]
+    assert any("facsimile" in w for w in out["warnings"])
+
+
+def test_a_thin_page_with_no_images_is_not_called_a_facsimile(ctx, tiny):
+    """Fourteen characters on a page with nothing else on it is a short page."""
+    out = _read(ctx, tiny, "1")
+    assert out["per_page"][0]["images"] == 0
+    assert out["thin_layer_pages"] == []
+    assert "facsimile" not in (out["per_page"][0].get("note") or "")
+
+
+def test_two_images_is_below_the_count_a_facsimile_needs(ctx, tiny, monkeypatch):
+    monkeypatch.setattr(
+        D, "_page_fonts_and_images",
+        lambda page: (set(), D.FACSIMILE_MIN_IMAGES - 1),
+    )
+    out = _read(ctx, tiny, "1")
+    assert out["thin_layer_pages"] == []
+    assert "facsimile" not in (out["per_page"][0].get("note") or "")
+
+
+def test_a_page_nobody_could_count_is_not_called_a_facsimile(ctx, tiny, monkeypatch):
+    """The same rule the image count already holds: nobody looked is not a
+    statement about what is there."""
+    monkeypatch.setattr(D, "_page_fonts_and_images", lambda page: (set(), None))
+    out = _read(ctx, tiny, "1")
+    assert out["per_page"][0]["images"] is None
+    assert out["thin_layer_pages"] == []
+
+
+def test_a_full_page_of_text_beside_images_is_not_a_facsimile(monkeypatch):
+    """The false-positive side: a real page of prose with figures on it is the
+    ordinary case, and it already has `figures_not_seen` to report the figures."""
+    monkeypatch.setattr(D, "_page_fonts_and_images", lambda page: (set(), 10))
+    monkeypatch.setattr(D, "_char_fonts", lambda textpage: None)
+    body = "полный текст страницы " * 40
+
+    class _TextPage:
+        def get_text_range(self):
+            return body
+
+    class _Page:
+        def get_textpage(self):
+            return _TextPage()
+
+    class _Doc:
+        def __getitem__(self, index):
+            return _Page()
+
+    entry = D._read_page(_Doc(), 1)
+    assert entry["chars"] >= D.THIN_TEXT_CHARS
+    assert entry.get("note") is None
+
+
+def test_the_thin_boundary_is_the_one_the_library_measured_with():
+    """Both numbers are borrowed, not invented: dpc-library's re-measurement
+    sorts pages under 300 characters as thin, and its Stage 3 routing rule
+    checks a page carrying three images or more before trusting the cheap path."""
+    assert D.THIN_TEXT_CHARS == 300
+    assert D.FACSIMILE_MIN_IMAGES == 3
+
+
+# --------------------------------- what the model was asked for, and why
+
+def test_a_page_with_text_read_on_request_does_not_claim_it_had_none(
+    ctx, tiny, tmp_path
+):
+    """The note was written for the auto route and said so on every page,
+    including one whose text layer was full and deliberately ignored."""
+    vision = _Vision(answer="Hello document, as the model read it")
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "1", mode="vision")
+    page = out["per_page"][0]
+
+    assert page["route"] == "vision"
+    assert "has no text layer" not in page["note"]
+    assert "on request (mode='vision')" in page["note"]
+    assert "its own text layer holds 14 characters and was not used" in page["note"]
+    assert "a transcription, not the document's own characters" in page["note"]
+    assert not any("has no text layer" in w for w in out["warnings"])
+
+
+def test_a_page_that_really_had_no_layer_still_says_so(ctx, tiny, tmp_path):
+    """The other half: the original sentence is right where it was written for."""
+    out = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), tiny, "2", mode="vision")
+    note = out["per_page"][0]["note"]
+    assert "has no text layer and was transcribed by a vision model" in note
+    assert "a transcription, not the document's own characters" in note

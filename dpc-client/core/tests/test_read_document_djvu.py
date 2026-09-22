@@ -440,3 +440,50 @@ def test_no_pdf_reader_is_imported_for_a_djvu(ctx, book, libre, monkeypatch):
     libre(_DjVuLibre(pages=2, text={1: "x"}))
     monkeypatch.setattr("builtins.__import__", refuse)
     assert _read(ctx, book, "1")["format"] == "djvu"
+
+
+# ------------------------------------------ a layer that is only a header
+
+def test_a_header_only_layer_beside_raster_chunks_is_named_a_facsimile(ctx, book, libre):
+    """The DjVu half of the PDF case: a running header over a scanned page."""
+    header = "В ШТАБАХ ПОБЕДЫ\n"
+    libre(_DjVuLibre(pages=3, text={1: header}, raster={1: 10}))
+    out = _read(ctx, book, "1", mode="text")
+    page = out["per_page"][0]
+
+    assert page["route"] == "text", "the routing must not change"
+    assert out["thin_layer_pages"] == [1]
+    assert f"only {len(header)} characters of text layer beside 10 raster chunks" in page["note"]
+    assert "likely a scan or facsimile" in page["note"]
+    assert "mode='vision' reads it" in page["note"]
+    assert any("facsimile" in w for w in out["warnings"])
+
+
+def test_a_thin_djvu_page_with_no_raster_is_not_a_facsimile(ctx, book, libre):
+    libre(_DjVuLibre(pages=2, text={1: "заголовок"}, raster={1: 0}))
+    out = _read(ctx, book, "1", mode="text")
+    assert out["thin_layer_pages"] == []
+    assert "facsimile" not in (out["per_page"][0].get("note") or "")
+
+
+def test_a_full_djvu_page_beside_raster_chunks_is_not_a_facsimile(ctx, book, libre):
+    libre(_DjVuLibre(pages=2, text={1: "полный текст страницы " * 40}, raster={1: 10}))
+    out = _read(ctx, book, "1", mode="text")
+    assert out["per_page"][0]["chars"] >= D.THIN_TEXT_CHARS
+    assert out["thin_layer_pages"] == []
+
+
+def test_a_djvu_page_with_text_read_on_request_does_not_claim_it_had_none(
+    ctx, book, libre, tmp_path
+):
+    layer = "заголовок тома"
+    libre(_DjVuLibre(pages=2, text={1: layer}))
+    vision = _Vision()
+    ctx.dpc_service = SimpleNamespace(llm_manager=vision)
+    ctx.agent_root = tmp_path / "agent"
+
+    page = _read(ctx, book, "1", mode="vision")["per_page"][0]
+    assert page["route"] == "vision"
+    assert "has no text layer" not in page["note"]
+    assert "on request (mode='vision')" in page["note"]
+    assert f"its own text layer holds {len(layer)} characters" in page["note"]

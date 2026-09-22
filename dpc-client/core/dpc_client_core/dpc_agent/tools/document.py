@@ -95,6 +95,23 @@ SYMBOL_FONT_MARKERS = (
 # real mathematical symbol needs lives above it.
 SUSPECT_BELOW = 0x2000
 
+# A page whose text layer holds fewer characters than this is thin. The number
+# is not ours: it is TEXT_MIN_CHARS in dpc-library's re-measurement
+# (`tools/textlayer_remeasure.py`), which sorts every page into none (0 chars) /
+# thin (< 300) / text / garbage. Borrowed rather than re-derived so that a page
+# this tool calls thin is the same page that measurement calls thin.
+THIN_TEXT_CHARS = 300
+
+# ...and how many images beside a thin layer make the page worth doubting.
+# dpc-library's `docs/plan.md` Stage 3 checks every page of a born-digital book
+# against an escalation signal — `n_long_vec >= 4 OR img_area_share >= 0.30 OR
+# n_images >= 3` — before it is trusted on the cheap text-extraction path.
+# n_images >= 3 is the disjunct that can be read from pdfium's own object
+# inventory here, so it is the one used. Observed 2026-09-22 on pages 29/31/33
+# of a four-volume scan: 34 characters of running header beside 10-11 image
+# objects, returned as text with nothing said about the page underneath.
+FACSIMILE_MIN_IMAGES = 3
+
 # The vision route, and every number here is a bound rather than a preference.
 VISION_DPI = 150                    # 2162 image tokens for an A4 page, measured
 DEFAULT_MAX_VISION_PAGES = 2        # per call; the caller raises it deliberately
@@ -314,6 +331,39 @@ def _clean_text_layer(text: str) -> str:
     return text.translate(_NONCHARACTERS)
 
 
+def _is_thin_facsimile(entry: Dict[str, Any]) -> bool:
+    """Did the text route return a running header where a page was?
+
+    Such a page comes back looking like a success — route `text`, a count above
+    zero — with the page itself unread. `not images` covers None as well as
+    zero: a page nobody could measure is not one this may call a facsimile.
+    """
+    chars = entry.get("chars") or 0
+    images = entry.get("images")
+    return (
+        entry.get("route") == "text"
+        and 0 < chars < THIN_TEXT_CHARS
+        and bool(images)
+        and images >= FACSIMILE_MIN_IMAGES
+    )
+
+
+def _thin_facsimile_note(entry: Dict[str, Any], unit: str) -> Optional[str]:
+    """The sentence for such a page, or None if it is not one.
+
+    `unit` is what was counted: a PDF page carries image objects, a DjVu page
+    raster chunks. The rest of the sentence is the same on both.
+    """
+    if not _is_thin_facsimile(entry):
+        return None
+    return (
+        f"page {entry['page']} has only {entry['chars']} characters of text layer "
+        f"beside {entry['images']} {unit}s — likely a scan or facsimile with a "
+        f"header-only layer; the layer was returned, the page itself was not read. "
+        f"mode='vision' reads it."
+    )
+
+
 def _read_page(doc, number: int) -> Dict[str, Any]:
     """One page, and never an exception: a broken page is a marked page.
 
@@ -365,6 +415,12 @@ def _read_page(doc, number: int) -> Dict[str, Any]:
                 f"{suspect} characters came out of {', '.join(suspect_fonts)}, whose "
                 f"glyphs have no Latin meaning — the formulas on this page are unreliable "
                 f"and are returned as extracted, unrepaired"
+            )
+
+        facsimile = _thin_facsimile_note(entry, "image object")
+        if facsimile:
+            entry["note"] = (
+                f"{entry['note']}; {facsimile}" if entry.get("note") else facsimile
             )
     except Exception as exc:
         entry.update(route="failed", error=f"{type(exc).__name__}: {exc}")
@@ -568,6 +624,9 @@ def _read_djvu_page(tools: Dict[str, str], source: Path, number: int) -> Dict[st
             else:
                 tail = "; and no raster data either — the page is genuinely blank"
             notes.append("no text layer on this page" + tail)
+        facsimile = _thin_facsimile_note(entry, "raster chunk")
+        if facsimile:
+            notes.append(facsimile)
         if notes:
             entry["note"] = "; ".join(notes)
     except Exception as exc:
@@ -699,14 +758,23 @@ async def _read_page_with_vision(
     digest: str,
     model: Optional[str],
     dpi: int,
+    requested: bool = False,
 ) -> None:
     """Fill a page's text in by looking at it. Mutates `entry` in place.
 
     `render` hands back image bytes and their media type, or the reason there
     are none. What produced them — pdfium here, ddjvu in a subprocess — is the
     caller's business; from here a page is a picture with a type on it.
+
+    `requested` says the caller asked for the model (mode='vision') rather than
+    the page proving it has no text, which is what the note has to distinguish:
+    a page that did have a layer was transcribed *instead of* being read.
     """
     number = entry["page"]
+    # Read before anything overwrites them: after the model answers, `chars` is
+    # the length of the transcription and `route` is "vision".
+    had_layer = entry.get("route") == "text"
+    layer_chars = entry.get("chars") or 0
     alias = model or "default"
     cache = _cache_path(ctx, digest, number, alias, dpi)
     if cache.exists():
@@ -767,13 +835,21 @@ async def _read_page_with_vision(
         )
         return
 
-    entry.update(
-        route="vision", text=text, chars=len(text), model=used, cached=False,
-        seconds=seconds,
-        note=(
+    if had_layer:
+        why = "on request (mode='vision')" if requested else "by the auto route"
+        note = (
+            f"page {number} was transcribed by a vision model {why} in {seconds} s; "
+            f"its own text layer holds {layer_chars} characters and was not used — "
+            f"a transcription, not the document's own characters"
+        )
+    else:
+        note = (
             f"page {number} has no text layer and was transcribed by a vision model "
             f"in {seconds} s — a transcription, not the document's own characters"
-        ),
+        )
+    entry.update(
+        route="vision", text=text, chars=len(text), model=used, cached=False,
+        seconds=seconds, note=note,
     )
     try:
         cache.write_text(
@@ -816,7 +892,9 @@ async def read_document(
 
     Returns:
         JSON with per-page routes, character counts, image counts, the pages
-        nothing could be read from, and the pages whose mathematics is unreliable.
+        nothing could be read from, the pages whose mathematics is unreliable,
+        and `thin_layer_pages` — pages that returned a header-sized text layer
+        beside several images, which the text route reports rather than reroutes.
     """
     started = time.perf_counter()
     try:
@@ -917,7 +995,8 @@ async def read_document(
     else:
         for entry in candidates:
             await _read_page_with_vision(
-                ctx, render_one, entry, digest, vision_model, VISION_DPI
+                ctx, render_one, entry, digest, vision_model, VISION_DPI,
+                requested=(mode == "vision"),
             )
 
     unreadable = [p["page"] for p in per_page if p["route"] in ("no_text_layer", "failed")]
@@ -927,6 +1006,10 @@ async def read_document(
         for p in per_page
         if p.get("images") and p["route"] == "text"
     ]
+    # A field rather than a sentence, so a pipeline routes on it without
+    # reading prose. Computed after the vision pass: a page the model has since
+    # read is no longer a layer standing in for a page.
+    thin_layer = [p["page"] for p in per_page if _is_thin_facsimile(p)]
 
     warnings = list(notes)
     warnings.extend(p["note"] for p in per_page if p.get("note"))
@@ -994,6 +1077,7 @@ async def read_document(
         "unreadable_pages": unreadable,
         "pages_with_unreliable_math": wants_eye,
         "figures_not_seen": figures_unseen,
+        "thin_layer_pages": thin_layer,
         "vision_pages": [p["page"] for p in per_page if p["route"] == "vision"],
         "vision_pages_refused": refused_pages,
         # What this document cost, so the next decision about the cap is a
@@ -1053,6 +1137,10 @@ def get_tools() -> List[ToolEntry]:
                     "look at, and whether the page's mathematics is unreliable because "
                     "a symbol font mapped its glyphs into Latin letters — never "
                     "repaired, so a flagged page comes back exactly as extracted. The "
+                    "A page that hands back a header-sized text layer beside "
+                    "several images is named in `thin_layer_pages` and said to be a "
+                    "likely facsimile, not rerouted: leafing through a book never "
+                    "spends the GPU by itself, and mode='vision' reads such a page. The "
                     "answer carries a `position` line saying which pages of how many "
                     "you have and how to continue. For a document too long to read "
                     "into a conversation, pass save_to: the pages are written to that "
