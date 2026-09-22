@@ -745,11 +745,14 @@ def test_a_page_that_cannot_be_asked_answers_with_the_four_facts_and_no_guess(
     _session._page.goto(f"{_server}/fallback.html")
     answer = _download(_session, _ctx(_agent_root), "#inert", timeout_seconds=3)
     lines = answer.splitlines()
-    assert len(lines) == 4, answer
+    assert len(lines) == 5, answer
     assert "No download started within 3s" in lines[0]
     assert "did not change" in lines[1]
     assert "1 tab" in lines[2]
-    assert "transfer" in lines[3]
+    # The advice the fourth line carries is about the click, not the page's
+    # links, and is the same whatever the page could not answer.
+    assert "browser_snapshot" in lines[3]
+    assert "transfer" in lines[4]
     assert "links" not in answer.lower()
 
 

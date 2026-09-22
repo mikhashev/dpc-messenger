@@ -214,13 +214,15 @@ def test_a_visible_window_installs_no_route_handler_at_all(
     )
 
     assert ctx.routes == []
-    assert [event for event, _h in ctx.listeners] == ["request"]
+    # `page` is on both sides: it holds nothing up, and it is what keeps a
+    # download nobody asked for from dying with the context.
+    assert [event for event, _h in ctx.listeners] == ["request", "page"]
 
     # The other half, or the test passes by wiring nothing anywhere.
     blind = _StubContext()
     _open_browser(monkeypatch, blind, domains=[TEST_DOMAIN], headed=False)
     assert [pattern for pattern, _h in blind.routes] == ["**/*"]
-    assert blind.listeners == []
+    assert [event for event, _h in blind.listeners] == ["page"]
 
 
 def test_a_visible_window_reaches_what_a_sign_in_delegates_to(

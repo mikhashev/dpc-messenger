@@ -1739,6 +1739,8 @@ _NO_DOWNLOAD_LINK_TEXT_LIMIT = 60
 _CROSS_HOST_LINKS_JS = """
 (max) => {
   const here = location.host;
+  const mine = location.href;
+  const mineEncoded = encodeURIComponent(mine);
   const seen = new Set();
   const out = [];
   for (const a of document.querySelectorAll('a[href]')) {
@@ -1748,16 +1750,101 @@ _CROSS_HOST_LINKS_JS = """
     let host = '';
     try { host = new URL(href).host; } catch (e) { continue; }
     if (!host || host === here || seen.has(href)) continue;
+    // A link to another host that carries this page's own address is a
+    // share button by definition, and a row of them is what a page puts
+    // above the link worth having.
+    if (href.includes(mine) || href.includes(mineEncoded)) continue;
     seen.add(href);
-    out.push({
-      href: href,
-      text: (a.textContent || '').trim().replace(/\\s+/g, ' '),
-    });
-    if (out.length >= max) break;
+    let text = (a.textContent || '').trim().replace(/\\s+/g, ' ');
+    if (!text) text = (a.getAttribute('aria-label') || '').trim();
+    if (!text) text = (a.getAttribute('title') || '').trim();
+    if (!text) {
+      const img = a.querySelector('img[alt]');
+      if (img) text = (img.getAttribute('alt') || '').trim();
+    }
+    out.push({href: href, text: text});
   }
-  return out;
+  // Named first, then the cap: a link nobody can read is worth a slot only
+  // when no named one wants it.
+  return out.filter(l => l.text).concat(out.filter(l => !l.text)).slice(0, max);
 }
 """
+
+
+# What a click that never reached the page is asked afterwards. Short,
+# because the click has already spent its whole wait — and each probe acts
+# as well as asks, so a "passed" means the page may have moved.
+_CLICK_PROBE_TIMEOUT_MS = 5000
+# How long a probe that acted waits for the file it may have started: a
+# download nobody waits for dies with the context.
+_CLICK_PROBE_DOWNLOAD_MS = 5000
+
+# Set on the exception a failed click raises: present when the click itself
+# is what failed, and carrying the probe lines when it timed out.
+_CLICK_DIAGNOSIS_ATTR = "_dpc_click_diagnosis"
+
+# Returns a word rather than undefined: what the probe answered is how
+# `_click_probes` knows it ran at all when the wait after it times out.
+_JS_CLICK = "el => { el.click(); return 'clicked'; }"
+
+# A window Windows is not painting — minimised, or moved off screen —
+# delivers requestAnimationFrame about once a second instead of sixty times,
+# and `document.visibilityState` still says "visible", so the page cannot
+# tell. Playwright's actionability poll rides on rAF, so `click()` waits out
+# its whole timeout without one DOM event reaching the page. Counting the
+# callbacks is the only reading that separates that from a page that is
+# merely slow.
+_RAF_SAMPLE_MS = 250
+_RAF_STARVED_BELOW = 10
+
+_CLICK_FACTS_JS = """
+(el, sample) => new Promise(resolve => {
+  let frames = 0;
+  let done = false;
+  const tick = () => { frames++; if (!done) requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+  setTimeout(() => {
+    done = true;
+    resolve({
+      tag: el.tagName.toLowerCase(),
+      ready: document.readyState,
+      raf: frames,
+    });
+  }, sample);
+})
+"""
+
+_CLICK_DELIVERY_MOUSE = "mouse"
+_CLICK_DELIVERY_EVENT = "dom_event"
+
+_WINDOW_NOT_PAINTED = (
+    "The browser window is not being painted — it is minimised or "
+    "off-screen. Restore it on screen; clicks are then delivered normally."
+)
+
+_UNCLAIMED_DIR_NAME = "unclaimed"
+_UNCLAIMED_NOTE = "unclaimed: no tool call was waiting for this download"
+
+
+def _window_is_starved(facts: dict) -> bool:
+    """True when the frame count says the window is not being painted. A
+    reading that never arrived decides nothing: the ordinary click stands."""
+    raf = (facts or {}).get("raf")
+    return isinstance(raf, (int, float)) and raf < _RAF_STARVED_BELOW
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """Playwright's TimeoutError, by name: the package is an optional extra
+    and this module imports none of it."""
+    return any(cls.__name__ == "TimeoutError" for cls in type(exc).__mro__)
+
+
+def _unclaimed_download_dir(agent_id: str) -> Path:
+    """Where a download nobody claimed lands, beside the ones a tool call
+    asked for."""
+    from ..utils import get_agent_root
+
+    return get_agent_root(agent_id) / _DOWNLOAD_DIR_DEFAULT / _UNCLAIMED_DIR_NAME
 
 
 def _one_line(text: str, limit: int = _DOWNLOAD_SHOWN_LIMIT) -> str:
@@ -2060,6 +2147,11 @@ class AuthBrowser:
         # the subprocess orphans and survives Python exit. See
         # _force_kill_process.
         self._browser_pids: set[int] = set()
+        # True while a `download()` call holds an `expect_download`, so the
+        # file it is about to save is not also saved as unclaimed.
+        self._download_claimed = False
+        self._unclaimed_downloads = 0
+        self._download_watched_pages: set[int] = set()
 
     def _get_executor(self) -> "_PinnedThread":
         """Lazy single-thread runner pinned to this AuthBrowser.
@@ -2269,8 +2361,18 @@ class AuthBrowser:
                 domains=list(self._domains), skip_missing=True
             )
 
+        # Every page, not just the first: a file can also start in a tab the
+        # site opened.
+        try:
+            self._context.on("page", self._watch_for_unclaimed_downloads)
+        except Exception as e:
+            log.debug(
+                "attach download capture to the context failed (agent=%s): %s",
+                self._agent_id, e,
+            )
         self._page = self._context.new_page()
         _attach_page_diagnostics(self._page, agent_id=self._agent_id)
+        self._watch_for_unclaimed_downloads(self._page)
         _active_camoufox_browsers.add(self)
 
     def _inject_vault_cookies(
@@ -3022,24 +3124,150 @@ class AuthBrowser:
             scrolled=scrolled, target=target, wheel_ok=wheel_ok,
         )
 
-    def click(self, ref_or_selector: str, timeout: int = 30000) -> None:
+    def click(
+        self,
+        ref_or_selector: str,
+        timeout: int = 30000,
+        probe_on_timeout: bool = True,
+    ) -> dict:
         """Click an element. Accepts a `@eN` ref from the last
-        `a11y_snapshot()` or a CSS selector (fallback)."""
+        `a11y_snapshot()` or a CSS selector (fallback).
+
+        A click can end at Playwright's "performing click action" with
+        nothing behind it — no request, no error, no line anywhere. The
+        measured cause is a window Windows has stopped painting: see
+        `_RAF_SAMPLE_MS`. So the frame rate is read before the attempt and
+        logged with the element, and a starved window takes
+        `dispatch_event` — the actionability wait it would otherwise sit in
+        is driven by the frames that are not arriving. `probe_on_timeout` is
+        for `download()`, which runs the same probes itself inside a
+        download context; the diagnosis rides on the exception either way.
+
+        Returns how the click was delivered, for the answer to say.
+        """
         self._require_open()
         url = self._page.url
         mode = "ref" if ref_or_selector.startswith("@e") else "css"
+        locator = None
+        facts: dict = {}
+        starved = False
         try:
-            self._resolve_ref(ref_or_selector).click(timeout=timeout)
+            locator = self._resolve_ref(ref_or_selector)
+            facts = self._click_target_facts(locator)
+            starved = _window_is_starved(facts)
+            log.info(
+                "about to click %s (agent=%s, tag=%s, readyState=%s, "
+                "raf=%s in %dms, url=%s)",
+                ref_or_selector, self._agent_id,
+                facts.get("tag") or "unknown", facts.get("ready") or "unknown",
+                facts.get("raf"), _RAF_SAMPLE_MS, url,
+            )
+            if starved:
+                log.warning(
+                    "window is not being painted (minimised or off-screen); "
+                    "dispatching the click without the actionability wait "
+                    "(agent=%s, selector=%s, raf=%s in %dms)",
+                    self._agent_id, ref_or_selector, facts.get("raf"),
+                    _RAF_SAMPLE_MS,
+                )
+                locator.dispatch_event("click", timeout=timeout)
+                delivery = _CLICK_DELIVERY_EVENT
+            else:
+                locator.click(timeout=timeout)
+                delivery = _CLICK_DELIVERY_MOUSE
         except Exception as exc:
+            probes = None
+            if locator is not None and probe_on_timeout and _is_timeout(exc):
+                probes, _file, _by = self._click_probes(locator)
+            if locator is not None:
+                setattr(exc, _CLICK_DIAGNOSIS_ATTR, {
+                    "probes": probes, "raf": facts.get("raf"), "starved": starved,
+                })
             self._audit_action(
                 "click", url, "failed",
-                selector=ref_or_selector, mode=mode,
-                **_audit_error(exc),
+                selector=ref_or_selector, mode=mode, probes=probes,
+                raf=facts.get("raf"), **_audit_error(exc),
             )
             raise
         self._audit_action(
             "click", url, "ok", selector=ref_or_selector, mode=mode,
+            delivery=delivery, raf=facts.get("raf"),
         )
+        return {"delivery": delivery, "raf": facts.get("raf"), "starved": starved}
+
+    def _click_target_facts(self, locator) -> dict:
+        """The element, the document and the frame rate, in one bounded call.
+
+        A page that cannot answer costs the reading, not the click — and an
+        absent reading leaves the ordinary click in place."""
+        try:
+            return locator.evaluate(
+                _CLICK_FACTS_JS, _RAF_SAMPLE_MS, timeout=_CLICK_PROBE_TIMEOUT_MS,
+            ) or {}
+        except Exception as exc:
+            log.debug("click target facts unavailable: %s", exc)
+            return {}
+
+    def _click_probes(self, locator, catch_download: bool = False):
+        """What a click that timed out anyway is asked afterwards, and the
+        file the last of them may start.
+
+        Is the main thread answering; is the window being painted; and does
+        a click dispatched from JS get through. Each is caught on its own,
+        so the first failure still leaves the other answers.
+
+        `wait_for_function` rather than `evaluate` for the first, because
+        `page.evaluate` takes no timeout and an unbounded probe on a wedged
+        page is the thing being diagnosed. `catch_download` wraps the one
+        that acts in a download context: a rescue that works is how the file
+        arrives, and a download nobody waits for dies with the context.
+
+        Returns (lines, download or None, name of the probe that started it).
+        """
+        lines: List[str] = []
+        download = None
+        started_by = ""
+        try:
+            self._page.wait_for_function("1+1", timeout=_CLICK_PROBE_TIMEOUT_MS)
+            lines.append("evaluate: passed")
+        except Exception as exc:
+            lines.append(f"evaluate: failed({type(exc).__name__})")
+
+        facts = self._click_target_facts(locator)
+        if facts.get("raf") is None:
+            lines.append("raf: failed(no answer)")
+        else:
+            lines.append(
+                f"raf: {facts['raf']} in {_RAF_SAMPLE_MS}ms"
+                + (" (starved — the window is not being painted)"
+                   if _window_is_starved(facts) else "")
+            )
+
+        outcome = None
+        try:
+            if catch_download:
+                with self._page.expect_download(
+                    timeout=_CLICK_PROBE_DOWNLOAD_MS
+                ) as pending:
+                    outcome = locator.evaluate(
+                        _JS_CLICK, timeout=_CLICK_PROBE_TIMEOUT_MS
+                    )
+                download = pending.value
+                started_by = "js_click"
+            else:
+                outcome = locator.evaluate(
+                    _JS_CLICK, timeout=_CLICK_PROBE_TIMEOUT_MS
+                )
+        except Exception as exc:
+            if outcome is None:
+                lines.append(f"js_click: failed({type(exc).__name__})")
+                return lines, download, started_by
+            # The rescue itself ran; what ran out was the wait for a file.
+        lines.append(
+            "js_click: passed and started the download" if download is not None
+            else "js_click: passed"
+        )
+        return lines, download, started_by
 
     def _cross_host_links(self) -> Optional[List[dict]]:
         """The current page's links to a host other than its own, bounded.
@@ -3057,9 +3285,13 @@ class AuthBrowser:
         except Exception as exc:
             log.debug("cross-host link scan failed: %s", exc)
             return None
+        named = [i for i in (raw or []) if (i or {}).get("href") and i.get("text")]
+        nameless = [
+            i for i in (raw or []) if (i or {}).get("href") and not i.get("text")
+        ]
         links: List[dict] = []
-        for item in (raw or [])[:_NO_DOWNLOAD_LINKS_MAX]:
-            href = _one_line(str((item or {}).get("href") or ""))
+        for item in (named + nameless)[:_NO_DOWNLOAD_LINKS_MAX]:
+            href = _one_line(str(item.get("href") or ""))
             if not href:
                 continue
             links.append({
@@ -3097,41 +3329,82 @@ class AuthBrowser:
             title = self._page.title()
         except Exception:
             title = ""
+        probes: Optional[List[str]] = None
+        started_by = ""
+        starved = False
+        self._download_claimed = True
         try:
-            with self._page.expect_download(timeout=timeout) as pending:
-                self.click(ref_or_selector, timeout=timeout)
-        except ValueError:
-            raise  # a ref the snapshot no longer answers
-        except Exception as exc:
-            if _is_session_dead(exc):
-                raise
-            # An ordinary link, an element that never moved, and a network
-            # that was down for the minute all arrive here as one timeout, so
-            # nothing here says which: what goes back is where the page was,
-            # where it is, and how many tabs there are — a site that opens the
-            # file in a new tab is the other reading of a silent click.
-            now = self._page.url
             try:
-                tab_count = len(self._context.pages)
-            except Exception:
-                tab_count = 0
-            links = self._cross_host_links()
-            self._audit_action(
-                "download", url, "failed",
-                selector=ref_or_selector, reason="no_download",
-                timeout=timeout, page_url=now, url_before=url,
-                tab_count=tab_count, error=type(exc).__name__,
-                # The count, not the hrefs: the row is a ledger of what the
-                # tool did, and the links themselves are in the answer.
-                cross_host_links=None if links is None else len(links),
+                with self._page.expect_download(timeout=timeout) as pending:
+                    starved = bool(self.click(
+                        ref_or_selector, timeout=timeout, probe_on_timeout=False,
+                    ).get("starved"))
+                download = pending.value
+            except ValueError:
+                raise  # a ref the snapshot no longer answers
+            except Exception as exc:
+                if _is_session_dead(exc):
+                    raise
+                download = None
+                diagnosis = getattr(exc, _CLICK_DIAGNOSIS_ATTR, None) or {}
+                starved = bool(diagnosis.get("starved"))
+                # Only when the CLICK is what timed out: a click that landed
+                # and started nothing must not be repeated by a probe, because
+                # a site that meters downloads charges for the second press.
+                if hasattr(exc, _CLICK_DIAGNOSIS_ATTR) and _is_timeout(exc):
+                    try:
+                        probes, download, started_by = self._click_probes(
+                            self._resolve_ref(ref_or_selector),
+                            catch_download=True,
+                        )
+                    except Exception as probe_exc:
+                        log.debug("click probes unavailable: %s", probe_exc)
+                if download is None:
+                    # An ordinary link, an element that never moved, and a
+                    # network that was down for the minute all arrive here as
+                    # one timeout, so nothing here says which: what goes back
+                    # is where the page was, where it is, and how many tabs
+                    # there are — a site that opens the file in a new tab is
+                    # the other reading of a silent click.
+                    now = self._page.url
+                    try:
+                        tab_count = len(self._context.pages)
+                    except Exception:
+                        tab_count = 0
+                    links = self._cross_host_links()
+                    self._audit_action(
+                        "download", url, "failed",
+                        selector=ref_or_selector, reason="no_download",
+                        timeout=timeout, page_url=now, url_before=url,
+                        tab_count=tab_count, error=type(exc).__name__,
+                        probes=probes,
+                        # The count, not the hrefs: the row is a ledger of
+                        # what the tool did, and the links themselves are in
+                        # the answer.
+                        cross_host_links=None if links is None else len(links),
+                    )
+                    return {
+                        "status": "no_download", "page_url": now,
+                        "url_before": url, "tab_count": tab_count,
+                        "cross_host_links": links, "probes": probes,
+                        "window_not_painted": starved,
+                        "timeout_ms": timeout, "error": type(exc).__name__,
+                    }
+            return self._save_download(
+                download, ref_or_selector, target_dir, cap, url, title,
+                probes, started_by, starved,
             )
-            return {
-                "status": "no_download", "page_url": now, "url_before": url,
-                "tab_count": tab_count, "cross_host_links": links,
-                "timeout_ms": timeout, "error": type(exc).__name__,
-            }
+        finally:
+            self._download_claimed = False
 
-        download = pending.value
+    def _save_download(
+        self, download, ref_or_selector: str, target_dir: Path, cap: int,
+        url: str, title: str, probes: Optional[List[str]] = None,
+        started_by: str = "", starved: bool = False,
+    ) -> dict:
+        """Copy the bytes out of Playwright's temp folder and say what they
+        are. Split from `download()` so the file a probe started is saved by
+        the same path as the one the click started."""
         suggested = download.suggested_filename or ""
         try:
             source_url = download.url or ""
@@ -3201,7 +3474,72 @@ class AuthBrowser:
             "source_url": source_url,
             "page_url": url,
             "page_title": title,
+            "probes": probes,
+            "started_by": started_by,
+            "window_not_painted": starved,
         }
+
+    def _watch_for_unclaimed_downloads(self, page) -> None:
+        """Keep the files this session starts without being asked.
+
+        Playwright puts every download in a temp folder under a GUID and
+        deletes it at context close, so a file started by a hand click in the
+        visible window, or by a page that redirects between two tool calls,
+        left nothing behind and said nothing. Idempotent: the context's own
+        `page` event also fires for the page `_open` creates."""
+        if page is None or id(page) in self._download_watched_pages:
+            return
+        try:
+            page.on("download", self._keep_unclaimed_download)
+        except Exception as exc:
+            log.debug("attach download capture failed: %s", exc)
+            return
+        self._download_watched_pages.add(id(page))
+
+    def _keep_unclaimed_download(self, download) -> None:
+        """Save a download no tool call is waiting for, and record it the way
+        `browser_download` records its own."""
+        if self._download_claimed:
+            return
+        try:
+            suggested = download.suggested_filename or ""
+            source_url = download.url or ""
+            directory = _unclaimed_download_dir(self._agent_id)
+            directory.mkdir(parents=True, exist_ok=True)
+            path = _unique_download_path(directory, _safe_download_name(suggested))
+            download.save_as(str(path))
+            size = path.stat().st_size
+            with open(path, "rb") as fh:
+                detected = _sniff_file_type(fh.read(_DOWNLOAD_SNIFF_BYTES))
+            page_url, page_title = "", ""
+            try:
+                page = download.page
+                page_url, page_title = page.url, page.title()
+            except Exception:
+                pass
+            self._unclaimed_downloads += 1
+            log.info(
+                "kept an unclaimed download: %s (%d bytes, type=%s) from %s "
+                "(agent=%s)",
+                path, size, detected, source_url, self._agent_id,
+            )
+            _append_download_record(directory, {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "saved_path": path.name,
+                "bytes": size,
+                "sha256": _file_sha256(path),
+                "detected_type": detected,
+                "suggested_filename": suggested,
+                "url": source_url,
+                "page_url": page_url,
+                "page_title": _one_line(page_title),
+                "note": _UNCLAIMED_NOTE,
+            })
+        except Exception as exc:
+            log.warning(
+                "an unclaimed download could not be kept (agent=%s): %s: %s",
+                self._agent_id, type(exc).__name__, exc,
+            )
 
     def fill(self, ref_or_selector: str, text: str) -> None:
         """Fill an input element. Accepts a `@eN` ref or CSS selector.
@@ -3729,7 +4067,17 @@ class AuthBrowser:
                         url = self._page.url
                     except Exception:
                         pass
-                self._audit_action("close", url, "ok")
+                self._audit_action(
+                    "close", url, "ok",
+                    unclaimed_downloads=self._unclaimed_downloads,
+                )
+                if self._unclaimed_downloads:
+                    log.info(
+                        "session kept %d unclaimed download(s) in %s (agent=%s)",
+                        self._unclaimed_downloads,
+                        _unclaimed_download_dir(self._agent_id),
+                        self._agent_id,
+                    )
                 if self._context is not None:
                     try:
                         self._persist_session_cookies()
@@ -4838,7 +5186,9 @@ async def browser_click(
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            await _run_in_session(session, "click", ref_or_selector, timeout)
+            outcome = await _run_in_session(
+                session, "click", ref_or_selector, timeout,
+            )
         except ValueError as e:
             return f"⚠️ {e}"
         except Exception as e:
@@ -4846,7 +5196,22 @@ async def browser_click(
                 "click failed (agent=%s): %s: %s",
                 agent_id, type(e).__name__, str(e).split(chr(10))[0],
             )
-            return f"⚠️ Click failed: {type(e).__name__}: {e}"
+            # First line only: Playwright appends a call log dozens of lines
+            # long, and what the agent needs after it is the probes.
+            diagnosis = getattr(e, _CLICK_DIAGNOSIS_ATTR, None) or {}
+            lines = [
+                f"⚠️ Click failed: {type(e).__name__}: "
+                f"{_one_line(str(e).split(chr(10))[0])}"
+            ]
+            if diagnosis.get("starved"):
+                lines.append(_WINDOW_NOT_PAINTED)
+            lines.extend(_probe_answer_lines(diagnosis.get("probes")))
+            return "\n".join(lines)
+    if isinstance(outcome, dict) and outcome.get("delivery") == _CLICK_DELIVERY_EVENT:
+        return (
+            f"Clicked {ref_or_selector} (as a DOM event; window not painted).\n"
+            f"{_WINDOW_NOT_PAINTED}"
+        )
     return f"Clicked {ref_or_selector}"
 
 
@@ -5163,6 +5528,20 @@ def _download_ledger_tally(directory: Path) -> Tuple[int, int]:
     return total, today_count
 
 
+def _probe_answer_lines(probes: Optional[List[str]]) -> List[str]:
+    """The probe outcomes, one per line, under a heading that says js_click
+    acted.
+
+    That last probe is also a press that got through, so an agent reading
+    "js_click: passed" must not be left thinking the page stood still."""
+    if not probes:
+        return []
+    return [
+        "The click never reached the page; js_click below is also an "
+        "attempt, so a pass there may have acted on it:"
+    ] + [f"  {line}" for line in probes[:3]]
+
+
 def _download_answer(
     ctx: ToolContext, directory: Path, result: dict, note: str,
 ) -> str:
@@ -5177,13 +5556,25 @@ def _download_answer(
         # Facts only. The sentence that used to stand here guessed the element
         # was an ordinary link; on the live run the button was the right one
         # and the network was down, so the guess cost a turn.
+        moved = before != now
         lines = [
             f"No download started within {waited}s of the click "
             f"({result.get('error', 'TimeoutError')}).",
             f"The page was {before} before the click and is {now} now — "
-            f"{'the URL changed' if before != now else 'the URL did not change'}.",
+            f"{'the URL changed' if moved else 'the URL did not change'}.",
             f"The browser context has {tabs} tab(s).",
         ]
+        # What to do next, from the one fact that separates the two cases.
+        lines.append(
+            "The page advanced: take a fresh browser_snapshot and run "
+            "browser_download on the link the new page offers."
+            if moved else
+            "The page did not move: a fresh browser_snapshot and the same "
+            "click again is the move that has worked here."
+        )
+        if result.get("window_not_painted"):
+            lines.append(_WINDOW_NOT_PAINTED)
+        lines.extend(_probe_answer_lines(result.get("probes")))
         # What the page itself offers off its own host — a site's own fallback
         # link is the usual answer to a button that starts nothing. A page
         # that could not be asked (None) says nothing rather than claiming it
@@ -5248,6 +5639,15 @@ def _download_answer(
     )
     if result.get("source_url"):
         lines.append(f"It came from {_one_line(result['source_url'])}")
+    if result.get("started_by"):
+        lines.append(
+            f"The click itself never reached the page — the "
+            f"{result['started_by']} probe started this download."
+        )
+    if result.get("window_not_painted"):
+        lines.append(
+            "The click was delivered as a DOM event. " + _WINDOW_NOT_PAINTED
+        )
     if note:
         lines.append(f"Your note: {note}")
 

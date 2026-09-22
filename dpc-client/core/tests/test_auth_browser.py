@@ -739,6 +739,7 @@ class _FakeStateContext:
     def __init__(self, on_storage_state=None, cookies_payload=None):
         self.added: list[list[dict]] = []
         self.routes: list[tuple[str, object]] = []
+        self.listeners: list[tuple[str, object]] = []
         self.pages: list[object] = []
         self._on_storage_state = on_storage_state
         self.cookies_payload: list[dict] = list(cookies_payload or [])
@@ -751,6 +752,9 @@ class _FakeStateContext:
 
     def route(self, pattern: str, handler) -> None:
         self.routes.append((pattern, handler))
+
+    def on(self, event: str, handler) -> None:
+        self.listeners.append((event, handler))
 
     def new_page(self):
         page = object()

@@ -406,7 +406,7 @@ Interactive headed/headless browser driven via Camoufox + Playwright. Disabled b
 | `browser_snapshot` | Accessibility-tree snapshot of the page with element refs | ⛔ opt-in |
 | `browser_navigate` | Navigate the stateful session to a URL | ⛔ opt-in |
 | `browser_scroll` | Scroll the page / a scrollable container (real wheel events) | ⛔ opt-in |
-| `browser_click` | Click an element by ref or selector | ⛔ opt-in |
+| `browser_click` | Click an element by ref or selector. A window the OS is not painting (minimised or off-screen) starves Playwright's actionability wait, so the frame rate is read first and the click is then delivered as a DOM event, which the answer says; a click that times out anyway comes back with three probes — main thread, frame rate, JS click | ⛔ opt-in |
 | `browser_fill` | Fill an input field | ⛔ opt-in |
 | `browser_select` | Choose one option of a native `<select>` by value, visible label or 0-based index (what `browser_click` and `browser_fill` cannot do); fires the page's own `input`/`change` handlers, reports a URL change, does not submit the form, and sets a secret select without echoing its option | ⛔ opt-in |
 | `browser_wait_for` | Wait for an element/condition | ⛔ opt-in |
@@ -414,7 +414,7 @@ Interactive headed/headless browser driven via Camoufox + Playwright. Disabled b
 | `browser_screenshot` | Capture a screenshot | ⛔ opt-in |
 | `browser_switch_tab` | Switch between open tabs | ⛔ opt-in |
 | `browser_collect` | Collect items from infinite-scroll / paginated lists, one line per item with its link, handed back in `offset`/`limit` windows | ⛔ opt-in |
-| `browser_download` | Click a download link and save the file into the agent's sandbox (`downloads/` by default): sanitized filename, size cap, sha256, signature check against the extension, and one provenance line per file in `downloads.jsonl` | ⛔ opt-in |
+| `browser_download` | Click a download link and save the file into the agent's sandbox (`downloads/` by default): sanitized filename, size cap, sha256, signature check against the extension, and one provenance line per file in `downloads.jsonl`. A download nobody asked for — a hand click in the visible window, a page that redirects — is kept in `downloads/unclaimed/` with its own ledger line instead of dying with the browser context | ⛔ opt-in |
 | `browser_close` | Close the browser session | ⛔ opt-in |
 
 ### Shell Tool (ADR-030)
