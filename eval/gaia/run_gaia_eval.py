@@ -362,6 +362,31 @@ def gold_fingerprint(gold: str) -> str:
 
 
 CANARY_NAME = "gaia-validation-answers.json"
+CANARY_NOTE = "decoy planted by the GAIA harness"
+
+
+def remove_stale_decoys(caches: List[Path], results_dir: Optional[Path]) -> List[Path]:
+    """Decoys a killed run left behind, removed by the next start.
+
+    A run removes its bait in `finally`, and a taskkill of the process tree
+    never reaches that. Only a file carrying the harness's own note is touched:
+    anything else by that name is somebody else's and stays.
+    """
+    removed: List[Path] = []
+    for target in [c / CANARY_NAME for c in caches] + (
+        [results_dir / CANARY_NAME] if results_dir else []
+    ):
+        try:
+            body = json.loads(target.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(body, dict) and body.get("note") == CANARY_NOTE:
+            try:
+                target.unlink()
+                removed.append(target)
+            except Exception:
+                continue
+    return removed
 
 
 def plant_canary(caches: List[Path], results_dir: Optional[Path], token: str) -> List[Path]:
@@ -374,7 +399,7 @@ def plant_canary(caches: List[Path], results_dir: Optional[Path], token: str) ->
     ledger is proof of a read rather than absence of evidence.
     """
     payload = json.dumps(
-        {"canary": token, "note": "decoy planted by the GAIA harness", "answers": {}},
+        {"canary": token, "note": CANARY_NOTE, "answers": {}},
         indent=2,
     )
     planted: List[Path] = []
@@ -461,12 +486,32 @@ def drop_gated_credentials() -> List[str]:
 _HUB_VARS = ("HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_DATASETS_CACHE")
 
 
+def _point_library_at(home: str, hub: str) -> None:
+    """Set the cache path `huggingface_hub` froze at import, if it is imported.
+
+    The environment alone reaches only an import that has not happened yet.
+    """
+    try:
+        from huggingface_hub import constants as _hf_constants
+
+        _hf_constants.HF_HOME = home
+        _hf_constants.HF_HUB_CACHE = hub
+        _hf_constants.HUGGINGFACE_HUB_CACHE = hub
+    except Exception:
+        # The library not being importable here is not a reason to fail a run;
+        # every download below also names its cache explicitly.
+        pass
+
+
 def redirect_hub_into(workdir: Path) -> Tuple[Path, Dict[str, Optional[str]]]:
     """Point huggingface_hub at a directory this run owns, so it can delete it.
 
     Returns the directory and the settings it replaced, which `restore_hub`
     puts back: the redirect hides every other model in the machine's cache as
     well as the dataset, and the agent needs its embedding model from there.
+    The library's frozen constants are moved too, symmetric with `restore_hub`:
+    on 2026-09-23 `resolve_hf_token` imported the library before this ran, and
+    a smoke run downloaded the gold into the machine's real cache.
     """
     private = workdir / "hf"
     (private / "hub").mkdir(parents=True, exist_ok=True)
@@ -475,6 +520,7 @@ def redirect_hub_into(workdir: Path) -> Tuple[Path, Dict[str, Optional[str]]]:
     os.environ["HF_HUB_CACHE"] = str(private / "hub")
     os.environ["HUGGINGFACE_HUB_CACHE"] = str(private / "hub")
     os.environ["HF_DATASETS_CACHE"] = str(private / "datasets")
+    _point_library_at(str(private), str(private / "hub"))
     return private, previous
 
 
@@ -494,24 +540,49 @@ def restore_hub(previous: Dict[str, Optional[str]]) -> None:
             os.environ.pop(var, None)
         else:
             os.environ[var] = value
+    home = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
+    _point_library_at(home, os.environ.get("HF_HUB_CACHE") or str(Path(home) / "hub"))
+
+
+class GoldOutsideThePrivateCache(RuntimeError):
+    """A download landed somewhere this run will not delete."""
+
+
+def _inside(path: Path, root: Path) -> bool:
     try:
-        from huggingface_hub import constants as _hf_constants
-
-        home = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
-        _hf_constants.HF_HOME = home
-        _hf_constants.HF_HUB_CACHE = os.environ.get("HF_HUB_CACHE") or str(Path(home) / "hub")
-        _hf_constants.HUGGINGFACE_HUB_CACHE = _hf_constants.HF_HUB_CACHE
-    except Exception:
-        # The library not being importable here is not a reason to fail a run;
-        # the cost of missing it is a re-download, not a wrong number.
-        pass
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except ValueError:
+        return False
 
 
-def load_tasks(token: str, limit: Optional[int], with_files: bool) -> List[Dict[str, Any]]:
+def _checked_download(cache_dir: Path, filename: str, token: str) -> Path:
+    """`hf_hub_download` into `cache_dir`, named explicitly, and proved to be there.
+
+    Explicit because the library's default is a constant frozen at its first
+    import, which any earlier import can point at the machine's real cache.
+    Proved because a path outside the private cache is one this run would
+    report as removed and leave behind — so it stops before deleting anything.
+    """
     from huggingface_hub import hf_hub_download
+
+    path = Path(hf_hub_download(REPO, filename, repo_type="dataset", token=token,
+                                cache_dir=str(cache_dir)))
+    _DATASET_STATE.setdefault("downloaded_to", []).append(str(path))
+    if not _inside(path, cache_dir):
+        raise GoldOutsideThePrivateCache(
+            f"{filename} was written to {path}, outside this run's private cache "
+            f"{cache_dir}; nothing was deleted — remove it by hand before the next run")
+    return path
+
+
+def load_tasks(token: str, limit: Optional[int], with_files: bool,
+               cache_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     import pyarrow.parquet as pq
 
-    path = hf_hub_download(REPO, SPLIT, repo_type="dataset", token=token)
+    if cache_dir is None:
+        raise ValueError("load_tasks needs the private cache_dir it may write to")
+    path = _checked_download(cache_dir, SPLIT, token)
     _DATASET_STATE["local_path"] = str(path)
     # .../snapshots/<revision>/2023/validation/... — the revision is the only
     # thing that pins which version of a gated dataset was actually read.
@@ -526,13 +597,14 @@ def load_tasks(token: str, limit: Optional[int], with_files: bool) -> List[Dict[
     return rows
 
 
-def fetch_attachment(token: str, file_name: str, into: Path) -> Optional[Path]:
-    from huggingface_hub import hf_hub_download
-
+def fetch_attachment(token: str, file_name: str, into: Path,
+                     cache_dir: Optional[Path] = None) -> Optional[Path]:
+    if cache_dir is None:
+        raise ValueError("fetch_attachment needs the private cache_dir it may write to")
     try:
-        src = hf_hub_download(
-            REPO, f"{ATTACHMENT_DIR}/{file_name}", repo_type="dataset", token=token
-        )
+        src = _checked_download(cache_dir, f"{ATTACHMENT_DIR}/{file_name}", token)
+    except GoldOutsideThePrivateCache:
+        raise
     except Exception:
         return None
     into.mkdir(parents=True, exist_ok=True)
@@ -776,7 +848,12 @@ async def main_async(args) -> int:
     # steps that no path gate sees, because the path lives inside the file. So
     # the answer is not a better gate, it is not leaving the answers where a
     # process can open them.
+    _DATASET_STATE.pop("downloaded_to", None)
     real_caches = hub_caches_in_effect()
+    stale = remove_stale_decoys(real_caches, RESULTS_DIR)
+    _DATASET_STATE["stale_decoys_removed"] = [str(p) for p in stale]
+    if stale:
+        print(f"removed {len(stale)} stale decoy(s) a killed run left behind", flush=True)
     visible = reachable_gold(real_caches, RESULTS_DIR, archives=[GOLD_ARCHIVE])
     _DATASET_STATE["gold_reachable_at_start"] = [str(v) for v in visible]
     _DATASET_STATE["gold_reachable_allowed"] = bool(args.allow_reachable_gold)
@@ -813,22 +890,42 @@ async def main_async(args) -> int:
         logs_root.mkdir(parents=True, exist_ok=True)
 
         private_hub, hub_before = redirect_hub_into(workdir)
-        rows = load_tasks(token, args.limit, args.with_files)
-        print(f"{len(rows)} task(s) from GAIA L1 validation", flush=True)
+        private_cache = private_hub / "hub"
+        try:
+            rows = load_tasks(token, args.limit, args.with_files, cache_dir=private_cache)
+            print(f"{len(rows)} task(s) from GAIA L1 validation", flush=True)
 
-        # Every attachment is fetched now, while the cache still exists, and copied
-        # into the sandbox. After this the run needs the hub for nothing, so the
-        # cache goes and the gold survives only in `rows` — in memory.
-        prefetched: Dict[str, Optional[Path]] = {}
-        for row in rows:
-            if row.get("file_name"):
-                prefetched[row["task_id"]] = fetch_attachment(
-                    token, row["file_name"], attachments_dir
-                )
+            # Every attachment is fetched now, while the cache still exists, and
+            # copied into the sandbox. After this the run needs the hub for
+            # nothing, so the cache goes and the gold survives only in `rows`.
+            prefetched: Dict[str, Optional[Path]] = {}
+            for row in rows:
+                if row.get("file_name"):
+                    prefetched[row["task_id"]] = fetch_attachment(
+                        token, row["file_name"], attachments_dir, cache_dir=private_cache
+                    )
+        except GoldOutsideThePrivateCache as exc:
+            print(f"ABORTED: {exc}", flush=True)
+            return CONTAMINATED_EXIT
         shutil.rmtree(private_hub, ignore_errors=True)
-        _DATASET_STATE["private_cache_removed"] = not private_hub.exists()
+        # Removed means every file the downloads returned is gone, not that the
+        # directory we meant to use is: the two differed on 2026-09-23 and the
+        # log said «removed: True» with the answers in the machine's own cache.
+        downloaded = [Path(p) for p in _DATASET_STATE.get("downloaded_to", [])]
+        _DATASET_STATE["private_cache_removed"] = (
+            not private_hub.exists() and not any(p.exists() for p in downloaded))
         restore_hub(hub_before)
         hub_before = None
+        # The same enumeration as the start, again, before any agent exists: a
+        # copy that appeared during setup is a leak of this run's own making.
+        leaked = [p for p in reachable_gold(hub_caches_in_effect(), RESULTS_DIR,
+                                            archives=[GOLD_ARCHIVE])
+                  if str(p) not in set(_DATASET_STATE["gold_reachable_at_start"])]
+        if leaked or not _DATASET_STATE["private_cache_removed"]:
+            _DATASET_STATE["gold_leaked_during_setup"] = [str(p) for p in leaked]
+            print("ABORTED before the first task: the answers are readable after setup: "
+                  + "; ".join(str(p) for p in leaked or downloaded), flush=True)
+            return CONTAMINATED_EXIT
         _DATASET_STATE["token_dropped"] = drop_gated_credentials()
         token = None
         env_before.update(fence_stored_token(workdir))
@@ -967,6 +1064,8 @@ async def main_async(args) -> int:
                 "gold_reachable_at_start": _DATASET_STATE.get("gold_reachable_at_start", []),
                 "gold_reachable_allowed": _DATASET_STATE.get("gold_reachable_allowed", False),
                 "private_cache_removed": _DATASET_STATE.get("private_cache_removed"),
+                "downloaded_to": _DATASET_STATE.get("downloaded_to", []),
+                "stale_decoys_removed": _DATASET_STATE.get("stale_decoys_removed", []),
             },
             **({"approvals": approver.summary()} if approver is not None else {}),
             "provenance": provenance.snapshot(

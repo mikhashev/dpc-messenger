@@ -145,7 +145,15 @@ def run_checks(alias: str, efforts: List[str], results_dir: Path,
     if shutil.which("uv") is None:
         add("FAIL", "uv", "`uv` is not on PATH; every run is launched through it")
 
-    # 7. no readable answers, or every run refuses in its first second
+    # 7. no readable answers, or every run refuses in its first second. Decoys a
+    # killed run left are removed first — only files carrying the harness note.
+    try:
+        stale = gaia.remove_stale_decoys(gaia.hub_caches_in_effect(), results_dir)
+        add("OK", "stale decoys", f"removed {len(stale)}" + (
+            ": " + "; ".join(str(p) for p in stale[:4]) + (" …" if len(stale) > 4 else "")
+            if stale else ""))
+    except Exception as exc:
+        add("WARN", "stale decoys", f"{type(exc).__name__}: {exc}")
     try:
         found = gaia.reachable_gold(gaia.hub_caches_in_effect(), results_dir,
                                     archives=[gaia.GOLD_ARCHIVE])
