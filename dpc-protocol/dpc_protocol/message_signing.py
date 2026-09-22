@@ -50,7 +50,20 @@ __all__ = [
     "VOTE_PREIMAGE_VERSION",
     "vote_preimage",
     "vote_content_hash",
+    "GOSSIP_PREIMAGE_VERSION",
+    "gossip_preimage",
+    "gossip_content_hash",
 ]
+
+
+def _length_prefixed(fields) -> bytes:
+    """``len(bytes) + ":" + bytes`` for each field, in order — see the module doc."""
+    out = bytearray()
+    for field in fields:
+        encoded = field.encode("utf-8")
+        out += f"{len(encoded)}:".encode("utf-8")
+        out += encoded
+    return bytes(out)
 
 
 def _canonical_timestamp(timestamp: Optional[str]) -> str:
@@ -146,12 +159,7 @@ def message_preimage(
         last,
     ]
 
-    out = bytearray()
-    for field in fields:
-        encoded = field.encode("utf-8")
-        out += f"{len(encoded)}:".encode("utf-8")
-        out += encoded
-    return bytes(out)
+    return _length_prefixed(fields)
 
 
 def message_content_hash(**fields: Any) -> str:
@@ -214,14 +222,54 @@ def vote_preimage(
         _canonical_timestamp(timestamp),
     ]
 
-    out = bytearray()
-    for field in fields:
-        encoded = field.encode("utf-8")
-        out += f"{len(encoded)}:".encode("utf-8")
-        out += encoded
-    return bytes(out)
+    return _length_prefixed(fields)
 
 
 def vote_content_hash(**fields: Any) -> str:
     """SHA256 of the canonical vote preimage, hex — the value that gets signed."""
     return hashlib.sha256(vote_preimage(**fields)).hexdigest()
+
+
+GOSSIP_PREIMAGE_VERSION = "dptp-gossip-v1"
+
+
+def gossip_preimage(
+    *,
+    message_id: Optional[str],
+    source: Optional[str],
+    destination: Optional[str],
+    payload: Any,
+    max_hops: Any,
+    created_at: Any,
+    ttl: Any,
+    priority: Optional[str],
+    vector_clock: Any,
+) -> bytes:
+    """The exact bytes a GOSSIP_MESSAGE origin signature covers.
+
+    Every field the author fixes when it creates the message. `hops` and
+    `already_forwarded` are left out because each relay rewrites them; a relay
+    can therefore reset them, which is bounded by the signed `created_at` + `ttl`
+    and by the receiver's deduplication on `message_id`.
+
+    Numbers go through the canonical JSON so an int stays an int and a float
+    keeps its JSON spelling on both ends. Own version tag, like the vote.
+    """
+    fields = [
+        GOSSIP_PREIMAGE_VERSION,
+        message_id or "",
+        source or "",
+        destination or "",
+        _canonical_json(payload),
+        _canonical_json(max_hops),
+        _canonical_json(created_at),
+        _canonical_json(ttl),
+        priority or "",
+        _canonical_json(vector_clock),
+    ]
+    return _length_prefixed(fields)
+
+
+def gossip_content_hash(**fields: Any) -> str:
+    """SHA256 of the canonical gossip preimage, hex — the value that gets signed."""
+    return hashlib.sha256(gossip_preimage(**fields)).hexdigest()

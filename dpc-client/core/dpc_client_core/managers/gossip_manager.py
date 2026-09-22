@@ -54,6 +54,38 @@ def gossip_message_frame(msg: GossipMessage) -> Dict:
     }
 
 
+def origin_refusal(msg: GossipMessage) -> Optional[str]:
+    """Why ``msg`` cannot be shown to come from ``msg.source``, or None if it can.
+
+    Self-contained on purpose: the key is the certificate the message carries,
+    bound to ``source`` by re-deriving the node id from its public key, so no
+    DHT or cache lookup (which can miss or be poisoned) stands between a frame
+    and its check. Encryption to us proves nothing here - anyone holds our key.
+    Returns the stats key to count the refusal under.
+    """
+    from cryptography import x509
+    from dpc_protocol.commit_integrity import CommitSigner
+    from dpc_protocol.crypto import generate_node_id
+    from dpc_protocol.message_signing import GOSSIP_PREIMAGE_VERSION
+
+    if not (msg.signature and msg.cert_pem and msg.gossip_preimage_version):
+        return "unsigned_frames_refused"
+    try:
+        cert = x509.load_pem_x509_certificate(msg.cert_pem.encode("utf-8"))
+        signer_id = generate_node_id(cert.public_key())
+    except Exception:  # noqa: BLE001 - an unreadable certificate binds nothing
+        return "source_mismatch_frames_refused"
+    if signer_id != msg.source:
+        return "source_mismatch_frames_refused"
+    if msg.gossip_preimage_version != GOSSIP_PREIMAGE_VERSION:
+        return "bad_signature_frames_refused"
+    if not CommitSigner.verify_with_public_key(
+        cert.public_key(), msg.origin_hash(), msg.signature
+    ):
+        return "bad_signature_frames_refused"
+    return None
+
+
 class GossipManager:
     """
     Manages gossip protocol for store-and-forward messaging.
@@ -145,6 +177,11 @@ class GossipManager:
             # Flat GOSSIP_MESSAGE frames read from nodes older than 2026-09-14;
             # counted by GossipMessageHandler. See gossip_message_frame().
             "flat_frames_accepted": 0,
+            # Frames refused before anything else because the origin signature
+            # does not show they come from their `source`. See origin_refusal().
+            "unsigned_frames_refused": 0,
+            "source_mismatch_frames_refused": 0,
+            "bad_signature_frames_refused": 0,
         }
 
         logger.info(
@@ -495,6 +532,25 @@ class GossipManager:
             logger.error(f"Error querying DHT for certificate: {e}", exc_info=True)
             return None
 
+    def _origin_identity(self):
+        """(CommitSigner, certificate PEM) for this node, or (None, None).
+
+        The certificate is read beside the key signing.node_signer() loads, so
+        the one carried is the one that matches the signing key.
+        """
+        from pathlib import Path
+        from ..signing import node_signer
+
+        signer = node_signer()
+        if signer is None:
+            return None, None
+        try:
+            cert_pem = (Path.home() / ".dpc" / "node.crt").read_text(encoding="utf-8")
+        except OSError as e:
+            logger.warning("Cannot read node certificate for gossip signing: %s", e)
+            return None, None
+        return signer, cert_pem
+
     async def send_gossip(
         self,
         destination: str,
@@ -516,7 +572,8 @@ class GossipManager:
             Message ID
 
         Raises:
-            ValueError: If recipient's certificate cannot be found
+            ValueError: If recipient's certificate cannot be found, or this
+                node has no key to sign with (receivers drop unsigned frames)
             Exception: If encryption fails
 
         Example:
@@ -529,6 +586,11 @@ class GossipManager:
         Note:
             Intermediate hops cannot decrypt the payload (end-to-end encryption).
         """
+        signer, cert_pem = self._origin_identity()
+        if signer is None:
+            logger.error("Cannot send gossip to %s: no node key to sign with", destination[:20])
+            raise ValueError("No node key to sign the gossip message with")
+
         # Increment vector clock
         self.vector_clock.increment()
 
@@ -550,6 +612,13 @@ class GossipManager:
             priority=priority,
             vector_clock=self.vector_clock.to_dict()
         )
+        # Signed at origin over the fields fixed here (DPTP §3.10); the
+        # certificate travels so every hop can check it without a lookup.
+        from dpc_protocol.message_signing import GOSSIP_PREIMAGE_VERSION
+
+        msg.gossip_preimage_version = GOSSIP_PREIMAGE_VERSION
+        msg.cert_pem = cert_pem
+        msg.signature = signer.sign_commit(msg.origin_hash())
 
         # Store message
         self.messages[msg.id] = msg
@@ -567,21 +636,13 @@ class GossipManager:
 
         return msg.id
 
-    async def handle_gossip_message(self, msg: GossipMessage):
+    async def handle_gossip_message(self, msg: GossipMessage, sender_node_id: str = "?"):
         """
         Handle incoming gossip message.
 
-        Algorithm:
-        1. Check if destination is us → deliver
-        2. Check if seen before → ignore (deduplication)
-        3. Check TTL/hops → drop if exceeded
-        4. Store and forward to N random peers
-
-        Args:
-            msg: Gossip message received
-
-        Example:
-            >>> await manager.handle_gossip_message(gossip_msg)
+        Order: origin signature, TTL, dedup, deliver if ours, hop limit, then
+        store and forward to N random peers. ``sender_node_id`` is the
+        transport peer that handed the frame over, named in the refusal log.
         """
         logger.debug(
             "Received gossip message: %s (src=%s, dst=%s, hops=%d/%d)",
@@ -590,20 +651,29 @@ class GossipManager:
 
         self.stats["messages_received"] += 1
 
-        # Step 1: Deliver if destination is us
-        if msg.destination == self.node_id:
-            await self._deliver_message(msg)
+        # First, before deliver, dedup, store, clock merge or forward.
+        refusal = origin_refusal(msg)
+        if refusal:
+            self.stats[refusal] += 1
+            logger.warning(
+                "Refused gossip message %s claiming source %s, handed over by %s: %s",
+                msg.id, str(msg.source)[:20], str(sender_node_id)[:20], refusal,
+            )
             return
 
-        # Step 2: Deduplication (seen before?)
+        # created_at and ttl are signed: this bounds a replay with hops reset.
+        if msg.is_expired():
+            logger.debug("Message %s expired - dropping", msg.id)
+            self.stats["messages_dropped"] += 1
+            return
+
+        # Before delivery too, so a replayed message is delivered once.
         if msg.id in self.seen_messages:
             logger.debug("Message %s already seen - ignoring", msg.id)
             return
 
-        # Step 3: Check TTL and hops
-        if msg.is_expired():
-            logger.debug("Message %s expired - dropping", msg.id)
-            self.stats["messages_dropped"] += 1
+        if msg.destination == self.node_id:
+            await self._deliver_message(msg)
             return
 
         if not msg.can_forward():

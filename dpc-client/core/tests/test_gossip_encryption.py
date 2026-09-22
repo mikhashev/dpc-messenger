@@ -27,6 +27,14 @@ from dpc_protocol.crypto import (
 from dpc_client_core.managers.gossip_manager import GossipManager
 
 
+def sign_as(manager, keypair):
+    """send_gossip signs at origin; give it this keypair rather than ~/.dpc."""
+    from dpc_protocol.commit_integrity import CommitSigner
+    pem = keypair["certificate"].public_bytes(serialization.Encoding.PEM).decode()
+    signer = CommitSigner(keypair["node_id"], keypair["private_key"])
+    manager._origin_identity = lambda: (signer, pem)
+
+
 @pytest.fixture
 def alice_keypair():
     """Generate RSA key pair for Alice."""
@@ -368,7 +376,7 @@ class TestGossipManagerEncryption:
                 del os.environ["DPC_DIR"]
 
     @pytest.mark.asyncio
-    async def test_send_gossip_encrypts_payload(self, bob_keypair):
+    async def test_send_gossip_encrypts_payload(self, alice_keypair, bob_keypair):
         """Test that send_gossip encrypts the payload before storing."""
         # Create mock manager
         p2p_manager = Mock()
@@ -376,6 +384,7 @@ class TestGossipManagerEncryption:
 
         manager = GossipManager(p2p_manager, "dpc-node-alice123")
         manager._get_peer_certificate = AsyncMock(return_value=bob_keypair["certificate"])
+        sign_as(manager, alice_keypair)
 
         # Mock _forward_message to prevent actual forwarding
         manager._forward_message = AsyncMock()
@@ -408,6 +417,7 @@ class TestEndToEndSecurity:
         alice_manager = GossipManager(p2p_manager, alice_keypair["node_id"])
         alice_manager._get_peer_certificate = AsyncMock(return_value=bob_keypair["certificate"])
         alice_manager._forward_message = AsyncMock()
+        sign_as(alice_manager, alice_keypair)
 
         # Setup Bob's manager with private key
         bob_manager = GossipManager(Mock(), bob_keypair["node_id"])
@@ -454,6 +464,7 @@ class TestEndToEndSecurity:
         manager = GossipManager(p2p_manager, alice_keypair["node_id"])
         manager._get_peer_certificate = AsyncMock(return_value=bob_keypair["certificate"])
         manager._forward_message = AsyncMock()
+        sign_as(manager, alice_keypair)
 
         # Send message
         payload = {"command": "SEND_TEXT", "text": "Secret content"}

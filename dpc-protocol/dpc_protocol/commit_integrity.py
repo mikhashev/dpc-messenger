@@ -205,6 +205,32 @@ class CommitSigner:
         return signature_b64
 
     @staticmethod
+    def _verify_with_key(public_key, commit_hash: str, signature_b64: str) -> None:
+        """The one RSA-PSS check sign_commit's output is read with; raises on failure."""
+        public_key.verify(
+            base64.b64decode(signature_b64),
+            commit_hash.encode('utf-8'),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+
+    @staticmethod
+    def verify_with_public_key(public_key, commit_hash: str, signature_b64: str) -> bool:
+        """Verify against a key the caller already holds, with no disk lookup.
+
+        For a signature whose certificate travelled with the record: the caller
+        binds that certificate to the claimed node_id, this checks the bytes.
+        """
+        try:
+            CommitSigner._verify_with_key(public_key, commit_hash, signature_b64)
+            return True
+        except Exception:  # noqa: BLE001 - bad base64, wrong key type, InvalidSignature
+            return False
+
+    @staticmethod
     def verify_signature(
         node_id: str,
         commit_hash: str,
@@ -258,19 +284,7 @@ class CommitSigner:
                 cert = x509.load_pem_x509_certificate(f.read())
                 public_key = cert.public_key()
 
-            # Decode signature
-            signature_bytes = base64.b64decode(signature_b64)
-
-            # Verify
-            public_key.verify(
-                signature_bytes,
-                commit_hash.encode('utf-8'),
-                padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.MAX_LENGTH
-                ),
-                hashes.SHA256()
-            )
+            CommitSigner._verify_with_key(public_key, commit_hash, signature_b64)
 
             logger.debug(f"Signature verified for {node_id}")
             return True

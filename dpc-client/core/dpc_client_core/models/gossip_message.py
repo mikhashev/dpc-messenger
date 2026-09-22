@@ -52,6 +52,9 @@ class GossipMessage:
         created_at: UNIX timestamp when message was created
         ttl: Time-to-live in seconds (expiry)
         priority: Message priority ("normal", "high", "low")
+        signature: RSA-PSS by the source over origin_hash() (DPTP §3.10)
+        cert_pem: The source's certificate, so any hop can check the signature
+        gossip_preimage_version: Preimage version the signature was made over
 
     Example:
         >>> msg = GossipMessage(
@@ -80,6 +83,31 @@ class GossipMessage:
     created_at: float = field(default_factory=time.time)
     ttl: int = 86400  # 24 hours default
     priority: str = "normal"
+    # Origin signature. Optional so a frame without it still deserializes and
+    # is refused by the manager as unsigned, rather than crashing the handler.
+    signature: Optional[str] = None
+    cert_pem: Optional[str] = None
+    gossip_preimage_version: Optional[str] = None
+
+    def origin_hash(self) -> str:
+        """SHA256 hex over the fields fixed at origin — what `signature` signs.
+
+        Not hops or already_forwarded: every relay rewrites them. See
+        dpc_protocol.message_signing.gossip_preimage for why that is bounded.
+        """
+        from dpc_protocol.message_signing import gossip_content_hash
+
+        return gossip_content_hash(
+            message_id=self.id,
+            source=self.source,
+            destination=self.destination,
+            payload=self.payload,
+            max_hops=self.max_hops,
+            created_at=self.created_at,
+            ttl=self.ttl,
+            priority=self.priority,
+            vector_clock=self.vector_clock,
+        )
 
     def can_forward(self) -> bool:
         """
@@ -172,6 +200,9 @@ class GossipMessage:
             "created_at": self.created_at,
             "ttl": self.ttl,
             "priority": self.priority,
+            "signature": self.signature,
+            "cert_pem": self.cert_pem,
+            "gossip_preimage_version": self.gossip_preimage_version,
         }
 
     @classmethod
@@ -197,6 +228,9 @@ class GossipMessage:
             created_at=data.get("created_at", time.time()),
             ttl=data.get("ttl", 86400),
             priority=data.get("priority", "normal"),
+            signature=data.get("signature"),
+            cert_pem=data.get("cert_pem"),
+            gossip_preimage_version=data.get("gossip_preimage_version"),
         )
 
     @classmethod

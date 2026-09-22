@@ -1093,7 +1093,10 @@ Epidemic message routing for store-and-forward delivery with end-to-end encrypti
       "created_at": 1705329600.0,
       "already_forwarded": ["dpc-node-alice123", "dpc-node-charlie789"],
       "vector_clock": {"dpc-node-alice123": 5},
-      "priority": "normal"
+      "priority": "normal",
+      "gossip_preimage_version": "dptp-gossip-v1",
+      "cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+      "signature": "base64-rsa-pss-signature"
     }
   }
 }
@@ -1114,17 +1117,60 @@ Epidemic message routing for store-and-forward delivery with end-to-end encrypti
 - `already_forwarded` (array, required): Node IDs that have forwarded this message
 - `vector_clock` (object, required): Causality tracking (node_id → counter)
 - `priority` (string, required): Message priority ("normal", "high", "low")
+- `gossip_preimage_version` (string, required): `dptp-gossip-v1` — the preimage the
+  signature was made over
+- `cert_pem` (string, required): the **source's** X.509 certificate, PEM
+- `signature` (string, required): RSA-PSS by the source's key, see *Origin signature*
+
+**Origin signature:**
+
+The source signs when it creates the message; relays never re-sign. The preimage
+(`dpc_protocol/message_signing.py`, `gossip_preimage`) uses the §4.1 encoding —
+length-prefixed UTF-8 fields in this fixed order, structured values as §4.1
+canonical JSON:
+
+| # | Field |
+|---|---|
+| 1 | `dptp-gossip-v1` (constant `GOSSIP_PREIMAGE_VERSION`) |
+| 2 | `id` |
+| 3 | `source` |
+| 4 | `destination` |
+| 5 | `payload`, canonical JSON |
+| 6 | `max_hops`, canonical JSON |
+| 7 | `created_at`, canonical JSON |
+| 8 | `ttl`, canonical JSON |
+| 9 | `priority` |
+| 10 | `vector_clock`, canonical JSON |
+
+`signature = RSA-PSS(SHA256, MAX_LENGTH salt)` over the lowercase hex
+`SHA256(preimage)`, as in §4.1. `hops` and `already_forwarded` are **not** covered:
+every relay rewrites them. A relay can therefore reset them; how long it can keep
+such a message alive is bounded by the signed `created_at` + `ttl`, and a node
+acts on one message `id` once.
+
+The certificate travels with the message so any hop can check it without a DHT or
+cache lookup, which can miss or be poisoned. The binding is the node id itself:
+`generate_node_id(cert_pem's public key)` (§4) must equal `source`. Encryption to
+the destination proves nothing about the author — anyone can encrypt to a public key.
 
 **Behavior:**
 
 Receiver performs these checks in order:
 
-1. **TTL check**: Drop if `current_time - created_at > ttl`
-2. **Hop limit check**: Drop if `hops >= max_hops`
-3. **Destination check**: If `destination == self.node_id` → decrypt and deliver locally
-4. **Deduplication**: If message ID seen before → ignore (already processed)
-5. **Already forwarded**: If `self.node_id` in `already_forwarded` → ignore (loop prevention)
-6. **Forward**: Otherwise, forward to N=3 random connected peers (epidemic fanout)
+1. **Origin check — before anything else**: drop the message if `signature`,
+   `cert_pem` or `gossip_preimage_version` is absent, if the node id derived from
+   `cert_pem` is not `source`, or if the signature does not verify over the
+   preimage above. A dropped message is not delivered, stored, merged into the
+   vector clock or forwarded. There is no acceptance of unsigned messages: a node
+   older than this rule is refused
+2. **TTL check**: Drop if `current_time - created_at > ttl`
+3. **Deduplication**: If message ID seen before → ignore (already processed; also
+   keeps a replayed message from being delivered twice)
+4. **Destination check**: If `destination == self.node_id` → decrypt and deliver
+   locally, attributed to `source`
+5. **Hop limit check**: Drop if `hops >= max_hops`
+6. **Forward**: Otherwise, forward to N=3 random connected peers not in
+   `already_forwarded` (epidemic fanout)
 
 **Security (End-to-End Encryption):**
 - Payload encrypted for the recipient with hybrid encryption: a random AES-256 key
@@ -2530,6 +2576,15 @@ DPTP is designed to be extensible. New commands can be added by:
 ## 9. Changelog
 
 ### v1.7 (September 2026)
+- **§3.10 GOSSIP_MESSAGE** — the source now signs at origin: required
+  `gossip_preimage_version` (`dptp-gossip-v1`), `cert_pem` and `signature` over
+  every field fixed at creation except `hops` and `already_forwarded`. A receiver
+  checks it first — the node id derived from `cert_pem` must be `source`, the
+  signature must verify — and drops a message that fails, unsigned included,
+  before it delivers, stores or forwards it. Before this any connected peer could
+  deliver any command as any node id. Not backward compatible by design: a node
+  that does not sign is refused. The receiver order is also restated as the code
+  runs it (dedup before delivery). Added 2026-09-23
 - **§3.4 REMOTE_INFERENCE_REQUEST** — optional `messages`, `system`, `tools` and
   `stream`: the conversation un-flattened in the Anthropic shape, its system
   prompt, the tool definitions the model may call, and whether the host should

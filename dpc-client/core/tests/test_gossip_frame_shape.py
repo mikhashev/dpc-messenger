@@ -19,11 +19,11 @@ from dpc_client_core.managers import gossip_manager as gm
 from dpc_client_core.managers.gossip_manager import GossipManager
 from dpc_client_core.message_handlers.gossip_handler import GossipMessageHandler
 from dpc_client_core.models.gossip_message import GossipMessage
+from tests.test_gossip_signed_source import Identity, signed
 
-ALICE = "dpc-node-alice123"
-BOB = "dpc-node-bob456"
-CHARLIE = "dpc-node-charlie789"
-DAVE = "dpc-node-dave000"
+# Real keys: a receiver refuses a frame whose source did not sign it.
+IDENTITIES = {i.node_id: i for i in (Identity() for _ in range(4))}
+ALICE, BOB, CHARLIE, DAVE = IDENTITIES
 
 
 def capturing_peer(node_id: str) -> Mock:
@@ -42,6 +42,8 @@ def node(node_id: str, connected_peers=()) -> GossipManager:
     manager = GossipManager(p2p, node_id)
     # Encryption is covered by test_gossip_encryption.py; here the payload is opaque.
     manager._encrypt_payload = AsyncMock(return_value="opaque-blob")
+    identity = IDENTITIES[node_id]
+    manager._origin_identity = lambda: (identity.signer, identity.cert_pem)
     return manager
 
 
@@ -80,6 +82,7 @@ async def test_fan_out_frame_reaches_the_receivers_manager():
     assert received.destination == BOB
     assert charlie.stats["messages_received"] == 1
     assert charlie.stats["flat_frames_accepted"] == 0
+    assert not [k for k, v in charlie.stats.items() if k.endswith("_frames_refused") and v]
 
 
 @pytest.mark.asyncio
@@ -110,6 +113,7 @@ async def test_second_hop_forward_frame_reaches_the_next_manager():
     assert received.hops == 2
     assert received.already_forwarded == [ALICE, CHARLIE]
     assert dave.stats["flat_frames_accepted"] == 0
+    assert not [k for k, v in dave.stats.items() if k.endswith("_frames_refused") and v]
 
 
 @pytest.mark.asyncio
@@ -127,10 +131,10 @@ async def test_anti_entropy_resend_still_reaches_the_receiver(monkeypatch):
     spy = Mock(wraps=real_frame)
     monkeypatch.setattr(gm, "gossip_message_frame", spy)
 
-    msg = GossipMessage.create(
+    msg = signed(GossipMessage.create(
         source=ALICE, destination=BOB, payload={"encrypted": "opaque-blob"},
         max_hops=5, ttl=86400, priority="normal", vector_clock={ALICE: 1},
-    )
+    ), by=IDENTITIES[ALICE])
     alice.messages[msg.id] = msg
 
     await alice.handle_gossip_sync(peer_id=CHARLIE, peer_clock_dict={}, peer_message_ids=[])
@@ -143,6 +147,7 @@ async def test_anti_entropy_resend_still_reaches_the_receiver(monkeypatch):
     charlie.handle_gossip_message.assert_awaited_once()
     assert charlie.handle_gossip_message.await_args.args[0].id == msg.id
     assert charlie.stats["flat_frames_accepted"] == 0
+    assert not [k for k, v in charlie.stats.items() if k.endswith("_frames_refused") and v]
 
 
 @pytest.mark.asyncio
@@ -150,10 +155,10 @@ async def test_flat_frame_from_an_older_node_is_accepted_with_a_counted_warning(
     """(d) A pre-fix peer still fans out flat; for one release it is read, not lost."""
     charlie = node(CHARLIE)
     handler = receiving_handler(charlie)
-    msg = GossipMessage.create(
+    msg = signed(GossipMessage.create(
         source=ALICE, destination=BOB, payload={"encrypted": "opaque-blob"},
         max_hops=5, ttl=86400, priority="normal", vector_clock={ALICE: 1},
-    )
+    ), by=IDENTITIES[ALICE])
 
     with caplog.at_level(logging.WARNING, logger="dpc_client_core.message_handlers"):
         await handler.handle(ALICE, msg.to_dict())  # flat: message keys at the top
@@ -161,6 +166,7 @@ async def test_flat_frame_from_an_older_node_is_accepted_with_a_counted_warning(
     charlie.handle_gossip_message.assert_awaited_once()
     assert charlie.handle_gossip_message.await_args.args[0].id == msg.id
     assert charlie.stats["flat_frames_accepted"] == 1
+    assert not [k for k, v in charlie.stats.items() if k.endswith("_frames_refused") and v]
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert "flat" in warnings[0].getMessage()
@@ -179,4 +185,5 @@ async def test_frame_with_neither_shape_is_dropped_with_the_old_warning(caplog):
 
     charlie.handle_gossip_message.assert_not_awaited()
     assert charlie.stats["flat_frames_accepted"] == 0
+    assert not [k for k, v in charlie.stats.items() if k.endswith("_frames_refused") and v]
     assert any("missing 'gossip_message'" in r.getMessage() for r in caplog.records)

@@ -76,7 +76,8 @@ class GossipMessageHandler(MessageHandler):
             # Linux node may run the older code for days after this lands,
             # and a refused frame is a message lost until anti-entropy - the
             # very path this fix exists to stop relying on. Remove the flat
-            # branch in the release after the one that ships it.
+            # branch in the release after the one that ships it. Since origin
+            # signing such a sender's frames are unsigned and refused anyway.
             gossip_data = payload.get("gossip_message")
             if not gossip_data and {"id", "source", "destination", "payload"} <= payload.keys():
                 stats = self.service.gossip_manager.stats
@@ -95,7 +96,7 @@ class GossipMessageHandler(MessageHandler):
             from ..models.gossip_message import GossipMessage
             message = GossipMessage.from_dict(gossip_data)
 
-            await self.service.gossip_manager.handle_gossip_message(message)
+            await self.service.gossip_manager.handle_gossip_message(message, sender_node_id)
 
         except Exception as e:
             self.logger.error(f"Error handling GOSSIP_MESSAGE: {e}", exc_info=True)
