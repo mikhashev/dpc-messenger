@@ -530,6 +530,129 @@ def _run_djvu(binary: str, args: List[str]) -> Tuple[int, str, str]:
     )
 
 
+# ------------------------------------------- an ASCII path, on Windows only
+#
+# Tested live 2026-09-22 and recorded as R1a in
+# `docs/decisions/043-one-reader-now-the-module-in-dpc-messenger-later.md`:
+# DjVuLibre 3.5.29 on Windows opens no path with a non-ASCII component.
+# djvused crashes (exit 3221226505, `***` on stdout), djvutxt answers "Cannot
+# create djvu context", and even an ASCII-named file inside a Cyrillic
+# directory fails with "Failed to open 'ascii.djvu': Invalid argument" — the
+# same file under an all-ASCII path reads. 356 of the 374 DjVu files in the
+# owner's library sit under such a path. Linux and macOS open them today, so
+# nothing below runs there: the staging is the repair for one platform's
+# defect, not a step in reading a document.
+#
+# The repair is to hand the binaries a hard link under an ASCII name. The
+# source is never touched, a link costs no disk, and nothing the caller sees
+# changes — the answer's `path`, the digest that keys the vision cache and
+# every sentence in the warnings stay the path that was asked for.
+ASCII_TMP_ENV = "DPC_ASCII_TMP"
+
+DJVU_NO_ASCII_STAGING = (
+    "⚠️ DjVuLibre on Windows cannot open a file whose path holds a non-ASCII "
+    "character — tested 2026-09-22 on 3.5.29: a Cyrillic directory or filename "
+    "crashes djvused, and even an ASCII name inside one fails with 'Invalid "
+    "argument'. Such a file is therefore read through an ASCII-named hard link, "
+    "and no directory with an all-ASCII path was found to put one in: neither "
+    f"${ASCII_TMP_ENV}, nor the system temp directory, nor ~/.dpc/tmp. Set "
+    f"{ASCII_TMP_ENV} to a directory whose whole path is ASCII — for example "
+    f"`set {ASCII_TMP_ENV}=C:\\dpc-tmp` — and read the file again. PDF reading "
+    "is unaffected: it goes through pypdfium2 in this process, which opens "
+    "these paths."
+)
+
+
+def _ascii_staging_root() -> Optional[Path]:
+    """A directory whose whole path is ASCII, to put the link in, or None.
+
+    The setting wins over the system temp directory for the same reason
+    $DPC_DJVULIBRE_DIR wins over PATH: a machine whose TEMP sits under a
+    non-ASCII user name needs a way to say where instead, and `~/.dpc/tmp` is
+    no better when the profile itself carries the non-ASCII component.
+    """
+    override = os.environ.get(ASCII_TMP_ENV)
+    candidates: List[Path] = [Path(override)] if override else []
+    candidates += [Path(tempfile.gettempdir()), Path.home() / ".dpc" / "tmp"]
+    for candidate in candidates:
+        if not str(candidate).isascii():
+            continue
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.debug("ASCII staging directory %s is unusable: %s", candidate, exc)
+            continue
+        return candidate
+    return None
+
+
+def _stage_ascii_path(
+    source: Path, digest: str
+) -> Tuple[Optional[Path], Optional[Path], Optional[str]]:
+    """(the path to hand the binaries, what to remove afterwards, a refusal).
+
+    Off everywhere but Windows, and on Windows off for a path that is already
+    ASCII: both return `source` itself with nothing to remove, so the reading
+    on Linux and macOS is byte for byte what it was.
+
+    The staged name is the document's own digest, so the same content stages
+    one link however it was reached, and a link left behind by a call that
+    died is the same bytes the next call would have made — it is reused rather
+    than replaced, and not removed by the call that did not make it.
+    """
+    if sys.platform != "win32" or str(source).isascii():
+        return source, None, None
+
+    root = _ascii_staging_root()
+    if root is None:
+        return None, None, DJVU_NO_ASCII_STAGING
+
+    folder = root / f"dpc-djvu-{os.getpid()}"
+    staged = folder / f"{digest[:16]}{source.suffix.lower()}"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        if staged.exists():
+            return staged, None, None
+        os.link(source, staged)
+        return staged, staged, None
+    except FileExistsError:
+        return staged, None, None
+    except OSError as exc:
+        # A different volume, a filesystem with no links, or a permission that
+        # allows reading and not linking. A copy is slower and still correct.
+        log.debug("hard link %s -> %s failed (%s); copying instead", staged, source, exc)
+    try:
+        shutil.copy2(source, staged)
+        return staged, staged, None
+    except OSError as exc:
+        return None, None, (
+            f"⚠️ '{source.name}' sits under a non-ASCII path, which DjVuLibre on "
+            f"Windows cannot open, and the ASCII copy it is read through could not "
+            f"be made in {folder}: {type(exc).__name__}: {exc}. Set {ASCII_TMP_ENV} "
+            f"to a writable directory whose whole path is ASCII and read the file "
+            f"again."
+        )
+
+
+def _unstage_ascii_path(staged: Optional[Path]) -> None:
+    """Remove the link this call made, and the folder if it was the last one.
+
+    Never the source: `staged` is None unless this call created a file of its
+    own under the staging folder.
+    """
+    if staged is None:
+        return
+    try:
+        staged.unlink()
+    except OSError as exc:
+        log.debug("staged file %s could not be removed: %s", staged, exc)
+        return
+    try:
+        staged.parent.rmdir()
+    except OSError:
+        pass  # another read in this process is still using it
+
+
 def _first_line(text: str, fallback: str) -> str:
     for line in text.splitlines():
         if line.strip():
@@ -914,204 +1037,218 @@ async def read_document(
             f"read_file."
         )
 
-    if suffix in DJVU_SUFFIXES:
-        fmt = "djvu"
-        tools = _djvulibre()
-        if tools is None:
-            return DJVULIBRE_MISSING
-        total, problem = _djvu_page_count(tools, source)
-        if total is None:
-            return f"⚠️ Could not open '{source.name}': {problem}"
-        read_one = partial(_read_djvu_page, tools, source)
-        render_one = partial(_render_djvu_page, tools, source)
-    else:
-        fmt = "pdf"
-        try:
-            import pypdfium2 as pdfium
-        except ImportError:
-            return (
-                "⚠️ PDF reading is not installed. It is an optional extra, because its "
-                "wheel does not exist for every platform and the source build fetches "
-                "PDFium over the network. Add it without disturbing anything else: "
-                "`uv sync --extra pdf --inexact` in dpc-client/core. Leave `--inexact` "
-                "out and uv makes the environment match the command exactly, which "
-                "UNINSTALLS every extra the line does not name."
-            )
-
-        try:
-            doc = pdfium.PdfDocument(source)
-            total = len(doc)
-        except Exception as exc:
-            low = str(exc).lower()
-            if "password" in low or "encrypt" in low:
-                return (
-                    f"⚠️ '{source.name}' is encrypted and this reader has no password for it."
-                )
-            return f"⚠️ Could not open '{source.name}': {type(exc).__name__}: {exc}"
-        read_one = partial(_read_page, doc)
-        render_one = partial(_render_page, doc)
-
-    wanted, notes = _parse_pages(pages, total)
-    if not wanted:
-        notes = notes or ["no readable page numbers in the range"]
-
-    per_page = [read_one(n) for n in wanted]
-    if fmt == "djvu" and any(p["route"] == "text" for p in per_page):
-        notes.append(
-            "a DjVu text layer carries no font information, so the "
-            "unreliable-mathematics check — which reads the font behind each "
-            "character — did not run on these pages"
-        )
-
-    # The eye, and only where it was asked for or proved necessary. Deciding
-    # this after every page has been inventoried — which costs about 5 ms a
-    # page — is what lets the refusal below quote a real number instead of
-    # discovering the cost halfway through spending it.
-    if mode not in ("auto", "text", "vision"):
-        notes.append(f"mode '{mode}' is not one of auto/text/vision; read as text only")
-        mode = "text"
-    if mode == "vision":
-        candidates = [p for p in per_page if p["route"] != "failed"]
-    elif mode == "auto":
-        candidates = [p for p in per_page if p["route"] == "no_text_layer" and p.get("images")]
-    else:
-        candidates = []
-
-    # The digest identifies the document in the answer and keys the page cache.
-    # It streams a megabyte at a time, and tools run in an executor thread
+    # The digest identifies the document in the answer, keys the page cache and
+    # names the ASCII link below, so it is taken before anything is opened. It
+    # streams a megabyte at a time, and tools run in an executor thread
     # (`dpc_agent/loop.py:378`), so neither memory nor the service's event loop
     # pays for a large file — only the read itself, once per call.
     digest = _file_digest(source)
-    refused_pages: List[int] = []
-    if len(candidates) > max(0, max_vision_pages):
-        refused_pages = [p["page"] for p in candidates]
-        notes.append(
-            f"{len(candidates)} pages were put to the vision model and this call allows "
-            f"{max_vision_pages}: pages {refused_pages} were not looked at. That would "
-            f"take roughly {len(candidates) * VISION_SECONDS_PER_PAGE} s on a GPU shared "
-            f"with everything else here. Call again with a narrower range, or raise "
-            f"max_vision_pages deliberately."
-        )
-    else:
-        for entry in candidates:
-            await _read_page_with_vision(
-                ctx, render_one, entry, digest, vision_model, VISION_DPI,
-                requested=(mode == "vision"),
+
+    # Everything from here on is the read; `staged` is what the finally at the
+    # end removes, and is None on every platform but Windows and for every
+    # path that is already ASCII.
+    staged: Optional[Path] = None
+    try:
+        if suffix in DJVU_SUFFIXES:
+            fmt = "djvu"
+            tools = _djvulibre()
+            if tools is None:
+                return DJVULIBRE_MISSING
+            # The binaries get `handle`; every string the caller reads stays
+            # `source`, which is the path that was asked for.
+            handle, staged, refusal = _stage_ascii_path(source, digest)
+            if handle is None:
+                return refusal
+            total, problem = _djvu_page_count(tools, handle)
+            if total is None:
+                return f"⚠️ Could not open '{source.name}': {problem}"
+            read_one = partial(_read_djvu_page, tools, handle)
+            render_one = partial(_render_djvu_page, tools, handle)
+        else:
+            fmt = "pdf"
+            try:
+                import pypdfium2 as pdfium
+            except ImportError:
+                return (
+                    "⚠️ PDF reading is not installed. It is an optional extra, because its "
+                    "wheel does not exist for every platform and the source build fetches "
+                    "PDFium over the network. Add it without disturbing anything else: "
+                    "`uv sync --extra pdf --inexact` in dpc-client/core. Leave `--inexact` "
+                    "out and uv makes the environment match the command exactly, which "
+                    "UNINSTALLS every extra the line does not name."
+                )
+
+            try:
+                doc = pdfium.PdfDocument(source)
+                total = len(doc)
+            except Exception as exc:
+                low = str(exc).lower()
+                if "password" in low or "encrypt" in low:
+                    return (
+                        f"⚠️ '{source.name}' is encrypted and this reader has no password for it."
+                    )
+                return f"⚠️ Could not open '{source.name}': {type(exc).__name__}: {exc}"
+            read_one = partial(_read_page, doc)
+            render_one = partial(_render_page, doc)
+
+        wanted, notes = _parse_pages(pages, total)
+        if not wanted:
+            notes = notes or ["no readable page numbers in the range"]
+
+        per_page = [read_one(n) for n in wanted]
+        if fmt == "djvu" and any(p["route"] == "text" for p in per_page):
+            notes.append(
+                "a DjVu text layer carries no font information, so the "
+                "unreliable-mathematics check — which reads the font behind each "
+                "character — did not run on these pages"
             )
 
-    unreadable = [p["page"] for p in per_page if p["route"] in ("no_text_layer", "failed")]
-    wants_eye = [p["page"] for p in per_page if p.get("suspect_chars")]
-    figures_unseen = [
-        {"page": p["page"], "images": p["images"]}
-        for p in per_page
-        if p.get("images") and p["route"] == "text"
-    ]
-    # A field rather than a sentence, so a pipeline routes on it without
-    # reading prose. Computed after the vision pass: a page the model has since
-    # read is no longer a layer standing in for a page.
-    thin_layer = [p["page"] for p in per_page if _is_thin_facsimile(p)]
+        # The eye, and only where it was asked for or proved necessary. Deciding
+        # this after every page has been inventoried — which costs about 5 ms a
+        # page — is what lets the refusal below quote a real number instead of
+        # discovering the cost halfway through spending it.
+        if mode not in ("auto", "text", "vision"):
+            notes.append(f"mode '{mode}' is not one of auto/text/vision; read as text only")
+            mode = "text"
+        if mode == "vision":
+            candidates = [p for p in per_page if p["route"] != "failed"]
+        elif mode == "auto":
+            candidates = [p for p in per_page if p["route"] == "no_text_layer" and p.get("images")]
+        else:
+            candidates = []
 
-    warnings = list(notes)
-    warnings.extend(p["note"] for p in per_page if p.get("note"))
-    if any(p.get("detector") == "unavailable" for p in per_page):
-        warnings.append(
-            "per-character font attribution was unavailable on this build, so the "
-            "unreliable-mathematics check did not run"
-        )
-
-    # Written out instead of returned: the pages go to a file, the answer keeps
-    # the metadata. A tool result is capped at 15 000 characters, so an eighty
-    # page document cannot be read into a conversation however many calls it is
-    # split into — it has to land somewhere and be read from there.
-    saved_to = None
-    if save_to:
-        try:
-            target = _resolve_file_path(ctx, save_to, require_write=True)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            body = NL2.join(
-                (PAGE_HEADING.format(n=e['page']) + (e.get('text') or '')).rstrip()
-                for e in per_page
+        refused_pages: List[int] = []
+        if len(candidates) > max(0, max_vision_pages):
+            refused_pages = [p["page"] for p in candidates]
+            notes.append(
+                f"{len(candidates)} pages were put to the vision model and this call allows "
+                f"{max_vision_pages}: pages {refused_pages} were not looked at. That would "
+                f"take roughly {len(candidates) * VISION_SECONDS_PER_PAGE} s on a GPU shared "
+                f"with everything else here. Call again with a narrower range, or raise "
+                f"max_vision_pages deliberately."
             )
-            header = FILE_HEADING.format(
-                name=source.name, first=wanted[0], last=wanted[-1], total=total
-            )
-            existing = target.read_text(encoding='utf-8') if target.exists() else ''
-            target.write_text(
-                (existing + NL2 if existing else header) + body + NL,
-                encoding='utf-8',
-            )
-            saved_to = str(target)
-        except PermissionError as exc:
-            warnings.append(f"could not write to '{save_to}': {exc}")
-        except OSError as exc:
-            warnings.append(f"could not write to '{save_to}': {type(exc).__name__}: {exc}")
+        else:
+            for entry in candidates:
+                await _read_page_with_vision(
+                    ctx, render_one, entry, digest, vision_model, VISION_DPI,
+                    requested=(mode == "vision"),
+                )
 
-    # Fill to the budget, then stop and say so. A page is kept whole or not at
-    # all: half a page of text with no marker is the failure this is preventing.
-    kept: List[Dict[str, Any]] = []
-    omitted: List[int] = []
-    spent = 0
-    if saved_to:
-        spent = sum(len(e.get("text") or "") for e in per_page)
-        kept = [{k: v for k, v in e.items() if k != "text"} for e in per_page]
-        per_page = []
-    if per_page:
-        kept, omitted, spent = _fit_to_budget(per_page)
-    if omitted:
-        warnings.append(
-            f"pages {omitted[0]}-{omitted[-1]} were read and left out of this answer "
-            f"to stay under the {MAX_TEXT_CHARS}-character limit a tool result has. "
-            f"Continue with pages='{omitted[0]}-{omitted[-1]}', or pass save_to to "
-            f"write the whole range to a file instead of returning it."
-        )
+        unreadable = [p["page"] for p in per_page if p["route"] in ("no_text_layer", "failed")]
+        wants_eye = [p["page"] for p in per_page if p.get("suspect_chars")]
+        figures_unseen = [
+            {"page": p["page"], "images": p["images"]}
+            for p in per_page
+            if p.get("images") and p["route"] == "text"
+        ]
+        # A field rather than a sentence, so a pipeline routes on it without
+        # reading prose. Computed after the vision pass: a page the model has since
+        # read is no longer a layer standing in for a page.
+        thin_layer = [p["page"] for p in per_page if _is_thin_facsimile(p)]
 
-    payload = {
-        "path": str(source),
-        "format": fmt,
-        "sha256": digest,
-        "pages_total": total,
-        "pages_read": wanted,
-        "per_page": kept,
-        "pages_omitted_for_size": omitted,
-        "saved_to": saved_to,
-        "unreadable_pages": unreadable,
-        "pages_with_unreliable_math": wants_eye,
-        "figures_not_seen": figures_unseen,
-        "thin_layer_pages": thin_layer,
-        "vision_pages": [p["page"] for p in per_page if p["route"] == "vision"],
-        "vision_pages_refused": refused_pages,
-        # What this document cost, so the next decision about the cap is a
-        # number rather than a taste.
-        "vision_seconds": round(sum(p.get("seconds") or 0 for p in per_page), 1),
-        # The document is data, not instruction. Nothing in this repository has
-        # carried this field before; a page that asks the agent to do something
-        # is a page quoting itself, and the tool gates decide what asking can
-        # achieve.
-        "untrusted_content": True,
-        "elapsed_sec": round(time.perf_counter() - started, 3),
-        "warnings": warnings,
-    }
-    returned = [p["page"] for p in kept]
-    unread = [n for n in range(1, total + 1) if n not in returned]
-    # Where this answer sits in the document, in the same shape read_file uses —
-    # what you have, out of how much, and the call that continues. An agent that
-    # cannot see the edges of what it received has no way to know it is missing
-    # anything, which is how twenty pages of an eighty-page document get treated
-    # as the whole thing.
-    payload["position"] = (
-        f"[Pages {returned[0]}-{returned[-1]} of {total} | {spent:,} chars"
-        + (f" | {len(unread)} pages not read" if unread else " | whole document")
-        + (f" | continue: pages='{unread[0]}-{min(unread[0] + DEFAULT_PAGES - 1, total)}'"
-           if unread else "")
-        + "]"
-        if returned
-        else f"[No pages returned of {total}]"
-    )
-    if unread:
-        payload["continue_hint"] = (
-            f"{len(unread)} pages not read; the next is page {unread[0]}"
+        warnings = list(notes)
+        warnings.extend(p["note"] for p in per_page if p.get("note"))
+        if any(p.get("detector") == "unavailable" for p in per_page):
+            warnings.append(
+                "per-character font attribution was unavailable on this build, so the "
+                "unreliable-mathematics check did not run"
+            )
+
+        # Written out instead of returned: the pages go to a file, the answer keeps
+        # the metadata. A tool result is capped at 15 000 characters, so an eighty
+        # page document cannot be read into a conversation however many calls it is
+        # split into — it has to land somewhere and be read from there.
+        saved_to = None
+        if save_to:
+            try:
+                target = _resolve_file_path(ctx, save_to, require_write=True)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                body = NL2.join(
+                    (PAGE_HEADING.format(n=e['page']) + (e.get('text') or '')).rstrip()
+                    for e in per_page
+                )
+                header = FILE_HEADING.format(
+                    name=source.name, first=wanted[0], last=wanted[-1], total=total
+                )
+                existing = target.read_text(encoding='utf-8') if target.exists() else ''
+                target.write_text(
+                    (existing + NL2 if existing else header) + body + NL,
+                    encoding='utf-8',
+                )
+                saved_to = str(target)
+            except PermissionError as exc:
+                warnings.append(f"could not write to '{save_to}': {exc}")
+            except OSError as exc:
+                warnings.append(f"could not write to '{save_to}': {type(exc).__name__}: {exc}")
+
+        # Fill to the budget, then stop and say so. A page is kept whole or not at
+        # all: half a page of text with no marker is the failure this is preventing.
+        kept: List[Dict[str, Any]] = []
+        omitted: List[int] = []
+        spent = 0
+        if saved_to:
+            spent = sum(len(e.get("text") or "") for e in per_page)
+            kept = [{k: v for k, v in e.items() if k != "text"} for e in per_page]
+            per_page = []
+        if per_page:
+            kept, omitted, spent = _fit_to_budget(per_page)
+        if omitted:
+            warnings.append(
+                f"pages {omitted[0]}-{omitted[-1]} were read and left out of this answer "
+                f"to stay under the {MAX_TEXT_CHARS}-character limit a tool result has. "
+                f"Continue with pages='{omitted[0]}-{omitted[-1]}', or pass save_to to "
+                f"write the whole range to a file instead of returning it."
+            )
+
+        payload = {
+            "path": str(source),
+            "format": fmt,
+            "sha256": digest,
+            "pages_total": total,
+            "pages_read": wanted,
+            "per_page": kept,
+            "pages_omitted_for_size": omitted,
+            "saved_to": saved_to,
+            "unreadable_pages": unreadable,
+            "pages_with_unreliable_math": wants_eye,
+            "figures_not_seen": figures_unseen,
+            "thin_layer_pages": thin_layer,
+            "vision_pages": [p["page"] for p in per_page if p["route"] == "vision"],
+            "vision_pages_refused": refused_pages,
+            # What this document cost, so the next decision about the cap is a
+            # number rather than a taste.
+            "vision_seconds": round(sum(p.get("seconds") or 0 for p in per_page), 1),
+            # The document is data, not instruction. Nothing in this repository has
+            # carried this field before; a page that asks the agent to do something
+            # is a page quoting itself, and the tool gates decide what asking can
+            # achieve.
+            "untrusted_content": True,
+            "elapsed_sec": round(time.perf_counter() - started, 3),
+            "warnings": warnings,
+        }
+        returned = [p["page"] for p in kept]
+        unread = [n for n in range(1, total + 1) if n not in returned]
+        # Where this answer sits in the document, in the same shape read_file uses —
+        # what you have, out of how much, and the call that continues. An agent that
+        # cannot see the edges of what it received has no way to know it is missing
+        # anything, which is how twenty pages of an eighty-page document get treated
+        # as the whole thing.
+        payload["position"] = (
+            f"[Pages {returned[0]}-{returned[-1]} of {total} | {spent:,} chars"
+            + (f" | {len(unread)} pages not read" if unread else " | whole document")
+            + (f" | continue: pages='{unread[0]}-{min(unread[0] + DEFAULT_PAGES - 1, total)}'"
+               if unread else "")
+            + "]"
+            if returned
+            else f"[No pages returned of {total}]"
         )
-    return json.dumps(payload, ensure_ascii=False)
+        if unread:
+            payload["continue_hint"] = (
+                f"{len(unread)} pages not read; the next is page {unread[0]}"
+            )
+        return json.dumps(payload, ensure_ascii=False)
+    finally:
+        _unstage_ascii_path(staged)
 
 
 # ---------------------------------------------------------------------------

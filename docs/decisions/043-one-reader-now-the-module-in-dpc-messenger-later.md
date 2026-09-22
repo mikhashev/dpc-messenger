@@ -185,9 +185,9 @@ For the integration phase: `dpc-client/core/dpc_client_core/document_pipeline/` 
 `reader.py`, `scan.py`, `classify.py`, `route.py`, `record.py`, `summary.py`,
 `__main__.py`, plus one `ToolEntry` with `default_enabled=False` — the posture
 `read_document` and `web_fetch` take, since converting a folder is a long, GPU-spending,
-disk-writing act. **The package name is proposed, not settled, and is Mike's** —
+disk-writing act. **The names are settled (Mike's call, 2026-09-22)** —
 `document_pipeline` for the module, *knowledge base* for the entity it fills, the
-vocabulary argument in Q1 — and it is owed at the integration phase, not before.
+vocabulary argument in Q1 — and the package itself is owed at the integration phase, not before.
 
 ### Rationale
 
@@ -270,12 +270,12 @@ refactor the scripts import from a module shaped for a tool.
 - **Q1 — the names, two of them.** The **entity** is a *knowledge base*, not a library
   (Mike's call, 2026-09-22): "library" is taken twice over — the cryptography sense in
   this source tree, and the user's own book collection on disk — and VISION already says
-  "shared knowledge bases". The **module** is proposed as `document_pipeline`, built from
+  "shared knowledge bases". The **module** is `document_pipeline` (Mike's call, 2026-09-22), built from
   words the project owns: `pipeline` names a staged transform in two ADR-backed modules
   (`dpc_agent/indexing_pipeline.py`, ADR-010/018/024; `dpc_agent/sleep_pipeline.py`,
   ADR-014), and `document` is what `read_document` calls its input. `library` as a package
-  name is what this replaces. A `docs/GLOSSARY.md` row is owed for *knowledge base*, which
-  the file does not carry today; both names are still Mike's call. — @Mike
+  name is what this replaces. Both names are settled; `docs/GLOSSARY.md` carries a row for each since the
+  same day. Closed.
 - **Q2 — where records land for a user**, as opposed to for a measurement. `~/.dpc/`
   holds per-peer conversation files today; a knowledge base built from a user's book
   collection is larger and is not conversation. — @Mike

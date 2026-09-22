@@ -487,3 +487,196 @@ def test_a_djvu_page_with_text_read_on_request_does_not_claim_it_had_none(
     assert "has no text layer" not in page["note"]
     assert "on request (mode='vision')" in page["note"]
     assert f"its own text layer holds {len(layer)} characters" in page["note"]
+
+
+# ------------------------------- a path DjVuLibre on Windows cannot open
+#
+# Tested live 2026-09-22 (ADR-043 R1a): DjVuLibre 3.5.29 on Windows opens no
+# path with a non-ASCII component, and 356 of the 374 DjVu files in the
+# owner's library sit under one. The repair is a hard link under an ASCII
+# name, made for Windows only — so these tests say which platform they are
+# about instead of asking the one they run on.
+
+
+@pytest.fixture
+def cyrillic_book(tmp_path):
+    """The library's ordinary case: a Cyrillic directory and a Cyrillic name."""
+    folder = tmp_path / "кириллица"
+    folder.mkdir()
+    path = folder / "Данилов Ставка.djvu"
+    path.write_bytes(b"AT&TFORM\x00\x00\x00\x10DJVM")
+    return path
+
+
+@pytest.fixture
+def staging_root(tmp_path, monkeypatch):
+    """Where the link is put, said out loud rather than read off this machine:
+    a test that trusted $TEMP to be ASCII would pass for the wrong reason."""
+    root = tmp_path / "ascii-tmp"
+    monkeypatch.setenv(D.ASCII_TMP_ENV, str(root))
+    return root
+
+
+def _documents_handed_over(calls):
+    """Every path the binaries were given the document under."""
+    return [
+        arg
+        for _name, args in calls
+        for arg in args
+        if arg.lower().endswith(D.DJVU_SUFFIXES)
+    ]
+
+
+def _watching(fake, seen):
+    """The same DjVuLibre, recording what each path held while it ran — the
+    staged file is gone by the time the assertions run, which is the point."""
+
+    def run(binary, args):
+        for arg in args:
+            if arg.lower().endswith(D.DJVU_SUFFIXES):
+                seen[arg] = Path(arg).read_bytes() if Path(arg).exists() else None
+        return fake(binary, args)
+
+    return run
+
+
+def test_on_windows_a_cyrillic_path_reaches_the_binaries_as_ascii(
+    ctx, cyrillic_book, libre, staging_root, monkeypatch
+):
+    monkeypatch.setattr(D.sys, "platform", "win32")
+    fake = _DjVuLibre(pages=2, text={1: "ГОСУДАРСТВЕННЫЙ КОМИТЕТ ОБОРОНЫ"})
+    libre(fake)
+
+    out = _read(ctx, cyrillic_book, "1", mode="text")
+
+    given = _documents_handed_over(fake.calls)
+    assert given, "no binary was handed the document at all"
+    assert all(path.isascii() for path in given), given
+    assert str(cyrillic_book) not in given
+    # What the caller reads is the path it asked about, not the link.
+    assert out["path"] == str(cyrillic_book)
+    assert "КОМИТЕТ" in out["per_page"][0]["text"]
+
+
+def test_the_link_carries_the_document_and_is_gone_when_the_call_ends(
+    ctx, cyrillic_book, libre, staging_root, monkeypatch
+):
+    monkeypatch.setattr(D.sys, "platform", "win32")
+    seen = {}
+    fake = _DjVuLibre(pages=2, text={1: "x"})
+    libre(_watching(fake, seen))
+
+    _read(ctx, cyrillic_book, "1", mode="text")
+
+    (staged,) = set(_documents_handed_over(fake.calls))
+    assert seen[staged] == cyrillic_book.read_bytes(), "the link held other bytes"
+    assert not Path(staged).exists(), "the staged file outlived the call"
+    assert list(staging_root.rglob("*")) == []
+    assert cyrillic_book.exists(), "the source was touched"
+
+
+def test_the_ascii_name_is_the_documents_own_digest(
+    ctx, cyrillic_book, libre, staging_root, monkeypatch
+):
+    """The name is the content, so two calls on one document stage one link and
+    the vision cache keyed by the same digest stays keyed by content."""
+    monkeypatch.setattr(D.sys, "platform", "win32")
+    fake = _DjVuLibre(pages=2, text={1: "x"})
+    libre(fake)
+
+    _read(ctx, cyrillic_book, "1", mode="text")
+
+    (staged,) = set(_documents_handed_over(fake.calls))
+    assert Path(staged).name == f"{D._file_digest(cyrillic_book)[:16]}.djvu"
+
+
+def test_a_hard_link_that_cannot_be_made_becomes_a_copy(
+    ctx, cyrillic_book, libre, staging_root, monkeypatch
+):
+    """A different volume, a filesystem with no links, a permission that allows
+    reading and not linking: slower, and still the document."""
+    monkeypatch.setattr(D.sys, "platform", "win32")
+    attempts = []
+
+    def no_links(source, target):
+        attempts.append((source, target))
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(D.os, "link", no_links)
+    seen = {}
+    fake = _DjVuLibre(pages=2, text={1: "x"})
+    libre(_watching(fake, seen))
+
+    out = _read(ctx, cyrillic_book, "1", mode="text")
+
+    assert len(attempts) == 1, "the link was not tried before the copy"
+    (staged,) = set(_documents_handed_over(fake.calls))
+    assert seen[staged] == cyrillic_book.read_bytes()
+    assert not Path(staged).exists()
+    assert out["per_page"][0]["text"] == "x"
+
+
+def test_an_ascii_path_is_handed_over_untouched_on_windows(
+    ctx, book, libre, staging_root, monkeypatch
+):
+    monkeypatch.setattr(D.sys, "platform", "win32")
+    fake = _DjVuLibre(pages=2, text={1: "x"})
+    libre(fake)
+
+    _read(ctx, book, "1", mode="text")
+
+    assert set(_documents_handed_over(fake.calls)) == {str(book)}
+    assert not staging_root.exists(), "an ASCII path was staged anyway"
+
+
+def test_off_windows_a_cyrillic_path_is_never_staged(
+    ctx, cyrillic_book, libre, staging_root, monkeypatch
+):
+    """Linux and macOS open these paths today, and the repair must not change
+    what they read or what they measure."""
+    monkeypatch.setattr(D.sys, "platform", "linux")
+    fake = _DjVuLibre(pages=2, text={1: "полный текст"})
+    libre(fake)
+
+    out = _read(ctx, cyrillic_book, "1", mode="text")
+
+    assert set(_documents_handed_over(fake.calls)) == {str(cyrillic_book)}
+    assert not staging_root.exists()
+    assert out["per_page"][0]["text"] == "полный текст"
+
+
+def test_a_page_read_through_the_link_is_cached_against_the_document(
+    ctx, cyrillic_book, libre, staging_root, tmp_path, monkeypatch
+):
+    """The cache key is the content, not the path the binaries were given: a
+    page read once on Windows is not read again on the same file elsewhere."""
+    libre(_DjVuLibre(pages=2))
+    vision = _Vision()
+    ctx.dpc_service = SimpleNamespace(llm_manager=vision)
+    ctx.agent_root = tmp_path / "agent"
+
+    monkeypatch.setattr(D.sys, "platform", "win32")
+    first = _read(ctx, cyrillic_book, "1", mode="vision")["per_page"][0]
+    monkeypatch.setattr(D.sys, "platform", "linux")
+    second = _read(ctx, cyrillic_book, "1", mode="vision")["per_page"][0]
+
+    assert len(vision.calls) == 1, "the staged path made a second cache entry"
+    assert second["cached"] is True and second["text"] == first["text"]
+
+
+def test_with_no_ascii_directory_anywhere_the_answer_names_the_setting(
+    ctx, cyrillic_book, libre, tmp_path, monkeypatch
+):
+    """A user whose profile is not ASCII has no temp directory that is; the
+    answer has to name the one setting that repairs it."""
+    monkeypatch.setattr(D.sys, "platform", "win32")
+    libre(_DjVuLibre(pages=2, text={1: "x"}))
+    monkeypatch.setenv(D.ASCII_TMP_ENV, str(tmp_path / "настройка"))
+    monkeypatch.setattr(D.tempfile, "gettempdir", lambda: str(tmp_path / "время"))
+    monkeypatch.setattr(D.Path, "home", staticmethod(lambda: tmp_path / "пользователь"))
+
+    out = asyncio.run(D.read_document(ctx, str(cyrillic_book)))
+
+    assert out.startswith("⚠️")
+    assert D.ASCII_TMP_ENV in out
+    assert "PDF reading is unaffected" in out
