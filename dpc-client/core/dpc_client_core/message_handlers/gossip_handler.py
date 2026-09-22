@@ -69,25 +69,12 @@ class GossipMessageHandler(MessageHandler):
         try:
             # DPTP §3.10: the message sits under payload.gossip_message, and
             # gossip_manager.gossip_message_frame() is the one place that
-            # builds it. A frame with the message flat in the payload comes
-            # from a node running code older than 2026-09-14, whose fan-out
-            # and forwarding sent that shape. Accepted for one release, with a
-            # warning that counts, rather than refused: both DHT seeds and the
-            # Linux node may run the older code for days after this lands,
-            # and a refused frame is a message lost until anti-entropy - the
-            # very path this fix exists to stop relying on. Remove the flat
-            # branch in the release after the one that ships it. Since origin
-            # signing such a sender's frames are unsigned and refused anyway.
+            # builds it. A flat frame (the pre-2026-09-14 fan-out shape, or
+            # anything else missing the key) is refused here: since origin
+            # signing (20ffb357) such a sender's frame carries no signature
+            # either and proven_origin would drop it anyway, so there is no
+            # longer a release-window reason to accept it first.
             gossip_data = payload.get("gossip_message")
-            if not gossip_data and {"id", "source", "destination", "payload"} <= payload.keys():
-                stats = self.service.gossip_manager.stats
-                stats["flat_frames_accepted"] = stats.get("flat_frames_accepted", 0) + 1
-                self.logger.warning(
-                    "GOSSIP_MESSAGE from %s arrived flat (sender older than 2026-09-14); "
-                    "accepted this release, refused next (%d so far)",
-                    sender_node_id[:20], stats["flat_frames_accepted"],
-                )
-                gossip_data = payload
             if not gossip_data:
                 self.logger.warning("GOSSIP_MESSAGE missing 'gossip_message' field")
                 return None

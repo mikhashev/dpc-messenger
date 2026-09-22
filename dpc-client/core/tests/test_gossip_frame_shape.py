@@ -8,6 +8,10 @@ only ``payload["gossip_message"]`` (the shape DPTP §3.10 states), so the sixth
 tier delivered through anti-entropy alone. These tests push a frame built by
 each real sender path through ``GossipMessageHandler.handle`` and require it
 to reach ``GossipManager.handle_gossip_message`` on the far side.
+
+A transitional accept-with-warning for a flat frame lived here from 2026-09-14
+to 2026-09-23: origin signing (20ffb357) made it moot, since a pre-fix sender's
+frame is unsigned too and refused on that ground regardless of shape.
 """
 
 import logging
@@ -81,7 +85,6 @@ async def test_fan_out_frame_reaches_the_receivers_manager():
     assert received.id == msg_id
     assert received.destination == BOB
     assert charlie.stats["messages_received"] == 1
-    assert charlie.stats["flat_frames_accepted"] == 0
     assert not [k for k, v in charlie.stats.items() if k.endswith("_frames_refused") and v]
 
 
@@ -112,7 +115,6 @@ async def test_second_hop_forward_frame_reaches_the_next_manager():
     assert received.id == msg_id
     assert received.hops == 2
     assert received.already_forwarded == [ALICE, CHARLIE]
-    assert dave.stats["flat_frames_accepted"] == 0
     assert not [k for k, v in dave.stats.items() if k.endswith("_frames_refused") and v]
 
 
@@ -146,13 +148,12 @@ async def test_anti_entropy_resend_still_reaches_the_receiver(monkeypatch):
 
     charlie.handle_gossip_message.assert_awaited_once()
     assert charlie.handle_gossip_message.await_args.args[0].id == msg.id
-    assert charlie.stats["flat_frames_accepted"] == 0
     assert not [k for k, v in charlie.stats.items() if k.endswith("_frames_refused") and v]
 
 
 @pytest.mark.asyncio
-async def test_flat_frame_from_an_older_node_is_accepted_with_a_counted_warning(caplog):
-    """(d) A pre-fix peer still fans out flat; for one release it is read, not lost."""
+async def test_flat_frame_is_refused_with_the_old_missing_field_warning(caplog):
+    """(d) A flat frame - even signed - never reaches the manager; the old wording holds."""
     charlie = node(CHARLIE)
     handler = receiving_handler(charlie)
     msg = signed(GossipMessage.create(
@@ -163,14 +164,9 @@ async def test_flat_frame_from_an_older_node_is_accepted_with_a_counted_warning(
     with caplog.at_level(logging.WARNING, logger="dpc_client_core.message_handlers"):
         await handler.handle(ALICE, msg.to_dict())  # flat: message keys at the top
 
-    charlie.handle_gossip_message.assert_awaited_once()
-    assert charlie.handle_gossip_message.await_args.args[0].id == msg.id
-    assert charlie.stats["flat_frames_accepted"] == 1
+    charlie.handle_gossip_message.assert_not_awaited()
     assert not [k for k, v in charlie.stats.items() if k.endswith("_frames_refused") and v]
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "flat" in warnings[0].getMessage()
-    assert ALICE[:20] in warnings[0].getMessage()
+    assert any("missing 'gossip_message'" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -184,6 +180,5 @@ async def test_frame_with_neither_shape_is_dropped_with_the_old_warning(caplog):
         await handler.handle(ALICE, {"vector_clock": {}, "message_ids": []})
 
     charlie.handle_gossip_message.assert_not_awaited()
-    assert charlie.stats["flat_frames_accepted"] == 0
     assert not [k for k, v in charlie.stats.items() if k.endswith("_frames_refused") and v]
     assert any("missing 'gossip_message'" in r.getMessage() for r in caplog.records)

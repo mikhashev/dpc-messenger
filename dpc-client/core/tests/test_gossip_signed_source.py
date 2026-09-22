@@ -158,10 +158,13 @@ async def test_frame_carrying_the_victims_certificate_but_signed_by_another_key_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field,value", [
+    ("id", "msg-tampered-" + "0" * 20),
     ("payload", {"encrypted": "other-blob"}),
     ("destination", "dpc-node-" + "0" * 32),
+    ("max_hops", 4),
     ("created_at", 0.0),
     ("ttl", 10 ** 9),
+    ("priority", "high"),
     ("vector_clock", {"dpc-node-x": 99}),
 ])
 async def test_signed_frame_altered_in_transit_is_refused(ids, field, value):
@@ -255,6 +258,45 @@ async def test_send_gossip_emits_a_frame_the_receiver_accepts(ids):
         alice.node_id, {"command": "SEND_TEXT", "text": "hi"}
     )
     assert msg_id in bob_node.seen_messages
+
+
+@pytest.mark.asyncio
+async def test_delivery_is_attributed_to_the_certificate_not_a_later_mutated_source(ids):
+    """_deliver_message must use the id proven_origin() derived, not msg.source
+    re-read - falsified by reverting to msg.source: a mutation between the
+    origin check and delivery would then reach the router under the wrong id."""
+    alice, bob = ids["alice"], ids["bob"]
+    bob_node = node(bob)
+    msg = signed(new_message(alice.node_id, bob.node_id), by=alice)
+    msg.source = "dpc-node-" + "9" * 32  # mutated after the check, before delivery
+
+    await bob_node._deliver_message(msg, alice.node_id)
+
+    bob_node.message_router.route_message.assert_awaited_once_with(
+        alice.node_id, {"command": "SEND_TEXT", "text": "hi"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_already_forwarded_naming_the_recipient_does_not_stop_sync_delivery(ids):
+    """already_forwarded is a fan-out hint, unsigned - a relay padding it with
+    bob's id only suppresses _forward_message's fanout, not the anti-entropy
+    pull, which resends by message_ids regardless of the list."""
+    alice, bob = ids["alice"], ids["bob"]
+    msg = signed(new_message(alice.node_id, bob.node_id), by=alice)
+    msg.already_forwarded.append(bob.node_id)
+
+    charlie_relay = node(ids["charlie"])
+    charlie_relay.messages[msg.id] = msg
+    bob_peer = peer(bob.node_id)
+    charlie_relay.p2p_manager.peers = {bob.node_id: bob_peer}
+
+    await charlie_relay.handle_gossip_sync(peer_id=bob.node_id, peer_clock_dict={}, peer_message_ids=[])
+    bob_peer.send.assert_awaited_once()
+
+    bob_node = node(bob)
+    await handler_for(bob_node).handle(charlie_relay.node_id, bob_peer.send.await_args.args[0]["payload"])
+    bob_node.message_router.route_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio

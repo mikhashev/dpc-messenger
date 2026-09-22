@@ -54,14 +54,17 @@ def gossip_message_frame(msg: GossipMessage) -> Dict:
     }
 
 
-def origin_refusal(msg: GossipMessage) -> Optional[str]:
-    """Why ``msg`` cannot be shown to come from ``msg.source``, or None if it can.
+def proven_origin(msg: GossipMessage) -> "tuple[Optional[str], Optional[str]]":
+    """(refusal, proven_id) for ``msg`` — never both non-None.
 
-    Self-contained on purpose: the key is the certificate the message carries,
-    bound to ``source`` by re-deriving the node id from its public key, so no
-    DHT or cache lookup (which can miss or be poisoned) stands between a frame
-    and its check. Encryption to us proves nothing here - anyone holds our key.
-    Returns the stats key to count the refusal under.
+    Self-contained: the key is the certificate the message carries, bound to
+    ``source`` by re-deriving the node id from its public key, so no DHT or
+    cache lookup (which can miss or be poisoned) stands between a frame and
+    its check. Encryption to us proves nothing - anyone holds our key.
+
+    ``proven_id`` is what the certificate itself derives to, for a caller to
+    deliver under - not ``msg.source`` re-read, which a mutation after this
+    check would desync from it.
     """
     from cryptography import x509
     from dpc_protocol.commit_integrity import CommitSigner
@@ -69,21 +72,21 @@ def origin_refusal(msg: GossipMessage) -> Optional[str]:
     from dpc_protocol.message_signing import GOSSIP_PREIMAGE_VERSION
 
     if not (msg.signature and msg.cert_pem and msg.gossip_preimage_version):
-        return "unsigned_frames_refused"
+        return "unsigned_frames_refused", None
     try:
         cert = x509.load_pem_x509_certificate(msg.cert_pem.encode("utf-8"))
         signer_id = generate_node_id(cert.public_key())
     except Exception:  # noqa: BLE001 - an unreadable certificate binds nothing
-        return "source_mismatch_frames_refused"
+        return "source_mismatch_frames_refused", None
     if signer_id != msg.source:
-        return "source_mismatch_frames_refused"
+        return "source_mismatch_frames_refused", None
     if msg.gossip_preimage_version != GOSSIP_PREIMAGE_VERSION:
-        return "bad_signature_frames_refused"
+        return "bad_signature_frames_refused", None
     if not CommitSigner.verify_with_public_key(
         cert.public_key(), msg.origin_hash(), msg.signature
     ):
-        return "bad_signature_frames_refused"
-    return None
+        return "bad_signature_frames_refused", None
+    return None, signer_id
 
 
 class GossipManager:
@@ -174,11 +177,8 @@ class GossipManager:
             "messages_delivered": 0,
             "messages_dropped": 0,
             "sync_cycles": 0,
-            # Flat GOSSIP_MESSAGE frames read from nodes older than 2026-09-14;
-            # counted by GossipMessageHandler. See gossip_message_frame().
-            "flat_frames_accepted": 0,
             # Frames refused before anything else because the origin signature
-            # does not show they come from their `source`. See origin_refusal().
+            # does not show they come from their `source`. See proven_origin().
             "unsigned_frames_refused": 0,
             "source_mismatch_frames_refused": 0,
             "bad_signature_frames_refused": 0,
@@ -652,7 +652,7 @@ class GossipManager:
         self.stats["messages_received"] += 1
 
         # First, before deliver, dedup, store, clock merge or forward.
-        refusal = origin_refusal(msg)
+        refusal, proven_id = proven_origin(msg)
         if refusal:
             self.stats[refusal] += 1
             logger.warning(
@@ -673,7 +673,7 @@ class GossipManager:
             return
 
         if msg.destination == self.node_id:
-            await self._deliver_message(msg)
+            await self._deliver_message(msg, proven_id)
             return
 
         if not msg.can_forward():
@@ -748,16 +748,11 @@ class GossipManager:
             except Exception as e:
                 logger.debug("Failed to forward message %s to %s: %s", msg.id, peer.node_id[:20], e)
 
-    async def _deliver_message(self, msg: GossipMessage):
-        """
-        Deliver message to local application (with decryption).
+    async def _deliver_message(self, msg: GossipMessage, proven_source: str):
+        """Deliver message to local application (with decryption).
 
-        Args:
-            msg: Message for this node (with encrypted payload)
-
-        Note:
-            Decrypts payload before delivering to callback.
-            Only the intended recipient can decrypt (end-to-end encryption).
+        proven_source is the id proven_origin() derived from the cert, used
+        for attribution instead of msg.source re-read.
         """
         logger.info(
             "Delivering gossip message %s from %s (hops: %d)",
@@ -782,7 +777,7 @@ class GossipManager:
             return
 
         # Notify GossipConnection if callback registered
-        source_peer = msg.source
+        source_peer = proven_source
         if hasattr(self, 'delivery_callbacks') and source_peer in self.delivery_callbacks:
             try:
                 callback = self.delivery_callbacks[source_peer]

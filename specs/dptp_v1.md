@@ -1148,6 +1148,20 @@ every relay rewrites them. A relay can therefore reset them; how long it can kee
 such a message alive is bounded by the signed `created_at` + `ttl`, and a node
 acts on one message `id` once.
 
+`already_forwarded` is a routing hint, not a fact: unsigned, a relay that pads it
+with names can suppress `_forward_message`'s fanout to those peers but cannot
+prevent delivery. `handle_gossip_sync` ignores the list and resends by
+`message_ids` alone every `sync_interval` (default 300s), so the ceiling such a
+relay can impose is one anti-entropy interval per hop it sits on.
+
+A node running code older than v1.7 rebuilds the message from its own
+11-field model when it relays, dropping `signature`, `cert_pem` and
+`gossip_preimage_version` — a signed message forwarded through such a node
+therefore arrives unsigned and is refused. There is no mixed-version tier: every
+node must run v1.7 before signed gossip works across the pair (Mike's call,
+2026-09-23). No negative acknowledgement is sent for a refused frame; refusals
+are visible only in the receiver's `get_stats()` counters.
+
 The certificate travels with the message so any hop can check it without a DHT or
 cache lookup, which can miss or be poisoned. The binding is the node id itself:
 `generate_node_id(cert_pem's public key)` (§4) must equal `source`. Encryption to
@@ -2584,7 +2598,12 @@ DPTP is designed to be extensible. New commands can be added by:
   before it delivers, stores or forwards it. Before this any connected peer could
   deliver any command as any node id. Not backward compatible by design: a node
   that does not sign is refused. The receiver order is also restated as the code
-  runs it (dedup before delivery). Added 2026-09-23
+  runs it (dedup before delivery). A pre-v1.7 relay rebuilds the message from
+  its own field set and drops the signature, so there is no mixed-version
+  operation for this tier — every node updates before signed gossip works
+  across it — and refusals carry no NACK, visible only in `get_stats()`.
+  `already_forwarded` is stated as a hint the anti-entropy pull ignores, not a
+  guarantee. Added 2026-09-23
 - **§3.4 REMOTE_INFERENCE_REQUEST** — optional `messages`, `system`, `tools` and
   `stream`: the conversation un-flattened in the Anthropic shape, its system
   prompt, the tool definitions the model may call, and whether the host should
