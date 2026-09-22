@@ -188,10 +188,28 @@ def _fake_run_one(records):
     """Stand in for run_one, handing back prepared records in order."""
     it = iter(records)
 
-    def run_one(cfg, deadline, stamp):
+    # `*_settings`: since 2026-09-23 the campaign passes the alias and limits on.
+    def run_one(cfg, deadline, stamp, *_settings):
         return next(it)
 
     return run_one
+
+
+class _Preflight:
+    """The checks pass, so these tests reach the queue they are about."""
+
+    def __init__(self, ok=True):
+        self.ok = ok
+
+    def run_checks(self, *a, **k):
+        return [("OK" if self.ok else "FAIL", "alias", "stub")]
+
+    def print_checks(self, checks):
+        for status, name, detail in checks:
+            print(f"  {status} {name} {detail}")
+
+    def all_ok(self, checks):
+        return self.ok
 
 
 def _record(name, exit_code, minutes):
@@ -200,11 +218,12 @@ def _record(name, exit_code, minutes):
             "json": f"{name}.json"}
 
 
-def _run_main(monkeypatch, tmp_path, records):
+def _run_main(monkeypatch, tmp_path, records, argv=("--hours", "24"), preflight_ok=True):
     monkeypatch.setattr(campaign, "RESULTS", tmp_path)
     monkeypatch.setattr(campaign, "wait_for_gpu", lambda *a, **k: True)
     monkeypatch.setattr(campaign, "run_one", _fake_run_one(records))
-    monkeypatch.setattr(sys, "argv", ["campaign.py", "--hours", "24"])
+    monkeypatch.setitem(sys.modules, "preflight", _Preflight(preflight_ok))
+    monkeypatch.setattr(sys, "argv", ["campaign.py", *argv])
     return campaign.main()
 
 
@@ -239,3 +258,92 @@ def test_a_failure_says_so_on_screen_rather_than_none(monkeypatch, tmp_path, cap
     out = capsys.readouterr().out
     assert "FAILED (exit 1)" in out
     assert "None/None = None" not in out, "a failed run must not read as a score"
+
+
+# --- one command, unattended, 2026-09-23 --------------------------------------
+# The queue named `qwen3.8 27b Mythos`, an alias the providers file no longer
+# held, so every run would have died after the dataset download. The alias is
+# now an argument, checked before anything starts, and the night ends with one
+# status a caller can read.
+
+
+def test_the_runs_use_the_alias_the_campaign_was_given(tmp_path):
+    cmd = campaign.runner_command(campaign.QUEUE[0], tmp_path / "r.json",
+                                  {"alias": "some alias", "limit": 3})
+    assert cmd[cmd.index("--provider-alias") + 1] == "some alias"
+    assert cmd[cmd.index("--limit") + 1] == "3"
+    assert "Mythos" not in " ".join(cmd)
+    assert campaign.DEFAULT_ALIAS == "qwen3.8 27b"
+
+
+def test_a_refused_preflight_starts_nothing(monkeypatch, tmp_path, capsys):
+    code = _run_main(monkeypatch, tmp_path, [], preflight_ok=False)
+
+    assert code == campaign.PREFLIGHT_EXIT
+    assert "not started" in capsys.readouterr().out
+
+
+def test_a_dry_run_starts_nothing_even_when_the_checks_pass(monkeypatch, tmp_path, capsys):
+    code = _run_main(monkeypatch, tmp_path, [], argv=("--dry-run",))
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "dry run" in out and "campaign until" not in out
+
+
+@pytest.mark.parametrize("codes, never_free, expected", [
+    ([0, 0], False, 0),
+    ([0, 3], False, 3),
+    ([0, 1], False, 1),
+    ([3, -9], False, 1),
+    ([], True, 4),
+    ([], False, 4),
+    ([0], True, 4),
+])
+def test_the_night_ends_with_one_status_worst_first(codes, never_free, expected):
+    done = [{"exit_code": c} for c in codes]
+    assert campaign.campaign_exit(done, never_free) == expected
+
+
+def test_the_summary_line_carries_the_exit(monkeypatch, tmp_path, capsys):
+    records = [_record(cfg["name"], 0, 100.0) for cfg in campaign.QUEUE]
+
+    code = _run_main(monkeypatch, tmp_path, records)
+
+    assert code == 0
+    assert "campaign exit 0" in capsys.readouterr().out
+
+
+def test_a_run_that_never_returns_is_killed_with_its_tree(monkeypatch, tmp_path, capsys):
+    """A hung run held the night; now it is stopped, children included."""
+    killed = []
+
+    class _Hung:
+        pid = 4242
+
+        def __init__(self, *a, **k):
+            pass
+
+        def wait(self, timeout=None):
+            if not killed:
+                raise subprocess.TimeoutExpired("uv", timeout)
+            return -1
+
+    monkeypatch.setattr(campaign, "RESULTS", tmp_path)
+    monkeypatch.setattr(campaign.subprocess, "Popen", _Hung)
+    monkeypatch.setattr(campaign, "_kill_tree", lambda proc: killed.append(proc.pid))
+
+    record = campaign.run_one(campaign.QUEUE[0], datetime.now(), "stamp",
+                              {"alias": "a", "run_timeout_minutes": 0.01})
+
+    assert killed == [4242]
+    assert record["exit_code"] == campaign.TIMED_OUT
+    assert "timed out" in capsys.readouterr().out
+
+
+def test_the_wait_line_says_to_stop_the_service(clock, monkeypatch, capsys):
+    _card(monkeypatch, free_mib=3000, holders=["llama-server.exe (pid 1)"])
+
+    campaign.wait_for_gpu(clock.now() + timedelta(hours=8), budget_minutes=5)
+
+    assert "Stop the DPC service" in capsys.readouterr().out

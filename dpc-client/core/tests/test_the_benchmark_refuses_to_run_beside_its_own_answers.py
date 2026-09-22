@@ -118,18 +118,40 @@ class TestTheBenchmarkAgentsOwnRules:
         assert firewall.access_file_path == tmp_path / "privacy_rules.json"
         assert firewall.access_file_path.is_file()
 
-    def test_every_tool_stays_on_so_the_firewall_changes_only_the_paths(self, tmp_path):
+    # Replaced 2026-09-23. This asserted every tool on; with every tool on,
+    # `read_session_archive` fell back to the operator's own archive and
+    # `get_dpc_context` read personal.json. The tools a task needs stay on.
+
+    def test_every_registered_tool_is_written_down_so_none_is_seeded_on(self, tmp_path):
         from dpc_client_core.dpc_agent.tools.registry import ToolRegistry
 
         firewall = gaia.benchmark_firewall(tmp_path)
         tools = firewall.get_agent_tools_map(gaia.BENCH_PROFILE)
 
         assert set(tools) == set(ToolRegistry()._entries)
-        off = sorted(name for name, on in tools.items() if not on)
-        assert off == [], (
-            "the runs this score is compared with had every tool; dropping the web "
-            "or the shell measures the tooling instead of the loop"
-        )
+
+    @pytest.mark.parametrize("tool", [
+        "read_session_archive", "read_session_detail", "search_session_archives",
+        "chat_history", "get_dpc_context", "send_user_message", "schedule_task",
+        "git_push", "comfyui_submit", "list_auth_domains", "list_local_agents",
+        "import_skill_from_agent", "update_identity",
+    ])
+    def test_a_tool_that_reaches_the_operator_is_off(self, tmp_path, tool):
+        tools = gaia.benchmark_firewall(tmp_path).get_agent_tools_map(gaia.BENCH_PROFILE)
+        assert tools.get(tool) is False, tool
+
+    def test_what_a_task_needs_stays_on(self, tmp_path):
+        tools = gaia.benchmark_firewall(tmp_path).get_agent_tools_map(gaia.BENCH_PROFILE)
+        for tool in ("search_web", "browse_page", "read_file", "write_file",
+                     "run_shell", "read_document", "describe_image"):
+            assert tools.get(tool) is True, tool
+
+    def test_a_tool_nobody_has_listed_is_off(self):
+        from _harness import benchmark_tools
+
+        tools = benchmark_tools.tool_map(registered=["read_file", "brand_new_tool"])
+
+        assert tools == {"read_file": True, "brand_new_tool": False}
 
     def test_the_repository_is_outside_the_benchmark_sandbox(self, tmp_path):
         firewall = gaia.benchmark_firewall(tmp_path)

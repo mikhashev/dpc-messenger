@@ -28,22 +28,34 @@ The queue waits for the GPU to be free before each run, so it can be started
 while something else is still finishing, and it refuses to start a run that
 cannot finish before the deadline.
 
-Run it from `dpc-client/core` — there is no project at the repository root for
-`uv run` to resolve, and the runs it launches are started there anyway. The
-campaign itself imports nothing outside the standard library; `--with pyarrow`
-belongs to the child command and is already in it.
+The one command, from `dpc-client/core`, with the DPC service stopped (it
+holds the model through its own llama-server child, and the card has room for
+one):
 
     cd dpc-client/core
-    HF_TOKEN=... uv run python ../../eval/gaia/campaign.py --hours 7.5
+    uv run --with pyarrow python ../../eval/gaia/campaign.py --dry-run
+    uv run --with pyarrow python ../../eval/gaia/campaign.py --hours 7.5
+
+`--dry-run` checks everything a night depends on — the alias, the pinned
+llama-server binary, the GGUF, the token, the card, the results directory, the
+tool set — and downloads nothing and loads no model. The real start runs the
+same checks and refuses before the first run if any of them fails. The token
+is `HF_TOKEN` or, when that is unset, the one `hf auth login` stored.
 
 A run needs about 170 minutes, so 7.5 hours starts two of the four and says so
 for the rest. The queue's order is what makes a short night still worth having.
+
+Exit codes: 0 every started run scored clean; 1 a run failed or timed out;
+2 the preflight refused; 3 a run was contaminated; 4 the card never came free
+or nothing could start before the deadline.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -56,6 +68,17 @@ from _harness.results_root import results_root  # noqa: E402
 
 RESULTS = results_root("gaia")
 RUNNER = HERE / "run_gaia_eval.py"
+# The local llama-server alias. An alias the providers file does not hold stops
+# the campaign in the preflight, before any download — it used to be a
+# hardcoded name that had been renamed, and every run would have died on it.
+DEFAULT_ALIAS = "qwen3.8 27b"
+FAILED_EXIT = 1
+PREFLIGHT_EXIT = 2
+NO_CARD_EXIT = 4
+# A run that outlives this is killed with its whole tree (uv, the runner and
+# the llama-server it started), so an unattended night cannot hang on one run.
+DEFAULT_RUN_TIMEOUT_MIN = 240
+TIMED_OUT = -9
 # The runner's own exit for «the agent read a planted answer key». Named here
 # rather than folded into the generic failure branch: the run did not fail, it
 # produced a number that must not be counted.
@@ -179,7 +202,9 @@ def wait_for_gpu(deadline: datetime, budget_minutes: float = DEFAULT_WAIT_BUDGET
             holders = gpu_holder_candidates()
             who = ", ".join(holders) if holders else "no compute process named it"
             print(f"  waiting for the GPU: {free} MiB free, {GPU_NEEDED_MIB} needed, "
-                  f"{waited:.0f} min so far — held by: {who}", flush=True)
+                  f"{waited:.0f} min so far — held by: {who}. Stop the DPC service "
+                  f"(or unload its model): it holds the card through its own "
+                  f"llama-server child", flush=True)
         polls += 1
         time.sleep(POLL_SECONDS)
     waited = (datetime.now() - started).total_seconds() / 60
@@ -190,27 +215,62 @@ def wait_for_gpu(deadline: datetime, budget_minutes: float = DEFAULT_WAIT_BUDGET
     return False
 
 
-def run_one(cfg: dict, deadline: datetime, stamp: str) -> dict:
-    out_json = RESULTS / f"{stamp}-{cfg['name']}.json"
-    out_log = RESULTS / f"{stamp}-{cfg['name']}.log"
+def runner_command(cfg: dict, out_json: Path, settings: dict) -> list:
     cmd = [
         "uv", "run", "--with", "pyarrow", "python", str(RUNNER),
-        "--provider-alias", "qwen3.8 27b Mythos",
+        "--provider-alias", settings["alias"],
         "--with-files", "--auto-approve",
         "--temperature", str(cfg["temperature"]),
         "--reasoning-effort", cfg["reasoning_effort"],
         "--json", str(out_json),
     ]
+    if settings.get("limit"):
+        cmd += ["--limit", str(settings["limit"])]
+    return cmd
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """The runner's children too: a killed uv alone leaves llama-server on the card."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=60)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except Exception as exc:
+        print(f"  warning: could not kill run tree {proc.pid}: {exc}", flush=True)
+    try:
+        proc.wait(timeout=60)
+    except Exception:
+        pass
+
+
+def run_one(cfg: dict, deadline: datetime, stamp: str, settings: dict | None = None) -> dict:
+    settings = settings or {"alias": DEFAULT_ALIAS}
+    out_json = RESULTS / f"{stamp}-{cfg['name']}.json"
+    out_log = RESULTS / f"{stamp}-{cfg['name']}.log"
+    cmd = runner_command(cfg, out_json, settings)
+    timeout_min = settings.get("run_timeout_minutes") or DEFAULT_RUN_TIMEOUT_MIN
     started = datetime.now()
     print(f"[{started:%H:%M:%S}] {cfg['name']}: {cfg['why']}", flush=True)
+    timed_out = False
     with open(out_log, "w", encoding="utf-8") as log:
-        proc = subprocess.run(cmd, cwd=str(CORE), stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, cwd=str(CORE), stdout=log, stderr=subprocess.STDOUT,
+                                start_new_session=(sys.platform != "win32"))
+        try:
+            returncode = proc.wait(timeout=timeout_min * 60)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_tree(proc)
+            returncode = TIMED_OUT
     elapsed = (datetime.now() - started).total_seconds() / 60
     record = {
         "name": cfg["name"], "temperature": cfg["temperature"],
         "reasoning_effort": cfg["reasoning_effort"], "minutes": round(elapsed, 1),
-        "exit_code": proc.returncode, "json": str(out_json),
+        "exit_code": returncode, "json": str(out_json), "alias": settings["alias"],
     }
+    if timed_out:
+        record["timed_out_after_minutes"] = timeout_min
     if out_json.exists():
         try:
             report = json.loads(out_json.read_text(encoding="utf-8"))
@@ -219,16 +279,18 @@ def run_one(cfg: dict, deadline: datetime, stamp: str) -> dict:
             record["tasks"] = report.get("tasks")
         except Exception as exc:
             record["read_error"] = str(exc)
-    if proc.returncode == CONTAMINATED_EXIT:
+    if returncode == CONTAMINATED_EXIT:
         record["contaminated"] = True
         print(f"  -> CONTAMINATED: the canary was read, so "
               f"{record.get('correct')}/{record.get('tasks')} is not a score "
               f"({record['minutes']} min) — {out_log}", flush=True)
-    elif proc.returncode == 0:
+    elif returncode == 0:
         print(f"  -> {record.get('correct')}/{record.get('tasks')} "
               f"= {record.get('accuracy')} in {record['minutes']} min", flush=True)
     else:
-        print(f"  -> FAILED (exit {proc.returncode}) after {record['minutes']} min "
+        why = (f"timed out after {timeout_min:.0f} min, tree killed" if timed_out
+               else f"exit {returncode}")
+        print(f"  -> FAILED ({why}) after {record['minutes']} min "
               f"— {out_log}", flush=True)
         for line in _log_tail(out_log):
             print(f"     {line}", flush=True)
@@ -254,26 +316,65 @@ def _log_tail(path: Path, lines: int = 3) -> list:
 FAST_FAILURE_MINUTES = 3.0
 
 
+def campaign_exit(done: list, card_never_free: bool) -> int:
+    """One status for the whole night, worst first: a caller reads only this."""
+    codes = [r["exit_code"] for r in done]
+    if any(c not in (0, CONTAMINATED_EXIT) for c in codes):
+        return FAILED_EXIT
+    if CONTAMINATED_EXIT in codes:
+        return CONTAMINATED_EXIT
+    if card_never_free or not done:
+        return NO_CARD_EXIT
+    return 0
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hours", type=float, default=7.5,
                     help="stop starting new runs this long from now")
     ap.add_argument("--minutes-per-run", type=float, default=170,
                     help="a run is not started unless this much time is left")
     ap.add_argument("--wait-budget-minutes", type=float, default=DEFAULT_WAIT_BUDGET_MIN,
                     help="stop waiting for the card after this long and say so")
+    ap.add_argument("--alias", default=DEFAULT_ALIAS,
+                    help="provider alias in ~/.dpc/providers.json (a llamacpp_server entry)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="tasks per run, for a short smoke campaign (default: all 53)")
+    ap.add_argument("--run-timeout-minutes", type=float, default=DEFAULT_RUN_TIMEOUT_MIN,
+                    help="kill a run and its children after this long")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="run every preflight check and stop: no download, no model load")
     args = ap.parse_args()
 
+    # Beside this file; it imports the client, so it is not loaded at import.
+    import preflight
+
+    checks = preflight.run_checks(args.alias, [c["reasoning_effort"] for c in QUEUE],
+                                  RESULTS, GPU_NEEDED_MIB)
+    preflight.print_checks(checks)
+    if args.dry_run:
+        print("\ndry run: nothing downloaded, no model loaded, no run started.", flush=True)
+        return 0 if preflight.all_ok(checks) else PREFLIGHT_EXIT
+    if not preflight.all_ok(checks):
+        print("\n=== campaign === not started: the preflight refused (FAIL above)",
+              flush=True)
+        return PREFLIGHT_EXIT
+
+    settings = {"alias": args.alias, "limit": args.limit,
+                "run_timeout_minutes": args.run_timeout_minutes}
     RESULTS.mkdir(parents=True, exist_ok=True)
     deadline = datetime.now() + timedelta(hours=args.hours)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
-    print(f"campaign until {deadline:%H:%M:%S}, {len(QUEUE)} run(s) queued", flush=True)
+    print(f"campaign until {deadline:%H:%M:%S}, {len(QUEUE)} run(s) queued, "
+          f"alias {args.alias!r}", flush=True)
 
     done = []
+    card_never_free = False
     for cfg in QUEUE:
         left = (deadline - datetime.now()).total_seconds() / 60
         if left < args.minutes_per_run:
@@ -281,10 +382,11 @@ def main() -> int:
                   f"a run needs about {args.minutes_per_run:.0f}", flush=True)
             continue
         if not wait_for_gpu(deadline, args.wait_budget_minutes):
+            card_never_free = True
             print("not starting the rest of the queue: the card never came free",
                   flush=True)
             break
-        record = run_one(cfg, deadline, stamp)
+        record = run_one(cfg, deadline, stamp, settings)
         done.append(record)
         summary = RESULTS / f"{stamp}-campaign.json"
         summary.write_text(json.dumps({"runs": done}, indent=2), encoding="utf-8")
@@ -301,11 +403,16 @@ def main() -> int:
             outcome = f"CONTAMINATED ({r.get('correct')}/{r.get('tasks')}, not a score)"
         elif r["exit_code"] == 0:
             outcome = f"{r.get('correct')}/{r.get('tasks')} = {r.get('accuracy')}"
+        elif r["exit_code"] == TIMED_OUT:
+            outcome = f"FAILED (timed out, killed after {r.get('timed_out_after_minutes')} min)"
         else:
             outcome = f"FAILED (exit {r['exit_code']})"
         print(f"  {r['name']:12} t={r['temperature']} effort={r['reasoning_effort']:6} "
               f"{outcome} ({r['minutes']} min)", flush=True)
-    return 0
+    code = campaign_exit(done, card_never_free)
+    print(f"campaign exit {code}: {len(done)} of {len(QUEUE)} run(s) started, "
+          f"alias {args.alias!r}", flush=True)
+    return code
 
 
 if __name__ == "__main__":

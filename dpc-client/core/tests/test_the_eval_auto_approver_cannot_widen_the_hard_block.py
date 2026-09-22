@@ -39,9 +39,16 @@ def test_a_tier2_command_never_reaches_the_approval_queue():
     assert "return" in tier2_arm and "_request_approval" not in tier2_arm
 
 
+# The reason exactly as the gate words it. The hand-written "Requires approval:
+# python -c" these tests used before is not a string the gate produces — the
+# gate names the pattern — and a check written against it tested nothing real.
+_PY_C = "Requires approval: " + next(
+    p.pattern for p in shell.DANGEROUS_PATTERNS if p.search('python -c "x"'))
+
+
 def test_the_approver_answers_a_waiting_tier1_request():
     entry = {"command": "python -c \"print(1)\"", "event": threading.Event(),
-             "reason": "Requires approval: python -c"}
+             "reason": _PY_C}
     shell._pending_approvals["eval-test-1"] = entry
     try:
         with Tier1AutoApprover(poll_seconds=0.01) as approver:
@@ -96,8 +103,7 @@ def test_a_headless_eval_run_is_asked_rather_than_refused(tmp_path, monkeypatch)
 
     with Tier1AutoApprover(poll_seconds=0.01) as approver:
         result = shell._request_approval(
-            _headless_ctx(tmp_path), "echo probe",
-            "Requires approval: echo", "", 10
+            _headless_ctx(tmp_path), 'python -c "print(1)"', _PY_C, "", 10
         )
         assert result == "RAN"
         assert approver.summary()["tier1_auto_approved"] == 1
@@ -153,17 +159,17 @@ def test_leaving_the_sandbox_is_not_a_question_it_may_answer():
 
 
 def test_a_command_a_person_would_have_glanced_at_is_approved():
-    approve, _ = Tier1AutoApprover().verdict(
-        _pending('python -c "print(1)"', "Requires approval: python -c"))
+    approve, _ = Tier1AutoApprover().verdict(_pending('python -c "print(1)"', _PY_C))
     assert approve is True
 
 
 def test_a_destructive_tier1_command_is_refused_even_with_the_right_reason():
-    """«Tier 2 stays blocked» undersells what an unattended yes waves through."""
+    """«Tier 2 stays blocked» undersells what an unattended yes waves through.
+
+    Even handed the inline-code reason, the command itself is still read."""
     for command in ("git reset --hard HEAD~5", "git clean -fd", "net user bob /add",
                     "reg delete HKLM\Software\X /f"):
-        approve, why = Tier1AutoApprover().verdict(
-            _pending(command, "Requires approval: " + command.split()[0]))
+        approve, why = Tier1AutoApprover().verdict(_pending(command, _PY_C))
         assert approve is False, command
         assert "destructive" in why
 
@@ -242,3 +248,99 @@ def test_the_gate_puts_the_reason_where_the_approver_can_read_it(tmp_path, monke
     shell._pending_approvals.clear()
 
     assert seen.get("reason") == "Requires approval: python -c"
+
+
+# --- the reason as the gate really joins it ---------------------------------
+# Since 2026-09-21 the gate joins its reasons with "; ": kills first, then
+# «Requires approval: …», then leaving the sandbox. A prefix test read only the
+# head, so a command that also left the sandbox was approved. These reasons are
+# produced by calling the gate itself, not copied from it.
+
+
+class _Firewall:
+    def get_tool_setting(self, *args, **kwargs):
+        return []
+
+
+class _Sandbox:
+    """One directory as the whole sandbox, as a benchmark task root is."""
+
+    def __init__(self, root):
+        self.firewall = _Firewall()
+        self.agent_root = str(root)
+        self._root = Path(root).resolve()
+
+    def validate_extended_path(self, path):
+        import os
+        resolved = Path(os.path.expanduser(str(path)))
+        try:
+            resolved = resolved.resolve()
+        except OSError:
+            pass
+        if self._root not in resolved.parents and resolved != self._root:
+            raise PermissionError(f"{path} is outside {self._root}")
+        return True
+
+
+def _gate(command, tmp_path):
+    verdict = shell._validate_command(command, _Sandbox(tmp_path), str(tmp_path))
+    assert verdict and verdict[0] == "tier1", verdict
+    return _pending(command, verdict[1])
+
+
+def test_inline_code_that_also_leaves_the_sandbox_is_refused(tmp_path):
+    entry = _gate('python -c "print(1)" && type C:\Windows\win.ini', tmp_path)
+    assert entry["reason"].startswith("Requires approval:"), "the case the prefix test missed"
+    assert "outside sandbox" in entry["reason"]
+
+    approve, why = Tier1AutoApprover().verdict(entry)
+
+    assert approve is False
+    assert "outside sandbox" in why
+
+
+def test_a_kill_note_ahead_of_the_approval_is_refused(tmp_path):
+    approve, _ = Tier1AutoApprover().verdict(
+        _gate('taskkill /PID 4242 /F && python -c "print(1)"', tmp_path))
+    assert approve is False
+
+
+def test_a_second_pattern_that_is_not_inline_code_is_refused(tmp_path):
+    """`sudo` rides in the same «Requires approval» part, joined by "; "."""
+    approve, why = Tier1AutoApprover().verdict(_gate('sudo python -c "print(1)"', tmp_path))
+    assert approve is False
+    assert "not an inline-code wrapper" in why
+
+
+@pytest.mark.parametrize("command", [
+    'python -c "import openpyxl" || pip install openpyxl',
+    'python -m pip install openpyxl -q && python -c "import openpyxl"',
+    'python -m ensurepip && python -c "print(1)"',
+    'uv pip install openpyxl && python -c "import openpyxl"',
+    'powershell -Command "pip install curl_cffi"',
+])
+def test_an_install_into_an_interpreter_is_refused(command, tmp_path):
+    approve, why = Tier1AutoApprover().verdict(_gate(command, tmp_path))
+    assert approve is False
+    assert "installs into an interpreter" in why
+
+
+@pytest.mark.parametrize("command", [
+    'python -c "import os; print(open(os.path.expanduser(\'~/.dpc/providers.json\')).read())"',
+    'type "%USERPROFILE%\.dpc\providers.json" & python -c "print(1)"',
+    'powershell -Command "Get-Content $env:USERPROFILE\.dpc\providers.json"',
+    'bash -c "cat $HOME/.dpc/providers.json"',
+])
+def test_the_operators_home_is_not_reached_through_a_variable(command, tmp_path):
+    """Each spelling is from a report on this machine; none is a literal path."""
+    approve, why = Tier1AutoApprover().verdict(_gate(command, tmp_path))
+    assert approve is False
+    assert "operator's home" in why
+
+
+def test_plain_inline_code_inside_the_task_is_still_approved(tmp_path):
+    """The non-regression: the benchmark exists to measure this, not the gate."""
+    for command in ('python -c "print(sum(range(10)))"', 'bash -c "echo hi"',
+                    'node -e "console.log(1)"'):
+        approve, why = Tier1AutoApprover().verdict(_gate(command, tmp_path))
+        assert approve is True, (command, why)

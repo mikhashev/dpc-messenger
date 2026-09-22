@@ -43,11 +43,23 @@ def test_a_secret_never_reaches_the_report():
     )
 
 
-def test_an_inherited_reasoning_effort_is_labelled_as_inherited():
-    """The trap this exists for: absent is not 'default', it is unrecorded."""
+def test_an_inherited_reasoning_effort_is_labelled_as_inherited(monkeypatch):
+    """The trap this exists for: absent is not 'default', it is unrecorded.
+
+    Changed 2026-09-23: the value used to be the constant "xhigh" — one model's
+    default written down for every model. It is now read from the GGUF's own
+    template, and recorded as unknown where there is none to read.
+    """
     inherited = _snapshot(provider_entry={"alias": "a"})
-    assert inherited["reasoning_effort"]["value"] == "xhigh"
+    assert inherited["reasoning_effort"]["value"] is None
     assert "template" in inherited["reasoning_effort"]["source"]
+
+    import dpc_client_core.managers.llama_server_supervisor as sup
+    monkeypatch.setattr(sup, "gguf_effort_dictionary",
+                        lambda path: (("low", "high"), "low") if path == "m.gguf" else None)
+    read = _snapshot(provider_entry={"alias": "a", "gguf_path": "m.gguf"})
+    assert read["reasoning_effort"]["value"] == "low"
+    assert "read from the GGUF" in read["reasoning_effort"]["source"]
 
     pinned = _snapshot(provider_entry={"alias": "a", "reasoning_effort": "high"})
     assert pinned["reasoning_effort"]["value"] == "high"
@@ -132,3 +144,67 @@ def test_the_first_dirty_file_keeps_its_first_character(tmp_path, monkeypatch):
     assert repo["dirty_files"][0] == "dpc-client/core/tests/test_x.py"
     assert repo["dirty_files"][1] == "eval/gaia/results/"
     assert calls[("git", "status", "--porcelain")] is True
+
+
+# --- the model by its files, 2026-09-23 --------------------------------------
+# The alias `qwen3.8 27b` carried the label "qwen3.8 27b Mythos" after the
+# alias had been renamed: the label is free text. The file and its digest are
+# what identify a model.
+
+
+def test_a_model_file_is_hashed_once_and_then_read_from_the_cache(tmp_path, monkeypatch):
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"GGUF" + b"\0" * 1000)
+    cache = tmp_path / "results"
+
+    first = provenance.file_sha256(gguf, cache)
+    assert first["sha256_from_cache"] is False
+    assert len(first["sha256"]) == 64
+
+    def _must_not_hash(*a, **k):
+        raise AssertionError("a cache hit must not read the file again")
+
+    monkeypatch.setattr(provenance.hashlib, "sha256", _must_not_hash)
+    second = provenance.file_sha256(gguf, cache)
+    assert second["sha256_from_cache"] is True
+    assert second["sha256"] == first["sha256"]
+
+
+def test_a_changed_file_is_hashed_again(tmp_path):
+    import os
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"one")
+    first = provenance.file_sha256(gguf, tmp_path)
+    gguf.write_bytes(b"two!")
+    os.utime(gguf, ns=(first["mtime_ns"] + 10**9, first["mtime_ns"] + 10**9))
+
+    second = provenance.file_sha256(gguf, tmp_path)
+    assert second["sha256_from_cache"] is False
+    assert second["sha256"] != first["sha256"]
+
+
+def test_a_llama_server_alias_records_its_files_binary_and_pin(tmp_path, monkeypatch):
+    from dpc_client_core.managers import llama_server_fetcher as fetcher
+
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"GGUF")
+    binary = tmp_path / "llama-server.exe"
+    binary.write_bytes(b"")
+    monkeypatch.setattr(fetcher, "resolve_binary", lambda entry: binary)
+    monkeypatch.setattr(provenance.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"stdout": "", "stderr": "version: 0.4.1 (build 10964)\nbuilt with X\n"})())
+
+    record = provenance.model_files(
+        {"type": "llamacpp_server", "model": "stale label", "gguf_path": str(gguf)}, tmp_path)
+
+    assert record["gguf"]["sha256"] and record["gguf"]["path"] == str(gguf)
+    assert record["model_label"] == "stale label" and "free label" in record["note"]
+    server = record["llama_server"]
+    assert server["pinned_tag"] == fetcher.LLAMA_CPP_TAG
+    assert server["binary"] == str(binary) and server["binary_is_the_pin"] is True
+    assert any("10964" in line for line in server["version"])
+
+
+def test_a_provider_without_local_files_says_so():
+    record = provenance.model_files({"type": "ollama", "model": "x"})
+    assert "no local model files" in record["note"]

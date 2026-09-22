@@ -28,6 +28,7 @@ can show them, and it lives in `eval/` where no production path imports it.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import List
@@ -43,12 +44,37 @@ class Tier1AutoApprover:
     # The one reason it answers. Everything else — the sandbox boundary above
     # all — is a question it is not entitled to answer.
     _APPROVABLE = "Requires approval:"
+    # The gate joins its reasons with "; " (kills first, then this one, then
+    # leaving the sandbox), and this reason joins its own pattern list the same
+    # way — so a prefix test approved a command that also left the sandbox.
+    # A yes now needs the reason to be this prefix followed by nothing but
+    # pattern strings from DANGEROUS_PATTERNS, and each of those to be an
+    # inline-code wrapper: the one thing a headless task legitimately needs.
+    _INLINE_CODE_PROBES = (
+        "python -c x", "node -e x", "bash -c x", "cmd /c x", "powershell -Command x",
+    )
     # Tier 1 commands that are destructive on their own terms, listed because
     # "Tier 2 stays blocked" is true and undersells what an unattended yes
     # would otherwise wave through.
     _NEVER = (
         "reset --hard", "clean -f", "clean -d", "reg add", "reg delete",
         "net user", "systemctl stop", "shutdown", "diskpart", "format ",
+    )
+    # The agent must not change the operator's interpreters. The measured runs
+    # installed openpyxl, pypdf, pytesseract and curl_cffi into the system
+    # Python this way, and read ~/.dpc/providers.json through %USERPROFILE%,
+    # $HOME and expanduser — none of which is a literal path the gate checks.
+    # Lexical, so a speed bump: a script file walks past it (WRITE-A-SCRIPT...).
+    _INSTALLS = re.compile(
+        r"\b(?:pip3?(?:\.exe)?\s+install|-m\s+pip\b|ensurepip|uv\s+(?:pip|add|tool)\b"
+        r"|conda\s+install|mamba\s+install|npm\s+(?:i|install)\b|winget|choco\s+install)",
+        re.I,
+    )
+    _OPERATOR_HOME = re.compile(
+        r"%userprofile%|%appdata%|%localappdata%|%homepath%|\$env:(?:userprofile|appdata"
+        r"|localappdata|homepath)|\$home\b|\$\{home\}|expanduser|path\.home|getenv|environ"
+        r"|(?<![\w.])~(?=[/\\\s\"']|$)|\.dpc\b|huggingface|gaia-archive|providers\.json",
+        re.I,
     )
 
     def __init__(self, poll_seconds: float = 0.2):
@@ -123,13 +149,49 @@ class Tier1AutoApprover:
             # An approver that cannot see why cannot judge. Refusing is the
             # only honest answer, and it is also what an old queue entry gets.
             return False, "the queue entry carries no reason"
-        if not reason.startswith(self._APPROVABLE):
+        patterns = self._patterns_in(reason)
+        if patterns is None:
             return False, reason
-        command = (entry.get("command") or "").lower()
+        not_inline = [p for p in patterns if not self._is_inline_code(p)]
+        if not_inline:
+            return False, f"not an inline-code wrapper: {not_inline[0]}"
+        command = entry.get("command") or ""
         for pattern in self._NEVER:
-            if pattern in command:
+            if pattern in command.lower():
                 return False, f"destructive without a person: {pattern!r}"
+        install = self._INSTALLS.search(command)
+        if install:
+            return False, f"installs into an interpreter: {install.group(0)!r}"
+        home = self._OPERATOR_HOME.search(command)
+        if home:
+            return False, f"reaches the operator's home or credentials: {home.group(0)!r}"
         return True, reason
+
+    def _patterns_in(self, reason: str):
+        """The DANGEROUS_PATTERNS strings the reason names, or None.
+
+        None when anything else is in it: a kill note, an outside-sandbox
+        part, a script part, or text this approver does not recognise.
+        Longest pattern first, because a pattern string may itself hold "; ".
+        """
+        if not reason.startswith(self._APPROVABLE + " "):
+            return None
+        from dpc_client_core.dpc_agent.tools import shell
+        known = sorted({p.pattern for p in shell.DANGEROUS_PATTERNS}, key=len, reverse=True)
+        rest, found = reason[len(self._APPROVABLE) + 1:], []
+        while rest:
+            match = next((k for k in known
+                          if rest.startswith(k) and (rest == k or rest[len(k):].startswith("; "))),
+                         None)
+            if match is None:
+                return None
+            found.append(match)
+            rest = rest[len(match) + 2:]
+        return found or None
+
+    def _is_inline_code(self, pattern: str) -> bool:
+        compiled = re.compile(pattern, re.I)
+        return any(compiled.search(probe) for probe in self._INLINE_CODE_PROBES)
 
     def _drain(self, shell) -> None:
         # A copy: the waiting thread pops entries out from under us.

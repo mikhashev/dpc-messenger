@@ -18,17 +18,19 @@ Read the caveats before quoting any figure it produces:
 - **Many GAIA tasks need the open web.** A run without working browse tooling
   measures the tooling's absence, not the loop. The report separates tasks the
   agent answered from tasks it could not attempt.
-- Scoring is the official-style normalised exact match: numbers compared as
-  numbers, comma-separated lists elementwise, strings lowercased and stripped.
-  No model judges anything.
+- Scoring is the official leaderboard's `question_scorer`, ported rule for rule
+  (`OFFICIAL_SCORER` below names the revision it was read at and the two
+  deliberate deviations). No model judges anything.
 
 The dataset is gated. Accept the licence at
-https://huggingface.co/datasets/gaia-benchmark/GAIA, then export `HF_TOKEN`.
-The token is never written to disk by this script.
+https://huggingface.co/datasets/gaia-benchmark/GAIA, then either export
+`HF_TOKEN` or log in once with `hf auth login`; the stored token is used when
+the variable is unset. The token is never written to disk by this script.
 
-Run from `dpc-client/core`:
+The one command for an overnight campaign is `campaign.py` beside this file.
+A single run, from `dpc-client/core`:
 
-    HF_TOKEN=... uv run --with pyarrow python ../../eval/gaia/run_gaia_eval.py --limit 5
+    uv run --with pyarrow python ../../eval/gaia/run_gaia_eval.py --limit 5
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # The shared harness bits live one directory up.
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from _harness import provenance  # noqa: E402
+from _harness import benchmark_tools, provenance  # noqa: E402
 from _harness.results_root import results_root  # noqa: E402
 
 _DATASET_STATE = {}
@@ -75,25 +77,53 @@ LEAKED_WORKDIR_GLOB = "dpc-gaia-*"
 # found a planted answer key» is visible to a caller that reads status codes
 # and never opens the report.
 CONTAMINATED_EXIT = 3
+# The documented path: the local llama-server alias. The Ollama branch stays
+# for a deliberate `--model`, never as a silent fallback.
+DEFAULT_ALIAS = "qwen3.8 27b"
 
 
 # --- scoring ---------------------------------------------------------------
+#
+# `question_scorer` from the official leaderboard (see OFFICIAL_SCORER), rule
+# for rule, because this number exists to stand beside other people's: no
+# article removal, all whitespace removed, lists split on `,`/`;` and ordered,
+# a comma-formatted numeric gold is a list, units and Unicode minus are misses.
+# Two deliberate deviations: only the FINAL ANSWER span is graded (the paper's
+# prompt asks for that template), and a non-number against a numeric gold is a
+# miss where official maps it to `inf`, which would equal a gold of "inf".
 
-_ARTICLES = {"a", "an", "the"}
+OFFICIAL_SCORER = {
+    "source": "huggingface.co/spaces/gaia-benchmark/leaderboard scorer.py",
+    "revision": "9f133d71362e77b3539f1514f31b9c101a545fec",
+    "sha256": "0d44c07f3046eec521697c22e3eaca8719cc81e422a8eaf32695c5f22bdac6e2",
+    "deviations": ["only the FINAL ANSWER span is graded; no span is a miss",
+                   "a non-numeric answer to a numeric gold is a miss, not inf"],
+}
+
+_PUNCT = str.maketrans("", "", string.punctuation)
+_LIST_SPLIT = re.compile(r"[,;]")
+
+
+def _is_float(text: str) -> bool:
+    try:
+        float(text)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def _norm_number(text: str) -> Optional[float]:
-    cleaned = text.strip().replace(",", "").replace("$", "").replace("%", "").strip()
+    for char in ("$", "%", ","):
+        text = text.replace(char, "")
     try:
-        return float(cleaned)
+        return float(text)
     except ValueError:
         return None
 
 
-def _norm_string(text: str) -> str:
-    text = text.strip().lower()
-    text = text.translate(str.maketrans("", "", string.punctuation))
-    return " ".join(w for w in text.split() if w not in _ARTICLES)
+def _norm_string(text: str, remove_punct: bool = True) -> str:
+    text = re.sub(r"\s", "", text).lower()
+    return text.translate(_PUNCT) if remove_punct else text
 
 
 # The line the prompt asks for, at the start of its own line — with or without
@@ -132,25 +162,26 @@ def scores_as_correct(answer: str, gold: str) -> bool:
     return _matches(span, gold)
 
 
+def _number_equals(candidate: str, gold: str) -> bool:
+    # The candidate must BE the number, never merely contain one (deviation 2).
+    value = _norm_number(candidate)
+    return value is not None and value == float(gold)
+
+
 def _matches(candidate: str, gold: str) -> bool:
-    gold = gold.strip()
-    # A comma inside a number is a thousands separator, not a list delimiter —
-    # splitting `1,234` produced a two-element gold nothing could ever match.
-    if "," in gold and _norm_number(gold) is None:
-        gold_parts = [p.strip() for p in gold.split(",")]
-        cand_parts = [p.strip() for p in candidate.split(",")]
+    """The official `question_scorer`, branch for branch."""
+    if _is_float(gold):
+        return _number_equals(candidate, gold)
+    if "," in gold or ";" in gold:
+        gold_parts = _LIST_SPLIT.split(gold)
+        cand_parts = _LIST_SPLIT.split(candidate)
         if len(cand_parts) != len(gold_parts):
             return False
-        return all(_matches_one(c, g) for c, g in zip(cand_parts, gold_parts))
-    return _matches_one(candidate, gold)
-
-
-def _matches_one(candidate: str, gold: str) -> bool:
-    gold_num = _norm_number(gold)
-    if gold_num is not None:
-        # The candidate must BE the number, never merely contain one.
-        cand_num = _norm_number(candidate)
-        return cand_num is not None and abs(cand_num - gold_num) < 1e-6
+        return all(
+            _number_equals(c, g) if _is_float(g)
+            else _norm_string(c, remove_punct=False) == _norm_string(g, remove_punct=False)
+            for c, g in zip(cand_parts, gold_parts)
+        )
     return _norm_string(candidate) == _norm_string(gold)
 
 
@@ -237,7 +268,8 @@ def gold_in_traces(results_dir: Optional[Path]) -> List[Path]:
     agent ran, so it is not the `"gold"` key the refusal keys on. Refusing on it
     would stop tonight's campaign for every ledger written before today, which
     is a decision rather than a fix; until it is taken, the run says what it
-    found instead of pretending the directory is clean.
+    found instead of pretending the directory is clean. A run reports it over
+    its own ledger only: the whole results tree names earlier nights' files.
     """
     if not results_dir or not results_dir.is_dir():
         return []
@@ -257,18 +289,27 @@ def gold_in_traces(results_dir: Optional[Path]) -> List[Path]:
 # with the same question, and its answer said so — the local guards saw nothing,
 # because nothing local was touched. No decoy can be planted on the open web, so
 # the ledger is the only surface there is.
+# The named mirrors are the ones A-MIRROR-PAGE-FULL-OF-GOLD... found in run
+# context; the last branch is that entry's shape rule, because a static list
+# of mirrors is always short: any URL carrying `gaia` beside a split word.
 _MIRROR_RE = re.compile(
-    r"huggingface\.co/(?:api/)?datasets/\S*gaia|harbor-datasets|cmriat/gaia",
+    r"huggingface\.co/(?:api/)?(?:datasets|spaces)/\S*gaia|harbor-datasets"
+    r"|cmriat/gaia|bstraehle/gaia|MinorJerry/WebVoyager|MCP-1st-Birthday"
+    r"|enlatics/Enlatics_benchmarking|lauspectrum/\S*gaia|Intelligent-Internet/\S*gaia"
+    r"|https?://\S*gaia\S*(?:jsonl|validation|metadata|benchmark)",
     re.I,
 )
 
 
-def web_lookups(logs_dir: Optional[Path], task_ids: List[str]) -> List[Dict[str, str]]:
+def web_lookups(logs_dir: Optional[Path], task_ids: List[str],
+                task_of: Optional[Dict[str, str]] = None) -> List[Dict[str, str]]:
     """Ledger evidence that a run went looking for the answers on the web.
 
     Reports, never refuses: a mirror URL can appear in an honest search result,
-    and a task id can be quoted by the harness itself. It names the file and
-    what matched, and a reader decides.
+    and a task id can be quoted by the harness itself. It names the ledger by
+    its task directory, the task it belongs to (`task_of` maps one to the
+    other), and what matched; a reader decides. An attachment is named
+    `<task_id>.<ext>`, so that spelling is not a lookup and is skipped.
     """
     if not logs_dir or not logs_dir.is_dir():
         return []
@@ -279,12 +320,15 @@ def web_lookups(logs_dir: Optional[Path], task_ids: List[str]) -> List[Dict[str,
             text = f.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
+        rel = f.relative_to(logs_dir).as_posix()
+        where = {"file": rel, "task": (task_of or {}).get(rel.split("/", 1)[0])}
         mirror = _MIRROR_RE.search(text)
-        searched = next((t for t in ids if t in text), None)
+        searched = next((t for t in ids
+                         if re.search(re.escape(t) + r"(?!\.[A-Za-z0-9]{1,5}\b)", text)), None)
         if mirror:
-            hits.append({"file": f.name, "marker": mirror.group(0), "kind": "mirror"})
+            hits.append({**where, "marker": mirror.group(0), "kind": "mirror"})
         if searched:
-            hits.append({"file": f.name, "marker": searched, "kind": "task_id_in_trace"})
+            hits.append({**where, "marker": searched, "kind": "task_id_in_trace"})
     return hits
 
 
@@ -299,23 +343,11 @@ def benchmark_firewall(workdir: Path):
     profiles read of this repository, it is edited between runs, and loading it
     would let a score depend on one machine's personal configuration. The copy
     lands in the workdir because the firewall reconciles tool keys against the
-    registry and writes the result back.
+    registry and writes the result back. Which tools are on is the harness's
+    allow list (`_harness/benchmark_tools.py`): a tool nobody listed is off.
     """
-    from dpc_client_core.dpc_agent.tools.registry import ToolRegistry
-    from dpc_client_core.firewall import ContextFirewall
-
-    # Every tool the registry knows, on. The runs this score is compared with
-    # had no firewall at all, and the registry's own defaults leave the web,
-    # the shell and write_file off - a benchmark that quietly drops them
-    # measures the tooling rather than the loop.
     rules = json.loads(BENCH_RULES.read_text(encoding="utf-8"))
-    every_tool = {name: True for name in ToolRegistry()._entries}
-    rules["dpc_agent"]["tools"] = dict(every_tool)
-    rules["agent_profiles"][BENCH_PROFILE]["tools"] = dict(every_tool)
-
-    local = workdir / "privacy_rules.json"
-    local.write_text(json.dumps(rules, indent=2), encoding="utf-8")
-    return ContextFirewall(local)
+    return benchmark_tools.benchmark_firewall(workdir, BENCH_PROFILE, template=rules)
 
 
 def gold_fingerprint(gold: str) -> str:
@@ -509,16 +541,74 @@ def fetch_attachment(token: str, file_name: str, into: Path) -> Optional[Path]:
     return dst
 
 
-def providers_file_for(alias: str, model: Optional[str], base_url: str,
-                       context_window: int, workdir: Path,
-                       temperature: Optional[float] = None,
-                       reasoning_effort: Optional[str] = None) -> tuple:
-    """Write the throwaway providers file the eval will run against.
+_TOKEN_GUARD_VARS = ("HF_HUB_DISABLE_IMPLICIT_TOKEN", "HF_TOKEN_PATH")
+
+
+def resolve_hf_token() -> Tuple[Optional[str], str]:
+    """(token, where it came from). The value is never printed.
+
+    The environment first, as before; then the token `hf auth login` stored,
+    because an unattended run started from a shell that never exported one
+    should not die in its first second on a machine that is logged in.
+    """
+    for var in _GATED_TOKEN_VARS:
+        if os.environ.get(var):
+            return os.environ[var], f"env:{var}"
+    try:
+        from huggingface_hub import get_token
+        token = get_token()
+    except Exception:
+        token = None
+    return (token, "huggingface_hub stored token") if token else (None, "none")
+
+
+def fence_stored_token(workdir: Path) -> Dict[str, Optional[str]]:
+    """Make the stored token invisible to anything the agent starts.
+
+    Dropping the env vars alone meant little once the stored token was a
+    fallback: `huggingface_hub` in any subprocess would read it from disk by
+    itself. These two settings stop the library from sending it implicitly and
+    point it at a file that does not exist. A script that opens the token file
+    by path still reads it; that is the script-gate class, not this one.
+    """
+    previous = {var: os.environ.get(var) for var in _TOKEN_GUARD_VARS}
+    os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+    os.environ["HF_TOKEN_PATH"] = str(workdir / "no-hf-token")
+    return previous
+
+
+def restore_env(previous: Dict[str, Optional[str]]) -> None:
+    for var, value in previous.items():
+        if value is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = value
+
+
+def fence_operator_interpreters() -> Dict[str, Optional[str]]:
+    """Make pip refuse to install into any interpreter that is not a venv.
+
+    The agent's `python` is the throwaway environment `uv run --with` builds and
+    deletes afterwards; its `pip` is not — measured 2026-09-23 it resolves to the
+    operator's system Python, which carries openpyxl, pypdf, pytesseract and
+    curl_cffi that earlier runs installed. A plain `pip install` is Tier 0 and
+    never reaches the approver, so the refusal has to live in pip itself.
+    """
+    previous = {"PIP_REQUIRE_VIRTUALENV": os.environ.get("PIP_REQUIRE_VIRTUALENV")}
+    os.environ["PIP_REQUIRE_VIRTUALENV"] = "true"
+    return previous
+
+
+def provider_entry_for(alias: Optional[str], model: Optional[str], base_url: str,
+                       context_window: int, temperature: Optional[float] = None,
+                       reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
+    """The provider entry the eval will run against, resolved before any download.
 
     `--provider-alias` copies the named entry out of the operator's real
     `~/.dpc/providers.json` **verbatim**, so the run uses exactly the
     production configuration rather than a second copy of it that drifts.
-    Nothing is written back to the operator's file.
+    Nothing is written back to the operator's file. A missing alias exits here,
+    before the gated dataset reaches the disk.
     """
     if alias:
         src = Path.home() / ".dpc" / "providers.json"
@@ -533,6 +623,9 @@ def providers_file_for(alias: str, model: Optional[str], base_url: str,
                 + ", ".join(sorted(str(r.get("alias")) for r in rows))
             )
         entry = dict(match[0])
+    elif not model:
+        raise SystemExit("no provider: pass --provider-alias (the documented path) "
+                         "or --model for an Ollama model")
     else:
         entry = {
             "alias": "eval_local",
@@ -550,23 +643,55 @@ def providers_file_for(alias: str, model: Optional[str], base_url: str,
         entry["temperature"] = temperature
     if reasoning_effort:
         entry["reasoning_effort"] = reasoning_effort
+    return entry
 
+
+def write_providers_file(entry: Dict[str, Any], workdir: Path) -> Path:
     path = workdir / "providers.json"
     path.write_text(json.dumps({"providers": [entry], "default_provider": entry["alias"]}),
                     encoding="utf-8")
-    return path, entry
+    return path
+
+
+def providers_file_for(alias: str, model: Optional[str], base_url: str,
+                       context_window: int, workdir: Path,
+                       temperature: Optional[float] = None,
+                       reasoning_effort: Optional[str] = None) -> tuple:
+    """Resolve the entry and write the throwaway providers file, in one call."""
+    entry = provider_entry_for(alias, model, base_url, context_window,
+                               temperature=temperature, reasoning_effort=reasoning_effort)
+    return write_providers_file(entry, workdir), entry
 
 
 # --- the run ---------------------------------------------------------------
 
+# The format rules of the GAIA paper's prompt, verbatim from the leaderboard's
+# `content.py`. The scorer above keeps articles and units, so the rules that tell
+# the model to drop them have to travel with it or it grades a different game.
 PROMPT_SUFFIX = (
-    "\n\nAnswer with the shortest possible answer: a number, a single word, or a "
-    "comma-separated list. Do not explain. End your reply with a line reading "
-    "FINAL ANSWER: <answer>"
+    "\n\nFinish your answer with the following template: FINAL ANSWER: [YOUR FINAL "
+    "ANSWER]. YOUR FINAL ANSWER should be a number OR as few words as possible OR "
+    "a comma separated list of numbers and/or strings. If you are asked for a "
+    "number, don't use comma to write your number neither use units such as $ or "
+    "percent sign unless specified otherwise. If you are asked for a string, don't "
+    "use articles, neither abbreviations (e.g. for cities), and write the digits in "
+    "plain text unless specified otherwise. If you are asked for a comma separated "
+    "list, apply the above rules depending of whether the element to be put in the "
+    "list is a number or a string."
 )
 
 
-async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path]) -> Dict[str, Any]:
+ANSWER_KEEP_CHARS = 600
+DEFAULT_TASK_TIMEOUT_SECONDS = 2700
+# The key under which `run_one` hands the untruncated answer to the caller. The
+# caller pops it before the row is written: the scans need the whole text, the
+# report needs only the ends of it.
+FULL_ANSWER_KEY = "_answer_full"
+
+
+async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path],
+                  timeout_seconds: Optional[float] = DEFAULT_TASK_TIMEOUT_SECONDS
+                  ) -> Dict[str, Any]:
     question = row["Question"]
     if attachment:
         question = f"{question}\n\nThe attached file is at: {attachment}"
@@ -577,22 +702,33 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path]) -> Dic
     started = time.time()
     answer, error = "", None
     try:
-        answer = await agent.process(
+        # Bounded, because nobody is watching: one task that never returns
+        # would otherwise hold the whole night.
+        answer = await asyncio.wait_for(agent.process(
             message=question + PROMPT_SUFFIX,
             conversation_id=conversation_id,
-        )
+        ), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        error = f"TimeoutError: no answer within {timeout_seconds:.0f}s"
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     # The loop accumulates usage and `process()` returns only text, so the
     # counters live on the agent afterwards. Absent stays absent: a task whose
     # provider reported nothing records `null`, not a confident zero.
     usage = dict(getattr(agent, "_last_usage", None) or {})
+    answer = answer or ""
     return {
         "task_id": row["task_id"],
         "conversation_id": conversation_id,
         "gold_sha256": gold_fingerprint(row["Final answer"]),
-        "answer": (answer or "")[:600],
-        "correct": scores_as_correct(answer or "", row["Final answer"]),
+        # The head alone lost the verdict: FINAL ANSWER sits at the end, so the
+        # graded span and the tail are kept beside the first 600 characters.
+        "final_answer": extract_final_answer(answer),
+        "answer": answer[:ANSWER_KEEP_CHARS],
+        "answer_tail": answer[-ANSWER_KEEP_CHARS:] if len(answer) > ANSWER_KEEP_CHARS else "",
+        "answer_chars": len(answer),
+        FULL_ANSWER_KEY: answer,
+        "correct": scores_as_correct(answer, row["Final answer"]),
         "error": error,
         "had_attachment": bool(row.get("file_name")),
         "seconds": round(time.time() - started, 1),
@@ -613,12 +749,27 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path]) -> Dic
 
 
 async def main_async(args) -> int:
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    token, token_source = resolve_hf_token()
     if not token:
-        raise SystemExit("HF_TOKEN is not set — the GAIA split is a gated dataset.")
+        raise SystemExit("no Hugging Face token: export HF_TOKEN or run `hf auth login` "
+                         "once — the GAIA split is a gated dataset.")
+    _DATASET_STATE["token_source"] = token_source
 
     from dpc_client_core.llm_manager import LLMManager
     from dpc_client_core.dpc_agent.agent import DpcAgent, AgentConfig
+
+    # The alias is resolved before anything is downloaded: a missing one used to
+    # surface only after the gated split had reached the disk.
+    entry = provider_entry_for(
+        args.provider_alias, args.model, args.base_url, args.context_window,
+        temperature=args.temperature, reasoning_effort=args.reasoning_effort,
+    )
+    model_record = provenance.model_files(entry, RESULTS_DIR)
+    max_rounds = getattr(args, "max_rounds", None)
+    task_timeout = getattr(args, "task_timeout", None) or DEFAULT_TASK_TIMEOUT_SECONDS
+
+    def _agent_config():
+        return AgentConfig(max_rounds=max_rounds) if max_rounds else AgentConfig()
 
     # Measured 2026-08-28: an agent wrote a script into its own sandbox and ran
     # it, and the script read the gold parquet out of the hub cache — two Tier-0
@@ -646,6 +797,8 @@ async def main_async(args) -> int:
     canary_files: List[Path] = []
     hub_before = None
     llm = None
+    approver = None
+    env_before: Dict[str, Optional[str]] = {}
     # The gold lands on disk inside the setup below, and this guard used to open
     # after it: the night of 2026-08-30 03:12 died on a stale token four times
     # between the two and left a hub full of answers in the temp directory each
@@ -677,14 +830,15 @@ async def main_async(args) -> int:
         restore_hub(hub_before)
         hub_before = None
         _DATASET_STATE["token_dropped"] = drop_gated_credentials()
+        token = None
+        env_before.update(fence_stored_token(workdir))
+        env_before.update(fence_operator_interpreters())
         print(f"attachments prefetched: {len(prefetched)}; hub cache removed: "
               f"{_DATASET_STATE['private_cache_removed']}", flush=True)
 
-        providers_path, entry = providers_file_for(
-            args.provider_alias, args.model, args.base_url, args.context_window, workdir,
-            temperature=args.temperature, reasoning_effort=args.reasoning_effort,
-        )
-        print(f"provider: {entry['alias']!r} type={entry.get('type')} model={entry.get('model')}")
+        providers_path = write_providers_file(entry, workdir)
+        print(f"provider: alias {entry['alias']!r} type={entry.get('type')} "
+              f"model file={_model_identity(entry, model_record)}", flush=True)
 
         # Planted here rather than thirty lines earlier, and the distance was the
         # bug: the `finally` that removes the decoy starts below, and `load_tasks`
@@ -699,38 +853,48 @@ async def main_async(args) -> int:
 
         llm = LLMManager(config_path=providers_path)
         firewall = benchmark_firewall(workdir)
-        approver = None
         if args.auto_approve:
             from _harness.auto_approve import Tier1AutoApprover
             approver = Tier1AutoApprover().start()
             print("Tier 1 auto-approval ON (Tier 2 still blocked)", flush=True)
 
         results = []
+        # The whole answer stays in memory for the scans below and never reaches
+        # the report, which keeps only its ends (`run_one`).
+        full_answers: List[Dict[str, Any]] = []
+        task_of: Dict[str, str] = {}
+        agent_config = _agent_config()
         started = time.time()
         for i, row in enumerate(rows, 1):
             # A root per task, so nothing an agent writes reaches the next one:
             # scratchpad, knowledge, logs and task_results all start empty.
             task_root = workdir / f"task-{i:03d}"
+            task_of[task_root.name] = row["task_id"]
             (task_root / "gaia-files").mkdir(parents=True, exist_ok=True)
             attachment = prefetched.get(row["task_id"])
             if attachment is not None:
                 attachment = Path(shutil.copy2(attachment, task_root / "gaia-files"))
             agent = DpcAgent(
-                llm_manager=llm, config=AgentConfig(), agent_root=task_root,
+                llm_manager=llm, config=_agent_config(), agent_root=task_root,
                 firewall=firewall, firewall_profile=BENCH_PROFILE,
             )
-            outcome = await run_one(agent, row, attachment)
+            outcome = await run_one(agent, row, attachment, timeout_seconds=task_timeout)
+            full = outcome.pop(FULL_ANSWER_KEY, None)
+            full_answers.append({"task_id": outcome.get("task_id"),
+                                 "answer": full if full is not None else outcome.get("answer") or "",
+                                 "correct": outcome.get("correct")})
             if (task_root / "logs").is_dir():
                 shutil.copytree(task_root / "logs", logs_root / task_root.name,
                                 dirs_exist_ok=True)
             results.append(outcome)
             mark = "OK  " if outcome["correct"] else "MISS"
+            got = outcome.get("final_answer") or ("<no FINAL ANSWER> " + (outcome.get("answer") or "")[-40:])
             # flush: redirected stdout is block-buffered, so a run watched through
             # a log file showed zero completed tasks for over an hour while the
             # agent was demonstrably on its third. The progress line is the only
             # window into a run that takes hours; it has to reach the file.
             print(f"  [{i:2}/{len(rows)}] {mark} {outcome['seconds']:6.1f}s  "
-                  f"task={outcome['task_id'][:8]} got={outcome['answer'][-60:].strip()!r}",
+                  f"task={outcome['task_id'][:8]} got={got[:80].strip()!r}",
                   flush=True)
 
         if approver is not None:
@@ -746,10 +910,14 @@ async def main_async(args) -> int:
                     "not_reported_by": len(vals) - len(present)}
         report = {
             "benchmark": "GAIA L1 validation",
-            "model": entry.get("model"),
+            "alias": entry.get("alias"),
+            # The `model` field is a free label and has been stale (an alias
+            # renamed, the label kept). The model is the file and its digest.
+            "model_label": entry.get("model"),
+            "model_file": _model_identity(entry, model_record),
             "provider_type": entry.get("type"),
             "temperature": entry.get("temperature"),
-            "reasoning_effort": entry.get("reasoning_effort", "(template default: xhigh)"),
+            "reasoning_effort": provenance.effort_record(entry),
             "tasks": len(results),
             "correct": correct,
             "accuracy": round(correct / len(results), 3) if results else 0.0,
@@ -773,19 +941,23 @@ async def main_async(args) -> int:
             },
             "results": results,
             "canary": {
-                **canary_was_read(canary_token, results, logs_root),
+                **canary_was_read(canary_token, full_answers, logs_root),
                 "planted": [str(p) for p in canary_files],
             },
             # What the canary structurally cannot see: an answer that names its
             # own source. Four such tasks are already on the board for 2026-08-28
             # and two more were found on 08-30 in runs nobody had re-read.
-            "admissions": answers_admitting_a_lookup(results),
+            "admissions": answers_admitting_a_lookup(full_answers),
             # The two surfaces that report rather than refuse: answers reachable
             # in the run's own ledgers, and the open web, where nothing can be
             # planted. Turning either into a refusal stops the campaign for every
             # ledger already on disk, which is a decision, not a fix.
-            "traces_carrying_gold": [str(p) for p in gold_in_traces(RESULTS_DIR)],
-            "web_lookups": web_lookups(logs_root, [r.get("task_id") for r in results]),
+            # This run's own ledger, before it is copied anywhere: scanning the
+            # results tree named earlier nights and could never name this one.
+            "traces_carrying_gold": [p.relative_to(logs_root).as_posix()
+                                     for p in gold_in_traces(logs_root)],
+            "web_lookups": web_lookups(logs_root, [r.get("task_id") for r in results],
+                                       task_of=task_of),
             # The one bit whose whole job is «this number is dirty», computed at
             # :449 since the guard was written and dropped before the report ever
             # since — the `--allow-reachable-gold` help promises the run records
@@ -812,9 +984,15 @@ async def main_async(args) -> int:
                 harness_file=Path(__file__).resolve(),
                 argv=sys.argv[1:],
                 extra={
-                    "scoring": "normalised exact match; numbers as numbers, "
-                               "comma lists elementwise, strings lowercased and "
-                               "de-articled; no model judges anything",
+                    "scoring": {**OFFICIAL_SCORER,
+                                "prompt": "the paper's format rules, appended to each question",
+                                "prompt_suffix_sha256": hashlib.sha256(
+                                    PROMPT_SUFFIX.encode("utf-8")).hexdigest()},
+                    "model_files": model_record,
+                    "max_rounds": getattr(agent_config, "max_rounds", None),
+                    "task_timeout_seconds": task_timeout,
+                    "hf_token_source": _DATASET_STATE.get("token_source"),
+                    "subprocess_env_fences": sorted(env_before),
                     "tier1_auto_approved": bool(args.auto_approve),
                     # Which tools were on decides what the number measures at
                     # least as much as the model does: the runs before this one
@@ -828,7 +1006,8 @@ async def main_async(args) -> int:
         }
         print()
         tok = report["tokens"]["total"]
-        print(f"{correct}/{len(results)} = {report['accuracy']:.1%} on {entry.get('model')} "
+        print(f"{correct}/{len(results)} = {report['accuracy']:.1%} on alias "
+              f"{entry.get('alias')!r} ({report['model_file']}) "
               f"in {report['seconds']}s | {tok['total']} tokens over {tok['reported_by']} task(s)",
               flush=True)
         # The report's own `caveat` field has said the general thing since it was
@@ -867,6 +1046,9 @@ async def main_async(args) -> int:
         # invisible to the campaign, to CI and to anything reading the status.
         return CONTAMINATED_EXIT if report["canary"]["triggered"] else 0
     finally:
+        if approver is not None:
+            approver.stop()
+        restore_env(env_before)
         for bait in canary_files:
             bait.unlink(missing_ok=True)
         if hub_before is not None:
@@ -882,6 +1064,15 @@ async def main_async(args) -> int:
         if not args.keep:
             shutil.rmtree(workdir, ignore_errors=True)
 
+def _model_identity(entry: Dict[str, Any], record: Dict[str, Any]) -> str:
+    """One line naming the model by its file and digest, else by its label."""
+    gguf = record.get("gguf") if isinstance(record, dict) else None
+    if isinstance(gguf, dict) and gguf.get("path"):
+        sha = gguf.get("sha256") or "sha256 unread"
+        return f"{Path(gguf['path']).name} sha256:{sha[:16]}"
+    return f"{entry.get('model')} (label only; no model file recorded)"
+
+
 def main() -> int:
     # Model answers carry arrows, dashes and non-Latin text; a Windows console
     # defaults to cp1252 and a run that finished would die on printing it.
@@ -891,11 +1082,18 @@ def main() -> int:
         pass
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--limit", type=int, default=None)
-    ap.add_argument("--provider-alias", default=None,
-                    help="run the eval on this alias from ~/.dpc/providers.json, verbatim")
-    ap.add_argument("--model", default="qwen3.8:latest")
+    ap.add_argument("--provider-alias", default=DEFAULT_ALIAS,
+                    help="run the eval on this alias from ~/.dpc/providers.json, verbatim "
+                         f"(default {DEFAULT_ALIAS!r}, the local llama-server)")
+    ap.add_argument("--model", default=None,
+                    help="an Ollama model instead of the alias; nothing falls back to it")
     ap.add_argument("--base-url", default="http://127.0.0.1:11434")
-    ap.add_argument("--context-window", type=int, default=32768)
+    ap.add_argument("--context-window", type=int, default=32768,
+                    help="Ollama only; an alias carries its own")
+    ap.add_argument("--max-rounds", type=int, default=None,
+                    help="agent round limit (default: AgentConfig's)")
+    ap.add_argument("--task-timeout", type=float, default=DEFAULT_TASK_TIMEOUT_SECONDS,
+                    help="seconds one task may take before it is recorded as a timeout")
     ap.add_argument("--with-files", action="store_true",
                     help="include the 11 tasks that carry an attachment")
     ap.add_argument("--temperature", type=float, default=None,
@@ -910,7 +1108,10 @@ def main() -> int:
     ap.add_argument("--allow-reachable-gold", action="store_true",
                     help="run even though the answers are readable on this machine; "
                          "the report records that the score is contaminable")
-    return asyncio.run(main_async(ap.parse_args()))
+    args = ap.parse_args()
+    if args.model:
+        args.provider_alias = None
+    return asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":

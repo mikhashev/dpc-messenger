@@ -45,8 +45,18 @@ def test_a_missing_colon_is_a_formatting_slip_not_a_wrong_answer():
     assert score("FINAL ANSWER THE CASTLE", "THE CASTLE") is True
 
 
-def test_a_comma_in_a_number_is_a_thousands_separator_not_a_list():
-    assert score("FINAL ANSWER: 1234", "1,234") is True
+def test_a_comma_in_an_answer_number_is_a_thousands_separator():
+    assert score("FINAL ANSWER: 1,234", "1234") is True
+    assert score("FINAL ANSWER: $1,234", "1234") is True
+
+
+def test_a_comma_formatted_gold_is_a_list_as_the_official_scorer_reads_it():
+    # Changed 2026-09-23. This used to assert «1234» matches gold «1,234»; the
+    # official `question_scorer` does not parse «1,234» as a float, so it takes
+    # the list branch and «1234» is a one-element list against two. Comparability
+    # with published figures is the point of this number, so ours follows.
+    assert score("FINAL ANSWER: 1234", "1,234") is False
+    assert score("FINAL ANSWER: 1,234", "1,234") is True
 
 
 def test_the_marker_survives_bold_markdown():
@@ -82,3 +92,63 @@ def test_ordinary_matching_still_works():
     assert score("FINAL ANSWER: b, e", "b, e") is True
     assert score("FINAL ANSWER: b", "b, e") is False
     assert score("", "42") is False
+
+
+# --- the official scorer's rules, settled case by case ----------------------
+# Ported from `question_scorer` in the GAIA leaderboard space (revision in
+# OFFICIAL_SCORER). Each case below is what that function returns for the
+# extracted span; the two places ours differs are named where they are tested.
+
+def test_two_different_articles_are_two_different_answers():
+    # De-articling both sides made «a» equal «the» (both became empty). The
+    # official scorer strips no articles; the prompt tells the model to omit them.
+    assert score("FINAL ANSWER: a", "the") is False
+    assert score("FINAL ANSWER: The Castle", "castle") is False
+
+
+def test_whitespace_is_removed_entirely():
+    # official: «Required e.g for seagull vs. sea gull»
+    assert score("FINAL ANSWER: sea gull", "seagull") is True
+
+
+def test_punctuation_is_removed_from_a_plain_string():
+    assert score("FINAL ANSWER: h.e.l.l.o", "hello") is True
+
+
+def test_a_unicode_minus_is_not_a_number():
+    # float("−5") raises, so the official scorer reads a miss; so do we.
+    assert score("FINAL ANSWER: −5", "-5") is False
+    assert score("FINAL ANSWER: -5", "-5") is True
+
+
+def test_units_are_not_understood():
+    assert score("FINAL ANSWER: 17 thousand", "17000") is False
+    assert score("FINAL ANSWER: 5 m", "5") is False
+    assert score("FINAL ANSWER: 50%", "50") is True
+
+
+def test_a_non_number_against_a_numeric_gold_is_a_miss_even_for_inf():
+    # Deviation 2: official maps an unparsable answer to inf, which would
+    # equal a gold of "inf". Ours calls it what it is.
+    assert score("FINAL ANSWER: banana", "inf") is False
+    assert score("FINAL ANSWER: inf", "inf") is True
+
+
+def test_semicolons_split_a_list_on_either_side():
+    assert score("FINAL ANSWER: a; b", "a, b") is True
+    assert score("FINAL ANSWER: a, b", "a;b") is True
+
+
+def test_list_order_matters():
+    assert score("FINAL ANSWER: e, b", "b, e") is False
+
+
+def test_list_elements_keep_their_punctuation():
+    # official: `normalize_str(..., remove_punct=False)` inside a list
+    assert score("FINAL ANSWER: b, e.", "b, e") is False
+    assert score("FINAL ANSWER: 3/4, 1/4", "3/4,1/4") is True
+
+
+def test_numbers_compare_exactly_as_floats():
+    assert score("FINAL ANSWER: 1e3", "1000") is True
+    assert score("FINAL ANSWER: 0.30000000000000004", "0.3") is False
