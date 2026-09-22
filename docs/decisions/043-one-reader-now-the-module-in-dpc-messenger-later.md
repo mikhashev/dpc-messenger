@@ -129,8 +129,9 @@ first macOS number is a measurement to take, not a box to tick.
 Russian and tonight's measurement is Russian-only, so nothing is shown for a second
 language yet. So the engine measurement designed in dpc-library 0012 for decision 0007
 **must carry a `language coverage` column**, and a cheap second-language check is
-available at once, because the pilot corpus already holds English sources in both
-EPUB and PDF (listed in the dpc-library catalog).
+available cheaply: the pilot corpus holds English PDFs that are already measured, and
+English EPUBs that are catalogued but not yet measured (readable after Stage 2). The
+dpc-library catalog is the list.
 Surya/Marker and Tesseract language coverage is to be **read from their own
 documentation and then measured**, never assumed.
 
