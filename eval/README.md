@@ -16,7 +16,7 @@ cost is the card and the hours.
 | harness | question | cost | last run |
 |---|---|---|---|
 | `retrieval/` | does the index find a card, and does fusing BM25 with vectors help? | seconds — the embedding encoder production already loads, no model served, no network (189 queries in 1 s) | 2026-08-24 |
-| `loop/` | does the agent loop finish the kind of task we actually give it? | a minute — a local model through the harness's own provider file, `~/.dpc/providers.json` untouched | 2026-08-24 |
+| `loop/` | does the agent loop finish the kind of task we actually give it? | about two minutes — the local `llamacpp_server` alias `qwen3.8 27b`, one entry copied from `~/.dpc/providers.json`, the file untouched; needs 26 000 MiB free | 2026-09-23 |
 | `kv/` | does K quantised to q4_0 diverge from q8_0 as depth grows? | the whole card and ~35 min of answer time for four arms; refuses to start while the DPC service holds VRAM | 2026-08-30 |
 | `gaia/` | how does the loop score on a public split that other agents publish scores on? | a night per campaign (~2 h per run); gated dataset, needs a Hugging Face token | 2026-08-31 |
 
@@ -71,7 +71,32 @@ provenance files; today's alias points at `Qwen3.8-27B-Uncensored-IQ4_XS.gguf`),
 all 70 tools then registered, the old approver, a shorter prompt, and a scorer
 that removed articles; the run of 2026-08-25 had no firewall at all.
 
+## loop — how to run it (2026-09-23)
+
+From `dpc-client/core`, the DPC service stopped or its model unloaded:
+
+    uv run python ../../eval/loop/run_loop_eval.py --dry-run
+    uv run python ../../eval/loop/run_loop_eval.py --tier hard
+
+`--provider-alias` (default `qwen3.8 27b`) copies that entry verbatim out of
+`~/.dpc/providers.json`, the way `gaia/` does, so the run is the production
+configuration rather than a copy of it that drifts; Ollama stays reachable
+only as an explicit `--providers eval/loop/providers.eval.json`. Below 26 000
+MiB free the harness refuses to start a `llamacpp_server` run, and it stops
+its own child on exit — normal, exception or Ctrl-C — through
+`LLMManager.shutdown()`. Answer checks were substring containment until
+2026-09-23, so `14` satisfied a gold of `4`; they match whole tokens now, and
+file-content checks stay exact substrings. Results go to
+`~/.dpc/eval-results/loop/` with the same provenance block as `gaia/`.
+Still open: the loop agent runs with no firewall, every tool on — it should
+take `_harness/benchmark_tools.benchmark_firewall` as `gaia/` does.
+
 ## State of the set, 2026-09-23
+
+- **`loop/` ran again, on the production path.** Easy tier on `qwen3.8 27b`
+  through llama-server: **10/10 in 125 s**. Ten out of ten on the only tier
+  run is still the result this file tells you to distrust; the hard tier has
+  not been run on llama-server yet.
 
 - **`gaia/` has not run since 2026-08-31, and its harness changed underneath
   it on 2026-09-23** — the campaign named an alias that no longer existed, the
@@ -100,8 +125,8 @@ that removed articles; the run of 2026-08-25 had no firewall at all.
 - **`retrieval/` and `loop/` have each run once, on 2026-08-24** — the day they
   were written. Whatever this file says below about the precedent that ran
   once and was never re-run, half the set is currently in that state.
-  *(2026-09-23: a separate change moves `loop/` onto the local llama-server;
-  nothing here describes it yet.)*
+  *(2026-09-23: `loop/` has moved onto the local llama-server and ran again —
+  see above.)*
 - **GAIA results are not in git, and since 2026-09-01 are not in the tree
   either** — `~/.dpc/eval-results/gaia`, 1 633 files, 15.4 MB, moved with every
   SHA256 checked. They stayed out on evidence, not taste: an audit of all of
