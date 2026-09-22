@@ -37,13 +37,12 @@ curate. The agent assists.", divides the labour and settles the apparent clash b
 manual curation and half a million pages: the pipeline **verdicts**, it does not curate;
 curation stays human and happens at the moment of citation. (Ark's review, 2026-09-22.)
 
-The sibling research repository `dpc-research/dpc-library` has measured a corpus and
-stopped where content would be written. Measured 2026-09-22, every page, no sampling:
-52 sources (45 PDF, 7 DJVU), 17 865 pages — `text` 10 003, `thin` 143, `facsimile`
-1 286, `none` 6 357, `junk_damaged` 19, `numeric` 57; vision share 36.0 % on the old
-definition, 42.9 % with facsimile counted. 34 of the 52 sources carry pages readable
-for free and **not one is free in its entirety**, so a cheap first pass delivers most
-of the units in 34 books and a tail in every one of them.
+The sibling research repository `dpc-research/dpc-library` has measured a pilot
+corpus page by page and stopped where content would be written. The two facts that
+matter here, from its 2026-09-22 measurement report: roughly four pages in ten need
+the visual path, and no book is readable for free in its entirety — a cheap first pass
+leaves a tail in every one. Which books, which classes and which counts are the
+report's business, not this record's.
 
 The reading code already lives here. `read_document`
 (`dpc-client/core/dpc_client_core/dpc_agent/tools/document.py`, 1 221 lines) opens PDF
@@ -55,8 +54,8 @@ a pipeline routes on it without reading prose".
 What is missing is not a reader but everything around one call of it: a folder scan, a
 route per page, a record per page, a resumable run, a summary. Writing *a second reader*
 for that would put two instruments on the same page — and dpc-library has already paid
-for two instruments once, when two definitions of "image" gave 36.0 % and 42.9 % for the
-same 17 865 pages. Mike's goal makes location a product question too: any user should
+for two instruments once, when two definitions of "image" gave two different vision
+shares for the same pages. Mike's goal makes location a product question too: any user should
 eventually convert their own library locally, so the code has to ship in the client. But
 **how it runs, on what, how it integrates and what the user does with it are unknown
 today** — which is why the move is not the next step (R2).
@@ -85,15 +84,15 @@ unit of indexing is settled, and the sentence that joins the halves is Johnny's:
 record is the input of the index (layer 5), not only the output of the pipeline** — the
 indexing unit is the record unit, so `verdict` decides what is indexed at all (only
 `done`), `method` gives the weight of trust, `label` gives the locator a citation carries,
-`tree` gives navigation. ADR-010 today indexes whole files with model-sized chunking; one
-576-page book is one file, which yields no locator and no right to believe. That mismatch,
+`tree` gives navigation. ADR-010 today indexes whole files with model-sized chunking; a
+book of several hundred pages is one file, which yields no locator and no right to believe. That mismatch,
 not a missing button, is what Q0 is about.
 
 ## Decision Drivers
 
 - **D1 — one reader.** Every refusal rate the research repository reports must be a
   number about the corpus, not about which of two readers ran.
-- **D2 — the agent is not the only caller.** A 17 865-page run cannot go through an
+- **D2 — the agent is not the only caller.** A run over thousands of pages cannot go through an
   agent loop: tool results truncate at 15 000 characters and `read_document` caps a call
   at 20 pages on purpose. The pipeline needs the functions, not the tool.
 - **D3 — no client, no GUI, no service** in the import path, and **D4 — resumable**: a
@@ -101,9 +100,9 @@ not a missing button, is what Q0 is about.
   silently reuse a record made by an older reader.
 - **D5 — the record comes first.** `docs/page-record.md` in dpc-library (Ark,
   2026-09-22) is the contract: one line per unit, verdict computed from class + method +
-  evidence, denominator from a second instrument. A facsimile page gave 34 characters of
-  running head by the cheap path and 1 434 by the eye — which is why the verdict is
-  computed, not claimed by the stage that did the work.
+  evidence, denominator from a second instrument. A facsimile page read by the cheap path
+  yields its running head and nothing else, while the eye reads the whole document —
+  which is why the verdict is computed, not claimed by the stage that did the work.
 
 ## Requirements
 
@@ -130,8 +129,8 @@ first macOS number is a measurement to take, not a box to tick.
 Russian and tonight's measurement is Russian-only, so nothing is shown for a second
 language yet. So the engine measurement designed in dpc-library 0012 for decision 0007
 **must carry a `language coverage` column**, and a cheap second-language check is
-available at once: the pilot corpus already holds nine English sources — Freedman, van
-Creveld, Barnett and Klein as EPUB, Chandra, Cowan, Harrison, Kometer and Shamir as PDF.
+available at once, because the pilot corpus already holds English sources in both
+EPUB and PDF (listed in the dpc-library catalog).
 Surya/Marker and Tesseract language coverage is to be **read from their own
 documentation and then measured**, never assumed.
 
@@ -287,8 +286,7 @@ refactor the scripts import from a module shaped for a tool.
 
 **Every number below is an estimate, not a measurement** — nothing here has been built or
 timed, and they are for sequencing, not for a schedule. The integration phase is gated on
-Q0. The corpus is 52 sources (45 PDF + 7 DJVU, 17 865 pages) per the 2026-09-22
-re-measurement; a "62-file" figure in circulation does not match that report.
+Q0. Corpus sizes are the dpc-library catalog's business and are not restated here.
 
 | Phase | Item | Engineer-hours (estimate) |
 |---|---|---:|
