@@ -1,10 +1,15 @@
 """
-DPC Agent — document reading (PDF).
+DPC Agent — document reading (PDF and DjVu).
 
 `read_file` decodes every path as UTF-8 with errors="replace", so a paper
 handed to an agent came back as replacement characters — and came back as a
 *string*, so nothing reported a failure. This tool reads the text layer of a
-PDF instead, page by page, and says per page what it got and what it did not.
+PDF or a DjVu instead, page by page, and says per page what it got and what it
+did not. PDF goes through pypdfium2 in this process; DjVu through DjVuLibre's
+command-line tools as bounded subprocesses. The answer shape is the same for
+both, and what the formats do not share is said rather than smoothed over: a
+DjVu text layer carries no font attribution, so the unreliable-mathematics
+check below cannot run on one.
 
 A page with no text layer is a scan, and the only local way to read one is to
 render it and look. That route exists here, and every part of it is bounded:
@@ -37,9 +42,16 @@ import base64
 import hashlib
 import json
 import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import time
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .core import _resolve_file_path
 from .registry import ToolContext, ToolEntry
@@ -359,6 +371,281 @@ def _read_page(doc, number: int) -> Dict[str, Any]:
     return entry
 
 
+# --------------------------------------------------------------------- DjVu
+#
+# DjVu has no reader in this process: DjVuLibre is a set of command-line
+# binaries, and the three used here do one job each. They run as subprocesses
+# inside the executor thread a tool already runs in, one call per page, each
+# bounded by DJVU_CALL_SECONDS.
+
+DJVU_SUFFIXES = (".djvu", ".djv")
+DJVU_TOOLS = ("djvutxt", "ddjvu", "djvused")
+DJVU_CALL_SECONDS = 30
+DJVULIBRE_DIR_ENV = "DPC_DJVULIBRE_DIR"
+# Where the Windows installer puts them. It does not touch PATH, so without
+# this list a Windows node with DjVuLibre installed reports it missing.
+WINDOWS_DJVULIBRE_DIRS = (
+    Path(r"C:\Program Files (x86)\DjVuLibre"),
+    Path(r"C:\Program Files\DjVuLibre"),
+)
+# The chunk ids that carry a page's raster data. Their presence is what makes
+# "this page is a scan" a reading rather than an assumption about the format.
+DJVU_RASTER_CHUNKS = frozenset(
+    {"Sjbz", "BG44", "FG44", "BGjp", "FGjp", "BG2k", "FG2k", "FGbz"}
+)
+# `INFO [10]  DjVu 2808x4386, v25, 600 dpi, gamma=2.2`
+_DJVU_INFO = re.compile(r"DjVu\s+(\d+)x(\d+).*?(\d+)\s+dpi")
+
+DJVULIBRE_MISSING = (
+    "⚠️ DjVu reading needs DjVuLibre, and djvutxt/ddjvu/djvused were not all "
+    "found — not on PATH, not in the Windows install directory, and not under "
+    f"${DJVULIBRE_DIR_ENV}. Install it: `winget install DjVuLibre.DjView` on "
+    "Windows (the installer ships the command-line tools beside the viewer but "
+    f"leaves PATH alone — set {DJVULIBRE_DIR_ENV} to the install directory if "
+    "this message comes back), `apt install djvulibre-bin` on Debian or Ubuntu, "
+    "`brew install djvulibre` on macOS. PDF reading is unaffected: it goes "
+    "through pypdfium2 and needs none of this."
+)
+
+
+def _binary_in(name: str, directories: Tuple[Path, ...]) -> Optional[str]:
+    """The first of these directories holding this binary, or None."""
+    for directory in directories:
+        for candidate in (directory / f"{name}.exe", directory / name):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def _djvulibre() -> Optional[Dict[str, str]]:
+    """Absolute paths to the three binaries, or None if any one is missing.
+
+    The settings directory wins over PATH: that is how a machine carrying an
+    old djvulibre on PATH and a newer one installed elsewhere says which it
+    means. All three or nothing — a half-installed DjVuLibre that counts pages
+    but cannot render one would fail in the middle of a page range instead of
+    at the door with an install line.
+    """
+    override = os.environ.get(DJVULIBRE_DIR_ENV)
+    settings_dir: Tuple[Path, ...] = (Path(override),) if override else ()
+
+    found: Dict[str, str] = {}
+    for name in DJVU_TOOLS:
+        path = (
+            _binary_in(name, settings_dir)
+            or shutil.which(name)
+            or _binary_in(name, WINDOWS_DJVULIBRE_DIRS)
+        )
+        if not path:
+            log.debug("DjVuLibre incomplete: %s not found", name)
+            return None
+        found[name] = path
+    return found
+
+
+def _run_djvu(binary: str, args: List[str]) -> Tuple[int, str, str]:
+    """One bounded call. Returns (returncode, stdout, stderr).
+
+    A negative return code is this function's own failure — the binary did not
+    start, or did not finish inside DJVU_CALL_SECONDS — and the reason is in
+    stderr. A tool call runs in an executor thread; a djvu binary that never
+    returns would hold that thread for as long as the process lives.
+    """
+    extra: Dict[str, Any] = {}
+    if sys.platform == "win32":
+        extra["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.run(
+            [binary, *args],
+            capture_output=True,
+            timeout=DJVU_CALL_SECONDS,
+            **extra,
+        )
+    except subprocess.TimeoutExpired:
+        return -1, "", (
+            f"{Path(binary).name} did not finish within {DJVU_CALL_SECONDS} s"
+        )
+    except OSError as exc:
+        return -1, "", f"{Path(binary).name} could not be run: {type(exc).__name__}: {exc}"
+    return (
+        proc.returncode,
+        (proc.stdout or b"").decode("utf-8", errors="replace"),
+        (proc.stderr or b"").decode("utf-8", errors="replace"),
+    )
+
+
+def _first_line(text: str, fallback: str) -> str:
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return fallback
+
+
+def _djvu_page_count(tools: Dict[str, str], source: Path) -> Tuple[Optional[int], str]:
+    """How many pages, or (None, why not)."""
+    rc, out, err = _run_djvu(tools["djvused"], [str(source), "-e", "n"])
+    if rc != 0:
+        return None, _first_line(err, f"djvused exited {rc}")
+    try:
+        return int(out.strip().split()[0]), ""
+    except (IndexError, ValueError):
+        return None, f"djvused answered {out.strip()[:80]!r} where a page count was expected"
+
+
+def _djvu_page_shape(tools: Dict[str, str], source: Path, number: int) -> Dict[str, Any]:
+    """Pixel size, the page's own dpi, and how many raster chunks it carries.
+
+    An `error` key instead means nothing here was read, which the callers turn
+    into None rather than zero — a page reported as carrying no image, when in
+    truth nobody could look, is how "there is no figure here" gets said about a
+    figure.
+    """
+    rc, out, err = _run_djvu(
+        tools["djvused"], [str(source), "-e", f"select {number}; dump"]
+    )
+    if rc != 0 or not out.strip():
+        return {"error": _first_line(err, f"djvused could not describe page {number}")}
+    shape: Dict[str, Any] = {
+        "images": sum(
+            1
+            for line in out.splitlines()
+            if line.split()[:1] and line.split()[0] in DJVU_RASTER_CHUNKS
+        )
+    }
+    info = _DJVU_INFO.search(out)
+    if info:
+        shape.update(
+            width=int(info.group(1)),
+            height=int(info.group(2)),
+            dpi=int(info.group(3)),
+        )
+    return shape
+
+
+def _read_djvu_page(tools: Dict[str, str], source: Path, number: int) -> Dict[str, Any]:
+    """One DjVu page in the same shape `_read_page` returns for a PDF one.
+
+    `detector` is "no_font_information" rather than "unavailable": the PDF
+    value means this pdfium build could not attribute characters, and a reader
+    acting on it would go looking for a better build. A DjVu text layer has no
+    font information to attribute, on any machine.
+    """
+    entry: Dict[str, Any] = {"page": number, "route": "text"}
+    try:
+        rc, out, err = _run_djvu(tools["djvutxt"], [f"--page={number}", str(source)])
+        if rc != 0:
+            entry.update(route="failed", error=_first_line(err, f"djvutxt exited {rc}"))
+            return entry
+
+        shape = _djvu_page_shape(tools, source, number)
+        images = None if "error" in shape else shape["images"]
+        text = _clean_text_layer(out)
+        entry.update(
+            chars=len(text),
+            images=images,
+            fonts=[],
+            suspect_chars=None,
+            suspect_fonts=[],
+            detector="no_font_information",
+            text=text,
+        )
+
+        notes: List[str] = []
+        if err.strip():
+            notes.append(f"djvutxt wrote to stderr on page {number}: {_first_line(err, '')}")
+        if not text.strip():
+            entry["route"] = "no_text_layer"
+            if images is None:
+                tail = (
+                    "; and this page's structure could not be read, so whether it "
+                    f"carries a scan is unknown: {shape['error']}"
+                )
+            elif images:
+                tail = (
+                    f"; it carries {images} raster chunk(s), so it is a scan and "
+                    "needs an eye"
+                )
+            else:
+                tail = "; and no raster data either — the page is genuinely blank"
+            notes.append("no text layer on this page" + tail)
+        if notes:
+            entry["note"] = "; ".join(notes)
+    except Exception as exc:
+        entry.update(route="failed", error=f"{type(exc).__name__}: {exc}")
+    return entry
+
+
+def _render_djvu_page(
+    tools: Dict[str, str], source: Path, number: int, dpi: int
+) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+    """A DjVu page as PNG bytes, or the reason it was not rendered.
+
+    ddjvu's -scale is a dpi against the page's own resolution, so the size is
+    known before anything is allocated — the same guard the PDF route applies
+    to a MediaBox.
+    """
+    shape = _djvu_page_shape(tools, source, number)
+    if "error" in shape:
+        return None, None, (
+            f"page {number} could not be measured before rendering: {shape['error']}"
+        )
+    width, height, own_dpi = shape.get("width"), shape.get("height"), shape.get("dpi")
+    if width and height and own_dpi:
+        scale = dpi / own_dpi
+        megapixels = (width * scale) * (height * scale) / 1_000_000
+        if megapixels > MAX_RENDER_MEGAPIXELS:
+            return None, None, (
+                f"page {number} would render to {megapixels:.0f} megapixels at "
+                f"{dpi} dpi, over the {MAX_RENDER_MEGAPIXELS} limit; not rendered"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="dpc-djvu-") as folder:
+        target = Path(folder) / f"page-{number}.pnm"
+        rc, _, err = _run_djvu(
+            tools["ddjvu"],
+            [
+                "-format=pnm",
+                f"-page={number}",
+                f"-scale={dpi}",
+                str(source),
+                str(target),
+            ],
+        )
+        if rc != 0 or not target.exists() or target.stat().st_size == 0:
+            return None, None, (
+                f"page {number} could not be rendered: "
+                f"{_first_line(err, f'ddjvu exited {rc} and wrote nothing')}"
+            )
+        raw = target.read_bytes()
+
+    # Pillow is a core dependency of this package, not an extra; if it is gone
+    # the environment is broken, and the honest answer is that the page cannot
+    # be handed to a model rather than a PNM labelled as something else.
+    try:
+        import io
+
+        from PIL import Image
+    except ImportError:
+        return None, None, (
+            f"page {number} was rendered by ddjvu, but Pillow is missing from this "
+            f"environment, so the PNM cannot be turned into a PNG. The vision route "
+            f"sends the bytes with their media type attached, and no provider here "
+            f"accepts image/x-portable-anymap or image/tiff — labelling one as PNG "
+            f"would be a lie. Pillow is a required dependency: `uv sync --all-extras` "
+            f"in dpc-client/core restores it."
+        )
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+        return buffer.getvalue(), "image/png", None
+    except Exception as exc:
+        return None, None, (
+            f"page {number} rendered but the PNM could not be converted to PNG: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
 def _cache_path(ctx: ToolContext, digest: str, page: int, model: str, dpi: int) -> Path:
     """Where a page already read by the model is kept.
 
@@ -374,8 +661,10 @@ def _cache_path(ctx: ToolContext, digest: str, page: int, model: str, dpi: int) 
     return folder / f"{safe}.json"
 
 
-def _render_page(doc, number: int, dpi: int) -> Tuple[Optional[bytes], Optional[str]]:
-    """A page as PNG bytes, or the reason it was not rendered.
+def _render_page(
+    doc, number: int, dpi: int
+) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+    """A PDF page as (PNG bytes, media type), or (None, None, why not).
 
     The size is asked for before anything is allocated: a page's MediaBox is
     whatever the document says it is, and a hostile one asks for a bitmap the
@@ -387,7 +676,7 @@ def _render_page(doc, number: int, dpi: int) -> Tuple[Optional[bytes], Optional[
         width_pt, height_pt = page.get_size()
         megapixels = (width_pt * dpi / 72) * (height_pt * dpi / 72) / 1_000_000
         if megapixels > MAX_RENDER_MEGAPIXELS:
-            return None, (
+            return None, None, (
                 f"page {number} would render to {megapixels:.0f} megapixels at "
                 f"{dpi} dpi, over the {MAX_RENDER_MEGAPIXELS} limit; not rendered"
             )
@@ -396,15 +685,27 @@ def _render_page(doc, number: int, dpi: int) -> Tuple[Optional[bytes], Optional[
         image = page.render(scale=dpi / 72).to_pil()
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
-        return buffer.getvalue(), None
+        return buffer.getvalue(), "image/png", None
     except Exception as exc:
-        return None, f"page {number} could not be rendered: {type(exc).__name__}: {exc}"
+        return None, None, (
+            f"page {number} could not be rendered: {type(exc).__name__}: {exc}"
+        )
 
 
 async def _read_page_with_vision(
-    ctx: ToolContext, doc, entry: Dict[str, Any], digest: str, model: Optional[str], dpi: int
+    ctx: ToolContext,
+    render: Callable[[int, int], Tuple[Optional[bytes], Optional[str], Optional[str]]],
+    entry: Dict[str, Any],
+    digest: str,
+    model: Optional[str],
+    dpi: int,
 ) -> None:
-    """Fill a page's text in by looking at it. Mutates `entry` in place."""
+    """Fill a page's text in by looking at it. Mutates `entry` in place.
+
+    `render` hands back image bytes and their media type, or the reason there
+    are none. What produced them — pdfium here, ddjvu in a subprocess — is the
+    caller's business; from here a page is a picture with a type on it.
+    """
     number = entry["page"]
     alias = model or "default"
     cache = _cache_path(ctx, digest, number, alias, dpi)
@@ -425,8 +726,8 @@ async def _read_page_with_vision(
         entry["note"] = f"page {number} needs an eye and no model is reachable from here"
         return
 
-    png, problem = _render_page(doc, number, dpi)
-    if png is None:
+    image, mime, problem = render(number, dpi)
+    if image is None:
         entry["note"] = problem
         return
 
@@ -435,7 +736,10 @@ async def _read_page_with_vision(
         meta = await llm.query(
             prompt=VISION_PROMPT,
             provider_alias=model,  # None → the configured vision provider
-            images=[{"base64": base64.b64encode(png).decode("ascii"), "mime_type": "image/png"}],
+            images=[{
+                "base64": base64.b64encode(image).decode("ascii"),
+                "mime_type": mime or "image/png",
+            }],
             return_metadata=True,
             # A copy has no business being creative. The alias this runs through
             # carries whatever temperature its owner chose for describing
@@ -490,11 +794,13 @@ async def read_document(
     save_to: Optional[str] = None,
 ) -> str:
     """
-    Read the text of a PDF, page by page, and report what each page gave up.
+    Read the text of a PDF or a DjVu, page by page, and report what each page
+    gave up.
 
     Args:
         ctx: Tool context
-        path: Relative (sandbox) or absolute (firewall-checked) path to a PDF
+        path: Relative (sandbox) or absolute (firewall-checked) path to a .pdf,
+            .djvu or .djv file
         pages: "3", "1-5", "2,7,9-12". Omitted reads the first 10. Twenty pages
             per call at most; call again for the rest.
         mode: "auto" sends only pages with no text layer to the vision model,
@@ -522,40 +828,62 @@ async def read_document(
         return f"⚠️ File not found: {path}"
     if not source.is_file():
         return f"⚠️ Not a file: {path}"
-    if source.suffix.lower() != ".pdf":
+    suffix = source.suffix.lower()
+    if suffix not in (".pdf",) + DJVU_SUFFIXES:
         return (
-            f"⚠️ read_document reads PDF; '{source.suffix or 'no extension'}' is not "
-            f"supported yet. Text and markdown already read correctly through read_file."
+            f"⚠️ read_document reads PDF and DjVu; '{source.suffix or 'no extension'}' "
+            f"is not supported yet. Text and markdown already read correctly through "
+            f"read_file."
         )
 
-    try:
-        import pypdfium2 as pdfium
-    except ImportError:
-        return (
-            "⚠️ PDF reading is not installed. It is an optional extra, because its "
-            "wheel does not exist for every platform and the source build fetches "
-            "PDFium over the network. Add it without disturbing anything else: "
-            "`uv sync --extra pdf --inexact` in dpc-client/core. Leave `--inexact` "
-            "out and uv makes the environment match the command exactly, which "
-            "UNINSTALLS every extra the line does not name."
-        )
-
-    try:
-        doc = pdfium.PdfDocument(source)
-        total = len(doc)
-    except Exception as exc:
-        low = str(exc).lower()
-        if "password" in low or "encrypt" in low:
+    if suffix in DJVU_SUFFIXES:
+        fmt = "djvu"
+        tools = _djvulibre()
+        if tools is None:
+            return DJVULIBRE_MISSING
+        total, problem = _djvu_page_count(tools, source)
+        if total is None:
+            return f"⚠️ Could not open '{source.name}': {problem}"
+        read_one = partial(_read_djvu_page, tools, source)
+        render_one = partial(_render_djvu_page, tools, source)
+    else:
+        fmt = "pdf"
+        try:
+            import pypdfium2 as pdfium
+        except ImportError:
             return (
-                f"⚠️ '{source.name}' is encrypted and this reader has no password for it."
+                "⚠️ PDF reading is not installed. It is an optional extra, because its "
+                "wheel does not exist for every platform and the source build fetches "
+                "PDFium over the network. Add it without disturbing anything else: "
+                "`uv sync --extra pdf --inexact` in dpc-client/core. Leave `--inexact` "
+                "out and uv makes the environment match the command exactly, which "
+                "UNINSTALLS every extra the line does not name."
             )
-        return f"⚠️ Could not open '{source.name}': {type(exc).__name__}: {exc}"
+
+        try:
+            doc = pdfium.PdfDocument(source)
+            total = len(doc)
+        except Exception as exc:
+            low = str(exc).lower()
+            if "password" in low or "encrypt" in low:
+                return (
+                    f"⚠️ '{source.name}' is encrypted and this reader has no password for it."
+                )
+            return f"⚠️ Could not open '{source.name}': {type(exc).__name__}: {exc}"
+        read_one = partial(_read_page, doc)
+        render_one = partial(_render_page, doc)
 
     wanted, notes = _parse_pages(pages, total)
     if not wanted:
         notes = notes or ["no readable page numbers in the range"]
 
-    per_page = [_read_page(doc, n) for n in wanted]
+    per_page = [read_one(n) for n in wanted]
+    if fmt == "djvu" and any(p["route"] == "text" for p in per_page):
+        notes.append(
+            "a DjVu text layer carries no font information, so the "
+            "unreliable-mathematics check — which reads the font behind each "
+            "character — did not run on these pages"
+        )
 
     # The eye, and only where it was asked for or proved necessary. Deciding
     # this after every page has been inventoried — which costs about 5 ms a
@@ -588,7 +916,9 @@ async def read_document(
         )
     else:
         for entry in candidates:
-            await _read_page_with_vision(ctx, doc, entry, digest, vision_model, VISION_DPI)
+            await _read_page_with_vision(
+                ctx, render_one, entry, digest, vision_model, VISION_DPI
+            )
 
     unreadable = [p["page"] for p in per_page if p["route"] in ("no_text_layer", "failed")]
     wants_eye = [p["page"] for p in per_page if p.get("suspect_chars")]
@@ -654,6 +984,7 @@ async def read_document(
 
     payload = {
         "path": str(source),
+        "format": fmt,
         "sha256": digest,
         "pages_total": total,
         "pages_read": wanted,
@@ -711,7 +1042,8 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "read_document",
                 "description": (
-                    "Read a PDF — the text layer where there is one, and the local "
+                    "Read a PDF or a DjVu (.pdf, .djvu, .djv) — the text layer where "
+                    "there is one, and the local "
                     "vision model where there is not. A page with no text is a scan: "
                     "it is rendered and transcribed automatically (bounded by "
                     "max_vision_pages, cached by file hash, ~40 s a page on a shared "
@@ -724,7 +1056,10 @@ def get_tools() -> List[ToolEntry]:
                     "answer carries a `position` line saying which pages of how many "
                     "you have and how to continue. For a document too long to read "
                     "into a conversation, pass save_to: the pages are written to that "
-                    "file and only the metadata comes back. Local only: no network."
+                    "file and only the metadata comes back. DjVu needs DjVuLibre "
+                    "installed (djvutxt/ddjvu/djvused) and carries no font "
+                    "information, so the mathematics check does not run on one. Local "
+                    "only: no network."
                 ),
                 "parameters": {
                     "type": "object",
@@ -732,9 +1067,9 @@ def get_tools() -> List[ToolEntry]:
                         "path": {
                             "type": "string",
                             "description": (
-                                "Path to the PDF. Relative paths resolve to the agent "
-                                "sandbox; absolute paths require extended-path read "
-                                "access in the firewall."
+                                "Path to the .pdf, .djvu or .djv file. Relative paths "
+                                "resolve to the agent sandbox; absolute paths require "
+                                "extended-path read access in the firewall."
                             ),
                         },
                         "pages": {
