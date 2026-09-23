@@ -119,6 +119,18 @@ def test_a_visible_window_nothing_is_doing_is_still_reaped():
     assert "agent_abandoned" not in B._active_browser_sessions
 
 
+def test_an_age_older_than_the_hosts_uptime_is_still_that_age():
+    """`time.monotonic()` counts from boot. On a runner up for five minutes
+    "no page event" (0.0) used to floor the agent's clock, so a call 40
+    minutes ago read as 5 minutes idle and nothing was reaped."""
+    uptime = 300.0
+    session = types.SimpleNamespace(
+        _last_activity=uptime - 2400.0, _last_page_event=0.0,
+    )
+
+    assert B._session_idle_seconds(session, uptime) == 2400.0
+
+
 def test_a_page_event_ages_out_like_an_agent_call():
     """A page event does not make a window immortal — an old one is as
     idle as an old call, or the reaper would keep every window that ever

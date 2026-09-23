@@ -892,8 +892,14 @@ def _session_idle_seconds(session, now: float) -> float:
     as use. A window whose page has gone quiet still ages out, which is the
     case the idle sweep exists for.
     """
+    # 0.0 means "no page event", not a moment. Used as one in max() it
+    # floored the agent's clock at the monotonic epoch (boot), so an age
+    # older than the host's uptime read as the uptime.
+    last = session._last_activity
     page_event = getattr(session, "_last_page_event", 0.0) or 0.0
-    return now - max(session._last_activity, page_event)
+    if page_event:
+        last = max(last, page_event)
+    return now - last
 
 
 async def cleanup_idle_browser_sessions() -> int:
