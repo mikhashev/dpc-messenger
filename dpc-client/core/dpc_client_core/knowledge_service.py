@@ -382,12 +382,8 @@ class KnowledgeService:
             )
             return
 
-        payload = {
-            "group_id": group_id,
-            "history_hash": monitor.compute_history_hash(),
-            "message_count": len(monitor.message_history),
-            "history_digest": monitor.history_digest(),
-        }
+        from .conversation_monitor import history_status_for
+        payload = history_status_for(group_id, monitor)
 
         async def _send():
             for peer_id in peers:

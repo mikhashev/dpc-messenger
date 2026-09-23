@@ -13,7 +13,7 @@ import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSource
 
@@ -135,8 +135,122 @@ def is_local_file_note(record: Dict[str, Any], local_node_id: Optional[str]) -> 
         and bool(record.get("attachments"))
 
 
+LIVE_HISTORY_BOUNDARY_KEY = "live_history_boundary"
+# How far ahead of our clock a peer's boundary may be before it is ignored.
+BOUNDARY_CLOCK_SKEW = timedelta(minutes=5)
+
+
+def parse_moment(value: Any) -> Optional[datetime]:
+    """An ISO-8601 moment as an aware UTC datetime, or None when it is not one."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def is_before_boundary(record: Dict[str, Any], boundary: Optional[str]) -> bool:
+    """True when the record is dated before the boundary.
+
+    A record with no readable timestamp is inside every window (ADR-037,
+    amendment 2026-09-23): it cannot be placed, and leaving it out would hide it.
+    """
+    limit = parse_moment(boundary)
+    if limit is None:
+        return False
+    moment = parse_moment(record.get("timestamp"))
+    return moment is not None and moment < limit
+
+
+def later_boundary(*boundaries: Optional[str]) -> Optional[str]:
+    """The latest of the given boundaries; absent or unreadable ones are ignored."""
+    best, best_moment = None, None
+    for b in boundaries:
+        moment = parse_moment(b)
+        if moment is not None and (best_moment is None or moment > best_moment):
+            best, best_moment = b, moment
+    return best
+
+
+def same_moment(a: Optional[str], b: Optional[str]) -> bool:
+    """Two boundaries name the same window; None only equals None."""
+    return parse_moment(a) == parse_moment(b)
+
+
+def accepted_peer_boundary(value: Any, conversation_id: str = "",
+                           peer: str = "") -> Optional[str]:
+    """A peer's advertised boundary, or None when it must not be used.
+
+    One later than our clock (with some skew) is ignored: taken at its word it
+    would empty the window and hide every later divergence for good (ADR-038,
+    amendment 2026-09-23, rule 5).
+    """
+    moment = parse_moment(value)
+    if moment is None:
+        return None
+    if moment > datetime.now(timezone.utc) + BOUNDARY_CLOCK_SKEW:
+        logger.warning(
+            "Ignoring live-history boundary %s from %s for %s: it lies in the future",
+            value, str(peer)[:20], conversation_id,
+        )
+        return None
+    return value
+
+
+def live_history_boundary_of(conversation_id: str) -> Optional[str]:
+    """This node's own boundary for a conversation, read from disk without a monitor."""
+    base = Path.home() / ".dpc" / "conversations"
+    try:
+        path = conversation_paths.resolve_store_dir(base, conversation_id) / "settings.json"
+        if not path.exists():
+            return None
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        logger.debug("Could not read the boundary of %s: %s", conversation_id, exc)
+        return None
+    value = data.get(LIVE_HISTORY_BOUNDARY_KEY) if isinstance(data, dict) else None
+    return value if parse_moment(value) is not None else None
+
+
+def history_status_for(conversation_id: str, monitor: Any = None,
+                       since: Optional[str] = None) -> Dict[str, Any]:
+    """The GROUP_HISTORY_STATUS payload for one conversation.
+
+    One builder for every sender. The digest covers the window formed by this
+    node's boundary and `since` (the peer's, when known); `digest_since` names
+    that window so the receiver can tell whether the two digests are comparable.
+    """
+    if monitor is not None and hasattr(monitor, "compute_history_hash"):
+        boundary = getattr(monitor, "live_history_boundary", None)
+        window = later_boundary(boundary, since)
+        history_hash = monitor.compute_history_hash()
+        count = len(monitor.message_history)
+        digest = monitor.history_digest(since=window) if window else monitor.history_digest()
+    else:
+        messages = ConversationMonitor.peek_group_messages(conversation_id)
+        boundary = live_history_boundary_of(conversation_id)
+        window = later_boundary(boundary, since)
+        history_hash = ConversationMonitor.history_hash_for(messages)
+        count = len(messages)
+        digest = digest_for(messages, since=window)
+    return {
+        "group_id": conversation_id,
+        "history_hash": history_hash,
+        "message_count": count,
+        "history_digest": digest,
+        LIVE_HISTORY_BOUNDARY_KEY: boundary,
+        "digest_since": window,
+    }
+
+
 def digest_for(messages: List[Dict[str, Any]],
-               local_node_id: Optional[str] = None) -> Dict[str, Any]:
+               local_node_id: Optional[str] = None,
+               since: Optional[str] = None) -> Dict[str, Any]:
     """Per-author counts and digests over a message list.
 
     A free function so a node can advertise what it holds without loading the
@@ -150,11 +264,16 @@ def digest_for(messages: List[Dict[str, Any]],
     `is_local_file_note`. `local_node_id` names this node, and when it is
     omitted the identity file answers — so a caller holding only a list of
     messages filters exactly as a loaded monitor does.
+
+    `since` narrows the digest to a pair's window: records dated before it are
+    left out, records with no timestamp stay in.
     """
     local = local_node_id if local_node_id is not None else _local_node_id_from_disk()
     by_author: Dict[str, List[str]] = {}
     for msg in messages:
         if is_local_file_note(msg, local):
+            continue
+        if since and is_before_boundary(msg, since):
             continue
         author = msg.get("sender_node_id") or ""
         key = msg.get("content_hash") or f"id:{msg.get('id', '')}"
@@ -2153,6 +2272,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         cut = [m for m in self.message_history if (m.get("timestamp") or "") < boundary]
         dropped = len(cut)
         if not dropped:
+            self._advance_live_history_boundary(boundary)
             return 0
 
         try:
@@ -2164,6 +2284,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             )
             return 0
 
+        self._advance_live_history_boundary(boundary)
         self.message_history = kept
         kept_ids = {m.get("id") for m in kept}
         self.full_conversation = [
@@ -2181,6 +2302,80 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             cut[0].get("timestamp"), cut[-1].get("timestamp"), archive_path or "nowhere: history not persisted",
         )
         return dropped
+
+    @property
+    def live_history_boundary(self) -> Optional[str]:
+        """This node's own boundary: it keeps no live history older than this.
+
+        Stored in the conversation's settings file, not in history.json (which a
+        reset deletes) and not in the group record (which `apply_sync` replaces).
+        """
+        value = self._load_conversation_settings().get(LIVE_HISTORY_BOUNDARY_KEY)
+        return value if parse_moment(value) is not None else None
+
+    def _advance_live_history_boundary(self, moment: str) -> bool:
+        """Move the boundary forward to `moment`; never back. True when it moved."""
+        new = parse_moment(moment)
+        if new is None or not self.persist_history:
+            return False
+        # A folder is not created just to hold a boundary: with nothing stored
+        # there is nothing a boundary could keep out.
+        if not self._get_settings_path().parent.exists():
+            return False
+        current = parse_moment(self.live_history_boundary)
+        if current is not None and current >= new:
+            return False
+        settings = self._load_conversation_settings()
+        settings[LIVE_HISTORY_BOUNDARY_KEY] = new.astimezone(timezone.utc).isoformat()
+        if not self._save_conversation_settings(settings):
+            return False
+        logger.info(
+            "Monitor %s: live-history boundary moved to %s",
+            self.conversation_id, settings[LIVE_HISTORY_BOUNDARY_KEY],
+        )
+        return True
+
+    def _archived_keys(self) -> Set[str]:
+        """Ids and content hashes of every record in this conversation's archive."""
+        keys: Set[str] = set()
+        archive_dir = self._get_history_path().parent / "archive"
+        if not archive_dir.exists():
+            return keys
+        for path in archive_dir.rglob("*_session.json"):
+            for msg in _read_messages(path):
+                if msg.get("id"):
+                    keys.add("id:" + str(msg["id"]))
+                if msg.get("content_hash"):
+                    keys.add("hash:" + str(msg["content_hash"]))
+        return keys
+
+    def _archive_older_arrivals(self, records: List[Dict[str, Any]]) -> int:
+        """Archive arrivals older than the boundary, skipping any already archived.
+
+        Without the skip every reconnect that carried older records would write
+        the same ones into a new archive file.
+        """
+        seen = self._archived_keys()
+        fresh = []
+        for msg in records:
+            keys = {k for k in ("id:" + str(msg.get("id") or ""),
+                                "hash:" + str(msg.get("content_hash") or ""))
+                    if not k.endswith(":")}
+            if keys & seen:
+                continue
+            seen |= keys
+            fresh.append(msg)
+        if not fresh:
+            return 0
+        try:
+            self._archive_messages(fresh, reason="before_boundary")
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "Monitor %s: could not archive %d record(s) older than the boundary: %s",
+                self.conversation_id, len(fresh), e,
+            )
+            return 0
+        return len(fresh)
 
     def _archive_messages(self, messages: List[Dict[str, Any]], reason: str) -> Optional[Path]:
         """Write exactly these messages to archive/ as one session file.
@@ -2515,6 +2710,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         # Archive before wiping
         archive_count = self._archive_current_session(reason="reset", max_sessions=max_sessions) if preserve else 0
+        # Without it the next reconnect merges the dropped records straight back.
+        self._advance_live_history_boundary(datetime.now(timezone.utc).isoformat())
 
         self.message_history = []
         self.message_ids = set()
@@ -2597,6 +2794,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self,
         authors: Optional[List[str]] = None,
         content_hashes: Optional[List[str]] = None,
+        since: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Export conversation history for syncing with peer
 
@@ -2617,6 +2815,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 whose history lacks messages of a proposal's extraction window
                 asks for those and nothing else. Takes precedence over
                 `authors`; an empty list exports nothing, as above.
+            since: the pair's window. Records dated before it are not
+                exported: the asker would only archive them. `None` exports
+                every date, which is what a peer predating the field gets.
 
         Returns:
             List of message dicts with 'role', 'content', 'timestamp', 'attachments'
@@ -2630,6 +2831,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 if (msg.get("content_hash") or "") not in wanted_hashes:
                     continue
             elif wanted is not None and (msg.get("sender_node_id") or "") not in wanted:
+                continue
+            if since and is_before_boundary(msg, since):
                 continue
             # A note this node wrote about a peer's file is attributed to that
             # peer and signed by us, so every other node refuses it on arrival —
@@ -2741,6 +2944,22 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             return
         if refused:
             logger.warning("Import refused %d of %d records", refused, len(messages))
+
+        # The replacing path obeys the boundary too, or a node that reset
+        # alone gets its old history back whole on the next reconnect.
+        boundary = self.live_history_boundary
+        if boundary:
+            older = [m for m in accepted if is_before_boundary(m, boundary)]
+            if older:
+                accepted = [m for m in accepted if not is_before_boundary(m, boundary)]
+                archived = self._archive_older_arrivals(older)
+                logger.info(
+                    "Import into %s: %d record(s) older than the boundary %s kept out of "
+                    "the live history (%d newly archived)",
+                    self.conversation_id, len(older), boundary, archived,
+                )
+                if not accepted:
+                    return
 
         # Replace all three message stores (v0.14.0 fix)
         self.message_history = []
@@ -3054,7 +3273,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         )
         return "sha256:" + hashlib.sha256(data.encode()).hexdigest()[:16]
 
-    def history_digest(self) -> Dict[str, Any]:
+    def history_digest(self, since: Optional[str] = None) -> Dict[str, Any]:
         """What this node holds, in a form two nodes can compare.
 
         Per author, a count and a digest over the sorted `content_hash` values
@@ -3081,7 +3300,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         Notes this node wrote about a peer's files are left out, the same ones
         `export_history` holds back — see `is_local_file_note`.
         """
-        return digest_for(self.message_history, self._local_node_id())
+        return digest_for(self.message_history, self._local_node_id(), since=since)
 
     def authors_that_differ(self, remote_digest: Dict[str, Any]) -> List[str]:
         """Which authors the two sides disagree about; empty means agreement."""
@@ -3646,15 +3865,21 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             remote_messages: List of message dicts from peer
 
         Returns:
-            Count of new messages added. The records refused are left in
-            `last_merge_rejected` (id, content_hash, sender, verdict), so a
-            caller waiting for a specific record can learn it will never come.
+            Count of new messages added to the live history. The records
+            refused are left in `last_merge_rejected` (id, content_hash, sender,
+            verdict), so a caller waiting for a specific record can learn it
+            will never come. Records older than this node's live-history
+            boundary go to the archive instead; their count is left in
+            `last_merge_archived`.
         """
         added = 0
         rejected = 0
         legacy = 0
         dropped = 0
         self.last_merge_rejected: List[Dict[str, Any]] = []
+        self.last_merge_archived = 0
+        boundary = self.live_history_boundary
+        older: List[Dict[str, Any]] = []
         for msg in remote_messages:
             checked, verdict = self._verify_incoming(msg)
             if checked is None:
@@ -3667,6 +3892,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     "sender_name": msg.get("sender_name"),
                     "verdict": verdict,
                 })
+                continue
+            # Verified first, so a record refused by signature is refused on
+            # both routes.
+            if boundary and is_before_boundary(checked, boundary):
+                if not (checked.get("id") and checked["id"] in self.message_ids):
+                    older.append(checked)
                 continue
             # The transfer got here before the sender's record of it, and we
             # wrote a note of our own meanwhile. One file, one record.
@@ -3691,10 +3922,18 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "Merged %d unsigned record(s) into %s: stored `verification: legacy`, not checked",
                 legacy, self.conversation_id,
             )
+        if older:
+            self.last_merge_archived = self._archive_older_arrivals(older)
         if added > 0 or dropped > 0:
             self.restore_chronological_order()
             self.save_history()
-            logger.info("Merged %d new messages into conversation history", added)
+        if added or older:
+            logger.info(
+                "Merged %d new message(s) into the live history of %s; %d older than "
+                "the boundary %s went to the archive (%d already there)",
+                added, self.conversation_id, self.last_merge_archived, boundary,
+                len(older) - self.last_merge_archived,
+            )
 
         return added
 
@@ -3744,6 +3983,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         # Archive before wiping
         archive_count = self._archive_current_session(reason="new_session", max_sessions=max_sessions) if preserve else 0
+        # Without it the next reconnect merges the dropped records straight back.
+        self._advance_live_history_boundary(datetime.now(timezone.utc).isoformat())
 
         self.message_history = []
         self.message_ids = set()

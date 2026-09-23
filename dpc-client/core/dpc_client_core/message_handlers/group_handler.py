@@ -13,9 +13,13 @@ from dpc_protocol.message_signing import (
 )
 from ..conversation_monitor import (
     Message as ConvMessage,
-    ConversationMonitor,
+    LIVE_HISTORY_BOUNDARY_KEY,
+    accepted_peer_boundary,
     authors_that_differ_between,
-    digest_for,
+    history_status_for,
+    later_boundary,
+    live_history_boundary_of,
+    same_moment,
 )
 from .group_access import may_share_group, refuse_group_access
 
@@ -658,6 +662,11 @@ class GroupSyncHandler(MessageHandler):
                 except Exception:
                     needs_history = True
 
+            # A node with a boundary emptied its history on purpose; the status
+            # exchange brings what lies inside its window, and asking for the
+            # whole file here would hand the reset straight back.
+            if needs_history and live_history_boundary_of(group_id):
+                needs_history = False
             if needs_history:
                 import uuid
                 request_id = str(uuid.uuid4())[:8]
@@ -701,6 +710,8 @@ class GroupHistoryRequestHandler(MessageHandler):
         # Exact records by hash — a voter fetching a proposal's extraction
         # window. Wins over `authors` when both are present.
         content_hashes = payload.get("content_hashes")
+        # The pair's window; absent from a peer that predates it.
+        since = payload.get("since") if isinstance(payload.get("since"), str) else None
 
         self.logger.info(
             "Received GROUP_HISTORY_REQUEST from %s for group %s (%s)",
@@ -731,7 +742,8 @@ class GroupHistoryRequestHandler(MessageHandler):
         elif content_hashes is not None:
             history = monitor.export_history(content_hashes=content_hashes)
         else:
-            history = monitor.export_history(authors=authors)
+            history = (monitor.export_history(authors=authors, since=since) if since
+                       else monitor.export_history(authors=authors))
         response = {
             "group_id": group_id,
             "history": history,
@@ -832,7 +844,10 @@ class GroupHistoryResponseHandler(MessageHandler):
         if hasattr(monitor, "merge_history"):
             added = monitor.merge_history(history)
             rejected = list(getattr(monitor, "last_merge_rejected", []) or [])
-            self.logger.info("Merged %d new messages into group %s history", added, group_id)
+            self.logger.info(
+                "Merged %d new messages into group %s history (%d older than the boundary archived)",
+                added, group_id, getattr(monitor, "last_merge_archived", 0) or 0,
+            )
         elif hasattr(monitor, "import_history"):
             # Fallback for older monitors
             monitor.import_history(history)
@@ -888,40 +903,51 @@ class GroupHistoryStatusHandler(MessageHandler):
             )
             return None
 
-        # Get local monitor
+        # Peek disk when the monitor is not loaded this session — which,
+        # monitors being lazy, is the usual case. Without a digest both sides
+        # fell back to comparing chain tips, which never match between honest
+        # nodes.
         monitor = self.service.conversation_monitors.get(group_id)
+        own_boundary = (
+            getattr(monitor, "live_history_boundary", None) if monitor is not None
+            and hasattr(monitor, "compute_history_hash")
+            else live_history_boundary_of(group_id)
+        )
+        peer_boundary = accepted_peer_boundary(
+            payload.get(LIVE_HISTORY_BOUNDARY_KEY), group_id, sender_node_id
+        )
+        # The pair compares only what lies inside the later of the two
+        # boundaries (ADR-037, amendment 2026-09-23).
+        window = later_boundary(own_boundary, peer_boundary)
+        local = history_status_for(group_id, monitor, since=window)
+        local_hash = local["history_hash"]
+        local_count = local["message_count"]
+        local_digest = local["history_digest"]
 
-        # Compute local hash and digest (peek disk when the monitor is not
-        # loaded this session — which, monitors being lazy, is the usual case).
-        # The digest used to be None whenever there was no monitor, and both
-        # sides then fell back to comparing chain tips: a comparison that never
-        # matches between two honest nodes, so every connection either reported
-        # divergence or shipped the whole history.
-        if monitor and hasattr(monitor, "compute_history_hash"):
-            local_hash = monitor.compute_history_hash()
-            local_count = len(monitor.message_history)
-            local_digest = monitor.history_digest()
-        else:
-            disk_messages = ConversationMonitor.peek_group_messages(group_id)
-            local_count = len(disk_messages)
-            local_hash = ConversationMonitor.history_hash_for(disk_messages)
-            local_digest = digest_for(disk_messages)
+        # A peer that predates the boundary sends no `digest_since`; its digest
+        # covers its whole history and is compared as before.
+        legacy_peer = "digest_since" not in payload
+        comparable = legacy_peer or same_moment(payload.get("digest_since"), window)
 
-        # Reply only to the initiating STATUS (not to replies), to prevent infinite ping-pong.
-        # A sends STATUS → B replies once with is_reply=True → A does NOT reply again.
+        # Reply only to the initiating STATUS, to prevent ping-pong: A sends
+        # STATUS, B replies once with is_reply=True, A does not reply again.
+        # One exception, sent at most once: the initiator digested over its own
+        # boundary alone, so when the peer's boundary is later the peer could
+        # not compare it, and gets one more status over the pair's window.
         if not is_reply:
-            reply = {
-                "group_id": group_id,
-                "history_hash": local_hash,
-                "message_count": local_count,
-                "is_reply": True,
-            }
-            if local_digest:
-                reply["history_digest"] = local_digest
-            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-                "command": "GROUP_HISTORY_STATUS",
-                "payload": reply,
-            })
+            await self._send_status(sender_node_id, dict(local, is_reply=True))
+        elif (not legacy_peer and not payload.get("window_retry")
+              and not same_moment(window, own_boundary)):
+            await self._send_status(
+                sender_node_id, dict(local, is_reply=True, window_retry=True)
+            )
+
+        if not comparable:
+            self.logger.debug(
+                "Group %s: %s digested since %s, the pair's window is %s — not compared",
+                group_id, sender_node_id[:20], payload.get("digest_since"), window,
+            )
+            return None
 
         remote_digest = payload.get("history_digest")
         if remote_digest and local_digest:
@@ -934,16 +960,12 @@ class GroupHistoryStatusHandler(MessageHandler):
                 self.logger.debug("Group %s: histories agree (%d messages)", group_id, local_count)
                 return None
             self.logger.info(
-                "Requesting history sync for group %s: differs for %d author(s)",
-                group_id, len(differing)
+                "Requesting history sync for group %s: differs for %d author(s) since %s",
+                group_id, len(differing), window,
             )
-            request_id = uuid.uuid4().hex[:8]
-            self.service.history_requests.note(sender_node_id, group_id, request_id)
-            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-                "command": "GROUP_HISTORY_REQUEST",
-                "payload": {"group_id": group_id, "authors": differing,
-                            "request_id": request_id},
-            })
+            await self._request_history(
+                sender_node_id, group_id, window, authors=differing
+            )
             return None
 
         # Peer predates the digest: fall back to the old tip comparison, which
@@ -953,14 +975,30 @@ class GroupHistoryStatusHandler(MessageHandler):
                 "Requesting history sync for group %s (local: %d, remote: %d)",
                 group_id, local_count, remote_count
             )
-            request_id = uuid.uuid4().hex[:8]
-            self.service.history_requests.note(sender_node_id, group_id, request_id)
-            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-                "command": "GROUP_HISTORY_REQUEST",
-                "payload": {"group_id": group_id, "request_id": request_id}
-            })
+            await self._request_history(sender_node_id, group_id, window)
 
         return None
+
+    async def _send_status(self, peer: str, payload: Dict[str, Any]) -> None:
+        await self.service.p2p_manager.send_message_to_peer(peer, {
+            "command": "GROUP_HISTORY_STATUS",
+            "payload": payload,
+        })
+
+    async def _request_history(self, peer: str, group_id: str, window: Optional[str],
+                               authors: Optional[list] = None) -> None:
+        request_id = uuid.uuid4().hex[:8]
+        self.service.history_requests.note(peer, group_id, request_id)
+        request: Dict[str, Any] = {"group_id": group_id, "request_id": request_id}
+        if authors is not None:
+            request["authors"] = authors
+        # The answering side exports nothing older than the pair's window.
+        if window:
+            request["since"] = window
+        await self.service.p2p_manager.send_message_to_peer(peer, {
+            "command": "GROUP_HISTORY_REQUEST",
+            "payload": request,
+        })
 
 
 class GroupDeletedStatusHandler(MessageHandler):
