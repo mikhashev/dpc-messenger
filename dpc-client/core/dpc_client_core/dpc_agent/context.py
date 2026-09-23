@@ -1054,12 +1054,12 @@ the live number may be noticeably above this lower bound.
 
 Your runtime `budget` says who runs and pays for your model calls:
 - `provider_alias` — the model endpoint you run on; `route` — `local` (this node's engine) or `peer` (another node's, named in `served_by`)
-- `provider_kind` — `local` (a model on the serving node's own hardware), `vendor` (a paid API) or `unknown`
-- `tokens_paid_by` — `nobody` (local model), `this_node` (this node's API key), `peer` (the serving node) or `unknown`
+- `provider_kind` — `self_hosted` (a model on the serving node's own hardware), `vendor` (a paid API) or `unknown`
+- `tokens_paid_by` — per token only: `nobody` (a self-hosted model; power and card time still cost), `this_node` (this node's API key), `peer` (the serving node; if it declared a tariff above zero, this node pays that tariff) or `unknown`
 - `agent_lifetime_tokens` — tokens YOU have used across all your chats and tasks since your state began; not this chat, not this node
 - `billing` and the `*_usd` fields appear only when your configuration sets a billing model
 
-In a group, `task.participants` names each agent's node: `(agent on this node)` is on the same node as you, `(agent on peer X)` runs on peer X's node; `external agent` is a session outside DPC posting through the bridge.
+In a group, `task.participants` names each agent's node: `[agent on this node]` is on the same node as you, `[agent on peer X]` runs on peer X's node; `external agent` is a session outside DPC posting through the bridge, on this node or on a peer.
 
 ## Constraints
 

@@ -42,10 +42,10 @@ def test_every_agent_carries_its_owning_node():
     labels = _service(peer_metadata={LINUX: {"name": "Mike (linux)"}})._group_participants(GROUP)
     assert "Mike (User)" in labels
     assert "Mike (linux) (peer)" in labels
-    assert "Ark (agent on this node)" in labels
-    assert "CC_windows (external agent on this node)" in labels
-    assert "Ubu (agent on peer Mike (linux))" in labels
-    assert "CC_linux (external agent on peer Mike (linux))" in labels
+    assert "Ark [agent on this node]" in labels
+    assert "CC_windows [external agent on this node]" in labels
+    assert "Ubu [agent on peer Mike (linux)]" in labels
+    assert "CC_linux [external agent on peer Mike (linux)]" in labels
 
 
 def test_own_agents_and_a_peers_agents_read_differently():
@@ -56,7 +56,7 @@ def test_own_agents_and_a_peers_agents_read_differently():
 def test_a_peer_name_survives_a_cold_peer_metadata_through_the_peer_cache():
     labels = _service(peer_metadata={}, cached={LINUX: "Mike (linux)"})._group_participants(GROUP)
     assert "Mike (linux) (peer)" in labels
-    assert "Ubu (agent on peer Mike (linux))" in labels
+    assert "Ubu [agent on peer Mike (linux)]" in labels
     assert not any("dpc-node-6d218e9 " in label for label in labels)
 
 

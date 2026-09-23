@@ -21,13 +21,17 @@ REMOTE_PREFIX = "remote:"
 
 
 def provider_kind(provider_type: Optional[str], base_url: Optional[str] = None) -> str:
-    """'local' (a model on the serving node's own hardware), 'vendor' (a paid API) or 'unknown'."""
+    """'self_hosted' (a model on the serving node's own hardware), 'vendor' (a paid API) or 'unknown'.
+
+    Not 'local': `route` already says local-or-peer about who answered, and a
+    peer serving its own model would print as route peer, kind local.
+    """
     if provider_type in LOCAL_TYPES:
-        return "local"
+        return "self_hosted"
     if provider_type == "openai_compatible" and base_url:
         host = (urlparse(base_url).hostname or "").lower()
         if host in _LOOPBACK_HOSTS:
-            return "local"
+            return "self_hosted"
     if provider_type in VENDOR_TYPES:
         return "vendor"
     return "unknown"
@@ -89,5 +93,5 @@ def provider_facts_for(
     if config.get("type") == "remote_peer" and config.get("peer_id"):
         return _peer_facts(config.get("provider") or alias, config["peer_id"], peer_metadata)
     kind = provider_kind(config.get("type"), config.get("base_url"))
-    paid = {"local": "nobody", "vendor": "this_node"}.get(kind, "unknown")
+    paid = {"self_hosted": "nobody", "vendor": "this_node"}.get(kind, "unknown")
     return {"provider_alias": alias, "route": "local", "provider_kind": kind, "tokens_paid_by": paid}

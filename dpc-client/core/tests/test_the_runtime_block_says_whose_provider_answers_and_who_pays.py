@@ -44,7 +44,7 @@ def test_a_local_model_agent_is_told_nobody_pays_and_never_subscription(tmp_path
     budget = _budget(tmp_path, provider_facts=facts)
     assert budget["provider_alias"] == "qwen3.8 27b"
     assert budget["route"] == "local"
-    assert budget["provider_kind"] == "local"
+    assert budget["provider_kind"] == "self_hosted"
     assert budget["tokens_paid_by"] == "nobody"
     assert "billing" not in budget
     assert "subscription" not in json.dumps(budget)
@@ -64,7 +64,7 @@ def test_a_vendor_api_on_this_node_is_paid_by_this_node(tmp_path):
 
 def test_an_openai_compatible_server_on_loopback_is_a_local_model(tmp_path):
     facts = provider_facts_for(_llm(ROWS), "lmstudio")
-    assert (facts["provider_kind"], facts["tokens_paid_by"]) == ("local", "nobody")
+    assert (facts["provider_kind"], facts["tokens_paid_by"]) == ("self_hosted", "nobody")
 
 
 def test_an_agent_pinned_to_a_peer_is_served_and_paid_by_that_peer():
@@ -73,7 +73,7 @@ def test_an_agent_pinned_to_a_peer_is_served_and_paid_by_that_peer():
                                peer_metadata=peers)
     assert facts["route"] == "peer"
     assert facts["served_by"] == "dpc-node-bob"
-    assert facts["provider_kind"] == "local"
+    assert facts["provider_kind"] == "self_hosted"
     assert facts["tokens_paid_by"] == "peer"
 
 

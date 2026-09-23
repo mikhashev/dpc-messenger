@@ -6198,7 +6198,7 @@ class CoreService:
             where = "this node" if nid == own else f"peer {self._peer_name(nid)}"
             for aid, dname in names.items():
                 kind = "external agent" if str(aid).startswith("ext:") else "agent"
-                participants.append(f"{dname} ({kind} on {where})")
+                participants.append(f"{dname} [{kind} on {where}]")
         return participants
 
     def update_group_agent_context(self, group_id: str, agent_id: str,
