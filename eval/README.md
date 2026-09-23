@@ -31,7 +31,11 @@ profile, template=None)`), so a tool nobody listed is off.
 One command, from `dpc-client/core`, after a dry run:
 
     uv run --with pyarrow python ../../eval/gaia/campaign.py --dry-run
-    uv run --with pyarrow python ../../eval/gaia/campaign.py --hours 7.5
+    uv run --with pyarrow python ../../eval/gaia/campaign.py --hours 11
+
+`--hours 11` fits the four-run queue: a run is started only while at least
+`--minutes-per-run` (170) remain, and on 2026-09-23 a run took 142–156 min, so
+`--hours 7.5` runs two and skips the rest by design.
 
 Before it:
 
@@ -64,6 +68,21 @@ Tier 1 answered by the eval approver only for inline code inside the task
 (no installs, nothing reaching the home directory or credentials), scored by
 the official leaderboard scorer's rules on the FINAL ANSWER span. The queue
 is t0-xhigh, t0-low, t1-xhigh, t1-low.
+
+**Published answer keys are refused in the run** (`_harness/answer_key_policy.py`,
+versioned and hashed in provenance): the web tools refuse URLs shaped like a GAIA
+answer list — the dataset's own Hugging Face pages and discussions, `Who_and_When`,
+`harbor-datasets`/`harbor-index`, HAL's GAIA analysis, `Final_Assignment` spaces,
+named mirrors, any URL carrying `gaia` beside jsonl/validation/metadata/benchmark/
+leaderboard/answer — refuse searches naming GAIA, drop such items from search
+results and withhold a browser page that is one; every refusal is in the report.
+`run_shell` is refused on its command text only, so a script that fetches a mirror
+is caught by the scan below, not prevented.
+**`accuracy_clean`** counts correct answers of tasks that never met an answer key:
+a call naming such a URL (fetched or refused), a query naming GAIA, a listed
+answer-key page showing the task's answer, a dataset-row marker (`groundtruth`,
+`"Final answer"`, `Expected answer`) in a tool result, or an answer naming its
+source. A correct task that *reached* one — not refused — makes the run exit 3.
 
 **Not comparable with what came before.** The eleven runs of 2026-08-29 to
 08-31 ran `27B-Cold-Fusion-GAIN-V1.1-NVFP4-MID-HIGH.gguf` (per their
@@ -98,15 +117,21 @@ take `_harness/benchmark_tools.benchmark_firewall` as `gaia/` does.
   run is still the result this file tells you to distrust; the hard tier has
   not been run on llama-server yet.
 
-- **`gaia/` has not run since 2026-08-31, and its harness changed underneath
-  it on 2026-09-23** — the campaign named an alias that no longer existed, the
+- **`gaia/` ran on the new harness: `20260923-0543`, t0-xhigh and t0-low,
+  40/53 and 41/53 reported, 37/53 and 37/53 clean.** The agent searched for
+  GAIA by name and read published answers in 3 and 4 correct tasks (xhigh 005,
+  014, 016; low 004, 005, 014, 017), and both runs exited 0. Both numbers
+  predate the answer-key policy above; the next run is the first under it.
+- **Before that campaign `gaia/` had not run since 2026-08-31, and its harness
+  changed underneath it on 2026-09-23** — the campaign named an alias that no longer existed, the
   approver passed commands that left the sandbox, and every tool was on. The
   eleven post-guard runs (2026-08-29 to 08-31) scored **47.2 %–66.0 %** (25–35
   of 53) as stored; re-scored with the official scorer's rules on the 539 of
   583 rows whose stored text was not truncated, five runs moved by one task
   and the range is **47.2 %–67.9 %**. The 69.8 % of 2026-08-28 is not in
   either: that run read the answer file. None of these is comparable with a
-  run on the new harness (see above).
+  run on the new harness (see above). *(Later the same day it ran — the line
+  above.)*
 
 ## State of the set, 2026-08-30
 

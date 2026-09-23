@@ -53,7 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # The shared harness bits live one directory up.
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from _harness import benchmark_tools, provenance  # noqa: E402
+from _harness import answer_key_policy, benchmark_tools, provenance  # noqa: E402
 from _harness.results_root import results_root  # noqa: E402
 
 _DATASET_STATE = {}
@@ -289,16 +289,37 @@ def gold_in_traces(results_dir: Optional[Path]) -> List[Path]:
 # with the same question, and its answer said so — the local guards saw nothing,
 # because nothing local was touched. No decoy can be planted on the open web, so
 # the ledger is the only surface there is.
-# The named mirrors are the ones A-MIRROR-PAGE-FULL-OF-GOLD... found in run
-# context; the last branch is that entry's shape rule, because a static list
-# of mirrors is always short: any URL carrying `gaia` beside a split word.
-_MIRROR_RE = re.compile(
-    r"huggingface\.co/(?:api/)?(?:datasets|spaces)/\S*gaia|harbor-datasets"
-    r"|cmriat/gaia|bstraehle/gaia|MinorJerry/WebVoyager|MCP-1st-Birthday"
-    r"|enlatics/Enlatics_benchmarking|lauspectrum/\S*gaia|Intelligent-Internet/\S*gaia"
-    r"|https?://\S*gaia\S*(?:jsonl|validation|metadata|benchmark)",
-    re.I,
-)
+# One list for what the run refuses and what the report looks for: the deny
+# shapes in `_harness/answer_key_policy.py`. The copy that lived here missed
+# Who_and_When, Final_Assignment spaces, harbor-index and HAL on 2026-09-23.
+_MIRROR_RE = answer_key_policy.DENY_URL_RE
+# An attachment is `<task_id>.<ext>`, and a PowerShell error cuts it to
+# `gaia-files/<task_id> ...` (t0-low task-025, 2026-09-23): neither is a lookup.
+_ATTACHMENT_BEFORE = re.compile(r"gaia-files[\\/]+$")
+
+
+def _id_outside_attachments(text: str, task_id: str) -> bool:
+    for m in re.finditer(re.escape(task_id), text):
+        if re.match(r"\.[A-Za-z0-9]{1,5}\b", text[m.end():m.end() + 7]):
+            continue
+        if _ATTACHMENT_BEFORE.search(text[max(0, m.start() - 16):m.start()]):
+            continue
+        return True
+    return False
+
+
+def _queries(text: str) -> List[str]:
+    """Every `args.query` in a ledger's rows, parsed; an unparsable row is skipped."""
+    out = []
+    for line in text.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        args = row.get("args") if isinstance(row, dict) else None
+        if isinstance(args, dict) and isinstance(args.get("query"), str):
+            out.append(args["query"])
+    return out
 
 
 def web_lookups(logs_dir: Optional[Path], task_ids: List[str],
@@ -323,13 +344,189 @@ def web_lookups(logs_dir: Optional[Path], task_ids: List[str],
         rel = f.relative_to(logs_dir).as_posix()
         where = {"file": rel, "task": (task_of or {}).get(rel.split("/", 1)[0])}
         mirror = _MIRROR_RE.search(text)
-        searched = next((t for t in ids
-                         if re.search(re.escape(t) + r"(?!\.[A-Za-z0-9]{1,5}\b)", text)), None)
+        searched = next((t for t in ids if _id_outside_attachments(text, t)), None)
+        named = next((q for q in _queries(text) if answer_key_policy.names_gaia(q)), None)
         if mirror:
             hits.append({**where, "marker": mirror.group(0), "kind": "mirror"})
         if searched:
             hits.append({**where, "marker": searched, "kind": "task_id_in_trace"})
+        if named:
+            hits.append({**where, "marker": named[:200], "kind": "gaia_query"})
     return hits
+
+
+# --- exposure: which correct answers may have come from an answer key ------
+#
+# Per task, from its own ledger. A task is exposed when a call's arguments name
+# an answer-key URL (fetched or refused), a search names GAIA, a search listed an
+# answer-key page, a tool result carried a dataset row's marker, or the answer
+# says where it came from. `reached` separates what got to the agent from what
+# the policy refused: a correct answer that was reached is a copy, and the run
+# exits 3 for it; every exposed task, reached or not, is out of accuracy_clean.
+
+EXPOSURE_DEFINITION = (
+    "exposed = a call's arguments named an answer-key URL (fetched or refused), a "
+    "search query named GAIA, a search listed an answer-key page, a tool result "
+    "carried groundtruth / \"Final answer\" / Expected answer, or the answer names "
+    "its source. accuracy_clean counts correct answers of tasks that are not "
+    "exposed. reached = at least one reason the policy did not refuse; a correct "
+    "reached task makes the run exit 3."
+)
+
+
+_SEARCH_ITEMS = re.compile(r"\n\n(?=\s*\d+\.\s)")
+
+
+def _strings(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
+def _url_around(text: str, m: "re.Match") -> str:
+    for u in re.finditer(r"https?://\S+", text):
+        if u.start() <= m.start() < u.end():
+            return u.group(0)[:200]
+    return m.group(0)[:200]
+
+
+def _ledger_calls(path: Path) -> List[Dict[str, Any]]:
+    """One entry per tool call: its tool, arguments and outcome text."""
+    calls: Dict[str, Dict[str, Any]] = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    for i, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        key = row.get("tool_call_id") or f"row-{i}"
+        call = calls.setdefault(key, {"tool": row.get("tool"), "args": {}, "outcome": None})
+        if isinstance(row.get("args"), dict) and row["args"]:
+            call["args"] = row["args"]
+        if row.get("phase") == "outcome" or "result_preview" in row:
+            call["outcome"] = row.get("result_preview")
+    return list(calls.values())
+
+
+def _answer_in(text: str, answer: Optional[str]) -> bool:
+    answer = (answer or "").strip()
+    return bool(answer) and re.search(
+        r"(?<![A-Za-z0-9])" + re.escape(answer) + r"(?![A-Za-z0-9])", text, re.I) is not None
+
+
+def _call_reasons(call: Dict[str, Any], answer: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Why this call exposed its task, if it did.
+
+    A search result that merely lists an answer-key page is counted only when
+    that item also shows this task's own final answer: HF Final_Assignment and
+    Who_and_When pages quote GAIA questions and turn up in honest searches
+    (t0-xhigh 019, 027; t0-low 046 on 2026-09-23), while the discussions/11
+    snippet in t0-low 004 carried the answer itself. The policy drops such
+    items before the agent sees them, so this only matters for an old ledger.
+    """
+    tool, args, outcome = call["tool"], call["args"], call["outcome"]
+    blocked = isinstance(outcome, str) and outcome.startswith(answer_key_policy.BLOCK_PREFIX)
+    reasons = []
+
+    def add(kind, marker, was_blocked=blocked):
+        reasons.append({"kind": kind, "tool": tool, "marker": marker, "blocked": was_blocked})
+
+    for s in _strings(args):
+        m = _MIRROR_RE.search(s) or answer_key_policy.GAIA_IN_URL_QUERY_RE.search(s)
+        if m:
+            add("mirror_url", _url_around(s, m))
+    if answer_key_policy.names_gaia(args.get("query")):
+        add("gaia_query", args["query"][:200])
+    if blocked:
+        if not reasons:
+            add("blocked_by_policy", outcome[:200])
+        return reasons
+    if isinstance(outcome, str):
+        if tool in answer_key_policy.SEARCH_TOOLS:
+            for item in _SEARCH_ITEMS.split(outcome)[1:]:
+                m = _MIRROR_RE.search(item)
+                if m and _answer_in(item, answer):
+                    add("mirror_in_results", _url_around(item, m))
+        m = answer_key_policy.GOLD_MARKER_RE.search(outcome)
+        if m:
+            add("gold_marker", m.group(0))
+    return reasons
+
+
+def answer_key_exposure(logs_dir: Optional[Path], results: List[Dict[str, Any]],
+                        answers: List[Dict[str, Any]],
+                        task_of: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Which tasks met an answer key, why, and the score without them."""
+    per_task: Dict[str, List[Dict[str, Any]]] = {}
+    dir_of: Dict[str, str] = {}
+    final_of = {r.get("task_id"): r.get("final_answer") for r in results}
+    if logs_dir and logs_dir.is_dir():
+        for f in sorted(logs_dir.rglob("tools.jsonl")):
+            task_dir = f.relative_to(logs_dir).as_posix().split("/", 1)[0]
+            tid = (task_of or {}).get(task_dir, task_dir)
+            dir_of[tid] = task_dir
+            for call in _ledger_calls(f):
+                per_task.setdefault(tid, []).extend(_call_reasons(call, final_of.get(tid)))
+    for hit in answers_admitting_a_lookup(answers):
+        per_task.setdefault(hit["task_id"], []).append(
+            {"kind": "admission", "tool": None, "marker": hit["phrase"], "blocked": False})
+
+    correct = {r.get("task_id"): bool(r.get("correct")) for r in results}
+    tasks = []
+    for tid in [r.get("task_id") for r in results] + sorted(set(per_task) - set(correct)):
+        reasons, seen = [], set()
+        for r in per_task.get(tid, []):
+            key = (r["kind"], r["tool"], r["marker"], r["blocked"])
+            if key not in seen:
+                seen.add(key)
+                reasons.append(r)
+        if reasons:
+            tasks.append({"task_id": tid, "task_dir": dir_of.get(tid),
+                          "correct": correct.get(tid, False),
+                          "reached": any(not r["blocked"] for r in reasons),
+                          "reasons": reasons[:25], "reason_count": len(reasons)})
+    exposed = {t["task_id"] for t in tasks}
+    clean = sum(1 for r in results if r.get("correct") and r.get("task_id") not in exposed)
+    return {
+        "correct_clean": clean,
+        "accuracy_clean": round(clean / len(results), 3) if results else 0.0,
+        "answer_key_exposure": {
+            "definition": EXPOSURE_DEFINITION,
+            "exposed_tasks": len(tasks),
+            "exposed_correct": [t["task_id"] for t in tasks if t["correct"]],
+            "copied": [t["task_id"] for t in tasks if t["correct"] and t["reached"]],
+            "tasks": tasks,
+        },
+    }
+
+
+def exposure_from_report(report: Dict[str, Any], logs_dir: Path) -> Dict[str, Any]:
+    """The same scan over a stored report and its ledger, for a past run.
+
+    A stored answer is its head and tail, not the whole text, so an admission
+    in the middle of a long answer is not seen here.
+    """
+    results = report.get("results") or []
+    task_of = {f"task-{i:03d}": r.get("task_id") for i, r in enumerate(results, 1)}
+    answers = [{"task_id": r.get("task_id"), "correct": r.get("correct"),
+                "answer": (r.get("answer") or "") + "\n" + (r.get("answer_tail") or "")}
+               for r in results]
+    return answer_key_exposure(logs_dir, results, answers, task_of=task_of)
+
+
+def contaminated(report: Dict[str, Any]) -> bool:
+    """The canary was read, or a correct answer reached an answer key."""
+    return bool((report.get("canary") or {}).get("triggered")
+                or (report.get("answer_key_exposure") or {}).get("copied"))
 
 
 BENCH_PROFILE = "gaia_benchmark"
@@ -440,8 +637,13 @@ def canary_was_read(token: str, results: List[Dict[str, Any]], logs_dir: Path) -
 # («the official answer file confirms»), 08-28 («I located the official answer in
 # the local GAIA dataset»), 08-29 («I found the ground truth answer from a dataset
 # with this exact question»). The canary saw none of them: the file read was real.
+# Widened 2026-09-23 by the spellings of that night's four copied answers:
+# «official final answer», «official GAIA answer», «golden answer», «matches the
+# dataset ground truth», «Expected answer» (case kept: «the expected answer
+# format» is ordinary prose).
 _ADMISSION_RE = re.compile(
-    r"reference answer|official answer|answer key|ground.truth answer|true_answer"
+    r"reference answer|official (?:final |GAIA )?answer|answer key|ground.?truth answer"
+    r"|true_answer|golden answer|dataset(?:'s)? ground.?truth|groundtruth|(?-i:Expected answer)"
     r"|authoritative source|local GAIA dataset|metadata\.level1",
     re.I,
 )
@@ -961,6 +1163,9 @@ async def main_async(args) -> int:
         full_answers: List[Dict[str, Any]] = []
         task_of: Dict[str, str] = {}
         agent_config = _agent_config()
+        # Answer lists and mirrors are refused in this run's web tools only.
+        answer_key = answer_key_policy.AnswerKeyPolicy()
+        wrapped_per_task: Dict[str, List[str]] = {}
         started = time.time()
         for i, row in enumerate(rows, 1):
             # A root per task, so nothing an agent writes reaches the next one:
@@ -975,6 +1180,10 @@ async def main_async(args) -> int:
                 llm_manager=llm, config=_agent_config(), agent_root=task_root,
                 firewall=firewall, firewall_profile=BENCH_PROFILE,
             )
+            wrapped_per_task[task_root.name] = answer_key.install(getattr(agent, "tools", None))
+            if i == 1:
+                print(f"answer-key policy {answer_key_policy.POLICY_VERSION} on "
+                      f"{len(wrapped_per_task[task_root.name])} tool(s)", flush=True)
             outcome = await run_one(agent, row, attachment, timeout_seconds=task_timeout)
             full = outcome.pop(FULL_ANSWER_KEY, None)
             full_answers.append({"task_id": outcome.get("task_id"),
@@ -1005,6 +1214,10 @@ async def main_async(args) -> int:
             # not, and the total over those that did.
             return {"total": sum(present), "reported_by": len(present),
                     "not_reported_by": len(vals) - len(present)}
+        exposure = answer_key_exposure(logs_root, results, full_answers, task_of=task_of)
+        policy_summary = answer_key.summary()
+        policy_summary["tools_wrapped_per_task"] = sorted(
+            {len(v) for v in wrapped_per_task.values()})
         report = {
             "benchmark": "GAIA L1 validation",
             "alias": entry.get("alias"),
@@ -1018,6 +1231,10 @@ async def main_async(args) -> int:
             "tasks": len(results),
             "correct": correct,
             "accuracy": round(correct / len(results), 3) if results else 0.0,
+            # Correct and never near an answer key; the list and the reasons
+            # are under `answer_key_exposure`.
+            "correct_clean": exposure["correct_clean"],
+            "accuracy_clean": exposure["accuracy_clean"],
             "seconds": round(time.time() - started, 1),
             "with_attachments": args.with_files,
             "caveat": (
@@ -1055,6 +1272,8 @@ async def main_async(args) -> int:
                                      for p in gold_in_traces(logs_root)],
             "web_lookups": web_lookups(logs_root, [r.get("task_id") for r in results],
                                        task_of=task_of),
+            "answer_key_exposure": exposure["answer_key_exposure"],
+            "answer_key_policy": policy_summary,
             # The one bit whose whole job is «this number is dirty», computed at
             # :449 since the guard was written and dropped before the report ever
             # since — the `--allow-reachable-gold` help promises the run records
@@ -1093,6 +1312,7 @@ async def main_async(args) -> int:
                     "hf_token_source": _DATASET_STATE.get("token_source"),
                     "subprocess_env_fences": sorted(env_before),
                     "tier1_auto_approved": bool(args.auto_approve),
+                    "answer_key_policy": answer_key_policy.describe(),
                     # Which tools were on decides what the number measures at
                     # least as much as the model does: the runs before this one
                     # had no firewall, so they had all of them.
@@ -1122,6 +1342,14 @@ async def main_async(args) -> int:
             print(f"CANARY TRIGGERED: the decoy answer key was read — "
                   f"answers={report['canary']['seen_in_answers']} "
                   f"trace={report['canary']['seen_in_trace']}", flush=True)
+        ak = report["answer_key_exposure"]
+        print(f"clean {report['correct_clean']}/{len(results)} = "
+              f"{report['accuracy_clean']:.1%}: {ak['exposed_tasks']} task(s) met an answer "
+              f"key, {len(ak['exposed_correct'])} of them correct; policy refusals "
+              f"{policy_summary['refusals']}", flush=True)
+        if ak["copied"]:
+            print(f"ANSWER-KEY EXPOSURE: {len(ak['copied'])} correct answer(s) reached an "
+                  f"answer-key source — {', '.join(t[:8] for t in ak['copied'])}", flush=True)
 
         if args.json:
             out = Path(args.json)
@@ -1143,7 +1371,9 @@ async def main_async(args) -> int:
         # number above is not a score. It used to leave by the same door as a
         # clean run, which made the one signal that says «do not cite this»
         # invisible to the campaign, to CI and to anything reading the status.
-        return CONTAMINATED_EXIT if report["canary"]["triggered"] else 0
+        # A correct answer that reached an answer key on the web is the same
+        # thing without a planted file (A-GAIA-AGENT-GOES-LOOKING…, 2026-09-23).
+        return CONTAMINATED_EXIT if contaminated(report) else 0
     finally:
         if approver is not None:
             approver.stop()

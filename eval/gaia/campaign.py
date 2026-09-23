@@ -46,7 +46,8 @@ A run needs about 170 minutes, so 7.5 hours starts two of the four and says so
 for the rest. The queue's order is what makes a short night still worth having.
 
 Exit codes: 0 every started run scored clean; 1 a run failed or timed out;
-2 the preflight refused; 3 a run was contaminated; 4 the card never came free
+2 the preflight refused; 3 a run was contaminated (the canary was read, or a
+correct answer reached a published answer key); 4 the card never came free
 or nothing could start before the deadline.
 """
 
@@ -79,8 +80,9 @@ NO_CARD_EXIT = 4
 # the llama-server it started), so an unattended night cannot hang on one run.
 DEFAULT_RUN_TIMEOUT_MIN = 240
 TIMED_OUT = -9
-# The runner's own exit for «the agent read a planted answer key». Named here
-# rather than folded into the generic failure branch: the run did not fail, it
+# The runner's own exit for «the agent read a planted answer key», and since
+# 2026-09-23 for «a correct answer reached a published one». Named here rather
+# than folded into the generic failure branch: the run did not fail, it
 # produced a number that must not be counted.
 CONTAMINATED_EXIT = 3
 
@@ -273,20 +275,18 @@ def run_one(cfg: dict, deadline: datetime, stamp: str, settings: dict | None = N
         record["timed_out_after_minutes"] = timeout_min
     if out_json.exists():
         try:
-            report = json.loads(out_json.read_text(encoding="utf-8"))
-            record["accuracy"] = report.get("accuracy")
-            record["correct"] = report.get("correct")
-            record["tasks"] = report.get("tasks")
+            record.update(report_fields(json.loads(out_json.read_text(encoding="utf-8"))))
         except Exception as exc:
             record["read_error"] = str(exc)
     if returncode == CONTAMINATED_EXIT:
         record["contaminated"] = True
-        print(f"  -> CONTAMINATED: the canary was read, so "
-              f"{record.get('correct')}/{record.get('tasks')} is not a score "
-              f"({record['minutes']} min) — {out_log}", flush=True)
+        print(f"  -> CONTAMINATED: {contamination_reason(record)}, so "
+              f"{record.get('correct')}/{record.get('tasks')} is not a score; "
+              f"{_clean(record)} ({record['minutes']} min) — {out_log}", flush=True)
     elif returncode == 0:
         print(f"  -> {record.get('correct')}/{record.get('tasks')} "
-              f"= {record.get('accuracy')} in {record['minutes']} min", flush=True)
+              f"= {record.get('accuracy')}, {_clean(record)} in {record['minutes']} min",
+              flush=True)
     else:
         why = (f"timed out after {timeout_min:.0f} min, tree killed" if timed_out
                else f"exit {returncode}")
@@ -295,6 +295,38 @@ def run_one(cfg: dict, deadline: datetime, stamp: str, settings: dict | None = N
         for line in _log_tail(out_log):
             print(f"     {line}", flush=True)
     return record
+
+
+def report_fields(report: dict) -> dict:
+    """What the night's summary carries from one run's report."""
+    exposure = report.get("answer_key_exposure") or {}
+    return {
+        "accuracy": report.get("accuracy"),
+        "correct": report.get("correct"),
+        "tasks": report.get("tasks"),
+        "correct_clean": report.get("correct_clean"),
+        "accuracy_clean": report.get("accuracy_clean"),
+        "canary_triggered": bool((report.get("canary") or {}).get("triggered")),
+        "copied": [t[:8] for t in exposure.get("copied") or []],
+        "exposed_tasks": exposure.get("exposed_tasks"),
+        "policy_refusals": (report.get("answer_key_policy") or {}).get("refusals"),
+    }
+
+
+def contamination_reason(record: dict) -> str:
+    reasons = []
+    if record.get("canary_triggered"):
+        reasons.append("the canary was read")
+    if record.get("copied"):
+        reasons.append(f"{len(record['copied'])} correct answer(s) reached an answer key "
+                       f"({', '.join(record['copied'])})")
+    return "; ".join(reasons) or "the run exited 3 (report unread)"
+
+
+def _clean(record: dict) -> str:
+    if record.get("correct_clean") is None:
+        return "clean score not in the report"
+    return f"clean {record['correct_clean']}/{record.get('tasks')} = {record.get('accuracy_clean')}"
 
 
 def _log_tail(path: Path, lines: int = 3) -> list:
@@ -400,9 +432,10 @@ def main() -> int:
     print("\n=== campaign ===", flush=True)
     for r in done:
         if r["exit_code"] == CONTAMINATED_EXIT:
-            outcome = f"CONTAMINATED ({r.get('correct')}/{r.get('tasks')}, not a score)"
+            outcome = (f"CONTAMINATED ({r.get('correct')}/{r.get('tasks')} reported, not a "
+                       f"score; {_clean(r)}; {contamination_reason(r)})")
         elif r["exit_code"] == 0:
-            outcome = f"{r.get('correct')}/{r.get('tasks')} = {r.get('accuracy')}"
+            outcome = f"{r.get('correct')}/{r.get('tasks')} = {r.get('accuracy')}, {_clean(r)}"
         elif r["exit_code"] == TIMED_OUT:
             outcome = f"FAILED (timed out, killed after {r.get('timed_out_after_minutes')} min)"
         else:

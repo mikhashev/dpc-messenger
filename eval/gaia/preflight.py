@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from typing import List, Tuple
@@ -198,6 +199,23 @@ def run_checks(alias: str, efforts: List[str], results_dir: Path,
             add("WARN", "tools", f"allowed but not registered: {', '.join(missing)}")
     except Exception as exc:
         add("FAIL", "tools", f"{type(exc).__name__}: {exc}")
+
+    # 11. the answer-key policy wraps every web tool the agent will hold
+    try:
+        from dpc_client_core.dpc_agent.tools.registry import ToolRegistry
+        from _harness import answer_key_policy
+        with tempfile.TemporaryDirectory(prefix="dpc-policy-probe-") as probe_root:
+            registry = ToolRegistry(agent_root=Path(probe_root))
+            wrapped = set(answer_key_policy.AnswerKeyPolicy().install(registry))
+        web = {n for n in benchmark_tools.BENCHMARK_TOOLS
+               if n in answer_key_policy.WRAPPED_TOOLS and n in registry._entries}
+        info = answer_key_policy.describe()
+        add("FAIL" if web - wrapped else "OK", "answer keys",
+            (f"not wrapped: {sorted(web - wrapped)}; " if web - wrapped else "")
+            + f"policy {info['version']} sha256 {info['sha256'][:16]}… on {len(wrapped)} "
+              f"tool(s); run_shell is refused on its command text only")
+    except Exception as exc:
+        add("FAIL", "answer keys", f"{type(exc).__name__}: {exc}")
     return checks
 
 
