@@ -125,6 +125,7 @@ from .message_handlers.group_handler import (  # v0.19.0+ Group chat
     GroupHistoryStatusHandler,  # v0.20.0 hash-based sync
     GroupDeletedStatusHandler,  # v0.20.0 offline deletion notification
     GroupAccessDeniedHandler,  # the refusal a removed node learns from
+    send_history_status as send_group_history_status,  # the one door into a group's history
 )
 from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
     SkillSearchHandler, SkillsCatalogHandler, SkillRequestHandler,
@@ -1583,11 +1584,37 @@ class CoreService:
 
     # --- Callback Methods (called by P2PManager) ---
 
+    async def _deliver_removals_owed(self) -> None:
+        """Send each connected node the roster it was removed from while offline."""
+        for peer_id in list(self.p2p_manager.peers):
+            for group_id in self.group_manager.removals_owed_to(peer_id):
+                group = self.group_manager.get_group(group_id)
+                if group is None or peer_id in group.members:
+                    # Deleted since, or added back: nothing left to tell.
+                    self.group_manager.forget_removal(group_id, peer_id)
+                    continue
+                try:
+                    await self.p2p_manager.send_message_to_peer(peer_id, {
+                        "command": "GROUP_SYNC",
+                        "payload": group.to_dict(),
+                    })
+                except Exception as e:
+                    logger.debug("Could not tell %s it was removed from %s: %s", peer_id[:20], group_id, e)
+                    continue
+                self.group_manager.forget_removal(group_id, peer_id)
+                logger.info(
+                    "Told %s on connect it was removed from group %s (v%d)",
+                    peer_id[:20], group_id, group.version,
+                )
+
     async def on_peer_list_change(self):
         """Callback function that is triggered by P2PManager when peer list changes."""
         logger.debug("Peer list changed, broadcasting status update to UI")
 
         self._settle_reconnects_for_connected_peers()
+
+        # First, the removals a returning node missed while offline.
+        await self._deliver_removals_owed()
 
         # Cache peer information for offline mode
         for peer_id, peer_conn in self.p2p_manager.peers.items():
@@ -6448,27 +6475,13 @@ class CoreService:
                     "payload": group.to_dict()
                 })
 
-                # Send conversation history to the new member
-                conv_dir = self.group_manager._get_conversation_dir(group_id)
-                history_path = conv_dir / "history.json" if conv_dir else None
-                if history_path and history_path.exists():
-                    try:
-                        import json as _json
-                        with open(history_path, encoding="utf-8") as f:
-                            data = _json.load(f)
-                        messages = data.get("messages", [])
-                        if messages:
-                            await self.p2p_manager.send_message_to_peer(node_id, {
-                                "command": "CHAT_HISTORY_RESPONSE",
-                                "payload": {
-                                    "conversation_id": group_id,
-                                    "messages": messages,
-                                }
-                            })
-                            logger.info("Sent %d history messages to new member %s in group %s",
-                                        len(messages), node_id[:16], group_id)
-                    except Exception as e:
-                        logger.warning("Could not send history to new member: %s", e)
+                # History goes through the digest exchange, not a push: the
+                # push had no request id, so the receiver discarded it, and it
+                # carried raw records (tool_calls) that export_history filters.
+                try:
+                    await send_group_history_status(self, node_id, group_id, logger)
+                except Exception as e:
+                    logger.warning("Could not open history exchange with new member: %s", e)
 
             # Notify local UI to refresh group settings
             await self.local_api.broadcast_event("group_updated", {
@@ -6519,8 +6532,10 @@ class CoreService:
                 except Exception as e:
                     logger.warning("Could not tell %s it was removed from %s: %s", node_id[:20], group_id, e)
             else:
+                # Owed on its next connect, so that connect is not spent on refusals.
+                self.group_manager.note_removed_while_offline(group_id, node_id)
                 logger.info(
-                    "Removed %s from group %s while it was offline; it will find out by refusal",
+                    "Removed %s from group %s while it was offline; the roster goes to it on its next connect",
                     node_id[:20], group_id,
                 )
 

@@ -99,6 +99,9 @@ class GroupManager:
         self._groups: Dict[str, GroupMetadata] = {}
         self._deleted_groups: Dict[str, Dict[str, str]] = {}  # group_id -> {deleted_at, deleted_by}
         self._deleted_registry_path = self.groups_dir / "deleted_registry.json"
+        # node_id -> group ids it was removed from while offline, owed a GROUP_SYNC
+        self._removed_while_offline: Dict[str, List[str]] = {}
+        self._removal_registry_path = self.groups_dir / "removal_registry.json"
 
     @staticmethod
     def _slugify(name: str) -> str:
@@ -168,7 +171,7 @@ class GroupManager:
         if self.groups_dir.exists():
             for legacy_file in self.groups_dir.glob("*.json"):
                 # Skip the deleted registry file
-                if legacy_file.name == "deleted_registry.json":
+                if legacy_file.name in ("deleted_registry.json", "removal_registry.json"):
                     continue
 
                 try:
@@ -233,6 +236,7 @@ class GroupManager:
 
         # Load deleted groups registry (v0.20.0) - kept in groups dir
         self._load_deleted_registry()
+        self._load_removal_registry()
 
     def _save_group(self, group_id: str):
         """Save a single group metadata file to disk.
@@ -349,6 +353,55 @@ class GroupManager:
         """
         return list(self._deleted_groups.keys())
 
+    # --- Removals a node has not heard of yet ---
+    #
+    # A node removed while offline learns it only from the next GROUP_SYNC we
+    # send it. Kept on disk, so a restart in between does not turn the news
+    # back into a refusal (REMOVING-AN-OFFLINE-MEMBER-QUEUES-NOTHING...).
+
+    def _load_removal_registry(self):
+        if not self._removal_registry_path.exists():
+            return
+        try:
+            with open(self._removal_registry_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            owed = data.get("removed_while_offline", {})
+            self._removed_while_offline = {
+                str(node): [str(g) for g in groups]
+                for node, groups in owed.items() if isinstance(groups, list)
+            }
+        except Exception as e:
+            logger.error("Error loading removal registry: %s", e)
+
+    def _save_removal_registry(self):
+        try:
+            self.groups_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._removal_registry_path.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "removed_while_offline": self._removed_while_offline}, f, indent=2)
+            tmp.replace(self._removal_registry_path)
+        except Exception as e:
+            logger.error("Error saving removal registry: %s", e)
+
+    def note_removed_while_offline(self, group_id: str, node_id: str) -> None:
+        groups = self._removed_while_offline.setdefault(node_id, [])
+        if group_id not in groups:
+            groups.append(group_id)
+            self._save_removal_registry()
+
+    def removals_owed_to(self, node_id: str) -> List[str]:
+        """Groups `node_id` was removed from while offline and has not been told."""
+        return list(self._removed_while_offline.get(node_id, []))
+
+    def forget_removal(self, group_id: str, node_id: str) -> None:
+        groups = self._removed_while_offline.get(node_id)
+        if not groups or group_id not in groups:
+            return
+        groups.remove(group_id)
+        if not groups:
+            del self._removed_while_offline[node_id]
+        self._save_removal_registry()
+
     def create_group(self, name: str, topic: str, member_node_ids: List[str]) -> GroupMetadata:
         """
         Create a new group chat.
@@ -463,6 +516,8 @@ class GroupManager:
         group.members.append(node_id)
         group.version += 1
         self._save_group(group_id)
+        # Back in the roster: the invitation itself carries the news now.
+        self.forget_removal(group_id, node_id)
         logger.info("Added %s to group %s (v%d)", node_id, group_id, group.version)
         return group
 

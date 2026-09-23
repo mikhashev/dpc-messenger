@@ -24,6 +24,32 @@ from ..conversation_monitor import (
 from .group_access import may_share_group, refuse_group_access
 
 
+async def send_history_status(service, peer: str, group_id: str, log=None) -> bool:
+    """Open the digest exchange for one group with one peer.
+
+    The only door a group's history uses: the peer answers with its own status,
+    each side asks for what differs, and what arrives is merged. Sent only
+    while both nodes are in our roster, so a status never tells an outsider
+    our count or digest.
+    """
+    group = service.group_manager.get_group(group_id) if group_id else None
+    if group is None or service.p2p_manager.node_id not in group.members:
+        return False
+    if not may_share_group(service.group_manager, group_id, peer):
+        return False
+    payload = history_status_for(group_id, service.conversation_monitors.get(group_id))
+    await service.p2p_manager.send_message_to_peer(peer, {
+        "command": "GROUP_HISTORY_STATUS",
+        "payload": payload,
+    })
+    if log is not None:
+        log.info(
+            "Sent GROUP_HISTORY_STATUS for %s to %s (count=%d)",
+            group_id, peer[:20], payload.get("message_count", 0),
+        )
+    return True
+
+
 class GroupCreateHandler(MessageHandler):
     """Handles GROUP_CREATE messages (group invite from creator)."""
 
@@ -65,18 +91,11 @@ class GroupCreateHandler(MessageHandler):
                 "members": group.members,
             })
 
-            # Request conversation history from the sender (group creator/admin)
-            import uuid
-            request_id = str(uuid.uuid4())[:8]
-            self.service.history_requests.note(sender_node_id, group.group_id, request_id)
-            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-                "command": "REQUEST_CHAT_HISTORY",
-                "payload": {
-                    "conversation_id": group.group_id,
-                    "request_id": request_id,
-                }
-            })
-            self.logger.info("Requested history for group %s from %s", group.group_id, sender_node_id[:16])
+        # Also when apply_sync kept our copy: a re-add sends GROUP_SYNC first,
+        # so the create that follows applies nothing, and a node that kept its
+        # history would otherwise never compare it. Merged, never replaced.
+        if group_id:
+            await send_history_status(self.service, sender_node_id, group_id, self.logger)
 
         return None
 
@@ -667,18 +686,10 @@ class GroupSyncHandler(MessageHandler):
             # whole file here would hand the reset straight back.
             if needs_history and live_history_boundary_of(group_id):
                 needs_history = False
-            if needs_history:
-                import uuid
-                request_id = str(uuid.uuid4())[:8]
-                self.service.history_requests.note(sender_node_id, group_id, request_id)
-                await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-                    "command": "REQUEST_CHAT_HISTORY",
-                    "payload": {
-                        "conversation_id": group_id,
-                        "request_id": request_id,
-                    }
-                })
-                self.logger.info("Requested history for group %s from %s (local history empty)", group_id, sender_node_id[:16])
+            if needs_history and await send_history_status(
+                self.service, sender_node_id, group_id
+            ):
+                self.logger.info("Opened history exchange for group %s with %s (local history empty)", group_id, sender_node_id[:16])
 
         return None
 
@@ -995,8 +1006,27 @@ class GroupHistoryStatusHandler(MessageHandler):
 
     async def _request_history(self, peer: str, group_id: str, window: Optional[str],
                                authors: Optional[list] = None) -> None:
+        # Two statuses cross when both sides open the exchange (a re-add), and
+        # each would ask for the same records twice. A request still in flight
+        # that covers these authors over the same window answers this one.
+        wanted = None if authors is None else frozenset(authors)
+        in_flight = getattr(self, "_in_flight", None)
+        if in_flight is None:
+            in_flight = self._in_flight = {}
+        previous = in_flight.get((peer, group_id))
+        if previous is not None:
+            prev_id, prev_window, prev_authors = previous
+            if (self.service.history_requests.is_outstanding(peer, group_id, prev_id)
+                    and same_moment(prev_window, window)
+                    and (prev_authors is None or (wanted is not None and wanted <= prev_authors))):
+                self.logger.debug(
+                    "Group %s: a request to %s covering these authors is in flight",
+                    group_id, peer[:20],
+                )
+                return
         request_id = uuid.uuid4().hex[:8]
         self.service.history_requests.note(peer, group_id, request_id)
+        in_flight[(peer, group_id)] = (request_id, window, wanted)
         request: Dict[str, Any] = {"group_id": group_id, "request_id": request_id}
         if authors is not None:
             request["authors"] = authors

@@ -140,6 +140,7 @@ def _service(manager):
     service.group_manager = types.SimpleNamespace(
         get_groups_for_peer=lambda peer_id: [],
         get_deleted_group_ids=lambda: [],
+        removals_owed_to=lambda peer_id: [],
     )
     service._get_or_create_conversation_monitor = lambda peer_id: None
 

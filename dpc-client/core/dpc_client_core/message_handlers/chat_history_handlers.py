@@ -30,6 +30,10 @@ class HistoryRequestRegistry:
         self._outstanding.discard(key)
         return True
 
+    def is_outstanding(self, peer_node_id: str, conversation_id: str, request_id: str) -> bool:
+        """Whether this question is still waiting for its answer. Consumes nothing."""
+        return (peer_node_id, conversation_id, request_id) in self._outstanding
+
     def claim_any(self, peer_node_id: str, conversation_id: str) -> bool:
         """Consume any outstanding question to this peer about this conversation.
 
@@ -189,8 +193,13 @@ class ChatHistoryResponseHandler(MessageHandler):
             self.logger.warning(f"No conversation monitor found for {monitor_key} - cannot import history")
             return None
 
-        # Import history into conversation monitor
-        conversation_monitor.import_history(messages)
+        # A group history is shared by several authors, so an answer adds to
+        # ours; replacing it would erase whatever the answering node lacks.
+        if monitor_key.startswith("group-") and hasattr(conversation_monitor, "merge_history"):
+            added = conversation_monitor.merge_history(messages)
+            self.logger.info(f"Merged {added} new messages into {monitor_key} from {len(messages)} received")
+        else:
+            conversation_monitor.import_history(messages)
 
         # Broadcast to UI for display
         await self.service.local_api.broadcast_event("history_restored", {

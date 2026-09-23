@@ -55,7 +55,6 @@ holds nothing but `deleted_registry.json`.
 | `GROUP_DELETED_STATUS` | Exchange deleted group IDs on connect (notify of deletions that happened while offline) |
 | `GROUP_SYNC` | Metadata reconciliation on connect — carries the full group dict (incl. `agents`/`agent_names`); version + content-hash tie-break |
 | `GROUP_HISTORY_REQUEST` / `GROUP_HISTORY_RESPONSE` | Chat-history reconciliation (hash-based, bidirectional); the request may narrow to `authors` or to individual `content_hashes` |
-| `CHAT_HISTORY_RESPONSE` | Full-history push to a newly added member on join |
 | `cc_group_mention` *(local event)* | Broadcasts an `@CC` mention to the Claude Code CLI bridge |
 
 Files, voice, and screenshots use the existing `FILE_OFFER` with an optional `group_id` field; each member runs an independent transfer.
@@ -141,7 +140,8 @@ On connect, nodes reconcile group history so all members converge.
 - **Create** — name + topic + peer checklist via NewGroupDialog.
 - **Leave** — member leaves; remaining members notified.
 - **Delete** — creator-only; broadcasts `GROUP_DELETE`; all members clean up, including the on-disk conversation directory (GROUP-DELETE-FOLDER-REMNANT fix). Peers that were offline learn of the deletion via `GROUP_DELETED_STATUS` on next connect.
-- **Sync** — `GROUP_SYNC` on connect (version + content-hash tie-break); history reconciliation (hash-based); newly added members receive a full history push (`CHAT_HISTORY_RESPONSE`).
+- **Sync** — `GROUP_SYNC` on connect (version + content-hash tie-break); history reconciliation (hash-based). Adding a member sends it `GROUP_CREATE` and then `GROUP_HISTORY_STATUS`, and the invited node answers `GROUP_CREATE` with its own status even when the version was already applied, so a re-added member that kept its history compares and merges instead of waiting for the next reconnect. No history is pushed.
+- **Remove while offline** — the removal is recorded in `~/.dpc/groups/removal_registry.json`, and the node's next connect starts with a `GROUP_SYNC` carrying the roster that leaves it out, before any other group traffic.
 
 ## Backend Files
 
