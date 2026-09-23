@@ -51,6 +51,14 @@ class _Ctx:
         return True
 
 
+@pytest.fixture(autouse=True)
+def _build_is_set_inside_the_sandbox(tmp_path, monkeypatch):
+    """`$BUILD` stands for a move the cwd tracker cannot evaluate. Unset, the
+    path check now refuses it on its own; set inside the sandbox, only the
+    tracker is left blind, which is what these cases are about."""
+    monkeypatch.setenv("BUILD", str(tmp_path / "build"))
+
+
 def _script(sandbox, name, body):
     p = Path(sandbox) / name
     p.write_text(body, encoding="utf-8")

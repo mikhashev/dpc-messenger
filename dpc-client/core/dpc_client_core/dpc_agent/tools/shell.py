@@ -1489,28 +1489,431 @@ def _is_windows_switch(segment: str, match: "re.Match", drive: str) -> bool:
     return token[1:].lower() not in at_root
 
 
-def _path_outside_sandbox(segments: list, ctx: "ToolContext", drive: str) -> str:
-    """The first path in this command that leaves the sandbox, or "".
+def _literal_path_outside(segment: str, ctx: "ToolContext", drive: str) -> str:
+    """The first literal absolute path in this segment that leaves the sandbox."""
+    for pat in PATH_PATTERNS:
+        for match in pat.finditer(segment):
+            extracted = match.group(1)
+            if _is_url_interior(segment, match):
+                continue
+            if _is_windows_switch(segment, match, drive):
+                continue
+            # `./x`, `../x`, `${VAR}/x`, `%VAR%/x`: branch 2 read the tail as
+            # absolute. Those are relative or expanded, and resolved below.
+            start = match.start(1)
+            if extracted.startswith("/") and start > 0 and segment[start - 1] in ".}%":
+                continue
+            try:
+                ctx.validate_extended_path(extracted)
+            except PermissionError:
+                return f"Command accesses path outside sandbox: {extracted}"
+    return ""
 
-    Per segment, because the path that leaves the sandbox is in one segment and
-    only that segment may be waived by the whitelist.
+
+def _path_outside_sandbox(
+    segments: list, ctx: "ToolContext", drive: str, base_dir: str = ""
+) -> str:
+    """Why this command's paths need a person, or "".
+
+    At most two `; `-joined parts: the first path that leaves the sandbox, and
+    the first one the gate cannot resolve without running the shell. Per
+    segment, because only the segment holding a finding may be whitelisted.
+    Variables, `~` and `..` are resolved against the child's environment and
+    the directory the command has moved to. Still lexical: a path built inside
+    a script walks past.
     """
     whitelist = _get_tier1_whitelist(ctx)
+    env = _child_environment()
+    windows = _on_windows()
+    walk = _Cwd(base_dir) if base_dir else None
+    outside, unresolvable = "", ""
     for segment in segments:
-        for pat in PATH_PATTERNS:
-            for match in pat.finditer(segment):
-                extracted = match.group(1)
-                if _is_url_interior(segment, match):
-                    continue
-                if _is_windows_switch(segment, match, drive):
-                    continue
-                try:
-                    ctx.validate_extended_path(extracted)
-                except PermissionError:
-                    if whitelist and _is_whitelisted(segment, whitelist):
-                        break
-                    return f"Command accesses path outside sandbox: {extracted}"
-    return ""
+        here = walk.here if walk else ""
+        view = _expand_for_path_check(segment, env, windows, here)
+        waived = bool(whitelist) and _is_whitelisted(segment, whitelist)
+        if not waived:
+            if not outside:
+                outside = _literal_path_outside(segment, ctx, drive)
+            found, blind = _expanded_path_outside(view, ctx, windows, here, drive)
+            outside = outside or found
+            unresolved = view.unresolved + ([blind] if blind else [])
+            if unresolved and not unresolvable:
+                unresolvable = (
+                    "Path cannot be resolved without running the shell: "
+                    f"{_one_line(unresolved[0], 80)}"
+                )
+        if walk is None:
+            continue
+        move = _cd_move(view.text)
+        if move is None or (windows and _is_bare_cd(view.text)):
+            # cmd's bare `cd` prints the directory; it moves nowhere.
+            continue
+        walk.apply(move)
+        if walk.here and not waived and not outside:
+            # Where a move lands: a bare POSIX `cd` goes home without naming it.
+            try:
+                ctx.validate_extended_path(walk.here)
+            except PermissionError:
+                outside = f"Command accesses path outside sandbox: {walk.here}"
+            except (OSError, ValueError):
+                pass
+    return "; ".join(part for part in (outside, unresolvable) if part)
+
+
+# --- Path spellings the shell expands before anything runs -------------------
+# A view for the check only: the command the shell receives is never rewritten.
+
+def _child_environment() -> dict:
+    """The environment `run_shell` gives the child, and so the one its shell expands."""
+    return {**os.environ, "PYTHONIOENCODING": "utf-8"}
+
+
+class _Word(NamedTuple):
+    text: str                # quotes, carets and escapes removed, variables expanded
+    anchors: tuple = ()      # offsets where an expanded absolute value starts
+
+
+class _Expanded(NamedTuple):
+    text: str                # the segment with every resolvable reference expanded
+    words: list
+    unresolved: list         # spellings only the running shell could resolve
+
+
+# Where `$` means a variable on a Windows fleet: only inside a shell that reads
+# it. cmd leaves `$HOME` as four literal characters.
+_POSIX_SHELL_NAMED = re.compile(r"(?<![\w.\\/-])(?:bash|sh|zsh|dash|ksh)(?:\.exe)?\b", re.I)
+_PWSH_NAMED = re.compile(r"(?<![\w.\\/-])(?:powershell|pwsh)(?:\.exe)?\b", re.I)
+_INVOKE_EXPRESSION = re.compile(r"(?<![\w-])(?:iex|invoke-expression)(?![\w-])", re.I)
+_ENV_REF_RE = re.compile(r"\$(?:\{env:(?P<braced>[^}]+)\}|env:(?P<bare>\w+))", re.I)
+# The closing brace may be gone: `_strip_grouping` trims it off a segment's end.
+_BRACED_RE = re.compile(r"\$\{(?P<name>[A-Za-z_]\w*)(?:\}|$)")
+_DOLLAR_RE = re.compile(r"\$(?P<name>[A-Za-z_]\w*)")
+_PERCENT_TILDE_RE = re.compile(r"%~[A-Za-z$:]*[0-9A-Za-z*]")
+_PERCENT_RE = re.compile(r"%(?P<name>[^%\s=:\"'<>|&^]+)(?P<mod>:[^%]*)?%")
+_DELAYED_RE = re.compile(r"!(?P<name>[^!\s=:\"'<>|&^]+)(?P<mod>:[^!]*)?!")
+_FOR_VAR_RE = re.compile(r"%%?[A-Za-z](?![\w%])")
+_TILDE_RE = re.compile(r"~(?P<user>[\w.-]*)(?=[/\\\s\"']|$)")
+_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_ROOTED_ODD_RE = re.compile(r"^/[._~]")         # `/.dpc`: branch 2 wants a letter
+_REDIRECT_PREFIX_RE = re.compile(r"^\d*[<>]+&?")
+_ASSIGNMENT_RE = re.compile(r"^-{0,2}[\w.-]+=")
+_ECHO_VERBS = frozenset({"echo", "echo.", "printf", "write-output", "write-host"})
+# Values the shell computes rather than inherits; none of them is a path.
+_CMD_DYNAMIC = frozenset({
+    "date", "time", "random", "errorlevel", "cmdextversion", "cmdcmdline",
+    "highestnumanodenumber",
+})
+_POSIX_DYNAMIC = frozenset({"RANDOM", "SECONDS", "LINENO", "UID", "EUID", "PPID", "BASHPID"})
+_PWSH_AUTOMATIC = frozenset({
+    "_", "null", "true", "false", "psitem", "args", "input", "this",
+    "lastexitcode", "matches", "error", "host", "pid",
+})
+
+
+def _env_lookup(name: str, env: dict, windows: bool) -> Optional[str]:
+    if name in env:
+        return env[name]
+    if windows:
+        low = name.lower()
+        for key, value in env.items():
+            if key.lower() == low:
+                return value
+    return None
+
+
+def _home_of(user: str, env: dict, windows: bool) -> Optional[str]:
+    """`~` or `~user`, from the child's environment rather than this process's."""
+    if windows:
+        home = _env_lookup("USERPROFILE", env, True) or _env_lookup("HOME", env, True)
+        if not home:
+            drive, rest = env.get("HOMEDRIVE"), env.get("HOMEPATH")
+            home = (drive + rest) if drive and rest else None
+        if not user or not home:
+            return home
+        return os.path.join(os.path.dirname(home.rstrip("\\/")), user)
+    if not user:
+        return env.get("HOME")
+    try:
+        import pwd
+        return pwd.getpwnam(user).pw_dir
+    except (ImportError, KeyError):
+        return None
+
+
+def _looks_absolute(path: str, windows: bool) -> bool:
+    return bool(_DRIVE_RE.match(path)) or path.startswith(("/", "\\"))
+
+
+def _is_path_list(value: str, windows: bool) -> bool:
+    """`%PATH%` is many directories and none of them is being opened."""
+    if windows:
+        return ";" in value
+    body = value[2:] if re.match(r"^[A-Za-z]:", value) else value
+    return ":" in body
+
+
+def _is_bare_cd(text: str) -> bool:
+    match = _CD_RE.match(text)
+    return bool(match) and not _strip_comment(match.group("target")).strip().strip("\"'")
+
+
+def _closing(text: str, start: int, opening: str = "(", closing: str = ")") -> int:
+    """The index after the bracket that closes the one at `start`."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == opening:
+            depth += 1
+        elif text[i] == closing:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def _expand_for_path_check(segment: str, env: dict, windows: bool, cwd: str) -> _Expanded:
+    """The segment's words as its shell would expand them, for the check only.
+
+    cmd expands `%VAR%` and drops `^`; sh expands `$VAR`, `${VAR}` and a
+    leading `~`, and honours single quotes and backslashes; `$env:VAR` is
+    expanded everywhere. What only the running shell knows — an unset
+    variable, a substitution, a `%~` modifier, a loop variable, iex — is
+    listed as unresolved. An unset `%VAR%` stays literal in cmd, so it counts
+    only in a word that carries a separator.
+    """
+    sh = (not windows) or bool(_POSIX_SHELL_NAMED.search(segment))
+    pwsh = bool(_PWSH_NAMED.search(segment))
+    delayed = windows and bool(re.search(r"/v:on\b", segment, re.I))
+    for_loop = windows and bool(re.match(r"for\b", segment, re.I))
+    out: list = []
+    words: list = []
+    unresolved: list = []
+    buf: list = []
+    anchors: list = []
+    soft: list = []
+    if _INVOKE_EXPRESSION.search(segment):
+        unresolved.append("Invoke-Expression")
+
+    def flush() -> None:
+        if buf:
+            text = "".join(buf)
+            if soft and re.search(r"[\\/]", text):
+                unresolved.extend(soft)
+            words.append(_Word(text, tuple(anchors)))
+        buf.clear()
+        anchors.clear()
+        soft.clear()
+
+    def emit(raw: str, value: Optional[str], hard: bool = True) -> None:
+        if value is None:
+            (unresolved if hard else soft).append(raw)
+            value = raw
+        elif _is_path_list(value, windows):
+            value = raw
+        elif _looks_absolute(value, windows):
+            anchors.append(sum(len(part) for part in buf))
+        buf.append(value)
+        out.append(value)
+
+    def resolve(name: str, flavor: str) -> Optional[str]:
+        if flavor == "cmd":
+            if name.lower() == "cd":
+                return cwd or None
+            if name.lower() in _CMD_DYNAMIC:
+                return "0"
+            return _env_lookup(name, env, True)
+        if name == "PWD" or (windows and name.lower() == "pwd"):
+            return cwd or None
+        if pwsh and name.lower() in _PWSH_AUTOMATIC:
+            return "0"
+        if name in _POSIX_DYNAMIC:
+            return "0"
+        value = _env_lookup(name, env, windows)
+        if value is None and name.lower() == "home":
+            value = _home_of("", env, windows)      # PowerShell's automatic $HOME
+        return value
+
+    quote = ""
+    i, n = 0, len(segment)
+    while i < n:
+        ch = segment[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            else:
+                buf.append(ch)
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            quote = "" if quote == '"' else '"'
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "'":
+            if not windows:
+                quote = "'"
+            out.append(ch)
+            i += 1
+            continue
+        if not quote and ch in " \t":
+            flush()
+            out.append(ch)
+            i += 1
+            continue
+        if windows and ch == "^" and not quote and i + 1 < n:
+            buf.append(segment[i + 1])
+            out.append(segment[i + 1])
+            i += 2
+            continue
+        if not windows and ch == "\\" and i + 1 < n and (not quote or segment[i + 1] in '$`"\\'):
+            buf.append(segment[i + 1])
+            out.append(segment[i:i + 2])
+            i += 2
+            continue
+        match = _ENV_REF_RE.match(segment, i)
+        if match:
+            name = match.group("braced") or match.group("bare")
+            emit(match.group(0), _env_lookup(name, env, windows))
+            i = match.end()
+            continue
+        if (sh or pwsh) and segment.startswith("$(", i):
+            end = _closing(segment, i + 1)
+            emit(segment[i:end], None)
+            i = end
+            continue
+        if sh and ch == "`":
+            end = segment.find("`", i + 1)
+            end = n if end < 0 else end + 1
+            emit(segment[i:end], None)
+            i = end
+            continue
+        if (sh or pwsh) and segment.startswith("${", i):
+            match = _BRACED_RE.match(segment, i)
+            if match:
+                emit(match.group(0), resolve(match.group("name"), "sh"))
+                i = match.end()
+            else:
+                end = _closing(segment, i + 1, "{", "}")
+                emit(segment[i:end], None)          # ${VAR:-x}, ${VAR%/*}, …
+                i = end
+            continue
+        if sh or pwsh:
+            match = _DOLLAR_RE.match(segment, i)
+            if match:
+                emit(match.group(0), resolve(match.group("name"), "sh"))
+                i = match.end()
+                continue
+        if windows and ch == "%":
+            match = _PERCENT_TILDE_RE.match(segment, i)
+            if match:
+                emit(match.group(0), None)
+                i = match.end()
+                continue
+            match = _PERCENT_RE.match(segment, i)
+            if match:
+                if match.group("mod"):
+                    emit(match.group(0), None)      # %VAR:~0,3%, %VAR:a=b%
+                else:
+                    emit(match.group(0), resolve(match.group("name"), "cmd"), hard=False)
+                i = match.end()
+                continue
+            match = _FOR_VAR_RE.match(segment, i) if for_loop else None
+            if match:
+                emit(match.group(0), None)
+                i = match.end()
+                continue
+        if delayed and ch == "!":
+            match = _DELAYED_RE.match(segment, i)
+            if match:
+                if match.group("mod"):
+                    emit(match.group(0), None)
+                else:
+                    emit(match.group(0), resolve(match.group("name"), "cmd"), hard=False)
+                i = match.end()
+                continue
+        if ch == "~" and not quote and not buf:
+            match = _TILDE_RE.match(segment, i)
+            if match:
+                emit(match.group(0), _home_of(match.group("user"), env, windows))
+                i = match.end()
+                continue
+        buf.append(ch)
+        out.append(ch)
+        i += 1
+    flush()
+    return _Expanded("".join(out), words, unresolved)
+
+
+def _word_spellings(word: _Word, windows: bool, drive: str = "") -> list:
+    """The spellings in one word worth resolving: an expanded absolute value,
+    an absolute form the two literal patterns miss, or a `..` traversal."""
+    text = word.text
+    found = [text[at:] for at in word.anchors]
+    body = _REDIRECT_PREFIX_RE.sub("", text, count=1)
+    if _ASSIGNMENT_RE.match(body):
+        body = body.split("=", 1)[1]
+    if windows and (_DRIVE_RE.match(body) or body.startswith("\\\\")):
+        found.append(body)          # `c:\…`, `C:/…`, `"C:"\…`, `\\host\share`
+    elif windows and _is_drive_rooted(body, drive):
+        found.append(body)          # `\Users\…` is `C:\Users\…` to cmd
+    elif _ROOTED_ODD_RE.match(body):
+        found.append(body)
+    if ".." in re.split(r"[\\/]" if windows else "/", body):
+        found.append(body)
+    return found
+
+
+def _is_drive_rooted(body: str, drive: str) -> bool:
+    """`\\Users\\x`, but not a regex like `\\bword\\b`: the first name must
+    exist at the drive root, and an unreadable root counts as a path."""
+    match = re.match(r'^\\([^\\/:*?"<>|\s]+)[\\/]', body)
+    if not match:
+        return False
+    at_root = _names_at_drive_root(drive or _drive_root_of(""))
+    return at_root is None or match.group(1).lower() in at_root
+
+
+def _resolve_spelling(spelling: str, cwd: str, windows: bool) -> Optional[str]:
+    if windows and os.sep == "/":
+        spelling = spelling.replace("\\", "/")
+    if _looks_absolute(spelling, windows):
+        return os.path.normpath(spelling)
+    if not cwd:
+        return None
+    return os.path.normpath(os.path.join(cwd, spelling))
+
+
+def _expanded_path_outside(
+    view: _Expanded, ctx: "ToolContext", windows: bool, cwd: str, drive: str = ""
+) -> Tuple[str, str]:
+    """(outside reason, unresolvable spelling) for the words of one segment.
+
+    `echo %USERPROFILE%` prints a path and opens nothing, so an echo's
+    arguments are skipped — its redirect target is not.
+    """
+    words = view.words
+    echo = bool(words) and words[0].text.lower() in _ECHO_VERBS
+    after_redirect = False
+    for word in words[1:] if echo else words:
+        redirect = bool(_REDIRECT_PREFIX_RE.match(word.text))
+        if echo and not (redirect or after_redirect):
+            continue
+        after_redirect = redirect and not _REDIRECT_PREFIX_RE.sub("", word.text, count=1)
+        for spelling in _word_spellings(word, windows, drive):
+            if windows and spelling.startswith(("\\\\", "//")):
+                # Resolving a share contacts its host: the gate must not.
+                return f"Command accesses path outside sandbox: {spelling}", ""
+            resolved = _resolve_spelling(spelling, cwd, windows)
+            if resolved is None:
+                return "", spelling         # a `..` after a move the gate lost
+            try:
+                ctx.validate_extended_path(resolved)
+            except PermissionError:
+                shown = resolved if resolved == spelling else f"{resolved} (spelled {spelling})"
+                return f"Command accesses path outside sandbox: {shown}", ""
+            except (OSError, ValueError):
+                return "", spelling
+    return "", ""
 
 # An interpreter invoked on a script file. `-c` and `-e` have their own Tier 1
 # rules; running a file had none.
@@ -1790,14 +2193,14 @@ def _validate_command(
         if dangerous:
             reasons.append("Requires approval: " + "; ".join(dangerous))
         if ctx:
-            outside = _path_outside_sandbox(segments, ctx, _drive_root_of(base_dir))
+            outside = _path_outside_sandbox(segments, ctx, _drive_root_of(base_dir), base_dir)
             if outside:
                 reasons.append(outside)
         return ("tier1", "; ".join(reasons))
 
     if ctx:
         whitelist = _get_tier1_whitelist(ctx)
-        outside = _path_outside_sandbox(segments, ctx, _drive_root_of(base_dir))
+        outside = _path_outside_sandbox(segments, ctx, _drive_root_of(base_dir), base_dir)
         if outside:
             return ("tier1", outside)
 
@@ -2066,7 +2469,7 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
             timeout=timeout,
             cwd=working_dir,
             shell=True,
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            env=_child_environment(),
             ceiling_mb=_MEMORY_CEILING_MB,
             popen_kwargs=popen_kwargs,
         )

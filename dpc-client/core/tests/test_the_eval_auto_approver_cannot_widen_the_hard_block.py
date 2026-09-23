@@ -332,10 +332,14 @@ def test_an_install_into_an_interpreter_is_refused(command, tmp_path):
     'bash -c "cat $HOME/.dpc/providers.json"',
 ])
 def test_the_operators_home_is_not_reached_through_a_variable(command, tmp_path):
-    """Each spelling is from a report on this machine; none is a literal path."""
+    """Each spelling is from a report on this machine; none is a literal path.
+
+    Since the gate expands variables it names the outside path itself for the
+    last three, and the approver refuses on that part before its own backstop.
+    """
     approve, why = Tier1AutoApprover().verdict(_gate(command, tmp_path))
     assert approve is False
-    assert "operator's home" in why
+    assert "operator's home" in why or "outside sandbox" in why, why
 
 
 def test_plain_inline_code_inside_the_task_is_still_approved(tmp_path):
