@@ -37,6 +37,12 @@ def _never_touch_disk(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _sign_with_a_test_key(signing_identity):
+    """Export by hash and the tamper check both need signed records; without a
+    key of the test's own they depended on ~/.dpc/node.key existing."""
+
+
 def _monitor(texts=("one", "two", "three")):
     m = ConversationMonitor(
         conversation_id=GROUP,

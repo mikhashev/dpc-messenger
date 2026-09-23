@@ -29,6 +29,13 @@ def _never_touch_disk(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _sign_with_a_test_key(signing_identity):
+    """The window is about signed records. Without a key of the test's own the
+    monitor signs with ~/.dpc/node.key when there is one, so on a runner with
+    none every record was unsigned, unstamped, and left out."""
+
+
 def _monitor(texts=("one", "two", "three")):
     m = ConversationMonitor(
         conversation_id=GROUP,
