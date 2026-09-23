@@ -120,6 +120,7 @@ def _monitor(timestamps):
     monitor._history_dirty = False
     monitor.save_history = lambda: True
     monitor._archive_messages = lambda messages, reason: None
+    monitor._advance_live_history_boundary = lambda moment: False
     return monitor
 
 

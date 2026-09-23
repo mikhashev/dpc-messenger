@@ -191,6 +191,11 @@ def accepted_peer_boundary(value: Any, conversation_id: str = "",
     """
     moment = parse_moment(value)
     if moment is None:
+        if value is not None:
+            logger.debug(
+                "Ignoring unreadable live-history boundary %r from %s for %s",
+                value, str(peer)[:20], conversation_id,
+            )
         return None
     if moment > datetime.now(timezone.utc) + BOUNDARY_CLOCK_SKEW:
         logger.warning(
@@ -2261,8 +2266,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         written *after* the boundary are part of the new session and throwing
         them away would turn a late arrival into a second reset.
 
-        Returns how many were dropped, so the caller can stay quiet when the
-        answer is none. What is dropped is archived first; a failed archive
+        Returns how many left the live history, so the caller can stay quiet
+        when the answer is none. They are archived first; a failed archive
         cancels the trim, so a wrong marker hides messages but cannot destroy them.
         """
         if not boundary:
@@ -2297,7 +2302,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self._history_dirty = True
         self.save_history()
         logger.info(
-            "Monitor %s: dropped %d message(s) predating %s (%s .. %s), archived to %s",
+            "Monitor %s: moved %d message(s) predating %s (%s .. %s) to the archive at %s",
             self.conversation_id, dropped, boundary,
             cut[0].get("timestamp"), cut[-1].get("timestamp"), archive_path or "nowhere: history not persisted",
         )

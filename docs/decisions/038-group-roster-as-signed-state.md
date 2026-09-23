@@ -385,7 +385,8 @@ records back. The three ship together.
 - [ ] A member with no boundary receives the whole history.
 - [ ] A boundary in the future is ignored.
 - [ ] Observed on the live pair: after a single-node reset and a reconnect,
-      the log reads "older than the boundary archived" and nothing rolls back.
+      the log reads "older than the boundary … went to the archive" and nothing
+      rolls back.
 
 **What this changes.** Two members of one group may now show different live
 histories, while every record stays signed by its author (ADR-036) and nothing
