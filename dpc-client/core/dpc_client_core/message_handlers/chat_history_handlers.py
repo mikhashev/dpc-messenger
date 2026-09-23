@@ -151,9 +151,21 @@ class ChatHistoryResponseHandler(MessageHandler):
         conversation_id = payload.get("conversation_id")
         request_id = payload.get("request_id")
         messages = payload.get("messages", [])
-        total_count = payload.get("total_count", 0)
+        total_count = payload.get("total_count")
 
-        self.logger.info(f"Received {total_count} messages from {sender_node_id} for {conversation_id} (request_id: {request_id})")
+        # `total_count` is set by RequestChatHistoryHandler's export path but
+        # not by the new-member history push (service.py), so logging that
+        # field prints "Received 0 messages" for a 45-record push. The real
+        # length of `messages` is always accurate; total_count is appended
+        # only when the sender provided it and it disagrees, since that
+        # disagreement is itself worth knowing.
+        if total_count is not None and total_count != len(messages):
+            self.logger.info(
+                f"Received {len(messages)} messages from {sender_node_id} for {conversation_id} "
+                f"(total_count {total_count}) (request_id: {request_id})"
+            )
+        else:
+            self.logger.info(f"Received {len(messages)} messages from {sender_node_id} for {conversation_id} (request_id: {request_id})")
 
         # This handler replaces the whole local history, so an answer is only
         # worth that much if we asked the question. Unclaimed, it lets any
