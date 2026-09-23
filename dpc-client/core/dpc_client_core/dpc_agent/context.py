@@ -1055,7 +1055,7 @@ the live number may be noticeably above this lower bound.
 Your runtime `budget` says who runs and pays for your model calls:
 - `provider_alias` — the model endpoint you run on; `route` — `local` (this node's engine) or `peer` (another node's, named in `served_by`)
 - `provider_kind` — `self_hosted` (a model on the serving node's own hardware), `vendor` (a paid API) or `unknown`
-- `tokens_paid_by` — per token only: `nobody` (a self-hosted model; power and card time still cost), `this_node` (this node's API key), `peer` (the serving node; if it declared a tariff above zero, this node pays that tariff) or `unknown`
+- `tokens_paid_by` — per token only: `nobody` (a self-hosted model and no tariff to pay; power and card time still cost), `this_node` (this node's API key, or a peer's tariff above zero, which the caller pays), `peer` (a vendor model the peer serves as a gift) or `unknown`. On a peer route this is read from the tariff the peer last quoted, not from a receipt
 - `agent_lifetime_tokens` — tokens YOU have used across all your chats and tasks since your state began; not this chat, not this node
 - `billing` and the `*_usd` fields appear only when your configuration sets a billing model
 

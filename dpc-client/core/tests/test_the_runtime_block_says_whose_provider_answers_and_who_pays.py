@@ -67,14 +67,14 @@ def test_an_openai_compatible_server_on_loopback_is_a_local_model(tmp_path):
     assert (facts["provider_kind"], facts["tokens_paid_by"]) == ("self_hosted", "nobody")
 
 
-def test_an_agent_pinned_to_a_peer_is_served_and_paid_by_that_peer():
+def test_an_agent_pinned_to_a_peer_self_hosted_model_is_served_by_that_peer_and_paid_by_nobody():
     peers = {"dpc-node-bob": {"providers": [{"alias": "qwen3.8 27b", "type": "llamacpp_server"}]}}
     facts = provider_facts_for(_llm(ROWS), "qwen3.8 27b", compute_host="dpc-node-bob",
                                peer_metadata=peers)
     assert facts["route"] == "peer"
     assert facts["served_by"] == "dpc-node-bob"
     assert facts["provider_kind"] == "self_hosted"
-    assert facts["tokens_paid_by"] == "peer"
+    assert facts["tokens_paid_by"] == "nobody"
 
 
 def test_a_remote_peer_provider_row_is_a_peer_route():
@@ -82,7 +82,7 @@ def test_a_remote_peer_provider_row_is_a_peer_route():
     assert facts["route"] == "peer"
     assert facts["served_by"] == "dpc-node-alice"
     assert facts["provider_kind"] == "unknown"
-    assert facts["tokens_paid_by"] == "peer"
+    assert facts["tokens_paid_by"] == "unknown"
 
 
 def test_an_unknown_provider_is_printed_unknown(tmp_path):
@@ -146,4 +146,5 @@ def test_the_agent_reads_its_facts_from_the_adapter_it_calls_through():
     agent._service = types.SimpleNamespace(peer_metadata={})
     agent.llm = DpcLlmAdapter(_llm(ROWS), provider_alias="qwen3.8 27b", compute_host="dpc-node-bob")
     facts = agent._provider_facts()
-    assert (facts["route"], facts["served_by"], facts["tokens_paid_by"]) == ("peer", "dpc-node-bob", "peer")
+    # No menu row from that peer yet, so no payer can be named.
+    assert (facts["route"], facts["served_by"], facts["tokens_paid_by"]) == ("peer", "dpc-node-bob", "unknown")

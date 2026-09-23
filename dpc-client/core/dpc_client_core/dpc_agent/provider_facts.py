@@ -4,6 +4,13 @@ Read for the agent's runtime block. The route is resolved the way the LLM adapte
 resolves it (per-agent compute_host first, then the global dpc_agent peer_id, then
 the local alias chain), so the block describes the call the adapter will make.
 Anything that cannot be resolved is printed as "unknown", never as a default.
+
+The words are the node ledger's (ADR-041 D3): `route` and `served_by` are the
+usage row's columns, and `provider_alias` is the row's `alias`. On a peer route
+the payer follows D3's amendment of 2026-09-13, "the payer is the caller": the
+tariff quoted in the peer's menu row decides it. That quote is the last
+PROVIDERS_RESPONSE, so the budget is a quote, not a receipt; the ledger row
+written at the call is the record.
 """
 
 from __future__ import annotations
@@ -28,7 +35,11 @@ def provider_kind(provider_type: Optional[str], base_url: Optional[str] = None) 
     """
     if provider_type in LOCAL_TYPES:
         return "self_hosted"
-    if provider_type == "openai_compatible" and base_url:
+    if provider_type == "openai_compatible":
+        # A peer's menu row carries no base_url, and without it a server on
+        # the peer's own card cannot be told from a vendor.
+        if not base_url:
+            return "unknown"
         host = (urlparse(base_url).hostname or "").lower()
         if host in _LOOPBACK_HOSTS:
             return "self_hosted"
@@ -37,22 +48,42 @@ def provider_kind(provider_type: Optional[str], base_url: Optional[str] = None) 
     return "unknown"
 
 
-def _peer_row_type(peer_metadata: Optional[Dict[str, Any]], node_id: str, alias: Optional[str]) -> Optional[str]:
+def _peer_row(peer_metadata: Optional[Dict[str, Any]], node_id: str, alias: Optional[str]) -> Optional[Dict[str, Any]]:
     rows = ((peer_metadata or {}).get(node_id) or {}).get("providers") or []
     for row in rows:
         if isinstance(row, dict) and row.get("alias") == alias:
-            return row.get("type")
+            return row
     return None
 
 
+def _quoted_rate_is_paid(tariff: Any) -> bool:
+    if not isinstance(tariff, dict) or tariff.get("free"):
+        return False
+    try:
+        return float(tariff.get("in") or 0) > 0 or float(tariff.get("out") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _peer_payer(row: Optional[Dict[str, Any]], kind: str) -> str:
+    """No key is the v1 gift and `free` a declared zero: both leave nothing for
+    the caller to pay, so the payer is whoever bears the model's own cost."""
+    if row is None:
+        return "unknown"
+    if _quoted_rate_is_paid(row.get("tariff")):
+        return "this_node"
+    return {"self_hosted": "nobody", "vendor": "peer"}.get(kind, "unknown")
+
+
 def _peer_facts(alias: Optional[str], node_id: str, peer_metadata) -> Dict[str, Any]:
-    kind = provider_kind(_peer_row_type(peer_metadata, node_id, alias))
+    row = _peer_row(peer_metadata, node_id, alias)
+    kind = provider_kind(row.get("type") if row else None)
     return {
         "provider_alias": alias or "unknown",
         "route": "peer",
         "served_by": node_id,
         "provider_kind": kind,
-        "tokens_paid_by": "peer",
+        "tokens_paid_by": _peer_payer(row, kind),
     }
 
 
