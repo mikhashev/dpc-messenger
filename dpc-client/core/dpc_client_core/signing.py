@@ -58,9 +58,9 @@ def quorum_is_proven(
     kept nothing older than it: the votes travel with the marker, so the check
     needs no history at all.
 
-    Unanimity, matching the rule a reset already runs under — a member that did
-    not agree keeps its history and hands it back, so anything less is a pause
-    rather than a reset. A signature that cannot be checked for want of a
+    Unanimity, matching the rule a reset already runs under: the marker is a
+    statement about the whole group, so it needs the whole group's agreement
+    (GROUP_CHAT.md, Session Reset). A signature that cannot be checked for want of a
     certificate counts as not proven: the marker will be adopted later, when the
     certificate arrives, rather than on trust now.
     """

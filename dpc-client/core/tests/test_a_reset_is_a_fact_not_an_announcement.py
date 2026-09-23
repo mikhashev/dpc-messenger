@@ -193,7 +193,7 @@ def test_a_unanimous_signed_vote_proves_the_reset(verifier):
 
 
 def test_a_missing_participant_is_not_a_quorum(verifier):
-    """Unanimity, because a member who did not agree hands its history back."""
+    """Unanimity, because the marker speaks for the whole group."""
     assert _proven(votes={ME: _signed(ME)}) is False
 
 
