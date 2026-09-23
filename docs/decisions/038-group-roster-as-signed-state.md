@@ -385,8 +385,10 @@ records back. The three ship together.
 - [ ] A member with no boundary receives the whole history.
 - [ ] A boundary in the future is ignored.
 - [ ] Observed on the live pair: after a single-node reset and a reconnect,
-      the log reads "older than the boundary … went to the archive" and nothing
-      rolls back.
+      the log shows the archived count and nothing rolls back. Two lines report
+      one merge: the handler always prints "(N older than the boundary
+      archived)"; the monitor prints "... went to the archive" only when
+      something was added or archived.
 
 **What this changes.** Two members of one group may now show different live
 histories, while every record stays signed by its author (ADR-036) and nothing
