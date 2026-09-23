@@ -2253,7 +2253,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return changed
 
     def clear_before(self, boundary: str) -> int:
-        """Drop messages older than a session boundary, keep the rest.
+        """Archive messages older than a session boundary, keep the rest live.
 
         A reset agreed while this node was away arrives as a fact rather than a
         command (`session_started_at`, ADR-038 Q3), and the node applies it to

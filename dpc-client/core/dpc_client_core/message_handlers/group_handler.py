@@ -584,7 +584,7 @@ class GroupSyncHandler(MessageHandler):
         dropped = monitor.clear_before(marker)
         if dropped:
             self.logger.info(
-                "Session marker on %s: dropped %d message(s) older than %s",
+                "Session marker on %s: %d message(s) older than %s moved to the archive",
                 applied.group_id, dropped, marker,
             )
             await self.service.local_api.broadcast_event(

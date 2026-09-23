@@ -277,7 +277,7 @@ would stay red on γ items, which turns a compliance test into a wish list.
 | β — "Chain broken" cause removed | Done — chain is local | `19471d70` |
 | β — stop minting hashes on load | Not needed after `19471d70` — every stored message is chained locally on insert, so the loader has nothing to mint except in files written by older builds, where the existing warning already says so | — |
 | β — group history off the private path | Pending | — |
-| β — digest over the pair's window (amendment 2026-09-23) | Pending | — |
+| β — digest over the pair's window (amendment 2026-09-23) | Done — awaiting observation on the live pair | `c8582d43` |
 | Naming swept out of code, spec, ADRs | Pending | — |
 | γ — preconditions below | Blocked | — |
 
@@ -294,9 +294,16 @@ the same records again.
 - The status exchange carries the sender's live-history boundary, optional;
   absent means no boundary.
 - Each side computes the digest it compares over the records at or after
-  `max` of the two boundaries it knows: its own and the peer's, ignoring an
-  absent one. The window belongs to the pair, so one node computes a separate
-  digest for each peer.
+  `max` of the two boundaries it knows: its own and the peer's. A boundary that
+  is absent, or that ADR-038's rule 5 refuses as lying in the future, is left
+  out. The window belongs to the pair, so one node computes a separate digest
+  for each peer.
+- Each status names the window its digest covers (`digest_since`). A digest
+  over a different window is not compared. The first status can cover only the
+  sender's own boundary, so the receiver's reply is over the pair's window; when
+  the peer's boundary is the later one, the initiator sends one more status over
+  that window (`window_retry`), and nothing answers it. One exchange is at most
+  three statuses.
 - `GROUP_HISTORY_REQUEST` carries the same window as `since`. The answering
   side exports nothing older, and so never ships what the asker would only
   archive.

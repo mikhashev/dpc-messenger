@@ -249,7 +249,7 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 | Per-field authority in `apply_sync` | Pending | — |
 | Signed roster changes | Pending | — |
 | `session_started_at` marker | Partial — honoured against the pre-sync roster, votes bound to the group, trim archived first; the roster itself is still unsigned | `e2962656` |
-| Live-history boundary (amendment 2026-09-23) | Pending | — |
+| Live-history boundary (amendment 2026-09-23) | Done — awaiting observation on the live pair | `c8582d43` |
 | Unsigned changes refused, legibly | Pending | — |
 | `GROUP_SYNC` in the spec | Pending | — |
 
@@ -323,7 +323,7 @@ nothing to stop the merge.
 | says | the group agreed to start over | this node keeps no live history older than T |
 | whose | the group's record, synced | this node's own, never a group field |
 | proof | every member of the receiver's pre-sync roster signed (`e2962656`) | none, and none is possible |
-| effect on others | a returning node archives what predates it | none: it narrows only what its owner holds live |
+| effect on others | a returning node archives what predates it | none on their records; it narrows the window the pair compares over (rule 4) |
 
 The boundary needs no proof because it can only shrink what its owner shows as
 live. It cannot reach another node's records. The cost of this is that a node
@@ -335,8 +335,13 @@ node's own copy.
 
 1. A node moves its own boundary forward whenever it clears or trims its live
    history: a reset of its own, an approved New Session, or an honoured marker.
-   The boundary never moves back. It is stored beside the conversation on this
-   node and is not part of the group record, so `apply_sync` never touches it.
+   The boundary never moves back: each move takes the later of the current
+   boundary and the new moment, so a marker older than a node's own reset
+   leaves the boundary where it is. It moves even when the trim cuts nothing.
+   The move lives inside the functions that clear or trim (`reset_conversation`,
+   `clear_history`, `clear_before`), not at their call sites, so a new caller
+   cannot forget it. It is stored beside the conversation on this node and is
+   not part of the group record, so `apply_sync` never touches it.
 2. A record that arrives older than the receiver's boundary goes to the
    receiver's archive, not to its live history. Nothing is dropped.
 3. The boundary is advertised in the history status exchange. It is optional:
@@ -347,15 +352,40 @@ node's own copy.
    boundaries (ADR-037 β, amended the same day). The window is therefore a
    property of the pair, not of the node. With N peers, one node computes N
    digests.
-5. A boundary a peer advertises later than the receiver's current time is
-   ignored and logged. Otherwise a single field could empty the window and hide
-   every later divergence for good.
+5. A boundary a peer advertises more than five minutes past the receiver's
+   clock is ignored, logged, and treated as absent. Otherwise a single field
+   could empty the window and hide every later divergence for good. The check
+   runs on each side's own clock, so two nodes whose clocks disagree by more
+   than that can derive different windows from the same inputs. Each status
+   therefore names the window its digest covers, and a node compares only a
+   digest over the same window as its own. When the windows differ it compares
+   nothing and logs it: the pair stops reconciling until the clocks agree,
+   rather than asking for the same records forever. Capping a peer's boundary
+   at the receiver's newest record as well was proposed in review and is not
+   adopted: that bound differs per node by construction, so it would make the
+   two windows disagree in the ordinary case.
 
 Rule 2 without rules 3 and 4 is a regression, not half a fix. A record kept
 out of the live history keeps the per-author digest different, and every
-reconnect asks for the same records again. That is the failure `merge_history`
-already documents ("re-synced twenty-eight times a day"). Rules 1, 3 and 4
-without rule 2 are safe. The three ship together.
+reconnect asks for the same records again. `merge_history` already documents
+the same symptom from a different cause ("re-synced twenty-eight times a day").
+Rules 1, 3 and 4 without rule 2 converge, but then the boundary stops being
+true: the node says it keeps nothing live before T while merge puts older
+records back. The three ship together.
+
+**Confirmation.**
+
+- [ ] A node that resets alone keeps the older records in its archive, and a
+      reconnect does not put them back into its live history.
+- [ ] Two nodes with different boundaries reconcile once, and the next connect
+      sends no history request.
+- [ ] A marker older than a node's own reset does not move its boundary back.
+- [ ] A node's boundary does not change the digest a peer computes over its
+      own window.
+- [ ] A member with no boundary receives the whole history.
+- [ ] A boundary in the future is ignored.
+- [ ] Observed on the live pair: after a single-node reset and a reconnect,
+      the log reads "older than the boundary archived" and nothing rolls back.
 
 **What this changes.** Two members of one group may now show different live
 histories, while every record stays signed by its author (ADR-036) and nothing
