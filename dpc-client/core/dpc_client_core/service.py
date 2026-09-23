@@ -257,6 +257,11 @@ class CoreService:
     The main orchestrating class for the D-PC client's backend.
     Manages all sub-components and the application's lifecycle.
     """
+    # First wait of the slow reconnect phase; doubles up to
+    # [connection] reconnect_slow_interval_max_seconds, jittered by this fraction.
+    _RECONNECT_SLOW_FIRST_SECONDS = 60.0
+    _RECONNECT_SLOW_JITTER = 0.2
+
     def __init__(self, skip_knowledge_index: bool = False):
         logger.info("Initializing D-PC Core Service")
 
@@ -451,7 +456,12 @@ class CoreService:
 
         self._is_running = False
         self._background_tasks = set()
-        
+        # One reconnect task per peer; the slow phase and the user's Disconnect
+        # are read by every wake of it (RECONNECT-GIVES-UP-AFTER-FIVE-ATTEMPTS...)
+        self._reconnect_tasks: Dict[str, asyncio.Task] = {}
+        self._reconnect_slow_phase: Set[str] = set()
+        self._user_disconnected_peers: Set[str] = set()
+
         # Store peer metadata (names, profiles, etc.)
         self.peer_metadata: Dict[str, Dict[str, Any]] = {}
 
@@ -1577,6 +1587,8 @@ class CoreService:
         """Callback function that is triggered by P2PManager when peer list changes."""
         logger.debug("Peer list changed, broadcasting status update to UI")
 
+        self._settle_reconnects_for_connected_peers()
+
         # Cache peer information for offline mode
         for peer_id, peer_conn in self.p2p_manager.peers.items():
             # Get peer metadata
@@ -1783,12 +1795,49 @@ class CoreService:
 
         # Schedule auto-reconnect if this is a peer we keep a connection to
         if hasattr(self, 'connection_orchestrator') and self.connection_orchestrator:
-            if peer_id in self._peers_to_auto_connect() and self._worth_dialling(peer_id):
+            if (
+                peer_id not in self._user_disconnected_peers
+                and peer_id in self._peers_to_auto_connect()
+                and self._worth_dialling(peer_id)
+            ):
+                existing = self._reconnect_tasks.get(peer_id)
+                if existing is not None and not existing.done():
+                    if peer_id not in self._reconnect_slow_phase:
+                        return  # the fast attempts are already running
+                    # A fresh loss means it was reachable a moment ago: start over fast.
+                    existing.cancel()
+                    self._reconnect_slow_phase.discard(peer_id)
                 task = asyncio.create_task(self._auto_reconnect_peer(peer_id))
                 task.set_name(f"reconnect_{peer_id[:16]}")
+                self._reconnect_tasks[peer_id] = task
                 self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
 
-    def _worth_dialling(self, peer_id: str) -> bool:
+    def _keeps_dialling(self, peer_id: str) -> bool:
+        """The question every reconnect wake asks again, fast or slow."""
+        return (
+            self._is_running
+            and peer_id not in self._user_disconnected_peers
+            and peer_id in self._peers_to_auto_connect()
+            and self._worth_dialling(peer_id, quiet=True)
+        )
+
+    def _settle_reconnects_for_connected_peers(self) -> None:
+        """A connected peer needs no redial: end a sleeping slow loop and the
+        user's Disconnect mark, which a new link supersedes."""
+        me = asyncio.current_task()
+        for peer_id in list(self.p2p_manager.peers):
+            self._user_disconnected_peers.discard(peer_id)
+            task = self._reconnect_tasks.get(peer_id)
+            if (
+                task is not None and task is not me and not task.done()
+                and peer_id in self._reconnect_slow_phase
+            ):
+                task.cancel()
+                self._reconnect_tasks.pop(peer_id, None)
+                self._reconnect_slow_phase.discard(peer_id)
+
+    def _worth_dialling(self, peer_id: str, quiet: bool = False) -> bool:
         """Is a dial to this peer worth five attempts, or will it come back itself?
 
         Decided by who placed the last connection that worked. A peer that
@@ -1807,6 +1856,8 @@ class CoreService:
             return True
         if getattr(cached, "last_connection_direction", None) != "in":
             return True
+        if quiet:
+            return False
         logger.info(
             "Not redialling %s: it reached us and we have never reached it — "
             "it reconnects on its own",
@@ -1815,12 +1866,70 @@ class CoreService:
         return False
 
     async def _auto_reconnect_peer(self, peer_id: str, max_attempts: int = 5):
-        """Auto-reconnect to a known peer after disconnect with exponential backoff."""
-        for attempt in range(1, max_attempts + 1):
-            if not self._is_running:
+        """Auto-reconnect to a known peer: fast attempts, then a slow retry."""
+        me = asyncio.current_task()
+        try:
+            if await self._reconnect_fast(peer_id, max_attempts):
                 return
+            if not self._keeps_dialling(peer_id):
+                return
+            # The switch that turns off dialling on our own schedule at startup
+            # also keeps the slow phase off (A-HUB-KEEPS-REDIALLING-SPOKES...).
+            if not self.settings.get_p2p_auto_connect_node_groups():
+                logger.info("Gave up reconnecting to %s: auto_connect_node_groups is off", peer_id[:20])
+                return
+            self._reconnect_slow_phase.add(peer_id)
+            await self._reconnect_slowly(peer_id)
+        finally:
+            if self._reconnect_tasks.get(peer_id) is me:
+                self._reconnect_tasks.pop(peer_id, None)
+                self._reconnect_slow_phase.discard(peer_id)
+
+    async def _reconnect_slowly(self, peer_id: str) -> None:
+        """Retry a peer we keep until it answers, backing off to a ceiling.
+
+        Ends on success, when the peer connects some other way, or when
+        _keeps_dialling says no: the user disconnected it, it left every
+        group we share, it is not worth dialling, or the service stops.
+        """
+        import random
+
+        ceiling = self.settings.get_reconnect_slow_interval_max_seconds()
+        delay = min(self._RECONNECT_SLOW_FIRST_SECONDS, ceiling)
+        logger.info(
+            "Reconnect to %s moves to a slow retry every %ds, backing off to %ds",
+            peer_id[:20], delay, ceiling,
+        )
+        attempt = 0
+        while True:
+            jitter = 1 + random.uniform(-self._RECONNECT_SLOW_JITTER, self._RECONNECT_SLOW_JITTER)
+            await asyncio.sleep(delay * jitter)
             if peer_id in self.p2p_manager.peers:
                 return
+            if not self._keeps_dialling(peer_id):
+                logger.debug("Slow reconnect to %s stopped: no longer dialled", peer_id[:20])
+                return
+            attempt += 1
+            logger.debug("Slow reconnect attempt %d for %s", attempt, peer_id[:20])
+            try:
+                await self.connection_orchestrator.connect(peer_id)
+            except Exception as e:
+                logger.debug("Slow reconnect attempt %d failed for %s: %s", attempt, peer_id[:20], e)
+                delay = min(delay * 2, ceiling)
+                continue
+            logger.info("Reconnected to %s on slow retry %d", peer_id[:20], attempt)
+            await self.local_api.broadcast_event("peer_reconnected", {
+                "node_id": peer_id, "attempt": attempt, "slow": True,
+            })
+            return
+
+    async def _reconnect_fast(self, peer_id: str, max_attempts: int) -> bool:
+        """The first attempts after a loss. True when there is nothing left to do."""
+        for attempt in range(1, max_attempts + 1):
+            if peer_id in self.p2p_manager.peers:
+                return True
+            if not self._keeps_dialling(peer_id):
+                return True
             delay = min(2 ** attempt, 60)
             logger.info("Reconnect attempt %d/%d for %s in %ds", attempt, max_attempts, peer_id[:20], delay)
             await self.local_api.broadcast_event("peer_reconnecting", {
@@ -1828,17 +1937,18 @@ class CoreService:
             })
             await asyncio.sleep(delay)
             if peer_id in self.p2p_manager.peers:
-                return
+                return True
             try:
                 await self.connection_orchestrator.connect(peer_id)
                 logger.info("Reconnected to %s on attempt %d", peer_id[:20], attempt)
                 await self.local_api.broadcast_event("peer_reconnected", {
                     "node_id": peer_id, "attempt": attempt,
                 })
-                return
+                return True
             except Exception as e:
                 logger.debug("Reconnect attempt %d failed for %s: %s", attempt, peer_id[:20], e)
-        logger.warning("Gave up reconnecting to %s after %d attempts", peer_id[:20], max_attempts)
+        logger.warning("%d reconnect attempts to %s failed", max_attempts, peer_id[:20])
+        return False
 
     # --- High-level methods (API for the UI) ---
 
@@ -7309,6 +7419,13 @@ class CoreService:
 
     async def disconnect_from_peer(self, node_id: str):
         """Disconnect from a peer."""
+        # Recorded here, not in p2p_manager, whose flag a lost link also sets
+        # (A-LOST-CONNECTION-IS-RECORDED-AS-INTENTIONAL...). A new link clears it.
+        self._user_disconnected_peers.add(node_id)
+        task = self._reconnect_tasks.pop(node_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._reconnect_slow_phase.discard(node_id)
         await self.p2p_coordinator.disconnect(node_id)
 
     async def send_p2p_message(self, target_node_id: str, text: str):

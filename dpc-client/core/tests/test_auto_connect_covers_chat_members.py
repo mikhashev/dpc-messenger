@@ -128,6 +128,9 @@ async def test_a_dropped_chat_member_gets_a_reconnect(tmp_home):
     service._history_requested_peers = set()
     service.history_requests = SimpleNamespace(forget_peer=lambda peer_id: None)
     service._background_tasks = set()
+    service._reconnect_tasks = {}
+    service._reconnect_slow_phase = set()
+    service._user_disconnected_peers = set()
     scheduled = []
     service._auto_reconnect_peer = lambda peer_id: _record(scheduled, peer_id)
 

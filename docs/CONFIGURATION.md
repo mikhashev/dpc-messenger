@@ -621,6 +621,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `remote_inference_timeout` | `1200` |  |
 | `hello_timeout` | `10` | Seconds the listener waits for HELLO after its challenge |
 | `max_pending_hellos_per_ip` | `8` | Inbound connections one address may hold before HELLO_ACK |
+| `reconnect_slow_interval_max_seconds` | `900` | After five fast reconnect attempts to a peer we keep, retry from 60 s, doubling to this ceiling (±20 % jitter), until it answers, the user disconnects it or it leaves every shared group. Off when `[p2p] auto_connect_node_groups` is off |
 
 #### `[conversations]`
 

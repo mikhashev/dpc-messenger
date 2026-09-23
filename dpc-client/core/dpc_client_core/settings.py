@@ -158,7 +158,10 @@ class Settings:
             # Inbound handshake (ADR-041 D8): a peer that completes TLS and never
             # sends HELLO fails no HELLO, so the rate limiter alone never sees it
             'hello_timeout': '10',  # Seconds the listener waits for HELLO after its challenge
-            'max_pending_hellos_per_ip': '8'  # Inbound connections one address may hold before HELLO_ACK
+            'max_pending_hellos_per_ip': '8',  # Inbound connections one address may hold before HELLO_ACK
+            # After the five fast reconnect attempts, a kept peer is retried from
+            # 60s, doubling up to this ceiling, until it answers
+            'reconnect_slow_interval_max_seconds': '900'
         }
 
         self._config['hole_punch'] = {
@@ -770,6 +773,10 @@ class Settings:
     def get_max_pending_hellos_per_ip(self) -> int:
         """How many inbound connections one address may hold before HELLO_ACK."""
         return int(self.get('connection', 'max_pending_hellos_per_ip', '8'))
+
+    def get_reconnect_slow_interval_max_seconds(self) -> float:
+        """Ceiling of the slow reconnect backoff that follows the fast attempts."""
+        return float(self.get('connection', 'reconnect_slow_interval_max_seconds', '900'))
 
     def get_hole_punch_port(self) -> int:
         """Get UDP port for hole punching."""

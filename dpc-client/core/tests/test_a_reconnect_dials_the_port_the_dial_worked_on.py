@@ -132,6 +132,9 @@ def _service(manager):
     service.peer_metadata = {}
     service._history_requested_peers = set()
     service._group_access_denied = set()
+    service._reconnect_tasks = {}
+    service._reconnect_slow_phase = set()
+    service._user_disconnected_peers = set()
     service.conversation_monitors = {}
     service.knowledge_service = None
     service.group_manager = types.SimpleNamespace(
