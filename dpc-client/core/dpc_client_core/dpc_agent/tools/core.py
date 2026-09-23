@@ -1683,6 +1683,47 @@ import os
 import re
 import subprocess
 
+# Content is read one file at a time and dropped, so the total cap bounds time,
+# not memory; 64 MB covers the repository root once vendor trees are pruned.
+SEARCH_MAX_FILE_BYTES = 1024 * 1024
+SEARCH_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+
+# Never the target of a code search; searched only when `path` points inside one.
+SEARCH_PRUNED_DIRS = frozenset({
+    ".venv", "venv", "node_modules", ".git", "__pycache__", ".mypy_cache",
+    ".pytest_cache", "target", "dist", "build",
+})
+
+_SEARCH_SKIPPED_SUFFIXES = frozenset({
+    '.pyc', '.pyo', '.exe', '.dll', '.so', '.dylib',
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico',
+    '.mp3', '.mp4', '.wav', '.avi', '.mkv', '.webm',
+    '.zip', '.tar', '.gz', '.rar', '.7z', '.pdf',
+    '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.db', '.sqlite', '.sqlite3',
+})
+
+
+def _iter_search_candidates(search_dir: Path, include_pattern: str):
+    """Yield (path, relative path) of text candidates in a stable walk order."""
+    prune = not any(part in SEARCH_PRUNED_DIRS for part in search_dir.parts)
+    pattern = include_pattern or "*"
+    while pattern.startswith("**/"):
+        # rglob treats a leading **/ as "any depth, including none"; match() does not.
+        pattern = pattern[3:]
+    for root, dirnames, filenames in os.walk(search_dir):
+        if prune:
+            dirnames[:] = [d for d in dirnames if d not in SEARCH_PRUNED_DIRS]
+        dirnames.sort()
+        for name in sorted(filenames):
+            file_path = Path(root) / name
+            if file_path.suffix.lower() in _SEARCH_SKIPPED_SUFFIXES:
+                continue
+            rel_path = file_path.relative_to(search_dir)
+            if pattern != "*" and not rel_path.match(pattern):
+                continue
+            yield file_path, rel_path
+
 
 def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: int = 50, include_pattern: str = "*") -> str:
     """
@@ -1701,10 +1742,6 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
     Returns:
         Search results with file:line:content format
     """
-    # Memory limits to prevent OOM issues
-    MAX_FILE_SIZE = 1024 * 1024  # 1MB per file
-    MAX_TOTAL_BYTES = 10 * 1024 * 1024  # 10MB total
-
     try:
         # Determine search directory
         normalized = os.path.expanduser(path) if path.startswith("~") else path
@@ -1732,71 +1769,95 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
         files_with_matches = 0
         total_bytes_read = 0
         skipped_large_files = 0
+        unreadable_files = 0
+        stop_reason = None  # "read_limit" or "result_limit"
+        first_unread = None
+        files_not_searched = 0
 
-        # Search files
-        for file_path in search_dir.rglob(include_pattern):
-            if not file_path.is_file():
-                continue
-
-            # Skip binary files and common non-text files
-            if file_path.suffix.lower() in {'.pyc', '.pyo', '.exe', '.dll', '.so', '.dylib',
-                                              '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico',
-                                              '.mp3', '.mp4', '.wav', '.avi', '.mkv', '.webm',
-                                              '.zip', '.tar', '.gz', '.rar', '.7z', '.pdf',
-                                              '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-                                              '.db', '.sqlite', '.sqlite3'}:
-                continue
-
-            # Check file size to avoid reading huge files
+        candidates = _iter_search_candidates(search_dir, include_pattern)
+        for file_path, rel_path in candidates:
             try:
-                file_size = file_path.stat().st_size
-                if file_size > MAX_FILE_SIZE:
-                    skipped_large_files += 1
+                if not file_path.is_file():
                     continue
-                if total_bytes_read + file_size > MAX_TOTAL_BYTES:
-                    # Stop if we've read too much data
-                    break
+                file_size = file_path.stat().st_size
             except OSError:
+                unreadable_files += 1
                 continue
+            if file_size > SEARCH_MAX_FILE_BYTES:
+                skipped_large_files += 1
+                continue
+            if total_bytes_read + file_size > SEARCH_MAX_TOTAL_BYTES:
+                stop_reason = "read_limit"
+                first_unread = rel_path
+                files_not_searched = 1
+                break
 
             files_searched += 1
 
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
-                total_bytes_read += len(content)
-                rel_path = file_path.relative_to(search_dir)
-
-                for line_num, line in enumerate(content.splitlines(), 1):
-                    if regex.search(line):
-                        # Truncate long lines
-                        display_line = line.strip()[:300]
-                        if len(line.strip()) > 300:
-                            display_line += "..."
-
-                        matches.append(f"{rel_path}:{line_num}: {display_line}")
-                        files_with_matches = files_with_matches if matches else 1
-                        if len(matches) >= max_results:
-                            break
-
-                # Clear content from memory after processing each file
-                del content
-
-                if len(matches) >= max_results:
-                    break
-
             except Exception:
+                unreadable_files += 1
                 continue
+            total_bytes_read += len(content)
+
+            file_had_match = False
+            for line_num, line in enumerate(content.splitlines(), 1):
+                if regex.search(line):
+                    display_line = line.strip()[:300]
+                    if len(line.strip()) > 300:
+                        display_line += "..."
+                    matches.append(f"{rel_path}:{line_num}: {display_line}")
+                    file_had_match = True
+                    if len(matches) >= max_results:
+                        break
+            if file_had_match:
+                files_with_matches += 1
+            del content
+
+            if len(matches) >= max_results:
+                stop_reason = "result_limit"
+                break
+
+        if stop_reason is not None:
+            # Listing the rest is cheap once vendor trees are pruned.
+            for _file_path, rel_path in candidates:
+                if first_unread is None:
+                    first_unread = rel_path
+                files_not_searched += 1
+
+        stop_note = None
+        if stop_reason == "read_limit":
+            stop_note = (
+                f"the walk stopped at the {SEARCH_MAX_TOTAL_BYTES // (1024 * 1024)} MB read limit "
+                f"before {files_not_searched} more files (first unread: {first_unread}) "
+                f"— narrow `path` or `include_pattern`"
+            )
+        elif stop_reason == "result_limit" and files_not_searched:
+            stop_note = (
+                f"the walk stopped at {max_results} results "
+                f"before {files_not_searched} more files (first unread: {first_unread})"
+            )
 
         if not matches:
-            msg = f"No matches found for pattern '{pattern}' in {files_searched} files"
+            if stop_note:
+                msg = f"No matches for pattern '{pattern}' in the {files_searched} files searched; {stop_note}"
+            else:
+                msg = f"No matches found for pattern '{pattern}' in {files_searched} files"
             if skipped_large_files > 0:
                 msg += f" ({skipped_large_files} large files skipped)"
+            if unreadable_files > 0:
+                msg += f" ({unreadable_files} files could not be read)"
             return msg
 
         result = [f"## Search Results for '{pattern}'"]
         result.append(f"Found {len(matches)} matches in {files_with_matches} files (searched {files_searched} files)")
+        if stop_note:
+            result.append(f"_Note: {stop_note}_")
         if skipped_large_files > 0:
             result.append(f"_Note: {skipped_large_files} files >1MB were skipped to conserve memory_")
+        if unreadable_files > 0:
+            result.append(f"_Note: {unreadable_files} files could not be read_")
         result.append("")
 
         # Group by file for better readability
