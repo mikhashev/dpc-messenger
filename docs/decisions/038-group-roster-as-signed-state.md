@@ -95,6 +95,7 @@ version bump.
 | `agents[X]`, `agent_names[X]` | node X, for its own entry — **or** the creator, to remove |
 | `session_started_at` | any participant, as the outcome of an approved New Session |
 | `created_by` | nobody, after creation |
+| live-history boundary | **not a group field** — each node for itself, never applied from the wire (amendment 2026-09-23) |
 
 `name` is immutable by intent rather than by caution (Mike, 2026-08-06): one
 group is one project, and a renameable group is the first step toward the
@@ -247,7 +248,8 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 | `created_by` pinned | Pending | — |
 | Per-field authority in `apply_sync` | Pending | — |
 | Signed roster changes | Pending | — |
-| `session_started_at` marker | Pending | — |
+| `session_started_at` marker | Partial — honoured against the pre-sync roster, votes bound to the group, trim archived first; the roster itself is still unsigned | `e2962656` |
+| Live-history boundary (amendment 2026-09-23) | Pending | — |
 | Unsigned changes refused, legibly | Pending | — |
 | `GROUP_SYNC` in the spec | Pending | — |
 
@@ -288,7 +290,8 @@ asking anyone, and the creator retains a veto by being entitled to remove.
   and the next sync hands its copy back to them, undoing the reset with nobody
   noticing. The marker turns the reset from a message into a fact about the
   group: the returning node sees a `session_started_at` newer than its own
-  history and clears what predates it. Same record, same sync.
+  history and archives what predates it (amended 2026-09-23 from "clears"; a
+  trim whose archive fails does not happen). Same record, same sync.
 
   **It has to be its own field, and not — as proposed in review — a bump of the
   existing `version`.** `version` increments on *every* metadata change, so a
@@ -302,6 +305,72 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 
 - **Q4 — closed (Mike, 2026-08-06):** `topic` creator-only, `name` immutable
   after creation. See the authority table.
+
+## Amendment 2026-09-23 — the marker and the live-history boundary
+
+Mike's call, 2026-09-23, after the case Q3 describes happened on a path Q3 does
+not cover. A node that could not reach its offline peer removed it and reset
+alone. That reset wrote no marker, and the next reconnect merged 139 of the
+dropped records back into its live history. Nobody noticed until the logs were
+read. The marker only closes the reset the group agreed to. A reset one node
+makes for itself, or any reset reached by a member that did not vote, still had
+nothing to stop the merge.
+
+**Two concepts, kept apart.**
+
+| | session marker (`session_started_at`) | live-history boundary |
+|---|---|---|
+| says | the group agreed to start over | this node keeps no live history older than T |
+| whose | the group's record, synced | this node's own, never a group field |
+| proof | every member of the receiver's pre-sync roster signed (`e2962656`) | none, and none is possible |
+| effect on others | a returning node archives what predates it | none: it narrows only what its owner holds live |
+
+The boundary needs no proof because it can only shrink what its owner shows as
+live. It cannot reach another node's records. The cost of this is that a node
+can mark a span as forgotten and so hide its own divergence from comparison,
+which looks exactly like a legitimate reset. The damage stays inside that
+node's own copy.
+
+**Rules.**
+
+1. A node moves its own boundary forward whenever it clears or trims its live
+   history: a reset of its own, an approved New Session, or an honoured marker.
+   The boundary never moves back. It is stored beside the conversation on this
+   node and is not part of the group record, so `apply_sync` never touches it.
+2. A record that arrives older than the receiver's boundary goes to the
+   receiver's archive, not to its live history. Nothing is dropped.
+3. The boundary is advertised in the history status exchange. It is optional:
+   *absent* means "I accept everything". This is how a new member or a node
+   that never reset is expressed, and it must never be encoded as "boundary =
+   the moment I joined".
+4. A pair of nodes compares only what lies inside the later of their two
+   boundaries (ADR-037 β, amended the same day). The window is therefore a
+   property of the pair, not of the node. With N peers, one node computes N
+   digests.
+5. A boundary a peer advertises later than the receiver's current time is
+   ignored and logged. Otherwise a single field could empty the window and hide
+   every later divergence for good.
+
+Rule 2 without rules 3 and 4 is a regression, not half a fix. A record kept
+out of the live history keeps the per-author digest different, and every
+reconnect asks for the same records again. That is the failure `merge_history`
+already documents ("re-synced twenty-eight times a day"). Rules 1, 3 and 4
+without rule 2 are safe. The three ship together.
+
+**What this changes.** Two members of one group may now show different live
+histories, while every record stays signed by its author (ADR-036) and nothing
+is lost. The goal is one set of signed records, with each node holding its own
+live window over it. It is no longer one identical live history on every node.
+Unanimity for New Session was argued from the other goal: "whoever did not take
+part hands their history straight back". Once rules 1–5 land, that argument no
+longer holds. Whether the rule itself stays is open, on
+`ENDING-A-SESSION-NEEDS-EVERY-MEMBER-ONLINE-SO-THE-WAY-THROUGH-IS-REMOVING-THE-OFFLINE-ONE`.
+
+After `e2962656` no path deletes records on a marker. So the open halves of the
+quorum check — a New Session proposal naming its own participants, and
+`apply_sync` taking `members` wholesale — now threaten the consistency of the
+group, not the survival of its data. This is inferred from reading the code,
+not measured.
 
 ## Authors
 

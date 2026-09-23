@@ -216,6 +216,9 @@ would stay red on γ items, which turns a compliance test into a wish list.
       says once (Q4).
 - [ ] **[β]** Group history sync no longer travels the private
       `CHAT_HISTORY` path, or that path is under the same rules.
+- [ ] **[β, 2026-09-23]** Two nodes with different live-history boundaries
+      reconcile once and do not ask again on the next connect; a node with no
+      boundary still receives the whole history.
 - [ ] **[now]** No identifier in code, no line in the spec, and no ADR calls
       this a "feed".
 - [ ] **[γ]** A node holding only heads (no bodies) detects a fork presented
@@ -274,8 +277,34 @@ would stay red on γ items, which turns a compliance test into a wish list.
 | β — "Chain broken" cause removed | Done — chain is local | `19471d70` |
 | β — stop minting hashes on load | Not needed after `19471d70` — every stored message is chained locally on insert, so the loader has nothing to mint except in files written by older builds, where the existing warning already says so | — |
 | β — group history off the private path | Pending | — |
+| β — digest over the pair's window (amendment 2026-09-23) | Pending | — |
 | Naming swept out of code, spec, ADRs | Pending | — |
 | γ — preconditions below | Blocked | — |
+
+## Amendment 2026-09-23 — β compares a window, not the whole live history
+
+Mike's call, 2026-09-23, together with the live-history boundary in
+[ADR-038's amendment of the same day](038-group-roster-as-signed-state.md#amendment-2026-09-23--the-marker-and-the-live-history-boundary).
+β as first adopted compared per-author digests over each node's entire live
+history, which assumed every node holds the same live history. Once a node may
+keep older records in its archive instead, that assumption fails. A digest
+over everything would then differ for good, and every reconnect would ask for
+the same records again.
+
+- The status exchange carries the sender's live-history boundary, optional;
+  absent means no boundary.
+- Each side computes the digest it compares over the records at or after
+  `max` of the two boundaries it knows: its own and the peer's, ignoring an
+  absent one. The window belongs to the pair, so one node computes a separate
+  digest for each peer.
+- `GROUP_HISTORY_REQUEST` carries the same window as `since`. The answering
+  side exports nothing older, and so never ships what the asker would only
+  archive.
+- A record with no timestamp is counted inside every window. It cannot be
+  placed, and leaving it out would hide it from comparison.
+
+The per-author form (Q2, V2) and the order-independence are unchanged. Only
+the set being digested narrows.
 
 ## Preconditions for γ
 

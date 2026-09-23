@@ -80,7 +80,7 @@ Group Settings dialog (existing modal) extended with "Agents" section below Memb
 
 - Full history sent to agent (no artificial limits) — already implemented (S89)
 - Context window naturally limits what fits
-- New Session clears group history (existing behavior)
+- New Session archives the group's live history and moves this node's live-history boundary; records older than the boundary never re-enter the live history (amended 2026-09-23, see [ADR-038](038-group-roster-as-signed-state.md#amendment-2026-09-23--the-marker-and-the-live-history-boundary))
 
 ## Migration
 
