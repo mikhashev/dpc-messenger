@@ -8,8 +8,7 @@
   import ThinkingBlock from './ThinkingBlock.svelte';
   import { showsThinkingBlock } from '$lib/utils/thinkingVisibility';
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
-  import { agentLiveTools } from '$lib/coreService';
-  import { agentsList } from '$lib/services/agents';
+  import { agentLiveTools, agentLiveAgentIds } from '$lib/coreService';
   import { dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import type { Message, Mention } from '$lib/types.js';
 
@@ -94,12 +93,14 @@
   // live spinner (currentTool); completed tools come from the snapshot with their results.
   let liveToolCalls = $derived($agentLiveTools[conversationId] ?? []);
 
-  // First registered agent — fallback agent_id for the group-chat Stop button.
-  // The 1:1 fallback below only covers conversation_id starting with 'agent_'; in a
-  // group chat that's never true, so without this an empty agent_id is sent and the
-  // backend interrupt is a no-op (no agent_id provided). See backend defense-in-depth
-  // in CoreService.interrupt_agent.
-  let defaultAgentId = $derived($agentsList[0]?.agent_id ?? '');
+  // Who runs here, as far as the client knows. Never the first agent in the
+  // list: in a group that named an idle agent and Stop missed. Empty lets
+  // CoreService.interrupt_agent find the running agent itself.
+  let stopAgentId = $derived(
+    agentProgressAgentId
+      || $agentLiveAgentIds[conversationId]
+      || (conversationId.startsWith('agent_') ? conversationId : '')
+  );
 
   // Filter tool_call code blocks from streaming when collapsible is active
   let filteredStreamingText = $derived.by(() => {
@@ -313,7 +314,7 @@
       currentRound={agentProgressRound}
       streamingText={filteredStreamingText}
       conversationId={conversationId}
-      agentId={agentProgressAgentId || (conversationId.startsWith('agent_') ? conversationId : '') || defaultAgentId}
+      agentId={stopAgentId}
       speed={agentProgressSpeed}
     />
   {/if}

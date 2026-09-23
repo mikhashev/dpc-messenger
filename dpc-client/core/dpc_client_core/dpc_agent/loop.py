@@ -823,6 +823,7 @@ async def _finalize_after_guard_stop(
     llm_trace: Dict[str, Any],
     fallback_reason: str,
     task_id: str = "",
+    stop_event: Optional[asyncio.Event] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Shared "guard fired → graceful termination" sequence.
 
@@ -831,20 +832,51 @@ async def _finalize_after_guard_stop(
     a system message, and does one more LLM call without tools so the
     model can produce a clean final answer. If that call fails the
     fallback_reason (or the stop message) is returned instead.
+
+    Two exceptions: after ContextLimitGuard the call is skipped, and a
+    user stop during the call cancels it.
     """
     mw = hooks.last_triggered
     stop_msg = mw.stop_message() if mw is not None else None
     if stop_msg:
         log.warning("Guard %s stopped loop: %s", mw.__class__.__name__, stop_msg)
         messages.append({"role": "system", "content": stop_msg})
+    if isinstance(mw, ContextLimitGuard):
+        # The prompt already sits at the window's edge; a local model spends
+        # minutes prefilling it again for an answer the stop message already gives.
+        log.warning(
+            "Finalising call skipped after ContextLimitGuard: the prompt is at the "
+            "edge of the window, the stop message is the final answer"
+        )
+        return stop_msg or fallback_reason, accumulated_usage, llm_trace
+
+    user_stopped = (
+        "⚠️ Stopped by user while the final answer was being written.\n\n"
+        + (stop_msg or fallback_reason)
+    )
+    if stop_event is not None and stop_event.is_set():
+        llm_trace["stopped_by_user"] = True
+        return user_stopped, accumulated_usage, llm_trace
     try:
-        final_msg, final_usage = await llm.chat(
+        chat_task = asyncio.ensure_future(llm.chat(
             messages,
             tools=None,
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
             task_id=task_id or None,
-        )
+        ))
+        if stop_event is not None:
+            stop_task = asyncio.ensure_future(stop_event.wait())
+            try:
+                await asyncio.wait({chat_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                stop_task.cancel()
+            if not chat_task.done():
+                chat_task.cancel()
+                log.info("Agent stopped by user during the finalising call after a guard stop")
+                llm_trace["stopped_by_user"] = True
+                return user_stopped, accumulated_usage, llm_trace
+        final_msg, final_usage = await chat_task
         accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
         if final_msg and final_msg.get("content"):
             return final_msg["content"], accumulated_usage, llm_trace
@@ -997,6 +1029,7 @@ async def run_llm_loop(
                     accumulated_usage, llm_trace,
                     fallback_reason=f"⚠️ Task exceeded MAX_ROUNDS ({max_rounds}).",
                     task_id=task_id,
+                    stop_event=stop_event,
                 )
 
             # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
@@ -1096,6 +1129,7 @@ async def run_llm_loop(
                     accumulated_usage, llm_trace,
                     fallback_reason="⚠️ Agent loop stopped by guard.",
                     task_id=task_id,
+                    stop_event=stop_event,
                 )
 
             # No tool calls — final response or empty-response retry

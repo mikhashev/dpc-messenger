@@ -24,6 +24,9 @@ export const agentProgressClear = writable<AgentProgressClearEvent | null>(null)
 // list directly instead of accumulating a lossy event stream (no dropped results,
 // survives chat switches).
 export const agentLiveTools = writable<Record<string, any[]>>({});
+// conversation_id -> agent_id of the run in progress, so Stop names the
+// running agent even after a chat switch cleared the page-level id.
+export const agentLiveAgentIds = writable<Record<string, string>>({});
 export const agentTextChunk = writable<AgentTextChunkEvent | null>(null);
 
 // CC agent chat message (injected by CC via send_cc_agent_response)

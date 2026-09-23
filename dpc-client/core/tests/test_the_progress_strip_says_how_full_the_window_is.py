@@ -337,22 +337,20 @@ class TestTheContextGuardIsActuallyFedByTheLoop:
 
     def test_a_run_past_the_ceiling_is_stopped_by_the_loop_itself(self, tmp_path, monkeypatch):
         # 200 000 against CompactionState's 204 800 fallback window is 97.7 %.
-        _response, llm = self._drive(200_000, tmp_path, monkeypatch)
+        response, llm = self._drive(200_000, tmp_path, monkeypatch)
 
-        assert llm.seen_final_messages is not None, "the guard never stopped the loop"
-        injected = "\n".join(
-            m.get("content") or "" for m in llm.seen_final_messages
-            if m.get("role") == "system"
-        )
-        assert "[CONTEXT_LIMIT]" in injected
+        # The stop message is the answer: no finalising call at the window's edge.
+        assert "[CONTEXT_LIMIT]" in response, "the guard never stopped the loop"
+        assert llm.seen_final_messages is None
 
     def test_a_run_with_room_is_not_stopped(self, tmp_path, monkeypatch):
         """The same wiring, below the ceiling: the loop must run on. Without this
         the test above would pass on a guard that stops everything."""
-        _response, llm = self._drive(1_000, tmp_path, monkeypatch)
+        response, llm = self._drive(1_000, tmp_path, monkeypatch)
 
         injected = "\n".join(
             m.get("content") or "" for m in (llm.seen_final_messages or [])
             if m.get("role") == "system"
         )
         assert "[CONTEXT_LIMIT]" not in injected
+        assert "[CONTEXT_LIMIT]" not in response

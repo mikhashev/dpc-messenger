@@ -910,6 +910,10 @@ class DpcAgentManager:
             self._agent = None
         log.info("DpcAgent stopped")
 
+    def has_active_loop(self, conversation_id: str) -> bool:
+        """True while this agent runs a loop in that conversation."""
+        return conversation_id in self._interrupt_events
+
     def interrupt(self, conversation_id: str) -> bool:
         """Signal the active agent loop to stop after the current LLM call/tool finishes."""
         ev = self._interrupt_events.get(conversation_id)

@@ -9434,27 +9434,38 @@ class CoreService:
         logger.info("interrupt_agent called: agent_id=%r, conversation_id=%r", agent_id, conversation_id)
         if not agent_id and conversation_id.startswith("agent_"):
             agent_id = conversation_id
-        if not agent_id:
-            # Defense-in-depth: group-chat Stop button can arrive with empty agent_id
-            # (frontend ChatMessageList.svelte only injects conversation_id fallback for
-            # agent_* chats, not group-*). Resolve to the default agent instead of
-            # erroring out — the Stop should still reach the active loop.
-            agent_id = self._get_default_agent_id()
-            logger.info("interrupt_agent: empty agent_id resolved to default %r", agent_id)
-        if not agent_id:
-            logger.warning("interrupt_agent: no agent_id provided")
-            return {"status": "error", "message": "agent_id required"}
         if not conversation_id:
             conversation_id = agent_id
+        if not conversation_id:
+            logger.warning("interrupt_agent: neither agent_id nor conversation_id provided")
+            return {"status": "error", "message": "agent_id or conversation_id required"}
         provider = self.llm_manager.providers.get("dpc_agent") if self.llm_manager else None
         if not provider or not hasattr(provider, "get_manager"):
             logger.warning("interrupt_agent: DpcAgentProvider not found")
             return {"status": "error", "message": "DpcAgentProvider not available"}
         try:
-            manager = provider.get_manager(agent_id)
-            stopped = manager.interrupt(conversation_id)
-            logger.info("interrupt_agent result: agent_id=%s, conversation_id=%s, stopped=%s", agent_id, conversation_id, stopped)
-            return {"status": "stopped" if stopped else "no_active_loop"}
+            # Stop whoever runs in this conversation: the UI can name the wrong
+            # agent in a group (first in its list), and a stop must still land.
+            managers = dict(getattr(provider, "_managers", {}) or {})
+            legacy = getattr(provider, "_manager", None)
+            if legacy is not None and legacy not in managers.values():
+                managers[""] = legacy
+            named = managers.get(agent_id) if agent_id else None
+            if named is not None and named.has_active_loop(conversation_id):
+                targets = [agent_id]
+            else:
+                targets = [aid for aid, m in managers.items()
+                           if m.has_active_loop(conversation_id)]
+            stopped = [aid for aid in targets if managers[aid].interrupt(conversation_id)]
+            if stopped and agent_id not in stopped:
+                logger.warning(
+                    "interrupt_agent: request named %r, which runs no loop in %s; stopped %s instead",
+                    agent_id, conversation_id, stopped,
+                )
+            logger.info("interrupt_agent result: conversation_id=%s, stopped=%s", conversation_id, stopped)
+            if not stopped:
+                return {"status": "no_active_loop"}
+            return {"status": "stopped", "agent_id": stopped[0], "agent_ids": stopped}
         except Exception as e:
             logger.error("interrupt_agent error: %s", e)
             return {"status": "error", "message": str(e)}
