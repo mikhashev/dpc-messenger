@@ -302,7 +302,7 @@ the same records again.
   over a different window is not compared. The first status can cover only the
   sender's own boundary, so the receiver's reply is over the pair's window; when
   the peer's boundary is the later one, the initiator sends one more status over
-  that window (`window_retry`), and nothing answers it. One exchange is at most
+  that window (`is_correction`), and nothing answers it. One exchange is at most
   three statuses.
 - `GROUP_HISTORY_REQUEST` carries the same window as `since`. The answering
   side exports nothing older, and so never ships what the asker would only

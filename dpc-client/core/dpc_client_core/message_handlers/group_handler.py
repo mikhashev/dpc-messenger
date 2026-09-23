@@ -926,8 +926,16 @@ class GroupHistoryStatusHandler(MessageHandler):
 
         # A peer that predates the boundary sends no `digest_since`; its digest
         # covers its whole history and is compared as before.
+        # Every status this build sends carries the key, via history_status_for.
         legacy_peer = "digest_since" not in payload
         comparable = legacy_peer or same_moment(payload.get("digest_since"), window)
+        if legacy_peer:
+            self.logger.debug(
+                "Group %s: status from %s carries no digest_since — an older build, "
+                "compared over its whole history", group_id, sender_node_id[:20],
+            )
+        elif peer_boundary is None and payload.get(LIVE_HISTORY_BOUNDARY_KEY) is None:
+            self.logger.debug("Group %s: %s has no live-history boundary", group_id, sender_node_id[:20])
 
         # Reply only to the initiating STATUS, to prevent ping-pong: A sends
         # STATUS, B replies once with is_reply=True, A does not reply again.
@@ -936,10 +944,10 @@ class GroupHistoryStatusHandler(MessageHandler):
         # not compare it, and gets one more status over the pair's window.
         if not is_reply:
             await self._send_status(sender_node_id, dict(local, is_reply=True))
-        elif (not legacy_peer and not payload.get("window_retry")
+        elif (not legacy_peer and not payload.get("is_correction")
               and not same_moment(window, own_boundary)):
             await self._send_status(
-                sender_node_id, dict(local, is_reply=True, window_retry=True)
+                sender_node_id, dict(local, is_reply=True, is_correction=True)
             )
 
         if not comparable:
