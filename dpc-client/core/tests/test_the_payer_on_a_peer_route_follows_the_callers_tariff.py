@@ -15,8 +15,8 @@ import pytest
 from dpc_client_core.dpc_agent.provider_facts import provider_facts_for
 
 PEER = "dpc-node-bob"
-PAID = {"in": 0.5, "out": 1.5, "currency": "USD", "unit": "per_1m", "free": False}
-FREE = {"in": 0, "out": 0, "currency": "USD", "unit": "per_1m", "free": True}
+PAID = {"in": 0.5, "out": 1.5, "currency": "USD", "unit": "per_1m_tokens", "free": False}
+FREE = {"in": 0, "out": 0, "currency": "USD", "unit": "per_1m_tokens", "free": True}
 
 
 def _llm():
@@ -69,3 +69,23 @@ def test_an_openai_compatible_row_without_its_address_is_not_called_a_vendor():
     facts = _facts("openai_compatible")
     assert facts["provider_kind"] == "unknown"
     assert facts["tokens_paid_by"] == "unknown"
+
+
+def test_the_fixture_speaks_the_producers_unit():
+    from dpc_client_core.service import MENU_TARIFF_UNIT
+    assert PAID["unit"] == FREE["unit"] == MENU_TARIFF_UNIT
+
+
+@pytest.mark.parametrize("tariff", [
+    {"in": 0.5, "out": 1.5, "currency": "USD", "unit": "per_1k_tokens", "free": False},
+    {"in": 0.5, "out": 1.5, "currency": "USD", "free": False},
+    {"input": 0.5, "output": 1.5, "currency": "USD", "unit": "per_1m_tokens", "free": False},
+    {"in": "cheap", "out": 1.5, "currency": "USD", "unit": "per_1m_tokens", "free": False},
+    "0.5/1.5",
+])
+def test_a_tariff_this_node_cannot_read_names_no_payer(tariff):
+    """The producer's rule: a guest that does not know the unit must not price
+    the row. An unreadable quote read as a gift would tell the agent a paid call
+    is free."""
+    assert _facts("llamacpp_server", tariff)["tokens_paid_by"] == "unknown"
+    assert _facts("deepseek", tariff)["tokens_paid_by"] == "unknown"

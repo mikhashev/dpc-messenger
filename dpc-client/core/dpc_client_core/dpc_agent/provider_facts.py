@@ -56,22 +56,41 @@ def _peer_row(peer_metadata: Optional[Dict[str, Any]], node_id: str, alias: Opti
     return None
 
 
-def _quoted_rate_is_paid(tariff: Any) -> bool:
-    if not isinstance(tariff, dict) or tariff.get("free"):
-        return False
+# service.MENU_TARIFF_UNIT, the unit a menu row's rates are stated in; a test
+# keeps the two equal without importing the service here.
+MENU_TARIFF_UNIT = "per_1m_tokens"
+
+
+def _quote_state(tariff: Any) -> str:
+    """'gift' (no tariff key), 'free' (a declared zero), 'paid', or 'unreadable'.
+
+    The producer's rule is that a guest which does not know the unit must not
+    price the row, so an unknown unit or unparseable rates are 'unreadable',
+    never a gift: read as a gift, a paid call would look free to the agent.
+    """
+    if tariff is None:
+        return "gift"
+    if not isinstance(tariff, dict) or tariff.get("unit") != MENU_TARIFF_UNIT:
+        return "unreadable"
     try:
-        return float(tariff.get("in") or 0) > 0 or float(tariff.get("out") or 0) > 0
-    except (TypeError, ValueError):
-        return False
+        rate_in, rate_out = float(tariff["in"]), float(tariff["out"])
+    except (KeyError, TypeError, ValueError):
+        return "unreadable"
+    if tariff.get("free") or (rate_in == 0 and rate_out == 0):
+        return "free"
+    return "paid" if rate_in > 0 or rate_out > 0 else "unreadable"
 
 
 def _peer_payer(row: Optional[Dict[str, Any]], kind: str) -> str:
-    """No key is the v1 gift and `free` a declared zero: both leave nothing for
+    """No tariff is the v1 gift and `free` a declared zero: both leave nothing for
     the caller to pay, so the payer is whoever bears the model's own cost."""
     if row is None:
         return "unknown"
-    if _quoted_rate_is_paid(row.get("tariff")):
+    state = _quote_state(row.get("tariff"))
+    if state == "paid":
         return "this_node"
+    if state == "unreadable":
+        return "unknown"
     return {"self_hosted": "nobody", "vendor": "peer"}.get(kind, "unknown")
 
 
