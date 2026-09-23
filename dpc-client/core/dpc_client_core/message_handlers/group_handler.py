@@ -564,9 +564,10 @@ class GroupSyncHandler(MessageHandler):
             )
             return
 
-        monitor = self.service.conversation_monitors.get(applied.group_id)
-        if monitor is None:
-            return
+        # Loaded through the factory, not looked up: monitors are created
+        # lazily, and nothing else trims by the stored marker, so skipping an
+        # unloaded one left the older records on disk for good.
+        monitor = self.service._get_or_create_conversation_monitor(applied.group_id)
         dropped = monitor.clear_before(marker)
         if dropped:
             self.logger.info(
