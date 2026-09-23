@@ -331,15 +331,29 @@ def test_an_install_into_an_interpreter_is_refused(command, tmp_path):
     'powershell -Command "Get-Content $env:USERPROFILE\.dpc\providers.json"',
     'bash -c "cat $HOME/.dpc/providers.json"',
 ])
-def test_the_operators_home_is_not_reached_through_a_variable(command, tmp_path):
+def test_the_operators_home_is_not_reached_through_a_variable(command, tmp_path, monkeypatch):
     """Each spelling is from a report on this machine; none is a literal path.
 
     Since the gate expands variables it names the outside path itself for the
     last three, and the approver refuses on that part before its own backstop.
+    USERPROFILE is pinned because a Linux runner has none, and the gate then
+    gives the reason the next test pins instead.
     """
+    monkeypatch.setenv("USERPROFILE", str(Path.home()))
     approve, why = Tier1AutoApprover().verdict(_gate(command, tmp_path))
     assert approve is False
     assert "operator's home" in why or "outside sandbox" in why, why
+
+
+def test_a_variable_the_gate_cannot_expand_is_still_refused(tmp_path, monkeypatch):
+    """With the variable unset, the gate cannot name the path; it says so, and
+    the approver refuses on the part it does not recognise."""
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    approve, why = Tier1AutoApprover().verdict(_gate(
+        'powershell -Command "Get-Content $env:USERPROFILE\\.dpc\\providers.json"',
+        tmp_path))
+    assert approve is False
+    assert "cannot be resolved without running the shell" in why, why
 
 
 def test_plain_inline_code_inside_the_task_is_still_approved(tmp_path):
