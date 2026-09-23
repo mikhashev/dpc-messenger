@@ -6138,17 +6138,7 @@ class CoreService:
             chat_context = None
             group_meta = self.group_manager.get_group(group_id)
             if group_meta:
-                participants = []
-                for nid in group_meta.members:
-                    if nid == self.p2p_manager.node_id:
-                        uname = self.p2p_manager.get_display_name() or "User"
-                        participants.append(f"{uname} (User)")
-                    else:
-                        pname = self.peer_metadata.get(nid, {}).get("name", nid[:16])
-                        participants.append(f"{pname} (peer)")
-                for nid, names in group_meta.agent_names.items():
-                    for aid, dname in names.items():
-                        participants.append(f"{dname} (agent)")
+                participants = self._group_participants(group_meta)
                 chat_context = {
                     "chat_type": "group",
                     "chat_name": group_meta.name,
@@ -6177,6 +6167,39 @@ class CoreService:
                 await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls)
         except Exception as e:
             logger.error("Agent group response failed: %s", e, exc_info=True)
+
+    def _peer_name(self, node_id: str) -> str:
+        """A peer's display name: live metadata, then the peer cache on disk, then the id stub.
+
+        peer_metadata is memory and empty until the peer reconnects, so after a
+        restart the cache is what still knows the name.
+        """
+        name = (self.peer_metadata.get(node_id) or {}).get("name")
+        if name:
+            return name
+        cache = getattr(getattr(self, "p2p_manager", None), "peer_cache", None)
+        try:
+            cached = cache.get_peer(node_id) if cache else None
+        except Exception:
+            cached = None
+        return getattr(cached, "display_name", None) or node_id[:16]
+
+    def _group_participants(self, group_meta) -> List[str]:
+        """Participant labels for an agent's runtime block: humans, then agents with their node."""
+        own = self.p2p_manager.node_id
+        participants = []
+        for nid in group_meta.members:
+            if nid == own:
+                uname = self.p2p_manager.get_display_name() or "User"
+                participants.append(f"{uname} (User)")
+            else:
+                participants.append(f"{self._peer_name(nid)} (peer)")
+        for nid, names in group_meta.agent_names.items():
+            where = "this node" if nid == own else f"peer {self._peer_name(nid)}"
+            for aid, dname in names.items():
+                kind = "external agent" if str(aid).startswith("ext:") else "agent"
+                participants.append(f"{dname} ({kind} on {where})")
+        return participants
 
     def update_group_agent_context(self, group_id: str, agent_id: str,
                                    prompt_tokens: int, token_limit: int,

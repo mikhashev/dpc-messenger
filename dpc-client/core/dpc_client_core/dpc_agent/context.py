@@ -138,18 +138,70 @@ def _deferred_tasks_digest(agent_root: pathlib.Path, *, limit: int = 5) -> Optio
     return digest
 
 
+def context_usage_ratio(session_state: Optional[Dict[str, Any]]) -> float:
+    """How full the window is, for sizing Active Recall; unmeasured reads the history floor.
+
+    `context_usage_percent` is None until a prompt has been measured in this chat
+    (a group's first turn after a restart). History alone is a lower bound on the
+    prompt, so it stands in rather than a 0 that would size recall for an empty window.
+    """
+    state = session_state or {}
+    measured = state.get("context_usage_percent")
+    if measured is None:
+        measured = state.get("history_usage_percent") or 0
+    return float(measured) / 100.0
+
+
+def _build_budget(
+    agent_root: pathlib.Path,
+    billing_model: Optional[str],
+    provider_facts: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Whose engine answers, what kind of model, who pays per token — and the configured billing, if any.
+
+    `billing` appears only when the agent's config sets `billing_model`; nothing
+    known is printed as "unknown", never as "subscription".
+    """
+    facts = dict(provider_facts or {})
+    budget: Dict[str, Any] = {
+        "provider_alias": facts.get("provider_alias", "unknown"),
+        "route": facts.get("route", "unknown"),
+    }
+    if facts.get("served_by"):
+        budget["served_by"] = facts["served_by"]
+    budget["provider_kind"] = facts.get("provider_kind", "unknown")
+    budget["tokens_paid_by"] = facts.get("tokens_paid_by", "unknown")
+
+    state_path = agent_root / "state" / "state.json"
+    state_data = json.loads(read_text(state_path)) if state_path.exists() else {}
+    if billing_model == "pay_per_use":
+        spent = float(state_data.get("spent_usd", 0))
+        total = float(state_data.get("budget_usd", 0))
+        budget.update({
+            "billing": "pay_per_use",
+            "spent_usd": spent,
+            "total_usd": total,
+            "remaining_usd": max(0.0, total - spent),
+        })
+    else:
+        if billing_model:
+            budget["billing"] = billing_model
+        if "tokens_used_total" in state_data:
+            budget["agent_lifetime_tokens"] = int(state_data.get("tokens_used_total", 0))
+    return budget
+
+
 def _build_runtime_section(
     agent_root: pathlib.Path,
     task: Dict[str, Any],
     session_state: Optional[Dict[str, Any]] = None,
-    billing_model: str = "subscription",
+    billing_model: Optional[str] = None,
+    provider_facts: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build the runtime context section.
 
-    billing_model is the authoritative source of truth for which budget shape
-    to emit — passed down from AgentConfig so a fresh state.json (empty dict)
-    is correctly classified for pay_per_use agents before the first task has
-    written spent_usd.
+    billing_model is the agent's configured `billing_model`, None when the config
+    does not set it. provider_facts is `provider_facts.provider_facts_for(...)`.
     """
     task_info = {"id": task.get("id"), "type": task.get("type")}
     chat_ctx = task.get("chat_context")
@@ -173,26 +225,8 @@ def _build_runtime_section(
     if deferred:
         runtime_data["deferred_tasks"] = deferred
 
-    # Budget info from agent state. Shape depends on billing model:
-    #   subscription → {"billing": "subscription", "tokens_used_total": N}
-    #   pay_per_use  → {"billing": "pay_per_use", "spent_usd", "total_usd", "remaining_usd"}
     try:
-        state_path = agent_root / "state" / "state.json"
-        state_data = json.loads(read_text(state_path)) if state_path.exists() else {}
-        if billing_model == "subscription":
-            runtime_data["budget"] = {
-                "billing": "subscription",
-                "tokens_used_total": int(state_data.get("tokens_used_total", 0)),
-            }
-        else:
-            spent = float(state_data.get("spent_usd", 0))
-            total = float(state_data.get("budget_usd", 0))
-            runtime_data["budget"] = {
-                "billing": "pay_per_use",
-                "spent_usd": spent,
-                "total_usd": total,
-                "remaining_usd": max(0.0, total - spent),
-            }
+        runtime_data["budget"] = _build_budget(agent_root, billing_model, provider_facts)
     except Exception:
         log.debug("Failed to read budget info", exc_info=True)
 
@@ -200,8 +234,9 @@ def _build_runtime_section(
     if session_state:
         token_limit = session_state.get("tokens_limit") or 204800
         history_tokens = session_state.get("history_tokens", 0)
-        tokens_after_last_response = session_state.get("tokens_after_last_response", 0)
-        tokens_after_last_response_at = session_state.get("tokens_after_last_response_at")
+        # 0 is what the monitor holds when nothing was measured in this chat; a
+        # real prompt is never 0 tokens, so it is printed as null (unknown).
+        tokens_after_last_response = session_state.get("tokens_after_last_response") or None
         runtime_data["session"] = {
             "messages_count": session_state.get("messages_count", 0),
             "tokens_limit": token_limit,
@@ -213,8 +248,12 @@ def _build_runtime_section(
             # request this is a lower bound on actual usage. Pair with *_at timestamp for
             # freshness. Matches "Context size: X%" in dpc-client.log.
             "tokens_after_last_response": tokens_after_last_response,
-            "tokens_after_last_response_at": tokens_after_last_response_at,
-            "context_usage_percent": session_state.get("context_usage_percent", 0),
+            "tokens_after_last_response_at": (
+                session_state.get("tokens_after_last_response_at")
+                if tokens_after_last_response else None),
+            "context_usage_percent": (
+                session_state.get("context_usage_percent")
+                if tokens_after_last_response else None),
         }
         breakdown = session_state.get("context_breakdown")
         if breakdown:
@@ -459,7 +498,8 @@ def build_llm_messages(
     sandbox_read_only: Optional[List[str]] = None,
     sandbox_read_write: Optional[List[str]] = None,
     embedding_provider: Optional[Any] = None,
-    billing_model: str = "subscription",
+    billing_model: Optional[str] = None,
+    provider_facts: Optional[Dict[str, Any]] = None,
     reader_identity: Optional[Dict[str, str]] = None,
     extended_read_enabled: bool = True,
     shared_knowledge_enabled: bool = True,
@@ -623,7 +663,7 @@ def build_llm_messages(
                     log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
 
                 _results = _backend.fuser.fuse(_faiss_results, _keyword_results, graph_results=_graph_results)
-                _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
+                _ctx_ratio = context_usage_ratio(session_state)
                 _recall = get_recall_block(
                     _results, context_usage_ratio=_ctx_ratio, agent_root=agent_root,
                     extended_read_enabled=extended_read_enabled,
@@ -670,7 +710,8 @@ def build_llm_messages(
     if recall_text:
         turn_parts.append(recall_text)
     turn_parts.append(
-        _build_runtime_section(agent_root, task, session_state, billing_model=billing_model))
+        _build_runtime_section(agent_root, task, session_state, billing_model=billing_model,
+                               provider_facts=provider_facts))
     turn_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
 
     # Context breakdown for UI tooltip (token estimates per component)
@@ -986,10 +1027,10 @@ Available skills are listed below. Choose the one whose description best matches
 
 Your runtime context includes session metrics:
 - `history_tokens` — conversation messages only (matches UI counter)
-- `tokens_after_last_response` — full context size measured AFTER your previous response (system + memory + tools + history)
+- `tokens_after_last_response` — full context size measured AFTER your previous response (system + memory + tools + history). `null` means not measured in this chat yet (e.g. the first turn after a restart) — it does NOT mean empty; read `history_usage_percent` as the floor
 - `tokens_after_last_response_at` — ISO 8601 timestamp of when `tokens_after_last_response` was measured
-- `context_usage_percent` — how full your context window is (based on `tokens_after_last_response`)
-- `context_breakdown` — per-section composition of your previous request's context: section name + estimated tokens (system prompt, scratchpad, identity, knowledge index, skills, tool capabilities, Active Recall with its file list). Token values are rough estimates — read the proportions, not the absolutes.
+- `context_usage_percent` — how full your context window is (based on `tokens_after_last_response`); `null` when that is `null`
+- `context_breakdown` — per-section composition of your previous request in this chat: section name + estimated tokens (system prompt, scratchpad, identity, knowledge index, skills, tool capabilities, Active Recall with its file list). Token values are rough estimates — read the proportions, not the absolutes.
 
 **Thresholds:**
 - >65%: Start wrapping up open threads, save important insights
@@ -1010,6 +1051,15 @@ higher (this turn's user message + tool results are not yet included). Treat
 the value as a lower bound on current usage. Use `tokens_after_last_response_at`
 to judge how recent the measurement is — if many tool rounds passed since,
 the live number may be noticeably above this lower bound.
+
+Your runtime `budget` says who runs and pays for your model calls:
+- `provider_alias` — the model endpoint you run on; `route` — `local` (this node's engine) or `peer` (another node's, named in `served_by`)
+- `provider_kind` — `local` (a model on the serving node's own hardware), `vendor` (a paid API) or `unknown`
+- `tokens_paid_by` — `nobody` (local model), `this_node` (this node's API key), `peer` (the serving node) or `unknown`
+- `agent_lifetime_tokens` — tokens YOU have used across all your chats and tasks since your state began; not this chat, not this node
+- `billing` and the `*_usd` fields appear only when your configuration sets a billing model
+
+In a group, `task.participants` names each agent's node: `(agent on this node)` is on the same node as you, `(agent on peer X)` runs on peer X's node; `external agent` is a session outside DPC posting through the bridge.
 
 ## Constraints
 

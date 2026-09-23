@@ -173,7 +173,7 @@ class DpcAgentManager:
             budget_usd=self.config.get("budget_usd"),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=False,
-            billing_model=self.config.get("billing_model", "subscription"),
+            **self._billing_kwargs(),
         )
 
         # Create agent with specific provider
@@ -228,7 +228,7 @@ class DpcAgentManager:
             budget_usd=self.config.get("budget_usd"),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=self.config.get("enable_task_queue", True),
-            billing_model=self.config.get("billing_model", "subscription"),
+            **self._billing_kwargs(),
             embedding_device=_mem_cfg_for_agent.embedding_device,
             embedding_model=_mem_cfg_for_agent.embedding_model,
         )
@@ -1222,6 +1222,8 @@ class DpcAgentManager:
             elif hasattr(agent, '_last_cap_info') and agent._last_cap_info:
                 new_token_count = agent._last_cap_info.get("estimated_tokens_before", 0)
 
+            self._remember_breakdown(conversation_id, agent)
+
             if new_token_count is not None:
                 monitor._tokens_after_last_response = new_token_count
                 monitor._tokens_after_last_response_at = utc_now_iso()
@@ -1414,6 +1416,20 @@ class DpcAgentManager:
                     await broadcast(gid)
         return window
 
+    def _billing_kwargs(self) -> Dict[str, Any]:
+        """billing_model for AgentConfig, and whether the config named it or it is the default."""
+        return {
+            "billing_model": self.config.get("billing_model", "subscription"),
+            "billing_model_explicit": "billing_model" in self.config,
+        }
+
+    def _remember_breakdown(self, conversation_id: str, agent: Any) -> None:
+        """Keep the context breakdown of the request just made, under the chat it was made in."""
+        if not hasattr(self, "_last_breakdowns"):
+            self._last_breakdowns = {}
+        cap_info = getattr(agent, "_last_cap_info", None) or {}
+        self._last_breakdowns[conversation_id] = cap_info.get("context_breakdown")
+
     def get_session_state(self, conversation_id: str) -> Dict[str, Any]:
         """
         Get session state for an agent conversation.
@@ -1460,17 +1476,18 @@ class DpcAgentManager:
             if own and own[0] > (tokens_after_last_response or 0):
                 tokens_after_last_response = own[0]
                 tokens_after_last_response_at = own[2]
-        context_breakdown = None
-        agent = self._last_used_agent
-        if agent and hasattr(agent, '_last_cap_info') and agent._last_cap_info:
-            context_breakdown = agent._last_cap_info.get("context_breakdown")
+        # From the last request made in THIS chat; the agent's own _last_cap_info
+        # is its last request in any chat.
+        context_breakdown = getattr(self, "_last_breakdowns", {}).get(conversation_id)
 
         return {
             "history_tokens": history_tokens,
             "history_usage_percent": round(history_tokens / token_limit * 100, 2) if token_limit else 0,
             "tokens_after_last_response": tokens_after_last_response,
             "tokens_after_last_response_at": tokens_after_last_response_at,
-            "context_usage_percent": round(tokens_after_last_response / token_limit * 100, 2) if token_limit and tokens_after_last_response else 0,
+            # None, not 0, when no prompt was measured in this chat: a group's
+            # first turn after a restart has history but no figure.
+            "context_usage_percent": round(tokens_after_last_response / token_limit * 100, 2) if token_limit and tokens_after_last_response else None,
             "tokens_limit": token_limit,
             "messages_count": len(monitor.message_history),
             "context_breakdown": context_breakdown,

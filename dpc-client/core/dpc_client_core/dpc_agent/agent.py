@@ -100,6 +100,9 @@ class AgentConfig:
 
     # Budget settings
     billing_model: str = "subscription"  # or "pay_per_use"
+    # True only when the agent's config names billing_model. The budget tracker
+    # needs a shape either way; the runtime block prints the word only when set.
+    billing_model_explicit: bool = False
 
     # Device and name of the embedding model, carried here because the agent builds
     # the per-process singleton before the manager's index pass runs — a value that
@@ -224,6 +227,23 @@ class DpcAgent:
         self._last_cap_info: Optional[Dict[str, Any]] = None
 
         log.info(f"DpcAgent initialized with storage at {self.agent_root}")
+
+    def _runtime_billing_model(self) -> Optional[str]:
+        """The configured billing word for the runtime block, or None when nothing configured it."""
+        return self.config.billing_model if self.config.billing_model_explicit else None
+
+    def _provider_facts(self) -> Dict[str, Any]:
+        """Whose engine answers this agent, what kind of model, who pays — for the runtime block."""
+        from .provider_facts import provider_facts_for
+        try:
+            return provider_facts_for(
+                self.llm._llm_manager, self._provider_alias,
+                compute_host=getattr(self.llm, "_compute_host", "") or "",
+                peer_metadata=getattr(self._service, "peer_metadata", None),
+            )
+        except Exception:
+            log.debug("provider facts unavailable", exc_info=True)
+            return {}
 
     def set_provider_alias(self, provider_alias: Optional[str]) -> None:
         """Switch this agent's inference provider at runtime (Main LLM change) without recreating the agent, so the task processor, memory and Telegram bridge stay intact."""
@@ -360,7 +380,8 @@ class DpcAgent:
             sandbox_read_only=sandbox_ro,
             sandbox_read_write=sandbox_rw,
             embedding_provider=self._embedding_provider,
-            billing_model=self.config.billing_model,
+            billing_model=self._runtime_billing_model(),
+            provider_facts=self._provider_facts(),
             reader_identity=reader_identity,
             extended_read_enabled=extended_read,
             shared_knowledge_enabled=shared_knowledge,
