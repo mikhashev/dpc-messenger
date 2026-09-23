@@ -2143,14 +2143,25 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         them away would turn a late arrival into a second reset.
 
         Returns how many were dropped, so the caller can stay quiet when the
-        answer is none.
+        answer is none. What is dropped is archived first; a failed archive
+        cancels the trim, so a wrong marker hides messages but cannot destroy them.
         """
         if not boundary:
             return 0
 
         kept = [m for m in self.message_history if (m.get("timestamp") or "") >= boundary]
-        dropped = len(self.message_history) - len(kept)
+        cut = [m for m in self.message_history if (m.get("timestamp") or "") < boundary]
+        dropped = len(cut)
         if not dropped:
+            return 0
+
+        try:
+            archive_path = self._archive_messages(cut, reason="marker")
+        except Exception as e:  # noqa: BLE001 — any failure keeps the history
+            logger.error(
+                "Monitor %s: could not archive the %d message(s) predating %s (%s) — nothing dropped",
+                self.conversation_id, dropped, boundary, e,
+            )
             return 0
 
         self.message_history = kept
@@ -2165,10 +2176,59 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self._history_dirty = True
         self.save_history()
         logger.info(
-            "Monitor %s: dropped %d message(s) predating %s",
+            "Monitor %s: dropped %d message(s) predating %s (%s .. %s), archived to %s",
             self.conversation_id, dropped, boundary,
+            cut[0].get("timestamp"), cut[-1].get("timestamp"), archive_path or "nowhere: history not persisted",
         )
         return dropped
+
+    def _archive_messages(self, messages: List[Dict[str, Any]], reason: str) -> Optional[Path]:
+        """Write exactly these messages to archive/ as one session file.
+
+        Unlike `_archive_current_session` this raises instead of logging, so a
+        caller about to delete can refuse to, and it archives the span it is
+        given rather than the whole file. Returns None when this conversation
+        does not persist history — there is nothing on disk to protect.
+        """
+        if not self.persist_history:
+            return None
+
+        import os
+        import tempfile
+
+        path = self._get_history_path()
+        now = datetime.now(timezone.utc)
+        archive_dir = path.parent / "archive" / now.strftime("%Y") / now.strftime("%m")
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{now.strftime('%Y-%m-%dT%H-%M-%S')}_{reason}"
+        archive_path = archive_dir / f"{stem}_session.json"
+        n = 1
+        while archive_path.exists():
+            archive_path = archive_dir / f"{stem}-{n}_session.json"
+            n += 1
+
+        data = {
+            "conversation_id": self.conversation_id,
+            "version": 1,
+            "archived_at": now.isoformat(),
+            "session_reason": reason,
+            "message_count": len(messages),
+            "messages": messages,
+        }
+        fd, tmp = tempfile.mkstemp(dir=archive_dir, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, archive_path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+        self._generate_session_digest(data, archive_path)
+        return archive_path
 
     def window_content_hashes(self, messages: List[Any]) -> List[str]:
         """The `content_hash` of every message an extraction read.

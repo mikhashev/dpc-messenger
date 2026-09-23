@@ -525,7 +525,7 @@ class GroupSyncHandler(MessageHandler):
     def command_name(self) -> str:
         return "GROUP_SYNC"
 
-    async def _honour_session_marker(self, local, marker_before, applied) -> None:
+    async def _honour_session_marker(self, members_before, marker_before, applied) -> None:
         """Clear what predates a newly learned session boundary.
 
         This is the half of ADR-038 Q3 that pays for the field. A node that was
@@ -535,11 +535,13 @@ class GroupSyncHandler(MessageHandler):
         older than it ends that, and it ends it symmetrically: whoever was away
         does the clearing, not whoever was present.
 
-        The marker is only obeyed when its own evidence proves the quorum, so a
-        peer cannot erase a history by announcing a reset that never happened.
+        The marker is only obeyed when every member of OUR roster from before
+        this sync signed the reset. The evidence's own participant list, and
+        the record's members, arrive in the same letter as the marker, so
+        checking against either proves only that the sender agreed with itself.
         Unprovable evidence is left alone rather than trusted — the certificate
         may simply not have arrived yet, and the marker will be honoured when it
-        does.
+        does. The roster itself is still unsigned (ADR-038, Pending).
         """
         if applied is None:
             return
@@ -549,13 +551,20 @@ class GroupSyncHandler(MessageHandler):
         if marker_before and marker <= marker_before:
             return
 
+        if not members_before:
+            self.logger.warning(
+                "Session marker on %s arrived with no local roster to check it against — history untouched",
+                applied.group_id,
+            )
+            return
+
         evidence = getattr(applied, "session_reset_evidence", None) or {}
         from dpc_client_core.signing import quorum_is_proven
 
-        if not quorum_is_proven(
+        if evidence.get("conversation_id") != applied.group_id or not quorum_is_proven(
             proposal_id=evidence.get("proposal_id"),
-            conversation_id=evidence.get("conversation_id"),
-            participants=evidence.get("participants"),
+            conversation_id=applied.group_id,
+            participants=members_before,
             votes=evidence.get("votes"),
         ):
             self.logger.warning(
@@ -615,9 +624,10 @@ class GroupSyncHandler(MessageHandler):
             return None
 
         marker_before = local.session_started_at
+        members_before = frozenset(local.members)
 
         result = self.service.group_manager.apply_sync(payload)
-        await self._honour_session_marker(local, marker_before, result)
+        await self._honour_session_marker(members_before, marker_before, result)
         # Re-added by the same peer that refused us: the standing refusal is
         # spent, and without this the group would stay unasked until a restart.
         if result and self.service.p2p_manager.node_id in getattr(result, "members", ()):

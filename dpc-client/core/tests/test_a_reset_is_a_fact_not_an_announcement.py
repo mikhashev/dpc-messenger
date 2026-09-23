@@ -119,6 +119,7 @@ def _monitor(timestamps):
     monitor.message_buffer = []
     monitor._history_dirty = False
     monitor.save_history = lambda: True
+    monitor._archive_messages = lambda messages, reason: None
     return monitor
 
 
