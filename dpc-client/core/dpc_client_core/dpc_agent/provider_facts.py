@@ -49,6 +49,8 @@ def provider_kind(provider_type: Optional[str], base_url: Optional[str] = None) 
 
 
 def _peer_row(peer_metadata: Optional[Dict[str, Any]], node_id: str, alias: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not alias:
+        return None
     rows = ((peer_metadata or {}).get(node_id) or {}).get("providers") or []
     for row in rows:
         if isinstance(row, dict) and row.get("alias") == alias:

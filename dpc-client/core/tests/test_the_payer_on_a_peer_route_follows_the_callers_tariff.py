@@ -89,3 +89,12 @@ def test_a_tariff_this_node_cannot_read_names_no_payer(tariff):
     is free."""
     assert _facts("llamacpp_server", tariff)["tokens_paid_by"] == "unknown"
     assert _facts("deepseek", tariff)["tokens_paid_by"] == "unknown"
+
+
+def test_a_call_with_no_alias_matches_no_menu_row():
+    """None == None must not pick a row: a row that lost its alias would
+    otherwise lend its type and tariff to a call that named no provider."""
+    peers = {PEER: {"providers": [{"type": "deepseek", "tariff": PAID}]}}
+    facts = provider_facts_for(_llm(), None, compute_host=PEER, peer_metadata=peers)
+    assert facts["provider_kind"] == "unknown"
+    assert facts["tokens_paid_by"] == "unknown"
