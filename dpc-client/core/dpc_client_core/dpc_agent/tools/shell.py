@@ -2476,9 +2476,10 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
 
         note = ""
         if run.exceeded_mb:
+            # Name the ceiling the run was actually held to.
             note = (
                 f"Error: the command and its children reached "
-                f"{run.exceeded_mb} MB, over the {_MEMORY_CEILING_MB} MB "
+                f"{run.exceeded_mb} MB, over the {run.ceiling_mb} MB "
                 f"ceiling, and were killed"
             )
             # Naming the clock when the ceiling is what fired tells the agent

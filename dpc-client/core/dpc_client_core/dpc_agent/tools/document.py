@@ -526,7 +526,7 @@ def _run_djvu(binary: str, args: List[str]) -> Tuple[int, str, str]:
         return -1, "", (
             f"{Path(binary).name} killed by DPC memory ceiling "
             f"({run.ceiling_mb} MB): its tree reached {run.exceeded_mb} MB "
-            f"- {run.killed}"
+            f"- {run.killed}. Raise DPC_SHELL_MEMORY_LIMIT_MB (a restart applies it)."
         )
     if run.timed_out:
         return -1, "", (

@@ -82,7 +82,7 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
             # the tree was killed under it, and nothing said so.
             return {"success": False,
                     "error": f"Git and its children reached {result.exceeded_mb} MB, "
-                             f"over the ceiling, and were killed - {result.killed}"}
+                             f"over the {result.ceiling_mb} MB ceiling, and were killed - {result.killed}"}
         if result.timed_out:
             return {"success": False,
                     "error": f"Git command timed out (30s) - {result.killed}"}
@@ -148,7 +148,7 @@ def _run_git_external(repo_path: str, args: List[str], timeout: int = 30) -> Dic
             # the tree was killed under it, and nothing said so.
             return {"success": False,
                     "error": f"Git and its children reached {result.exceeded_mb} MB, "
-                             f"over the ceiling, and were killed - {result.killed}"}
+                             f"over the {result.ceiling_mb} MB ceiling, and were killed - {result.killed}"}
         if result.timed_out:
             return {"success": False,
                     "error": f"Git command timed out ({timeout}s) - {result.killed}"}

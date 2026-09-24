@@ -62,6 +62,20 @@ class TestOllamaTokenization:
         """Create LLMManager instance for tests."""
         return LLMManager()
 
+    @pytest.fixture(autouse=True)
+    def _offline_tokenizer(self, monkeypatch):
+        # "llama*" maps to the gpt2 tokenizer (token_count_manager.py
+        # OLLAMA_TOKENIZER_MAP), so on a cold local cache every count_tokens()
+        # call below would fetch gpt2 from the HF CDN. Every assertion in this
+        # class only needs a count in a wide range, which the character-
+        # estimation fallback also produces, so HF_HUB_OFFLINE=1 is enough —
+        # no need to stub a real tokenizer. It works because _fetch_tokenizer
+        # re-reads os.environ at call time and the cache-first lookup already
+        # uses local_files_only=True (token_count_manager.py _fetch_tokenizer,
+        # _get_tokenizer_for_ollama): a contract of our manager, not of
+        # huggingface_hub, which bakes HF_HUB_OFFLINE at import instead.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
     def test_tokenization_uses_transformers(self, llm_manager):
         """Verify tokenizer loads for Ollama models."""
         text = "The quick brown fox jumps over the lazy dog"
@@ -116,8 +130,11 @@ class TestModelFamilyDetection:
         """Create LLMManager instance for tests."""
         return LLMManager()
 
-    def test_llama_models(self, llm_manager):
+    def test_llama_models(self, llm_manager, monkeypatch):
         """Test llama model family detection."""
+        # Offline: every one of these maps to gpt2 (see TestOllamaTokenization
+        # for why this is enough — only count > 0 is asserted below).
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         test_cases = [
             "llama2:7b",
             "llama3:8b",
@@ -275,8 +292,12 @@ class TestTokenCountManagerDirectly:
         """Create TokenCountManager instance for tests."""
         return TokenCountManager()
 
-    def test_count_tokens_delegation(self, token_manager):
+    def test_count_tokens_delegation(self, token_manager, monkeypatch):
         """Verify TokenCountManager counts tokens correctly."""
+        # Offline for the llama leg (gpt2) — same reasoning as
+        # TestOllamaTokenization: a range assertion, so the fallback estimate
+        # is as good as a real fetch and costs no network call.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         text = "The quick brown fox jumps over the lazy dog"
 
         # Count tokens for different models
@@ -289,8 +310,12 @@ class TestTokenCountManagerDirectly:
         assert 5 <= gpt_count <= 20
         assert 5 <= claude_count <= 20
 
-    def test_validate_prompt_success(self, token_manager):
+    def test_validate_prompt_success(self, token_manager, monkeypatch):
         """Test validate_prompt when prompt fits in context window."""
+        # validate_prompt() calls count_tokens() internally, which hits the
+        # same gpt2-on-cold-cache path as the tests above; not on the
+        # reviewers' list but the same defect, found by reading this file.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         prompt = "Hello world, this is a short prompt"
         model = "llama3.1:8b"
         context_window = 16384
@@ -305,8 +330,11 @@ class TestTokenCountManagerDirectly:
         assert is_valid is True
         assert error_msg is None
 
-    def test_validate_prompt_failure(self, token_manager):
+    def test_validate_prompt_failure(self, token_manager, monkeypatch):
         """Test validate_prompt when prompt too large."""
+        # Same reason as test_validate_prompt_success: validate_prompt()
+        # counts tokens for the llama model internally.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         # Create a very long prompt (simulate 10,000 tokens)
         prompt = "word " * 10000  # ~10,000 tokens (4 chars/token estimate)
         model = "llama3.1:8b"
@@ -382,8 +410,11 @@ class TestLLMManagerWithTokenCountManager:
         assert hasattr(llm_manager, "token_count_manager")
         assert isinstance(llm_manager.token_count_manager, TokenCountManager)
 
-    def test_count_tokens_delegates(self, llm_manager):
+    def test_count_tokens_delegates(self, llm_manager, monkeypatch):
         """Verify LLMManager.count_tokens() delegates to TokenCountManager."""
+        # Offline: only equality between the two call paths is asserted, so
+        # the character-estimation fallback proves it as well as a real fetch.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         text = "Hello world"
         model = "llama3.1:8b"
 
@@ -396,8 +427,10 @@ class TestLLMManagerWithTokenCountManager:
         # Should be identical
         assert llm_count == direct_count
 
-    def test_tokenizer_cache_shared(self, llm_manager):
+    def test_tokenizer_cache_shared(self, llm_manager, monkeypatch):
         """Verify tokenizer cache is maintained by TokenCountManager."""
+        # Offline: only the cache attribute's presence is asserted below.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         # Count tokens twice for same model
         llm_manager.count_tokens("Hello", "llama3.1:8b")
         llm_manager.count_tokens("World", "llama3.1:8b")

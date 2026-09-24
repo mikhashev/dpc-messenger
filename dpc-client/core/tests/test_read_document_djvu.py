@@ -250,6 +250,7 @@ def test_a_tree_killed_by_the_memory_ceiling_names_the_ceiling_and_the_usage(mon
     assert "ddjvu killed by DPC memory ceiling (8192 MB)" in err
     assert "8300 MB" in err
     assert "descendants were killed" in err
+    assert "Raise DPC_SHELL_MEMORY_LIMIT_MB (a restart applies it)" in err
 
 
 # ------------------------------------------------------------- the text route

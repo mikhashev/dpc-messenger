@@ -125,7 +125,8 @@ def _watch_memory(process: "subprocess.Popen", ceiling_mb: int, verdict: dict) -
                 "the command tree of pid %s reached %d MB, over the %d MB ceiling — killing it",
                 process.pid, round(used), ceiling_mb,
             )
-            _kill_process_tree(process)
+            # The real verdict: a partial kill must not be reported as a full one.
+            verdict["killed"] = _kill_process_tree(process)
             return
         time.sleep(_MEMORY_POLL_SECONDS)
 
@@ -302,6 +303,7 @@ class SupervisedRun:
     timed_out: bool = False
     exceeded_mb: Optional[int] = None
     # The ceiling this run was held to, so a report names the one applied.
+    # 0 = the ceiling was off; None = not set (built outside run_supervised).
     ceiling_mb: Optional[int] = None
     killed: str = ""
 
@@ -360,15 +362,17 @@ def run_supervised(
     )
 
     verdict: dict = {}
+    watch_thread: Optional[threading.Thread] = None
     if ceiling and ceiling > 0:
-        threading.Thread(
+        watch_thread = threading.Thread(
             target=_watch_memory,
             args=(process, ceiling, verdict),
             name=f"dpc-memory-watch-{process.pid}",
             daemon=True,
-        ).start()
+        )
+        watch_thread.start()
 
-    run = SupervisedRun(ceiling_mb=ceiling or None)
+    run = SupervisedRun(ceiling_mb=ceiling)
     try:
         run.stdout, run.stderr = process.communicate(timeout=timeout)
         run.returncode = process.returncode
@@ -377,8 +381,11 @@ def run_supervised(
         run.killed = _kill_process_tree(process)
         run.stdout, run.stderr = _drain_after_kill(process)
         run.returncode = process.returncode
+    if watch_thread is not None:
+        # communicate() can return before the watcher has written its verdict.
+        watch_thread.join(timeout=15)
     if verdict.get("exceeded_mb"):
         run.exceeded_mb = verdict["exceeded_mb"]
         if not run.killed:
-            run.killed = "the command and its descendants were killed"
+            run.killed = verdict.get("killed") or "the command and its descendants were killed"
     return run

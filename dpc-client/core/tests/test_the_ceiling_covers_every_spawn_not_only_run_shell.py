@@ -109,9 +109,70 @@ def test_an_allocator_under_git_dies_at_the_ceiling(monkeypatch):
     )
 
     assert result["success"] is False
-    # The caller has to be told the tree was killed under it. A non-zero exit
-    # with an empty stderr is what this looked like before.
-    assert "over the ceiling" in (result["error"] or ""), result["error"]
+    # The caller has to be told the tree was killed under it, and which
+    # ceiling it was measured against. A non-zero exit with an empty stderr
+    # is what this looked like before; "over the ceiling" with no number is
+    # what it looked like before git.py started naming result.ceiling_mb.
+    assert "over the 200 MB ceiling" in (result["error"] or ""), result["error"]
+
+
+def test_run_ceiling_mb_records_the_applied_value_not_zero_or_none():
+    """`ceiling or None` used to collapse 0 (deliberately off) and a real
+    ceiling that happened to be applied into the same value, so a caller
+    reading `run.ceiling_mb` could not tell "off" from "unset". The applied
+    value must survive as-is.
+
+    Mutation check: reverting the `SupervisedRun(ceiling_mb=ceiling)` line in
+    `run_supervised` back to `SupervisedRun()` turns this red, because the
+    dataclass default (None) would then be returned in all three cases.
+    """
+    run = run_supervised(
+        [sys.executable, "-c", "pass"], launcher="test", timeout=30, ceiling_mb=200,
+    )
+    assert run.ceiling_mb == 200
+
+    from dpc_client_core.dpc_agent.tools import process as process_mod
+
+    run_default = run_supervised(
+        [sys.executable, "-c", "pass"], launcher="test", timeout=30,
+    )
+    assert run_default.ceiling_mb == process_mod._MEMORY_CEILING_MB
+
+    run_off = run_supervised(
+        [sys.executable, "-c", "pass"], launcher="test", timeout=30, ceiling_mb=0,
+    )
+    assert run_off.ceiling_mb == 0, "ceiling_mb=0 (explicitly off) must not become None"
+
+
+def test_a_partial_kill_verdict_reaches_run_killed_not_an_assumed_full_kill(monkeypatch):
+    """The ceiling-kill path used to overwrite whatever `_kill_process_tree`
+    actually reported with a hardcoded "the command and its descendants were
+    killed" — a sentence the module's own comment forbids claiming when the
+    kill was only partial (a denied taskkill, a killpg that missed a stray).
+    """
+    from dpc_client_core.dpc_agent.tools import process as process_mod
+
+    partial = "the kill did not reach the whole tree (taskkill exited 5); a descendant may survive"
+    real_kill = process_mod._kill_process_tree
+
+    def fake_kill(process):
+        # Still has to actually end the process — only the *report* is under
+        # test here. A fake that merely returns a string without killing
+        # leaves the real allocator running as an orphan after the test ends.
+        real_kill(process)
+        return partial
+
+    monkeypatch.setattr(process_mod, "_kill_process_tree", fake_kill)
+
+    run = run_supervised(
+        [sys.executable, "-c", ALLOCATOR],
+        launcher="test(partial kill)",
+        timeout=60,
+        ceiling_mb=200,
+    )
+
+    assert run.exceeded_mb is not None
+    assert run.killed == partial, run.killed
 
 
 def test_the_git_tool_spawns_through_the_supervisor(monkeypatch):
