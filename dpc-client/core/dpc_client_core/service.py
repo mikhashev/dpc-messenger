@@ -8619,6 +8619,42 @@ class CoreService:
         except Exception as e:
             logger.error("Ark response to CC's @Ark mention failed: %s", e, exc_info=True)
 
+    def _inference_peer_for(self, compute_host: str = None, provider: str = None):
+        """The peer a text query will run on: compute_host, or the peer_id of a
+        remote_peer alias the local path would pick. None means it stays here."""
+        if compute_host:
+            return compute_host
+        from .providers.remote_peer_provider import RemotePeerProvider
+        alias = provider or getattr(self.llm_manager, "default_provider", None)
+        chosen = (getattr(self.llm_manager, "providers", None) or {}).get(alias) if alias else None
+        if isinstance(chosen, RemotePeerProvider):
+            return chosen.peer_id
+        return None
+
+    def _context_for_compute_peer(self, local_context, device_context, peer_id: str):
+        """Filter personal and device context for a peer that will run the inference.
+
+        Uses the same peer filters as REQUEST_CONTEXT. Fails closed: if either
+        filter raises, both contexts are dropped rather than sent unfiltered.
+        """
+        try:
+            filtered_local = (
+                self.firewall.filter_context_for_peer(local_context, peer_id)
+                if local_context is not None else None
+            )
+            filtered_device = (
+                self.firewall.filter_device_context_for_peer(device_context, peer_id)
+                if device_context else None
+            )
+            return filtered_local, filtered_device
+        except Exception as e:
+            logger.warning(
+                "Peer context filter failed for compute host %s (%s); "
+                "the query goes out with no personal or device context",
+                peer_id, e, exc_info=True,
+            )
+            return None, None
+
     @sends_own_response
     async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, reasoning_effort: str = None, **kwargs):
         """
@@ -8726,6 +8762,18 @@ class CoreService:
                         logger.warning("Falling back to unfiltered device context due to filtering error")
         else:
             logger.debug("User disabled context inclusion")
+
+        # A peer that runs the inference receives the assembled prompt, so it gets
+        # only what its node rules would let it fetch through REQUEST_CONTEXT.
+        inference_peer = self._inference_peer_for(compute_host, provider)
+        if include_context and inference_peer:
+            peer_local_context, device_context_data = self._context_for_compute_peer(
+                aggregated_contexts.get('local'), device_context_data, inference_peer
+            )
+            if peer_local_context is None:
+                aggregated_contexts.pop('local', None)
+            else:
+                aggregated_contexts['local'] = peer_local_context
 
         # Phase 7: Fetch remote contexts if context_ids provided (with caching)
         peer_device_contexts = {}
