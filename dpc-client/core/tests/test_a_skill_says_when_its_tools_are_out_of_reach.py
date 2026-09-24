@@ -1,11 +1,14 @@
 """A skill is not offered as usable to an agent that cannot call its tools.
 
 The skills section listed every skill in the agent's home and never read
-required_tools, so p2p-research (needs send_user_message) was offered to eight
-agents whose firewall refuses that tool, and starter skills copied before the
-tool merge kept telling agents to call repo_read and drive_write. Each skill now
-carries the reason on its own line; the section reads the same allowed/all tool
-sets as the capabilities section.
+required_tools, so the former p2p-research starter (needs send_user_message,
+now removed — it called request_inference, a tool that was never built) was
+offered to eight agents whose firewall refuses that tool, and starter skills
+copied before the tool merge kept telling agents to call repo_read and
+drive_write. Each skill now carries the reason on its own line; the section
+reads the same allowed/all tool sets as the capabilities section. The
+sample-skill fixture below stands in for any skill with required_tools —
+it is not a starter skill.
 """
 from __future__ import annotations
 
@@ -39,17 +42,17 @@ ALL = {"send_user_message": False, "read_file": True, "write_file": True}
 
 
 def test_a_skill_whose_tool_is_disabled_names_it(tmp_path):
-    _skill(tmp_path, "p2p-research", ["send_user_message", "read_file"])
+    _skill(tmp_path, "sample-skill", ["send_user_message", "read_file"])
     section = _build_skills_section(SkillStore(tmp_path), {"read_file", "write_file"}, ALL)
-    assert _line(section, "p2p-research").startswith(
-        "- **p2p-research** (needs send_user_message — disabled by firewall): Skill")
+    assert _line(section, "sample-skill").startswith(
+        "- **sample-skill** (needs send_user_message — disabled by firewall): Skill")
 
 
 def test_the_same_skill_is_plain_where_the_tool_is_enabled(tmp_path):
-    _skill(tmp_path, "p2p-research", ["send_user_message"])
+    _skill(tmp_path, "sample-skill", ["send_user_message"])
     allowed = {"send_user_message", "read_file", "write_file"}
     section = _build_skills_section(SkillStore(tmp_path), allowed, ALL)
-    assert _line(section, "p2p-research") == "- **p2p-research**: Skill p2p-research."
+    assert _line(section, "sample-skill") == "- **sample-skill**: Skill sample-skill."
 
 
 def test_no_required_tools_is_no_constraint(tmp_path):
@@ -61,16 +64,16 @@ def test_no_required_tools_is_no_constraint(tmp_path):
 
 
 def test_a_tool_the_firewall_does_not_know_is_called_missing_not_disabled(tmp_path):
-    _skill(tmp_path, "p2p-research", ["request_inference"])
+    _skill(tmp_path, "sample-skill", ["request_inference"])
     section = _build_skills_section(SkillStore(tmp_path), {"read_file"}, ALL)
-    assert "(needs request_inference — no such tool)" in _line(section, "p2p-research")
+    assert "(needs request_inference — no such tool)" in _line(section, "sample-skill")
 
 
 def test_without_a_firewall_only_retired_names_are_marked(tmp_path):
-    _skill(tmp_path, "p2p-research", ["send_user_message"])
+    _skill(tmp_path, "sample-skill", ["send_user_message"])
     _skill(tmp_path, "old", ["read_file"], body="Call repo_read(path) first.")
     section = _build_skills_section(SkillStore(tmp_path), None, None)
-    assert _line(section, "p2p-research") == "- **p2p-research**: Skill p2p-research."
+    assert _line(section, "sample-skill") == "- **sample-skill**: Skill sample-skill."
     assert "(references retired tool repo_read)" in _line(section, "old")
 
 
@@ -105,10 +108,10 @@ def test_the_marker_reaches_the_cached_system_block(tmp_path):
 
     root = tmp_path / "agent_x"
     Memory(root).ensure_files()
-    _skill(root, "p2p-research", ["send_user_message"])
+    _skill(root, "sample-skill", ["send_user_message"])
     messages, _ = build_llm_messages(
         agent_root=root, memory=Memory(root), task={"id": "t1", "text": "hi"},
         skill_store=SkillStore(root), allowed_tools={"read_file"}, all_tools=ALL,
     )
     semi_stable = messages[0]["content"][1]["text"]
-    assert "- **p2p-research** (needs send_user_message — disabled by firewall):" in semi_stable
+    assert "- **sample-skill** (needs send_user_message — disabled by firewall):" in semi_stable

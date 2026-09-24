@@ -25,7 +25,7 @@ Example: tool = `search_web`; skill = "when researching a technical topic: searc
 
 ### Phase 1 — Skills directory + starter skills ✅
 - `~/.dpc/agents/{id}/skills/` created on agent startup
-- Starter skills bootstrapped from the code repo (see `dpc_agent/skill_store.py`); the default set currently includes `skill-creator`, `code-analysis`, `knowledge-extraction`, `p2p-research`, `web-research` and additional skills — names shown are illustrative examples, the exact set is defined in code
+- Starter skills bootstrapped from the code repo (see `dpc_agent/skill_store.py`); the default set currently includes `skill-creator`, `code-analysis`, `knowledge-extraction`, `web-research` — names shown are illustrative examples, the exact set is defined in code
 - Each skill is a `SKILL.md` file with YAML frontmatter + markdown instructions
 
 ### Phase 2 — Skill router (Read phase) ✅
@@ -112,7 +112,6 @@ the recommended strategy. Choose the skill whose description best matches your t
 - **code-analysis**: Analyze code to understand architecture, find bugs, or review quality...
 - **web-research**: Research a topic online. Use when asked to find information...
 - **knowledge-extraction**: Extract reusable knowledge from conversation for a commit...
-- **p2p-research**: Research using connected DPC peers — their knowledge, AI capabilities...
 - **skill-creator**: Create or improve a skill. Use when asked to learn from a task...
 ```
 
@@ -212,8 +211,6 @@ The agent can read this file directly:
 │   │   └── SKILL.md
 │   ├── knowledge-extraction/
 │   │   └── SKILL.md
-│   ├── p2p-research/
-│   │   └── SKILL.md
 │   ├── web-research/
 │   │   └── SKILL.md
 │   └── pending_improvements.jsonl # shadow mode queue
@@ -227,14 +224,13 @@ The agent can list its skills:
 
 ---
 
-## 5 Starter Skills
+## 4 Starter Skills
 
 | Skill | Trigger phrases | Key tools |
 |-------|----------------|-----------|
 | `skill-creator` | "learn from this task", "remember this strategy", "improve how I handle..." | `update_scratchpad`, `repo_write_commit` |
 | `code-analysis` | "analyze", "review", "find bugs", "understand code" | `read_file`, `list_dir`, `search_in_file`, `search_files` |
 | `knowledge-extraction` | "remember this", "save that", "extract knowledge", "commit this" | `extract_knowledge`, `knowledge_write` |
-| `p2p-research` | "ask Alice", "check with peer", "distributed", "peer GPU" | `send_user_message`, `extended_path_read` |
 | `web-research` | "find", "look up", "research online", "check current facts" | `search_web`, `browse_page` |
 
 ---

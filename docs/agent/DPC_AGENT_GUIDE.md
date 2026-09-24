@@ -581,7 +581,6 @@ All agent data is stored in `~/.dpc/agents/{agent_id}/`:
 │   │   ├── skill-creator/SKILL.md
 │   │   ├── code-analysis/SKILL.md
 │   │   ├── knowledge-extraction/SKILL.md
-│   │   ├── p2p-research/SKILL.md
 │   │   ├── web-research/SKILL.md
 │   │   └── pending_improvements.jsonl  # Shadow-mode queue
 │   ├── logs/

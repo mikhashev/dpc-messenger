@@ -286,7 +286,7 @@ class SkillStore:
 
     def ensure_starter_skills(self) -> None:
         """
-        Bootstrap the 5 starter skills if skills/ directory has no skills yet.
+        Bootstrap the 4 starter skills if skills/ directory has no skills yet.
 
         Called on agent creation via create_agent_storage() in utils.py,
         mirroring memory.ensure_files() which bootstraps identity.md + scratchpad.md.
@@ -300,7 +300,6 @@ class SkillStore:
             ("skill-creator", self._default_skill_creator),
             ("code-analysis", self._default_code_analysis),
             ("knowledge-extraction", self._default_knowledge_extraction),
-            ("p2p-research", self._default_p2p_research),
             ("web-research", self._default_web_research),
         ]
         for name, content_fn in starters:
@@ -585,92 +584,6 @@ User: "We decided to use SQLite for the knowledge base because..."
 - **No context**: "We use X" without "because Y" loses the rationale
 - **Overwriting**: Always check read_file("knowledge/topic.md") first, then merge
 - **Wrong topic name**: Too generic ("notes") or too specific ("meeting-2026-03-24")
-
-## Update History
-
-- v1 ({now[:10]}): Initial bootstrap
-"""
-
-    def _default_p2p_research(self, now: str) -> str:
-        return f"""---
-name: p2p-research
-version: 1
-description: >
-  Research using connected DPC peers — their knowledge base, AI capabilities, or GPU
-  resources. Use when the task benefits from multiple perspectives, when asking about
-  shared projects or knowledge, or when local inference is insufficient. Also use when
-  asked to consult peers, get a second opinion, or leverage a peer's specialized model.
-  Do NOT use for internet research — use web-research for that.
-provenance:
-  source: bootstrapped
-  created_at: {now}
-  author_node_id: null
-  author_name: system
-  parent_skill: null
-  origin_peer: null
-sharing:
-  shareable: false
-  shared_with_nodes: []
-  shared_with_groups: []
-  dht_announced: false
-metadata:
-  execution_mode: knowledge
-  required_tools:
-    - send_user_message
-    - request_inference
-  required_permissions:
-    - compute.enabled
-  agent_profiles:
-    - default
-  tags:
-    - p2p
-    - research
-    - peers
-    - inference
----
-
-## Strategy
-
-1. **Identify the right peer**: Who has the relevant knowledge or capability?
-   - For specialized models: check who has compute sharing enabled
-   - For shared knowledge: ask peers working on the same project
-2. **Frame the request clearly**: Be specific about what you need (knowledge query vs. inference)
-3. **For inference requests**: Use `request_inference(peer_node_id, query, context)` to send to a peer's LLM
-4. **For knowledge sharing**: Use `send_user_message` to reach the human who can consult their peer network
-5. **Synthesize responses**: Multiple perspectives may conflict — identify consensus and dissent
-6. **Attribute sources**: Note which peer provided which information
-
-## When to Use
-
-- Task requires a specialized model the local agent doesn't have
-- Multiple perspectives would improve quality (architecture decisions, code review)
-- User explicitly asks to "ask Alice" or "check with the team"
-- Local knowledge is insufficient and a connected peer may have the answer
-- Heavy compute task better suited to a peer with a stronger GPU
-
-## When NOT to Use
-
-- Information available locally or via web search
-- Tasks where peer latency would be prohibitive
-- Private or sensitive queries that shouldn't leave local context
-- When no peers are connected
-
-## Examples
-
-Getting a second opinion on architecture:
-```
-1. Identify peers with relevant knowledge (from connected peers list)
-2. Frame specific questions: "Does this handle concurrent writes correctly?"
-3. request_inference(peer_node_id, question, context={{"code": relevant_code}})
-4. Compare response with local analysis
-```
-
-## Common Failures
-
-- **Asking vague questions**: Peers need specific questions to give useful answers
-- **Not checking peer availability**: Peers may be offline — have a local fallback
-- **Privacy leak**: Don't send sensitive code or personal data to peers without user consent
-- **Over-relying on peers**: Local analysis first, peer consultation for validation
 
 ## Update History
 
