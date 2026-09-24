@@ -13,6 +13,7 @@ and close() drains.
 import asyncio
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 from dpc_client_core.providers import llamacpp_server_provider
@@ -219,9 +220,16 @@ class TestDrainingBeforeReplacement:
             sup.call_slot()
 
     @pytest.mark.asyncio
-    async def test_the_successor_does_not_start_until_the_predecessor_let_go(self):
+    async def test_the_successor_does_not_start_until_the_predecessor_let_go(self, monkeypatch):
         # The card cannot hold two copies of the model, so "drain the old one"
         # is only safe if the new one waits for the card.
+        # `_launch`/`_launch_auto_kv` are faked below, but `ensure_running` calls
+        # `ensure_binary` first — real, that fetches ~570MB from GitHub on an
+        # empty DPC_HOME (measured: 124s, fills the dir). Stub it here too.
+        monkeypatch.setattr(
+            "dpc_client_core.managers.llama_server_supervisor.ensure_binary",
+            lambda config: Path("dummy-llama-server"),
+        )
         released = asyncio.Event()
 
         async def _slow_drain():
