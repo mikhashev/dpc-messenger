@@ -119,7 +119,7 @@
       isDanger: true,
       tools: [
         { key: 'run_shell', label: 'Shell Access', desc: 'Execute shell commands' },
-        { key: 'claude_code_edit', label: 'Code Editing', desc: 'Not implemented — placeholder. Code edits currently coordinated via CC (Claude Code) in group chat. See docs/agent/CC_INTEGRATION_GUIDE.md' },
+        { key: 'claude_code_edit', label: 'Code Editing', desc: 'Not implemented — placeholder. Code edits currently coordinated via CC (Claude Code) in group chat. See docs/agent/EXTERNAL_HARNESS_INTEGRATION_GUIDE.md' },
       ]
     },
     {

@@ -1,21 +1,52 @@
 # External Agent Integration Guide
 
-> The file name (`CC_INTEGRATION_GUIDE.md`) and the `cc_` prefixes on the bridge
-> scripts and the config key are historical — they date from when Claude Code was
-> the only harness wired in. The name an external agent answers to is set by you.
+> The `cc_` prefixes on the bridge scripts, the config key `cc_display_name` and
+> the `CC` display name/tag are historical — they date from when Claude Code was
+> the only harness wired in (this file itself used to be `CC_INTEGRATION_GUIDE.md`).
+> The mechanism is harness-independent by construction; the name an external
+> agent answers to is set by you.
 
-This guide explains how to connect an external agent — any harness that can run
-a shell command, read a file and call a local WebSocket — as a third participant
-in a DPC agent chat, alongside you and your embedded DPC agent.
-[Claude Code](https://claude.com/claude-code) is the worked example throughout,
-and the identity in the examples is the tag the maintainers registered for it
-(`CC_mike`); substitute your harness and your tag.
+This guide explains how to connect an external agent — any harness meeting the
+short list of requirements below — as a third participant in a DPC agent chat,
+alongside you and your embedded DPC agent.
+[Claude Code](https://claude.com/claude-code) is the one harness this project
+has actually wired up and documented; the identity in the examples is the tag
+the maintainers registered for it (`CC_mike`). Substitute your own harness and
+your own tag — nothing here depends on which harness it is, but no second
+harness has been verified against this guide yet.
+
+**What your harness must provide:**
+
+- Run a shell command in the project's Python virtualenv (`uv run python ...`
+  in `dpc-client/core`).
+- Read a file (to see command output, or a response you wrote to send).
+- Either a scheduler that can poll on an interval (a cron), **or** the ability
+  to start a long-running subprocess and wait on it (for `--listen`, below).
+
+That's the whole precondition. The WebSocket handshake, the auth token, and
+parsing chat history and mentions are the bridge scripts' job, not your
+harness's — see [The bridge scripts](#the-bridge-scripts).
 
 > **Status:** this is the same integration the project maintainers use
 > day-to-day (see `protocol-13-public.md` for how the three-way
 > collaboration is structured). The bridges are local helpers — nothing
 > in DPC requires an external agent. If you want an agent chat without one,
 > skip this file.
+
+### Examples substitute three things
+
+Every example in this guide is written against one worked setup: the harness
+is Claude Code, the tag is `CC` (or `CC_mike`), and the embedded agent it
+talks with is named `Ark`. All three are substitutions, not requirements —
+swap in your own harness, your own registered tag, and your own agent's
+display name wherever they appear.
+
+The one substitution with its own extra rule is the tag: if your tag has
+look-alike letters in another script (a mention-routing worry, not a display
+one — see [Choose a tag that survives mention routing](#one-name-several-machines--read-this-before-the-second-bridge)),
+register those spellings too. For the tag `CC` specifically, that means the
+visually identical Cyrillic spelling — `@` followed by two Cyrillic U+0421
+(С) rather than Latin C.
 
 ---
 
@@ -277,26 +308,38 @@ then send it.
 
 ---
 
-## The cron loop (harness side)
+## Setting up the check loop
 
-The worked example runs a cron inside Claude Code. The exact prompt text lives in
+Two equally valid ways to drive the loop. Pick the one your harness supports;
+if it has both, either works.
+
+### Path A — cron or poll
+
+Any harness that can fire a prompt on a schedule (a cron) or run a blocking
+poll loop. **This is Claude Code-specific below the schedule line** — Claude
+Code is the harness with a built-in cron, and the exact prompt text was
+written for it; adapt the mechanism (not necessarily the prompt) to your own
+scheduler.
+
+The exact prompt text lives in
 [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md)
 and is versioned there. The internal version (`cc_cron_prompt.md` at
 project root, gitignored) may have additional project-specific prompts
 for group chats.
 
-**Schedule:** every minute while the Claude Code session is open. Cron
-jobs are in-session only and disappear when Claude Code closes, so you
-need to recreate the cron after reopening the IDE. A harness with a
-persistent scheduler, or one that can wait on a subprocess with
-`--listen`, does not have this step.
+**Schedule:** every minute while the session is open. *(Claude Code-specific:*
+cron jobs are in-session only and disappear when Claude Code closes, so you
+need to recreate the cron after reopening the IDE — see step 6 under
+[Setup steps](#setup-steps). A harness with a persistent scheduler does not
+have this step.)
 
 **Behavior each fire (1:1 agent chat):**
 
 1. Run `uv run python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>`.
 2. Scan the output for mentions of your tag (`@<tag>`, plus the visually
-   identical Cyrillic spelling — `@` followed by two U+0421 — when the tag
-   is `CC`) from anyone who isn't you.
+   identical Cyrillic spelling — `@` followed by two U+0421, if your tag is
+   `CC` — see [Examples substitute three things](#examples-substitute-three-things))
+   from anyone who isn't you.
 3. If there is an unanswered direct question, respond via
    `uv run python cc_agent_bridge.py --send "..." --conversation-id <agent>`.
    Keep responses in markdown.
@@ -308,13 +351,44 @@ persistent scheduler, or one that can wait on a subprocess with
 2. Same scan and response logic, against the tag you registered.
 3. Respond via `--send "..."` or `--send-file path` for markdown content.
 
-You can run both crons in parallel — one for 1:1, one for group chat.
+You can run both loops in parallel — one for 1:1, one for group chat.
 
-The cron prompt does the filtering; the external agent just executes what
-the cron says. Substitute the agent name (or folder id) for `<agent>` and
-your tag for `<tag>` when you create the cron — see the canonical prompt in
+The prompt does the filtering; the external agent just executes what it
+says. Substitute the agent name (or folder id) for `<agent>` and your tag
+for `<tag>` when you create the check — see the canonical prompt in
 [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md), which
 ships with `Ark` as the default and notes how to swap it.
+
+### Path B — `--listen` (group chats only)
+
+For a harness that has no scheduler but can start a long-running subprocess
+and wait on it. `--listen` is a `cc_group_chat_bridge.py` flag — there is no
+equivalent on the 1:1 agent-chat bridge, so this path covers group chats
+only; a 1:1 chat needs Path A.
+
+1. Register the tag this node should answer to, in the group's
+   **Group Settings → External agents** (see [Which name it answers
+   to](#which-name-it-answers-to)).
+2. Start the blocking listener:
+
+   ```bash
+   uv run python cc_group_chat_bridge.py --group <group_id> --listen
+   ```
+
+   It authenticates once over the local WebSocket and then blocks, printing
+   one `[MENTION]` line per matching mention as the backend emits it —
+   nothing to poll, nothing to reschedule. `--once` exits 0 after the first
+   match (useful for a script that just needs to wait for one mention);
+   `--json` prints each event as one JSON object per line; `--all-tags`
+   listens for every tag registered in the group instead of just this
+   bridge's.
+3. On each `[MENTION]` (or JSON event), have your harness read the chat with
+   `--last 10` (as in Path A) and, if the mention needs a reply, send it with
+   `--send "..."` or `--send-file path`.
+4. Without `--once`, the listener runs until you stop it (Ctrl-C, exit 0)
+   and reconnects with backoff if the backend restarts — so unlike Path A's
+   cron, there is nothing to recreate after your harness itself restarts,
+   only the listener process to start again.
 
 ---
 
@@ -359,18 +433,28 @@ own setup can use the external agent differently (or not use one at all).
    1:1 chat there is nothing to register; the bridge answers to
    `[agent_chat] cc_display_name` (default `CC`).
 
-4. In your harness, create the recurring check using the exact prompt from
-   [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md).
-   In Claude Code that is a cron with schedule `every 1 minute`. The shipped
-   prompt targets the agent named `Ark`; if your agent uses a different
-   display name, replace `Ark` with that name (or with the folder id) in both
-   the `--once` and `--send` invocations, and replace `<tag>` with your tag.
+4. Set up the check loop, either path:
+
+   - **Path A (cron or poll):** in your harness, create the recurring check
+     using the exact prompt from
+     [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md).
+     *(Claude Code-specific: that is a cron with schedule `every 1 minute`.)*
+     The shipped prompt targets the agent named `Ark`; if your agent uses a
+     different display name, replace `Ark` with that name (or with the
+     folder id) in both the `--once` and `--send` invocations, and replace
+     `<tag>` with your tag.
+   - **Path B (`--listen`, group chats only):** start
+     `uv run python cc_group_chat_bridge.py --group <group_id> --listen`
+     and have your harness act on each `[MENTION]` line it prints. See
+     [Path B — `--listen`](#path-b--listen-group-chats-only).
 
 5. Open the chat in the DPC UI and mention `@<tag>` in a message.
-   Within ~60 seconds the external agent should respond.
+   Within ~60 seconds (Path A) or immediately (Path B) the external agent
+   should respond.
 
-6. If the harness restarts (IDE reload, window closed), recreate the
-   cron — in Claude Code it does not persist.
+6. *(Claude Code-specific, Path A only.)* If the harness restarts (IDE
+   reload, window closed), recreate the cron — it does not persist. Path B's
+   listener has nothing to recreate; just start the process again.
 
 ---
 
@@ -380,7 +464,8 @@ own setup can use the external agent differently (or not use one at all).
 `uv run python cc_agent_bridge.py --status --conversation-id <agent>`. If the
 backend is down, start it. If you see
 `[ERROR] Multiple agents found, specify --conversation-id...`, the
-cron prompt is missing the flag — recreate the cron with the current
+prompt is missing the flag — *(Path A only)* recreate the cron/poll with
+the current
 [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md). If the
 warning is `--conversation-id=... did not match any known agent`, you
 have a typo (or the agent was deleted) — the bridge prints the list of
@@ -396,9 +481,11 @@ different virtualenv than the one with `dpc-client/core` deps. Use
 every backend start. If the bridge was last run against a previous
 backend process, re-run it — it reads the file fresh each time.
 
-**It responds when it shouldn't (or vice versa).** The cron prompt
-defines the filter. Tune it in `cc_cron_prompt_public.md` and recreate the
-cron — the prompt version you create the cron with is what runs.
+**It responds when it shouldn't (or vice versa).** *(Path A only —* Path B
+has no prompt to tune; adjust your harness's own reaction to `[MENTION]`
+events instead.*)* The prompt defines the filter. Tune it in
+`cc_cron_prompt_public.md` and *(Claude Code-specific)* recreate the cron —
+the prompt version you create the check with is what runs.
 
 ---
 

@@ -152,7 +152,7 @@ not through a different tool. One allowlist entry covers both.
 
 - [`cc_agent_bridge.py`](./cc_agent_bridge.py) — the agent-chat bridge
   invoked by the prompt
-- [`../../docs/agent/CC_INTEGRATION_GUIDE.md`](../../docs/agent/CC_INTEGRATION_GUIDE.md) —
+- [`../../docs/agent/EXTERNAL_HARNESS_INTEGRATION_GUIDE.md`](../../docs/agent/EXTERNAL_HARNESS_INTEGRATION_GUIDE.md) —
   the External Agent Integration Guide (setup, authentication, troubleshooting)
 - [`../../docs/BACKLOG_FORMAT.md`](../../docs/BACKLOG_FORMAT.md) — **required reading before
   writing a backlog entry.** An external agent working a project through this bridge writes

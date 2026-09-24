@@ -414,7 +414,7 @@ do:
 - **[Agent reference → `docs/agent/DPC_AGENT_GUIDE.md`](./docs/agent/DPC_AGENT_GUIDE.md)** — tools, profiles, storage, troubleshooting
 - **[Skills → `docs/agent/DPC_AGENT_SKILLS.md`](./docs/agent/DPC_AGENT_SKILLS.md)** — teach the agent multi-step strategies
 - **[Telegram → `docs/agent/DPC_AGENT_TELEGRAM.md`](./docs/agent/DPC_AGENT_TELEGRAM.md)** — talk to your agent from Telegram
-- **[Claude Code → `docs/agent/CC_INTEGRATION_GUIDE.md`](./docs/agent/CC_INTEGRATION_GUIDE.md)** — connect Claude Code as a second participant in the same chat
+- **[External agent (Claude Code or any harness) → `docs/agent/EXTERNAL_HARNESS_INTEGRATION_GUIDE.md`](./docs/agent/EXTERNAL_HARNESS_INTEGRATION_GUIDE.md)** — connect an external agent as a second participant in the same chat
 
 ---
 

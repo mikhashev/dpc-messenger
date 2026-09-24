@@ -144,7 +144,7 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 - **Phase C Decomposition** — service.py 7799→6484 lines (-1315, -16.9%). Pragmatic ceiling reached (S85-S86)
 - **Rate Limiting + Security (ARCH-26)** — security/ folder, THREAT-MODEL.md (S58)
 - **Protocol 13** (v1.13) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)
-- **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py + cc_group_chat_bridge.py, cron monitoring, P13 coordination
+- **External Agent Bridge** — an external agent (Claude Code in our setup) ↔ DPC via cc_agent_bridge.py + cc_group_chat_bridge.py, cron monitoring, P13 coordination
 - **Group Chat** (v0.19.0 → v0.26.0) — Multi-participant with files, voice, knowledge commits. Phase 1 dogfooding complete (S88-S92). Phase 2 multi-node (S97-S206, **live-verified on two nodes S206**): cross-node history sync (hash-based bidirectional gate, disk-SSoT, `message_id` dedup), **ADR-031 per-reader role derivation** + single-writer history, `@all`/`@CC` mention routing, GROUP_SYNC content-hash tie-break + topic sync, delete-folder cleanup, per-group serialization lock, group Sleep button + morning briefs, token-counter agent attribution, peer-model selectable, default-deny agent context. See `docs/GROUP_CHAT.md`
 - **Discord Integration (ADR-025)** — Phase 1.5 built (S97-S107): discord_service.py, @mention routing, Iris agent (agent_007), system prompt, identity. **Currently switched off** — `[discord] enabled = false` in the local config as of 2026-08-09; the code is there, the bridge is not running
 - **Public Agent Guardrails (ADR-026)** — 6 of 11 done (S106-S107): source-based tool filtering, rate limiting, output sanitization, per-user routing, Discord threads, mention cleanup. Still open: URL whitelist, graceful fallback, TTL + context management, mention sanitization, KG long-term memory
@@ -188,7 +188,7 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 
 **Migration plan:** Phase 1 (single-node group chat) → Phase 2 (Ubuntu second node, multi-node P2P) → Phase 3 (scale).
 
-External Agent Bridge (CC) validates that non-embedded AI can participate as a full team member — foundation for multi-AI teams. CC operates via cc_agent_bridge.py (agent chat) + cc_group_chat_bridge.py (group chat), cron monitoring.
+External Agent Bridge validates that non-embedded AI can participate as a full team member — foundation for multi-AI teams. An external agent (Claude Code in our setup) operates via cc_agent_bridge.py (agent chat) + cc_group_chat_bridge.py (group chat), cron monitoring.
 
 | # | Feature | Complexity | Description |
 |---|---------|------------|-------------|
@@ -233,7 +233,7 @@ Each line below names a signal someone can actually go and look at:
 Not a feature list — three directions that grow from what we've already built.
 
 ### 1. Autonomous Agents
-From triggered to proactive. Sleep consolidation, scheduled sessions, self-improvement cycles. Agents that grow with their humans — not tools that wait for commands. External Agent Bridge (CC ↔ DPC) is a working prototype of A2A — any external AI can integrate as a team member through the same pattern.
+From triggered to proactive. Sleep consolidation, scheduled sessions, self-improvement cycles. Agents that grow with their humans — not tools that wait for commands. External Agent Bridge (an external agent ↔ DPC) is a working prototype of A2A — any external AI can integrate as a team member through the same pattern.
 
 ### 2. Network Effects
 From 1:1 to team networks to ecosystem. Agent Isolation → A2A → Teams → Open Source starter packs. Skills sharing and inference sharing already work. Hub becomes optional bootstrap, not architecture center. Any two nodes can connect directly via `dpc://` URI exchange — no server required.
