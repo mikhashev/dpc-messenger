@@ -22,6 +22,13 @@ if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
             "(hf_transfer package not installed)"
         )
 
+# The safetensors auto-conversion thread downloads a second, unused copy of
+# weights for repos that ship only pytorch_model.bin (bge-m3: +2.27 GB).
+# memory.py sets this before its own load; this covers any other
+# from_pretrained in the process. Read at call time, so unlike the blocks
+# around it, its position does not matter. Only the literal "true" works.
+os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "true")
+
 # S144 — HF offline mode guard. Same constraint as the fast-transfer block
 # above: must run BEFORE any import that pulls in huggingface_hub, since
 # HF_HUB_OFFLINE is read at huggingface_hub import time.

@@ -520,6 +520,19 @@ class EmbeddingProvider:
         with self._load_lock:
             if self._model is not None:
                 return
+            # bge-m3 ships only pytorch_model.bin, and transformers then fetches
+            # an unused model.safetensors from a bot PR in a background thread
+            # (+2.27 GB). The variable is read inside from_pretrained, so only
+            # "before SentenceTransformer(...)" matters, not import order; only
+            # the lowercase literal "true" disables it.
+            existing = os.environ.get("DISABLE_SAFETENSORS_CONVERSION")
+            if existing is not None and existing != "true":
+                log.warning(
+                    "DISABLE_SAFETENSORS_CONVERSION=%r will not disable the "
+                    "safetensors auto-conversion thread — only the literal "
+                    "lowercase \"true\" does", existing,
+                )
+            os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "true")
             from sentence_transformers import SentenceTransformer
             import torch
             kwargs = {"device": self.device}
