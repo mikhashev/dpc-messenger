@@ -228,6 +228,8 @@ def runner_command(cfg: dict, out_json: Path, settings: dict) -> list:
     ]
     if settings.get("limit"):
         cmd += ["--limit", str(settings["limit"])]
+    if settings.get("no_memory"):
+        cmd += ["--no-memory"]
     return cmd
 
 
@@ -381,13 +383,17 @@ def main() -> int:
                     help="kill a run and its children after this long")
     ap.add_argument("--dry-run", action="store_true",
                     help="run every preflight check and stop: no download, no model load")
+    ap.add_argument("--no-memory", action="store_true",
+                    help="disable the agent's memory_search tool for every run in the "
+                         "queue and skip the embedding-model preflight check, rather than "
+                         "refuse when the model is not cached; passed through to each run")
     args = ap.parse_args()
 
     # Beside this file; it imports the client, so it is not loaded at import.
     import preflight
 
     checks = preflight.run_checks(args.alias, [c["reasoning_effort"] for c in QUEUE],
-                                  RESULTS, GPU_NEEDED_MIB)
+                                  RESULTS, GPU_NEEDED_MIB, no_memory=args.no_memory)
     preflight.print_checks(checks)
     if args.dry_run:
         print("\ndry run: nothing downloaded, no model loaded, no run started.", flush=True)
@@ -398,7 +404,8 @@ def main() -> int:
         return PREFLIGHT_EXIT
 
     settings = {"alias": args.alias, "limit": args.limit,
-                "run_timeout_minutes": args.run_timeout_minutes}
+                "run_timeout_minutes": args.run_timeout_minutes,
+                "no_memory": args.no_memory}
     RESULTS.mkdir(parents=True, exist_ok=True)
     deadline = datetime.now() + timedelta(hours=args.hours)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")

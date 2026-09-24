@@ -6,9 +6,10 @@ one run at a time. These checks download nothing and load no model: the token
 is tested with an access check, the binary is asked for `--version`, and the
 GGUF is read for its chat template and hashed (once; the digest is cached).
 
-Each check is (status, name, detail), status one of OK / WARN / FAIL. Only FAIL
-stops a campaign. The card being full is a WARN, because the campaign waits for
-it, bounded, and says who holds it.
+Each check is (status, name, detail), status one of OK / WARN / FAIL / SKIP. Only
+FAIL stops a campaign. The card being full is a WARN, because the campaign waits
+for it, bounded, and says who holds it. SKIP marks a check the operator turned
+off on purpose (`--no-memory`) — not a pass, not a refusal, a recorded choice.
 """
 
 from __future__ import annotations
@@ -50,8 +51,39 @@ def _effort_words(entry) -> Tuple[tuple, str]:
     return words, f"{source}; default {default or 'unset'}; folds {FLEET_TO_TEMPLATE}"
 
 
+def memory_check(no_memory: bool) -> Check:
+    """Whether the agent's embedding model is cached — its own check, callable
+    on its own so a test can exercise it without the token, tools and GPU
+    checks around it in `run_checks`.
+    """
+    from dpc_client_core.dpc_agent.memory import DEFAULT_EMBEDDING_MODEL
+    from dpc_client_core.providers.model_sizes import is_model_cached, model_size_bytes
+    cached = is_model_cached(DEFAULT_EMBEDDING_MODEL)
+    if no_memory:
+        return ("SKIP", "memory",
+                f"--no-memory: agent memory search disabled for this run "
+                f"(embedding model {DEFAULT_EMBEDDING_MODEL!r} "
+                f"{'is' if cached else 'is not'} cached)")
+    if cached:
+        return ("OK", "memory",
+                f"embedding model {DEFAULT_EMBEDDING_MODEL!r} is cached; "
+                f"memory_search and Active Recall can load it")
+    size, source = model_size_bytes(DEFAULT_EMBEDDING_MODEL)
+    size_detail = f"{size / 1e9:.2f} GB, {source}" if size else "size unknown"
+    return ("FAIL",
+            "memory",
+            f"embedding model {DEFAULT_EMBEDDING_MODEL!r} is not cached ({size_detail}); "
+            f"memory_search would answer 'unavailable' and Active Recall would skip "
+            f"every turn — a run like that is not comparable with one that had memory. "
+            f"Fetch it once: start the DPC app and confirm the download when asked, or "
+            f"run `DISABLE_SAFETENSORS_CONVERSION=true uv run python -c "
+            f"\"from sentence_transformers import SentenceTransformer as S; "
+            f"S('{DEFAULT_EMBEDDING_MODEL}')\"`. Or pass --no-memory to run without "
+            f"it on purpose — the run then records that choice instead of hiding it")
+
+
 def run_checks(alias: str, efforts: List[str], results_dir: Path,
-               gpu_needed_mib: int) -> List[Check]:
+               gpu_needed_mib: int, no_memory: bool = False) -> List[Check]:
     import run_gaia_eval as gaia
     from campaign import gpu_free_mib, gpu_holder_candidates
 
@@ -216,6 +248,16 @@ def run_checks(alias: str, efforts: List[str], results_dir: Path,
               f"tool(s); run_shell is refused on its command text only")
     except Exception as exc:
         add("FAIL", "answer keys", f"{type(exc).__name__}: {exc}")
+
+    # 12. the agent's embedding model — memory_search and Active Recall both need
+    # it, and it is fetched only on explicit consent (commit 7a19bad3): a GAIA
+    # night that started without it would run agent memory silently absent, and
+    # the run comparing it against earlier nights would not know why. Refused
+    # here, not discovered three hours in.
+    try:
+        checks.append(memory_check(no_memory))
+    except Exception as exc:
+        add("FAIL", "memory", f"{type(exc).__name__}: {exc}")
     return checks
 
 

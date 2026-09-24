@@ -533,7 +533,7 @@ BENCH_PROFILE = "gaia_benchmark"
 BENCH_RULES = HERE / "benchmark_rules.json"
 
 
-def benchmark_firewall(workdir: Path):
+def benchmark_firewall(workdir: Path, allowed=benchmark_tools.BENCHMARK_TOOLS):
     """The rules a benchmark agent runs under, owned by the run.
 
     Not the operator's `~/.dpc/privacy_rules.json`: that file grants eight
@@ -542,9 +542,11 @@ def benchmark_firewall(workdir: Path):
     lands in the workdir because the firewall reconciles tool keys against the
     registry and writes the result back. Which tools are on is the harness's
     allow list (`_harness/benchmark_tools.py`): a tool nobody listed is off.
+    `allowed` narrows that list for one run (`--no-memory` drops `memory_search`).
     """
     rules = json.loads(BENCH_RULES.read_text(encoding="utf-8"))
-    return benchmark_tools.benchmark_firewall(workdir, BENCH_PROFILE, template=rules)
+    return benchmark_tools.benchmark_firewall(workdir, BENCH_PROFILE, template=rules,
+                                              allowed=allowed)
 
 
 def gold_fingerprint(gold: str) -> str:
@@ -927,6 +929,24 @@ def write_providers_file(entry: Dict[str, Any], workdir: Path) -> Path:
     return path
 
 
+def memory_provenance_fields(no_memory: bool, embedding_model: str, cached: bool) -> Dict[str, Any]:
+    """What every report says about the memory this run had, flag or not.
+
+    `memory_search` names a tool the agent held or did not. `active_recall` has
+    no per-run toggle in this harness (`context.py` calls it on every query) and
+    degrades on its own, silently, when the embedding model is not cached — the
+    same degradation `--no-memory` leans on, since only the tool can be dropped
+    from the agent's set.
+    """
+    return {
+        "memory_search": "off (--no-memory)" if no_memory else "on",
+        "embedding_model": embedding_model,
+        "embedding_model_cached": cached,
+        "active_recall": ("no per-run toggle exists; degrades silently to no recall "
+                          "block when the embedding model is not cached"),
+    }
+
+
 def providers_file_for(alias: str, model: Optional[str], base_url: str,
                        context_window: int, workdir: Path,
                        temperature: Optional[float] = None,
@@ -1151,7 +1171,20 @@ async def main_async(args) -> int:
         print(f"canary planted in {len(canary_files)} place(s)", flush=True)
 
         llm = LLMManager(config_path=providers_path)
-        firewall = benchmark_firewall(workdir)
+        # --no-memory drops memory_search from the tool set this agent is built
+        # with — not a rule the agent could still work around, a tool it never has.
+        # `getattr`, not `args.no_memory`: a caller that builds its own `args`
+        # (this file's own test suite does) does not have to know every flag.
+        no_memory = bool(getattr(args, "no_memory", False))
+        allowed_tools = (benchmark_tools.BENCHMARK_TOOLS - {"memory_search"}
+                         if no_memory else benchmark_tools.BENCHMARK_TOOLS)
+        firewall = benchmark_firewall(workdir, allowed=allowed_tools)
+        # Recorded even without the flag (S148-adjacent: every result should say
+        # which memory it ran with), because a run started before the model
+        # finished downloading looks identical to one with it, in the score alone.
+        from dpc_client_core.dpc_agent.memory import DEFAULT_EMBEDDING_MODEL
+        from dpc_client_core.providers.model_sizes import is_model_cached
+        embedding_model_cached = is_model_cached(DEFAULT_EMBEDDING_MODEL)
         if args.auto_approve:
             from _harness.auto_approve import Tier1AutoApprover
             approver = Tier1AutoApprover().start()
@@ -1320,6 +1353,8 @@ async def main_async(args) -> int:
                         name for name, on in
                         firewall.get_agent_tools_map(BENCH_PROFILE).items() if on
                     ),
+                    **memory_provenance_fields(no_memory, DEFAULT_EMBEDDING_MODEL,
+                                               embedding_model_cached),
                 },
             ),
         }
@@ -1437,6 +1472,10 @@ def main() -> int:
     ap.add_argument("--allow-reachable-gold", action="store_true",
                     help="run even though the answers are readable on this machine; "
                          "the report records that the score is contaminable")
+    ap.add_argument("--no-memory", action="store_true",
+                    help="disable the agent's memory_search tool for this run and skip "
+                         "the embedding-model preflight refusal; the report and its "
+                         "provenance record the choice")
     args = ap.parse_args()
     if args.model:
         args.provider_alias = None
