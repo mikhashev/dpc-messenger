@@ -2,9 +2,13 @@
 """
 Quick test to verify TURN server connectivity and ICE candidate gathering.
 Run this to diagnose WebRTC NAT traversal issues.
+
+Manual only: reaches real STUN/TURN servers over the network.
+    DPC_RUN_TURN_CHECK=1 uv run pytest tests/test_turn.py -v -s
 """
 
 import asyncio
+import os
 from pathlib import Path
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer
 
@@ -13,6 +17,15 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from dpc_client_core.settings import Settings
 
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DPC_RUN_TURN_CHECK"),
+    reason="manual TURN/STUN connectivity check; set DPC_RUN_TURN_CHECK=1 to run it",
+)
+
+
+@pytest.mark.asyncio
 async def test_turn_connectivity():
     """Test TURN server connectivity by gathering ICE candidates."""
 

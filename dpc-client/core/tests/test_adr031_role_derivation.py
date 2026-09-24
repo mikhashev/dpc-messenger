@@ -177,6 +177,20 @@ class TestBuildLlmMessagesDerivation:
     def agent_root(self, tmp_path):
         return tmp_path / "agent_001"
 
+    @pytest.fixture(autouse=True)
+    def _no_embedding_download(self, monkeypatch):
+        # make_backend_for_agent() reads get_embedding_provider().dimensions
+        # before the empty-index check, and on a cache miss that downloads
+        # bge-m3 (~4.3 GB) for a test about message roles.
+        class _FakeProvider:
+            model_name = "fake-embedding-model"
+            dimensions = 384
+
+        monkeypatch.setattr(
+            "dpc_client_core.dpc_agent.memory.get_embedding_provider",
+            lambda *a, **k: _FakeProvider(),
+        )
+
     def _build(self, agent_root, conversation_id, history, reader=READER):
         from dpc_client_core.dpc_agent.memory import Memory
         messages, _ = build_llm_messages(

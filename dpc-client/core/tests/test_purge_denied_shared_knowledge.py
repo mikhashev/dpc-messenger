@@ -86,6 +86,17 @@ def world(tmp_path, monkeypatch):
         _stock(agents / agent_id, l6_dir, shared, own)
 
     monkeypatch.setattr("dpc_client_core.service.DPC_HOME_DIR", home)
+
+    # The purge builds a retrieval backend, which reads the embedding
+    # dimensions from a real provider; stubbed so nothing is downloaded.
+    class _FakeProvider:
+        model_name = "fake-embedding-model"
+        dimensions = DIM
+
+    monkeypatch.setattr(
+        "dpc_client_core.dpc_agent.memory.get_embedding_provider",
+        lambda *a, **k: _FakeProvider(),
+    )
     return {"home": home, "agents": agents, "shared": shared}
 
 

@@ -130,8 +130,11 @@ class TestModelFamilyDetection:
             count = llm_manager.count_tokens("Hello world", model)
             assert count > 0, f"Should count tokens for {model}"
 
-    def test_mistral_models(self, llm_manager):
+    def test_mistral_models(self, llm_manager, monkeypatch):
         """Test mistral model family detection."""
+        # Offline: a cache miss would fetch the tokenizer from the HF CDN;
+        # the character estimate still proves the family routing.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         test_cases = [
             "mistral:7b",
             "mixtral:8x7b",
@@ -141,8 +144,10 @@ class TestModelFamilyDetection:
             count = llm_manager.count_tokens("Hello world", model)
             assert count > 0, f"Should count tokens for {model}"
 
-    def test_other_models(self, llm_manager):
+    def test_other_models(self, llm_manager, monkeypatch):
         """Test other model families."""
+        # Offline for the same reason as test_mistral_models.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         test_cases = [
             "qwen:7b",
             "qwen2:7b",
