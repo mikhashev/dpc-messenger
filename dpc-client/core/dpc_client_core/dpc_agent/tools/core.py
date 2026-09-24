@@ -769,13 +769,24 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
 
         backend = make_backend_for_agent(ctx.agent_root)
 
+        from dpc_client_core.dpc_agent.memory import DEFAULT_EMBEDDING_MODEL, get_embedding_provider
         from dpc_client_core.providers.base import ModelNotCachedError
+        from dpc_client_core.providers.model_sizes import is_model_cached
+
+        # Checked before the vector channel: an index that never built because
+        # the model is missing would otherwise report "No memory index yet".
+        # get_embedding_provider is lazy, so reading model_name loads nothing.
+        embedding_unavailable_model = None
+        try:
+            candidate_model = get_embedding_provider(local_files_only=True).model_name
+        except Exception:
+            candidate_model = DEFAULT_EMBEDDING_MODEL
+        if not is_model_cached(candidate_model):
+            embedding_unavailable_model = candidate_model
 
         vector_results = []
-        embedding_unavailable_model = None
-        if backend.vector.load():
+        if embedding_unavailable_model is None and backend.vector.load():
             try:
-                from dpc_client_core.dpc_agent.memory import get_embedding_provider
                 provider = get_embedding_provider(local_files_only=True)
                 qvec = np.array(provider.embed(query), dtype=np.float32)
                 vector_results = backend.vector.search(qvec, top_k)

@@ -200,16 +200,32 @@ class DpcAgent:
         _embedding_model_name = self.config.embedding_model or DEFAULT_EMBEDDING_MODEL
         _embedding_kwargs["model_name"] = _embedding_model_name
         self._embedding_provider = get_embedding_provider(**_embedding_kwargs)
+        # Strong references for fire-and-forget tasks started in this constructor:
+        # a bare create_task() result is only weakly held by the loop, so it can be
+        # GC'd mid-flight, which is how `maybe_emit_required` below used to log
+        # "Task exception was never retrieved" instead of anything actionable.
+        self._background_tasks: set = set()
         if not is_model_downloaded(_embedding_model_name):
             log.info("Agent memory search disabled: embedding model %s not cached", _embedding_model_name)
             download_service = getattr(self._service, "model_download_service", None)
             if download_service is not None:
+                async def _emit_required() -> None:
+                    try:
+                        await download_service.maybe_emit_required(
+                            _embedding_model_name,
+                            purpose="Agent memory search (Active Recall, memory_search)",
+                            consequence_if_declined="Memory search stays unavailable until downloaded.",
+                        )
+                    except Exception:
+                        log.warning(
+                            "maybe_emit_required failed for embedding model %s",
+                            _embedding_model_name, exc_info=True,
+                        )
+
                 try:
-                    asyncio.create_task(download_service.maybe_emit_required(
-                        _embedding_model_name,
-                        purpose="Agent memory search (Active Recall, memory_search)",
-                        consequence_if_declined="Memory search stays unavailable until downloaded.",
-                    ))
+                    task = asyncio.create_task(_emit_required())
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
                 except RuntimeError:
                     pass  # constructed outside an event loop (e.g. a sync test)
 

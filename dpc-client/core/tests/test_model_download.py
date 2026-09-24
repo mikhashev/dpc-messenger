@@ -291,3 +291,311 @@ def test_memory_search_reports_the_missing_model_without_raising(monkeypatch):
     result = tools_core.memory_search(_Ctx(), "hello")
     assert "not downloaded" in result
     assert "BAAI/bge-m3" in result
+
+
+def test_memory_search_reports_the_missing_model_when_the_index_never_built(monkeypatch):
+    """Finding C: `backend.vector.load()` can return False for the same reason
+    the except branch used to report — the index never built because the
+    embedding model was never downloaded. Before this, that order gave "No
+    memory index yet" instead, hiding the real cause."""
+    from dpc_client_core.dpc_agent.tools import core as tools_core
+
+    class _FakeVector:
+        def load(self):
+            return False  # no index — e.g. it never built
+
+        def search(self, *a, **k):
+            raise AssertionError("must not be reached")
+
+    class _FakeText:
+        def load(self):
+            return False
+
+    class _FakeBackend:
+        vector = _FakeVector()
+        text = _FakeText()
+
+    import dpc_client_core.dpc_agent.retrieval as retrieval_pkg
+    monkeypatch.setattr(retrieval_pkg, "make_backend_for_agent", lambda root: _FakeBackend())
+
+    class _FakeProvider:
+        model_name = "BAAI/bge-m3"
+
+    monkeypatch.setattr(memory, "get_embedding_provider", lambda **kw: _FakeProvider())
+    monkeypatch.setattr(model_sizes, "is_model_cached", lambda name: False)
+
+    class _Ctx:
+        agent_root = None
+
+    result = tools_core.memory_search(_Ctx(), "hello")
+    assert "not downloaded" in result
+    assert "BAAI/bge-m3" in result
+
+
+def test_memory_search_still_returns_text_results_when_the_embedding_model_is_missing(monkeypatch):
+    """Finding C also requires BM25/text search to keep working: checking the
+    embedding model's cache state up front must not short-circuit the text
+    channel."""
+    from dpc_client_core.dpc_agent.tools import core as tools_core
+
+    class _Result:
+        def __init__(self, chunk_meta, score):
+            self.chunk_meta = chunk_meta
+            self.score = score
+
+    class _FakeVector:
+        def load(self):
+            return False
+
+        def search(self, *a, **k):
+            raise AssertionError("must not be reached")
+
+    class _FakeText:
+        def load(self):
+            return True
+
+        def search(self, query, top_k):
+            return [_Result({"source_layer": "L5", "source_file": "notes.md"}, 0.9)]
+
+    class _FakeFuser:
+        def fuse(self, vector_results, text_results):
+            return text_results
+
+    class _FakeBackend:
+        vector = _FakeVector()
+        text = _FakeText()
+        fuser = _FakeFuser()
+
+    import dpc_client_core.dpc_agent.retrieval as retrieval_pkg
+    monkeypatch.setattr(retrieval_pkg, "make_backend_for_agent", lambda root: _FakeBackend())
+
+    class _FakeProvider:
+        model_name = "BAAI/bge-m3"
+
+    monkeypatch.setattr(memory, "get_embedding_provider", lambda **kw: _FakeProvider())
+    monkeypatch.setattr(model_sizes, "is_model_cached", lambda name: False)
+
+    class _Ctx:
+        agent_root = None
+
+    result = tools_core.memory_search(_Ctx(), "hello")
+    assert "Found 1 results" in result
+    assert "notes.md" in result
+
+
+# --- model_sizes.py: measured_on travels with the size, finding F ----------
+
+
+def test_model_size_measured_on_returns_the_dated_row():
+    assert model_sizes.model_size_measured_on(
+        "BAAI/bge-m3", "5617a9f61b028005a4858fdac845db406aefb181"
+    ) == "2026-09-24"
+
+
+def test_model_size_measured_on_follows_the_same_name_only_fallback_as_the_size():
+    assert model_sizes.model_size_measured_on("BAAI/bge-m3") == "2026-09-24"
+
+
+def test_model_size_measured_on_is_none_for_an_unmeasured_model():
+    assert model_sizes.model_size_measured_on("some/unmeasured-model") is None
+
+
+def test_required_payload_carries_size_measured_on(tmp_path):
+    svc = _service(tmp_path)
+    asyncio.run(svc.maybe_emit_required(
+        "BAAI/bge-m3", purpose="test", consequence_if_declined="none",
+    ))
+    payload = svc.local_api.events[0][1]
+    assert payload["size_measured_on"] == "2026-09-24"
+
+
+# --- dpc_agent/model_download.py: one cache check, not two, finding G ------
+
+
+def test_is_model_downloaded_delegates_to_the_single_cache_check(monkeypatch):
+    from dpc_client_core.dpc_agent import model_download
+
+    calls = []
+    monkeypatch.setattr(
+        model_sizes, "is_model_cached",
+        lambda name: calls.append(name) or True,
+    )
+    assert model_download.is_model_downloaded("some/model") is True
+    assert calls == ["some/model"]
+
+
+# --- ModelDownloadService.download_model: the allow-list, finding A --------
+
+
+class _FakeProviderObj:
+    def __init__(self, alias, config):
+        self.alias = alias
+        self.config = config
+
+
+class _FakeLlmManagerForDownload:
+    def __init__(self, providers=None):
+        self.providers = providers or {}
+
+
+def test_download_model_refuses_an_unknown_name_without_touching_the_network(tmp_path, monkeypatch):
+    svc = _service(tmp_path)
+
+    def _must_not_be_called(*a, **k):
+        raise AssertionError("SentenceTransformer must not be constructed for a refused name")
+
+    monkeypatch.setattr(
+        "dpc_client_core.model_download_service.ModelDownloadService.download_embedding_model",
+        _must_not_be_called,
+    )
+
+    result = asyncio.run(svc.download_model("some-attacker/arbitrary-repo"))
+    assert result["status"] == "error"
+    assert "is not one this app downloads" in result["error"]
+
+
+def test_download_model_accepts_a_measured_table_name(tmp_path, monkeypatch):
+    svc = _service(tmp_path)
+    calls = []
+
+    async def _fake_download(model_name=None):
+        calls.append(model_name)
+        return {"status": "success", "model_name": model_name}
+
+    monkeypatch.setattr(svc, "download_embedding_model", _fake_download)
+    result = asyncio.run(svc.download_model("BAAI/bge-m3"))
+    assert result["status"] == "success"
+    assert calls == ["BAAI/bge-m3"]
+
+
+def test_download_model_accepts_a_configured_local_whisper_model(tmp_path):
+    provider = _FakeProviderObj("my_whisper", {"type": "local_whisper", "model": "openai/whisper-tiny"})
+    svc = ModelDownloadService(
+        llm_manager=_FakeLlmManagerForDownload({"my_whisper": provider}),
+        settings=Settings(tmp_path),
+        local_api=_FakeLocalApi(),
+    )
+    assert "openai/whisper-tiny" in svc._allowed_model_names()
+
+
+def test_download_model_accepts_a_model_already_announced_this_session(tmp_path):
+    svc = _service(tmp_path)
+    asyncio.run(svc.maybe_emit_required("some/one-off-model", purpose="p", consequence_if_declined="c"))
+    assert "some/one-off-model" in svc._allowed_model_names()
+
+
+def test_download_model_accepts_an_agent_profiles_embedding_model(tmp_path):
+    class _FakeFirewall:
+        def list_agent_profiles(self):
+            return ["researcher"]
+
+        def get_agent_profile_settings(self, name):
+            return {"memory": {"embedding_model": "some-org/custom-embedder"}}
+
+    svc = ModelDownloadService(
+        llm_manager=None, settings=Settings(tmp_path), local_api=_FakeLocalApi(),
+        firewall=_FakeFirewall(),
+    )
+    assert "some-org/custom-embedder" in svc._allowed_model_names()
+
+
+# --- ModelDownloadService.reset_decline after a restart, finding B ---------
+
+
+def test_reset_decline_rebuilds_the_payload_from_the_known_registry_after_a_restart(tmp_path, monkeypatch):
+    """A fresh service (empty `_last_required_payload`, as after a process
+    restart) with only the persisted decline flag set must still be able to
+    re-ask, for a model this service knows about."""
+    svc = _service(tmp_path)
+    svc.settings.set_model_download_declined("BAAI/bge-m3")
+    monkeypatch.setattr(
+        "dpc_client_core.model_download_service.is_model_cached", lambda name: False
+    )
+
+    assert svc._last_required_payload == {}  # nothing asked yet this process
+    re_asked = asyncio.run(svc.reset_decline("BAAI/bge-m3"))
+
+    assert re_asked is True
+    assert svc.settings.get_model_download_declined("BAAI/bge-m3") is False
+    names = [name for name, _ in svc.local_api.events]
+    assert names.count("model_download_required") == 1
+    payload = svc.local_api.events[0][1]
+    assert payload["purpose"]  # non-empty: came from the registry, not an empty prior ask
+
+
+def test_reset_decline_still_declines_to_re_ask_for_a_name_it_has_never_seen(tmp_path, monkeypatch):
+    svc = _service(tmp_path)
+    svc.settings.set_model_download_declined("never-asked-about")
+    monkeypatch.setattr(
+        "dpc_client_core.model_download_service.is_model_cached", lambda name: False
+    )
+    re_asked = asyncio.run(svc.reset_decline("never-asked-about"))
+    assert re_asked is False
+    assert svc.local_api.events == []
+
+
+# --- service.py transcribe_audio / telegram_coordinator.py, finding D ------
+
+
+def test_telegram_branches_on_the_model_not_cached_field_not_the_wording(tmp_path):
+    """The branch must survive a reworded message: it reads the structural
+    `model_not_cached` field `transcribe_audio` returns, not the text
+    (finding D, 2026-09-24). Exercises the real
+    `TelegramBridge._transcribe_voice_and_notify`, not a reimplementation."""
+    from dpc_client_core.coordinators.telegram_coordinator import TelegramBridge
+
+    sent = []
+
+    class _FakeTelegram:
+        async def send_message(self, chat_id, text):
+            sent.append(text)
+
+    class _FakeService:
+        async def transcribe_audio(self, **kwargs):
+            return {
+                "status": "error",
+                "error": "a completely reworded sentence about the model",
+                "model_not_cached": "openai/whisper-large-v3-turbo",
+            }
+
+    bridge = TelegramBridge.__new__(TelegramBridge)
+    bridge.telegram = _FakeTelegram()
+    bridge.service = _FakeService()
+
+    voice_path = tmp_path / "v.ogg"
+    voice_path.write_bytes(b"fake audio")
+
+    text, provider = asyncio.run(
+        bridge._transcribe_voice_and_notify("chat1", voice_path, "whisper1")
+    )
+
+    assert text is None and provider is None
+    assert sent == ["⚠️ a completely reworded sentence about the model"]
+
+
+def test_telegram_does_not_mistake_an_unrelated_error_for_a_missing_model(tmp_path):
+    """Falsifier for finding D: an ordinary error dict (no `model_not_cached`)
+    must fall to the generic branch, capped and prefixed, not the
+    model-not-cached one."""
+    from dpc_client_core.coordinators.telegram_coordinator import TelegramBridge
+
+    sent = []
+
+    class _FakeTelegram:
+        async def send_message(self, chat_id, text):
+            sent.append(text)
+
+    class _FakeService:
+        async def transcribe_audio(self, **kwargs):
+            return {"status": "error", "error": "network unreachable"}
+
+    bridge = TelegramBridge.__new__(TelegramBridge)
+    bridge.telegram = _FakeTelegram()
+    bridge.service = _FakeService()
+
+    voice_path = tmp_path / "v.ogg"
+    voice_path.write_bytes(b"fake audio")
+
+    asyncio.run(bridge._transcribe_voice_and_notify("chat1", voice_path, "whisper1"))
+
+    assert sent == ["⚠️ Transcription failed: network unreachable"]

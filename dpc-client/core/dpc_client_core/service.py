@@ -493,6 +493,7 @@ class CoreService:
             llm_manager=self.llm_manager,
             settings=self.settings,
             local_api=self.local_api,
+            firewall=self.firewall,
         )
 
         # Voice transcription — managed by VoiceService (Phase 1a refactor)
@@ -3695,6 +3696,12 @@ class CoreService:
         import tempfile
         from pathlib import Path
 
+        # Set when the local_whisper branch below catches a ModelNotCachedError,
+        # so the final except block can carry the fact in the returned dict
+        # rather than a caller having to match it out of the message text
+        # (finding D, 2026-09-24: telegram_coordinator.py used to do exactly that).
+        _model_not_cached_name: str | None = None
+
         # 0. Check if this is a remote transcription request
         if provider_alias and provider_alias.startswith("remote:"):
             # Parse remote provider: "remote:node_id:alias"
@@ -3847,6 +3854,7 @@ class CoreService:
                         error_details = local_error.__cause__ if isinstance(local_error.__cause__, ModelNotCachedError) else local_error
 
                         logger.info(f"Whisper model not cached, prompting user for download")
+                        _model_not_cached_name = error_details.model_name
 
                         await self.model_download_service.maybe_emit_required(
                             error_details.model_name,
@@ -3946,10 +3954,13 @@ class CoreService:
                     "duration": 5000  # Show for 5 seconds
                 })
 
-            return {
-                "status": "error",
-                "error": str(e)
-            }
+            result_dict: dict = {"status": "error", "error": str(e)}
+            if _model_not_cached_name is not None:
+                # Structural marker, checked by field rather than by matching
+                # the message text — see the comment on `_model_not_cached_name`
+                # above (finding D).
+                result_dict["model_not_cached"] = _model_not_cached_name
+            return result_dict
         finally:
             # Only delete the temp file if we created it (not if the caller passed file_path)
             if _temp_path_to_delete:

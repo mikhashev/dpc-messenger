@@ -14,17 +14,29 @@ answer, not a traceback, when huggingface_hub is offline.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# (model_name, revision) -> size_bytes. A caller that pins no revision gets
-# the measured row for the name: the loaders here do not pin one either.
-_MEASURED_SIZES: Dict[Tuple[str, Optional[str]], int] = {
+
+@dataclass(frozen=True)
+class _SizeRow:
+    """One measured row: the byte count and the date it was taken (S148-style
+    finding, 2026-09-24) — a number with no date attached cannot be told apart
+    from one nobody has re-checked since the model itself changed shape."""
+    size_bytes: int
+    measured_on: Optional[str]  # ISO date, or None for a row with no date on record
+
+
+# (model_name, revision) -> row. A caller that pins no revision gets the
+# measured row for the name: the loaders here do not pin one either.
+_MEASURED_SIZES: Dict[Tuple[str, Optional[str]], _SizeRow] = {
     # Measured 2026-09-24: fresh cache, DISABLE_SAFETENSORS_CONVERSION=true
     # (see dpc_agent/memory.py), pytorch_model.bin + tokenizer files — the
     # files EmbeddingProvider actually loads.
-    ("BAAI/bge-m3", "5617a9f61b028005a4858fdac845db406aefb181"): 2_293_331_663,
+    ("BAAI/bge-m3", "5617a9f61b028005a4858fdac845db406aefb181"):
+        _SizeRow(2_293_331_663, "2026-09-24"),
 
     # Summed 2026-09-24 via HfApi().model_info(repo, revision, files_metadata=True)
     # over the files present in this machine's cached snapshot dir
@@ -33,7 +45,8 @@ _MEASURED_SIZES: Dict[Tuple[str, Optional[str]], int] = {
     # merges/normalizer/special_tokens files (what AutoModelForSpeechSeq2Seq +
     # AutoProcessor pull) — not README.md or .gitattributes. Not a fresh-download
     # measurement, a sum of the API's reported file sizes.
-    ("openai/whisper-large-v3-turbo", "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"): 1_622_443_339,
+    ("openai/whisper-large-v3-turbo", "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"):
+        _SizeRow(1_622_443_339, "2026-09-24"),
 }
 
 
@@ -71,11 +84,11 @@ def model_size_bytes(
     """
     key = (model_name, revision)
     if key in _MEASURED_SIZES:
-        return _MEASURED_SIZES[key], "measured"
+        return _MEASURED_SIZES[key].size_bytes, "measured"
     if revision is None:
-        for (name, _rev), size in _MEASURED_SIZES.items():
+        for (name, _rev), row in _MEASURED_SIZES.items():
             if name == model_name:
-                return size, "measured"
+                return row.size_bytes, "measured"
     try:
         from huggingface_hub import HfApi
         api = HfApi()
@@ -86,3 +99,33 @@ def model_size_bytes(
     except Exception as e:
         logger.debug("model_size_bytes: HfApi lookup failed for %s: %s", model_name, e)
     return None, None
+
+
+def model_size_measured_on(
+    model_name: str, revision: Optional[str] = None
+) -> Optional[str]:
+    """The ISO date the table row for `model_name` was measured, or None.
+
+    None covers two cases a caller does not need to tell apart: no table row
+    (the size came from the live HfApi sum, or is unknown), and a table row
+    that carries no date. Mirrors `model_size_bytes`'s own lookup order —
+    exact revision first, then the row for the name — so the two never
+    disagree about which row answered.
+    """
+    key = (model_name, revision)
+    if key in _MEASURED_SIZES:
+        return _MEASURED_SIZES[key].measured_on
+    if revision is None:
+        for (name, _rev), row in _MEASURED_SIZES.items():
+            if name == model_name:
+                return row.measured_on
+    return None
+
+
+def known_model_names() -> Tuple[str, ...]:
+    """Every model name this table has a measured row for, name only (no
+    revision) — the allow-list `ModelDownloadService.download_model` checks
+    against needs the name a caller passes, not the pinned revision the table
+    also carries.
+    """
+    return tuple(sorted({name for name, _rev in _MEASURED_SIZES}))

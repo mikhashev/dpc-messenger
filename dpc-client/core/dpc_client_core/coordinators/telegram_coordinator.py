@@ -464,6 +464,91 @@ class TelegramBridge:
         except Exception as e:
             logger.error(f"Error handling Telegram text message: {e}", exc_info=True)
 
+    async def _transcribe_voice_and_notify(
+        self, chat_id: str, voice_path: Path, voice_provider_alias: Optional[str]
+    ) -> tuple:
+        """Transcribe a downloaded voice file and notify Telegram on failure.
+
+        Split out of `handle_voice_message` so the model-not-cached branch is
+        unit-testable without the rest of the handler's conversation-monitor
+        plumbing. It reads the structural `model_not_cached` field
+        `transcribe_audio` returns, not the message text (finding D,
+        2026-09-24) — a reworded sentence must not change which branch fires.
+
+        Returns `(transcription_text, transcription_provider)`, both None when
+        transcription is not configured or failed (the failure was already
+        sent to the chat).
+        """
+        if not voice_provider_alias:
+            logger.warning("No voice provider configured, skipping transcription")
+            return None, None
+
+        try:
+            # Read file and encode as base64
+            import base64
+            with open(voice_path, "rb") as f:
+                audio_data = f.read()
+                audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+
+            # Transcribe using service method (handles provider selection)
+            # v0.15.4: Pass provider_alias to respect voice_provider setting from providers.json
+            transcription_result = await self.service.transcribe_audio(
+                audio_base64=audio_base64,
+                mime_type="audio/ogg",
+                provider_alias=voice_provider_alias
+            )
+
+            if transcription_result.get("status") == "error":
+                # transcribe_audio already turned a ModelNotCachedError into
+                # a plain sentence naming the app, not a UI dialog Telegram
+                # has none of — pass it through as-is. The dict's
+                # `model_not_cached` field (not the wording) is what the
+                # except block below branches on.
+                not_cached_error = RuntimeError(
+                    transcription_result.get("error", "transcription failed")
+                )
+                not_cached_error.model_not_cached = transcription_result.get("model_not_cached")
+                raise not_cached_error
+
+            transcription_text = transcription_result.get("text", "")
+            transcription_provider = transcription_result.get("provider", "unknown")
+
+            logger.info(f"Transcribed voice message ({len(transcription_text)} chars, provider: {transcription_provider})")
+
+            # Send transcription back to Telegram (v0.15.0 - re-enabled)
+            await self.telegram.send_message(
+                chat_id,
+                f"📝 Transcription:\n{transcription_text}"
+            )
+            return transcription_text, transcription_provider
+
+        except Exception as e:
+            logger.error(f"Failed to transcribe voice message: {e}", exc_info=True)
+
+            # v0.15.4: Notify Telegram user of transcription failure
+            try:
+                error_msg = str(e)
+                if "VRAM" in error_msg or "memory" in error_msg.lower() or "CUDA" in error_msg:
+                    await self.telegram.send_message(
+                        chat_id,
+                        "⚠️ Transcription failed: GPU memory error. Try a shorter voice message."
+                    )
+                elif getattr(e, "model_not_cached", None):
+                    # The model-not-cached sentence from transcribe_audio; short
+                    # and self-contained, sent whole rather than cut at 100 chars.
+                    await self.telegram.send_message(chat_id, f"⚠️ {error_msg}")
+                else:
+                    # Cap unknown errors so a verbose traceback string doesn't
+                    # flood the chat, but cut at a word boundary.
+                    display_error = error_msg if len(error_msg) <= 100 else error_msg[:100].rsplit(" ", 1)[0] + "…"
+                    await self.telegram.send_message(
+                        chat_id,
+                        f"⚠️ Transcription failed: {display_error}"
+                    )
+            except Exception as notify_error:
+                logger.error(f"Failed to notify Telegram user of transcription error: {notify_error}")
+            return None, None
+
     async def handle_voice_message(self, update, context):
         """
         Handle incoming voice message from Telegram with transcription.
@@ -519,69 +604,10 @@ class TelegramBridge:
             transcription_provider = None
 
             if self.telegram.transcription_enabled:
-                try:
-                    # Get voice provider alias
-                    voice_provider_alias = self.service.llm_manager.voice_provider
-
-                    if voice_provider_alias:
-                        # Read file and encode as base64
-                        import base64
-                        with open(voice_path, "rb") as f:
-                            audio_data = f.read()
-                            audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-
-                        # Transcribe using service method (handles provider selection)
-                        # v0.15.4: Pass provider_alias to respect voice_provider setting from providers.json
-                        transcription_result = await self.service.transcribe_audio(
-                            audio_base64=audio_base64,
-                            mime_type="audio/ogg",
-                            provider_alias=voice_provider_alias
-                        )
-
-                        if transcription_result.get("status") == "error":
-                            # transcribe_audio already turned a ModelNotCachedError into
-                            # a plain sentence naming the app, not a UI dialog Telegram
-                            # has none of — pass it through as-is.
-                            raise RuntimeError(transcription_result.get("error", "transcription failed"))
-
-                        transcription_text = transcription_result.get("text", "")
-                        transcription_provider = transcription_result.get("provider", "unknown")
-
-                        logger.info(f"Transcribed voice message ({len(transcription_text)} chars, provider: {transcription_provider})")
-
-                        # Send transcription back to Telegram (v0.15.0 - re-enabled)
-                        await self.telegram.send_message(
-                            chat_id,
-                            f"📝 Transcription:\n{transcription_text}"
-                        )
-                    else:
-                        logger.warning("No voice provider configured, skipping transcription")
-
-                except Exception as e:
-                    logger.error(f"Failed to transcribe voice message: {e}", exc_info=True)
-
-                    # v0.15.4: Notify Telegram user of transcription failure
-                    try:
-                        error_msg = str(e)
-                        if "VRAM" in error_msg or "memory" in error_msg.lower() or "CUDA" in error_msg:
-                            await self.telegram.send_message(
-                                chat_id,
-                                "⚠️ Transcription failed: GPU memory error. Try a shorter voice message."
-                            )
-                        elif "is not downloaded yet" in error_msg:
-                            # The model-not-cached sentence from transcribe_audio; short
-                            # and self-contained, sent whole rather than cut at 100 chars.
-                            await self.telegram.send_message(chat_id, f"⚠️ {error_msg}")
-                        else:
-                            # Cap unknown errors so a verbose traceback string doesn't
-                            # flood the chat, but cut at a word boundary.
-                            display_error = error_msg if len(error_msg) <= 100 else error_msg[:100].rsplit(" ", 1)[0] + "…"
-                            await self.telegram.send_message(
-                                chat_id,
-                                f"⚠️ Transcription failed: {display_error}"
-                            )
-                    except Exception as notify_error:
-                        logger.error(f"Failed to notify Telegram user of transcription error: {notify_error}")
+                voice_provider_alias = self.service.llm_manager.voice_provider
+                transcription_text, transcription_provider = await self._transcribe_voice_and_notify(
+                    chat_id, voice_path, voice_provider_alias
+                )
 
             # Create voice attachment
             from ..conversation_monitor import Message as ConvMessage
