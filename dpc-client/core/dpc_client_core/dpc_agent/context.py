@@ -30,6 +30,7 @@ from .utils import (
 )
 from .memory import Memory
 from .tool_ledger import is_outcome
+from ..providers.base import ModelNotCachedError
 
 log = logging.getLogger(__name__)
 
@@ -683,6 +684,10 @@ def build_llm_messages(
                     recall_text = _recall.text
                 else:
                     log.debug("Active Recall: no results matched query")
+            except ModelNotCachedError as e:
+                # What the user sees: nothing — the turn proceeds with no recall
+                # block, same as an empty result set.
+                log.info("Active Recall skipped: embedding model %s not cached", e.model_name)
             except Exception:
                 log.warning("Active Recall failed", exc_info=True)
 

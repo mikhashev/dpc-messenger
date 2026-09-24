@@ -7,6 +7,10 @@ import logging
 from typing import Dict, Any, Optional, List
 
 from .base import AIProvider, ModelNotCachedError
+from .model_sizes import model_size_bytes
+
+# The revision model_sizes.py's measured row is keyed on.
+WHISPER_MODEL_REVISION = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
 
 logger = logging.getLogger(__name__)
 
@@ -179,8 +183,9 @@ class LocalWhisperProvider(AIProvider):
             # PyTorch path (CUDA/MPS/CPU)
             import torch
             from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+            from .model_sizes import hf_cache_path
 
-            cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+            cache_dir = hf_cache_path()
             os.makedirs(cache_dir, exist_ok=True)
 
             torch_dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
@@ -204,14 +209,18 @@ class LocalWhisperProvider(AIProvider):
                 )
             except OSError as e:
                 if "local_files_only" in str(e) or "offline mode" in str(e).lower():
+                    revision = self.model_name == "openai/whisper-large-v3-turbo" and WHISPER_MODEL_REVISION or None
+                    size_bytes, size_source = model_size_bytes(self.model_name, revision)
                     logger.warning(
                         f"Whisper model '{self.model_name}' not found in cache. "
-                        f"Download required (~3GB). User will be prompted."
+                        f"User will be prompted to download."
                     )
                     raise ModelNotCachedError(
                         model_name=self.model_name,
                         cache_path=cache_dir,
-                        download_size_gb=3.0
+                        revision=revision,
+                        size_bytes=size_bytes,
+                        size_source=size_source,
                     ) from e
                 else:
                     raise
@@ -341,7 +350,7 @@ class LocalWhisperProvider(AIProvider):
             logger.info("Whisper model unloaded (async)")
 
     async def download_model_async(self, progress_callback=None) -> Dict[str, Any]:
-        logger.info(f"Starting download of Whisper model '{self.model_name}' (~3GB)...")
+        logger.info(f"Starting download of Whisper model '{self.model_name}'...")
 
         if progress_callback:
             await progress_callback("Preparing download", 0.0)
@@ -349,8 +358,9 @@ class LocalWhisperProvider(AIProvider):
         def _download():
             import torch
             from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+            from .model_sizes import hf_cache_path
 
-            cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+            cache_dir = hf_cache_path()
             os.makedirs(cache_dir, exist_ok=True)
 
             try:
@@ -386,7 +396,7 @@ class LocalWhisperProvider(AIProvider):
 
                 return {
                     "success": True,
-                    "message": f"Model '{self.model_name}' downloaded successfully (~3GB)",
+                    "message": f"Model '{self.model_name}' downloaded successfully",
                     "model_name": self.model_name,
                     "cache_path": cache_dir
                 }

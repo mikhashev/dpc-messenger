@@ -529,6 +529,31 @@ class Settings:
         value = self.get('hf', 'offline_mode', 'false')
         return value.lower() in ('true', '1', 'yes')
 
+    def get_model_download_declined(self, model_name: str) -> bool:
+        """Whether `model_name`'s download dialog was dismissed with "don't
+        remind me" (`decline_model_download {remember: true}`).
+
+        `[model_downloads]` holds one key per model, value `declined` — the
+        only download-consent outcome this file remembers; a cancel, a
+        failure or a closed dialog never write here (Ark's asking policy,
+        owner-accepted 2026-09-24). Option names go through configparser's
+        default lowercasing like every other key here, so callers must pass
+        the same `model_name` spelling on every call — which every call site
+        in this codebase does, reading it off the provider/agent config.
+        """
+        return self.get('model_downloads', model_name, '').strip().lower() == 'declined'
+
+    def set_model_download_declined(self, model_name: str) -> None:
+        """Persist "don't remind me" for `model_name`."""
+        self.set('model_downloads', model_name, 'declined')
+
+    def clear_model_download_declined(self, model_name: str) -> None:
+        """Undo a persisted decline (`reset_model_download_decline`)."""
+        if self._config.has_section('model_downloads') and self._config.has_option('model_downloads', model_name):
+            self._config.remove_option('model_downloads', model_name)
+            with open(self.config_file, 'w') as f:
+                self._config.write(f)
+
     def get_kg_backend(self) -> str:
         """Knowledge graph backend selection (ADR-024 Phase 1.5).
 

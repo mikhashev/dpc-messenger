@@ -49,11 +49,13 @@ class VoiceService:
         settings: Any,
         local_api: Any,
         on_transcription_enabled: Optional[Callable[[str], Coroutine]] = None,
+        model_download_service: Any = None,
     ):
         self.llm_manager = llm_manager
         self.settings = settings
         self.local_api = local_api
         self._on_transcription_enabled = on_transcription_enabled
+        self.model_download_service = model_download_service
 
         # Voice transcription state (owned by VoiceService)
         self._voice_transcriptions: Dict[str, Dict[str, Any]] = {}
@@ -305,24 +307,20 @@ class VoiceService:
                     "error": f"Provider '{provider_alias}' doesn't support model download"
                 }
 
-            # Broadcast download started event
-            await self.local_api.broadcast_event("whisper_model_download_started", {
-                "provider": provider_alias,
-                "model_name": provider_obj.config.get("model", "unknown")
-            })
+            model_name = provider_obj.config.get("model", "unknown")
 
-            # Download model (this runs in thread pool, so it won't block)
+            # Broadcast download started event — model_download_* family (2026-09-24),
+            # shared with the embedding model rather than a Whisper-only name.
+            if self.model_download_service:
+                await self.model_download_service.emit_started(model_name)
+
             logger.info(f"Starting Whisper model download for provider '{provider_alias}'...")
 
             result = await provider_obj.download_model_async()
 
             if result.get("success"):
-                # Broadcast download completed event
-                await self.local_api.broadcast_event("whisper_model_download_completed", {
-                    "provider": provider_alias,
-                    "model_name": result.get("model_name"),
-                    "cache_path": result.get("cache_path")
-                })
+                if self.model_download_service:
+                    await self.model_download_service.emit_completed(model_name)
 
                 logger.info(f"Successfully downloaded Whisper model for provider '{provider_alias}'")
 
@@ -333,11 +331,8 @@ class VoiceService:
                     "message": result.get("message")
                 }
             else:
-                # Broadcast download failed event
-                await self.local_api.broadcast_event("whisper_model_download_failed", {
-                    "provider": provider_alias,
-                    "error": result.get("message")
-                })
+                if self.model_download_service:
+                    await self.model_download_service.emit_failed(model_name, result.get("message", "download failed"))
 
                 return {
                     "status": "error",
@@ -347,11 +342,10 @@ class VoiceService:
         except Exception as e:
             logger.error(f"Failed to download Whisper model: {e}", exc_info=True)
 
-            # Broadcast download failed event
-            await self.local_api.broadcast_event("whisper_model_download_failed", {
-                "provider": provider_alias if provider_alias else "unknown",
-                "error": str(e)
-            })
+            if self.model_download_service and provider_obj is not None:
+                await self.model_download_service.emit_failed(
+                    provider_obj.config.get("model", "unknown"), str(e)
+                )
 
             return {
                 "status": "error",

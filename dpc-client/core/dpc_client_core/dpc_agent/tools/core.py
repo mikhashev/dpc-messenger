@@ -769,21 +769,33 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
 
         backend = make_backend_for_agent(ctx.agent_root)
 
+        from dpc_client_core.providers.base import ModelNotCachedError
+
         vector_results = []
+        embedding_unavailable_model = None
         if backend.vector.load():
             try:
                 from dpc_client_core.dpc_agent.memory import get_embedding_provider
                 provider = get_embedding_provider(local_files_only=True)
                 qvec = np.array(provider.embed(query), dtype=np.float32)
                 vector_results = backend.vector.search(qvec, top_k)
+            except ModelNotCachedError as e:
+                log.info("Vector search skipped: embedding model %s not cached", e.model_name)
+                embedding_unavailable_model = e.model_name
             except Exception as e:
                 log.warning("Vector search failed: %s", e)
 
+        # Text-only search still runs — it does not need the embedding model.
         text_results = []
         if backend.text.load():
             text_results = backend.text.search(query, top_k)
 
         if not vector_results and not text_results:
+            if embedding_unavailable_model:
+                return (
+                    f"memory search is unavailable: the embedding model "
+                    f"({embedding_unavailable_model}) is not downloaded"
+                )
             return "No memory index yet. Index builds automatically at startup when memory is enabled. Try again after restart."
 
         merged = backend.fuser.fuse(vector_results, text_results)

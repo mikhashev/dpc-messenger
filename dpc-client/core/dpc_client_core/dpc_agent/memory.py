@@ -310,11 +310,16 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
 # Embedding Provider (ADR-010, MEM-3.1)
 # ---------------------------------------------------------------------------
 
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
+# Known vector width per model, for a caller that must answer without loading
+# the model (retrieval/factory.py, when the model isn't cached yet).
+KNOWN_EMBEDDING_DIMENSIONS = {"BAAI/bge-m3": 1024}
+
 _singleton_providers: Dict[str, "EmbeddingProvider"] = {}
 _singleton_lock = threading.Lock()
 
 
-def get_embedding_provider(model_name: str = "BAAI/bge-m3", **kwargs) -> "EmbeddingProvider":
+def get_embedding_provider(model_name: str = DEFAULT_EMBEDDING_MODEL, **kwargs) -> "EmbeddingProvider":
     """Return a singleton EmbeddingProvider per model_name to avoid duplicate GPU loads.
 
     Because it is a singleton, whoever asks first decides the settings and everyone
@@ -447,9 +452,9 @@ class EmbeddingProvider:
 
     _gpu_semaphore = threading.Semaphore(1)
 
-    def __init__(self, model_name: str = "BAAI/bge-m3",
+    def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL,
                  device: Optional[str] = None, max_tokens: int = 4096,
-                 local_files_only: bool = False):
+                 local_files_only: bool = True):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self._device = device
@@ -543,10 +548,14 @@ class EmbeddingProvider:
                 kwargs["local_files_only"] = True
                 try:
                     self._model = SentenceTransformer(self.model_name, **kwargs)
-                except Exception:
-                    log.info("Model %s not in cache, downloading...", self.model_name)
-                    kwargs.pop("local_files_only")
-                    self._model = SentenceTransformer(self.model_name, **kwargs)
+                except OSError as e:
+                    from ..providers.base import ModelNotCachedError
+                    from ..providers.model_sizes import hf_cache_path
+                    if "local_files_only" not in str(e) and "offline mode" not in str(e).lower():
+                        raise
+                    raise ModelNotCachedError(
+                        model_name=self.model_name, cache_path=hf_cache_path(),
+                    ) from e
             else:
                 self._model = SentenceTransformer(self.model_name, **kwargs)
             self._apply_token_limit()

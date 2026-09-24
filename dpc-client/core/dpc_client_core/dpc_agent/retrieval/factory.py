@@ -154,8 +154,9 @@ def _derive_embedding_metadata(agent_config: dict) -> tuple[str, int]:
     Lazy imports keep `factory.py` free of memory/sentence-transformer
     dependencies in the unit-test path that supplies `dimensions` explicitly.
     """
-    from ..memory import get_embedding_provider
+    from ..memory import KNOWN_EMBEDDING_DIMENSIONS, get_embedding_provider
     from ..memory_config import get_memory_config
+    from ...providers.base import ModelNotCachedError
 
     mem_cfg = get_memory_config(agent_config)
     provider = get_embedding_provider(
@@ -163,7 +164,16 @@ def _derive_embedding_metadata(agent_config: dict) -> tuple[str, int]:
         local_files_only=True,
         device=mem_cfg.embedding_device,
     )
-    return provider.model_name, provider.dimensions
+    try:
+        return provider.model_name, provider.dimensions
+    except ModelNotCachedError:
+        # What the user sees: nothing — the backend builds with a placeholder
+        # width; a real load (once the model is downloaded) rebuilds it.
+        log.info(
+            "Retrieval backend: embedding model %s not cached, using known width",
+            mem_cfg.embedding_model,
+        )
+        return mem_cfg.embedding_model, KNOWN_EMBEDDING_DIMENSIONS.get(mem_cfg.embedding_model, 384)
 
 
 def _grafeo_path(index_dir: pathlib.Path) -> pathlib.Path:

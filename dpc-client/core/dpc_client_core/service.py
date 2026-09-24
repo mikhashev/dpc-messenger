@@ -136,6 +136,7 @@ from .voice_service import VoiceService
 from .knowledge_service import KnowledgeService
 from .telegram_service import TelegramService
 from .agent_service import AgentService
+from .model_download_service import ModelDownloadService
 from .managers.group_manager import GroupManager
 from .managers.prompt_manager import PromptManager
 from .managers.instruction_manager import InstructionManager
@@ -485,12 +486,22 @@ class CoreService:
         # Track pending providers requests (for on-demand provider discovery)
         self._pending_providers_requests: Dict[str, asyncio.Future] = {}
 
+        # Model-download consent flow (2026-09-24), shared by Whisper and the
+        # embedding model — constructed before VoiceService, which delegates
+        # its download half here.
+        self.model_download_service = ModelDownloadService(
+            llm_manager=self.llm_manager,
+            settings=self.settings,
+            local_api=self.local_api,
+        )
+
         # Voice transcription — managed by VoiceService (Phase 1a refactor)
         self.voice_service = VoiceService(
             llm_manager=self.llm_manager,
             settings=self.settings,
             local_api=self.local_api,
             on_transcription_enabled=self._retroactively_transcribe_conversation,
+            model_download_service=self.model_download_service,
         )
         # Alias state refs for backward compat: methods that stay in CoreService
         # (_maybe_transcribe_voice_message, _retroactively_transcribe_conversation)
@@ -3833,22 +3844,24 @@ class CoreService:
                     # Check if this is a model not cached error
                     from dpc_client_core.llm_manager import ModelNotCachedError
                     if isinstance(local_error.__cause__, ModelNotCachedError) or isinstance(local_error, ModelNotCachedError):
-                        # Model needs to be downloaded - broadcast event to UI
                         error_details = local_error.__cause__ if isinstance(local_error.__cause__, ModelNotCachedError) else local_error
 
                         logger.info(f"Whisper model not cached, prompting user for download")
 
-                        await self.local_api.broadcast_event("whisper_model_download_required", {
-                            "model_name": error_details.model_name,
-                            "cache_path": error_details.cache_path,
-                            "download_size_gb": error_details.download_size_gb,
-                            "provider_alias": provider_obj.alias
-                        })
+                        await self.model_download_service.maybe_emit_required(
+                            error_details.model_name,
+                            revision=error_details.revision,
+                            purpose="Voice transcription",
+                            consequence_if_declined="Voice messages will not be transcribed.",
+                            provider_alias=provider_obj.alias,
+                        )
 
-                        # Don't try fallback for this error - user needs to confirm download
+                        # Don't try fallback for this error - user needs to confirm
+                        # download. No mention of "the dialog": this text also reaches
+                        # Telegram, which has none (telegram_coordinator.py).
                         raise ValueError(
-                            f"Model '{error_details.model_name}' not cached locally. "
-                            f"Please confirm download in the dialog to proceed."
+                            f"Model '{error_details.model_name}' is not downloaded yet. "
+                            f"Confirm the download in the D-PC Messenger app to proceed."
                         ) from local_error
 
                     logger.warning(f"Local transcription failed: {local_error}")
@@ -3949,9 +3962,28 @@ class CoreService:
         """Delegated to VoiceService."""
         return await self.voice_service.preload_whisper_model(provider_alias)
 
+    @slow_command
     async def download_whisper_model(self, provider_alias: str | None = None) -> dict:
-        """Delegated to VoiceService."""
+        """Thin alias for `download_model`, kept for an older UI build."""
         return await self.voice_service.download_whisper_model(provider_alias)
+
+    @slow_command
+    async def download_model(self, model_name: str, provider_alias: str | None = None) -> dict:
+        """Generic download-consent executor (Whisper or the embedding model)."""
+        return await self.model_download_service.download_model(model_name, provider_alias)
+
+    async def decline_model_download(self, model_name: str, remember: bool = False) -> dict:
+        self.model_download_service.decline(model_name, remember)
+        return {"status": "success"}
+
+    async def reset_model_download_decline(self, model_name: str) -> dict:
+        re_asked = await self.model_download_service.reset_decline(model_name)
+        return {"status": "success", "re_asked": re_asked}
+
+    async def get_model_download_status(self, model_name: str | None = None) -> dict:
+        if model_name:
+            return {"status": "success", "models": {model_name: self.model_download_service.get_status(model_name)}}
+        return {"status": "success", "models": self.model_download_service.get_all_status()}
 
     async def _transcribe_with_openai(self, audio_path: str, provider_config: dict) -> dict:
         """

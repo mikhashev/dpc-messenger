@@ -538,6 +538,12 @@ class TelegramBridge:
                             provider_alias=voice_provider_alias
                         )
 
+                        if transcription_result.get("status") == "error":
+                            # transcribe_audio already turned a ModelNotCachedError into
+                            # a plain sentence naming the app, not a UI dialog Telegram
+                            # has none of — pass it through as-is.
+                            raise RuntimeError(transcription_result.get("error", "transcription failed"))
+
                         transcription_text = transcription_result.get("text", "")
                         transcription_provider = transcription_result.get("provider", "unknown")
 
@@ -562,9 +568,14 @@ class TelegramBridge:
                                 chat_id,
                                 "⚠️ Transcription failed: GPU memory error. Try a shorter voice message."
                             )
+                        elif "is not downloaded yet" in error_msg:
+                            # The model-not-cached sentence from transcribe_audio; short
+                            # and self-contained, sent whole rather than cut at 100 chars.
+                            await self.telegram.send_message(chat_id, f"⚠️ {error_msg}")
                         else:
-                            # Truncate error message to avoid long Telegram messages
-                            display_error = error_msg[:100] if len(error_msg) > 100 else error_msg
+                            # Cap unknown errors so a verbose traceback string doesn't
+                            # flood the chat, but cut at a word boundary.
+                            display_error = error_msg if len(error_msg) <= 100 else error_msg[:100].rsplit(" ", 1)[0] + "…"
                             await self.telegram.send_message(
                                 chat_id,
                                 f"⚠️ Transcription failed: {display_error}"

@@ -12,11 +12,34 @@ logger = logging.getLogger(__name__)
 # --- Custom Exceptions ---
 
 class ModelNotCachedError(Exception):
-    """Raised when a model is not found in local cache and needs to be downloaded."""
-    def __init__(self, model_name: str, cache_path: str, download_size_gb: float = 3.0):
+    """Raised when a model is not found in local cache and needs to be downloaded.
+
+    One class for every model this app may fetch — Whisper and the embedding
+    model both raise it, so there is one catcher shape and one consent dialog
+    for either, per the 2026-09-24 owner decision. `size_bytes`/`size_source`
+    replace the old hardcoded `download_size_gb=3.0`: a caller now gets a
+    measured or API-derived number, or an honest `None` ("size unknown") —
+    see `providers/model_sizes.py`. `download_size_gb` is kept and derived
+    from `size_bytes` for the two or three older catchers that still read it.
+    """
+    def __init__(
+        self,
+        model_name: str,
+        cache_path: str,
+        revision: Optional[str] = None,
+        size_bytes: Optional[int] = None,
+        size_source: Optional[str] = None,
+        download_size_gb: Optional[float] = None,
+    ):
         self.model_name = model_name
         self.cache_path = cache_path
-        self.download_size_gb = download_size_gb
+        self.revision = revision
+        self.size_bytes = size_bytes
+        self.size_source = size_source
+        self.download_size_gb = (
+            download_size_gb if download_size_gb is not None
+            else (round(size_bytes / (1024 ** 3), 2) if size_bytes else None)
+        )
         super().__init__(f"Model '{model_name}' not found in cache: {cache_path}")
 
 class ProviderRetryCancelled(Exception):

@@ -20,6 +20,7 @@ import pathlib
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..dpc_agent.agent import DpcAgent, AgentConfig
+from ..providers.base import ModelNotCachedError
 from ..dpc_agent.utils import get_agent_root, ensure_agent_dirs, utc_now_iso
 from ..dpc_agent.events import get_event_emitter, EventType
 from ..conversation_monitor import ConversationMonitor
@@ -300,16 +301,19 @@ class DpcAgentManager:
             return
         try:
             from dpc_client_core.dpc_agent.memory_config import get_memory_config
-            from dpc_client_core.dpc_agent.model_download import notify_download_needed
+            from dpc_client_core.dpc_agent.model_download import is_model_downloaded
             _profile = self.firewall.get_agent_profile_settings(self.agent_id) if (self.firewall and self.agent_id) else {}
             mem_cfg = get_memory_config(_profile or self.config)
             if mem_cfg.enabled:
-                notification = notify_download_needed(mem_cfg.embedding_model)
-                if notification.get("needed"):
+                if not is_model_downloaded(mem_cfg.embedding_model):
                     log.info("Memory: embedding model not yet downloaded (%s)", mem_cfg.embedding_model)
-                    # MEM-3.9: notify UI about pending model download
-                    if hasattr(self.service, 'broadcast_event'):
-                        self.service.broadcast_event("memory_model_download_needed", notification)
+                    download_service = getattr(self.service, "model_download_service", None)
+                    if download_service is not None:
+                        await download_service.maybe_emit_required(
+                            mem_cfg.embedding_model,
+                            purpose="Agent memory search (Active Recall, memory_search)",
+                            consequence_if_declined="Memory search stays unavailable until downloaded.",
+                        )
                 # First-use full rebuild (MEM-3.7 spec)
                 import asyncio
                 agent_root = self._agent.agent_root if self._agent else None
@@ -369,6 +373,7 @@ class DpcAgentManager:
                                 model_name=_actual_model,
                                 max_tokens=int(mem_cfg.max_tokens),
                                 device=mem_cfg.embedding_device,
+                                local_files_only=True,
                             ) if _provider_ref is None else _provider_ref
                             # The agent built its provider before this config was read, so
                             # state the window here too — otherwise the setting applies only
@@ -681,6 +686,13 @@ class DpcAgentManager:
                             except Exception:
                                 pass
 
+                        except ModelNotCachedError as e:
+                            # What the user sees: nothing — index rebuild is skipped
+                            # silently; memory_search reports the same reason.
+                            log.info(
+                                "[%s] memory index rebuild skipped: embedding model %s not cached",
+                                self.agent_id, e.model_name,
+                            )
                         except Exception as e:
                             log.warning("Background memory indexing failed: %s", e)
 

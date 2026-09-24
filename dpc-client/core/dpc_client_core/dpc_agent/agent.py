@@ -186,14 +186,32 @@ class DpcAgent:
             firewall_profile=firewall_profile,
         )
 
-        from .memory import get_embedding_provider
+        # What the user sees: the agent is created either way. get_embedding_provider
+        # only builds the object (lazy load), so the cache is checked directly here
+        # rather than by waiting for a load that has not been asked for yet; memory
+        # search reports the reason (tools/core.py:memory_search) until the
+        # download this emits `required` for is confirmed.
+        from .memory import DEFAULT_EMBEDDING_MODEL, get_embedding_provider
+        from .model_download import is_model_downloaded
         _embedding_kwargs = {
             "local_files_only": True,
             "device": self.config.embedding_device,
         }
-        if self.config.embedding_model:
-            _embedding_kwargs["model_name"] = self.config.embedding_model
+        _embedding_model_name = self.config.embedding_model or DEFAULT_EMBEDDING_MODEL
+        _embedding_kwargs["model_name"] = _embedding_model_name
         self._embedding_provider = get_embedding_provider(**_embedding_kwargs)
+        if not is_model_downloaded(_embedding_model_name):
+            log.info("Agent memory search disabled: embedding model %s not cached", _embedding_model_name)
+            download_service = getattr(self._service, "model_download_service", None)
+            if download_service is not None:
+                try:
+                    asyncio.create_task(download_service.maybe_emit_required(
+                        _embedding_model_name,
+                        purpose="Agent memory search (Active Recall, memory_search)",
+                        consequence_if_declined="Memory search stays unavailable until downloaded.",
+                    ))
+                except RuntimeError:
+                    pass  # constructed outside an event loop (e.g. a sync test)
 
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)
