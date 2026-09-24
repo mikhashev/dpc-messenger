@@ -126,7 +126,8 @@ import { p2pMessages, unreadMessageCounts } from './services/messaging';
 import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerRetries } from './services/providers';
 import { showNotificationIfBackground } from './notificationService';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
-import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
+import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded } from './services/voice';
+import { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed } from './services/modelDownload';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
@@ -140,7 +141,8 @@ export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
 export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerRetries };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
-export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
+export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded };
+export { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed };
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
 export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
@@ -923,21 +925,23 @@ export async function connectToCoreService() {
                     // Optional: Show toast notification about VRAM freed
                     // console.log(`💾 Voice transcription model unloaded (~${message.payload.vram_freed_gb}GB VRAM freed)`);
                 }
-                else if (message.event === "whisper_model_download_required") {
-                    console.log("Whisper model download required:", message.payload);
-                    whisperModelDownloadRequired.set(message.payload);
+                // Generic model download consent flow (2026-09-24) — replaces the
+                // old whisper_model_download_* events; covers Whisper, bge-m3, etc.
+                else if (message.event === "model_download_required") {
+                    console.log("Model download required:", message.payload);
+                    modelDownloadRequired.set(message.payload);
                 }
-                else if (message.event === "whisper_model_download_started") {
-                    console.log("Whisper model download started:", message.payload);
-                    whisperModelDownloadStarted.set(message.payload);
+                else if (message.event === "model_download_started") {
+                    console.log("Model download started:", message.payload);
+                    modelDownloadStarted.set(message.payload);
                 }
-                else if (message.event === "whisper_model_download_completed") {
-                    console.log("Whisper model download completed:", message.payload);
-                    whisperModelDownloadCompleted.set(message.payload);
+                else if (message.event === "model_download_completed") {
+                    console.log("Model download completed:", message.payload);
+                    modelDownloadCompleted.set(message.payload);
                 }
-                else if (message.event === "whisper_model_download_failed") {
-                    console.error("Whisper model download failed:", message.payload);
-                    whisperModelDownloadFailed.set(message.payload);
+                else if (message.event === "model_download_failed") {
+                    console.error("Model download failed:", message.payload);
+                    modelDownloadFailed.set(message.payload);
                 }
                 // Agent Telegram linking events (v0.15.0+)
                 else if (message.event === "agent_telegram_linked") {
@@ -1346,8 +1350,11 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             // Command 'execute_ai_query' timed out` in DevTools.
             'execute_ai_query',
             // Runs in the backend thread pool; progress/completion arrive via
-            // whisper_model_download_started/completed/failed events, not the await.
+            // model_download_started/completed/failed events, not the await.
+            // download_whisper_model is the old alias, kept for an older UI
+            // build (see service.py); harmless to keep listed alongside it.
             'download_whisper_model',
+            'download_model',
         ]);
         const expectsResponse = !fireAndForgetCommands.has(command);
 

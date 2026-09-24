@@ -396,6 +396,42 @@ export interface WhisperModelFailedEvent extends WhisperModelEvent {
     error: string | null;      // Always present on failure events
 }
 
+// --- Generic Model Download Event Payloads (2026-09-24) ---
+// One event family for any model requiring a download (Whisper, the bge-m3
+// embedding model, ...) — replaces the old whisper_model_download_* events.
+
+export interface ModelDownloadRequiredEvent {
+    model_name: string;
+    revision: string | null;
+    purpose: string;                       // e.g. "Voice transcription"
+    consequence_if_declined: string;
+    on_decline: 'degrade' | 'block';
+    size_bytes: number | null;
+    size_source: 'measured' | 'hf_api' | null;
+    cache_path: string;
+    provider_alias: string | null;
+}
+
+export interface ModelDownloadStartedEvent {
+    model_name: string;
+}
+
+export interface ModelDownloadCompletedEvent {
+    model_name: string;
+}
+
+export interface ModelDownloadFailedEvent {
+    model_name: string;
+    error: string;
+}
+
+export type ModelDownloadStatusState = 'cached' | 'missing' | 'downloading' | 'failed' | 'declined';
+
+export interface ModelDownloadStatusEntry {
+    state: ModelDownloadStatusState;
+    error?: string;
+}
+
 // --- Group Chat Event Payloads ---
 
 export interface GroupMessageEvent {

@@ -13,17 +13,13 @@ export const voiceTranscriptionComplete = writable<VoiceTranscription | null>(nu
 // Voice transcription config — free-form config object
 export const voiceTranscriptionConfig = writable<Record<string, any> | null>(null);
 
-// Whisper model lifecycle
+// Whisper model lifecycle (loading, not downloading — named per model
+// deliberately, since only Whisper loads/unloads like this; the download-
+// consent flow is generic across models and lives in services/modelDownload.ts)
 export const whisperModelLoadingStarted = writable<WhisperModelEvent | null>(null);
 export const whisperModelLoaded = writable<WhisperModelEvent | null>(null);
 export const whisperModelLoadingFailed = writable<WhisperModelFailedEvent | null>(null);
 export const whisperModelUnloaded = writable<WhisperModelEvent | null>(null);
-
-// Whisper model download
-export const whisperModelDownloadRequired = writable<WhisperModelEvent | null>(null);
-export const whisperModelDownloadStarted = writable<WhisperModelEvent | null>(null);
-export const whisperModelDownloadCompleted = writable<WhisperModelEvent | null>(null);
-export const whisperModelDownloadFailed = writable<WhisperModelFailedEvent | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;
@@ -75,6 +71,5 @@ export function get_state(): Record<string, unknown> {
         whisper_loaded: get(whisperModelLoaded) !== null,
         whisper_loading: get(whisperModelLoadingStarted) !== null,
         auto_transcribe: get(voiceTranscriptionConfig) !== null,
-        download_required: get(whisperModelDownloadRequired) !== null,
     };
 }
