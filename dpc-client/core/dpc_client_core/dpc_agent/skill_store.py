@@ -10,7 +10,7 @@ Each skill lives in its own directory:
 Skills encode *how to act* for a class of problems (procedural knowledge),
 complementing the knowledge/ system which stores *what to know* (declarative knowledge).
 
-Skills are bootstrapped with 5 starter strategies on first agent creation,
+Skills are bootstrapped with 4 starter strategies on first agent creation,
 mirroring how memory.py bootstraps identity.md and scratchpad.md.
 """
 from __future__ import annotations
