@@ -307,7 +307,7 @@
 
   function tempSelectValue(i: number): string | number {
     const t = editedConfig?.providers[i]?.temperature;
-    if (t !== undefined && !TEMPERATURE_PRESETS.some(p => p.value === t)) return 'custom';
+    if (t != null && !TEMPERATURE_PRESETS.some(p => p.value === t)) return 'custom';
     return t ?? '';
   }
 
@@ -408,6 +408,12 @@
     isSaving = true;
     saveMessage = '';
     saveMessageType = '';
+
+    // An emptied number input binds to null; absent is what "unset" means to the backend.
+    for (const p of editedConfig.providers) {
+      if (p.temperature === null) delete p.temperature;
+      if (p.context_window === null) delete p.context_window;
+    }
 
     try {
       const result = await sendCommand('save_providers_config', {
