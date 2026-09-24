@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 from dpc_client_core.dpc_agent.tools import document as D
+from dpc_client_core.dpc_agent.tools.process import SupervisedRun
 
 # A 4x4 grey square, which is all Pillow needs to prove the conversion ran.
 TINY_PNM = b"P5\n4 4\n255\n" + bytes(16)
@@ -197,6 +198,59 @@ def test_output_that_is_not_utf8_is_replaced_not_raised():
         ["-c", "import sys; sys.stdout.buffer.write(b'\\xff\\xfe text')"],
     )
     assert rc == 0 and "text" in out and "�" in out
+
+
+# `_run_djvu` goes through `run_supervised`; the three tests above measure its
+# own-failure paths against a real process. These fake `run_supervised` itself
+# to cover the translation offline, including the one path a real subprocess
+# cannot exercise without actually filling memory: the ceiling kill.
+
+def test_run_djvu_names_read_document_as_its_launcher(monkeypatch):
+    seen = {}
+
+    def fake(cmd, **kwargs):
+        seen["cmd"], seen["kwargs"] = cmd, kwargs
+        return SupervisedRun(returncode=0, stdout="1\n", stderr="")
+
+    monkeypatch.setattr(D, "run_supervised", fake)
+    D._run_djvu("djvused", ["book.djvu", "-e", "n"])
+    assert seen["cmd"] == ["djvused", "book.djvu", "-e", "n"]
+    assert seen["kwargs"]["launcher"] == "read_document"
+
+
+def test_a_timed_out_run_is_reported_the_same_way_as_before(monkeypatch):
+    monkeypatch.setattr(D, "DJVU_CALL_SECONDS", 30)
+    monkeypatch.setattr(
+        D, "run_supervised",
+        lambda *a, **kw: SupervisedRun(timed_out=True, killed="the command and its process group were killed"),
+    )
+    rc, out, err = D._run_djvu("djvutxt", ["--page=1", "book.djvu"])
+    assert rc == -1
+    assert "djvutxt did not finish within 30 s" in err
+
+
+def test_a_binary_run_supervised_cannot_spawn_is_reported_not_raised(monkeypatch):
+    def boom(*a, **kw):
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(D, "run_supervised", boom)
+    rc, out, err = D._run_djvu("does-not-exist", ["-e", "n"])
+    assert rc == -1 and "could not be run" in err
+
+
+def test_a_tree_killed_by_the_memory_ceiling_names_the_ceiling_and_the_usage(monkeypatch):
+    monkeypatch.setattr(D, "_MEMORY_CEILING_MB", 8192)
+    monkeypatch.setattr(
+        D, "run_supervised",
+        lambda *a, **kw: SupervisedRun(
+            exceeded_mb=8300, killed="the command and its descendants were killed"
+        ),
+    )
+    rc, out, err = D._run_djvu("ddjvu", ["-format=pnm"])
+    assert rc == -1
+    assert "ddjvu killed by DPC memory ceiling (8192 MB)" in err
+    assert "8300 MB" in err
+    assert "descendants were killed" in err
 
 
 # ------------------------------------------------------------- the text route

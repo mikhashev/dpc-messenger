@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .core import _resolve_file_path
+from .process import _MEMORY_CEILING_MB, run_supervised
 from .registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
@@ -500,34 +501,38 @@ def _djvulibre() -> Optional[Dict[str, str]]:
 
 
 def _run_djvu(binary: str, args: List[str]) -> Tuple[int, str, str]:
-    """One bounded call. Returns (returncode, stdout, stderr).
+    """One bounded call, through `run_supervised`. Returns (rc, stdout, stderr).
 
-    A negative return code is this function's own failure — the binary did not
-    start, or did not finish inside DJVU_CALL_SECONDS — and the reason is in
-    stderr. A tool call runs in an executor thread; a djvu binary that never
-    returns would hold that thread for as long as the process lives.
+    A negative rc is this function's own failure — the binary did not start,
+    timed out, or was killed for exceeding the memory ceiling — with the
+    reason in stderr. `run_supervised`'s universal-newline translation drops
+    a `\\r` a raw-byte decode would have kept; `_djvu_page_count` and
+    `_djvu_page_shape` do not count `\\r`, so only a page's `chars` moves.
     """
-    extra: Dict[str, Any] = {}
+    popen_kwargs: Dict[str, Any] = {}
     if sys.platform == "win32":
-        extra["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        proc = subprocess.run(
+        run = run_supervised(
             [binary, *args],
-            capture_output=True,
+            launcher="read_document",
             timeout=DJVU_CALL_SECONDS,
-            **extra,
-        )
-    except subprocess.TimeoutExpired:
-        return -1, "", (
-            f"{Path(binary).name} did not finish within {DJVU_CALL_SECONDS} s"
+            popen_kwargs=popen_kwargs,
         )
     except OSError as exc:
         return -1, "", f"{Path(binary).name} could not be run: {type(exc).__name__}: {exc}"
-    return (
-        proc.returncode,
-        (proc.stdout or b"").decode("utf-8", errors="replace"),
-        (proc.stderr or b"").decode("utf-8", errors="replace"),
-    )
+
+    if run.exceeded_mb:
+        return -1, "", (
+            f"{Path(binary).name} killed by DPC memory ceiling "
+            f"({_MEMORY_CEILING_MB} MB): its tree reached {run.exceeded_mb} MB "
+            f"- {run.killed}"
+        )
+    if run.timed_out:
+        return -1, "", (
+            f"{Path(binary).name} did not finish within {DJVU_CALL_SECONDS} s"
+        )
+    return run.returncode, run.stdout, run.stderr
 
 
 # ------------------------------------------- an ASCII path, on Windows only
