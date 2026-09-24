@@ -31,8 +31,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-LLAMA_CPP_TAG = "b10964"
+LLAMA_CPP_TAG = "b11146"
 LLAMA_CPP_RELEASE_BASE = "https://github.com/ggml-org/llama.cpp/releases/download"
+
+# The CUDA family for the Windows asset key, the two Windows asset names and
+# `platform_tag()`'s return all name the same CUDA toolkit version; one
+# constant keeps them from drifting apart on the next bump.
+WIN_CUDA_FAMILY = "win-cuda-13.4-x64"
 
 DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 
@@ -52,33 +57,33 @@ DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 # pin: read `nightly-tag.txt` from the newest `vX.Y.Z`, then take that tag's
 # `digest` and `size` from the release API.
 #
-# b10964 is what v0.4.1 named (2026-09-14). Do not follow `releases/latest`: it
+# b11146 is what v0.5.0 named (2026-09-23). Do not follow `releases/latest`: it
 # now returns the versioned release, whose only asset is that text file.
 PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
-    "win-cuda-13.3-x64": [
+    WIN_CUDA_FAMILY: [
         {
-            "name": "llama-b10964-bin-win-cuda-13.3-x64.zip",
-            "sha256": "cd63ae76ad78a1540aa0f30f6c6284bab14c146d99a58f70c3f0a38cb9c62351",
-            "size": 149_703_589,
+            "name": f"llama-{LLAMA_CPP_TAG}-bin-{WIN_CUDA_FAMILY}.zip",
+            "sha256": "b1866c0ce76bc7bfb0c24b33e9a37e9669f1be18539b12c74ce361f81c41f047",
+            "size": 149_758_833,
         },
         {
-            "name": "cudart-llama-bin-win-cuda-13.3-x64.zip",
-            "sha256": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
-            "size": 390_970_417,
+            "name": f"cudart-llama-bin-{WIN_CUDA_FAMILY}.zip",
+            "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668",
+            "size": 423_535_356,
         },
     ],
     "macos-arm64": [
         {
-            "name": "llama-b10964-bin-macos-arm64.tar.gz",
-            "sha256": "033c845c1df9bf945ff37bb193238b40910b2244be3e1e637b2ceb5878f1a6f5",
-            "size": 11_149_739,
+            "name": "llama-b11146-bin-macos-arm64.tar.gz",
+            "sha256": "1ad3f9eff80edb9dbef4259ad564d1720612ef7eea48fa4afed0e54f5f3d5711",
+            "size": 11_189_714,
         },
     ],
     "ubuntu-x64": [
         {
-            "name": "llama-b10964-bin-ubuntu-x64.tar.gz",
-            "sha256": "9abf88aea48a55d0f80edb1ee20220b186848cca0b4e919d71518cfd7ca67443",
-            "size": 16_825_086,
+            "name": "llama-b11146-bin-ubuntu-x64.tar.gz",
+            "sha256": "c150306eb16b5ab696f76a8bdf810c35fd98a24e82158742e6fa28f420ff8410",
+            "size": 16_998_357,
         },
     ],
 }
@@ -87,7 +92,7 @@ PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
 def platform_tag() -> str:
     """The pin's asset family for this machine."""
     if sys.platform == "win32":
-        return "win-cuda-13.3-x64"
+        return WIN_CUDA_FAMILY
     if sys.platform == "darwin":
         return "macos-arm64" if _platform.machine() == "arm64" else "ubuntu-x64"
     return "ubuntu-x64"

@@ -1,7 +1,7 @@
 """The pinned llama.cpp binary: resolved without a fetch, fetched only pinned.
 
 ADR-040 route (b2) runs a DPC-owned `llama-server`; its binary comes from the
-pinned `b10964` release, verified against sha256 digests taken from the
+pinned `b11146` release, verified against sha256 digests taken from the
 release API — never «latest». A configured `binary_path` always wins, so an
 operator-supplied build is never silently replaced, and a broken download
 must leave nothing behind that a later start would mistake for an install.
@@ -115,13 +115,18 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def test_every_asset_name_carries_the_pinned_tag():
+def test_every_asset_name_carries_its_platform_key_and_the_pinned_tag():
     # The download URL is `{BASE}/{LLAMA_CPP_TAG}/{name}` and nothing compares
     # the two: a table where one platform's name kept the old tag is a 404 on
-    # that platform alone, with a green suite on every other. `cudart-` carries
-    # no tag and is the same file across pins.
+    # that platform alone, with a green suite on every other. The b10964 ->
+    # b11146 bump disproved "cudart carries no tag and is the same file across
+    # pins": cudart's own name changed too (13.3-x64.zip -> 13.4-x64.zip), so
+    # every row -- llama and cudart alike -- must carry its platform's key
+    # (the dict key, which is also `platform_tag()`'s return) in its name,
+    # and the versioned rows must also carry the pinned tag.
     for plat, rows in fetcher.PLATFORM_ASSETS.items():
         for row in rows:
+            assert plat in row["name"], f"{plat}: {row['name']} does not carry {plat}"
             if row["name"].startswith("cudart-"):
                 continue
             assert row["name"].startswith(f"llama-{fetcher.LLAMA_CPP_TAG}-"), (
