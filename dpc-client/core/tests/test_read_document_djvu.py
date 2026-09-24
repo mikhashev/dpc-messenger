@@ -239,11 +239,10 @@ def test_a_binary_run_supervised_cannot_spawn_is_reported_not_raised(monkeypatch
 
 
 def test_a_tree_killed_by_the_memory_ceiling_names_the_ceiling_and_the_usage(monkeypatch):
-    monkeypatch.setattr(D, "_MEMORY_CEILING_MB", 8192)
     monkeypatch.setattr(
         D, "run_supervised",
         lambda *a, **kw: SupervisedRun(
-            exceeded_mb=8300, killed="the command and its descendants were killed"
+            exceeded_mb=8300, ceiling_mb=8192, killed="the command and its descendants were killed"
         ),
     )
     rc, out, err = D._run_djvu("ddjvu", ["-format=pnm"])

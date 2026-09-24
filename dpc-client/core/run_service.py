@@ -27,6 +27,13 @@ if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
 # memory.py sets this before its own load; this covers any other
 # from_pretrained in the process. Read at call time, so unlike the blocks
 # around it, its position does not matter. Only the literal "true" works.
+if os.environ.get("DISABLE_SAFETENSORS_CONVERSION", "true") != "true":
+    # Logging not configured yet at this stage — use print.
+    print(
+        "[startup] DISABLE_SAFETENSORS_CONVERSION="
+        f"{os.environ['DISABLE_SAFETENSORS_CONVERSION']!r} does not disable the "
+        'safetensors auto-conversion thread; only the literal "true" does'
+    )
 os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "true")
 
 # S144 — HF offline mode guard. Same constraint as the fast-transfer block

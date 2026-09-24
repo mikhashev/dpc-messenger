@@ -301,6 +301,8 @@ class SupervisedRun:
     stderr: str = ""
     timed_out: bool = False
     exceeded_mb: Optional[int] = None
+    # The ceiling this run was held to, so a report names the one applied.
+    ceiling_mb: Optional[int] = None
     killed: str = ""
 
     @property
@@ -366,7 +368,7 @@ def run_supervised(
             daemon=True,
         ).start()
 
-    run = SupervisedRun()
+    run = SupervisedRun(ceiling_mb=ceiling or None)
     try:
         run.stdout, run.stderr = process.communicate(timeout=timeout)
         run.returncode = process.returncode

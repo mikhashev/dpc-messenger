@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .core import _resolve_file_path
-from .process import _MEMORY_CEILING_MB, run_supervised
+from .process import run_supervised
 from .registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
@@ -525,7 +525,7 @@ def _run_djvu(binary: str, args: List[str]) -> Tuple[int, str, str]:
     if run.exceeded_mb:
         return -1, "", (
             f"{Path(binary).name} killed by DPC memory ceiling "
-            f"({_MEMORY_CEILING_MB} MB): its tree reached {run.exceeded_mb} MB "
+            f"({run.ceiling_mb} MB): its tree reached {run.exceeded_mb} MB "
             f"- {run.killed}"
         )
     if run.timed_out:
