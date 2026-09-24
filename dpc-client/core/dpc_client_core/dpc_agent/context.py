@@ -348,8 +348,42 @@ def _build_recent_sections(memory: Memory, task_id: str = "") -> List[str]:
     return sections
 
 
-def _build_skills_section(skill_store: Optional[Any]) -> str:
-    """Build the Available Skills section for the system prompt semi-stable block."""
+def _skill_marker(
+    skill: Dict[str, Any],
+    allowed_tools: Optional[set],
+    all_tools: Optional[Dict[str, bool]],
+) -> str:
+    """Why a skill cannot be followed as written here, or "" if nothing stops it.
+
+    Reads the same allowed/all tool sets as the capabilities section. allowed_tools
+    None means no firewall, so only retired names can be caught.
+    """
+    retired = list(skill.get("retired_tools") or [])
+    notes = []
+    if allowed_tools is not None:
+        missing = [t for t in skill.get("required_tools") or []
+                   if t not in allowed_tools and t not in retired]
+        unknown = [t for t in missing if all_tools is not None and t not in all_tools]
+        disabled = [t for t in missing if t not in unknown]
+        if disabled:
+            notes.append(f"needs {', '.join(disabled)} — disabled by firewall")
+        if unknown:
+            notes.append(f"needs {', '.join(unknown)} — no such tool")
+    if retired:
+        noun = "tool" if len(retired) == 1 else "tools"
+        notes.append(f"references retired {noun} {', '.join(retired)}")
+    return f" ({'; '.join(notes)})" if notes else ""
+
+
+def _build_skills_section(
+    skill_store: Optional[Any],
+    allowed_tools: Optional[set] = None,
+    all_tools: Optional[Dict[str, bool]] = None,
+) -> str:
+    """Build the Available Skills section for the system prompt semi-stable block.
+
+    A skill whose tools this agent cannot call is still listed, with the reason.
+    """
     if skill_store is None:
         return ""
     try:
@@ -367,7 +401,8 @@ def _build_skills_section(skill_store: Optional[Any]) -> str:
             desc = s.get("description", "").replace("\n", " ").strip()
             if len(desc) > 160:
                 desc = desc[:160].rsplit(" ", 1)[0] + "..."
-            lines.append(f"- **{s['name']}**: {desc}")
+            marker = _skill_marker(s, allowed_tools, all_tools)
+            lines.append(f"- **{s['name']}**{marker}: {desc}")
         return "\n".join(lines)
     except Exception:
         log.debug("Failed to build skills section", exc_info=True)
@@ -699,7 +734,7 @@ def build_llm_messages(
         semi_stable_parts.append(capabilities_section)
 
     # Available skills (skill router — Read phase of Memento-Skills loop)
-    skills_section = _build_skills_section(skill_store)
+    skills_section = _build_skills_section(skill_store, allowed_tools, all_tools)
     if skills_section:
         semi_stable_parts.append(skills_section)
 

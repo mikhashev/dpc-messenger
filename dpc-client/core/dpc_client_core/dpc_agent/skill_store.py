@@ -21,6 +21,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..firewall import LEGACY_TOOL_ALIASES
 from .skill_schema import SkillManifest
 from .utils import utc_now_iso, read_text, write_text
 
@@ -32,6 +33,10 @@ try:
 except ImportError:
     _YAML_OK = False
     log.debug("PyYAML not available; skill frontmatter will use fallback parser")
+
+# A retired name anywhere in a skill is a call the registry will refuse.
+_RETIRED_TOOL_RE = re.compile(
+    r"\b(" + "|".join(sorted(LEGACY_TOOL_ALIASES)) + r")\b")
 
 
 # ---------------------------------------------------------------------------
@@ -114,20 +119,23 @@ class SkillStore:
             if d.is_dir() and (d / "SKILL.md").exists()
         )
 
-    def list_skills(self) -> List[Dict[str, str]]:
+    def list_skills(self) -> List[Dict[str, Any]]:
         """
-        Return [{name, description}] for all skills.
+        Return [{name, description, required_tools, retired_tools}] for all skills.
 
         Used by the skill router to build the available-skills list for the LLM.
         The description is the routing key — make it specific and "pushy".
+        retired_tools: names from LEGACY_TOOL_ALIASES found anywhere in SKILL.md.
         """
         result = []
         for name in self.list_skill_names():
-            manifest = self.load_manifest(name)
+            manifest, content = self._load(name)
             if manifest and manifest.description:
                 result.append({
                     "name": manifest.name or name,
                     "description": manifest.description,
+                    "required_tools": [str(t) for t in manifest.metadata.required_tools],
+                    "retired_tools": sorted(set(_RETIRED_TOOL_RE.findall(content or ""))),
                 })
         return result
 
@@ -158,16 +166,20 @@ class SkillStore:
 
     def load_manifest(self, name: str) -> Optional[SkillManifest]:
         """Parse SKILL.md frontmatter for a skill. Returns None if not found."""
+        return self._load(name)[0]
+
+    def _load(self, name: str) -> Tuple[Optional[SkillManifest], Optional[str]]:
+        """(manifest, full SKILL.md text) from one read; (None, None) if unreadable."""
         path = self.skill_path(name)
         if not path.exists():
-            return None
+            return None, None
         try:
             content = read_text(path)
             fm, _ = _parse_frontmatter(content)
-            return SkillManifest.from_dict(fm)
+            return SkillManifest.from_dict(fm), content
         except Exception as e:
             log.warning(f"Failed to load skill manifest '{name}': {e}")
-            return None
+            return None, None
 
     def load_skill_content(self, name: str) -> Optional[str]:
         """Load full SKILL.md content (frontmatter + body)."""
