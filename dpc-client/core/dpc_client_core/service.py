@@ -8780,6 +8780,13 @@ class CoreService:
         if context_ids:
             logger.info("Processing contexts from %d peer(s)", len(context_ids))
             for node_id in context_ids:
+                # A peer's context was filtered for us, not for the peer that runs
+                # the model; it goes back only to the node it came from.
+                if inference_peer and node_id != inference_peer:
+                    logger.warning(
+                        "Context of %s not forwarded to inference peer %s", node_id, inference_peer
+                    )
+                    continue
                 if node_id in self.p2p_manager.peers:
                     try:
                         # Phase 7: Check cache first (avoid network request if cached)

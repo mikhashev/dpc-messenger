@@ -48,12 +48,28 @@ class _Monitor:
 
     def __init__(self):
         self.history = []
+        self.cached = {}
 
     def add_message(self, role, content):
         self.history.append({"role": role, "content": content})
 
     def get_message_history(self):
         return list(self.history)
+
+    # The peer-context cache, pre-filled so no fetch leaves the test.
+    peer_context_hashes = {}
+
+    def get_cached_peer_context(self, node_id):
+        return self.cached.get(node_id, (None, None))[0]
+
+    def get_cached_peer_device_context(self, node_id):
+        return self.cached.get(node_id, (None, None))[1]
+
+    def has_peer_context_changed(self, node_id, peer_hash):
+        return False
+
+    def cache_peer_context(self, node_id, context, device_context=None):
+        pass
 
 
 class _LocalApi:
@@ -94,6 +110,7 @@ class _FakeService:
     _context_for_compute_peer = CoreService._context_for_compute_peer
     execute_ai_query = CoreService.execute_ai_query
     send_ai_query = CoreService.send_ai_query
+    _compute_peer_context_hash = CoreService._compute_peer_context_hash
 
     def __init__(self, firewall, context, device_context):
         self.sent = []
@@ -143,10 +160,11 @@ def firewall(tmp_path):
     return ContextFirewall(rules)
 
 
-async def _run(service, compute_host, provider=None):
+async def _run(service, compute_host, provider=None, context_ids=None):
     await service.execute_ai_query(
         command_id="c1",
         prompt="what should I run?",
+        context_ids=context_ids,
         compute_host=compute_host,
         provider=provider,
         include_context=True,
@@ -246,3 +264,55 @@ def test_the_query_command_still_answers_the_client_itself():
     must stay on the command, not slide onto a helper."""
     assert getattr(CoreService.execute_ai_query, "dpc_sends_own_response", False)
     assert not getattr(CoreService._inference_peer_for, "dpc_sends_own_response", False)
+
+
+# --- Contexts of other peers: filtered for us, not for the peer running the model.
+
+THIRD_PEER = "dpc-node-carol-context-source"
+
+
+def _service_holding_carols_context(firewall):
+    service = _FakeService(firewall, _personal_context(), _device_context())
+    for peer in (THIRD_PEER, ALLOWED_PEER):
+        service.p2p_manager.peers[peer] = object()
+    service.monitor.cached[THIRD_PEER] = (
+        PersonalContext(profile=Profile(name="CAROL-PROFILE-MARKER", description="", core_values=[])),
+        {"software": {"os": {"family": "CAROL-DEVICE-MARKER"}}},
+    )
+    return service
+
+
+@pytest.mark.asyncio
+async def test_a_third_peers_context_is_not_forwarded_to_the_inference_peer(firewall, caplog):
+    service = _service_holding_carols_context(firewall)
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.service"):
+        where, peer_id, prompt = await _run(service, ALLOWED_PEER, context_ids=[THIRD_PEER])
+
+    assert (where, peer_id) == ("peer", ALLOWED_PEER)
+    assert "CAROL-PROFILE-MARKER" not in prompt
+    assert "CAROL-DEVICE-MARKER" not in prompt
+    assert any(THIRD_PEER in r.getMessage() and ALLOWED_PEER in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_peers_own_context_goes_back_to_that_peer(firewall):
+    service = _service_holding_carols_context(firewall)
+
+    where, peer_id, prompt = await _run(service, THIRD_PEER, context_ids=[THIRD_PEER])
+
+    assert (where, peer_id) == ("peer", THIRD_PEER)
+    assert "CAROL-PROFILE-MARKER" in prompt
+    assert "CAROL-DEVICE-MARKER" in prompt
+
+
+@pytest.mark.asyncio
+async def test_local_inference_still_sees_a_peers_context(firewall):
+    service = _service_holding_carols_context(firewall)
+
+    where, _, prompt = await _run(service, None, context_ids=[THIRD_PEER])
+
+    assert where == "local"
+    assert "CAROL-PROFILE-MARKER" in prompt
+    assert "CAROL-DEVICE-MARKER" in prompt

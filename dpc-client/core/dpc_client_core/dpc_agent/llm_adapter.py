@@ -37,6 +37,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# The first line of a get_dpc_context result that carries the context.
+_DPC_CONTEXT_HEADER = re.compile(r"^DPC (personal|device) context \(", re.MULTILINE)
+
 
 def messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     """
@@ -409,6 +412,18 @@ class DpcLlmAdapter:
         effective_peer_id = self._compute_host or (
             getattr(dpc_agent_provider, 'peer_id', None) if dpc_agent_provider else None
         )
+
+        # Every route below that leaves for a peer flattens these messages; the
+        # user's context in them is re-cut to what that peer's node rules allow.
+        egress_peer, egress_service = effective_peer_id, getattr(dpc_agent_provider, "_service", None)
+        if not egress_peer:
+            from ..providers.remote_peer_provider import RemotePeerProvider
+            alias = self._get_agent_provider_alias()
+            chosen = self._llm_manager.providers.get(alias) if alias else None
+            if isinstance(chosen, RemotePeerProvider):
+                egress_peer, egress_service = chosen.peer_id, chosen._service
+        if egress_peer:
+            messages = self._messages_for_peer(messages, egress_peer, egress_service)
 
         # Check if user message contains images (vision query)
         user_images = self._extract_images_from_messages(messages)
@@ -1331,6 +1346,46 @@ class DpcLlmAdapter:
         """The adapter's prompt flattening; the shared function does the work
         so the gateway speaks the same role markers without a second copy."""
         return messages_to_prompt(messages)
+
+    def _messages_for_peer(
+        self, messages: List[Dict[str, Any]], peer_id: str, service: Any
+    ) -> List[Dict[str, Any]]:
+        """The messages with every get_dpc_context result replaced by what
+        `peer_id`'s node rules allow, so a peer's model reads no more of the
+        user's context than REQUEST_CONTEXT would give it. The caller's list
+        is left untouched."""
+        from .tools.core import PEER_CONTEXT_WITHHELD, get_dpc_context_for_peer
+
+        calls: Dict[Any, Any] = {}
+        for msg in messages:
+            for tc in (msg.get("tool_calls") or []) if msg.get("role") == "assistant" else []:
+                fn = tc.get("function") or {}
+                calls[tc.get("id")] = (fn.get("name"), fn.get("arguments"))
+
+        out: List[Dict[str, Any]] = []
+        for msg in messages:
+            content = str(msg.get("content") or "")
+            name, raw_args = calls.get(msg.get("tool_call_id"), (None, None))
+            header = _DPC_CONTEXT_HEADER.search(content) if msg.get("role") == "tool" else None
+            failed = content.startswith(("⚠️", "[TOOL_FAILED"))
+            if msg.get("role") != "tool" or not (header or (name == "get_dpc_context" and not failed)):
+                out.append(msg)
+                continue
+            try:
+                if header:
+                    context_type = header.group(1)
+                else:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                    context_type = args.get("context_type", "personal")
+                replaced = (get_dpc_context_for_peer(service, context_type, peer_id)
+                            if service is not None else PEER_CONTEXT_WITHHELD)
+            except Exception:
+                log.warning("get_dpc_context result not filtered for peer %s; withheld",
+                            peer_id, exc_info=True)
+                replaced = PEER_CONTEXT_WITHHELD
+            log.info("get_dpc_context result re-cut for inference peer %s", peer_id)
+            out.append({**msg, "content": replaced})
+        return out
 
     def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
         """Format tool schemas as text descriptions for prompt injection."""

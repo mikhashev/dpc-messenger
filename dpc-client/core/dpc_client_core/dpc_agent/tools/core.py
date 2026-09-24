@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -1108,6 +1109,37 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
 
     except Exception as e:
         return f"⚠️ Error reading DPC context: {e}"
+
+
+PEER_CONTEXT_WITHHELD = "[context withheld: not shared with inference peer]"
+
+
+def get_dpc_context_for_peer(service: Any, context_type: str, peer_id: str) -> str:
+    """get_dpc_context as the node rules would hand it to `peer_id` over
+    REQUEST_CONTEXT, for an agent whose model runs on that peer. Fails closed:
+    no context, or a filter that cannot run, gives the placeholder."""
+    try:
+        if context_type == "device":
+            _, data = service._context_for_compute_peer(None, service.device_context, peer_id)
+            fname = "device_context.json"
+        else:
+            context_type, fname = "personal", "personal.json"
+            filtered, _ = service._context_for_compute_peer(
+                service.p2p_manager.local_context, None, peer_id)
+            data = None if filtered is None else {
+                k: v for k, v in asdict(filtered).items() if k not in _DPC_PERSONAL_SUMMARISED}
+        if data is None:
+            return PEER_CONTEXT_WITHHELD
+        data = {k: v for k, v in data.items() if v not in (None, "", [], {})}
+        formatted = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+        if len(formatted) > _DPC_CONTEXT_BUDGET_CHARS:
+            formatted = clip_text(formatted, _DPC_CONTEXT_BUDGET_CHARS)
+        return (f"DPC {context_type} context ({fname}), as node rules share it "
+                f"with inference peer {peer_id}:\n\n{formatted}")
+    except Exception:
+        log.warning("get_dpc_context could not be filtered for peer %s; withheld",
+                    peer_id, exc_info=True)
+        return PEER_CONTEXT_WITHHELD
 
 
 # ---------------------------------------------------------------------------
