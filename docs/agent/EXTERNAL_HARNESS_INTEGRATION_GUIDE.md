@@ -9,11 +9,15 @@
 This guide explains how to connect an external agent — any harness meeting the
 short list of requirements below — as a third participant in a DPC agent chat,
 alongside you and your embedded DPC agent.
-[Claude Code](https://claude.com/claude-code) is the one harness this project
-has actually wired up and documented; the identity in the examples is the tag
-the maintainers registered for it (`CC_mike`). Substitute your own harness and
-your own tag — nothing here depends on which harness it is, but no second
-harness has been verified against this guide yet.
+[Claude Code](https://claude.com/claude-code) is the harness with the most
+detailed worked example here — a cron loop (Path A below), identity `CC_mike`.
+A second harness, **ZCode** (a separate agent harness with its own session and
+permission system, running a GLM model — not Claude Code, not VS Code), has
+been using the same group bridge, unmodified, under the tag `Zcode`, with no
+cron and no `--listen`: a human starts a session and says "read the chat"
+(Path C below). Both facts about ZCode are self-reported by the `Zcode` agent
+in the project's group chat, 2026-09-24. Two worked examples on the same node,
+one mechanism — substitute your own harness and your own tag.
 
 **What your harness must provide:**
 
@@ -306,12 +310,18 @@ For responses containing backticks or code blocks, use `--send-file` to avoid
 bash command-substitution issues — write the response to a temp file first,
 then send it.
 
+**One outbox file per agent.** The bridge sends whatever the file holds, with
+no notion of who last wrote it — so when more than one external agent runs
+against the same node, give each its own outbox file (for example
+`cc-out-<target>.md` for one, `zcode-out-<target>.md` for another). A shared
+file means the second agent to send picks up the first agent's stale draft.
+
 ---
 
 ## Setting up the check loop
 
-Two equally valid ways to drive the loop. Pick the one your harness supports;
-if it has both, either works.
+Three equally valid ways to drive the loop. Pick the one your harness
+supports; if it has more than one, any of them works.
 
 ### Path A — cron or poll
 
@@ -390,6 +400,19 @@ only; a 1:1 chat needs Path A.
    cron, there is nothing to recreate after your harness itself restarts,
    only the listener process to start again.
 
+### Path C — on request
+
+No scheduler and no long-running subprocess: a human starts a session in the
+harness and asks it to check the chat ("read the chat"). The agent then runs
+the same poll command as Path A —
+`cc_group_chat_bridge.py --group <group_id> --last 10` (or the agent-chat
+bridge's `--last 10 --full` for a 1:1 chat) — and, if a reply is warranted,
+sends it the same way. This satisfies "a scheduler or the ability to wait" by
+substituting a person for the timer: cheapest to set up for a second harness
+already running on the same node, since there is no cron to create and no
+listener process to keep alive. This is how ZCode (tag `Zcode`) has been
+checking this project's group chat.
+
 ---
 
 ## Where the external agent fits in Protocol 13
@@ -433,7 +456,7 @@ own setup can use the external agent differently (or not use one at all).
    1:1 chat there is nothing to register; the bridge answers to
    `[agent_chat] cc_display_name` (default `CC`).
 
-4. Set up the check loop, either path:
+4. Set up the check loop, any path:
 
    - **Path A (cron or poll):** in your harness, create the recurring check
      using the exact prompt from
@@ -447,10 +470,13 @@ own setup can use the external agent differently (or not use one at all).
      `uv run python cc_group_chat_bridge.py --group <group_id> --listen`
      and have your harness act on each `[MENTION]` line it prints. See
      [Path B — `--listen`](#path-b--listen-group-chats-only).
+   - **Path C (on request):** no setup beyond the tag registration in step 3
+     — when the human asks the agent to check the chat, it runs the same
+     poll command as Path A. See [Path C — on request](#path-c--on-request).
 
 5. Open the chat in the DPC UI and mention `@<tag>` in a message.
-   Within ~60 seconds (Path A) or immediately (Path B) the external agent
-   should respond.
+   Within ~60 seconds (Path A), immediately (Path B), or whenever the human
+   next asks the agent to check (Path C), the external agent should respond.
 
 6. *(Claude Code-specific, Path A only.)* If the harness restarts (IDE
    reload, window closed), recreate the cron — it does not persist. Path B's
