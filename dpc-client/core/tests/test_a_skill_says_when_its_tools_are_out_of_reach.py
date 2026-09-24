@@ -101,6 +101,21 @@ def test_the_starter_skills_need_no_retired_tool(tmp_path):
         assert s["retired_tools"] == [], s["name"]
 
 
+def test_every_starter_skills_required_tool_is_registered(tmp_path):
+    """Not-retired is weaker than registered: a name absent from both the
+    retired-alias map and the live registry (a typo, a tool that was never
+    built) would pass the check above and still fail at call time. Every
+    required_tools entry of every starter skill must be a name the live
+    ToolRegistry actually holds.
+    """
+    store = SkillStore(tmp_path)
+    store.ensure_starter_skills()
+    registered = set(ToolRegistry()._entries)
+    for s in store.list_skills():
+        for tool_name in s.get("required_tools") or []:
+            assert tool_name in registered, f"{s['name']} requires unregistered tool {tool_name!r}"
+
+
 def test_the_marker_reaches_the_cached_system_block(tmp_path):
     """build_llm_messages hands the firewall's sets to the skills section, not only to capabilities."""
     from dpc_client_core.dpc_agent.context import build_llm_messages
