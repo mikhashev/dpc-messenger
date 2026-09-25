@@ -755,47 +755,59 @@ class TelegramBotManager:
     async def _send_text_message(self, msg: Dict[str, Any]):
         """Send a text message via Telegram Bot API.
 
-        Handles long messages by splitting them into multiple parts.
-        Telegram has a 4096 character limit per message.
+        Handles long messages by splitting them into multiple parts (4096 is
+        Telegram's limit); HTML is split with its tags closed and reopened at
+        each cut. A part Telegram refuses to parse is sent again as plain
+        text, so a markup mistake costs the formatting, not the message.
         """
         try:
             from telegram import Bot
+            from telegram.error import BadRequest
+            from ..telegram_format import html_to_plain, split_telegram_html
 
             bot: Bot = self.application.bot
             text = msg["text"]
+            parse_mode = msg.get("parse_mode")
 
-            # Check if message needs splitting
-            if len(text) > TELEGRAM_MESSAGE_MAX_LENGTH:
+            if parse_mode and str(parse_mode).upper() == "HTML":
+                chunks = split_telegram_html(text, TELEGRAM_MESSAGE_MAX_LENGTH - 20)
+            elif len(text) > TELEGRAM_MESSAGE_MAX_LENGTH:
                 chunks = self._split_long_message(text, TELEGRAM_MESSAGE_MAX_LENGTH)
+            else:
+                chunks = [text]
+            if len(chunks) > 1:
                 logger.info(
                     f"Splitting message into {len(chunks)} parts "
                     f"(original: {len(text)} chars)"
                 )
 
-                # Send each chunk with part indicator
-                for i, chunk in enumerate(chunks, 1):
-                    part_indicator = f"\n\n({i}/{len(chunks)})"
+            for i, chunk in enumerate(chunks, 1):
+                part_indicator = f"\n\n({i}/{len(chunks)})" if len(chunks) > 1 else ""
+                try:
                     await bot.send_message(
                         chat_id=msg["chat_id"],
                         text=chunk + part_indicator,
-                        parse_mode=msg.get("parse_mode"),
+                        parse_mode=parse_mode,
                         disable_web_page_preview=msg.get("disable_web_page_preview", False)
                     )
-                    logger.debug(
-                        f"Sent text message part {i}/{len(chunks)} "
-                        f"to chat {msg['chat_id']} ({len(chunk)} chars)"
+                except BadRequest as e:
+                    if not parse_mode:
+                        raise
+                    logger.warning(f"Telegram refused the {parse_mode} text ({e}); sending it as plain text")
+                    plain = html_to_plain(chunk) if str(parse_mode).upper() == "HTML" else chunk
+                    await bot.send_message(
+                        chat_id=msg["chat_id"],
+                        text=plain + part_indicator,
+                        parse_mode=None,
+                        disable_web_page_preview=msg.get("disable_web_page_preview", False)
                     )
+                logger.debug(
+                    f"Sent text message part {i}/{len(chunks)} "
+                    f"to chat {msg['chat_id']} ({len(chunk)} chars)"
+                )
+                if i < len(chunks):
                     # Small delay between parts to respect rate limits
                     await asyncio.sleep(0.05)
-            else:
-                # Send single message
-                await bot.send_message(
-                    chat_id=msg["chat_id"],
-                    text=text,
-                    parse_mode=msg.get("parse_mode"),
-                    disable_web_page_preview=msg.get("disable_web_page_preview", False)
-                )
-                logger.debug(f"Sent text message to chat {msg['chat_id']}")
 
         except Exception as e:
             logger.error(f"Failed to send text message: {e}", exc_info=True)

@@ -32,12 +32,14 @@ import asyncio
 import base64
 import inspect
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 
 from ..dpc_agent.events import AgentEvent, EventType
+from ..telegram_format import send_rendered, strip_markdown
 
 # Bot tokens currently polled by a live bridge in this process. A second bridge on
 # the same token would trigger a Telegram getUpdates Conflict.
@@ -79,6 +81,16 @@ def escape_markdown(text: str) -> str:
     """
     special_chars = r"_*[]()~`>#+-=|{}.!"
     return "".join(f"\\{c}" if c in special_chars else c for c in text)
+
+
+def md_literal(text: str) -> str:
+    """A value placed into Markdown that must show as written (ids, paths, errors)."""
+    return re.sub(r"([`*_\[\]#|~])", r"\\\1", str(text))
+
+
+def md_code(text: str) -> str:
+    """A value shown as inline code; a backtick inside would end the span."""
+    return "`" + str(text).replace("`", "'") + "`"
 
 
 def get_agent_telegram_bridge(llm_manager, agent_id: str):
@@ -1185,6 +1197,22 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.debug(f"send_chat_action({action}) failed, continuing: {e}")
 
+    async def _reply_markdown(self, update, text: str) -> None:
+        """Answer the sender with the agent's Markdown rendered (see telegram_format).
+
+        A chunk Telegram cannot parse is resent as plain text inside
+        send_rendered; anything else that goes wrong still leaves the words
+        delivered, markers stripped, rather than the reply lost.
+        """
+        async def post(body: str, parse_mode):
+            return await update.message.reply_text(body, parse_mode=parse_mode)
+
+        try:
+            await send_rendered(post, text or "")
+        except Exception as send_err:
+            log.warning(f"Rendered reply failed, falling back to plain text: {send_err}")
+            await update.message.reply_text(strip_markdown(text or "")[:TELEGRAM_MESSAGE_MAX_LENGTH])
+
     def _start_new_cc_chain(self, conversation_id: str) -> None:
         """A human wrote from Telegram: this conversation gets a fresh CC<->agent chain.
 
@@ -1287,19 +1315,9 @@ Send a voice message and it will be transcribed and processed\\.
                 _skip_history=skip_history,
             )
 
-            # Send response (escape for MarkdownV2, split if needed)
+            # Send response (Markdown rendered as Telegram HTML, split if needed)
             try:
-                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
-                    # Split long messages
-                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
-                    for i, chunk in enumerate(chunks):
-                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
-                else:
-                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
-            except Exception as send_err:
-                log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
-                await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+                await self._reply_markdown(update, response)
             finally:
                 # Always push updated history to DPC chat UI in unified_conversation mode
                 if self._unified_conversation and self._agent_manager:
@@ -1415,16 +1433,7 @@ Send a voice message and it will be transcribed and processed\\.
             )
 
             try:
-                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
-                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
-                    for i, chunk in enumerate(chunks):
-                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
-                else:
-                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
-            except Exception as send_err:
-                log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
-                await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+                await self._reply_markdown(update, response)
             finally:
                 if self._unified_conversation and self._agent_manager:
                     await self._broadcast_history_to_ui(conversation_id)
@@ -1501,16 +1510,7 @@ Send a voice message and it will be transcribed and processed\\.
 
             # Send response
             try:
-                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
-                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
-                    for i, chunk in enumerate(chunks):
-                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
-                else:
-                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
-            except Exception as send_err:
-                log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
-                await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+                await self._reply_markdown(update, response)
             finally:
                 if self._unified_conversation and self._agent_manager:
                     await self._broadcast_history_to_ui(conversation_id)
@@ -1619,27 +1619,6 @@ Send a voice message and it will be transcribed and processed\\.
             log.debug(f"[_broadcast_history_to_ui] Pushed {len(messages)} messages for {conversation_id}")
         except Exception as e:
             log.warning(f"[_broadcast_history_to_ui] Failed to push history: {e}")
-
-    def _split_message(self, text: str, max_length: int) -> List[str]:
-        """Split a long message into chunks."""
-        if len(text) <= max_length:
-            return [text]
-
-        chunks = []
-        while text:
-            if len(text) <= max_length:
-                chunks.append(text)
-                break
-
-            # Try to split at newline
-            split_pos = text.rfind('\n', 0, max_length)
-            if split_pos == -1:
-                split_pos = max_length
-
-            chunks.append(text[:split_pos])
-            text = text[split_pos:].lstrip('\n')
-
-        return chunks
 
     def is_enabled(self) -> bool:
         """Check if bridge is enabled."""
@@ -1771,96 +1750,55 @@ Send a voice message and it will be transcribed and processed\\.
         if not self.allowed_chat_ids:
             return
         chat_id = self.allowed_chat_ids[0]
-        await self._send_message(chat_id, escape_markdown(text))
+        await self.send_markdown(chat_id, text)
 
     async def _send_message(self, chat_id: str, text: str) -> None:
+        """Send Markdown to a chat, rendered; the one door handle_event uses."""
+        await self.send_markdown(chat_id, text)
+
+    async def send_markdown(self, chat_id: str, text: str) -> None:
+        """Send the agent's Markdown rendered as Telegram HTML.
+
+        Splitting, part labels and the plain-text fallback for a chunk
+        Telegram cannot parse live in telegram_format.send_rendered.
         """
-        Send a message to a Telegram chat.
+        async def post(body: str, parse_mode):
+            return await self._post(chat_id, body, parse_mode)
 
-        Splits long messages into multiple parts instead of truncating.
+        await send_rendered(post, text)
 
-        Args:
-            chat_id: Target chat ID
-            text: Message text (Markdown format)
-        """
-        # Split long messages instead of truncating
-        if len(text) > TELEGRAM_MESSAGE_MAX_LENGTH:
-            chunks = self._split_message(text, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
-            log.debug(f"[_send_message] Splitting message into {len(chunks)} parts")
-            for i, chunk in enumerate(chunks):
-                # Add part indicator for multi-part messages
-                if len(chunks) > 1:
-                    chunk = f"[{i+1}/{len(chunks)}]\n{chunk}"
-                await self._send_single_message(chat_id, chunk)
-                # Add small delay between chunks to avoid rate limiting
-                if i < len(chunks) - 1:
-                    await asyncio.sleep(0.1)  # 100ms between chunks
-            return
+    async def _post(self, chat_id: str, text: str, parse_mode) -> Any:
+        """One sendMessage call under the concurrency cap.
 
-        await self._send_single_message(chat_id, text)
-
-    async def _send_single_message(self, chat_id: str, text: str) -> None:
-        """
-        Send a single message to a Telegram chat (internal helper).
-
-        Uses semaphore to limit concurrent API calls and prevent connection pool exhaustion.
-
-        Args:
-            chat_id: Target chat ID
-            text: Message text (Markdown format)
+        BadRequest is a NetworkError subclass in python-telegram-bot, so it is
+        let through first: it means Telegram refused the text, which
+        send_rendered answers with a plain resend, not an outage.
         """
         async with self._send_semaphore:
-            log.debug(f"[_send_message] Sending to chat_id={chat_id}, text_len={len(text)}")
-
             try:
-                from telegram.error import NetworkError, TimedOut
-            except ImportError:
-                NetworkError = Exception  # type: ignore[misc,assignment]
-                TimedOut = Exception      # type: ignore[misc,assignment]
+                from telegram.error import BadRequest, NetworkError, TimedOut
+            except ImportError:  # pragma: no cover
+                BadRequest = NetworkError = TimedOut = ()  # type: ignore[assignment,misc]
 
             try:
                 result = await self._bot.send_message(
                     chat_id=chat_id,
                     text=text,
-                    parse_mode="MarkdownV2",
+                    parse_mode=parse_mode,
                     disable_notification=False,
                 )
-                log.debug(f"[_send_message] Success! message_id={result.message_id}")
                 self._network_error_count = 0
                 return result
+            except BadRequest:
+                raise
             except (NetworkError, TimedOut) as e:
-                # Network unavailable — skip Markdown fallback (same outcome), log at WARNING
                 self._network_error_count += 1
                 if self._network_error_count <= 3 or self._network_error_count % 50 == 0:
                     log.warning(
-                        "[_send_message] Telegram unreachable (error #%d): %s",
+                        "[_post] Telegram unreachable (error #%d): %s",
                         self._network_error_count, e,
                     )
                 raise
-            except Exception as e:
-                # Non-network failure (e.g. Markdown parse error) — try plain text fallback
-                log.debug(f"[_send_message] Send failed ({type(e).__name__}), retrying without Markdown: {e}")
-                try:
-                    result = await self._bot.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        parse_mode=None,
-                        disable_notification=False,
-                    )
-                    log.debug(f"[_send_message] Success without Markdown! message_id={result.message_id}")
-                    self._network_error_count = 0
-                    return result
-                except (NetworkError, TimedOut) as e2:
-                    self._network_error_count += 1
-                    if self._network_error_count <= 3 or self._network_error_count % 50 == 0:
-                        log.warning(
-                            "[_send_message] Telegram unreachable on fallback (error #%d): %s",
-                            self._network_error_count, e2,
-                        )
-                    raise
-                except Exception as e2:
-                    log.error(f"[_send_message] Failed even without Markdown: {e2}", exc_info=True)
-                    raise
 
     def _format_event(self, event: AgentEvent) -> str:
         """
@@ -1870,17 +1808,18 @@ Send a voice message and it will be transcribed and processed\\.
             event: The agent event
 
         Returns:
-            Formatted Markdown string
+            Markdown; agent-written text (messages, the morning brief) is kept as
+            the agent wrote it, data values are escaped to show as written
         """
         emoji = EVENT_EMOJIS.get(event.type.value, "📍")
         timestamp = event.timestamp[11:19] if event.timestamp else "?"  # Just time
 
         # Event type as title (escape for Markdown)
-        title = escape_markdown(event.type.value.replace("_", " ").title())
+        title = md_literal(event.type.value.replace("_", " ").title())
 
         lines = [
-            f"{emoji} *{title}*",
-            f"⏰ `{escape_markdown(timestamp)}`",
+            f"{emoji} **{title}**",
+            f"⏰ {md_code(timestamp)}",
         ]
 
         # Add event-specific details
@@ -1888,68 +1827,68 @@ Send a voice message and it will be transcribed and processed\\.
 
         # Task events
         if "task_id" in data:
-            lines.append(f"📋 Task: `{escape_markdown(str(data['task_id']))}`")
+            lines.append(f"📋 Task: {md_code(data['task_id'])}")
         if "task_type" in data:
-            lines.append(f"📁 Type: {escape_markdown(str(data['task_type']))}")
+            lines.append(f"📁 Type: {md_literal(data['task_type'])}")
         if "message_preview" in data:
-            preview = escape_markdown(str(data["message_preview"])[:150])
+            preview = md_literal(str(data["message_preview"])[:150])
             lines.append(f"💬 Preview: {preview}")
         if "conversation_id" in data:
-            lines.append(f"🔗 Conv: `{escape_markdown(str(data['conversation_id'][:30]))}`")
+            lines.append(f"🔗 Conv: {md_code(str(data['conversation_id'])[:30])}")
 
         # Tool events
         if "tool" in data:
-            lines.append(f"🔧 Tool: `{escape_markdown(str(data['tool']))}`")
+            lines.append(f"🔧 Tool: {md_code(data['tool'])}")
 
         # Sleep events — custom formatting
         if event.type == EventType.SLEEP_STATE_CHANGED:
             status = data.get("status", "unknown")
             agent_id = data.get("agent_id", "Agent")
             if status == "sleeping":
-                lines = [f"😴 *{escape_markdown(agent_id)} went to sleep*"]
+                lines = [f"😴 **{md_literal(agent_id)} went to sleep**"]
             elif status == "awake" and data.get("result") == "completed":
                 n = data.get("sessions_analyzed", 0)
-                lines = [f"☀️ *{escape_markdown(agent_id)} woke up* — {n} sessions analyzed"]
+                lines = [f"☀️ **{md_literal(agent_id)} woke up** — {n} sessions analyzed"]
                 brief = data.get("morning_brief", {})
                 if brief:
                     summary = brief.get("summary", "")
                     if summary:
                         lines.append("")
-                        lines.append(escape_markdown(summary))
+                        lines.append(str(summary))
                     last = brief.get("last_session")
                     if last:
                         lines.append("")
-                        lines.append("*Where we left off:*")
+                        lines.append("**Where we left off:**")
                         for item in last.get("what_was_done", [])[:5]:
-                            lines.append(f"• {escape_markdown(str(item))}")
+                            lines.append(f"• {item}")
                         stopped = last.get("where_stopped", "")
                         if stopped:
-                            lines.append(f"_Stopped:_ {escape_markdown(stopped)}")
+                            lines.append(f"_Stopped:_ {stopped}")
                         pending = last.get("pending_items", [])
                         if pending:
                             lines.append("")
-                            lines.append("*Pending:*")
+                            lines.append("**Pending:**")
                             for p in pending[:5]:
-                                lines.append(f"• {escape_markdown(str(p))}")
+                                lines.append(f"• {p}")
                     decisions = brief.get("key_decisions", [])
                     if decisions:
                         lines.append("")
-                        lines.append("*Key decisions:*")
+                        lines.append("**Key decisions:**")
                         for d in decisions[:5]:
                             text = d.get("decision", d) if isinstance(d, dict) else d
-                            lines.append(f"• {escape_markdown(str(text))}")
+                            lines.append(f"• {text}")
                     unresolved = brief.get("unresolved", [])
                     if unresolved:
                         lines.append("")
-                        lines.append("*Unresolved:*")
+                        lines.append("**Unresolved:**")
                         for u in unresolved[:5]:
                             text = u.get("topic", u) if isinstance(u, dict) else u
-                            lines.append(f"• {escape_markdown(str(text))}")
+                            lines.append(f"• {text}")
             elif status == "awake" and data.get("result") == "error":
-                err = escape_markdown(str(data.get("error", "unknown"))[:200])
-                lines = [f"❌ *{escape_markdown(agent_id)} sleep error:* {err}"]
+                err = md_literal(str(data.get("error", "unknown"))[:200])
+                lines = [f"❌ **{md_literal(agent_id)} sleep error:** {err}"]
             else:
-                lines = [f"😴 *{escape_markdown(agent_id)}* — {escape_markdown(status)}"]
+                lines = [f"😴 **{md_literal(agent_id)}** — {md_literal(status)}"]
             return "\n".join(lines)
 
         if "files_modified" in data:
@@ -1959,11 +1898,11 @@ Send a voice message and it will be transcribed and processed\\.
 
         # Code modified
         if "path" in data:
-            lines.append(f"📄 Path: `{escape_markdown(str(data['path']))}`")
+            lines.append(f"📄 Path: {md_code(data['path'])}")
 
         # Description/result - escape these as they contain free-form text
         if "description" in data:
-            desc = escape_markdown(str(data["description"])[:500])  # Increased from 200
+            desc = md_literal(str(data["description"])[:500])  # Increased from 200
             lines.append(f"📝 {desc}")
         # Note: result is intentionally not included in the task_completed notification.
         # The full response is already sent directly via reply_text before this notification,
@@ -1971,7 +1910,7 @@ Send a voice message and it will be transcribed and processed\\.
 
         # Error
         if "error" in data:
-            error = escape_markdown(str(data["error"])[:500])  # Increased from 200
+            error = md_literal(str(data["error"])[:500])  # Increased from 200
             lines.append(f"❌ Error: {error}")
 
         # Agent-initiated message (special formatting)
@@ -1981,12 +1920,12 @@ Send a voice message and it will be transcribed and processed\\.
             priority_emoji = priority_emojis.get(priority, "📍")
 
             # Rebuild lines for AGENT_MESSAGE with priority
-            lines = [f"{priority_emoji} *Message from Agent* \\({priority}\\)"]
+            lines = [f"{priority_emoji} **Message from Agent** ({priority})"]
 
             if "message" in data:
-                # Escape markdown for proper Telegram Markdown v2 escaping
-                # No truncation - _send_message will split if needed
-                msg = escape_markdown(str(data["message"]))
+                # The agent's own Markdown, rendered on send; no truncation,
+                # send_rendered splits under the limit.
+                msg = str(data["message"])
                 lines.append(f"\n{msg}")
 
         return "\n".join(lines)

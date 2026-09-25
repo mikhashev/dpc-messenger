@@ -8514,12 +8514,15 @@ class CoreService:
                                 bridge = getattr(dpc_agent_provider._managers[conversation_id], '_telegram_bridge', None)
                                 if bridge and bridge.allowed_chat_ids:
                                     chat_id = bridge.allowed_chat_ids[0]
-                                    # Use the agent's own bot (dpc_agent_bot), not telegram_manager's bot
-                                    bot = getattr(bridge, '_bot', None)
-                                    if bot:
-                                        await bot.send_message(chat_id=chat_id, text=f"CC: {text}")
+                                    # Use the agent's own bot (dpc_agent_bot), not telegram_manager's bot.
+                                    # CC writes Markdown; both doors render it for Telegram.
+                                    cc_markdown = f"**CC:** {text}"
+                                    if getattr(bridge, '_bot', None):
+                                        await bridge.send_markdown(chat_id, cc_markdown)
                                     else:
-                                        await self.telegram_manager.send_message(chat_id, f"CC: {text}")
+                                        from dpc_client_core.telegram_format import markdown_to_telegram_html
+                                        await self.telegram_manager.send_message(
+                                            chat_id, markdown_to_telegram_html(cc_markdown))
                                     logger.info("CC response also sent to Telegram chat %s via agent bot", chat_id)
                             break
             except Exception as e:

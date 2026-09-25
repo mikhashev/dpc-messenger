@@ -48,6 +48,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any, TYPE_CHECKING, List
 from datetime import datetime, timezone
 
+from ..telegram_format import markdown_to_telegram_html
+
 if TYPE_CHECKING:
     from ..service import CoreService
     from ..managers.telegram_manager import TelegramBotManager
@@ -429,7 +431,9 @@ class TelegramBridge:
                                 include_context=True,
                             )
                             if response:
-                                await self.telegram.send_message(chat_id, response)
+                                # The agent writes Markdown; the main bot sends HTML.
+                                await self.telegram.send_message(
+                                    chat_id, markdown_to_telegram_html(response))
                             # Broadcast updated history to UI so the chat panel reflects
                             # the Telegram exchange in real time (mirrors agent_telegram_bridge._broadcast_history_to_ui)
                             try:

@@ -898,13 +898,13 @@ class DpcAgentManager:
         """Send a scheduled task result back to a Telegram chat.
 
         Called by _execute_task when task.data contains _reply_telegram_chat_id.
-        Uses the existing _telegram_bridge._send_message so all escaping/retry
-        logic is reused.
+        Goes through the bridge's send_markdown, so the result is rendered the
+        way every other agent message to Telegram is.
         """
         if not self._telegram_bridge or not text:
             return
         try:
-            await self._telegram_bridge._send_message(chat_id, text)
+            await self._telegram_bridge.send_markdown(chat_id, text)
             log.info("Delivered task result to Telegram chat %s", chat_id)
         except Exception as e:
             log.warning("Failed to deliver task result to Telegram chat %s: %s", chat_id, e)
