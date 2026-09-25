@@ -23,7 +23,7 @@
     api_key_env?: string;    // Environment variable (cloud providers)
     context_window?: number; // Optional override
     temperature?: number;    // Model creativity (0.0-2.0, default 0.7)
-    max_tokens?: number;     // Max output tokens (zai/anthropic)
+    max_tokens?: number;     // Max output tokens (zai/deepseek/anthropic/llamacpp_server)
     top_p?: number;          // Nucleus sampling (zai, ollama)
     // Whether the model reasons before answering. Unset is not the same as
     // false: unset lets the capability decide, false says no to a model that
@@ -413,6 +413,7 @@
     for (const p of editedConfig.providers) {
       if (p.temperature === null) delete p.temperature;
       if (p.context_window === null) delete p.context_window;
+      if (p.max_tokens === null) delete p.max_tokens;
     }
 
     try {
@@ -1470,6 +1471,24 @@
                           Caps thinking per request. Without it the template's own default
                           effort (xhigh) is unbounded — on deep context it can spend the whole
                           window thinking and answer nothing.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="llama-max-tokens-{i}">Max output tokens (max_tokens)</label>
+                        <input
+                          id="llama-max-tokens-{i}"
+                          type="number"
+                          min="1"
+                          value={editedConfig.providers[i].max_tokens ?? ''}
+                          on:input={(e) => setNum(i, 'max_tokens', (e.target as HTMLInputElement).value)}
+                          placeholder="default 8192"
+                        />
+                        <p class="help-text">
+                          The output window each request carries: thinking and answer share it.
+                          Empty uses 8192. The reasoning budget above is capped at
+                          max_tokens − 2048, so the answer always keeps that much room. Not a
+                          flag the child is started with — changing it does not reload the model.
                         </p>
                       </div>
 
