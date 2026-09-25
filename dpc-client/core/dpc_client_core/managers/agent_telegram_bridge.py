@@ -1185,6 +1185,18 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.debug(f"send_chat_action({action}) failed, continuing: {e}")
 
+    def _start_new_cc_chain(self, conversation_id: str) -> None:
+        """A human wrote from Telegram: this conversation gets a fresh CC<->agent chain.
+
+        The UI resets the depth in _execute_agent_query, which Telegram never
+        reaches; without this a Telegram-only user whose chain hit the cap
+        would never get CC and the agent talking again.
+        """
+        service = getattr(self._agent_manager, "service", None)
+        reset = getattr(service, "reset_cc_agent_chain", None)
+        if callable(reset):
+            reset(conversation_id)
+
     async def _handle_message(self, update, context):
         """Handle incoming text message."""
         chat_id = str(update.effective_chat.id)
@@ -1213,6 +1225,7 @@ Send a voice message and it will be transcribed and processed\\.
             # Use agent_id as conversation_id when unified_conversation is enabled,
             # so Telegram messages share history with the DPC chat UI.
             conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+            self._start_new_cc_chain(conversation_id)
 
             # Pattern D: Check if message is @CC-only (no @Ark) — skip Ark processing,
             # save to history and broadcast cc_agent_mention for real CC to pick up
@@ -1391,6 +1404,7 @@ Send a voice message and it will be transcribed and processed\\.
             sender_name = f"{tg_display_name} (Telegram)"
 
             conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+            self._start_new_cc_chain(conversation_id)
 
             response = await self._message_handler(
                 message=transcription_text,
@@ -1467,6 +1481,7 @@ Send a voice message and it will be transcribed and processed\\.
             message_text = caption if caption else "Please analyze this image."
 
             conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+            self._start_new_cc_chain(conversation_id)
 
             attachment = self._keep_incoming_photo(
                 conversation_id, bytes(photo_bytes), update.message.message_id

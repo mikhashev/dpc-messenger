@@ -8167,7 +8167,7 @@ class CoreService:
             # A human message starts a new CC<->agent chain for this conversation.
             # Only the UI reaches here (execute_ai_query); the chain re-invokes the
             # agent through _invoke_agent_in_agent_chat -> process_message instead.
-            self._cc_ark_chain_depths.pop(conversation_id, None)
+            self.reset_cc_agent_chain(conversation_id)
 
             # Check if message is @CC-only (no @agent) — route to real Claude Code
             import re
@@ -8412,6 +8412,15 @@ class CoreService:
             "trigger_sender": trigger_sender,
             "recent_history": recent_messages,
         })
+
+    def reset_cc_agent_chain(self, conversation_id: str) -> None:
+        """A human message starts a new CC<->agent chain for this conversation.
+
+        Called by every path that hands a human's message to the agent (the UI
+        in _execute_agent_query, the agent's Telegram bot). Never by CC or by
+        the chain itself, or the five-round cap stops meaning anything.
+        """
+        self._cc_ark_chain_depths.pop(conversation_id, None)
 
     async def send_cc_agent_response(self, conversation_id: str, text: str, _skip_broadcast: bool = False, **kwargs) -> dict:
         """Inject CC's response into an agent conversation.

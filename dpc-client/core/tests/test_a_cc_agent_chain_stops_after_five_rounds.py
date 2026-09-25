@@ -130,3 +130,73 @@ async def test_a_human_message_gives_the_conversation_a_new_chain():
 
     await _cc_says(service, "agent_001", 1)
     assert service.invoked.count("agent_001") == 6
+
+
+# --- a human writing from the agent's Telegram bot also starts a new chain ---
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+from dpc_client_core.managers.agent_telegram_bridge import AgentTelegramBridge
+
+_TG_CHAT = "424242"
+
+
+def _telegram_bridge(service, conversation_id):
+    bridge = AgentTelegramBridge(
+        bot_token="t", allowed_chat_ids=[_TG_CHAT],
+        agent_id=conversation_id, unified_conversation=False,
+    )
+    manager = service.llm_manager.providers["dpc_agent"].get_manager(conversation_id)
+    manager.service = service
+    bridge.set_message_handler(AsyncMock(return_value="agent reply"), manager)
+    # Unified off keeps the handler from touching history; the conversation is
+    # then telegram-<chat>, so the chain under test lives there.
+    return bridge
+
+
+def _tg_update(text):
+    u = MagicMock()
+    u.effective_chat.id = _TG_CHAT
+    u.effective_user.first_name = "Mike"
+    u.message.text = text
+    u.message.reply_text = AsyncMock()
+    return u
+
+
+def _tg_context():
+    ctx = SimpleNamespace(bot=SimpleNamespace())
+    ctx.bot.send_chat_action = AsyncMock()
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_a_human_message_from_telegram_gives_the_conversation_a_new_chain():
+    conversation_id = f"telegram-{_TG_CHAT}"
+    service = _service()
+    await _cc_says(service, conversation_id, 6)
+    assert service.invoked.count(conversation_id) == 5
+
+    bridge = _telegram_bridge(service, conversation_id)
+    await bridge._handle_message(_tg_update("hello from the phone"), _tg_context())
+    bridge._message_handler.assert_awaited()
+
+    await _cc_says(service, conversation_id, 1)
+    assert service.invoked.count(conversation_id) == 6
+
+
+@pytest.mark.asyncio
+async def test_a_cc_only_message_from_telegram_is_human_too():
+    """`@CC` alone skips the agent, but a person still wrote it."""
+    conversation_id = f"telegram-{_TG_CHAT}"
+    service = _service()
+    service.p2p_manager = SimpleNamespace(node_id="dpc-node-test")
+    service._check_agent_cc_mention = AsyncMock()
+    await _cc_says(service, conversation_id, 6)
+
+    bridge = _telegram_bridge(service, conversation_id)
+    await bridge._handle_message(_tg_update("@CC look at this"), _tg_context())
+    bridge._message_handler.assert_not_awaited()
+
+    await _cc_says(service, conversation_id, 1)
+    assert service.invoked.count(conversation_id) == 6
