@@ -275,6 +275,9 @@ class CoreService:
         self._group_agent_locks: Dict[str, asyncio.Lock] = {}
         self._group_agent_context: Dict[str, Dict[str, tuple]] = {}
 
+        # CC<->agent chain depth per agent conversation; a human message resets it.
+        self._cc_ark_chain_depths: Dict[str, int] = {}
+
         DPC_HOME_DIR.mkdir(exist_ok=True)
 
         # Load settings (supports environment variables and config file)
@@ -8161,8 +8164,10 @@ class CoreService:
             await dpc_agent_provider._ensure_manager(agent_id=conversation_id)
             agent_manager = dpc_agent_provider.get_manager(conversation_id)
 
-            # Reset chain depth on new user message (prevents stale depth from prior exchanges)
-            self._cc_ark_chain_depth = 0
+            # A human message starts a new CC<->agent chain for this conversation.
+            # Only the UI reaches here (execute_ai_query); the chain re-invokes the
+            # agent through _invoke_agent_in_agent_chat -> process_message instead.
+            self._cc_ark_chain_depths.pop(conversation_id, None)
 
             # Check if message is @CC-only (no @agent) — route to real Claude Code
             import re
@@ -8464,9 +8469,6 @@ class CoreService:
             # increment here (same fix as agent_manager.py drift removal).
             token_stats = manager.get_session_state(conversation_id)
 
-            # Reset chain depth — each CC message starts a fresh chain allowance
-            self._cc_ark_chain_depth = 0
-
             # Broadcast to UI so message appears in chat (skip when caller
             # already delivers content via execute_ai_query response)
             if not _skip_broadcast:
@@ -8520,9 +8522,12 @@ class CoreService:
             text_lower = (text or '').lower()
             agent_mentioned = (f"@{agent_name.lower()}" in text_lower) or (f"@{_chain_agent_id}" in text_lower)
             if agent_mentioned:
-                chain_depth = getattr(self, '_cc_ark_chain_depth', 0)
+                # Per conversation, reset only by a human message in
+                # _execute_agent_query — never by CC or the chain itself.
+                depths = self._cc_ark_chain_depths
+                chain_depth = depths.get(conversation_id, 0)
                 if chain_depth < 5:
-                    self._cc_ark_chain_depth = chain_depth + 1
+                    depths[conversation_id] = chain_depth + 1
                     logger.info("CC mentioned @%s in %s (chain depth %d) — triggering agent response",
                                 agent_name, conversation_id, chain_depth + 1)
                     asyncio.ensure_future(self._invoke_agent_in_agent_chat(conversation_id, text, manager))
