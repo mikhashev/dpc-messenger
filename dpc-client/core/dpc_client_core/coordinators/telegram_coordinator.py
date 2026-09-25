@@ -421,6 +421,8 @@ class TelegramBridge:
                         agent_manager = dpc_agent_provider.get_manager(agent_id)
                         if agent_manager:
                             logger.info(f"Forwarding Telegram message to agent {agent_id}")
+                            # A person wrote: a new CC<->agent chain for this conversation.
+                            self.service.reset_cc_agent_chain(agent_id)
                             response = await agent_manager.process_message(
                                 message=text,
                                 conversation_id=agent_id,

@@ -200,3 +200,44 @@ async def test_a_cc_only_message_from_telegram_is_human_too():
 
     await _cc_says(service, conversation_id, 1)
     assert service.invoked.count(conversation_id) == 6
+
+
+@pytest.mark.asyncio
+async def test_a_human_message_through_the_main_telegram_bot_gives_a_new_chain():
+    """The main bot routes a chat linked to an agent into that agent's conversation."""
+    from datetime import datetime
+
+    from dpc_client_core.coordinators.telegram_coordinator import TelegramBridge
+
+    conversation_id = "agent_001"
+    service = _service()
+    await _cc_says(service, conversation_id, 6)
+    assert service.invoked.count(conversation_id) == 5
+
+    manager = service.llm_manager.providers["dpc_agent"].get_manager(conversation_id)
+    manager.process_message = AsyncMock(return_value="")
+    service.conversation_monitors = {"agent-agent_001": SimpleNamespace(on_message=AsyncMock())}
+    service.settings = MagicMock()
+    service.get_conversation_history = AsyncMock(return_value={"messages": []})
+
+    telegram = MagicMock()
+    telegram.is_allowed.return_value = True
+    telegram.bridge_to_p2p = False
+    telegram.send_message = AsyncMock()
+    coordinator = TelegramBridge.__new__(TelegramBridge)
+    coordinator.service = service
+    coordinator.telegram = telegram
+    coordinator._get_or_create_conversation_id = lambda chat_id, agent_id=None: "agent-agent_001"
+    coordinator._load_agent_context = lambda agent_id: {}
+
+    update = MagicMock()
+    update.message.chat_id = _TG_CHAT
+    update.message.text = "hello from the phone"
+    update.message.message_id = 7
+    update.message.from_user.full_name = "Mike"
+    update.message.date = datetime(2026, 9, 25, 12, 0, 0)
+    await coordinator.handle_text_message(update, None)
+    manager.process_message.assert_awaited()
+
+    await _cc_says(service, conversation_id, 1)
+    assert service.invoked.count(conversation_id) == 6
