@@ -1260,9 +1260,6 @@ class Settings:
     def get_discord_ark_channel_id(self) -> str:
         return self.get('discord', 'ark_channel_id', '')
 
-    def get_discord_morning_brief_channel_id(self) -> str:
-        return self.get('discord', 'morning_brief_channel_id', '') or self.get_discord_ark_channel_id()
-
     def get_discord_config(self) -> dict:
         return {
             'enabled': self.get_discord_enabled(),
@@ -1270,7 +1267,6 @@ class Settings:
             'guild_id': self.get_discord_guild_id(),
             'allowed_channel_ids': self.get_discord_allowed_channel_ids(),
             'ark_channel_id': self.get_discord_ark_channel_id(),
-            'morning_brief_channel_id': self.get_discord_morning_brief_channel_id(),
         }
 
     def save_config(self):

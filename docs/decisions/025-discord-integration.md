@@ -48,7 +48,6 @@ enabled = false
 bot_token_env = DISCORD_BOT_TOKEN
 allowed_guild_ids = []
 allowed_channel_ids = []
-morning_brief_channel_id =
 ```
 
 ### 4. Gateway Intents
@@ -66,7 +65,7 @@ Required privileged intents:
 - **Iris** handles all Discord interactions. Ark stays in DPC, does not spend context on Discord
 - **Whitelist enforcement:** Agent responds only in explicitly whitelisted channels (`allowed_channel_ids`) + DMs. @mention in non-whitelisted channels is silently ignored (same as Telegram `allowed_chat_ids` pattern)
 - **@mention only** — no slash commands (cancelled S97: `/ask`, `/status`, `/help` redundant with @mention)
-- Morning brief posted to configured `morning_brief_channel_id` (default: `#ark`) on wakeup, triggered by sleep consolidation pipeline
+- ~~Morning brief posted to configured `morning_brief_channel_id` (default: `#ark`) on wakeup, triggered by sleep consolidation pipeline~~ — dropped 2026-09-25 (Mike's call: the brief is not wanted in Discord). The leg was never wired; the uncalled `send_morning_brief` and the `morning_brief_channel_id` key were removed. The brief itself and its other delivery paths are unchanged.
 - Sleep/event notifications via Discord embeds
 - **Multi-language:** Iris responds in user's language (system prompt instruction)
 

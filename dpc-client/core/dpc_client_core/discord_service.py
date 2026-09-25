@@ -52,11 +52,3 @@ class DiscordService:
         if not channel_id:
             return False
         return await self.discord_manager.send_message(channel_id, text)
-
-    async def send_morning_brief(self, brief_text: str) -> bool:
-        if not self.discord_manager or not self.discord_manager.is_running:
-            return False
-        channel_id = self.discord_manager.morning_brief_channel_id
-        if not channel_id:
-            return False
-        return await self.discord_manager.send_message(channel_id, f"**Morning Brief**\n\n{brief_text}")

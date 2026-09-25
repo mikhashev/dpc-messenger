@@ -37,7 +37,6 @@ class DiscordBotManager:
         self.guild_id = config.get("guild_id", "")
         self.allowed_channel_ids: Set[str] = set(str(c) for c in config.get("allowed_channel_ids", []))
         self.ark_channel_id = config.get("ark_channel_id", "")
-        self.morning_brief_channel_id = config.get("morning_brief_channel_id", "") or self.ark_channel_id
         self._client: Optional[Any] = None
         self._task: Optional[asyncio.Task] = None
         self._running = False
