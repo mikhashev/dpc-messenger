@@ -469,7 +469,9 @@ class LLMManager:
                 provider_type = provider_config.get("type")
 
                 if not alias or not provider_type:
-                    logger.warning("Skipping invalid provider config: %s", provider_config)
+                    # Field names only: the entry may hold a plaintext api_key.
+                    logger.warning("Skipping provider config without alias or type; fields: %s",
+                                   sorted(provider_config))
                     continue
 
                 if provider_type in PROVIDER_MAP:

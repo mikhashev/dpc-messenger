@@ -7,6 +7,7 @@
   import { confirmAsync } from '$lib/utils/dialog';
   import { trackRename } from '$lib/utils/aliasRenames';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
+  import { envNameOrUndefined, looksLikeKey } from '$lib/utils/apiKeyEnv';
 
   export let open: boolean = false;
 
@@ -238,17 +239,23 @@
   // 'new' for the Add form, 'edit-<i>' for a provider being edited. The key is
   // resolved by the backend and never comes back here.
   type ModelList = { loading: boolean; error: string; models: ProviderModel[] | null };
+  const KEY_IN_ENV_FIELD_HINT = 'This looks like a key, not a variable name — use the API Key field';
   let modelLists: Record<string, ModelList> = {};
   const autoLoadedModelLists = new Set<string>();
 
   async function loadProviderModels(listKey: string, p: Provider, savedAlias?: string) {
+    // A key in the variable-name field is never sent as a name (see apiKeyEnv.ts).
+    if (looksLikeKey(p.api_key_env) && !p.api_key) {
+      modelLists[listKey] = { loading: false, error: KEY_IN_ENV_FIELD_HINT, models: null };
+      return;
+    }
     modelLists[listKey] = { loading: true, error: '', models: modelLists[listKey]?.models ?? null };
     try {
       const result = await sendCommand('query_provider_models', {
         provider_type: p.type,
         provider_alias: savedAlias || undefined,
         base_url: p.base_url || undefined,
-        api_key_env: p.api_key_env || undefined,
+        api_key_env: envNameOrUndefined(p.api_key_env),
         api_key: p.api_key || undefined,
       });
       if (result && result.status === 'success') {
@@ -454,6 +461,13 @@
   // Save changes
   async function saveChanges() {
     if (!editedConfig) return;
+
+    const keyInEnvField = editedConfig.providers.find((p) => looksLikeKey(p.api_key_env));
+    if (keyInEnvField) {
+      saveMessage = `${keyInEnvField.alias}: ${KEY_IN_ENV_FIELD_HINT}`;
+      saveMessageType = 'error';
+      return;
+    }
 
     isSaving = true;
     saveMessage = '';
@@ -810,7 +824,12 @@
     }
 
     // Carry over user-entered optional settings (override type defaults where set)
-    if (newProvider.api_key_env) provider.api_key_env = newProvider.api_key_env;
+    const envName = envNameOrUndefined(newProvider.api_key_env);
+    if (envName) provider.api_key_env = envName;
+    // The same plaintext alternative the edit form offers for these types.
+    if (newProvider.api_key && ['zai', 'deepseek', 'neuraldeep'].includes(newProvider.type)) {
+      provider.api_key = newProvider.api_key;
+    }
     if (newProvider.context_window !== undefined) provider.context_window = newProvider.context_window;
     if (newProvider.temperature !== undefined) provider.temperature = newProvider.temperature;
     if (newProvider.max_tokens !== undefined) provider.max_tokens = newProvider.max_tokens;
@@ -1967,8 +1986,13 @@
                             type="text"
                             bind:value={editedConfig.providers[i].api_key_env}
                             placeholder="OPENAI_API_KEY"
+                            autocomplete="off"
                           />
-                          <p class="help-text">Set this environment variable before starting the service</p>
+                          {#if looksLikeKey(editedConfig.providers[i].api_key_env)}
+                            <p class="help-text warn">{KEY_IN_ENV_FIELD_HINT}</p>
+                          {:else}
+                            <p class="help-text">Set this environment variable before starting the service</p>
+                          {/if}
                         {:else if editedConfig.providers[i].api_key !== undefined}
                           <form on:submit|preventDefault>
                             <input
@@ -1991,8 +2015,13 @@
                           type="text"
                           bind:value={editedConfig.providers[i].api_key_env}
                           placeholder="ANTHROPIC_API_KEY"
+                          autocomplete="off"
                         />
-                        <p class="help-text">Set this environment variable before starting the service</p>
+                        {#if looksLikeKey(editedConfig.providers[i].api_key_env)}
+                          <p class="help-text warn">{KEY_IN_ENV_FIELD_HINT}</p>
+                        {:else}
+                          <p class="help-text">Set this environment variable before starting the service</p>
+                        {/if}
                       </div>
                     {/if}
 
@@ -2052,8 +2081,26 @@
                           type="text"
                           bind:value={editedConfig.providers[i].api_key_env}
                           placeholder="ZAI_API_KEY"
+                          autocomplete="off"
                         />
-                        <p class="help-text">Recommended: Store API key in environment variable</p>
+                        {#if looksLikeKey(editedConfig.providers[i].api_key_env)}
+                          <p class="help-text warn">
+                            {KEY_IN_ENV_FIELD_HINT}
+                            <button
+                              type="button"
+                              class="btn-fetch"
+                              on:click={() => {
+                                const p = editedConfig?.providers[i];
+                                if (!p) return;
+                                p.api_key = (p.api_key_env || '').trim();
+                                p.api_key_env = '';
+                                editedConfig = editedConfig;
+                              }}
+                            >Move it there</button>
+                          </p>
+                        {:else}
+                          <p class="help-text">Recommended: Store API key in environment variable</p>
+                        {/if}
                       </div>
 
                       <div class="form-group">
@@ -2602,7 +2649,7 @@
                   {#if list?.error}
                     <p class="help-text warn">{list.error}</p>
                   {:else}
-                    <p class="help-text">From GET /models with the key in the variable below (default NEURALDEEP_API_KEY). A model missing from the list can still be typed above.</p>
+                    <p class="help-text">From GET /models with the key typed below, else the one in the named variable (default NEURALDEEP_API_KEY). A model missing from the list can still be typed above.</p>
                   {/if}
                 {/if}
                 {#if newProvider.type === 'llamacpp_server'}
@@ -2630,8 +2677,39 @@
                     newProvider.type === 'github_models' ? 'GITHUB_TOKEN' :
                     'GIGACHAT_CREDENTIALS'
                   }
+                  autocomplete="off"
                 />
+                {#if looksLikeKey(newProvider.api_key_env)}
+                  <p class="help-text warn">
+                    {KEY_IN_ENV_FIELD_HINT}
+                    {#if newProvider.type === 'zai' || newProvider.type === 'deepseek' || newProvider.type === 'neuraldeep'}
+                      <button
+                        type="button"
+                        class="btn-fetch"
+                        on:click={() => { newProvider.api_key = (newProvider.api_key_env || '').trim(); newProvider.api_key_env = ''; }}
+                      >Move it there</button>
+                    {/if}
+                  </p>
+                {:else}
+                  <p class="help-text">The name of a variable set before the service starts, not the key itself.</p>
+                {/if}
               </div>
+
+              {#if newProvider.type === 'zai' || newProvider.type === 'deepseek' || newProvider.type === 'neuraldeep'}
+                <div class="form-group">
+                  <label for="new-api-key">API Key (plaintext, alternative)</label>
+                  <form on:submit|preventDefault>
+                    <input
+                      id="new-api-key"
+                      type="password"
+                      bind:value={newProvider.api_key}
+                      placeholder="Leave blank to use the environment variable"
+                      autocomplete="off"
+                    />
+                  </form>
+                  <p class="help-text warn">⚠️ Not recommended: Stores key in config file</p>
+                </div>
+              {/if}
             {/if}
 
             {#if newProvider.type !== 'dpc_agent' && newProvider.type !== 'local_whisper'}
@@ -2779,7 +2857,7 @@
             <button
               class="btn btn-primary"
               on:click={addNewProvider}
-              disabled={!newProvider.alias || (newProvider.type !== 'dpc_agent' && !newProvider.model)}
+              disabled={!newProvider.alias || (newProvider.type !== 'dpc_agent' && !newProvider.model) || looksLikeKey(newProvider.api_key_env)}
             >
               Add Provider
             </button>

@@ -40,7 +40,7 @@ from .providers.base import (
     declared_reasoning_words,
     effective_reasoning_default,
 )
-from .local_api import LocalApiServer, sends_own_response, slow_command
+from .local_api import ENV_VAR_NAME_RE as _ENV_VAR_NAME, LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
 from .gateway import (
     GATEWAY_HOST,
@@ -2848,6 +2848,12 @@ class CoreService:
         live = (getattr(self.llm_manager, "providers", {}) or {}).get(provider_alias or "")
         live = live if isinstance(live, NeuralDeepProvider) else None
         env_name = (api_key_env or "").strip() or "NEURALDEEP_API_KEY"
+        if not _ENV_VAR_NAME.fullmatch(env_name):
+            # Most often a key pasted where the variable's name belongs: the
+            # value is never echoed, since this message reaches the UI and the log.
+            return {"status": "error",
+                    "message": "The API key environment variable name is not valid (a name is "
+                               "letters, digits and underscores); a key belongs in the API Key field"}
         key = (api_key or "").strip() or os.getenv(env_name) or (live._api_key if live else None)
         if not key:
             return {"status": "error",

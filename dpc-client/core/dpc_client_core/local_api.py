@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import stat
 import weakref
@@ -235,22 +236,49 @@ ALLOWED_COMMANDS: frozenset = frozenset({
 })
 
 
+# What an environment variable's name can be. Anything else in an
+# `api_key_env` field is most likely the key itself, pasted into the wrong box.
+ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SECRET_FIELD_WORDS = ("key", "token", "secret", "password")
+_SK_VALUE_RE = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
+_REDACTED = "<redacted>"
+
+
+def _redact_secrets(value, field: str = ""):
+    """A copy of `value` with secrets replaced, at any depth.
+
+    Redacted: any non-empty `api_key`; an `api_key_env` that is not a valid
+    variable name; an sk-... value under a field named like key/token/secret.
+    """
+    if isinstance(value, dict):
+        return {k: _redact_secrets(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_secrets(v, field) for v in value]
+    if not isinstance(value, str) or not value:
+        return value
+    name = field.lower()
+    if name == "api_key":
+        return _REDACTED
+    if name == "api_key_env" and not ENV_VAR_NAME_RE.fullmatch(value.strip()):
+        return _REDACTED
+    if any(w in name for w in _SECRET_FIELD_WORDS) and _SK_VALUE_RE.search(value):
+        return _REDACTED
+    return value
+
+
 def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
     """
-    Sanitize payload for logging by truncating large base64 strings.
+    Sanitize payload for logging: secrets redacted at any depth (the
+    providers editor sends whole provider configs), large base64 truncated.
 
     Args:
         payload: The payload dict to sanitize
         max_length: Maximum length for base64 strings (default: 30 characters)
 
     Returns:
-        Sanitized copy of payload with truncated base64 strings
+        Sanitized copy of payload
     """
-    sanitized = payload.copy()
-
-    # A key typed into an unsaved form (query_provider_models) is never logged.
-    if sanitized.get('api_key'):
-        sanitized['api_key'] = '<redacted>'
+    sanitized = _redact_secrets(payload)
 
     # Truncate image_base64 field if present
     if 'image_base64' in sanitized and isinstance(sanitized['image_base64'], str):
@@ -277,7 +305,7 @@ def _log_error_under_ok(command: str, result, envelope: str = "OK") -> None:
     detail = result.get("message") or result.get("error") or ""
     logger.warning(
         "Command '%s' answered an error under an OK envelope: %s",
-        command, str(detail)[:300] or "(no message given)",
+        command, _SK_VALUE_RE.sub("sk-" + _REDACTED, str(detail))[:300] or "(no message given)",
     )
 
 
