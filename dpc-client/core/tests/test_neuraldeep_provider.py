@@ -4,21 +4,64 @@ The response shapes here are the ones the 2026-09-26 probe recorded against
 api.neuraldeep.ru: reasoning in `reasoning_content`, usage on the last stream
 chunk, `reasoning_tokens` sometimes null and once above `completion_tokens`,
 an answer that starts with "\\n\\n", and thinking that only stops on the
-`-noreason` model. No network."""
+`-noreason` model. No network: the price list and /limits are stubbed."""
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from dpc_client_core.llm_manager import PROVIDER_MAP
 from dpc_client_core.node_ledger import OUTPUT_INCLUDES_THINKING
 from dpc_client_core.providers.base import reasoning_word_for
+from dpc_client_core.providers import neuraldeep_prices
+from dpc_client_core.providers.neuraldeep_prices import NeuralDeepPriceSource
 from dpc_client_core.providers.neuraldeep_provider import (
+    COST_BASIS_CHARGED,
+    COST_BASIS_LIST_PRICE_REFERENCE,
+    COST_BASIS_UNKNOWN,
     NEURALDEEP_DEFAULT_BASE_URL,
     NeuralDeepProvider,
 )
+
+_REAL_GET_BALANCE = NeuralDeepProvider.get_balance
+LIST_AT = datetime(2026, 9, 27, 6, 0, tzinfo=timezone.utc)
+PRICES = {"prices": [
+    {"model": "qwen3.8-27b", "billing": "token", "in_rub_1m": 24.48,
+     "out_rub_1m": 122.4, "cached_in_rub_1m": 2.448},
+    {"model": "qwen3.8-27b-noreason", "billing": "token", "in_rub_1m": 24.48,
+     "out_rub_1m": 122.4, "cached_in_rub_1m": 2.448},
+    {"model": "qwen3.6-35b-a3b", "billing": "token", "in_rub_1m": 7.14,
+     "out_rub_1m": 40.8, "cached_in_rub_1m": 0.714},
+    {"model": "whisper-1", "billing": "minute", "in_rub_1m": 0.0,
+     "out_rub_1m": 0.0, "cached_in_rub_1m": None, "rub_per_min": 102.0},
+]}
+
+
+class _Fetch:
+    def __init__(self, result=PRICES):
+        self.result, self.calls = result, 0
+
+    async def __call__(self):
+        self.calls += 1
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def _offline(tmp_path, monkeypatch):
+    """A price list served from a stub and a wallet key, per test."""
+    monkeypatch.setenv("DPC_HOME", str(tmp_path))
+    fetch = _Fetch()
+    neuraldeep_prices.reset_price_source(NeuralDeepPriceSource(fetch=fetch, clock=lambda: LIST_AT))
+    balance = AsyncMock(return_value={"billing_mode": "wallet"})
+    monkeypatch.setattr(NeuralDeepProvider, "get_balance", balance)
+    yield SimpleNamespace(fetch=fetch, balance=balance)
+    neuraldeep_prices.reset_price_source()
 
 
 def _make(config=None):
@@ -270,16 +313,86 @@ async def test_usage_carries_roubles_with_their_currency_and_no_dollar_cost():
     assert usage["cost_currency"] == "RUB"
     # 500k cached * 2.448 + 500k uncached * 24.48 + 1M out * 122.4, per 1M
     assert usage["cost_amount"] == pytest.approx(1.224 + 12.24 + 122.4)
+    assert usage["cost_price_list_at"] == LIST_AT.isoformat()
+    assert usage["cost_basis"] == COST_BASIS_CHARGED
     assert "cost" not in usage
 
 
 @pytest.mark.asyncio
-async def test_an_unpriced_model_records_no_amount():
+async def test_the_noreason_twin_is_priced_by_its_own_row():
+    p = _make()
+    _mock_create(p, _response(usage=_usage(prompt=0, completion=1_000_000, reasoning=0)))
+    await p.generate_response("ping", reasoning_effort="off")
+    assert p.get_last_usage()["cost_amount"] == pytest.approx(122.4)
+
+
+@pytest.mark.asyncio
+async def test_a_model_missing_from_the_list_is_unknown_with_the_reason():
     p = _make({"model": "some-new-model"})
     _mock_create(p, _response())
     await p.generate_response("ping")
     usage = p.get_last_usage()
-    assert "cost_amount" not in usage and "cost_currency" not in usage
+    assert usage["cost_amount"] is None and "cost_currency" not in usage
+    assert "not in the price list" in usage["cost_unpriced_reason"]
+    assert usage["cost_price_list_at"] == LIST_AT.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_row_without_token_prices_is_unknown_not_free():
+    p = _make({"model": "whisper-1"})
+    _mock_create(p, _response())
+    await p.generate_response("ping")
+    usage = p.get_last_usage()
+    assert usage["cost_amount"] is None
+    assert "billing='minute'" in usage["cost_unpriced_reason"]
+
+
+@pytest.mark.asyncio
+async def test_no_list_and_no_cache_is_unknown_and_the_call_still_answers(_offline):
+    _offline.fetch.result = httpx.ConnectError("offline")
+    p = _make()
+    _mock_create(p, _response())
+    assert await p.generate_response("ping") == "Pong"
+    usage = p.get_last_usage()
+    assert usage["cost_amount"] is None and "cost_currency" not in usage
+    assert "fetch failed and nothing cached" in usage["cost_unpriced_reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_pricing_crash_never_fails_the_call(monkeypatch):
+    async def boom(self):
+        raise RuntimeError("bug")
+    monkeypatch.setattr(NeuralDeepPriceSource, "current", boom)
+    p = _make()
+    create = _mock_create(p, _response())
+    assert await p.generate_response("ping") == "Pong"
+    assert create.await_count == 1  # not retried as if the vendor had failed
+    assert p.get_last_usage()["cost_unpriced_reason"] == "pricing failed: RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_a_subscription_key_records_a_list_price_reference(_offline):
+    _offline.balance.return_value = {"billing_mode": "subscription"}
+    p = _make()
+    _mock_create(p, _response())
+    await p.generate_response("ping")
+    await p.generate_response("ping")
+    usage = p.get_last_usage()
+    assert usage["cost_basis"] == COST_BASIS_LIST_PRICE_REFERENCE
+    assert usage["cost_amount"] > 0 and usage["cost_currency"] == "RUB"
+    assert _offline.balance.await_count == 1  # /limits once a day, not per call
+    assert _offline.fetch.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_limits_leaves_the_basis_unknown(_offline):
+    _offline.balance.side_effect = httpx.ConnectError("offline")
+    p = _make()
+    _mock_create(p, _response())
+    await p.generate_response("ping")
+    await p.generate_response("ping")
+    assert p.get_last_usage()["cost_basis"] == COST_BASIS_UNKNOWN
+    assert _offline.balance.await_count == 1
 
 
 # --- balance -----------------------------------------------------------------
@@ -304,7 +417,7 @@ async def test_balance_reads_the_wallet_from_limits(monkeypatch):
                         lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
     p = _make()
     assert p.supports_balance()
-    balance = await p.get_balance()
+    balance = await _REAL_GET_BALANCE(p)
     assert seen["url"] == "https://api.neuraldeep.ru/v1/limits"
     assert seen["auth"] == "Bearer test-key"
     assert balance["balance_infos"] == [{"currency": "RUB", "total_balance": "500.00"}]

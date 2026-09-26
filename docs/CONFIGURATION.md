@@ -290,9 +290,18 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   at load with a message naming it (ADR-041 D5). The day's spend is read from the node
   ledger (`~/.dpc/ledger/`), so it survives a restart; at or over the ceiling the
   gateway answers `429` naming the alias, the ceiling and the spend.
-  A `neuraldeep` alias is priced in roubles (`dpc_agent/pricing.py`,
-  `NEURALDEEP_RATES_RUB`), not in the USD tables the ceiling is counted from, so it is
-  refused here as unrated until the ledger carries a currency for `cost_usd`'s place.
+  A `neuraldeep` alias is priced in roubles, not in the USD tables the ceiling is counted
+  from, so it is refused here as unrated until the ledger carries a currency for
+  `cost_usd`'s place. Its prices come live from the vendor's public list
+  (`https://neuraldeep.ru/api/public/wallet-prices`, no key), fetched on the first priced
+  call after start and at most once a day, cached at
+  `~/.dpc/cache/neuraldeep_wallet_prices.json` (`$DPC_HOME` honoured). If a fetch fails
+  the cached list is used and its age is logged; with no cache the cost is recorded as
+  unknown (`cost_amount: null` with `cost_unpriced_reason`), never as zero. Every priced
+  call carries `cost_price_list_at`, the date of the list it was priced from, and
+  `cost_basis`: `charged` for a wallet key, `list_price_reference` for a key whose
+  `/v1/limits` reports `billing_mode: subscription` (the amount is what the call would
+  have cost, not a debit), `unknown` when `/v1/limits` could not be read.
 - A `remote_peer` or `dpc_agent` alias may stand in neither list: what is shared is not
   shared onward (ADR-041 D7).
 

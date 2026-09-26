@@ -3,6 +3,7 @@
 import os
 import json
 import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Union
 
@@ -13,6 +14,7 @@ from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages,
                    network_client_bounds, normalize_reasoning_effort,
                    numeric_setting, positive_ceiling)
 from ..dpc_agent.pricing import NEURALDEEP_CURRENCY, compute_cost_rub
+from .neuraldeep_prices import REFRESH_INTERVAL, RETRY_AFTER_FAILURE, price_source
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,11 @@ _REASONING_MODELS = frozenset({
 # Models with a published `-noreason` twin: the only way to turn thinking off,
 # because the gateway drops `chat_template_kwargs.enable_thinking=false`.
 _NOREASON_TWINS = frozenset({"qwen3.8-27b", "qwen3.6-35b-a3b", "qwen3.6-fp8", "gemma-4-31b"})
+
+# `cost_basis` on a priced usage record: what the RUB amount is.
+COST_BASIS_CHARGED = "charged"  # a wallet key: the amount is debited
+COST_BASIS_LIST_PRICE_REFERENCE = "list_price_reference"  # a subscription key: not debited
+COST_BASIS_UNKNOWN = "unknown"  # /limits could not be read
 
 # The shared effort word -> what each model's `reasoning_effort` accepts, per
 # the vendor's "Reasoning по моделям" section. qwen3.8-27b does not know `high`
@@ -58,8 +65,9 @@ class NeuralDeepProvider(AIProvider):
       - `completion_tokens_details.reasoning_tokens` can be null, and was once
         larger than `completion_tokens` (297 vs 296); it is clamped.
       - the answer after reasoning starts with "\\n\\n"; it is stripped.
-      - prices are roubles (`pricing.NEURALDEEP_RATES_RUB`); the usage dict
-        carries `cost_amount` with `cost_currency`, never a dollar `cost`.
+      - prices are roubles from the vendor's live list (`neuraldeep_prices`);
+        the usage dict carries `cost_amount` with `cost_currency`, the list's
+        `cost_price_list_at` and `cost_basis`, never a dollar `cost`.
       - one image per request (vendor docs).
     """
 
@@ -95,6 +103,10 @@ class NeuralDeepProvider(AIProvider):
 
         self._last_thinking: Optional[str] = None
         self._last_usage: Optional[Dict[str, Any]] = None
+        # `billing_mode` from /limits, read at most once per REFRESH_INTERVAL.
+        self._billing_mode: Optional[str] = None
+        self._billing_mode_read_at: Optional[datetime] = None
+        self._billing_mode_failed_at: Optional[datetime] = None
 
     # --- capabilities ---
 
@@ -206,29 +218,76 @@ class NeuralDeepProvider(AIProvider):
             usage["reasoning_tokens"] = reasoning
             usage["content_tokens"] = completion - reasoning
             usage["thinking_source"] = "engine"
-        amount = compute_cost_rub(
-            model, prompt_tokens, completion, cache_hit_tokens=cached,
-            output_includes_thinking=self.DECLARED_OUTPUT_INCLUDES_THINKING,
-        )
-        if amount is not None:
-            usage["cost_amount"] = amount
-            usage["cost_currency"] = NEURALDEEP_CURRENCY
         return usage
 
-    def _record_usage(self, raw_usage: Any, *, path: str, model: str,
-                      served_effort: Optional[str], tool_calls: int = 0) -> Dict[str, Any]:
+    async def _billing_mode_now(self) -> Optional[str]:
+        """This key's `billing_mode`, re-read from /limits once a day."""
+        now = datetime.now(timezone.utc)
+        if self._billing_mode_read_at and now - self._billing_mode_read_at < REFRESH_INTERVAL:
+            return self._billing_mode
+        if self._billing_mode_failed_at and now - self._billing_mode_failed_at < RETRY_AFTER_FAILURE:
+            return self._billing_mode
+        try:
+            self._billing_mode = (await self.get_balance()).get("billing_mode")
+            self._billing_mode_read_at = now
+            self._billing_mode_failed_at = None
+        except Exception as exc:
+            self._billing_mode_failed_at = now
+            logger.warning("NeuralDeep %s: /limits unreadable (%s: %s); billing_mode stays %s",
+                           self.alias, type(exc).__name__, exc, self._billing_mode)
+        return self._billing_mode
+
+    async def _price_usage(self, usage: Dict[str, Any], model: str) -> None:
+        """Add the RUB cost from the live list, or `cost_amount` None with the reason."""
+        usage["cost_amount"] = None
+        price_list = await price_source().current()
+        if price_list is None:
+            usage["cost_unpriced_reason"] = "no price list: fetch failed and nothing cached"
+            return
+        usage["cost_price_list_at"] = price_list.fetched_at_iso
+        row = price_list.rows.get((model or "").strip().lower())
+        if row is None:
+            usage["cost_unpriced_reason"] = f"model {model!r} is not in the price list"
+            return
+        amount = compute_cost_rub(
+            row, usage["prompt_tokens"], usage["completion_tokens"],
+            cache_hit_tokens=usage["cache_read_input_tokens"],
+            output_includes_thinking=self.DECLARED_OUTPUT_INCLUDES_THINKING,
+        )
+        if amount is None:
+            usage["cost_unpriced_reason"] = (
+                f"model {model!r} has no per-token price in the list "
+                f"(billing={row.get('billing')!r})")
+            return
+        usage["cost_amount"] = amount
+        usage["cost_currency"] = NEURALDEEP_CURRENCY
+        mode = await self._billing_mode_now()
+        usage["cost_basis"] = (
+            COST_BASIS_LIST_PRICE_REFERENCE if mode == "subscription"
+            else COST_BASIS_CHARGED if mode else COST_BASIS_UNKNOWN)
+
+    async def _record_usage(self, raw_usage: Any, *, path: str, model: str,
+                            served_effort: Optional[str], tool_calls: int = 0) -> Dict[str, Any]:
         if raw_usage is None:
             return {}
         usage = self._usage_from_response(raw_usage, model)
         usage["served_effort"] = served_effort
+        try:
+            await self._price_usage(usage, model)
+        except Exception as exc:  # a price must never fail the call
+            logger.error("NeuralDeep %s: pricing failed", self.alias, exc_info=True)
+            usage["cost_amount"] = None
+            usage["cost_unpriced_reason"] = f"pricing failed: {type(exc).__name__}"
         self._record_last_usage(usage)
         logger.info(
             "NeuralDeep usage: alias=%s model=%s prompt=%d (cached=%d), completion=%d "
-            "(reasoning=%s), cost=%s %s, tool_calls=%d, effort=%s, path=%s",
+            "(reasoning=%s), cost=%s %s %s, tool_calls=%d, effort=%s, path=%s",
             self.alias, model, usage["prompt_tokens"], usage["cache_read_input_tokens"],
             usage["completion_tokens"], usage.get("reasoning_tokens"),
-            f"{usage['cost_amount']:.4f}" if "cost_amount" in usage else "unpriced",
-            usage.get("cost_currency", ""), tool_calls, served_effort, path,
+            f"{usage['cost_amount']:.4f}" if usage.get("cost_amount") is not None
+            else "unpriced", usage.get("cost_currency", ""),
+            usage.get("cost_basis") or usage.get("cost_unpriced_reason", ""),
+            tool_calls, served_effort, path,
         )
         return usage
 
@@ -293,8 +352,8 @@ class NeuralDeepProvider(AIProvider):
             )
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
-            self._record_usage(getattr(resp, "usage", None), path="plain",
-                               model=params["model"], served_effort=self._effort_word(effort))
+            await self._record_usage(getattr(resp, "usage", None), path="plain",
+                                     model=params["model"], served_effort=self._effort_word(effort))
             return (msg.content or "").lstrip()
 
         try:
@@ -329,8 +388,9 @@ class NeuralDeepProvider(AIProvider):
             async for chunk in stream:
                 chunk_usage = getattr(chunk, "usage", None)
                 if chunk_usage is not None:
-                    self._record_usage(chunk_usage, path="plain-stream", model=params["model"],
-                                       served_effort=self._effort_word(reasoning_effort))
+                    await self._record_usage(chunk_usage, path="plain-stream",
+                                             model=params["model"],
+                                             served_effort=self._effort_word(reasoning_effort))
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -419,7 +479,7 @@ class NeuralDeepProvider(AIProvider):
             if on_chunk and content:
                 await on_chunk(content, conversation_id)
 
-            usage = self._record_usage(
+            usage = await self._record_usage(
                 resp.usage, path="tools", model=params["model"],
                 served_effort=self._effort_word(reasoning_effort),
                 tool_calls=len(tool_calls_raw),
@@ -469,8 +529,8 @@ class NeuralDeepProvider(AIProvider):
             )
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
-            self._record_usage(getattr(resp, "usage", None), path="vision",
-                               model=params["model"], served_effort=self._effort_word(effort))
+            await self._record_usage(getattr(resp, "usage", None), path="vision",
+                                     model=params["model"], served_effort=self._effort_word(effort))
             return (msg.content or "").lstrip()
 
         try:

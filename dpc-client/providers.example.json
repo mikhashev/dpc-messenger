@@ -205,7 +205,7 @@
         "qwen3.6-35b-a3b": "tools, reasoning, vision; RUB 7.14 / 40.8",
         "gpt-oss-120b": "tools, reasoning; RUB 5.1 / 20.4"
       },
-      "_pricing_note": "Wallet prices from https://neuraldeep.ru/api/public/wallet-prices (2026-09-26), in dpc_agent/pricing.py NEURALDEEP_RATES_RUB. Recorded in RUB beside the USD meter, never added to it. A key on a subscription tier is not debited per token."
+      "_pricing_note": "Prices are read live from https://neuraldeep.ru/api/public/wallet-prices and cached daily at ~/.dpc/cache/neuraldeep_wallet_prices.json (the per-model figures above are examples, not what is billed). Recorded in RUB beside the USD meter, never added to it, with the list date in cost_price_list_at. A key on a subscription tier is not debited per token: its amounts carry cost_basis=list_price_reference."
     },
 
     "openrouter": {

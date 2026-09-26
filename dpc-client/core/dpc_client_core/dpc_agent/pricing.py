@@ -118,30 +118,25 @@ PAY_PER_USE_RATES.update(ZAI_RATES)
 PAY_PER_USE_RATES_FROM_2026_08_16.update(ZAI_RATES)
 
 
-# NeuralDeep wallet rates in **RUB** per 1M tokens, same three slots
-# (cached_in_rub_1m / in_rub_1m / out_rub_1m), from
-# https://neuraldeep.ru/api/public/wallet-prices, snapshot 2026-09-26.
-# Kept out of the USD tables above on purpose: every reader of those sums the
-# result as dollars, so these models read as unpriced to `compute_cost_usd`
-# and are priced only by `compute_cost_rub`. The table, not the vendor's
-# "cached = 0.1x" prose, is what is debited (gemma-4-31b: 8.8 of 11.0).
-NEURALDEEP_RATES_RUB: Dict[str, Dict[str, float]] = {
-    "qwen3.8-27b": {"cache_hit": 2.448, "cache_miss": 24.48, "output": 122.4},
-    "qwen3.8-27b-noreason": {"cache_hit": 2.448, "cache_miss": 24.48, "output": 122.4},
-    "qwen3.6-35b-a3b": {"cache_hit": 0.714, "cache_miss": 7.14, "output": 40.8},
-    "qwen3.6-35b-a3b-noreason": {"cache_hit": 0.714, "cache_miss": 7.14, "output": 40.8},
-    "qwen3.6-fp8": {"cache_hit": 0.714, "cache_miss": 7.14, "output": 40.8},
-    "qwen3.6-fp8-noreason": {"cache_hit": 0.714, "cache_miss": 7.14, "output": 40.8},
-    "gpt-oss-120b": {"cache_hit": 0.51, "cache_miss": 5.1, "output": 20.4},
-    "gemma-4-31b": {"cache_hit": 8.8, "cache_miss": 11.0, "output": 37.4},
-    "gemma-4-31b-noreason": {"cache_hit": 8.8, "cache_miss": 11.0, "output": 37.4},
-    "kimi-k2.6": {"cache_hit": 16.32, "cache_miss": 99.75, "output": 420.0},
-}
+# NeuralDeep bills in **RUB** per 1M tokens. There is no rate table here: the
+# vendor's public list (https://neuraldeep.ru/api/public/wallet-prices) is read
+# live by `providers/neuraldeep_prices.py`, and this function only does the
+# arithmetic over one row of it. Kept out of the USD tables above on purpose:
+# every reader of those sums the result as dollars, so NeuralDeep's own models
+# read as unpriced to `compute_cost_usd`.
 NEURALDEEP_CURRENCY = "RUB"
 
 
+def _rate(value) -> Optional[float]:
+    """A per-1M rate from the vendor's row, or None when it is not one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if value >= 0 and value == value and value != float("inf") else None
+
+
 def compute_cost_rub(
-    model: Optional[str],
+    row: Optional[Dict],
     prompt_tokens: int,
     completion_tokens: int,
     *,
@@ -149,19 +144,31 @@ def compute_cost_rub(
     thinking_tokens: int = 0,
     output_includes_thinking: Optional[str] = None,
 ) -> Optional[float]:
-    """Roubles for one NeuralDeep call, or None when the model has no rate.
+    """Roubles for one NeuralDeep call, priced by one row of the live list.
 
-    None, not 0.0: an unknown model is unpriced, and a zero reads as free.
+    The row is the vendor's own shape: `in_rub_1m`, `cached_in_rub_1m`,
+    `out_rub_1m` per 1M tokens, `billing` = "token". Cached input is priced at
+    `cached_in_rub_1m` as published, not at an assumed fraction of input — the
+    list itself disagrees with the vendor's "0.1x" prose (gemma-4-31b: 8.8 of
+    11.0). A token row that prints no cached price bills cached tokens at the
+    input price, which can only overstate our own record.
+
+    None, not 0.0, when the row cannot price tokens (absent, not token-billed,
+    or a rate that is not a non-negative number): a zero reads as free.
     """
-    rates = NEURALDEEP_RATES_RUB.get((model or "").strip().lower())
-    if rates is None:
+    if not isinstance(row, dict) or row.get("billing", "token") != "token":
         return None
+    rate_in = _rate(row.get("in_rub_1m"))
+    rate_out = _rate(row.get("out_rub_1m"))
+    if rate_in is None or rate_out is None:
+        return None
+    rate_cached = _rate(row.get("cached_in_rub_1m"))
+    if rate_cached is None:
+        rate_cached = rate_in
     hit = max(0, cache_hit_tokens or 0)
     miss = max(0, (prompt_tokens or 0) - hit)
     out = _billable_output(completion_tokens, thinking_tokens, output_includes_thinking)
-    return (
-        hit * rates["cache_hit"] + miss * rates["cache_miss"] + out * rates["output"]
-    ) / 1_000_000.0
+    return (hit * rate_cached + miss * rate_in + out * rate_out) / 1_000_000.0
 
 
 def _peak_applies(model_key: str) -> bool:

@@ -15,7 +15,6 @@ import pytest
 AT_OLD_TARIFF = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
 
 from dpc_client_core.dpc_agent.pricing import (
-    NEURALDEEP_RATES_RUB,
     PAY_PER_USE_RATES,
     PAY_PER_USE_RATES_FROM_2026_08_16,
     compute_cost_rub,
@@ -395,17 +394,52 @@ def test_an_unknown_convention_keeps_the_same_arithmetic_and_does_not_zero_the_c
                             output_includes_thinking="unknown", **common) > 0
 
 
-# --- NeuralDeep: roubles, kept out of the dollar tables ---
 
-def test_rouble_models_never_reach_the_dollar_tables():
-    for model in NEURALDEEP_RATES_RUB:
+
+# --- NeuralDeep: roubles over a live price row, kept out of the dollar tables ---
+
+# Rows in the vendor's shape, as https://neuraldeep.ru/api/public/wallet-prices
+# served them on 2026-09-27.
+GEMMA_ROW = {"model": "gemma-4-31b", "billing": "token", "in_rub_1m": 11.0,
+             "out_rub_1m": 37.4, "cached_in_rub_1m": 8.8}
+KIMI_ROW = {"model": "kimi-k2.6", "billing": "token", "in_rub_1m": 99.75,
+            "out_rub_1m": 420.0, "cached_in_rub_1m": 16.32}
+
+
+def test_neuraldeep_own_models_never_reach_the_dollar_tables():
+    for model in ("qwen3.8-27b", "qwen3.6-35b-a3b-noreason", "gemma-4-31b",
+                  "gpt-oss-120b", "kimi-k2.6"):
         assert model not in PAY_PER_USE_RATES
         assert model not in PAY_PER_USE_RATES_FROM_2026_08_16
         assert compute_cost_usd("nd_alias", 10**6, 10**6, model=model) == 0.0
         assert get_billing_model("nd_alias", model) == "subscription"
 
 
-def test_compute_cost_rub_prices_known_models_and_refuses_unknown():
-    assert compute_cost_rub("gpt-oss-120b", 10**6, 10**6) == pytest.approx(25.5)
-    assert compute_cost_rub("kimi-k2.6", 0, 10**6) == pytest.approx(420.0)
-    assert compute_cost_rub("no-such-model", 10, 10) is None
+def test_compute_cost_rub_prices_cached_input_at_the_rows_own_cached_rate():
+    # 400k cached at 8.8 (not 0.1x of 11.0) + 600k uncached at 11.0 + 1M out at 37.4
+    assert compute_cost_rub(GEMMA_ROW, 10**6, 10**6, cache_hit_tokens=400_000) == \
+        pytest.approx(3.52 + 6.6 + 37.4)
+    assert compute_cost_rub(KIMI_ROW, 0, 10**6) == pytest.approx(420.0)
+
+
+def test_compute_cost_rub_bills_thinking_by_the_declared_convention():
+    assert compute_cost_rub(KIMI_ROW, 0, 10**6, thinking_tokens=10**6,
+                            output_includes_thinking="excludes") == pytest.approx(840.0)
+    assert compute_cost_rub(KIMI_ROW, 0, 10**6, thinking_tokens=10**6,
+                            output_includes_thinking="includes") == pytest.approx(420.0)
+
+
+def test_compute_cost_rub_without_a_cached_rate_bills_cached_as_input():
+    row = dict(GEMMA_ROW, cached_in_rub_1m=None)
+    assert compute_cost_rub(row, 10**6, 0, cache_hit_tokens=10**6) == pytest.approx(11.0)
+
+
+@pytest.mark.parametrize("row", [
+    None,
+    {"model": "whisper-1", "billing": "minute", "in_rub_1m": 0.0, "out_rub_1m": 0.0},
+    dict(GEMMA_ROW, in_rub_1m=None),
+    dict(GEMMA_ROW, out_rub_1m="37.4"),
+    dict(GEMMA_ROW, in_rub_1m=-1.0),
+])
+def test_compute_cost_rub_is_none_where_the_row_cannot_price_tokens(row):
+    assert compute_cost_rub(row, 10, 10) is None
