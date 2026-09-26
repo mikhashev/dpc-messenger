@@ -284,12 +284,15 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   `/v1/models` and answers a completion addressed to it `404` saying so. The same
   applies to a peer's `local_whisper` row: it is not listed as `remote:<peer>:<alias>`.
 - `serving_vendor` — aliases whose provider is a paid API (`anthropic`, `deepseek`,
-  `zai`, `openai_compatible`, `gemini`, `github_models`, `gigachat`). Money is the
+  `neuraldeep`, `zai`, `openai_compatible`, `gemini`, `github_models`, `gigachat`). Money is the
   scarce resource, so **every entry needs a ceiling in `vendor_quotas`** — USD per UTC
   calendar day, per caller; a vendor alias without one is a configuration error refused
   at load with a message naming it (ADR-041 D5). The day's spend is read from the node
   ledger (`~/.dpc/ledger/`), so it survives a restart; at or over the ceiling the
   gateway answers `429` naming the alias, the ceiling and the spend.
+  A `neuraldeep` alias is priced in roubles (`dpc_agent/pricing.py`,
+  `NEURALDEEP_RATES_RUB`), not in the USD tables the ceiling is counted from, so it is
+  refused here as unrated until the ledger carries a currency for `cost_usd`'s place.
 - A `remote_peer` or `dpc_agent` alias may stand in neither list: what is shared is not
   shared onward (ADR-041 D7).
 

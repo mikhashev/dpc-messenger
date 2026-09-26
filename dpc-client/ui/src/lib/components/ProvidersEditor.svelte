@@ -11,7 +11,7 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'llamacpp_server' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'neuraldeep' | 'llamacpp_server' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
 
   type Provider = {
     alias: string;
@@ -23,7 +23,7 @@
     api_key_env?: string;    // Environment variable (cloud providers)
     context_window?: number; // Optional override
     temperature?: number;    // Model creativity (0.0-2.0, default 0.7)
-    max_tokens?: number;     // Max output tokens (zai/deepseek/anthropic/llamacpp_server)
+    max_tokens?: number;     // Max output tokens (zai/deepseek/neuraldeep/anthropic/llamacpp_server)
     top_p?: number;          // Nucleus sampling (zai, ollama)
     // Whether the model reasons before answering. Unset is not the same as
     // false: unset lets the capability decide, false says no to a model that
@@ -291,7 +291,7 @@
   // it moved to the OpenAI-shaped platform API — same 1.0-while-thinking rule the
   // coding endpoint had.
   function temperatureDefaultLabel(type: ProviderType): string {
-    if (type === 'ollama') return 'Model default (not sent)';
+    if (type === 'ollama' || type === 'neuraldeep') return 'Model default (not sent)';
     if (type === 'deepseek' || type === 'zai' || type === 'llamacpp_server') return 'Provider default (1.0)';
     return 'Default (0.7)';
   }
@@ -504,7 +504,7 @@
     }
   }
 
-  $: hasPayPerUseProvider = !!displayConfig?.providers?.some((p) => p.type === 'deepseek');
+  $: hasPayPerUseProvider = !!displayConfig?.providers?.some((p) => p.type === 'deepseek' || p.type === 'neuraldeep');
   $: balResult = $providerBalance;
   $: balanceUnsupported = !!balResult && balResult.status === 'unsupported';
   $: balanceError = balResult && balResult.status === 'error' ? (balResult.message || 'error') : '';
@@ -717,6 +717,11 @@
       provider.model = newProvider.model || 'deepseek-v4-flash';
       provider.base_url = 'https://api.deepseek.com';
       provider.context_window = 1000000;
+    } else if (newProvider.type === 'neuraldeep') {
+      provider.api_key_env = 'NEURALDEEP_API_KEY';
+      provider.model = newProvider.model || 'qwen3.8-27b';
+      provider.base_url = 'https://api.neuraldeep.ru/v1';
+      provider.context_window = 262144;
     } else if (newProvider.type === 'llamacpp_server') {
       // The form's single Model field carries the GGUF path — that is the one
       // thing this type cannot default. Everything else has a measured default
@@ -1005,6 +1010,7 @@
                         <option value="anthropic">Anthropic</option>
                         <option value="zai">Z.AI</option>
                         <option value="deepseek">DeepSeek</option>
+                        <option value="neuraldeep">NeuralDeep</option>
                         <option value="llamacpp_server">llama-server (local, DPC pin)</option>
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
@@ -1935,7 +1941,24 @@
                       </div>
                     {/if}
 
-                    {#if editedConfig.providers[i].type === 'zai' || editedConfig.providers[i].type === 'deepseek'}
+                    {#if editedConfig.providers[i].type === 'neuraldeep'}
+                      <div class="form-group">
+                        <label for="base-url-{i}">Base URL</label>
+                        <input
+                          id="base-url-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].base_url}
+                          placeholder="https://api.neuraldeep.ru/v1"
+                        />
+                        <p class="help-text">
+                          NeuralDeep OpenAI-compatible gateway, billed in roubles. Prompts leave
+                          this machine for the vendor's servers. Thinking off switches the model
+                          to its -noreason variant where one exists.
+                        </p>
+                      </div>
+                    {/if}
+
+                    {#if editedConfig.providers[i].type === 'zai' || editedConfig.providers[i].type === 'deepseek' || editedConfig.providers[i].type === 'neuraldeep'}
                       <div class="form-group">
                         <label for="api-key-env-{i}">API Key Environment Variable</label>
                         <input
@@ -1990,7 +2013,7 @@
                         </label>
                       </div>
 
-                      {#if editedConfig.providers[i].thinking?.enabled}
+                      {#if editedConfig.providers[i].thinking?.enabled && editedConfig.providers[i].type !== 'neuraldeep'}
                         <div class="form-group">
                           <label for="zai-thinking-budget-{i}">Thinking Budget (tokens)</label>
                           <input
@@ -2429,6 +2452,7 @@
                 <option value="anthropic">Anthropic</option>
                 <option value="zai">Z.AI</option>
                 <option value="deepseek">DeepSeek</option>
+                <option value="neuraldeep">NeuralDeep</option>
                 <option value="llamacpp_server">llama-server (local, DPC pin)</option>
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
@@ -2452,6 +2476,7 @@
                     newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
                     newProvider.type === 'zai' ? 'glm-4.7' :
                     newProvider.type === 'deepseek' ? 'deepseek-v4-flash' :
+                    newProvider.type === 'neuraldeep' ? 'qwen3.8-27b' :
                     newProvider.type === 'gemini' ? 'gemini-2.0-flash' :
                     newProvider.type === 'github_models' ? 'gpt-4o' :
                     newProvider.type === 'gigachat' ? 'GigaChat-2-Pro' :
@@ -2467,7 +2492,7 @@
               </div>
             {/if}
 
-            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'deepseek' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
+            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'deepseek' || newProvider.type === 'neuraldeep' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
               <div class="form-group">
                 <label for="new-api-key-env">API Key Environment Variable</label>
                 <input
@@ -2477,6 +2502,7 @@
                   placeholder={
                     newProvider.type === 'zai' ? 'ZAI_API_KEY' :
                     newProvider.type === 'deepseek' ? 'DEEPSEEK_API_KEY' :
+                    newProvider.type === 'neuraldeep' ? 'NEURALDEEP_API_KEY' :
                     newProvider.type === 'anthropic' ? 'ANTHROPIC_API_KEY' :
                     newProvider.type === 'gemini' ? 'GEMINI_API_KEY' :
                     newProvider.type === 'github_models' ? 'GITHUB_TOKEN' :

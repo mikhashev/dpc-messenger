@@ -186,6 +186,28 @@
       "_pricing_note": "Pay-per-token, no Fair-Usage throttle"
     },
 
+    "neuraldeep": {
+      "_comment": "NeuralDeep gateway (OpenAI-compatible, vLLM behind it), billed in roubles. Cloud: prompts and context leave this machine for the vendor's servers; the context firewall applies as for any cloud provider.",
+      "alias": "neuraldeep_qwen",
+      "type": "neuraldeep",
+      "model": "qwen3.8-27b",
+      "api_key_env": "NEURALDEEP_API_KEY",
+      "base_url": "https://api.neuraldeep.ru/v1",
+      "max_tokens": 8192,
+      "thinking": {
+        "enabled": true
+      },
+      "context_window": 262144,
+      "_setup": "Get a key at https://neuraldeep.ru — set: export NEURALDEEP_API_KEY='sk-...'",
+      "_thinking": "The gateway ignores enable_thinking=false: thinking off (thinking.enabled=false or the chat's Off) switches to the '<model>-noreason' variant, which exists for qwen3.8-27b, qwen3.6-35b-a3b, qwen3.6-fp8 and gemma-4-31b. reasoning_effort reaches gpt-oss-* (low/medium/high) and qwen3.8-27b (low/medium/xhigh; 'high' is sent as xhigh).",
+      "_models": {
+        "qwen3.8-27b": "tools, reasoning, vision; RUB 24.48 in / 122.4 out per 1M",
+        "qwen3.6-35b-a3b": "tools, reasoning, vision; RUB 7.14 / 40.8",
+        "gpt-oss-120b": "tools, reasoning; RUB 5.1 / 20.4"
+      },
+      "_pricing_note": "Wallet prices from https://neuraldeep.ru/api/public/wallet-prices (2026-09-26), in dpc_agent/pricing.py NEURALDEEP_RATES_RUB. Recorded in RUB beside the USD meter, never added to it. A key on a subscription tier is not debited per token."
+    },
+
     "openrouter": {
       "alias": "openrouter",
       "type": "openai_compatible",
@@ -308,7 +330,7 @@
     "_comment": "Reference guide for provider configuration fields",
     "common_fields": {
       "alias": "User-friendly name for the provider (must be unique)",
-      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', 'deepseek', 'llamacpp_server', 'local_whisper', 'dpc_agent', 'gemini', 'github_models', or 'gigachat'",
+      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'llamacpp_server', 'local_whisper', 'dpc_agent', 'gemini', 'github_models', or 'gigachat'",
       "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7', 'openai/whisper-large-v3')",
       "context_window": "Optional: Override default context window size in tokens",
       "temperature": "Optional: Model creativity/randomness (0.0-2.0). Leave it out unless you have chosen a value: on Ollama the model's own default applies, on DeepSeek the API's 1.0 does -- and DeepSeek ignores the field entirely while thinking is enabled (measured 2026-08-15)"
@@ -338,6 +360,14 @@
       "max_tokens": "Maximum tokens in response (default: 8192; DeepSeek V4 max output up to 384K)",
       "thinking": "Object with 'enabled' (bool, default true). V4 thinking is default-on; disabled sends {type: disabled} to the API",
       "reasoning_effort": "Optional: 'low' | 'medium' | 'high' | 'max' (xhigh maps to max), applied when thinking enabled"
+    },
+    "neuraldeep_fields": {
+      "api_key": "API key (plaintext - alternative to api_key_env)",
+      "api_key_env": "Environment variable containing the NeuralDeep key (default: NEURALDEEP_API_KEY)",
+      "base_url": "API endpoint URL (default: https://api.neuraldeep.ru/v1)",
+      "max_tokens": "Maximum tokens in response, reasoning included (default: 8192)",
+      "thinking": "Object with 'enabled' (bool, default true); false switches to the -noreason model where one exists",
+      "reasoning_effort": "Optional: 'low' | 'medium' | 'high' | 'max', sent only to models that take it (gpt-oss-*, qwen3.8-27b)"
     },
     "gemini_fields": {
       "api_key_env": "Environment variable containing Google AI Studio API key (default: GEMINI_API_KEY)"

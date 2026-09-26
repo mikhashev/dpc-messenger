@@ -21,7 +21,8 @@ from urllib.parse import urlparse
 # The same classes firewall.py uses for the serving lists.
 LOCAL_TYPES = frozenset({"ollama", "llamacpp_server", "local_whisper"})
 VENDOR_TYPES = frozenset({
-    "openai_compatible", "anthropic", "zai", "deepseek", "gemini", "github_models", "gigachat",
+    "openai_compatible", "anthropic", "zai", "deepseek", "neuraldeep", "gemini", "github_models",
+    "gigachat",
 })
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
 REMOTE_PREFIX = "remote:"

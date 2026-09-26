@@ -70,7 +70,7 @@ describe('a provider is offered to one list by its type, or to none', () => {
   it('sends the card types to local and the paying types to vendor', () => {
     expect(classifyProviderType('ollama')).toBe('local');
     expect(classifyProviderType('llamacpp_server')).toBe('local');
-    for (const type of ['openai_compatible', 'anthropic', 'zai', 'deepseek', 'gemini', 'github_models', 'gigachat']) {
+    for (const type of ['openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'gemini', 'github_models', 'gigachat']) {
       expect(classifyProviderType(type)).toBe('vendor');
     }
   });

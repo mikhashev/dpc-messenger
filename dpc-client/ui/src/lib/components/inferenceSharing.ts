@@ -54,7 +54,8 @@ export interface ComputeRules {
 export const LOCAL_SERVING_TYPES: ReadonlySet<string> = new Set(['ollama', 'llamacpp_server']);
 /** A vendor type spends money and needs a ceiling (VENDOR_PROVIDER_TYPES). */
 export const VENDOR_SERVING_TYPES: ReadonlySet<string> = new Set([
-  'openai_compatible', 'anthropic', 'zai', 'deepseek', 'gemini', 'github_models', 'gigachat',
+  'openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'gemini', 'github_models',
+  'gigachat',
 ]);
 /** Somebody else's model, shared onward by nobody (UNSERVABLE_PROVIDER_TYPES, ADR-041 D7). */
 export const NEVER_OFFERED_TYPES: ReadonlySet<string> = new Set(['dpc_agent', 'remote_peer']);

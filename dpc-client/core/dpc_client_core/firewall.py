@@ -91,7 +91,8 @@ SERVING_ALIAS_KEY = 'serving_alias'
 # The last two are somebody else's model and belong in neither (D7 part 1).
 LOCAL_PROVIDER_TYPES = frozenset({'ollama', 'llamacpp_server', 'local_whisper'})
 VENDOR_PROVIDER_TYPES = frozenset({
-    'openai_compatible', 'anthropic', 'zai', 'deepseek', 'gemini', 'github_models', 'gigachat',
+    'openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'gemini', 'github_models',
+    'gigachat',
 })
 UNSERVABLE_PROVIDER_TYPES = frozenset({'dpc_agent', 'remote_peer'})
 

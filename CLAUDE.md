@@ -1432,6 +1432,7 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 - **OpenAI Compatible**: OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
 - **Anthropic**: Claude models (Claude 3.5 Sonnet, Claude Opus, etc.)
 - **DeepSeek**: Pay-per-token V4 models (`deepseek-v4-flash` / `deepseek-v4-pro`) via OpenAI-compatible endpoint; native pay-per-token cost + account-balance tracking and per-call reasoning-effort control (`deepseek` provider type, `deepseek_provider.py`)
+- **NeuralDeep**: OpenAI-compatible gateway (qwen3.8/3.6, gpt-oss, gemma-4, kimi) billed in roubles; tools, vision, reasoning, thinking off via the `-noreason` model, RUB cost beside the USD meter and wallet balance from `/v1/limits`. Cloud, opt-in (`neuraldeep` provider type, `neuraldeep_provider.py`)
 - **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-5.3, etc.) over the prepaid pay-per-token platform API (`zai` provider type, `zai_provider.py`). One provider, one endpoint — the `zai_coding` type is gone, see below
 - **Gemini**: Google Gemini models via `gemini_provider.py`
 - **GigaChat**: Sber GigaChat models via `gigachat_provider.py`
