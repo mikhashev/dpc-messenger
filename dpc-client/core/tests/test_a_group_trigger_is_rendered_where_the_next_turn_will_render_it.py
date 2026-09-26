@@ -132,9 +132,6 @@ def _markers(messages):
     return out
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "A-GROUP-TRIGGER-RENDERED-AFTER-LATER-REPLIES-REORDERS-THE-NEXT-PROMPT-AND-COLD-"
-    "PREFILLS-THE-ROOM: trigger rendered after later replies"))
 @pytest.mark.asyncio
 async def test_the_turn_after_a_queued_group_trigger_starts_with_this_turn_byte_for_byte(
         agent_root, built):

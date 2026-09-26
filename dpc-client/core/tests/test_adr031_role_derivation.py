@@ -112,6 +112,14 @@ class TestSelectPriorHistory:
         result = select_prior_history(history, "m3")
         assert [m["id"] for m in result] == ["m1", "m2", "m4"]
 
+    def test_numbered_later_arrival_is_left_for_the_next_turn(self):
+        # A-GROUP-TRIGGER-RENDERED-AFTER-LATER-REPLIES-...: rendered before the
+        # trigger now, after it next turn, it would break the prompt prefix.
+        history = [dict(m, msg_index=i) for i, m in enumerate(
+            self.HISTORY + [{"id": "m4", "content": "d"}], start=1)]
+        result = select_prior_history(history, "m3")
+        assert [m["id"] for m in result] == ["m1", "m2"]
+
     def test_single_message_history(self):
         assert select_prior_history([{"id": "m1", "content": "a"}], None) is None
         assert select_prior_history([{"id": "m1", "content": "a"}], "m1") == []

@@ -78,8 +78,22 @@ def select_prior_history(
 ) -> Optional[List[Dict[str, Any]]]:
     """Prior turns without the current trigger. Id-based dedup (ADR-031 T2):
     the positional slice cuts the wrong record when another participant's
-    message lands mid-invoke."""
+    message lands mid-invoke.
+
+    When the trigger carries a msg_index, only records numbered before it are
+    prior: the trigger is rendered last, so a message that arrived after it
+    (another agent answering first while this one waited on the group lock)
+    would stand before it here and after it next turn, and the prompt would
+    stop being a prefix of the next one. Later arrivals come back next turn,
+    in index order after the trigger and this turn's reply."""
     if trigger_message_id:
+        trigger = next((m for m in full_history if m.get("id") == trigger_message_id), None)
+        trigger_index = trigger.get("msg_index") if trigger else None
+        if isinstance(trigger_index, int) and not isinstance(trigger_index, bool):
+            return [m for m in full_history
+                    if m.get("id") != trigger_message_id
+                    and not (isinstance(m.get("msg_index"), int)
+                             and m["msg_index"] >= trigger_index)]
         return [m for m in full_history if m.get("id") != trigger_message_id]
     if len(full_history) > 1:
         return full_history[:-1]
