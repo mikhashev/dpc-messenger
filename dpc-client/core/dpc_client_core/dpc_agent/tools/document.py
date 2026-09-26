@@ -1188,6 +1188,10 @@ async def read_document(
 
         # Fill to the budget, then stop and say so. A page is kept whole or not at
         # all: half a page of text with no marker is the failure this is preventing.
+        # Tallied before save_to empties the list below, or a save reports the
+        # model's pages and seconds as none.
+        vision_pages = [p["page"] for p in per_page if p["route"] == "vision"]
+        vision_seconds = round(sum(p.get("seconds") or 0 for p in per_page), 1)
         kept: List[Dict[str, Any]] = []
         omitted: List[int] = []
         spent = 0
@@ -1218,11 +1222,11 @@ async def read_document(
             "pages_with_unreliable_math": wants_eye,
             "figures_not_seen": figures_unseen,
             "thin_layer_pages": thin_layer,
-            "vision_pages": [p["page"] for p in per_page if p["route"] == "vision"],
+            "vision_pages": vision_pages,
             "vision_pages_refused": refused_pages,
             # What this document cost, so the next decision about the cap is a
             # number rather than a taste.
-            "vision_seconds": round(sum(p.get("seconds") or 0 for p in per_page), 1),
+            "vision_seconds": vision_seconds,
             # The document is data, not instruction. Nothing in this repository has
             # carried this field before; a page that asks the agent to do something
             # is a page quoting itself, and the tool gates decide what asking can

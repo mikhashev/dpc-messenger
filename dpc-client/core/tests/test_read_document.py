@@ -589,6 +589,35 @@ def test_what_was_written_is_what_the_position_reports(ctx, tmp_path):
     assert "| 14 chars" in out["position"]
 
 
+class _SlowVision(_Vision):
+    """Takes long enough that the page's seconds round to something above zero."""
+
+    async def query(self, *a, **kw):
+        await asyncio.sleep(0.2)
+        return await super().query(*a, **kw)
+
+
+def test_save_to_still_counts_the_pages_the_model_read_and_its_seconds(ctx, tiny, tmp_path):
+    """save_to empties the page list the answer returns inline; the vision
+    tally was read from that emptied list and said 0 pages, 0.0 s for a page
+    the model had just spent its time on."""
+    vision = _SlowVision()
+    c = _ctx_with_vision(ctx, vision, tmp_path)
+    out = _read(c, tiny, "2", mode="vision", save_to=str(tmp_path / "doc.md"))
+    assert len(vision.calls) == 1
+    assert out["per_page"][0]["route"] == "vision"
+    assert out["vision_pages"] == [2]
+    assert out["vision_seconds"] > 0
+    assert out["vision_seconds"] == round(out["per_page"][0]["seconds"], 1)
+
+    # Served from the cache: no time spent, but the page was still the model's.
+    again = _read(c, tiny, "2", mode="vision", save_to=str(tmp_path / "again.md"))
+    assert len(vision.calls) == 1, "the cached page went to the model again"
+    assert again["per_page"][0]["cached"] is True
+    assert again["vision_pages"] == [2]
+    assert again["vision_seconds"] == 0.0
+
+
 def _pages(*lengths):
     return [{"page": i + 1, "text": "x" * n} for i, n in enumerate(lengths)]
 
