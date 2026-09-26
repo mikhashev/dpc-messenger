@@ -72,7 +72,9 @@ def model_kind(model_id: str) -> str:
     name = (model_id or "").strip().lower()
     if "rerank" in name:
         return "rerank"
-    if "embed" in name or name.startswith(("bge-", "e5-", "multilingual-e5", "gte-")):
+    # `frida` is NeuralDeep's RU-first embedding model (1536-dim per llms.txt);
+    # its id carries no marker, so it is named here — seen on the live list 2026-09-27.
+    if "embed" in name or name == "frida" or name.startswith(("bge-", "e5-", "multilingual-e5", "gte-")):
         return "embedding"
     if any(m in name for m in ("whisper", "gigaam", "stt", "asr", "transcri")):
         return "stt"

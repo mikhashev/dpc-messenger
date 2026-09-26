@@ -47,6 +47,7 @@ def test_kinds_are_read_conservatively_from_the_id():
     assert model_kind("gpt-oss-20b") == "chat"
     assert model_kind("qwen3-embedding-8b") == "embedding"
     assert model_kind("bge-m3") == "embedding"
+    assert model_kind("frida") == "embedding"
     assert model_kind("bge-reranker-v2-m3") == "rerank"
     assert model_kind("whisper-1") == "stt"
     assert model_kind("gigaam-v3") == "stt"
