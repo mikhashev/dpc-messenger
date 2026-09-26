@@ -419,7 +419,9 @@ def _build_capabilities_section(
     """Build the capabilities section from firewall data.
 
     Enabled tools are already visible to the agent via tool schemas passed to the LLM.
-    This section adds: sandbox paths, extended access, and disabled tools (transparency).
+    This section adds: the sandbox root, where the extended paths are listed, and
+    disabled tools (transparency). sandbox_read_only/read_write are accepted and not
+    rendered here any more — see _build_sandbox_paths_section.
 
     Args:
         agent_root: Agent storage root (real path)
@@ -428,22 +430,17 @@ def _build_capabilities_section(
         sandbox_read_only: Extended sandbox read-only paths
         sandbox_read_write: Extended sandbox read-write paths
     """
+    # The extended paths themselves are not listed here: this text sits in the cached
+    # system block ahead of all history, and a path added in the firewall would cold-
+    # prefill every agent on the profile. They travel in the turn context instead
+    # (_build_sandbox_paths_section); the tools enforce them either way.
     lines = [
         "## Your Tools & Capabilities",
         "",
         f"Sandbox: `{agent_root}`",
+        "Extended access outside the sandbox (configured in firewall) is listed under "
+        "\"## Extended access\" in the turn context of the latest message.",
     ]
-
-    # Extended sandbox paths
-    if sandbox_read_only or sandbox_read_write:
-        lines.append("")
-        lines.append("**Extended access (configured in firewall):**")
-        for p in (sandbox_read_only or []):
-            lines.append(f"  - `{p}` (read-only)")
-        for p in (sandbox_read_write or []):
-            lines.append(f"  - `{p}` (read-write)")
-    else:
-        lines.append("No extended sandbox paths configured. Ask Mike to add paths to firewall if needed.")
 
     if all_tools is None:
         lines.append("")
@@ -461,6 +458,24 @@ def _build_capabilities_section(
         lines.append(f"**Disabled by firewall ({len(disabled)} tools):** {', '.join(disabled)}")
         lines.append("These exist but are blocked. Ask Mike to enable in privacy_rules.json if needed.")
 
+    return "\n".join(lines)
+
+
+def _build_sandbox_paths_section(
+    sandbox_read_only: Optional[List[str]] = None,
+    sandbox_read_write: Optional[List[str]] = None,
+) -> str:
+    """The extended sandbox paths, for the per-turn tail. Volatile: Mike adds a
+    path and every agent on the profile would lose its prefix if this stood in
+    the system block."""
+    lines = ["## Extended access"]
+    if sandbox_read_only or sandbox_read_write:
+        for p in (sandbox_read_only or []):
+            lines.append(f"  - `{p}` (read-only)")
+        for p in (sandbox_read_write or []):
+            lines.append(f"  - `{p}` (read-write)")
+    else:
+        lines.append("No extended sandbox paths configured. Ask Mike to add paths to firewall if needed.")
     return "\n".join(lines)
 
 
@@ -752,6 +767,7 @@ def build_llm_messages(
     turn_parts.append(
         _build_runtime_section(agent_root, task, session_state, billing_model=billing_model,
                                provider_facts=provider_facts))
+    turn_parts.append(_build_sandbox_paths_section(sandbox_read_only, sandbox_read_write))
     turn_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
 
     # Context breakdown for UI tooltip (token estimates per component)
