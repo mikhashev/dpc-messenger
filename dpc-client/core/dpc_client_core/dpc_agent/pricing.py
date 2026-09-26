@@ -118,6 +118,52 @@ PAY_PER_USE_RATES.update(ZAI_RATES)
 PAY_PER_USE_RATES_FROM_2026_08_16.update(ZAI_RATES)
 
 
+# NeuralDeep wallet rates in **RUB** per 1M tokens, same three slots
+# (cached_in_rub_1m / in_rub_1m / out_rub_1m), from
+# https://neuraldeep.ru/api/public/wallet-prices, snapshot 2026-09-26.
+# Kept out of the USD tables above on purpose: every reader of those sums the
+# result as dollars, so these models read as unpriced to `compute_cost_usd`
+# and are priced only by `compute_cost_rub`. The table, not the vendor's
+# "cached = 0.1x" prose, is what is debited (gemma-4-31b: 8.8 of 11.0).
+NEURALDEEP_RATES_RUB: Dict[str, Dict[str, float]] = {
+    "qwen3.8-27b": {"cache_hit": 2.448, "cache_miss": 24.48, "output": 122.4},
+    "qwen3.8-27b-noreason": {"cache_hit": 2.448, "cache_miss": 24.48, "output": 122.4},
+    "qwen3.6-35b-a3b": {"cache_hit": 0.714, "cache_miss": 7.14, "output": 40.8},
+    "qwen3.6-35b-a3b-noreason": {"cache_hit": 0.714, "cache_miss": 7.14, "output": 40.8},
+    "qwen3.6-fp8": {"cache_hit": 0.714, "cache_miss": 7.14, "output": 40.8},
+    "qwen3.6-fp8-noreason": {"cache_hit": 0.714, "cache_miss": 7.14, "output": 40.8},
+    "gpt-oss-120b": {"cache_hit": 0.51, "cache_miss": 5.1, "output": 20.4},
+    "gemma-4-31b": {"cache_hit": 8.8, "cache_miss": 11.0, "output": 37.4},
+    "gemma-4-31b-noreason": {"cache_hit": 8.8, "cache_miss": 11.0, "output": 37.4},
+    "kimi-k2.6": {"cache_hit": 16.32, "cache_miss": 99.75, "output": 420.0},
+}
+NEURALDEEP_CURRENCY = "RUB"
+
+
+def compute_cost_rub(
+    model: Optional[str],
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    cache_hit_tokens: int = 0,
+    thinking_tokens: int = 0,
+    output_includes_thinking: Optional[str] = None,
+) -> Optional[float]:
+    """Roubles for one NeuralDeep call, or None when the model has no rate.
+
+    None, not 0.0: an unknown model is unpriced, and a zero reads as free.
+    """
+    rates = NEURALDEEP_RATES_RUB.get((model or "").strip().lower())
+    if rates is None:
+        return None
+    hit = max(0, cache_hit_tokens or 0)
+    miss = max(0, (prompt_tokens or 0) - hit)
+    out = _billable_output(completion_tokens, thinking_tokens, output_includes_thinking)
+    return (
+        hit * rates["cache_hit"] + miss * rates["cache_miss"] + out * rates["output"]
+    ) / 1_000_000.0
+
+
 def _peak_applies(model_key: str) -> bool:
     """Whether the doubled hours are this model's vendor's rule at all.
 

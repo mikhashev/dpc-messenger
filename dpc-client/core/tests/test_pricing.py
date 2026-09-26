@@ -15,6 +15,10 @@ import pytest
 AT_OLD_TARIFF = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
 
 from dpc_client_core.dpc_agent.pricing import (
+    NEURALDEEP_RATES_RUB,
+    PAY_PER_USE_RATES,
+    PAY_PER_USE_RATES_FROM_2026_08_16,
+    compute_cost_rub,
     compute_cost_usd,
     get_billing_model,
 )
@@ -389,3 +393,19 @@ def test_an_unknown_convention_keeps_the_same_arithmetic_and_does_not_zero_the_c
 
     assert compute_cost_usd("a", 0, 1, thinking_tokens=56,
                             output_includes_thinking="unknown", **common) > 0
+
+
+# --- NeuralDeep: roubles, kept out of the dollar tables ---
+
+def test_rouble_models_never_reach_the_dollar_tables():
+    for model in NEURALDEEP_RATES_RUB:
+        assert model not in PAY_PER_USE_RATES
+        assert model not in PAY_PER_USE_RATES_FROM_2026_08_16
+        assert compute_cost_usd("nd_alias", 10**6, 10**6, model=model) == 0.0
+        assert get_billing_model("nd_alias", model) == "subscription"
+
+
+def test_compute_cost_rub_prices_known_models_and_refuses_unknown():
+    assert compute_cost_rub("gpt-oss-120b", 10**6, 10**6) == pytest.approx(25.5)
+    assert compute_cost_rub("kimi-k2.6", 0, 10**6) == pytest.approx(420.0)
+    assert compute_cost_rub("no-such-model", 10, 10) is None
