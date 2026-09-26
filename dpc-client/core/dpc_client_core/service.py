@@ -2820,6 +2820,52 @@ class CoreService:
                 "message": f"Failed to query model info: {str(e)}"
             }
 
+    @slow_command
+    async def query_provider_models(
+        self,
+        provider_type: str,
+        provider_alias: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key_env: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """The models a provider's key can use, for the editor's Model picker.
+
+        NeuralDeep only (GET {base_url}/models). The key is resolved here and
+        never returned: `api_key` from an unsaved form, else the variable named
+        by `api_key_env` (default NEURALDEEP_API_KEY), else the running alias.
+        Returns {status: success, models: [{id, kind}]} or {status: error|unsupported, message}.
+        """
+        import os
+        import httpx
+        from .providers.neuraldeep_provider import (
+            NEURALDEEP_DEFAULT_BASE_URL, NeuralDeepProvider, fetch_model_ids, sorted_models,
+        )
+        if provider_type != "neuraldeep":
+            return {"status": "unsupported",
+                    "message": f"Listing models is not available for type '{provider_type}'"}
+
+        live = (getattr(self.llm_manager, "providers", {}) or {}).get(provider_alias or "")
+        live = live if isinstance(live, NeuralDeepProvider) else None
+        env_name = (api_key_env or "").strip() or "NEURALDEEP_API_KEY"
+        key = (api_key or "").strip() or os.getenv(env_name) or (live._api_key if live else None)
+        if not key:
+            return {"status": "error",
+                    "message": f"No API key: environment variable {env_name} is not set for the "
+                               f"service (set it and restart), and no key was entered"}
+        url = (base_url or "").strip() or (live._base_url if live else NEURALDEEP_DEFAULT_BASE_URL)
+        try:
+            ids = await fetch_model_ids(url, key)
+        except PermissionError as e:
+            return {"status": "error", "message": f"NeuralDeep key rejected ({e})"}
+        except httpx.HTTPStatusError as e:
+            return {"status": "error",
+                    "message": f"NeuralDeep /models answered HTTP {e.response.status_code}"}
+        except (httpx.HTTPError, OSError, ValueError) as e:
+            return {"status": "error",
+                    "message": f"Could not reach {url}: {type(e).__name__}: {e}".rstrip(": ")}
+        return {"status": "success", "models": sorted_models(ids)}
+
     async def query_remote_providers(self, peer_id: str, timeout: float = 10.0) -> Dict[str, Any]:
         """
         Query a remote peer for their available AI providers.

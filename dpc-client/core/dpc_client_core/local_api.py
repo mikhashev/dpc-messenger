@@ -81,6 +81,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_providers_config",
     "save_providers_config",
     "query_ollama_model_info",
+    "query_provider_models",
     "query_remote_providers",
     "get_provider_balance",
     # Personal context & instructions
@@ -246,6 +247,10 @@ def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
         Sanitized copy of payload with truncated base64 strings
     """
     sanitized = payload.copy()
+
+    # A key typed into an unsaved form (query_provider_models) is never logged.
+    if sanitized.get('api_key'):
+        sanitized['api_key'] = '<redacted>'
 
     # Truncate image_base64 field if present
     if 'image_base64' in sanitized and isinstance(sanitized['image_base64'], str):

@@ -53,6 +53,60 @@ def base_model(model: Optional[str]) -> str:
     return name[: -len(NOREASON_SUFFIX)] if name.endswith(NOREASON_SUFFIX) else name
 
 
+# --- the key's model list (GET /v1/models), for the providers editor ---
+
+MODEL_KINDS = ("chat", "embedding", "rerank", "stt", "other")
+# Chat families by id prefix. Anything not recognised is `other`, not `chat`:
+# offering an OCR or TTS model as a chat model is the worse mistake.
+_CHAT_PREFIXES = ("qwen", "gemma", "gpt-oss", "kimi", "llama", "mistral",
+                  "deepseek", "glm", "gpt-", "t-pro", "t-lite", "gigachat",
+                  "yandexgpt", "phi-", "command-")
+_NOT_CHAT_MARKERS = ("ocr", "tts", "diariz", "speech", "audio", "image", "moderation")
+
+
+def model_kind(model_id: str) -> str:
+    """chat / embedding / rerank / stt / other, from the id alone.
+
+    The endpoint returns OpenAI-shaped rows (id, object, owned_by) with no
+    type, so the kind is read from the name; an unfamiliar name is `other`."""
+    name = (model_id or "").strip().lower()
+    if "rerank" in name:
+        return "rerank"
+    if "embed" in name or name.startswith(("bge-", "e5-", "multilingual-e5", "gte-")):
+        return "embedding"
+    if any(m in name for m in ("whisper", "gigaam", "stt", "asr", "transcri")):
+        return "stt"
+    if any(m in name for m in _NOT_CHAT_MARKERS):
+        return "other"
+    base = base_model(name)
+    if base in _REASONING_MODELS or base in _VISION_MODELS or base.startswith(_CHAT_PREFIXES):
+        return "chat"
+    return "other"
+
+
+def sorted_models(model_ids: List[str]) -> List[Dict[str, str]]:
+    """[{id, kind}] with chat first, each `-noreason` twin right after its base."""
+    rows = [{"id": mid, "kind": model_kind(mid)} for mid in dict.fromkeys(model_ids) if mid]
+    return sorted(rows, key=lambda r: (MODEL_KINDS.index(r["kind"]), base_model(r["id"]),
+                                       r["id"].lower().endswith(NOREASON_SUFFIX), r["id"]))
+
+
+async def fetch_model_ids(base_url: str, api_key: str, timeout: float = 10.0) -> List[str]:
+    """The model ids GET {base_url}/models returns for this key.
+
+    Raises PermissionError on 401/403 and lets httpx errors through."""
+    import httpx
+    url = (base_url or NEURALDEEP_DEFAULT_BASE_URL).rstrip("/") + "/models"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+    if resp.status_code in (401, 403):
+        raise PermissionError(f"HTTP {resp.status_code}")
+    resp.raise_for_status()
+    body = resp.json()
+    rows = body.get("data", []) if isinstance(body, dict) else body
+    return [str(r.get("id")) for r in rows if isinstance(r, dict) and r.get("id")]
+
+
 class NeuralDeepProvider(AIProvider):
     """NeuralDeep (neuraldeep.ru), an OpenAI-compatible gateway over vLLM.
 

@@ -6,6 +6,7 @@
   import { sendCommand, peerProviders, providerBalance, getProviderBalance } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
   import { trackRename } from '$lib/utils/aliasRenames';
+  import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
 
   export let open: boolean = false;
 
@@ -232,6 +233,55 @@
   // Uses the shared peerProviders store from coreService for proper reactivity
   let remotePeerLoading: string = '';  // peer_id being fetched
   let remotePeerError: string = '';
+
+  // The models a NeuralDeep key can use (query_provider_models), per form:
+  // 'new' for the Add form, 'edit-<i>' for a provider being edited. The key is
+  // resolved by the backend and never comes back here.
+  type ModelList = { loading: boolean; error: string; models: ProviderModel[] | null };
+  let modelLists: Record<string, ModelList> = {};
+  const autoLoadedModelLists = new Set<string>();
+
+  async function loadProviderModels(listKey: string, p: Provider, savedAlias?: string) {
+    modelLists[listKey] = { loading: true, error: '', models: modelLists[listKey]?.models ?? null };
+    try {
+      const result = await sendCommand('query_provider_models', {
+        provider_type: p.type,
+        provider_alias: savedAlias || undefined,
+        base_url: p.base_url || undefined,
+        api_key_env: p.api_key_env || undefined,
+        api_key: p.api_key || undefined,
+      });
+      if (result && result.status === 'success') {
+        modelLists[listKey] = { loading: false, error: '', models: result.models ?? [] };
+      } else {
+        modelLists[listKey] = { loading: false, error: result?.message || 'Could not load the model list', models: null };
+      }
+    } catch (error) {
+      modelLists[listKey] = { loading: false, error: `Error: ${error}`, models: null };
+    }
+  }
+
+  // Auto-load once when a form shows a NeuralDeep provider; Load models re-reads.
+  $: if (open && selectedTab === 'add') {
+    if (newProvider.type === 'neuraldeep' && !autoLoadedModelLists.has('new')) {
+      autoLoadedModelLists.add('new');
+      loadProviderModels('new', { ...newProvider, base_url: 'https://api.neuraldeep.ru/v1' });
+    } else if (newProvider.type !== 'neuraldeep') {
+      autoLoadedModelLists.delete('new');
+    }
+  }
+  $: if (open && editMode && editedConfig) {
+    editedConfig.providers.forEach((p, i) => {
+      const listKey = `edit-${i}`;
+      if (p.type === 'neuraldeep' && !autoLoadedModelLists.has(listKey)) {
+        autoLoadedModelLists.add(listKey);
+        loadProviderModels(listKey, p, originalAliases.get(i));
+      }
+    });
+  }
+  $: if (!editMode) {
+    for (const k of [...autoLoadedModelLists]) if (k.startsWith('edit-')) autoLoadedModelLists.delete(k);
+  }
 
   // Context window presets
   const CONTEXT_WINDOW_PRESETS = [
@@ -1028,7 +1078,43 @@
                           type="text"
                           bind:value={editedConfig.providers[i].model}
                           placeholder="llama3.1:8b"
+                          autocomplete="off"
                         />
+                        {#if editedConfig.providers[i].type === 'neuraldeep'}
+                          {@const list = modelLists[`edit-${i}`]}
+                          <div class="input-with-button model-picker">
+                            <select
+                              aria-label="Models available to this key"
+                              value={list?.models?.some((m) => m.id === editedConfig?.providers[i].model) ? editedConfig.providers[i].model : ''}
+                              on:change={(e) => {
+                                const v = e.currentTarget.value;
+                                if (editedConfig && v) { editedConfig.providers[i].model = v; editedConfig = editedConfig; }
+                              }}
+                              disabled={!list?.models?.length}
+                            >
+                              <option value="">{list?.loading ? 'Loading…' : list?.models?.length ? 'Pick a model this key can use' : 'No list loaded'}</option>
+                              {#each groupModels(list?.models) as group}
+                                <optgroup label={group.label}>
+                                  {#each group.models as m}
+                                    <option value={m.id}>{modelOptionLabel(m)}</option>
+                                  {/each}
+                                </optgroup>
+                              {/each}
+                            </select>
+                            <button
+                              type="button"
+                              class="btn-fetch"
+                              on:click={() => editedConfig && loadProviderModels(`edit-${i}`, editedConfig.providers[i], originalAliases.get(i))}
+                              disabled={list?.loading}
+                              title="Ask NeuralDeep which models this key can use"
+                            >{list?.loading ? '⏳' : 'Load models'}</button>
+                          </div>
+                          {#if list?.error}
+                            <p class="help-text warn">{list.error}</p>
+                          {:else}
+                            <p class="help-text">From GET /models with this provider's key. A model missing from the list can still be typed above.</p>
+                          {/if}
+                        {/if}
                       </div>
                     {:else if editedConfig.providers[i].type === 'dpc_agent'}
                       <div class="form-info">
@@ -2482,7 +2568,43 @@
                     newProvider.type === 'gigachat' ? 'GigaChat-2-Pro' :
                     'claude-3-5-sonnet-20240620'
                   }
+                  autocomplete="off"
                 />
+                {#if newProvider.type === 'neuraldeep'}
+                  {@const list = modelLists['new']}
+                  <div class="input-with-button model-picker">
+                    <select
+                      aria-label="Models available to this key"
+                      value={list?.models?.some((m) => m.id === newProvider.model) ? newProvider.model : ''}
+                      on:change={(e) => {
+                        const v = e.currentTarget.value;
+                        if (v) newProvider.model = v;
+                      }}
+                      disabled={!list?.models?.length}
+                    >
+                      <option value="">{list?.loading ? 'Loading…' : list?.models?.length ? 'Pick a model this key can use' : 'No list loaded'}</option>
+                      {#each groupModels(list?.models) as group}
+                        <optgroup label={group.label}>
+                          {#each group.models as m}
+                            <option value={m.id}>{modelOptionLabel(m)}</option>
+                          {/each}
+                        </optgroup>
+                      {/each}
+                    </select>
+                    <button
+                      type="button"
+                      class="btn-fetch"
+                      on:click={() => loadProviderModels('new', { ...newProvider, base_url: 'https://api.neuraldeep.ru/v1' })}
+                      disabled={list?.loading}
+                      title="Ask NeuralDeep which models this key can use"
+                    >{list?.loading ? '⏳' : 'Load models'}</button>
+                  </div>
+                  {#if list?.error}
+                    <p class="help-text warn">{list.error}</p>
+                  {:else}
+                    <p class="help-text">From GET /models with the key in the variable below (default NEURALDEEP_API_KEY). A model missing from the list can still be typed above.</p>
+                  {/if}
+                {/if}
                 {#if newProvider.type === 'llamacpp_server'}
                   <p class="help-text">
                     Absolute path to the model file — DPC starts its own llama-server on it
@@ -3229,6 +3351,15 @@
 
   .input-with-button input {
     flex: 1;
+  }
+
+  .model-picker {
+    margin-top: 6px;
+  }
+
+  .model-picker select {
+    flex: 1;
+    min-width: 0;
   }
 
   .btn-fetch {
