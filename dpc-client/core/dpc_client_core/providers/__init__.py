@@ -6,6 +6,7 @@ from .openai_provider import OpenAICompatibleProvider
 from .anthropic_provider import AnthropicProvider
 from .zai_provider import ZaiProvider
 from .deepseek_provider import DeepSeekProvider
+from .neuraldeep_provider import NeuralDeepProvider
 from .llamacpp_server_provider import LlamaServerProvider
 from .whisper_provider import LocalWhisperProvider
 from .remote_peer_provider import RemotePeerProvider
@@ -27,6 +28,7 @@ __all__ = [
     "AnthropicProvider",
     "ZaiProvider",
     "DeepSeekProvider",
+    "NeuralDeepProvider",
     "LlamaServerProvider",
     "LocalWhisperProvider",
     "RemotePeerProvider",
