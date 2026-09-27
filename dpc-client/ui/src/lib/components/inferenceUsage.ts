@@ -4,10 +4,11 @@
 // folds the same rows three ways and `CoreService.get_inference_usage` answers
 // with them (ADR-041 D3; board entry THE-LEDGER-COUNTS-EVERY-SHARED-CALL-AND-
 // NEITHER-SIDE-CAN-SEE-IT-IN-THE-UI). Nothing here re-derives money: a group's
-// `cost_usd` and its per-currency `tariff` amounts are shown exactly as the rows
-// carry them, and the two states that are not an amount — a tariff over counts
-// nobody could price, and a call with no tariff at all — are counted, never
-// summed in as zero. No DOM in this file; it is what the tests exercise.
+// per-currency `cost` and `tariff` amounts are shown exactly as the rows carry
+// them, two currencies are never added, and the states that are not an amount —
+// a call nobody priced, a tariff over counts nobody could price, and a call with
+// no tariff at all — are counted, never summed in as zero. No DOM in this file;
+// it is what the tests exercise.
 
 // --- The response as `usage_by_role` writes it ---------------------------
 
@@ -16,6 +17,9 @@ export interface WireTariff {
   amount: number;
   rows: number;
 }
+
+/** The same shape for the node's own cost (`_fold_cost`). */
+export type WireAmount = WireTariff;
 
 /** One group of `_new_role_entry`, plus the fields its role sets on it. */
 export interface WireGroup {
@@ -26,7 +30,10 @@ export interface WireGroup {
   duration_s?: number;
   counts_source?: { ours?: number; engine?: number };
   peer_proved?: { true?: number; false?: number; none?: number };
-  cost_usd?: number;
+  /** What the calls cost this node, per currency (`node_ledger._fold_cost`). */
+  cost?: Record<string, WireAmount>;
+  /** Calls priced at zero in no currency — a local card's. */
+  cost_free?: number;
   unpriced?: number;
   tariff?: Record<string, WireTariff>;
   tariff_unpriceable?: number;
@@ -87,9 +94,11 @@ export interface UsageRow {
   completionTokens: number;
   thinkingTokens: number;
   durationS: number;
-  /** This node's own dollars on these rows — zero on a consumed row by
-   *  construction: the money stayed with the node that ran the call. */
-  costUsd: number;
+  /** This node's own spend on these rows, per currency — empty on a consumed
+   *  row by construction: the money stayed with the node that ran the call. */
+  spent: Owed[];
+  /** Calls that cost this node nothing, in no currency (a local card). */
+  free: number;
   unpriced: number;
   owed: Owed[];
   unpriceable: number;
@@ -213,6 +222,14 @@ export function formatOwed(owed: readonly Owed[]): string {
   return owed.map((o) => `${formatAmount(o.amount)} ${o.currency}`).join(' + ');
 }
 
+/** What this node spent, per currency as `formatOwed` writes it; 'free' where
+ *  every priced call cost nothing in no currency, and a dash where nothing was
+ *  priced at all. */
+export function formatSpent(spent: readonly Owed[], free: number): string {
+  if (spent.length > 0) return formatOwed(spent);
+  return free > 0 ? 'free' : '—';
+}
+
 export function formatDuration(seconds: number): string {
   const value = Number(seconds) || 0;
   if (value < 60) return `${value.toFixed(1)} s`;
@@ -228,8 +245,8 @@ function number(value: unknown): number {
   return typeof value === 'number' && isFinite(value) ? value : 0;
 }
 
-function owedOf(group: WireGroup): Owed[] {
-  return Object.entries(group.tariff ?? {})
+function amountsOf(amounts: Record<string, WireAmount> | undefined): Owed[] {
+  return Object.entries(amounts ?? {})
     .map(([currency, value]) => ({
       currency,
       amount: number(value?.amount),
@@ -242,7 +259,7 @@ function owedOf(group: WireGroup): Owed[] {
  *
  *  Nothing about a far end or a tariff is said on an own row: there is no node
  *  to prove (`usage_row` writes `none`), and no tariff applies to a call a node
- *  makes for itself — an own row is priced by `cost_usd`, so 'gift' there would
+ *  makes for itself — an own row is priced by its `cost`, so 'gift' there would
  *  deny real spend. 'recounted' says who counted the tokens, true of any row.
  */
 export function badgesOf(group: WireGroup, role: UsageRole): Badge[] {
@@ -279,9 +296,10 @@ function rowOf(
     completionTokens: number(group.completion_tokens),
     thinkingTokens: number(group.thinking_tokens),
     durationS: number(group.duration_s),
-    costUsd: number(group.cost_usd),
+    spent: amountsOf(group.cost),
+    free: number(group.cost_free),
     unpriced: number(group.unpriced),
-    owed: owedOf(group),
+    owed: amountsOf(group.tariff),
     unpriceable: number(group.tariff_unpriceable),
     badges: badgesOf(group, role),
     parts,

@@ -6,6 +6,7 @@ import {
   formatAmount,
   formatDuration,
   formatOwed,
+  formatSpent,
   formatTokens,
   monthKey,
   monthLabel,
@@ -34,7 +35,8 @@ const group = (over: Partial<WireGroup> = {}): WireGroup => ({
   duration_s: 4,
   counts_source: { ours: 0, engine: 1 },
   peer_proved: { true: 1, false: 0, none: 0 },
-  cost_usd: 0,
+  cost: {},
+  cost_free: 0,
   unpriced: 0,
   tariff: {},
   tariff_unpriceable: 0,
@@ -69,7 +71,7 @@ const response = (): UsageResponse => ({
         row_count: 2,
         node_id: BOB,
         alias: 'bob_glm',
-        cost_usd: 0,
+        cost: {},
         unpriced: 2,
         tariff: { EUR: { amount: 0.0014, rows: 1 } },
         tariff_unpriceable: 1,
@@ -83,7 +85,7 @@ const response = (): UsageResponse => ({
         prompt_tokens: 100,
         completion_tokens: 50,
         duration_s: 1,
-        cost_usd: 0.02,
+        cost: { USD: { amount: 0.02, rows: 1 } },
         untariffed: 1,
         peer_proved: { true: 0, false: 0, none: 1 },
       }),
@@ -130,7 +132,7 @@ describe('the three lists', () => {
     const [, , own] = shapeUsage(response(), NAMES, '2026-09').lists;
     expect(own.rows[0].label).toBe('ds_flash');
     expect(own.rows[0].alias).toBe('ds_flash');
-    expect(own.rows[0].costUsd).toBe(0.02);
+    expect(own.rows[0].spent).toEqual([{ currency: 'USD', amount: 0.02, rows: 1 }]);
   });
 
   it('orders rows busiest first, then by label', () => {
@@ -347,10 +349,10 @@ describe('an own row wears no tariff badge', () => {
 
   it('leaves the own list of a whole response badgeless where the tariff is all it had', () => {
     const view = shapeUsage({
-      own: { by_alias: { deepseek_flash: group({ row_count: 915, untariffed: 915, cost_usd: 4.9 }) } },
+      own: { by_alias: { deepseek_flash: group({ row_count: 915, untariffed: 915, cost: { USD: { amount: 4.9, rows: 915 } } }) } },
     }, NAMES, '2026-09');
     expect(view.lists[2].rows[0].badges).toEqual([]);
-    expect(view.lists[2].rows[0].costUsd).toBe(4.9);
+    expect(view.lists[2].rows[0].spent).toEqual([{ currency: 'USD', amount: 4.9, rows: 915 }]);
   });
 });
 
@@ -390,5 +392,21 @@ describe('the key a consumed row is grouped under', () => {
     const view = shapeUsage(both, NAMES, '2026-09');
     expect(view.lists[1].rows[0].key).toBe('remote:?:qwen_local');
     expect(view.lists[2].rows[0].key).toBe('qwen_local');
+  });
+});
+
+describe('what this node spent', () => {
+  it('keeps roubles and dollars apart and never adds them', () => {
+    const view = shapeUsage({
+      own: { by_alias: { mixed: group({ cost: { USD: { amount: 0.5, rows: 1 }, RUB: { amount: 12, rows: 2 } } }) } },
+    }, NAMES, '2026-09');
+    const row = view.lists[2].rows[0];
+    expect(row.spent.map((s) => s.currency)).toEqual(['RUB', 'USD']);
+    expect(formatSpent(row.spent, row.free)).toBe('12.00 RUB + 0.50 USD');
+  });
+
+  it('says free for a local card and a dash where nothing was priced', () => {
+    expect(formatSpent([], 3)).toBe('free');
+    expect(formatSpent([], 0)).toBe('—');
   });
 });

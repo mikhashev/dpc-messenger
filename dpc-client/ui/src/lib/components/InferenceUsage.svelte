@@ -16,9 +16,9 @@
   import {
     durationLabel,
     durationTitle,
-    formatAmount,
     formatDuration,
     formatOwed,
+    formatSpent,
     formatTokens,
     monthKey,
     monthLabel,
@@ -134,11 +134,11 @@
               <span title={durationTitle(list.role)}>{formatDuration(row.durationS)} {durationLabel(list.role)}</span>
               {#if list.role === 'served'}
                 <span class="money">owed to this node {formatOwed(row.owed)}</span>
-                {#if row.costUsd > 0}<span>cost here ${formatAmount(row.costUsd)}</span>{/if}
+                {#if row.spent.length > 0}<span>cost here {formatOwed(row.spent)}</span>{/if}
               {:else if list.role === 'consumed'}
                 <span class="money">owed to the host {formatOwed(row.owed)}</span>
               {:else}
-                <span class="money">${formatAmount(row.costUsd)}</span>
+                <span class="money">{formatSpent(row.spent, row.free)}</span>
               {/if}
               {#if list.role !== 'consumed' && row.unpriced > 0}
                 <span>{row.unpriced} unpriced</span>
