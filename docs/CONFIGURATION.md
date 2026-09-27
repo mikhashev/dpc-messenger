@@ -343,7 +343,9 @@ charge its own machine:
 - Each served call leaves the applied rates, their currency, the dated entry and the
   amount on the host's usage row (`tariff_in`, `tariff_out`, `tariff_currency`,
   `tariff_at`, `tariff_amount`) and sends the same group to the guest, whose row copies it
-  and keeps `cost_usd` null. `cost_usd` is only ever what a call cost the node that ran it.
+  and keeps `cost_amount` null. `cost_amount` (with its `cost_currency`) is only ever what
+  a call cost the node that ran it; a guest row leaves it null and carries
+  `cost_unpriced_reason` instead.
   Resetting the rules to defaults rewrites the block and drops the tariff with it.
 
 **Reading the door from the UI.** Four commands on the local API answer for the gateway
@@ -383,11 +385,15 @@ narrower copy built from the file on disk.
 
 **Reading the rows back.** Two commands on the local API read the node ledger.
 `get_usage_summary` is the owner's burn — every row this node ran itself, folded by
-caller, alias and month. `get_inference_usage` reads the same rows by role and answers
+caller, alias and month, each group's `cost` keyed per currency (`{amount, rows}`), with
+`cost_free` and `unpriced` counted apart rather than summed in as zero.
+`get_inference_usage` reads the same rows by role and answers
 with three series: `served`, what this node ran for peers, by the peer that asked and by
-the alias that answered, carrying its own `cost_usd` and what it is owed per currency;
-`consumed`, what peers ran for it, keyed `remote:<host node id>:<alias>`, where `cost_usd`
-is null by construction and the money is `tariff_amount`, what this node owes; and `own`,
+the alias that answered, each carrying its own `cost` per currency (what this node spent)
+and `tariff` per currency (what it is owed);
+`consumed`, what peers ran for it, keyed `remote:<host node id>:<alias>`, where
+`cost_amount` is null by construction on every row and the money is `tariff`, what this
+node owes, per currency; and `own`,
 its own calls on its own key, neither side of a sharing. Both take optional `since` /
 `until` ISO datetime bounds, and `get_inference_usage` a `month` of `YYYY-MM` to read one
 partition. A tariff that applied over counts nobody could price (`tariff_unpriceable`) and
@@ -500,7 +506,7 @@ not on its menu, `502` carrying the peer's refusal), the peer's card and quota b
 the call — this node's card lock and `vendor_quotas` are not consulted — and a peer
 that does not answer within `[connection] remote_inference_timeout` is `504`. The row
 this node writes says `route = peer` under the request id both nodes share, with the
-peer's token counts and its price copied when it sent them and `cost_usd` left null
+peer's token counts and its price copied when it sent them and `cost_amount` left null
 when it did not: this node did not run the call and does not price it. **The
 conversation, its tools and the stream all cross** since 2026-09-14 (DPTP v1.7): the
 turns travel un-flattened, `tools` reach the host's model, and `stream: true` brings
