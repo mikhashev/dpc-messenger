@@ -31,6 +31,7 @@ import {
   removeTariffEntry,
   selectedMenuEntry,
   SERVES_NO_LOCAL_ALIAS,
+  setAliasCurrency,
   setCurrency,
   setFree,
   setVendorQuota,
@@ -38,6 +39,8 @@ import {
   soleMenuChoiceLine,
   splitCallerIds,
   tariffAliases,
+  tariffCurrencyOf,
+  tariffCurrencySourceLabel,
   tariffEntryErrors,
   tariffHistory,
   tariffState,
@@ -849,5 +852,71 @@ describe('a vendor ceiling is labelled in the currency its alias bills in', () =
     }) as Record<string, string>)[0];
     expect(tab).not.toContain('USD/day');
     expect(tab).not.toContain('USD per day');
+  });
+});
+
+// Since 2026-09-28 the tariff currency is per served alias (ADR-041 D3,
+// amendment): an explicit `compute.tariff_currency.<alias>`, else for a vendor
+// alias the currency its provider bills in — the backend's `ceiling_currency`,
+// from the same `pricing.vendor_ceiling_currency` — else the node default.
+describe('each alias in the Tariff section names its own currency and where it came from', () => {
+  const nd: ProviderInfo = { alias: 'qwen 3.8 27b ND', model: 'qwen3.8-27b', type: 'neuraldeep', supports_vision: false, ceiling_currency: 'RUB' };
+  const local: ProviderInfo = { alias: 'llama', model: 'qwen3:8b', type: 'llamacpp_server', supports_vision: false };
+  const block = (): ComputeRules => ({
+    ...emptyBlock(),
+    currency: 'USD',
+    serving_local: ['llama'],
+    serving_vendor: [nd.alias],
+    vendor_quotas: { [nd.alias]: 1000 },
+    serving_tariff: {
+      llama: [{ from: '2026-09-01', in: 0.1, out: 0.3 }],
+      [nd.alias]: [{ from: '2026-09-01', in: 20, out: 60 }],
+    },
+  });
+
+  it('shows RUB for the NeuralDeep alias and USD for a local alias under a USD default', () => {
+    expect(tariffCurrencyOf(block(), nd.alias, nd)).toEqual({ currency: 'RUB', source: 'provider' });
+    expect(tariffCurrencyOf(block(), 'llama', local)).toEqual({ currency: 'USD', source: 'node' });
+    expect(tariffCurrencySourceLabel('provider')).toContain('provider');
+    expect(tariffCurrencySourceLabel('node')).toContain('default');
+  });
+
+  it('an explicit currency on the alias wins, and clearing it falls back', () => {
+    const set = setAliasCurrency(block(), 'llama', 'rub');
+    expect(set.tariff_currency).toEqual({ llama: 'RUB' });
+    expect(tariffCurrencyOf(set, 'llama', local)).toEqual({ currency: 'RUB', source: 'explicit' });
+    const ndEur = setAliasCurrency(block(), nd.alias, 'EUR');
+    expect(tariffCurrencyOf(ndEur, nd.alias, nd)).toEqual({ currency: 'EUR', source: 'explicit' });
+    const cleared = setAliasCurrency(set, 'llama', '');
+    expect(cleared.tariff_currency).toEqual({});
+    expect(tariffCurrencyOf(cleared, 'llama', local)).toEqual({ currency: 'USD', source: 'node' });
+  });
+
+  it('a vendor alias whose provider names no currency reads the node default, and nothing reads nothing', () => {
+    expect(tariffCurrencyOf(block(), nd.alias, { ...nd, ceiling_currency: null })).toEqual({ currency: 'USD', source: 'node' });
+    expect(tariffCurrencyOf({ ...block(), currency: null }, 'llama', local)).toEqual({ currency: null, source: null });
+    // An alias not in serving_vendor never takes a provider's unit.
+    expect(tariffCurrencyOf({ ...block(), serving_vendor: [] }, nd.alias, nd)).toEqual({ currency: 'USD', source: 'node' });
+  });
+
+  it('an invalid per-alias code is refused naming the alias, as the backend does', () => {
+    const [error] = computeBlockErrors({ ...block(), tariff_currency: { llama: 'XYZ' } });
+    expect(error).toContain("'compute.tariff_currency.llama' must be an ISO 4217 code");
+  });
+
+  it('the fold keeps the per-alias table and drops its comment keys', () => {
+    const folded = foldServingAlias({ ...block(), tariff_currency: { _comment: 'x', llama: 'RUB' } });
+    expect(folded.tariff_currency).toEqual({ llama: 'RUB' });
+  });
+
+  it('the tab reads each alias through the resolver and labels the node field as the default', () => {
+    const tab = Object.values(import.meta.glob('./InferenceSharingEditor.svelte', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>)[0];
+    expect(tab).toContain('tariffCurrencyOf(');
+    expect(tab).toContain('Default currency');
+    expect(tab).not.toMatch(/tariffState\([^)]*view\.currency/);
   });
 });

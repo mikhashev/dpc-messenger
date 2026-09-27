@@ -15,6 +15,7 @@
     addAllowedModel,
     addServing,
     addTariffEntry,
+    anyTariffCurrency,
     callerPriceBadge,
     clientLabel,
     computeBlockErrors,
@@ -39,11 +40,14 @@
     removeTariffEntry,
     selectedMenuEntry,
     SERVES_NO_LOCAL_ALIAS,
+    setAliasCurrency,
     setCurrency,
     setFree,
     setVendorQuota,
     soleMenuChoiceLine,
     tariffAliases,
+    tariffCurrencyOf,
+    tariffCurrencySourceLabel,
     tariffEntryErrors,
     tariffHistory,
     tariffState,
@@ -174,6 +178,7 @@
   // --- (4) Tariff ------------------------------------------------------
   $: today = utcToday();
   $: aliasesToPrice = view ? tariffAliases(view) : [];
+  $: declaredUnit = view ? anyTariffCurrency(view, providerByAlias) : null;
   // Lines appended in this edit session, by alias: the only ones that may be
   // taken back. An older line is a declaration already made.
   let addedThisSession: Record<string, Set<string>> = {};
@@ -213,6 +218,11 @@
   function currencyInput(raw: string) {
     if (!editCompute) return;
     apply(setCurrency(editCompute, raw));
+  }
+
+  function aliasCurrencyInput(alias: string, raw: string) {
+    if (!editCompute) return;
+    apply(setAliasCurrency(editCompute, alias, raw));
   }
 
   // --- What the validator would say ------------------------------------
@@ -620,7 +630,7 @@
           <p class="help-text-small">
             Peers and groups admitted to the aliases above; <strong>free</strong> puts an admitted
             caller's tariff at zero.
-            {#if !view.currency}
+            {#if !declaredUnit}
               <em>No tariff is declared, so today every call is a gift whatever the mark says.</em>
             {/if}
           </p>
@@ -654,7 +664,7 @@
                     <button class="btn-icon-small" title="Remove {nodeId}" on:click={() => editCompute && apply(removeAllowed(editCompute, 'nodes', nodeId))}>×</button>
                   {:else}
                     <span class="action-badge" class:allow={isFree(view, 'nodes', nodeId)} class:tariff={!isFree(view, 'nodes', nodeId)}>
-                      {callerPriceBadge(isFree(view, 'nodes', nodeId), view.currency)}
+                      {callerPriceBadge(isFree(view, 'nodes', nodeId), declaredUnit)}
                     </span>
                   {/if}
                 </span>
@@ -715,7 +725,7 @@
                     <button class="btn-icon-small" title="Remove {groupName}" on:click={() => editCompute && apply(removeAllowed(editCompute, 'groups', groupName))}>×</button>
                   {:else}
                     <span class="action-badge" class:allow={isFree(view, 'groups', groupName)} class:tariff={!isFree(view, 'groups', groupName)}>
-                      {callerPriceBadge(isFree(view, 'groups', groupName), view.currency)}
+                      {callerPriceBadge(isFree(view, 'groups', groupName), declaredUnit)}
                     </span>
                   {/if}
                 </span>
@@ -741,16 +751,19 @@
         <div class="subsection">
           <h4>3. Tariff</h4>
           <p class="help-text-small">
-            Rates per 1M tokens in and out, dated per alias, in this node's currency.
+            Rates per 1M tokens in and out, dated per alias, each in its alias's currency: the one set
+            for the alias, else for a vendor alias the one its provider bills in, else the default below.
           </p>
           <details class="why"><summary>why</summary>
             The newest line on or before the day of the call applies (UTC). Three states:
             <em>not declared</em> &mdash; the call is a gift; <em>declared 0</em> &mdash; free by decision;
             above zero &mdash; paid. A line once written is not edited: add a new one from a later date.
+            An alias resold in the currency it is bought in keeps the margin readable without an exchange
+            rate; nothing converts between currencies.
           </details>
 
           <div class="rule-row currency-row">
-            <span class="alias-cell"><strong>Currency</strong> <span class="muted">(ISO 4217)</span></span>
+            <span class="alias-cell"><strong>Default currency</strong> <span class="muted">(ISO 4217; local aliases, and a vendor alias whose provider names none)</span></span>
             <span class="quota-cell">
               {#if editMode && editCompute}
                 <input
@@ -772,19 +785,41 @@
               {:else if view.currency}
                 <span class="badge badge-quota">{view.currency}</span>
               {:else}
-                <span class="badge badge-gift">none &mdash; no tariff declared</span>
+                <span class="badge badge-gift">none</span>
               {/if}
             </span>
           </div>
 
           {#each aliasesToPrice as { alias, served } (alias)}
-            {@const state = tariffState(view.serving_tariff?.[alias], view.currency, today)}
+            {@const unit = tariffCurrencyOf(view, alias, providerByAlias.get(alias))}
+            {@const state = tariffState(view.serving_tariff?.[alias], unit.currency, today)}
             <div class="peer-card tariff-card">
               <div class="group-header">
                 <h5>
                   {alias}
                   {#if !served}<span class="badge badge-missing">priced, not served</span>{/if}
                 </h5>
+                <span class="currency-cell">
+                  {#if editMode && editCompute}
+                    <input
+                      id="compute-tariff-currency-{alias}"
+                      name="compute-tariff-currency-{alias}"
+                      class="inline-input currency-input"
+                      list="compute-iso4217"
+                      maxlength="3"
+                      placeholder={unit.source === 'explicit' ? '' : (unit.currency ?? 'none')}
+                      title="This alias's own currency; empty takes the provider's or the default"
+                      value={view.tariff_currency?.[alias] ?? ''}
+                      on:change={(e) => aliasCurrencyInput(alias, e.currentTarget.value)}
+                    />
+                  {/if}
+                  {#if unit.currency && !isIso4217(unit.currency)}
+                    <span class="badge badge-missing">{unit.currency} &mdash; not an ISO 4217 code</span>
+                  {:else if unit.currency}
+                    <span class="badge badge-quota" title={tariffCurrencySourceLabel(unit.source)}>{unit.currency}</span>
+                  {/if}
+                  <span class="muted">{tariffCurrencySourceLabel(unit.source)}</span>
+                </span>
                 {#if state.kind === 'gift'}
                   <span class="action-badge gift">
                     {#if state.reason === 'no-currency'}gift &mdash; no currency
@@ -794,7 +829,7 @@
                 {:else if state.kind === 'free'}
                   <span class="action-badge allow">free by decision since {state.entry.from}</span>
                 {:else}
-                  <span class="action-badge tariff">{rate(state.entry, view.currency)} since {state.entry.from}</span>
+                  <span class="action-badge tariff">{rate(state.entry, unit.currency)} since {state.entry.from}</span>
                 {/if}
               </div>
 
@@ -803,7 +838,7 @@
                   <div class="rule-row history-row" class:current={state.kind !== 'gift' && state.entry.from === entry.from} class:upcoming={entry.from > today}>
                     <span class="alias-cell">
                       <code class="rule-path">from {entry.from}</code>
-                      <span class="muted">{rate(entry, view.currency)}</span>
+                      <span class="muted">{rate(entry, unit.currency)}</span>
                       {#if entry.from > today}<span class="badge badge-first">upcoming</span>{/if}
                       {#if entry.in === 0 && entry.out === 0}<span class="badge badge-gift">0 &mdash; free by decision</span>{/if}
                     </span>
@@ -1123,6 +1158,7 @@
   .badge-live { background: #d4edda; color: #155724; }
   .free-toggle { display: flex; align-items: center; gap: 0.25rem; font-size: 0.85rem; color: #333; cursor: pointer; }
   .currency-row { margin-bottom: 0.75rem; }
+  .currency-cell { display: inline-flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   .tariff-card { margin-top: 0.5rem; }
   .history-row.current { border-left: 3px solid #1976d2; }
   .history-row.upcoming { opacity: 0.8; }

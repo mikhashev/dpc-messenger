@@ -38,8 +38,12 @@ export interface ComputeRules {
   /** alias -> amount per day per caller, in the currency the alias bills in
    *  (`ProviderInfo.ceiling_currency`); required for every vendor alias (:357-362). */
   vendor_quotas?: Record<string, number> | null;
-  /** ISO 4217 code or null = no tariff declared (:394-399). */
+  /** The default unit: every local alias, and a vendor alias whose provider
+   *  names none. Null with no other unit = no tariff declared. */
   currency?: string | null;
+  /** alias -> ISO 4217 code, over the provider's unit and the default
+   *  (`ContextFirewall.tariff_currency_for`). */
+  tariff_currency?: Record<string, string> | null;
   serving_tariff?: Record<string, TariffEntry[]> | null;
   free_nodes?: string[] | null;
   free_groups?: string[] | null;
@@ -117,6 +121,10 @@ export function foldServingAlias(compute: ComputeRules): ComputeRules {
     if (alias.startsWith('_') || !Array.isArray(entries)) continue;
     tariff[alias] = entries.map((e) => ({ from: e.from, in: e.in, out: e.out }));
   }
+  const perAlias: Record<string, string> = {};
+  for (const [alias, code] of Object.entries(compute.tariff_currency ?? {})) {
+    if (!alias.startsWith('_') && typeof code === 'string') perAlias[alias] = code;
+  }
   return {
     ...compute,
     enabled: !!compute.enabled,
@@ -128,6 +136,7 @@ export function foldServingAlias(compute: ComputeRules): ComputeRules {
     serving_vendor: cleanList(compute.serving_vendor),
     vendor_quotas: quotas,
     currency: typeof compute.currency === 'string' && compute.currency.length > 0 ? compute.currency : null,
+    tariff_currency: perAlias,
     serving_tariff: tariff,
     free_nodes: cleanList(compute.free_nodes),
     free_groups: cleanList(compute.free_groups),
@@ -408,6 +417,59 @@ export function removeTariffEntry(compute: ComputeRules, alias: string, from: st
   return { ...compute, serving_tariff: tariff };
 }
 
+export type TariffCurrencySource = 'explicit' | 'provider' | 'node';
+
+/** The unit an alias's tariff is in, by the backend's order
+ *  (`ContextFirewall.tariff_currency_for`): the alias's own code, else for a
+ *  `serving_vendor` alias the currency its provider bills in — read from the
+ *  backend's row (`ceiling_currency`), never mapped from a type here — else
+ *  the node default, else none. The block is the one being edited, so the
+ *  answer follows the owner's edit before it is saved. */
+export function tariffCurrencyOf(
+  compute: ComputeRules,
+  alias: string,
+  provider: ProviderInfo | null | undefined,
+): { currency: string | null; source: TariffCurrencySource | null } {
+  const explicit = compute.tariff_currency?.[alias];
+  if (typeof explicit === 'string' && explicit.length > 0) return { currency: explicit, source: 'explicit' };
+  const billed = provider?.ceiling_currency;
+  if (cleanList(compute.serving_vendor).includes(alias) && typeof billed === 'string' && billed.length > 0) {
+    return { currency: billed, source: 'provider' };
+  }
+  if (compute.currency) return { currency: compute.currency, source: 'node' };
+  return { currency: null, source: null };
+}
+
+export function tariffCurrencySourceLabel(source: TariffCurrencySource | null): string {
+  if (source === 'explicit') return 'set for this alias';
+  if (source === 'provider') return 'the currency its provider bills in';
+  if (source === 'node') return 'node default';
+  return 'none — no tariff declared';
+}
+
+/** The first unit any listed alias resolves to, or null: whether any tariff
+ *  can be declared at all, for the callers' marks above the table. */
+export function anyTariffCurrency(
+  compute: ComputeRules,
+  providers: ReadonlyMap<string, ProviderInfo>,
+): string | null {
+  for (const { alias } of tariffAliases(compute)) {
+    const { currency } = tariffCurrencyOf(compute, alias, providers.get(alias));
+    if (currency) return currency;
+  }
+  return null;
+}
+
+/** '' or null takes the alias's own code away; it falls back to the provider
+ *  or the node default. */
+export function setAliasCurrency(compute: ComputeRules, alias: string, code: string | null): ComputeRules {
+  const trimmed = (code ?? '').trim().toUpperCase();
+  const table = { ...(compute.tariff_currency ?? {}) };
+  if (trimmed.length > 0) table[alias] = trimmed;
+  else delete table[alias];
+  return { ...compute, tariff_currency: table };
+}
+
 /** '' or null clears the currency — no tariff declared. */
 export function setCurrency(compute: ComputeRules, code: string | null): ComputeRules {
   const trimmed = (code ?? '').trim().toUpperCase();
@@ -482,6 +544,15 @@ export function computeBlockErrors(compute: ComputeRules): string[] {
       `'compute.currency' must be an ISO 4217 code — three upper-case letters from the standard's list, ` +
       `such as 'USD' or 'RUB' — got ${JSON.stringify(currency)}`,
     );
+  }
+  for (const [alias, code] of Object.entries(compute.tariff_currency ?? {})) {
+    if (alias.startsWith('_')) continue;
+    if (!isIso4217(code)) {
+      errors.push(
+        `'compute.tariff_currency.${alias}' must be an ISO 4217 code — three upper-case letters from the standard's list, ` +
+        `such as 'USD' or 'RUB' — got ${JSON.stringify(code)}`,
+      );
+    }
   }
   for (const [alias, entries] of Object.entries(compute.serving_tariff ?? {})) {
     if (alias.startsWith('_')) continue;
