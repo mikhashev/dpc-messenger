@@ -285,19 +285,28 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   applies to a peer's `local_whisper` row: it is not listed as `remote:<peer>:<alias>`.
 - `serving_vendor` — aliases whose provider is a paid API (`anthropic`, `deepseek`,
   `neuraldeep`, `zai`, `openai_compatible`, `gemini`, `github_models`, `gigachat`). Money is the
-  scarce resource, so **every entry needs a ceiling in `vendor_quotas`** — USD per UTC
-  calendar day, per caller; a vendor alias without one is a configuration error refused
-  at load with a message naming it (ADR-041 D5). The day's spend is read from the node
-  ledger (`~/.dpc/ledger/`), so it survives a restart; at or over the ceiling the
-  gateway answers `429` naming the alias, the ceiling and the spend.
-  A `neuraldeep` alias is priced in roubles, not in the USD tables the ceiling is counted
-  from, so it is refused here as unrated until the ledger carries a currency for
-  `cost_usd`'s place. Its prices come live from the vendor's public list
-  (`https://neuraldeep.ru/api/public/wallet-prices`, no key), fetched on the first priced
-  call after start and at most once a day, cached at
+  scarce resource, so **every entry needs a ceiling in `vendor_quotas`** — one number per
+  alias, per caller, per UTC calendar day; a vendor alias without one is a configuration
+  error refused at load with a message naming it (ADR-041 D5). The ceiling is compared in
+  the currency the serving provider itself reports for its calls, read at runtime from the
+  usage row it just priced — not a fixed USD, and a `currency` key on that provider's
+  `providers.json` entry is read only as a fallback when a provider reports an amount with
+  no currency of its own; a comparison across two different currencies is refused rather
+  than summed, and only rows whose `cost_basis` is `charged` count toward the ceiling (a
+  `list_price_reference` row states what a call would have cost on a metered key, not a
+  debit against this one). The day's spend is read from the node ledger (`~/.dpc/ledger/`),
+  so it survives a restart; at or over the ceiling the gateway answers `429` naming the
+  alias, the ceiling and the spend (ADR-041 D3, amendment 2026-09-28).
+  A `neuraldeep` alias is priced in roubles: its usage rows carry `cost_amount` and
+  `cost_currency: RUB` beside `cost_basis`, and its ceiling in `vendor_quotas` is compared
+  in RUB, never folded into the USD tables the DeepSeek/Z.AI aliases price from — the
+  provider's own report of `cost_amount`, present or absent, is what decides who prices a
+  call, never a match against a model name. Its prices come live from the vendor's public
+  list (`https://neuraldeep.ru/api/public/wallet-prices`, no key), fetched on the first
+  priced call after start and at most once a day, cached at
   `~/.dpc/cache/neuraldeep_wallet_prices.json` (`$DPC_HOME` honoured). If a fetch fails
   the cached list is used and its age is logged; with no cache the cost is recorded as
-  unknown (`cost_amount: null` with `cost_unpriced_reason`), never as zero. Every priced
+  unpriced (`cost_amount: null` with `cost_unpriced_reason`), never as zero. Every priced
   call carries `cost_price_list_at`, the date of the list it was priced from, and
   `cost_basis`: `charged` for a wallet key, `list_price_reference` for a key whose
   `/v1/limits` reports `billing_mode: subscription` (the amount is what the call would

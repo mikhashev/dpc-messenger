@@ -796,6 +796,95 @@ configured `reasoning_effort`, a key six of the ten classes never read, so a
 billed row could name a rung the engine was never asked for
 ([[SERVED-EFFORT-REPORTS-THE-OWNERS-INTENT-ON-AN-ALIAS-WHOSE-PROVIDER-NEVER-READS-IT]]).*
 
+*(**Amendment, 2026-09-28 — the host's own cost carries its own currency, the
+provider's report wins by its presence, and the burn series stops asserting a
+zero it never priced.** Mike's call, 2026-09-28 ("делай", DPC Project group,
+2026-09-27/28), on the team's consensus.
+
+**The ledger row.** `cost_usd` is retired from the write path. In its place:
+`cost_amount` (a number or `null`), `cost_currency` (ISO 4217, validated
+exactly as `tariff_currency`), `cost_basis` (`charged` | `list_price_reference`
+| `unknown`) and `cost_unpriced_reason` (free text, why nothing priced the
+call). The four columns are one field under one invariant: a non-null,
+non-zero `cost_amount` requires a `cost_currency`; a `null` amount carries no
+currency, because `null` means nobody priced the call, not that the call cost
+nothing; a `0` may carry a `null` currency, because a free local call has no
+vendor and so no unit to be free *in*. Old rows are not rewritten on disk — a
+reader that finds no `cost_amount` key constructs `{amount: cost_usd,
+currency: "USD"}` from the row it does find, so every sum written before this
+amendment reads exactly as it did. The wire is unaffected: `cost_usd` left
+DPTP with the 2026-09-10 amendment above and has not carried the host's own
+cost across it since.
+
+**Who prices a call.** The provider's own report of what the call cost wins,
+detected by the *presence* of the `cost_amount` key in the usage dict the
+provider returns — never by its value. A provider that answers "I could not
+price this" with `cost_amount: None` is read as unpriced, and must not fall
+through to a table that happens to name a matching model; the seven rows this
+amendment corrects (below) are exactly what that fall-through produced. A
+provider that reports no `cost_amount` key at all is priced by its provider
+*type*: `deepseek` and `zai` read `dpc_agent/pricing.py`'s USD tables, every
+local provider type prices at `0`. Matching a model name or alias substring
+against those tables (`pricing._resolve_pay_model`) is the last resort,
+reached only when neither the report nor the type says anything — so a local
+alias whose model string merely *names* a DeepSeek or Z.AI model does not
+reach that resort, because its provider type has already priced it at `0`
+before the name is ever read. `billing` (`subscription` | `pay_per_use`) is
+read from the provider first and from the alias's type only where the
+provider is silent, on the same rule.
+
+**Carried through every writer.** The report crosses from provider to row at
+the three places a row is born: the agent path (`dpc_agent/llm_adapter.py`),
+the gateway — through `LLMManager.query_messages`, so a NeuralDeep call made
+through the gateway is priced exactly as one made directly, because the
+gateway is a caller and never its own pricing authority (Mike's requirement)
+— and `p2p_coordinator.py`. A guest's row (`route=peer`) is unchanged:
+`cost_amount: null`, `cost_currency: null`, because the guest ran nothing and
+prices nothing, as `cost_usd` already meant on that side.
+
+**The vendor ceiling moves currency with the provider.** `compute.vendor_quotas`
+still holds one number per alias, applied separately to each caller through
+`spent_today`; what changes is that the number is no longer assumed to be
+dollars. Its currency comes from the provider at the moment of the call — the
+same `cost_currency` the row just wrote — and a `currency` key on that
+provider's `providers.json` entry is read only as a fallback, for a provider
+that reports an amount with no currency of its own. The gateway and the peer
+door refuse a comparison between a ceiling and a row of a different currency
+rather than sum them, and the comparison counts only rows whose `cost_basis`
+is `charged`: a `list_price_reference` row states what a call *would* have
+cost against a metered key, not a debit against this one, and folding it into
+a ceiling would refuse calls nobody was actually charged for. The four places
+on this path that read a hard-coded `"USD"` or printed `$` are rewritten to
+read the row's own currency instead. `compute.currency` — the *tariff*
+currency an owner charges peers for a shared alias — is untouched: it answers
+a different question, settled in the 2026-09-10 amendment above, and was
+never the host's own cost.
+
+**Sums are per currency.** `spent_today`, the ledger's own `_fold` and
+`_fold_role`, the local-API endpoints built on them, and the GAIA eval reader
+fold `cost_amount` by `cost_currency` rather than into one number — the same
+shape `tariff_amount` already has — and the usage tab prints one line per
+currency rather than converting between them.
+
+**A data correction, not a policy change.** The seven usage rows written
+2026-09-26 under the alias `qwen 3.8 27b ND` — a local alias whose model name
+resembles a priced vendor model — carry `cost_usd: 0.0`, not because the call
+was free but because nothing priced it and the old schema had no column that
+could say so. They are rewritten to `cost_amount: null` with a
+`cost_unpriced_reason` naming why. One further row is deliberately left
+untouched by this correction: 2026-09-24, request_id
+`20085658-f296-4f2a-b190-cbc252ada936`, a local alias (`qwen3.8 27b`) whose
+usage row names model `deepseek-v4-flash` and `cost_usd: 0.03903064`. That row
+is a separate, open finding about a call that may have run across a mid-call
+provider switch, filed as its own board card and not decided here.
+
+**The burn series stops asserting a zero.** `dpc_agent/agent.py`'s
+`task_complete` event has written `cost_usd: usage.get("cost", 0)` since
+before this ledger existed — a burn line reading `0` where the true state is
+"nobody priced this call" is the same conflation this amendment closes on the
+ledger row itself, so the default becomes `None`, decided and done in this
+work rather than deferred (Mike's call, 2026-09-28).)*
+
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
 Sharing a vendor-backed alias is a different act: **the node holding the key
@@ -917,6 +1006,16 @@ arbiter's
 (`THE-INTERFACE-LETS-EVERY-AGENT-PICK-ITS-OWN-LOCAL-MODEL-AND-THE-CARD-CAN-HOLD-ONE`);
 a node may also have several GPUs, so «two served aliases» is not by itself two
 models on one card.)*
+
+*(**Amendment, 2026-09-28 — the ceiling's unit follows the provider, not the
+tariff.** Cross-reference to D3's amendment of the same date, item 4:
+`compute.vendor_quotas` is now compared in the currency the serving provider
+itself reports for the call, read at runtime, with a `currency` key on that
+provider's `providers.json` entry read only as a fallback; it is no longer
+assumed to be USD, and only rows whose `cost_basis` is `charged` count against
+it. `compute.currency` — the tariff an owner charges *peers* for a shared
+alias — is a different number answering a different question and does not
+move.)*
 
 ### D6 — `aiohttp.web`, declared explicitly
 
