@@ -96,12 +96,18 @@ VENDOR_PROVIDER_TYPES = frozenset({
 })
 UNSERVABLE_PROVIDER_TYPES = frozenset({'dpc_agent', 'remote_peer'})
 
-# The owner's tariff (ADR-041 D3, amendment): rates per 1M tokens in the
-# node's currency, dated per alias, and the subset of the allowed peers who
+# The owner's tariff (ADR-041 D3, amendment): rates per 1M tokens in each
+# alias's currency, dated per alias, and the subset of the allowed peers who
 # get them at zero. Beside the serving lists because they answer the next
 # question about the same aliases — what a call on them costs the caller.
 COMPUTE_CURRENCY_KEY = 'currency'
 SERVING_TARIFF_KEY = 'serving_tariff'
+# alias -> ISO 4217 code, over the provider's unit and the node default. Named
+# after the row column it ends up in, because it is that value, declared.
+TARIFF_CURRENCY_KEY = 'tariff_currency'
+TARIFF_CURRENCY_EXPLICIT = 'explicit'
+TARIFF_CURRENCY_PROVIDER = 'provider'
+TARIFF_CURRENCY_NODE = 'node'
 FREE_NODES_KEY = 'free_nodes'
 FREE_GROUPS_KEY = 'free_groups'
 
@@ -294,15 +300,27 @@ class ContextFirewall:
             for alias, entries in (compute.get(SERVING_TARIFF_KEY) or {}).items()
             if not alias.startswith('_')
         }
+        self.compute_tariff_currency: Dict[str, str] = {
+            alias: code
+            for alias, code in (compute.get(TARIFF_CURRENCY_KEY) or {}).items()
+            if not alias.startswith('_')
+        }
         self.compute_free_nodes: List[str] = list(compute.get(FREE_NODES_KEY) or [])
         self.compute_free_groups: List[str] = list(compute.get(FREE_GROUPS_KEY) or [])
-        if self.compute_serving_tariff and self.compute_currency is None:
+        # A vendor alias may take its provider's unit, unknown until the
+        # providers load, so only the others can be called unitless here.
+        unitless = [
+            alias for alias in self.compute_serving_tariff
+            if alias not in self.compute_tariff_currency and alias not in self.compute_serving_vendor
+        ]
+        if unitless and self.compute_currency is None:
             logger.warning(
-                "compute.%s names %d alias(es) but compute.%s is not set, so no tariff is "
-                "declared and every call is a gift (tariff null). Set the ISO 4217 code of the "
-                "unit the rates are in, in privacy_rules.json under compute.%s.",
-                SERVING_TARIFF_KEY, len(self.compute_serving_tariff), COMPUTE_CURRENCY_KEY,
-                COMPUTE_CURRENCY_KEY,
+                "compute.%s names %d alias(es) with no currency - neither compute.%s nor "
+                "compute.%s is set for them - so no tariff is declared and every call on them is "
+                "a gift (tariff null). Set the ISO 4217 code of the unit the rates are in, in "
+                "privacy_rules.json under compute.%s, or per alias under compute.%s.",
+                SERVING_TARIFF_KEY, len(unitless), COMPUTE_CURRENCY_KEY, TARIFF_CURRENCY_KEY,
+                COMPUTE_CURRENCY_KEY, TARIFF_CURRENCY_KEY,
             )
         served = set(self.compute_serving_local) | set(self.compute_serving_vendor)
         for alias in self.compute_serving_tariff:
@@ -419,6 +437,23 @@ class ContextFirewall:
                 f"from the standard's list, such as 'USD' or 'RUB' — got {currency!r}"
             )
 
+        per_alias = compute.get(TARIFF_CURRENCY_KEY)
+        if per_alias is not None and not isinstance(per_alias, dict):
+            errors.append(
+                f"'compute.{TARIFF_CURRENCY_KEY}' must be an object of alias -> ISO 4217 code, "
+                f"got {per_alias!r}"
+            )
+        elif per_alias:
+            for alias, code in per_alias.items():
+                if alias.startswith('_'):
+                    continue
+                if not isinstance(code, str) or code not in ISO_4217_CODES:
+                    errors.append(
+                        f"'compute.{TARIFF_CURRENCY_KEY}.{alias}' must be an ISO 4217 code — three "
+                        f"upper-case letters from the standard's list, such as 'USD' or 'RUB' — "
+                        f"got {code!r}"
+                    )
+
         tariff = compute.get(SERVING_TARIFF_KEY)
         if tariff is not None and not isinstance(tariff, dict):
             errors.append(
@@ -493,9 +528,35 @@ class ContextFirewall:
             return True
         return any(group in self.compute_free_groups for group in self._get_groups_for_node(peer_id))
 
-    def tariff_for(self, alias: str, *, peer_id: str, at: Union[datetime, date]) -> Optional[AppliedTariff]:
+    def tariff_currency_for(self, alias: str, provider: Any = None) -> Tuple[Optional[str], Optional[str]]:
+        """The unit `alias`'s tariff is in, and its source: `explicit`, `provider` or `node`.
+
+        ADR-041 D3, amendment of 2026-09-28: `compute.tariff_currency.<alias>`,
+        else for a `serving_vendor` alias what its provider bills in (the
+        ceiling's own `vendor_ceiling_currency`), else `compute.currency`,
+        else `(None, None)` — no tariff. With no `provider` the provider step
+        is skipped: that function would otherwise match the alias name against
+        the USD tables. Nothing converts; the rates are numbers in this unit.
+        """
+        explicit = self.compute_tariff_currency.get(alias)
+        if explicit is not None:
+            return explicit, TARIFF_CURRENCY_EXPLICIT
+        if provider is not None and alias in self.compute_serving_vendor:
+            from .dpc_agent.pricing import vendor_ceiling_currency  # pricing imports this module
+            billed = vendor_ceiling_currency(alias, provider)
+            if billed is not None:
+                return billed, TARIFF_CURRENCY_PROVIDER
+        if self.compute_currency is not None:
+            return self.compute_currency, TARIFF_CURRENCY_NODE
+        return None, None
+
+    def tariff_for(
+        self, alias: str, *, peer_id: str, at: Union[datetime, date], provider: Any = None,
+    ) -> Optional[AppliedTariff]:
         """The tariff a call on `alias` by `peer_id` on the day of `at` is charged at.
 
+        Its unit is `tariff_currency_for(alias, provider)`: pass the provider
+        that serves the alias, or a vendor alias is read in the node default.
         None is «not declared» — no currency, or no entry for the alias whose
         `from` is on or before the day — and the call is a gift. The newest
         such entry applies; a free peer gets the same entry at zero, and only
@@ -510,15 +571,16 @@ class ContextFirewall:
             day = at.astimezone(timezone.utc).date()
         else:
             day = at
-        if self.compute_currency is None:
+        currency, _ = self.tariff_currency_for(alias, provider)
+        if currency is None:
             return None
         applicable = [entry for entry in self.compute_serving_tariff.get(alias, ()) if entry.from_date <= day]
         if not applicable:
             return None
         entry = max(applicable, key=lambda e: e.from_date)
         if self._is_free_for(peer_id):
-            return AppliedTariff(0.0, 0.0, self.compute_currency, entry.from_date)
-        return AppliedTariff(entry.in_per_1m, entry.out_per_1m, self.compute_currency, entry.from_date)
+            return AppliedTariff(0.0, 0.0, currency, entry.from_date)
+        return AppliedTariff(entry.in_per_1m, entry.out_per_1m, currency, entry.from_date)
 
     def classify_serving_lists(self, provider_types: Mapping[str, Optional[str]]) -> ServingLists:
         """The two lists checked against what each alias's provider is.
@@ -1447,8 +1509,10 @@ class ContextFirewall:
                     "allowed_models": [],
                     "_serving_alias": "Deprecated single form of serving_local, still read. What this node serves is serving_local (aliases on this machine; every one of them is served to peers, the first being what a request naming none gets) and serving_vendor (paid APIs, each needing a daily ceiling in vendor_quotas, in the currency that vendor bills in). Empty = share nothing (the opposite of allowed_models, where empty = all).",
                     "serving_alias": None,
-                    "_currency": "ISO 4217 code of the unit the tariff below is priced in, e.g. \"USD\" or \"RUB\". Null = no tariff declared: every call served is a gift, whatever serving_tariff says.",
+                    "_currency": "Default ISO 4217 code of the unit the tariff below is priced in, e.g. \"USD\" or \"RUB\": every local alias, and a vendor alias whose provider names no billing currency. A vendor alias defaults to the currency its provider bills in. Null with no other unit = no tariff declared: every call served on that alias is a gift.",
                     "currency": None,
+                    "_tariff_currency": "Per alias, the ISO 4217 code its tariff is in, over the provider's currency and the default above: {\"alias\": \"RUB\"}.",
+                    "tariff_currency": {},
                     "_serving_tariff": "Rates per 1M input / output tokens, in currency, dated per alias: {\"alias\": [{\"from\": \"2026-09-01\", \"in\": 20, \"out\": 60}]}. The newest entry on or before the call's day (UTC) applies; an alias with no entry is a gift.",
                     "serving_tariff": {},
                     "_free_nodes": "Peers among allow_nodes / allow_groups who get the tariff at zero. Each entry must also be in the matching allow list: these lists distinguish, they do not admit.",

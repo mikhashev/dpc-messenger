@@ -182,7 +182,9 @@ _EXTERNAL_TAG_RE = MENTIONABLE_NAME_RE
 MENU_TARIFF_UNIT = "per_1m_tokens"
 
 
-def menu_tariff_row(firewall: Any, alias: str, peer_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def menu_tariff_row(
+    firewall: Any, alias: str, peer_id: Optional[str], provider: Any = None,
+) -> Optional[Dict[str, Any]]:
     """What `peer_id` is charged for a call on `alias` today, or None.
 
     The same resolution the call itself is priced by
@@ -197,7 +199,7 @@ def menu_tariff_row(firewall: Any, alias: str, peer_id: Optional[str]) -> Option
     if not peer_id or not callable(tariff_for):
         return None
     try:
-        applied = tariff_for(alias, peer_id=peer_id, at=datetime.now(timezone.utc))
+        applied = tariff_for(alias, peer_id=peer_id, at=datetime.now(timezone.utc), provider=provider)
     except Exception:
         logger.warning(
             "The tariff for %s could not be resolved for the menu sent to %s; the row "
@@ -2529,7 +2531,9 @@ class CoreService:
 
     def menu_tariff(self, alias: str, peer_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """This node's tariff row for `alias` as `peer_id` is charged it."""
-        return menu_tariff_row(getattr(self, "firewall", None), alias, peer_id)
+        providers = getattr(getattr(self, "llm_manager", None), "providers", None)
+        provider = providers.get(alias) if isinstance(providers, dict) else None
+        return menu_tariff_row(getattr(self, "firewall", None), alias, peer_id, provider)
 
     @staticmethod
     def menu_settings(provider: Any) -> Dict[str, Any]:
@@ -2594,7 +2598,7 @@ class CoreService:
             info["reasoning_words"] = words
             info["reasoning_default"] = effective_reasoning_default(provider)
 
-        tariff = menu_tariff_row(getattr(self, "firewall", None), alias, peer_id)
+        tariff = menu_tariff_row(getattr(self, "firewall", None), alias, peer_id, provider)
         if tariff is not None:
             info["tariff"] = tariff
         settings = menu_settings_row(provider)

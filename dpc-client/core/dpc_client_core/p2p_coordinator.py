@@ -456,7 +456,10 @@ class P2PCoordinator:
         """
         firewall = getattr(self.service, "firewall", None)
         try:
-            return firewall.tariff_for(serving_alias, peer_id=peer_id, at=started_at)
+            return firewall.tariff_for(
+                serving_alias, peer_id=peer_id, at=started_at,
+                provider=self._provider_for_alias(serving_alias),
+            )
         except Exception:
             logger.error(
                 "The tariff for %s served to %s could not be resolved; the call is recorded "
