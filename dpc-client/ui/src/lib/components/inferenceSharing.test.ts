@@ -44,6 +44,8 @@ import {
   THIS_MACHINE_GROUP,
   unmatchedModels,
   validationDraft,
+  vendorQuotaBadge,
+  vendorQuotaLabel,
   type ComputeRules,
   type GatewayMenuEntry,
   type GatewayState,
@@ -796,5 +798,56 @@ describe('what an admitted caller is marked with', () => {
   it('marks a free caller free whether or not a tariff exists', () => {
     expect(callerPriceBadge(true, null)).toBe('free');
     expect(callerPriceBadge(true, 'EUR')).toBe('free');
+  });
+});
+
+// Since 2026-09-28 both doors count a vendor ceiling in the currency the
+// serving provider bills in; the backend names it per row (`ceiling_currency`,
+// from `pricing.vendor_ceiling_currency`) and the tab only reads it.
+describe('a vendor ceiling is labelled in the currency its alias bills in', () => {
+  const nd: ProviderInfo = { alias: 'qwen 3.8 27b ND', model: 'qwen3.8-27b', type: 'neuraldeep', supports_vision: false, ceiling_currency: 'RUB' };
+  const ds: ProviderInfo = { alias: 'ds', model: 'deepseek-v4-flash', type: 'deepseek', supports_vision: false, ceiling_currency: 'USD' };
+  const unrated: ProviderInfo = { alias: 'odd', model: 'x', type: 'openai_compatible', supports_vision: false, ceiling_currency: null };
+
+  it('says RUB/day for a NeuralDeep alias and never USD', () => {
+    expect(vendorQuotaLabel(nd)).toContain('RUB/day');
+    expect(vendorQuotaLabel(nd)).not.toContain('USD');
+    expect(vendorQuotaBadge(3000, nd)).toBe('3000 RUB/day per caller');
+    expect(vendorQuotaBadge(3000, nd)).not.toContain('USD');
+  });
+
+  it('says USD/day for a DeepSeek alias', () => {
+    expect(vendorQuotaLabel(ds)).toBe('USD/day');
+    expect(vendorQuotaBadge(2.5, ds)).toBe('2.5 USD/day per caller');
+  });
+
+  it('names an unrated alias as refused rather than a currency', () => {
+    expect(vendorQuotaLabel(unrated)).toContain('unrated');
+    expect(vendorQuotaBadge(5, unrated)).toContain('refused');
+    expect(vendorQuotaBadge(5, unrated)).not.toMatch(/USD|RUB/);
+  });
+
+  it('names no currency where the row did not say one', () => {
+    expect(vendorQuotaLabel(undefined)).toBe('per day');
+    expect(vendorQuotaLabel({ ...ds, ceiling_currency: undefined })).toBe('per day');
+    expect(vendorQuotaBadge(5, undefined)).toBe('5 per day per caller');
+  });
+
+  it('refuses a bad quota without naming a fixed currency', () => {
+    const block = { ...addServing(emptyBlock(), 'vendor', 'nd'), vendor_quotas: { nd: -1 } };
+    const [error] = computeBlockErrors(block);
+    expect(error).toContain('in the currency the alias bills in');
+    expect(error).not.toContain('USD');
+  });
+
+  it('the tab source carries no fixed dollar on the ceiling', () => {
+    // Read as source, not rendered: see tabSource() above for why.
+    const tab = Object.values(import.meta.glob('./InferenceSharingEditor.svelte', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>)[0];
+    expect(tab).not.toContain('USD/day');
+    expect(tab).not.toContain('USD per day');
   });
 });

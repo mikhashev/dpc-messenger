@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 _BACKEND_OWNED_PROFILE_KEYS = frozenset()
 
 from .__version__ import __version__
-from .firewall import ContextFirewall
+from .firewall import VENDOR_PROVIDER_TYPES, ContextFirewall
+from .dpc_agent.pricing import vendor_ceiling_currency
 from . import node_ledger
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
@@ -2499,6 +2500,12 @@ class CoreService:
             }
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)
+
+            # The currency a vendor alias's daily ceiling (compute.vendor_quotas)
+            # is counted in, by the function both doors use; None is an alias
+            # they refuse as unrated. A local alias has no money ceiling.
+            if provider_dict["type"] in VENDOR_PROVIDER_TYPES:
+                provider_dict["ceiling_currency"] = vendor_ceiling_currency(alias, provider)
 
             words, _ = declared_reasoning_words(provider)
             if words is not None:

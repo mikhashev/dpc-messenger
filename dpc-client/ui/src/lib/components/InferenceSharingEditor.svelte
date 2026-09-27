@@ -50,6 +50,8 @@
     unmatchedModels,
     utcToday,
     validationDraft,
+    vendorQuotaBadge,
+    vendorQuotaLabel,
     type CallerKind,
     type ClientLinesResult,
     type ComputeRules,
@@ -465,7 +467,7 @@
             Two lists, by what an alias spends. A <strong>local</strong> alias (Ollama, llama.cpp) spends this
             card; every one listed is served to peers over P2P (Mike's call, 2026-09-18), the first being what
             a request naming no alias gets. A <strong>vendor</strong> alias spends money, so its ceiling is
-            per caller, in USD per day. A remote peer's model and an agent are never offered: what is shared is
+            per caller, per day, in the currency its provider bills in. A remote peer's model and an agent are never offered: what is shared is
             not shared onward (ADR-041 D7). Whisper is shared under Transcription Sharing.
           </details>
 
@@ -504,7 +506,7 @@
             </div>
           {/if}
 
-          <h5>Vendor (spends money; ceiling per caller, USD per day)</h5>
+          <h5>Vendor (spends money; ceiling per caller, per day, in the provider's own currency)</h5>
           <div class="rule-list">
             {#each view.serving_vendor ?? [] as alias (alias)}
               <div class="rule-row">
@@ -512,13 +514,16 @@
                   <code class="rule-path">{alias}</code>
                   {#if providerByAlias.has(alias)}
                     <span class="muted">({providerByAlias.get(alias)?.model})</span>
+                    {#if providerByAlias.get(alias)?.ceiling_currency === null}
+                      <span class="badge badge-missing">unrated &mdash; refused: no rate to count a ceiling in</span>
+                    {/if}
                   {:else}
                     <span class="badge badge-missing">not in providers.json</span>
                   {/if}
                 </span>
                 <span class="quota-cell">
                   {#if editMode && editCompute}
-                    <label class="muted" for="compute-quota-{alias}">USD/day</label>
+                    <label class="muted" for="compute-quota-{alias}">{vendorQuotaLabel(providerByAlias.get(alias))}</label>
                     <input
                       id="compute-quota-{alias}"
                       name="compute-quota-{alias}"
@@ -532,7 +537,7 @@
                     />
                     <button class="btn-icon-small" title="Stop serving {alias}" on:click={() => editCompute && apply(removeServing(editCompute, 'vendor', alias))}>×</button>
                   {:else if typeof view.vendor_quotas?.[alias] === 'number'}
-                    <span class="badge badge-quota">{view.vendor_quotas?.[alias]} USD/day per caller</span>
+                    <span class="badge" class:badge-quota={providerByAlias.get(alias)?.ceiling_currency !== null} class:badge-missing={providerByAlias.get(alias)?.ceiling_currency === null}>{vendorQuotaBadge(view.vendor_quotas?.[alias] ?? 0, providerByAlias.get(alias))}</span>
                   {:else}
                     <span class="badge badge-missing">no ceiling &mdash; refused</span>
                   {/if}

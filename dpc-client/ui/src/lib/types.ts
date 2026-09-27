@@ -86,6 +86,10 @@ export interface ProviderInfo {
     type: string;
     supports_vision: boolean;
     supports_voice?: boolean;  // v0.13.0+
+    /** Vendor rows only: the currency `compute.vendor_quotas` is counted in for
+     *  this alias (`pricing.vendor_ceiling_currency`), or null where the doors
+     *  refuse it as unrated. Absent on local rows and from an older backend. */
+    ceiling_currency?: string | null;
 }
 
 export interface DefaultProvidersResponse {

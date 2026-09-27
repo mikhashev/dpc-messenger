@@ -35,7 +35,8 @@ export interface ComputeRules {
   serving_alias?: string | null;
   serving_local?: string[] | null;
   serving_vendor?: string[] | null;
-  /** alias -> USD per day per caller; required for every vendor alias (:357-362). */
+  /** alias -> amount per day per caller, in the currency the alias bills in
+   *  (`ProviderInfo.ceiling_currency`); required for every vendor alias (:357-362). */
   vendor_quotas?: Record<string, number> | null;
   /** ISO 4217 code or null = no tariff declared (:394-399). */
   currency?: string | null;
@@ -240,11 +241,30 @@ export function removeServing(compute: ComputeRules, list: ServingList, alias: s
 }
 
 /** `null` removes the ceiling (the save is then refused with the reason). */
-export function setVendorQuota(compute: ComputeRules, alias: string, usdPerDay: number | null): ComputeRules {
+export function setVendorQuota(compute: ComputeRules, alias: string, perDay: number | null): ComputeRules {
   const quotas = { ...(compute.vendor_quotas ?? {}) };
-  if (usdPerDay === null || Number.isNaN(usdPerDay)) delete quotas[alias];
-  else quotas[alias] = usdPerDay;
+  if (perDay === null || Number.isNaN(perDay)) delete quotas[alias];
+  else quotas[alias] = perDay;
   return { ...compute, vendor_quotas: quotas };
+}
+
+/** The unit beside a vendor alias's ceiling input. The currency is the
+ *  backend's (`ceiling_currency`, the same function both doors count with);
+ *  it is never guessed here from the provider type. `null` is an alias the
+ *  doors refuse as unrated; a row that says nothing names no currency. */
+export function vendorQuotaLabel(provider: ProviderInfo | null | undefined): string {
+  const currency = provider?.ceiling_currency;
+  if (currency === undefined) return 'per day';
+  return currency ? `${currency}/day` : 'per day (unrated — refused)';
+}
+
+/** The read-only badge for a vendor alias's ceiling, by the same rule. */
+export function vendorQuotaBadge(quota: number, provider: ProviderInfo | null | undefined): string {
+  const currency = provider?.ceiling_currency;
+  if (currency === undefined) return `${quota} per day per caller`;
+  return currency
+    ? `${quota} ${currency}/day per caller`
+    : `${quota} per day — unrated, refused: no rate to count it in`;
 }
 
 // --- Which models the door accepts -----------------------------------------
@@ -436,7 +456,10 @@ export function computeBlockErrors(compute: ComputeRules): string[] {
   for (const [alias, quota] of Object.entries(quotas)) {
     if (alias.startsWith('_')) continue;
     if (typeof quota !== 'number' || !Number.isFinite(quota) || quota < 0) {
-      errors.push(`'compute.vendor_quotas.${alias}' must be a non-negative number of USD per day`);
+      errors.push(
+        `'compute.vendor_quotas.${alias}' must be a non-negative amount per day in the currency the alias bills in, ` +
+        `got ${JSON.stringify(quota)}`,
+      );
     }
   }
   for (const alias of vendor) {
