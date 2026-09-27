@@ -291,10 +291,13 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   the currency the serving provider itself reports for its calls, read at runtime from the
   usage row it just priced — not a fixed USD, and a `currency` key on that provider's
   `providers.json` entry is read only as a fallback when a provider reports an amount with
-  no currency of its own; a comparison across two different currencies is refused rather
-  than summed, and only rows whose `cost_basis` is `charged` count toward the ceiling (a
-  `list_price_reference` row states what a call would have cost on a metered key, not a
-  debit against this one). The day's spend is read from the node ledger (`~/.dpc/ledger/`),
+  no currency of its own. A row in any other currency is not counted toward the ceiling:
+  it is left out of the sum without a warning, neither converted nor refused. Rows whose
+  `cost_basis` is `charged` or `unknown` count — `unknown` means the vendor's billing mode
+  could not be read, and such a call is counted as debited, so an unreadable wallet does
+  not open the ceiling (fail-closed, Mike's call, 2026-09-28); only a
+  `list_price_reference` row is left out, since it states what a call would have cost on
+  a metered key, not a debit against this one. The day's spend is read from the node ledger (`~/.dpc/ledger/`),
   so it survives a restart; at or over the ceiling the gateway answers `429` naming the
   alias, the ceiling and the spend (ADR-041 D3, amendment 2026-09-28).
   A `neuraldeep` alias is priced in roubles: its usage rows carry `cost_amount` and
@@ -311,6 +314,10 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   `cost_basis`: `charged` for a wallet key, `list_price_reference` for a key whose
   `/v1/limits` reports `billing_mode: subscription` (the amount is what the call would
   have cost, not a debit), `unknown` when `/v1/limits` could not be read.
+  A NeuralDeep endpoint configured as `openai_compatible` is not supported for pricing:
+  that type has no price of its own, so its calls are priced by model name against the
+  USD tables — unpriced where the name matches nothing, in dollars where it reads like a
+  DeepSeek or Z.AI model. Configure it with the `neuraldeep` type.
 - A `remote_peer` or `dpc_agent` alias may stand in neither list: what is shared is not
   shared onward (ADR-041 D7).
 

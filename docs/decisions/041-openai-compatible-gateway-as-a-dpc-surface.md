@@ -851,7 +851,8 @@ provider's `providers.json` entry is read only as a fallback, for a provider
 that reports an amount with no currency of its own. The gateway and the peer
 door refuse a comparison between a ceiling and a row of a different currency
 rather than sum them, and the comparison counts only rows whose `cost_basis`
-is `charged`: a `list_price_reference` row states what a call *would* have
+is `charged` (widened the same day to `unknown` as well — see the addition at
+the end of this amendment): a `list_price_reference` row states what a call *would* have
 cost against a metered key, not a debit against this one, and folding it into
 a ceiling would refuse calls nobody was actually charged for. The four places
 on this path that read a hard-coded `"USD"` or printed `$` are rewritten to
@@ -867,11 +868,19 @@ shape `tariff_amount` already has — and the usage tab prints one line per
 currency rather than converting between them.
 
 **A data correction, not a policy change.** The seven usage rows written
-2026-09-26 under the alias `qwen 3.8 27b ND` — a local alias whose model name
-resembles a priced vendor model — carry `cost_usd: 0.0`, not because the call
-was free but because nothing priced it and the old schema had no column that
-could say so. They are rewritten to `cost_amount: null` with a
-`cost_unpriced_reason` naming why. One further row is deliberately left
+2026-09-26 under the alias `qwen 3.8 27b ND` — a `neuraldeep` alias, model
+`qwen3.8-27b` — carried `cost_usd: 0.0` and `billing: subscription`, not
+because the calls were free but because the writer of that day dropped the
+provider's own report and the old schema had no column that could say
+«nobody priced this». They were rewritten on 2026-09-28 by a one-off script
+run by hand while the backend was stopped, not by any code in this
+repository: in `~/.dpc/ledger/usage-2026-09.jsonl` each of the seven lost
+`cost_usd` and gained `cost_amount: null`, `cost_currency: null`,
+`cost_basis: null` and a `cost_unpriced_reason` naming why; no other line of
+the file changed, and a copy of the file as it stood before is kept beside it
+as `usage-2026-09.jsonl.before-nd-fix-2026-09-28`. This is local data on the
+owner's node alone. Every other node's ledger — the Linux node's among them —
+was not checked, and a row of the same shape there reads as it did. One further row is deliberately left
 untouched by this correction: 2026-09-24, request_id
 `20085658-f296-4f2a-b190-cbc252ada936`, a local alias (`qwen3.8 27b`) whose
 usage row names model `deepseek-v4-flash` and `cost_usd: 0.03903064`. That row
@@ -883,7 +892,33 @@ provider switch, filed as its own board card and not decided here.
 before this ledger existed — a burn line reading `0` where the true state is
 "nobody priced this call" is the same conflation this amendment closes on the
 ledger row itself, so the default becomes `None`, decided and done in this
-work rather than deferred (Mike's call, 2026-09-28).)*
+work rather than deferred (Mike's call, 2026-09-28).
+
+**Addition, 2026-09-28 — the ceiling fails closed, and a zero reads as what it
+was.** Mike's call, 2026-09-28, after review of the work above. Four points
+narrow what the amendment said earlier the same day:
+
+- *The ceiling counts `unknown`.* `spent_today` adds every row in the
+  ceiling's currency whose `cost_basis` is `charged` **or `unknown`**; only
+  `list_price_reference` is left out. NeuralDeep writes `unknown` when its
+  `/v1/limits` cannot be read, and counting only `charged` would have opened
+  the ceiling on exactly the day nobody could tell whether the wallet was
+  being debited. A call that may have been charged is counted as charged.
+- *Another currency is left out, not refused.* Where the text above says the
+  doors «refuse a comparison» across currencies, what the code does is skip
+  such a row in the sum without a word: a dollar row does not move a rouble
+  ceiling, and nothing is converted or reported.
+- *An older row's zero is read as what it was.* The reader that constructs
+  the four columns from `cost_usd` reads a number as USD, `charged`, only on a
+  `pay_per_use` row or where it is not zero. The `0.0` every local card's row
+  was written with reads as free — `0` in no currency on no basis — so it is
+  counted under `cost_free` and no longer sits in the USD group. Every
+  DeepSeek row sums to the same dollars as before.
+- *A type with no price is unpriced, not free.* `pricing.price_call` used to
+  end on `0.0` for a provider type none of its sets names (`anthropic`,
+  `gemini`, `openai_compatible`, …) when the model name matched no table. It
+  now ends on `cost_amount: null` with a reason. Only the local types
+  (`firewall.LOCAL_PROVIDER_TYPES`) are free by construction.)*
 
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
@@ -1008,12 +1043,14 @@ a node may also have several GPUs, so «two served aliases» is not by itself tw
 models on one card.)*
 
 *(**Amendment, 2026-09-28 — the ceiling's unit follows the provider, not the
-tariff.** Cross-reference to D3's amendment of the same date, item 4:
+tariff.** Cross-reference to D3's amendment of the same date, the paragraph
+«The vendor ceiling moves currency with the provider» and the addition at its
+end:
 `compute.vendor_quotas` is now compared in the currency the serving provider
 itself reports for the call, read at runtime, with a `currency` key on that
 provider's `providers.json` entry read only as a fallback; it is no longer
-assumed to be USD, and only rows whose `cost_basis` is `charged` count against
-it. `compute.currency` — the tariff an owner charges *peers* for a shared
+assumed to be USD, and rows whose `cost_basis` is `charged` or `unknown`
+count against it — never `list_price_reference`. `compute.currency` — the tariff an owner charges *peers* for a shared
 alias — is a different number answering a different question and does not
 move.)*
 
