@@ -273,6 +273,10 @@ async def test_a_served_call_on_a_local_alias_costs_the_host_nothing_and_says_so
     coord, svc = make_coordinator()
     coord._ledger = NodeLedger(tmp_path / "ledger")
     svc.firewall.can_request_inference.return_value = True
+    # Loaded as the registry loads it: a served alias always has its type, and
+    # the type — not the alias's name — is what makes it free (a type-less
+    # alias is unpriced, 2026-09-28).
+    svc.llm_manager.providers = {"ollama_local": SimpleNamespace(config={"type": "ollama", "model": "gemma3:27b"})}
     svc.llm_manager.query = AsyncMock(return_value={
         "response": "ok", "model": "gemma3:27b", "prompt_tokens": 1200, "response_tokens": 300,
     })

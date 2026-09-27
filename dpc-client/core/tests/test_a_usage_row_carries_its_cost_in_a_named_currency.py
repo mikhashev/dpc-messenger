@@ -125,14 +125,16 @@ def test_a_rouble_row_and_a_dollar_row_are_two_amounts_never_one(tmp_path):
     assert ledger.spent_today("mixed", caller="us", now=NOON, currency="RUB") == pytest.approx(12.0)
 
 
-# --- (vi) the ceiling counts what was charged ------------------------------
+# --- (vi) the ceiling counts what may have been charged --------------------
 
 
 def test_the_ceiling_ignores_rows_priced_only_for_reference(tmp_path):
+    """`charged` and `unknown` add, `list_price_reference` does not (fail-closed,
+    Mike's call, 2026-09-28)."""
     ledger = NodeLedger(tmp_path / "ledger")
     ledger.append(_row(request_id="wallet", cost_amount=10.0, cost_currency="RUB", cost_basis="charged"))
     ledger.append(_row(request_id="plan", cost_amount=99.0, cost_currency="RUB",
                        cost_basis="list_price_reference", billing="subscription"))
     ledger.append(_row(request_id="unknown", cost_amount=7.0, cost_currency="RUB", cost_basis="unknown"))
 
-    assert ledger.spent_today("nd", caller="us", now=NOON, currency="RUB") == pytest.approx(10.0)
+    assert ledger.spent_today("nd", caller="us", now=NOON, currency="RUB") == pytest.approx(17.0)

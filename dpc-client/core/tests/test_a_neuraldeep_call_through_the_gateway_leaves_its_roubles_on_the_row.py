@@ -10,8 +10,9 @@ DeepSeek one was booked in dollars, and a RUB report reached no row at all.
 The decision (Mike's call, 2026-09-28): a provider's own report wins whenever
 its usage dict carries the key `cost_amount` — even when the value is None —
 and otherwise the price follows the provider *type*, never the model name.
-The daily ceiling of a vendor alias then counts only `charged` rows in the
-ceiling's own currency, which admits a NeuralDeep alias it used to refuse as
+The daily ceiling of a vendor alias then counts the rows in the ceiling's own
+currency that may have been debited — `charged` and `unknown`, never
+`list_price_reference` — which admits a NeuralDeep alias it used to refuse as
 unrated and bounds it in roubles.
 
 The provider layer is stood in for by a fake `query_messages` returning what

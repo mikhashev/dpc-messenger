@@ -276,12 +276,8 @@ from ..firewall import ISO_4217_CODES, LOCAL_PROVIDER_TYPES  # noqa: E402  — l
 USD_TABLE_TYPES: Dict[str, str] = {"deepseek": "deepseek", "zai": "zai"}
 #: Types that price their own calls (`cost_amount` in their usage dict).
 SELF_PRICED_TYPES = frozenset({"neuraldeep"})
-#: What a typed vendor bills in; the unit of its daily ceiling.
-TYPE_BILLING_CURRENCY: Dict[str, str] = {
-    "deepseek": "USD", "zai": "USD", "neuraldeep": NEURALDEEP_CURRENCY,
-}
-
-# `cost_basis`; only `charged` counts against a daily ceiling.
+# `cost_basis`. A daily ceiling counts `charged` and `unknown` and leaves out
+# `list_price_reference` (`node_ledger.NodeLedger.spent_today`).
 COST_BASIS_CHARGED = "charged"
 COST_BASIS_LIST_PRICE_REFERENCE = "list_price_reference"
 COST_BASIS_UNKNOWN = "unknown"
@@ -546,10 +542,13 @@ def price_call(
        charged; a local type 0.0 in no currency; `neuraldeep` unpriced — it
        never resolves to dollars, whatever its model is called.
     3. A type with no pricing of its own, or no type at all, by name: the USD
-       tables where the name resolves, 0.0 in no currency where it does not.
+       tables where the name resolves.
+    4. Nothing above priced it: unpriced, with the reason. A type in none of
+       the sets — `anthropic`, `gemini`, `openai_compatible` and the rest, or
+       no type at all — has no price here, and a 0.0 would read as free.
 
     `billing` follows the same order: a reference price is a subscription's.
-    Never raises.
+    Never raises: a count that will not read as a number counts as 0.
     """
     if reported is not None and "cost_amount" in reported:
         price = _reported_price(reported)
@@ -565,9 +564,10 @@ def price_call(
                 "billing": "pay_per_use"}
     if _resolve_pay_model(alias, model, provider_type) is not None:
         amount = compute_cost_usd(
-            alias, int(prompt_tokens or 0), int(completion_tokens or 0), model=model,
-            cache_hit_tokens=int(cache_hit_tokens or 0), cache_miss_tokens=cache_miss_tokens,
-            thinking_tokens=int(thinking_tokens or 0), output_includes_thinking=output_includes_thinking,
+            alias, _count_or_zero(prompt_tokens), _count_or_zero(completion_tokens), model=model,
+            cache_hit_tokens=_count_or_zero(cache_hit_tokens),
+            cache_miss_tokens=None if cache_miss_tokens is None else _count_or_zero(cache_miss_tokens),
+            thinking_tokens=_count_or_zero(thinking_tokens), output_includes_thinking=output_includes_thinking,
             at=at, provider_type=provider_type,
         )
         return {"cost_amount": amount, "cost_currency": "USD", "cost_basis": COST_BASIS_CHARGED,
@@ -576,9 +576,20 @@ def price_call(
         return {"cost_amount": None, "cost_currency": None, "cost_basis": None,
                 "cost_unpriced_reason": f"no rate for model {model!r} in the {provider_type} table",
                 "billing": "pay_per_use"}
-    return {"cost_amount": 0.0, "cost_currency": None, "cost_basis": None,
-            "cost_unpriced_reason": None,
+    return {"cost_amount": None, "cost_currency": None, "cost_basis": None,
+            "cost_unpriced_reason": (
+                f"no price for provider type {provider_type!r}, model {model!r}: "
+                "no rate table and no price reported by the provider"
+            ),
             "billing": get_billing_model(alias, model, provider_type=provider_type)}
+
+
+def _count_or_zero(value: Any) -> int:
+    """A token count as an int, or 0 where it will not read as one."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def usd_figure(price: Mapping[str, Any]) -> Optional[float]:
@@ -597,7 +608,7 @@ def vendor_ceiling_currency(alias: str, provider: Any) -> Optional[str]:
     """The currency a vendor alias's daily ceiling is counted in, or None.
 
     None means the alias's spend cannot be counted — no row it leaves would
-    carry a charged amount — so a ceiling on it would guard nothing, and both
+    carry an amount in a currency — so a ceiling on it would guard nothing, and both
     doors refuse it as `unrated`. A self-priced provider says its own currency
     (`billing_currency()`, else a `currency` in its providers.json entry); a
     provider the USD tables price answers USD.

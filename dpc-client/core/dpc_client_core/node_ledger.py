@@ -24,7 +24,8 @@ priced at `started_at` by the node that made the call and never re-priced,
 which is the invariant `dpc_agent/pricing.py` states for itself. A null
 `cost_amount` is a call nobody priced; a zero is a price. Until 2026-09-28 the
 column was `cost_usd`, which no writer fills any more; `NodeLedger.rows()` reads
-an older row's `cost_usd` as a charged amount in USD.
+an older row's `cost_usd` as a charged amount in USD, or as free where it was
+the zero a local card was written with (`_read_cost`).
 
 Two columns beyond D3's list, both optional: `task_id` and `conversation_id`.
 D3's own consistency rule — the sum of a task's rows equals the
@@ -120,8 +121,11 @@ def stated_thinking_source(value: Any, *, peer: str, log: logging.Logger) -> Opt
     return None
 BILLINGS = ("subscription", "pay_per_use")
 # What a `cost_amount` is — the words of `pricing.COST_BASES`, named here where
-# the column lives. Only `charged` counts against a daily ceiling.
+# the column lives. A daily ceiling counts every basis but the reference one.
 COST_BASES = ("charged", "list_price_reference", "unknown")
+#: The basis a daily ceiling leaves out: a price quoted for a call a
+#: subscription covered. `unknown` counts — fail-closed (Mike's call, 2026-09-28).
+NOT_DEBITED_BASIS = "list_price_reference"
 
 LOCK_TIMEOUT_S = 2.0
 LOCK_STALE_S = 10.0
@@ -316,6 +320,8 @@ def _cost_columns(amount: Any, currency: Any, basis: Any, reason: Any) -> Dict[s
         raise ValueError(f"cost_amount={amount!r} with no cost_currency: an amount needs its currency")
     if basis is not None and basis not in COST_BASES:
         raise ValueError(f"cost_basis={basis!r} is not one of {COST_BASES}")
+    if amount is None and basis is not None:
+        raise ValueError(f"cost_basis={basis!r} with no cost_amount: a basis says what an amount is")
     return {
         "cost_amount": None if amount is None else float(amount),
         "cost_currency": currency,
@@ -326,15 +332,19 @@ def _cost_columns(amount: Any, currency: Any, basis: Any, reason: Any) -> Dict[s
 
 def _read_cost(row: Dict[str, Any]) -> None:
     """Give a row read from disk the four cost columns. A row written before
-    2026-09-28 has only `cost_usd`: a number there was a charged amount in USD
-    (the only tables that priced were DeepSeek's and Z.AI's, per token), and a
-    null was a call nobody priced. `cost_usd` itself stays on the dict, as read."""
+    2026-09-28 has only `cost_usd`, and a null there was a call nobody priced.
+    A number was a charged amount in USD where the row is `pay_per_use` or the
+    number is not zero — only the per-token tables of DeepSeek and Z.AI ever
+    produced one. A zero on any other row is the subscription branch's 0.0,
+    written for every local card: free, in no currency, on no basis.
+    `cost_usd` itself stays on the dict, as read."""
     if "cost_amount" not in row and "cost_usd" in row:
         legacy = row.get("cost_usd")
         priced = isinstance(legacy, (int, float)) and not isinstance(legacy, bool)
+        charged = priced and (row.get("billing") == "pay_per_use" or legacy != 0)
         row["cost_amount"] = float(legacy) if priced else None
-        row["cost_currency"] = "USD" if priced else None
-        row["cost_basis"] = "charged" if priced else None
+        row["cost_currency"] = "USD" if charged else None
+        row["cost_basis"] = "charged" if charged else None
     for name in ("cost_amount", "cost_currency", "cost_basis", "cost_unpriced_reason"):
         row.setdefault(name, None)
 
@@ -616,11 +626,14 @@ class NodeLedger:
         against (ADR-041 D5). The ceiling is per caller — each caller's own
         sum, never a total over callers — so the caller is a required
         argument even where it has one value. `caller_kind` narrows further
-        when given. Only rows whose `cost_basis` is `charged` and whose
-        `cost_currency` is `currency` add: a reference price was not debited,
-        another currency does not add to this one, and a null amount is a
-        call nobody priced. The row's `started_at` is already UTC, so the day
-        is its first ten characters.
+        when given. Rows in `currency` add whether their `cost_basis` is
+        `charged` or `unknown`: a call that may have been debited is counted
+        as debited, so a wallet nobody could read does not open the ceiling
+        (fail-closed, Mike's call, 2026-09-28). A `list_price_reference` row
+        does not add — a subscription covered it — and neither does a row in
+        another currency, which is left out without a word rather than
+        converted. A null amount is a call nobody priced. The row's
+        `started_at` is already UTC, so the day is its first ten characters.
         """
         moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         day = moment.date().isoformat()
@@ -632,7 +645,7 @@ class NodeLedger:
                 continue
             if not str(row.get("started_at", "")).startswith(day):
                 continue
-            if row.get("cost_basis") != "charged" or row.get("cost_currency") != currency:
+            if row.get("cost_basis") == NOT_DEBITED_BASIS or row.get("cost_currency") != currency:
                 continue
             cost = row.get("cost_amount")
             if cost is not None:
