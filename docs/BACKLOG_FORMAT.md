@@ -476,7 +476,7 @@ The full list, and the fixture that watches each rule fire, live in
 ## 8a. Writing an entry with the tool
 
 Editing the file by hand stays correct and always will — §8 is what holds the format, and
-no script can be the only way in. The five verbs exist so that the common path is right by
+no script can be the only way in. The seven verbs exist so that the common path is right by
 construction, and so that a rename cannot leave its inbound references behind (ADR-039).
 
 ```bash
@@ -491,6 +491,10 @@ uv run python tools/backlog/build.py close NAME --session=S72 --resolution=fixed
 
 uv run python tools/backlog/build.py append NAME --text='what was seen, with a file:line' \
     --by=CC [--date=YYYY-MM-DD]
+
+uv run python tools/backlog/build.py priority NAME --to=HIGH --by=CC [--reason='…']
+uv run python tools/backlog/build.py delete NAME --reason='filed twice, seconds apart' \
+    --by=CC [--force]
 ```
 
 What each one guarantees, beyond typing less:
@@ -526,6 +530,23 @@ What each one guarantees, beyond typing less:
   scripts — and why one of them truncated `backlog.md` to zero bytes. The text is one
   bullet and therefore one line; a newline in it is refused, because a newline can open a
   `###` of its own and split the entry in two.
+- **`priority` rewrites the priority inside the envelope and nothing else in the
+  heading**, and records the change as a dated bullet in the shape `append` writes —
+  `- **YYYY-MM-DD, who:** priority MEDIUM → HIGH: reason` — so the history of a priority
+  is read in the entry, not inferred from a field that changed without a trace (§4). The
+  word must be one of the five in §1 — `MED` is refused, because it is the typo the
+  checker reports — and setting the priority an entry already has is refused as a no-op.
+  `--reason` is optional and one line. Added 2026-09-28 on Mike's call: the priority was
+  the one envelope field no verb could change.
+- **`delete` removes an entry that should never have existed, and is not `close`.**
+  `close` is work that ended: it carries a resolution and its evidence and keeps the entry
+  in `backlog_closed.md`. `delete` is for an entry filed by mistake, or the same entry filed
+  twice seconds apart; it leaves nothing in either file, so `--reason` is mandatory and the
+  ANNOUNCE line carrying it is the only record. It refuses while any line in `backlog.md`
+  or `backlog_closed.md` references the name — bare or as `[[NAME]]`, by the rule in §8 —
+  and lists those lines; `--force` deletes anyway and leaves them for the checker to
+  report as stale. The copy taken before the write is the recovery path, and the verb
+  prints which copy that is. Added 2026-09-28 on Mike's call.
 
 **Every write is atomic, and every verb copies the board twice — before and after.** The
 bytes are built complete and then `os.replace`d onto the target, so a failure at any point
@@ -644,7 +665,7 @@ is filed under the name of the directory holding it, so moving that directory st
 second history rather than continuing the first.
 
 The verbs are watched to fire: `uv run python tools/backlog/verbs_fixture.py` builds a
-throwaway backlog, runs all five plus every refusal path, and asserts what the file says
+throwaway backlog, runs all seven plus every refusal path, and asserts what the file says
 afterwards. `uv run python tools/backlog/recovery_drill.py` is the other half — it
 reproduces the truncation against a throwaway board, both unprotected and protected, then
 asserts that each verb snapshots, that a verb works against a read-only board and leaves

@@ -14,7 +14,7 @@ What is watched here:
      shape being defended against is on the record rather than remembered;
   2. the same incident against a *protected* board, which is the case the tripwire exists
      for: the write is refused before it can truncate, and the board is byte-identical;
-  3. every verb takes a snapshot and leaves the board whole;
+  3. every verb — all seven — takes a snapshot and leaves the board whole;
   4. a verb still works against a protected board, and leaves it protected;
   5. the board is left protected when a verb refuses, and when one fails mid-write, and
      nothing the checker refused is left behind as a copy of the board;
@@ -179,6 +179,11 @@ def a_verb_works_against_a_protected_board(work):
           code == 0 and "written while the board was read-only" in text, out[-400:])
     check("the board is read-only again afterwards", not writable(board),
           "the replace leaves the temp file's mode behind, so this is the re-apply")
+    code, out = run(work, "priority", "BETA-ENTRY-POINTS-AT-ALPHA", "--to=MEDIUM",
+                    "--by=CC")
+    check("priority writes through the protection and leaves the board read-only",
+          code == 0 and "(MEDIUM, open," in board.read_text(encoding="utf-8")
+          and not writable(board), out[-400:])
     code, out = run(work, "close", "DELTA-ENTRY-HAS-NO-BODY", "--session=S2026-09-09.2",
                     "--resolution=moot", "--evidence=the drill needed a closed entry",
                     "--by=CC")
@@ -221,6 +226,12 @@ def a_refusal_leaves_the_board_protected(work):
     check("the verb refused before writing", code != 0, out[-300:])
     check("the board is still read-only after a refusal", not writable(board))
     check("and byte-identical", board.read_bytes() == before)
+    # ALPHA cites BETA, so delete refuses without --force.
+    code, out = run(work, "delete", "BETA-ENTRY-POINTS-AT-ALPHA", "--reason=drill",
+                    "--by=CC")
+    check("a delete refused over a reference leaves the board read-only and whole",
+          code == 2 and "ALPHA-ENTRY-EXISTS" in out and not writable(board)
+          and board.read_bytes() == before, out[-300:])
 
     # Refused by the checker rather than by argument parsing: this one reaches _commit.
     code, out = run(work, "add", "REFUSED-BY-THE-CHECKER", "--desc=описание",
@@ -252,12 +263,20 @@ def verbs_snapshot_and_keep_the_board_whole(work):
                  "--observed=written by build.py add", "--by=CC")),
         ("append", ("append", "DRILL-ENTRY-WAS-ADDED",
                     "--text=an observation appended by the drill", "--by=CC")),
+        ("priority", ("priority", "DRILL-ENTRY-WAS-ADDED", "--to=HIGH", "--by=CC",
+                      "--reason=the drill raises it")),
         ("move", ("move", "DRILL-ENTRY-WAS-ADDED", "--to=IN PROGRESS", "--by=CC")),
         ("rename", ("rename", "DRILL-ENTRY-WAS-ADDED", "DRILL-ENTRY-WAS-RENAMED",
                     "--by=CC")),
         ("close", ("close", "DRILL-ENTRY-WAS-RENAMED", "--session=S2026-09-09.1",
                    "--resolution=fixed", "--evidence=commit deadbeef, seen in the drill",
                    "--by=CC")),
+        ("add a mistake", ("add", "DRILL-ENTRY-FILED-BY-MISTAKE",
+                           "--desc=an entry the drill files only to delete it",
+                           "--priority=LOW", "--axis=honesty", "--origin=CC: recovery drill",
+                           "--observed=written by build.py add", "--by=CC")),
+        ("delete", ("delete", "DRILL-ENTRY-FILED-BY-MISTAKE",
+                    "--reason=filed by the drill to be deleted", "--by=CC")),
     ]
     for name, args in verbs:
         before = len(snaps(work))

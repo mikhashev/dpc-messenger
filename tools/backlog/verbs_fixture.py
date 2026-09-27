@@ -65,6 +65,24 @@ def check(label, condition, detail=""):
     print(f"  {'ok  ' if condition else 'FAIL'}  {label}" + (f"\n          {detail}" if not condition and detail else ""))
 
 
+def refused(code, out):
+    """Exit 2 from the verb's own argument check. A verb the script does not know falls
+    through to the render, which also exits 2 on a foreign board — so the code alone let
+    every refusal case pass before the verb existed."""
+    return code == 2 and "Refusing to overwrite" not in out
+
+
+def in_order(text, *parts):
+    """Every part present, each after the one before — False rather than a ValueError,
+    so a case that fails is reported as a FAIL and does not stop the run."""
+    at = -1
+    for part in parts:
+        at = text.find(part, at + 1)
+        if at < 0:
+            return False
+    return True
+
+
 def rmtree(path):
     """shutil.rmtree cannot delete a read-only file on Windows and ignore_errors hides
     that: the boards are read-only between edits, so every fixture run would leak its
@@ -341,6 +359,129 @@ def main():
         code, out = run(work, "close", "NO-SUCH-ENTRY", "--session=S1",
                         "--resolution=fixed", "--evidence=x", "--by=CC")
         check("close refuses a name that is not in the file", code == 2)
+
+        # --- priority --------------------------------------------------------------
+        # Added 2026-09-28 on Mike's call: the priority was the one envelope field no verb
+        # could change, so it was changed by hand or not at all.
+        board = work / "backlog.md"
+        head_before = next(ln for ln in board.read_text(encoding="utf-8").split("\n")
+                           if ln.startswith("### GAMMA-ENTRY-WAS-ADDED"))
+        n_snaps = len(list((work / "backups").rglob("backlog.*.auto.md")))
+        code, out = run(work, "priority", "GAMMA-ENTRY-WAS-ADDED", "--to=MEDIUM", "--by=CC",
+                        "--reason=the fixture lowers it")
+        text = board.read_text(encoding="utf-8")
+        head_after = next((ln for ln in text.split("\n")
+                           if ln.startswith("### GAMMA-ENTRY-WAS-ADDED")), "")
+        check("priority rewrites the priority in the envelope and nothing else",
+              code == 0 and head_after == head_before.replace("(HIGH, open,", "(MEDIUM, open,"),
+              f"{head_before!r} -> {head_after!r}\n{out[-400:]}")
+        check("priority records the change as a dated bullet naming the actor and the reason",
+              f"- **{TODAY}, CC:** priority HIGH → MEDIUM: the fixture lowers it" in text,
+              out[-300:])
+        body = text.split("### GAMMA-ENTRY-WAS-ADDED", 1)[1].split("###", 1)[0]
+        check("the priority bullet lands above the trailing metadata bullets",
+              in_order(body, "priority HIGH → MEDIUM", "- **axis:**"), body)
+        check("priority announces the change",
+              "ANNOUNCE  priority GAMMA-ENTRY-WAS-ADDED · HIGH → MEDIUM" in out, out[-300:])
+        check("priority snapshots the board like every other verb",
+              len(list((work / "backups").rglob("backlog.*.auto.md"))) > n_snaps)
+
+        code, out = run(work, "priority", "DELTA-ENTRY-HAS-NO-BODY", "--to=research", "--by=Ark")
+        text = board.read_text(encoding="utf-8")
+        check("priority takes the word in any case, and a reason is optional",
+              code == 0 and "(RESEARCH, open, 2026-08-01" in text
+              and f"- **{TODAY}, Ark:** priority LOW → RESEARCH\n" in text, out[-400:])
+
+        before = board.read_text(encoding="utf-8")
+        code, out = run(work, "priority", "GAMMA-ENTRY-WAS-ADDED", "--to=URGENT", "--by=CC")
+        check("priority refuses a word outside the vocabulary",
+              refused(code, out) and board.read_text(encoding="utf-8") == before, out[-300:])
+        code, out = run(work, "priority", "GAMMA-ENTRY-WAS-ADDED", "--to=MED", "--by=CC")
+        check("priority refuses the MED typo rather than guessing",
+              refused(code, out) and board.read_text(encoding="utf-8") == before, out[-300:])
+        code, out = run(work, "priority", "GAMMA-ENTRY-WAS-ADDED", "--to=MEDIUM", "--by=CC")
+        check("priority refuses a change to the priority the entry already has",
+              refused(code, out) and board.read_text(encoding="utf-8") == before, out[-300:])
+        code, out = run(work, "priority", "GAMMA-ENTRY-WAS-ADDED", "--by=CC")
+        check("priority refuses with no --to",
+              refused(code, out) and board.read_text(encoding="utf-8") == before, out[-300:])
+        code, out = run(work, "priority", "GAMMA-ENTRY-WAS-ADDED", "--to=LOW")
+        check("priority refuses when no actor is named",
+              refused(code, out) and board.read_text(encoding="utf-8") == before, out[-300:])
+        code, out = run(work, "priority", "NO-SUCH-ENTRY", "--to=LOW", "--by=CC")
+        check("priority refuses a name that is not in the file", refused(code, out), out[-300:])
+        code, out = run(work, "priority", "GAMMA-ENTRY-WAS-ADDED", "--to=LOW",
+                        "--reason=first\n### SMUGGLED-HEADING: x", "--by=CC")
+        check("priority refuses a newline in --reason",
+              refused(code, out) and board.read_text(encoding="utf-8") == before, out[-300:])
+        code, out = run(work, "priority", "GAMMA-ENTRY-WAS-ADDED", "--to=LOW", "--by=CC",
+                        "--dry-run")
+        check("priority --dry-run validates, announces, and writes nothing",
+              code == 0 and "ANNOUNCE  priority" in out
+              and board.read_text(encoding="utf-8") == before, out[-300:])
+
+        # --- delete ----------------------------------------------------------------
+        # Not `close`: close is work that ended with a resolution and evidence, and goes
+        # to the archive. delete is an entry that should never have existed.
+        arc_before = (work / "backlog_closed.md").read_bytes()
+        code, out = run(work, "delete", "ZETA-ACTOR-FROM-ENV", "--by=CC")
+        check("delete refuses with no --reason",
+              refused(code, out) and board.read_text(encoding="utf-8") == before, out[-300:])
+        code, out = run(work, "delete", "ZETA-ACTOR-FROM-ENV", "--reason=   ", "--by=CC")
+        check("delete refuses a whitespace-only --reason",
+              refused(code, out) and board.read_text(encoding="utf-8") == before, out[-300:])
+        code, out = run(work, "delete", "ZETA-ACTOR-FROM-ENV", "--reason=x")
+        check("delete refuses when no actor is named",
+              refused(code, out) and board.read_text(encoding="utf-8") == before, out[-300:])
+        code, out = run(work, "delete", "NO-SUCH-ENTRY", "--reason=x", "--by=CC")
+        check("delete refuses a name that is not in the file", refused(code, out), out[-300:])
+        code, out = run(work, "delete", "ZETA-ACTOR-FROM-ENV", "--reason=filed to test a fallback",
+                        "--by=CC", "--dry-run")
+        check("delete --dry-run validates, announces, and writes nothing",
+              code == 0 and "ANNOUNCE  delete ZETA-ACTOR-FROM-ENV" in out
+              and board.read_text(encoding="utf-8") == before, out[-300:])
+
+        n_snaps = len(list((work / "backups").rglob("backlog.*.auto.md")))
+        code, out = run(work, "delete", "ZETA-ACTOR-FROM-ENV",
+                        "--reason=filed to test a fallback", "--by=CC")
+        text = board.read_text(encoding="utf-8")
+        check("delete removes the heading and the body",
+              code == 0 and "ZETA-ACTOR-FROM-ENV" not in text
+              and "- **filed:** Johnny" not in text, out[-400:])
+        check("delete leaves every other entry in place",
+              all(n in text for n in ("### GAMMA-ENTRY-WAS-ADDED", "### BETA-ENTRY-POINTS-AT-ALPHA",
+                                      "### DELTA-ENTRY-HAS-NO-BODY")))
+        check("delete does not write the archive — that is what close is for",
+              (work / "backlog_closed.md").read_bytes() == arc_before)
+        check("delete announces the reason",
+              "ANNOUNCE  delete ZETA-ACTOR-FROM-ENV · filed to test a fallback · CC" in out,
+              out[-300:])
+        rec = re.search(r"^recover\s+.*?(\S+\.auto\.md)", out, re.M)
+        check("delete names the copy taken before the write, and it holds the entry",
+              bool(rec) and Path(rec.group(1)).exists()
+              and "ZETA-ACTOR-FROM-ENV" in Path(rec.group(1)).read_text(encoding="utf-8"),
+              out[-500:])
+        check("delete snapshots the board like every other verb",
+              len(list((work / "backups").rglob("backlog.*.auto.md"))) > n_snaps)
+
+        # A reference from the live file, and one from the archive.
+        run(work, "append", "BETA-ENTRY-POINTS-AT-ALPHA",
+            "--text=see also [[GAMMA-ENTRY-WAS-ADDED]]", "--by=CC")
+        before = board.read_text(encoding="utf-8")
+        code, out = run(work, "delete", "GAMMA-ENTRY-WAS-ADDED", "--reason=x", "--by=CC")
+        check("delete refuses an entry another entry references, and names it",
+              refused(code, out) and "BETA-ENTRY-POINTS-AT-ALPHA" in out
+              and board.read_text(encoding="utf-8") == before, out[-400:])
+        code, out = run(work, "delete", "BETA-ENTRY-POINTS-AT-ALPHA", "--reason=x", "--by=CC")
+        check("delete counts a reference from the archive too",
+              refused(code, out) and "backlog_closed.md" in out and "ALPHA-ENTRY-WAS-RENAMED" in out
+              and board.read_text(encoding="utf-8") == before, out[-400:])
+        code, out = run(work, "delete", "GAMMA-ENTRY-WAS-ADDED", "--reason=a duplicate",
+                        "--by=CC", "--force")
+        text = board.read_text(encoding="utf-8")
+        check("delete --force removes it and leaves the references for the checker",
+              code == 0 and "### GAMMA-ENTRY-WAS-ADDED" not in text
+              and "[[GAMMA-ENTRY-WAS-ADDED]]" in text, out[-400:])
 
         code, out = run(work, "--check")
         check("the file is still clean after every verb has run", code == 0, out[-400:])

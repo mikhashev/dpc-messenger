@@ -9,8 +9,10 @@
     uv run python tools/backlog/build.py close NAME  --session=S72 --resolution=fixed \\
                                                      --evidence='…' --by=CC
     uv run python tools/backlog/build.py append NAME --text='…' --by=CC
+    uv run python tools/backlog/build.py priority NAME --to=HIGH --by=CC [--reason='…']
+    uv run python tools/backlog/build.py delete NAME --reason='…' --by=CC [--force]
 
-`--by` is mandatory on all five write verbs and never falls back to the OS user: five
+`--by` is mandatory on all seven write verbs and never falls back to the OS user: five
 actors share one account on this box, so a derived name would stamp one label on all of
 them and look authoritative doing it. It stood in brackets here — optional — for a day
 after the code stopped accepting it that way.
@@ -18,7 +20,7 @@ after the code stopped accepting it that way.
 The board and the graph are written in one pass, so the two artefacts can never disagree
 about how fresh they are.
 
-Rendering and `--check` never touch backlog.md. The five verbs do (ADR-039): each writes
+Rendering and `--check` never touch backlog.md. The seven verbs do (ADR-039): each writes
 the file, re-runs `--check` over the result in a scratch copy first, and refuses to keep a
 write that would introduce a refusal. Add `--dry-run` to validate without writing.
 
@@ -58,7 +60,11 @@ ROOT = Path(__file__).resolve().parents[2]   # tools/backlog/build.py -> repo ro
 # hand-written script that truncated it: adding a dated observation to an existing entry
 # is the commonest edit there is, and the tool had no verb for it, so the common path led
 # straight out of the tool and past every guard in it.
-VERBS = ("add", "append", "close", "move", "rename")
+#
+# `priority` and `delete` joined on 2026-09-28, Mike's call. The priority was the one
+# envelope field no verb could change, and an entry filed by mistake could only leave
+# through `close`, which files it in the archive as work that ended.
+VERBS = ("add", "append", "close", "delete", "move", "priority", "rename")
 VERB = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in VERBS else ""
 
 # An explicit path lets --check run against any project's backlog (and against a fixture,
@@ -1164,7 +1170,9 @@ def _validate(src_text, arc_text):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _commit(src_text, arc_text, announcement):
+def _commit(src_text, arc_text, announcement, recovery=""):
+    """Validate, snapshot, write, snapshot. `recovery`, when given, is printed with the
+    path of the copy taken before the write — the one place a deleted entry still lives."""
     code, out = _validate(src_text, arc_text)
     if code != 0:
         print("refused — the result would not pass --check, so nothing was written:\n")
@@ -1187,6 +1195,9 @@ def _commit(src_text, arc_text, announcement):
     _touched = [SRC] + ([ARCHIVE] if arc_text != _ARC_TEXT else [])
     # Before the verb's first byte: this is the copy a mistaken verb is undone from.
     _snapshot(_touched, "before the write")
+    # Read back rather than taken from _snapshot: when the board is unchanged since the
+    # newest copy, no new copy is made and the newest one is the state before this write.
+    _before = _newest_snapshot(SRC.stem) if recovery else None
     _atomic_write(SRC, src_text)
     _atomic_write(ARCHIVE, arc_text)
     # And after it. The copy above preserves the state this verb destroyed; this one
@@ -1235,6 +1246,10 @@ def _commit(src_text, arc_text, announcement):
     # No JSON payload, deliberately — a payload is an invitation to grow these lines into
     # the sync channel ADR-039 declines to build. Sending it is the caller's job.
     print("ANNOUNCE  " + announcement)
+    if recovery:
+        print(f"recover   {recovery}: {_before[1]}" if _before else
+              f"recover   no copy was taken before this write, so {recovery} is not "
+              f"recoverable from {BACKUP_DIR} — see the snapshot warning above.")
     print("rebuild   " + rebuild_command())
 
 
@@ -1444,6 +1459,17 @@ if VERB == "add":
 # that run. `Renamed` is in the list because `rename` appends its trace below them all.
 META_BULLET_RE = re.compile(r"^\s*-\s*\*\*(?:axis|filed|taken|Renamed)\b")
 
+
+def _with_dated_bullet(block, text):
+    """`block` with `- **date, who:** text` above its trailing metadata bullets."""
+    block = list(block)
+    j = len(block)
+    while j > 1 and (not block[j - 1].strip() or META_BULLET_RE.match(block[j - 1])):
+        j -= 1
+    # An entry with no body at all keeps the blank line under its heading.
+    block[j:j] = ([""] if j == 1 else []) + [f"- **{_when}, {_by}:** {text}"]
+    return block
+
 if VERB == "append":
     # The commonest edit there is: one dated observation onto an entry that already
     # exists. Its absence is what sent people to hand-written scripts.
@@ -1462,14 +1488,107 @@ if VERB == "append":
              "which is the graph corruption §8 refuses. Run the verb twice, or write the "
              "second half as its own entry.")
     start, end = _span(e)
-    block = lines[start:end]
-    j = len(block)
-    while j > 1 and (not block[j - 1].strip() or META_BULLET_RE.match(block[j - 1])):
-        j -= 1
-    # An entry with no body at all keeps the blank line under its heading.
-    block[j:j] = ([""] if j == 1 else []) + [f"- **{_when}, {_by}:** {text}"]
+    block = _with_dated_bullet(lines[start:end], text)
     _commit("\n".join(lines[:start] + block + lines[end:]), _ARC_TEXT,
             f"append {e['ref'] or e['name']} · {text[:60]} · {_by}")
+    sys.exit(0)
+
+if VERB == "priority":
+    # The priority is the one field in the envelope no verb could change. The heading is
+    # rewritten in that one token, and the change is recorded as a dated bullet, the same
+    # shape `append` writes — a priority that moves silently is `Updated:` again (§4).
+    if not ARGS or not _flag("to"):
+        _die("usage: build.py priority NAME --to=HIGH --by=CC [--reason='…'] "
+             "[--date=YYYY-MM-DD] [--dry-run]")
+    e = _find(ARGS[0])
+    allowed = [p for p in PRIORITIES if p != "—"]      # the checker's own vocabulary
+    to = _flag("to").strip().upper()
+    if to not in allowed:
+        _die(f"--to must be one of {'/'.join(allowed)} (§1); got «{_flag('to')}».",
+             "Nothing is guessed: MED is the typo the checker reports, not MEDIUM.")
+    if e["pri"] == to:
+        _die(f"«{e['ref'] or e['name']}» is already {to}; nothing to change.")
+    reason = (_flag("reason") or "").strip()
+    if "\n" in reason or "\r" in reason:
+        _die("--reason is part of one bullet and so one line, and this text carries a "
+             "newline, which can open a heading of its own and split the entry in two.")
+    start, end = _span(e)
+    block = lines[start:end]
+    head = block[0]
+    sp = env_span(head)
+    if not sp:
+        _die(f"«{e['ref'] or e['name']}» has no envelope to carry a priority (§1). Write "
+             f"the (PRIORITY, status, date — origin) block by hand first.")
+    s = head.rstrip()
+    inner = s[sp[0] + 1:sp[1] - 1]
+    meta, sep, rest = inner.partition("—")
+    # The same reading the parser does: leading emphasis is skipped, the token is the
+    # first word, and CRIT/NORMAL are the legacy spellings it already accepts.
+    m = re.match(r"^([\s*_`]*)(CRIT|CRITICAL|HIGH|MEDIUM|LOW|RESEARCH|NORMAL)\b", meta)
+    if m:
+        meta = meta[:m.start(2)] + to + meta[m.end(2):]
+    elif e["pri_typo"] and e["pri_typo"].lower() not in (
+            "open", "in-progress", "done-awaiting-observation", "closed"):
+        t = re.match(r"^(\s*)" + re.escape(e["pri_typo"]) + r"\b", meta)
+        meta = (meta[:t.end(1)] + to + meta[t.end():]) if t else f"{to}, {meta.lstrip()}"
+    else:
+        meta = f"{to}, {meta.lstrip()}"
+    block[0] = s[:sp[0]] + "(" + meta + sep + rest + ")"
+    was = e["pri"] if e["pri"] != "—" else (e["pri_typo"] or "none")
+    note = f"priority {was} → {to}" + (f": {reason}" if reason else "")
+    block = _with_dated_bullet(block, note)
+    _commit("\n".join(lines[:start] + block + lines[end:]), _ARC_TEXT,
+            f"priority {e['ref'] or e['name']} · {was} → {to}"
+            + (f" · {reason[:60]}" if reason else "") + f" · {_by}")
+    sys.exit(0)
+
+if VERB == "delete":
+    # Not `close`. `close` is work that ended — a resolution, its evidence, and a place in
+    # the archive. `delete` is an entry that should never have existed: filed by mistake,
+    # or the same entry filed twice seconds apart. It leaves no trace in either file; the
+    # copy taken before the write is where it can be recovered from, and the output says
+    # which copy that is.
+    if not ARGS:
+        _die("usage: build.py delete NAME --reason='…' --by=CC [--force] [--dry-run]",
+             "  delete removes an entry that should never have existed. Work that ended "
+             "goes through `close`, which keeps it in backlog_closed.md.")
+    e = _find(ARGS[0])
+    reason = (_flag("reason") or "").strip()
+    if not reason:
+        _die("--reason is mandatory: a deleted entry leaves nothing behind on the board, "
+             "so the ANNOUNCE line is the only record of why.",
+             "If the work ended — fixed, disproved, a duplicate of something real — use "
+             "`close` with the resolution instead; it keeps the entry in the archive.")
+    if "\n" in reason or "\r" in reason:
+        _die("--reason is one line.")
+    who = e["ref"] or e["name"]
+    start, end = _span(e)
+    # Same token rule as `rename`: a bare name in a body is a reference (§8), and
+    # `[[NAME]]` is one by construction. The entry's own lines do not count.
+    tok = re.compile(rf"(?<![A-Za-z0-9-]){re.escape(who)}(?![A-Za-z0-9-])")
+    citing = []
+    for label, src_lines, skip in ((SRC.name, lines, range(start, end)),
+                                   (ARCHIVE.name, _ARC_TEXT.split("\n"), range(0))):
+        cur = ""
+        for k, ln in enumerate(src_lines):
+            h = re.match(r"^### (.+)", ln)
+            if h:
+                cur = (NAME_RE.match(h.group(1)) or [h.group(1)[:60]])[0]
+            if k not in skip and tok.search(ln):
+                citing.append(f"  {label}:{k + 1}  {cur or '(before any entry)'}")
+    if citing and "--force" not in sys.argv:
+        _die(f"«{who}» is referenced from {len(citing)} line(s):", *citing,
+             "Deleting it would leave those references pointing at nothing. Fix them "
+             "first, or pass --force and the checker will report them as stale.")
+    new_lines = lines[:start] + lines[end:]
+    # The blank separator the entry sat on would double up with the one before it.
+    if start < len(new_lines) and start > 0 and not new_lines[start].strip() \
+            and not new_lines[start - 1].strip():
+        del new_lines[start]
+    _commit("\n".join(new_lines), _ARC_TEXT,
+            f"delete {who} · {reason[:80]} · {_by}"
+            + (f" · {len(citing)} reference(s) left dangling" if citing else ""),
+            recovery=f"{who} is in the copy taken before the write")
     sys.exit(0)
 
 
