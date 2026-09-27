@@ -32,7 +32,7 @@ from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
 from .sent_annotations import SentAnnotationStore
-from .loop import run_llm_loop, RECORDED_USAGE_FIELDS, task_cost_fields
+from .loop import run_llm_loop, RECORDED_USAGE_FIELDS, task_cost_fields, unmeasured_task_cost
 from .utils import (
     get_agent_root, ensure_agent_dirs, utc_now_iso, append_jsonl
 )
@@ -830,8 +830,9 @@ class DpcAgent:
                     "prompt": str(task.data)[:2000] if task.data else "",
                     "response": task.result or "",
                     "rounds": 0,
-                    # Not measured here: this record holds no price, not a zero one.
-                    "cost_amount": None,
+                    # Not measured here: this record holds no price, not a zero one,
+                    # under the same keys a measured task's record carries.
+                    **unmeasured_task_cost(),
                 }
                 (results_dir / f"{task.id}.json").write_text(
                     _json.dumps(result_data, ensure_ascii=False, indent=2),

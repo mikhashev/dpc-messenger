@@ -233,17 +233,22 @@ class DpcLlmAdapter:
         condition for sending a vision query, so an unknown alias or an
         unanswered PROVIDERS_RESPONSE reads as no.
         """
+        return bool(self._peer_menu_row(dpc_agent_provider, peer_id).get("supports_vision"))
+
+    def _peer_menu_row(self, dpc_agent_provider: Any, peer_id: str) -> Dict[str, Any]:
+        """The peer's PROVIDERS_RESPONSE row for the alias this agent will ask
+        it to run, or an empty dict where there is none."""
         alias = self._remote_provider_alias(dpc_agent_provider)
         if not alias:
-            return False
+            return {}
         service = getattr(dpc_agent_provider, '_service', None) if dpc_agent_provider else None
         peer_providers = (getattr(service, 'peer_metadata', None) or {}).get(
             peer_id, {}
         ).get("providers") or []
         for row in peer_providers:
             if row.get("alias") == alias:
-                return bool(row.get("supports_vision"))
-        return False
+                return row
+        return {}
 
     @staticmethod
     def _images_for_peer(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -408,10 +413,14 @@ class DpcLlmAdapter:
                 served_by=facts.get("served_by"),
                 started_at=started_at,
                 duration_s=duration_s,
-                # Priced by the route (`_price_usage`); on the peer route the
-                # billing model is the host's copy from the wire and the cost is
-                # absent: this node did not run the call (D3).
-                billing=facts.get("billing") or get_billing_model(alias or "", model),
+                # Priced by the route (`_price_usage`), so a local route always
+                # has `billing` here; on the peer route the billing model is the
+                # host's copy from the wire and the cost is absent: this node
+                # did not run the call (D3). A host older than the field is
+                # classified by the type its menu row names.
+                billing=facts.get("billing") or get_billing_model(
+                    alias or "", model, provider_type=facts.get("host_provider_type"),
+                ),
                 **{name: usage.get(name) for name in COST_FIELDS},
                 # Copied from the wire on the peer route, never computed here.
                 **{name: facts.get(name) for name in TARIFF_FIELDS},
@@ -510,6 +519,9 @@ class DpcLlmAdapter:
             self._note_call(
                 route="peer", alias=self._remote_provider_alias(dpc_agent_provider),
                 served_by=effective_peer_id,
+                # The host's word for its alias's type, for the billing
+                # fallback when its answer carries no billing model.
+                host_provider_type=self._peer_menu_row(dpc_agent_provider, effective_peer_id).get("type"),
             )
             if self._compute_host:
                 # Per-agent remote routing: build a context object from per-agent values

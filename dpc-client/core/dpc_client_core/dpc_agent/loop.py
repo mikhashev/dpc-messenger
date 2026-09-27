@@ -159,6 +159,13 @@ def task_cost_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
     return fields
 
 
+def unmeasured_task_cost() -> Dict[str, Any]:
+    """The keys of `task_cost_fields`, every one null: a record that measured no
+    call. `cost_unpriced_calls` is null too — nobody counted the calls, which is
+    not «none were unpriced»."""
+    return {name: None for name in task_cost_fields({})}
+
+
 def round_progress_payload(
     speed: Optional[Dict[str, Any]],
     *,

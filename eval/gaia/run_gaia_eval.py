@@ -1051,22 +1051,29 @@ def _task_cost(usage: Dict[str, Any]) -> Dict[str, Any]:
 
 def _sum_cost(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """What the run cost, per currency — two currencies never add — with the
-    tasks that reported no price counted apart. A record written before
-    2026-09-28 carries `cost_usd`, read as that many dollars; a task priced
-    free in no currency (a local card) sums under `free`."""
+    tasks that reported no price counted apart. A task priced in two
+    currencies carries `cost_by_currency` and a null `cost_amount`
+    (`loop.task_cost_fields`); each of its amounts sums under its own currency.
+    A record written before 2026-09-28 carries `cost_usd`, read as that many
+    dollars; a task priced free in no currency (a local card) sums under `free`."""
     by_currency: Dict[str, Dict[str, Any]] = {}
     not_reported = 0
     for record in results:
         usage = record.get("usage") or {}
-        amount, currency = usage.get("cost_amount"), usage.get("cost_currency")
-        if "cost_amount" not in usage and isinstance(usage.get("cost_usd"), (int, float)):
-            amount, currency = usage["cost_usd"], "USD"
-        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        amounts = [(usage.get("cost_amount"), usage.get("cost_currency"))]
+        if isinstance(usage.get("cost_by_currency"), dict) and usage["cost_by_currency"]:
+            amounts = [(amount, currency) for currency, amount in usage["cost_by_currency"].items()]
+        elif "cost_amount" not in usage and isinstance(usage.get("cost_usd"), (int, float)):
+            amounts = [(usage["cost_usd"], "USD")]
+        amounts = [(amount, currency) for amount, currency in amounts
+                   if isinstance(amount, (int, float)) and not isinstance(amount, bool)]
+        if not amounts:
             not_reported += 1
             continue
-        entry = by_currency.setdefault(currency or "free", {"total": 0.0, "reported_by": 0})
-        entry["total"] += float(amount)
-        entry["reported_by"] += 1
+        for amount, currency in amounts:
+            entry = by_currency.setdefault(currency or "free", {"total": 0.0, "reported_by": 0})
+            entry["total"] += float(amount)
+            entry["reported_by"] += 1
     return {"by_currency": by_currency, "not_reported_by": not_reported}
 
 

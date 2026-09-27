@@ -984,8 +984,8 @@ class Gateway:
         """The currency a vendor alias's ceiling is counted in; an alias this
         node cannot price is refused, not served free.
 
-        The ceiling is money, and money is counted from the charged rows; an
-        alias whose rows carry no charged amount can never reach its ceiling,
+        The ceiling is money, and money is counted from the rows' amounts in
+        its currency; an alias whose rows carry none can never reach it,
         and `vendor_quotas` would guard nothing (Ark's review of `11b1de5c`,
         2026-09-14). The currency comes from the provider
         (`pricing.vendor_ceiling_currency`). `unrated`, not the spent
@@ -1408,12 +1408,16 @@ class Gateway:
             # Counted here over the visible text, which the host had already
             # separated from its thinking; the label is this node's to set.
             output_includes_thinking = "excludes"
-        # The host's billing model travels on the wire when it counted; absent,
-        # it is this node's table for the model the host named. The host's own
-        # cost does not travel and is not copied: this node ran nothing and
-        # prices nothing, so the row's cost stays null (D3). What it owes is the
-        # owner's tariff, copied as one group or not at all.
-        billing = result.get("billing") or get_billing_model(remote_alias, model)
+        # The host's billing model travels on the wire when it counted; absent
+        # — a host older than the field — it is this node's table, asked with
+        # the provider type the host's menu row names, so a typed alias is not
+        # classified by its name. The host's own cost does not travel and is
+        # not copied: this node ran nothing and prices nothing, so the row's
+        # cost stays null (D3). What it owes is the owner's tariff, copied as
+        # one group or not at all.
+        billing = result.get("billing") or get_billing_model(
+            remote_alias, model, provider_type=row.get("type"),
+        )
         tariff = {name: result.get(name) for name in TARIFF_FIELDS}
         if any(tariff[name] is None for name in TARIFF_FIELDS[:4]):
             tariff = {}
