@@ -1031,7 +1031,8 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path],
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "rounds": usage.get("rounds"),
-            "cost_usd": usage.get("cost"),
+            # Per currency and null where nothing was priced (`task_cost_fields`).
+            **_task_cost(usage),
             # Reported by providers that have a prompt cache (DeepSeek does).
             # The local llama.cpp path does not report it today — recorded as
             # missing rather than as zero, because a zero here would read as
@@ -1040,6 +1041,33 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path],
             "prompt_cache_miss_tokens": usage.get("prompt_cache_miss_tokens"),
         },
     }
+
+
+def _task_cost(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """The task's price as the agent's burn line carries it."""
+    from dpc_client_core.dpc_agent.loop import task_cost_fields
+    return task_cost_fields(usage)
+
+
+def _sum_cost(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the run cost, per currency — two currencies never add — with the
+    tasks that reported no price counted apart. A record written before
+    2026-09-28 carries `cost_usd`, read as that many dollars; a task priced
+    free in no currency (a local card) sums under `free`."""
+    by_currency: Dict[str, Dict[str, Any]] = {}
+    not_reported = 0
+    for record in results:
+        usage = record.get("usage") or {}
+        amount, currency = usage.get("cost_amount"), usage.get("cost_currency")
+        if "cost_amount" not in usage and isinstance(usage.get("cost_usd"), (int, float)):
+            amount, currency = usage["cost_usd"], "USD"
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            not_reported += 1
+            continue
+        entry = by_currency.setdefault(currency or "free", {"total": 0.0, "reported_by": 0})
+        entry["total"] += float(amount)
+        entry["reported_by"] += 1
+    return {"by_currency": by_currency, "not_reported_by": not_reported}
 
 
 async def main_async(args) -> int:
@@ -1279,7 +1307,7 @@ async def main_async(args) -> int:
                 "completion": _sum("completion_tokens"),
                 "total": _sum("total_tokens"),
                 "rounds": _sum("rounds"),
-                "cost_usd": _sum("cost_usd"),
+                "cost": _sum_cost(results),
                 "prompt_cache_hit": _sum("prompt_cache_hit_tokens"),
                 "prompt_cache_miss": _sum("prompt_cache_miss_tokens"),
                 "note": ("cache hit/miss is reported only by providers that expose a "

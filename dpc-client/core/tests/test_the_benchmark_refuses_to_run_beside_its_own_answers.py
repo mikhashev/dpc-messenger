@@ -266,7 +266,7 @@ def _outcome(*a, **k):
         "task_id": "t1", "gold_sha256": "abc", "answer": "7", "correct": True,
         "error": None, "had_attachment": False, "seconds": 1.0,
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
-                  "rounds": 1, "cost_usd": 0.0,
+                  "rounds": 1, "cost_amount": 0.0, "cost_currency": None,
                   "prompt_cache_hit_tokens": None, "prompt_cache_miss_tokens": None},
     }
 

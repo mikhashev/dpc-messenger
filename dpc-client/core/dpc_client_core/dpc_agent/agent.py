@@ -32,7 +32,7 @@ from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
 from .sent_annotations import SentAnnotationStore
-from .loop import run_llm_loop, RECORDED_USAGE_FIELDS
+from .loop import run_llm_loop, RECORDED_USAGE_FIELDS, task_cost_fields
 from .utils import (
     get_agent_root, ensure_agent_dirs, utc_now_iso, append_jsonl
 )
@@ -586,7 +586,9 @@ class DpcAgent:
             "conversation_id": conversation_id,
             "response_preview": response[:200] if response else "",
             "rounds": usage.get("rounds", 0),
-            "cost_usd": usage.get("cost", 0),
+            # The task's own price, per currency and null where nobody priced
+            # a call (`loop.task_cost_fields`); the ledger rows are the record.
+            **task_cost_fields(usage),
             # The same block as the task result, under the same names: this is
             # the series a burn rate is computed from, and it has carried a
             # cost with no decomposition since it was written.
@@ -609,7 +611,7 @@ class DpcAgent:
                 "prompt": message[:2000] if message else "",
                 "response": response or "",
                 "rounds": usage.get("rounds", 0),
-                "cost_usd": usage.get("cost", 0),
+                **task_cost_fields(usage),
                 "tokens": tokens_block(usage),
             }
             (results_dir / f"{event_task_id}.json").write_text(
@@ -828,7 +830,8 @@ class DpcAgent:
                     "prompt": str(task.data)[:2000] if task.data else "",
                     "response": task.result or "",
                     "rounds": 0,
-                    "cost_usd": 0.0,
+                    # Not measured here: this record holds no price, not a zero one.
+                    "cost_amount": None,
                 }
                 (results_dir / f"{task.id}.json").write_text(
                     _json.dumps(result_data, ensure_ascii=False, indent=2),

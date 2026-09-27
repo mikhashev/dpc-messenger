@@ -102,9 +102,61 @@ def accumulate_call_usage(
     accumulated["completion_tokens"] = accumulated.get("completion_tokens", 0) + usage.get("completion_tokens", 0)
     accumulated["total_tokens"] = accumulated.get("total_tokens", 0) + usage.get("total_tokens", 0)
     accumulated["cost"] = accumulated.get("cost", 0) + usage.get("cost", 0)
+    _accumulate_cost(accumulated, usage)
     if counts_as_round:
         accumulated["rounds"] = accumulated.get("rounds", 0) + 1
     merge_optional_usage(accumulated, usage)
+
+
+def _accumulate_cost(accumulated: Dict[str, Any], usage: Dict[str, Any]) -> None:
+    """The call's own price, added per currency: `cost_by_currency`, the
+    bases seen, and how many calls were priced free or not at all. A call whose
+    usage names no price (`cost_amount` absent) — a peer's answer — adds nothing
+    here, as it adds nothing to this node's spend."""
+    if "cost_amount" not in usage:
+        return
+    amount, currency = usage.get("cost_amount"), usage.get("cost_currency")
+    if amount is None:
+        accumulated["cost_unpriced_calls"] = accumulated.get("cost_unpriced_calls", 0) + 1
+        return
+    accumulated["cost_priced_calls"] = accumulated.get("cost_priced_calls", 0) + 1
+    if currency is None:
+        return
+    by_currency = accumulated.setdefault("cost_by_currency", {})
+    by_currency[currency] = by_currency.get(currency, 0.0) + float(amount)
+    bases = accumulated.setdefault("cost_bases", [])
+    if usage.get("cost_basis") not in bases:
+        bases.append(usage.get("cost_basis"))
+
+
+def task_cost_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """A task's cost as its burn line and result file carry it.
+
+    `cost_amount` in `cost_currency` on `cost_basis` when every priced call was
+    in one currency on one basis; None where no call was priced — null, never
+    0, because «nobody priced it» is not «free». Two currencies never add: the
+    amount is then None and `cost_by_currency` carries each. A task with some
+    calls priced and some not keeps the priced sum and says how many were not
+    (`cost_unpriced_calls`). A local card's calls are priced free, 0.0 in no
+    currency.
+    """
+    by_currency = dict(usage.get("cost_by_currency") or {})
+    bases = list(usage.get("cost_bases") or [])
+    fields: Dict[str, Any] = {
+        "cost_amount": None,
+        "cost_currency": None,
+        "cost_basis": None,
+        "cost_unpriced_calls": int(usage.get("cost_unpriced_calls", 0) or 0),
+    }
+    if len(by_currency) == 1:
+        (currency, amount), = by_currency.items()
+        fields.update(cost_amount=amount, cost_currency=currency,
+                      cost_basis=bases[0] if len(bases) == 1 else None)
+    elif len(by_currency) > 1:
+        fields["cost_by_currency"] = by_currency
+    elif usage.get("cost_priced_calls"):
+        fields["cost_amount"] = 0.0
+    return fields
 
 
 def round_progress_payload(
