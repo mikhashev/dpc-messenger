@@ -42,11 +42,11 @@ _CREATION_NEW_PROCESS_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platfor
 
 DEFAULTS: Dict[str, Any] = {
     "n_ctx": 262144,
-    # None means AUTO: the ladder in ensure_running steps f16 -> q8_0 -> q4_0
-    # against the free VRAM the card actually has, starting each rung and
-    # reading the child's own out-of-memory verdict from its log tail (the
-    # first live call, 2026-08-19 18:09, died on f16 in 12 s — a failed rung is
-    # cheap). An alias that names a type gets exactly that type, one attempt.
+    # None means AUTO: the ladder in _launch_auto_kv steps q8_0 -> q4_0 (f16
+    # is not a rung, see KV_LADDER), admitting each by the card's VRAM
+    # arithmetic and then reading the child's own out-of-memory verdict from
+    # its log tail. An alias that names a type gets exactly that type, one
+    # attempt.
     "cache_type_k": None,
     "cache_type_v": None,
     # Measured 2026-08-19 on b10472 at 139 490 tokens: without an explicit
@@ -68,7 +68,8 @@ DEFAULTS: Dict[str, Any] = {
     # 0.589 at n=4, i.e. 2.78 tokens per target pass against 3.35. The value
     # stays until its owner picks; the aliases already override it with 4.
     "spec_draft_n_max": 3,
-    # None = the server's own choice (4 unified slots on b10472). An explicit
+    # None = the server's own choice (4 unified slots on b10472; unmeasured on
+    # b11146, where the fleet sets 2 and the child logs n_slots = 2). An explicit
     # value is ALWAYS sent, so -np 1 is expressible — the old guard ate it and
     # the config said 1 while the server ran 4.
     "n_parallel": None,
@@ -85,10 +86,11 @@ DEFAULTS: Dict[str, Any] = {
     # How many context checkpoints the child keeps per slot, and how far apart.
     # None = the build's own 32 / 8192, which is what every install had. The
     # reason to name them is size, not availability: a checkpoint is a snapshot
-    # of the recurrent state and costs ~585-700 MiB here, so a parked deep
-    # conversation weighs 12-16 GB of which only ~2.5 GB is attention KV. With
-    # the host cache holding whole conversations, the checkpoint count decides
-    # how many of them fit — four checkpoints put a 150K state near 5 GB.
+    # of the recurrent state and grows with depth (~150 MiB near the start to
+    # ~920 MiB at ~196K tokens, qwen3.8-27B on b11146, 2026-09-24..28), so at
+    # the build's 32 a parked deep conversation is mostly checkpoints, not
+    # attention KV. With the host cache holding whole conversations, the
+    # checkpoint count decides how many of them fit.
     # The trade is where the engine can resume from after a prefix divergence;
     # with the stable-prefix layout the divergence sits in the turn tail, which
     # is exactly what the surviving checkpoints cover.

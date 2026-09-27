@@ -1296,8 +1296,10 @@
                         </div>
                         <p class="help-text">
                           The vision projector file passed to llama-server as --mmproj. With it
-                          the server serves images (and video) at full context; without it the
-                          alias is text-only. Needs KV headroom — q4_0 leaves it, q8_0 does not.
+                          the server serves images at full context; without it the alias is
+                          text-only. The projector's VRAM is not counted by the admission
+                          arithmetic (see VRAM overhead below); its fit beside a q8_0 KV cache
+                          is unmeasured.
                         </p>
                       </div>
 
@@ -1319,12 +1321,13 @@
                         />
                         <p class="help-text">
                           How many KV cells llama-server allocates (-c). Unset = 262 144. This is
-                          <strong>one pool shared by every slot</strong>, not a per-conversation
-                          limit — «Context Window» below is what a single conversation may occupy,
-                          and nothing derives one from the other. Two agents of one group carried
-                          137 616 + 139 819 tokens here and did not fit the default pool: the
-                          parked conversation could not be laid back down and was re-read from
-                          zero. Costs VRAM — measured ≈18 KiB per cell with q4_0 KV on this card.
+                          <strong>one pool shared by every slot</strong> (with Unified KV pool on,
+                          the default), not a per-conversation limit — «Context Window» below is
+                          what a single conversation may occupy, and nothing derives one from the
+                          other; two agents at 137 616 + 139 819 tokens did not fit the default
+                          pool, and the parked one was re-read from zero. Costs VRAM — ≈18 KiB per
+                          cell with q4_0 KV, computed for qwen3.8-27B (16 attention layers × 1024
+                          wide); other models differ.
                         </p>
                       </div>
 
@@ -1399,9 +1402,12 @@
                           cache when a cached prompt diverges in the middle (--cache-reuse). Off by
                           default, and with it off one changed line early in a prompt costs a
                           re-read of everything behind it — which matters if your prompt rebuilds
-                          anything ahead of the conversation. We have not measured a value on this
-                          fleet yet; start around 256 and watch how much of each prompt the server
-                          reports as already present.
+                          anything ahead of the conversation. <strong>The child ignores it</strong>
+                          when an mmproj is loaded, and on models whose KV memory cannot shift —
+                          the qwen3.8 hybrids refuse it even without a projector. On this machine
+                          it has been disabled on every start (47 of 47 in the qwen3.8 27b log,
+                          b10964–b11146). Check the child's start log for
+                          <code>will be disabled</code> before counting on it.
                         </p>
                       </div>
 
@@ -1429,31 +1435,19 @@
                                depends on the model's attention layers and head width, so a
                                number baked into a label would be right for one model only.
 
-                               What the argument parser accepts is NOT what the attention
-                               kernels implement. Measured 2026-08-22 on b10472 + this card:
-                               iq4_nl parsed fine and dropped prefill from ~1200-2500 tok/s to
-                               66 and falling, GPU at 2 % and CPU at 50 % — the CUDA build
-                               carries set_rows/get_rows/dequantize for it while every one of
-                               its 301 attention instantiations is flash_attn_ext_f16<…>.
-                               «Unverified» was itself a guess, and it was wrong for four of
-                               the nine. Decided 2026-08-22 by decoding the 48
-                               flash_attn_ext_vec instantiations in ggml-cuda.dll: the template
-                               arguments are Itanium-mangled enum values (L9ggml_type<N>E), so
-                               the type names never appear as text and searching for them
-                               returns nothing for every type, compiled or not. Decoded, the
-                               compiled K/V pairs are exactly BF16, F16, Q4_0 and Q8_0, twelve
-                               each. F32, Q4_1, Q5_0, Q5_1 and IQ4_NL have none.
-
-                               The asymmetry is the point: absence of a kernel is decisive —
-                               that type WILL fall to the CPU — while presence says only that
-                               the path exists, not that it is fast here. So four options now
-                               carry the iq4_nl warning, and the ones that compile say what
-                               was and was not measured. -->
-                          <option value="">Auto (q8_0 → q4_0 by free VRAM)</option>
+                               Which ones have a CUDA attention kernel was decided by decoding
+                               the flash_attn_ext_vec instantiations in ggml-cuda.dll — the
+                               type arguments are Itanium-mangled enum values
+                               (L9ggml_type<N>E), so searching for type names finds nothing.
+                               b10472 (2026-08-22) and b11146 (2026-09-28) both carry exactly
+                               F16, Q4_0, Q8_0 and BF16, twelve instantiations each. Absence is
+                               decisive (the type falls to the CPU); presence says only that
+                               the path exists, not that it is fast. -->
+                          <option value="">Auto (q8_0, else q4_0 — by the card's VRAM arithmetic)</option>
                           <option value="f32">f32 — 32 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
-                          <option value="f16">f16 — 16 bit, kernel present (needs headroom, check the card)</option>
+                          <option value="f16">f16 — 16 bit, kernel present (paged to 47–51 tok/s on a full card, b10472)</option>
                           <option value="bf16">bf16 — 16 bit, kernel present (speed unmeasured here)</option>
-                          <option value="q8_0">q8_0 — 8.5 bit, kernel present (speed unmeasured here)</option>
+                          <option value="q8_0">q8_0 — 8.5 bit, kernel present (~708–834 tok/s prefill at 130–162K, b10472)</option>
                           <option value="q5_1">q5_1 — 6 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
                           <option value="q5_0">q5_0 — 5.5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
                           <option value="q4_1">q4_1 — 5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
@@ -1461,28 +1455,23 @@
                           <option value="q4_0">q4_0 — 4.5 bit — kernel present, and what this fleet runs</option>
                         </select>
                         <p class="help-text">
-                          Auto never picks f16: on a full card Windows pages it into system RAM
+                          Auto tries q8_0, then q4_0, admitting a rung when weights + KV +
+                          VRAM overhead fit the card's physical VRAM less a 2048 MiB desktop
+                          reserve; free VRAM only decides whether a remembered fit is reused.
+                          It never picks f16: on a full card Windows pages it into system RAM
                           and prefill collapses instead of failing. An explicit choice is loaded
                           as configured, with a warning in the log when the arithmetic says it
-                          does not fit.
+                          does not fit — that check sizes only f16, bf16, q8_0 and q4_0, and
+                          reads only the K type.
                           <br />
                           Cost scales with bits per element, so q8_0 is roughly twice q4_0 and
-                          f16 roughly four times. <strong>Memory is not the only cost.</strong>
-                          The argument parser accepts all nine; this CUDA build implements
-                          attention for four. A type it does not cover moves attention onto the
-                          CPU — the model still answers, and prefill collapses by more than an
-                          order of magnitude, worsening with depth. Measured here on 2026-08-22:
-                          <code>iq4_nl</code> costs exactly what <code>q4_0</code> costs in VRAM
-                          and took prefill from ~1200–2500 tok/s to 66 and falling.
-                          <br />
-                          <strong>The four marked «no kernel» are not a guess.</strong> The
-                          compiled attention instantiations in <code>ggml-cuda.dll</code> were
-                          decoded on 2026-08-22 and cover exactly bf16, f16, q4_0 and q8_0.
-                          Choosing f32, q4_1, q5_0, q5_1 or iq4_nl buys the collapse above, on
-                          purpose. <strong>Presence of a kernel is not a measurement:</strong>
-                          only q4_0 has been run here — it is what this fleet uses. For any
-                          other, change one, send a long prompt, and read the child's
-                          <code>prompt processing</code> rate before trusting it.
+                          f16 roughly four times. <strong>Memory is not the only cost:</strong>
+                          the parser accepts all nine, but the CUDA build (b10472, b11146) has
+                          attention kernels for four; the five marked «no kernel» move attention
+                          onto the CPU — on 2026-08-22, b10472, <code>iq4_nl</code> took prefill
+                          from ~1200–2500 tok/s to 66 and falling. A kernel is not a measurement:
+                          after changing the type, send a long prompt and read the child's
+                          <code>prompt processing</code> rate.
                         </p>
                       </div>
 
@@ -1505,15 +1494,16 @@
                             }
                             editedConfig = editedConfig;
                           }}
-                          placeholder="auto — 4 slots here"
+                          placeholder="auto — the build decides"
                         />
                         <p class="help-text">
                           Empty sends nothing, and the build's own default for <code>-np</code>
-                          is <code>-1</code>, meaning auto — not a fixed number. On this fleet
-                          auto has resolved to <strong>4</strong> unified slots; the child prints
-                          <code>n_slots = 4</code> in its startup line, so the figure is one you
-                          can check rather than one this form promises. An explicit value is
-                          always sent — set 1 to serialize every request through one slot.
+                          is <code>-1</code>, meaning auto — not a fixed number. Auto gave 4
+                          unified slots on older builds (b10472, 2026-08-19); what it gives on the current pin
+                          (b11146) is unmeasured, because this fleet sets 2. The child's own log
+                          prints the count (<code>n_slots = 2</code>); DPC's start line does not.
+                          An explicit value is always sent — set 1 to serialize every request
+                          through one slot.
                         </p>
                       </div>
 
@@ -1580,7 +1570,7 @@
                         />
                         <p class="help-text">
                           Caps thinking per request. Without it the template's own default
-                          effort (xhigh) is unbounded — on deep context it can spend the whole
+                          effort (xhigh for qwen3.8) is unbounded — on deep context it can spend the whole
                           window thinking and answer nothing.
                         </p>
                       </div>
@@ -1630,7 +1620,7 @@
                             <option value="">default (draft-mtp)</option>
                             <option value="none">none — plain decoding</option>
                             <option value="draft-mtp">draft-mtp — head inside the GGUF, measured here</option>
-                            <option value="draft-dflash">draft-dflash — this is DFlash2; loads on this pin, but kills image requests beside an mmproj</option>
+                            <option value="draft-dflash">draft-dflash — this is DFlash2; loaded on b10809, but kills image requests beside an mmproj</option>
                             <option value="draft-eagle3">draft-eagle3 — needs a drafter file (unverified here)</option>
                             <option value="draft-simple">draft-simple — needs a drafter file (unverified here)</option>
                             <option value="draft-dspark">draft-dspark — needs a drafter file (unverified here)</option>
@@ -1642,38 +1632,22 @@
                           </select>
                           <p class="help-text">
                             <code>draft-mtp</code> needs nothing else: the head ships inside the
-                            GGUF, and it is the one value measured on this fleet — depth 3
-                            accepts 0.686 of its drafts against depth 4's 0.578. Everything
-                            beginning <code>draft-</code> other than that needs a separate
-                            drafter file, named through <code>--spec-draft-model</code> in Extra
-                            flags below — and a drafter beside an mmproj kills every request
-                            carrying an image on this build.
+                            GGUF, and it is the one value measured on this fleet — on 7 547
+                            production tasks depth 4 gave 3.35 tokens per target pass against
+                            depth 3's 2.78. Everything beginning <code>draft-</code> other than
+                            that needs a separate drafter file, named through
+                            <code>--spec-draft-model</code> in Extra flags below — and a drafter
+                            beside an mmproj killed every request carrying an image (measured on
+                            b10684).
                             <br />
-                            <strong><code>draft-dflash</code> is DFlash2 — upstream never put
-                            the 2 in the value name — and it loads on this pin.</strong> On
-                            b10472 and b10566 the child died with
-                            <code>expected 81, got 58</code> before serving anything: the
-                            drafter declares 81 tensors and those builds made 58, the missing
-                            ones being what PR&nbsp;27342 adds. That PR merged upstream on
-                            2026-08-27. Measured here on 2026-09-10, CPU-only on a spare port so
-                            the live child was not disturbed: the target plus
-                            <code>--spec-draft-model</code> pointing at the DFlash2 GGUF reaches
-                            <code>model loaded</code> and <code>listening on</code>, and the
-                            tensor-count refusal is gone.
-                            <br />
-                            <strong>What has not changed is the reason not to switch this alias
-                            to it.</strong> A drafter beside an
-                            <code>mmproj</code> kills every request carrying an image on this
-                            build — measured on b10684, and nothing in the range to b10809
-                            touches it. So <code>draft-dflash</code> belongs on a text-only
-                            alias, it needs its own drafter file named through
-                            <code>--spec-draft-model</code> in Extra flags below, and its speed
-                            against <code>draft-mtp</code> is <strong>unmeasured</strong>: it
-                            has been loaded here, never benchmarked. Everything
-                            else here is accepted by the parser and
-                            <strong>unverified on this build</strong>: the parser's list is not
-                            evidence that the path works, which is the same trap the KV menu
-                            above documents.
+                            <code>draft-dflash</code> is DFlash2 (upstream never put the 2 in the
+                            value name). It loaded on b10809 (2026-09-10, CPU-only on a spare
+                            port) and has never been benchmarked here, so it belongs on a
+                            text-only alias and its speed against <code>draft-mtp</code> is
+                            <strong>unmeasured</strong>. Everything else is accepted by the
+                            parser and <strong>unverified here</strong>: the parser's list is not
+                            evidence that the path works — the same trap the KV menu above
+                            documents.
                           </p>
                         </div>
 
@@ -1727,14 +1701,11 @@
                           <p class="help-text">
                             Passed as <code>--flash-attn on|off</code>. The binary's own default
                             is <code>auto</code>, not off, which is what leaving this empty
-                            gives you — the label said «off» until 2026-08-22 and was wrong.
-                            Until the same day the flag was also sent <em>bare</em>, and the pin
-                            refuses it that way: <code>unknown value for --flash-attn</code>,
-                            and the child died on argv before loading a backend. Its kernels
-                            exist only for some KV types; with a type they do not cover,
-                            attention falls back to the CPU and prefill collapses. Change one
-                            thing at a time and read the child's
-                            <code>prompt processing</code> rate afterwards.
+                            gives you. With a quantised KV type (q8_0, q4_0) auto resolves to on,
+                            and «off» makes the server refuse to start. Its kernels exist only
+                            for some KV types; with a type they do not cover, attention falls
+                            back to the CPU and prefill collapses. Change one thing at a time and
+                            read the child's <code>prompt processing</code> rate afterwards.
                           </p>
                         </div>
 
@@ -1755,9 +1726,7 @@
                             <code>--no-kv-unified</code>, always — the binary's own default is
                             conditional («enabled if number of slots is auto»), so saying
                             nothing means one thing with <code>-np</code> set and the opposite
-                            without it. Until 2026-08-22 this was emitted only above two slots,
-                            which left an alias asking for a unified pool beside an explicit
-                            <code>-np</code> quietly running a split one.
+                            without it.
                           </p>
                         </div>
 
@@ -1772,10 +1741,11 @@
                             placeholder="default 32 (the build's)"
                           />
                           <p class="help-text">
-                            A checkpoint snapshots the recurrent state and costs ~585–700 MiB
-                            here, so the count decides how many parked conversations fit rather
-                            than whether resuming works at all. Four checkpoints put a 150K state
-                            near 5 GB.
+                            A checkpoint snapshots the recurrent state, and its size grows with
+                            depth: ~150 MiB near the start to ~920 MiB at ~196K tokens
+                            (qwen3.8-27B, b11146, child log 2026-09-24…28). So the count decides
+                            how many parked conversations fit rather than whether resuming works
+                            at all.
                           </p>
                         </div>
 
@@ -1803,7 +1773,7 @@
                             min="0"
                             value={editedConfig.providers[i].cache_ram_mib ?? ''}
                             on:input={(e) => setNum(i, 'cache_ram_mib', (e.target as HTMLInputElement).value)}
-                            placeholder="e.g. 24576"
+                            placeholder="empty = the build's 8192"
                           />
                           <p class="help-text">
                             System RAM, <strong>not</strong> VRAM — it holds whole conversations
@@ -1831,8 +1801,9 @@
                             configuration that would have run or admits one that does not.
                             Empty uses 4608 MiB, measured on qwen3.8-27B at 262 144 — every
                             term in that sum belongs to that model, so a different one should
-                            carry its own. Measure it the same way: load, read the process's
-                            VRAM, subtract weights and KV. The start line prints which figure
+                            carry its own. The arithmetic counts only the GGUF path's weights, so
+                            an mmproj and its buffers are not in it — add them here. Measure it
+                            the same way: load, read the process's VRAM, subtract weights and KV. The start line prints which figure
                             was used and whether it came from here. It is not a flag the child is
                             started with, so a running server keeps the figure it began
                             with until it next starts.
@@ -1897,10 +1868,8 @@
                             Uses the template baked into the GGUF. Off falls back to the
                             server's built-in formatting, which for most modern models is the
                             wrong one — turn it off only if the model ships no template. Sent as
-                            <code>--jinja</code> or <code>--no-jinja</code>: the binary ships
-                            jinja <em>enabled</em>, so until 2026-08-22 «off» emitted nothing at
-                            all and left it on — the one thing this control existed to do was
-                            the one thing it could not do.
+                            <code>--jinja</code> or <code>--no-jinja</code>, always: the binary
+                            ships jinja <em>enabled</em>, so silence would mean on.
                           </p>
                         </div>
 
@@ -1919,7 +1888,8 @@
                             giving up with the child's last log lines attached. A very large
                             model on a cold disk can need more than 300 s.
                             <br />
-                            The one field here that does <strong>not</strong> restart the child:
+                            One of two fields here (with VRAM overhead) that do <strong>not</strong>
+                            restart the child:
                             it is not part of the command line, so a save that changes nothing
                             else keeps the running model loaded. The new value is still recorded
                             and applies to the next start — you simply do not pay a re-load to
