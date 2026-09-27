@@ -798,8 +798,8 @@ billed row could name a rung the engine was never asked for
 
 *(**Amendment, 2026-09-28 — the host's own cost carries its own currency, the
 provider's report wins by its presence, and the burn series stops asserting a
-zero it never priced.** Mike's call, 2026-09-28 ("делай", DPC Project group,
-2026-09-27/28), on the team's consensus.
+zero it never priced.** Mike's call, 2026-09-28, on the team's consensus in the DPC Project group
+(2026-09-27/28).
 
 **The ledger row.** `cost_usd` is retired from the write path. In its place:
 `cost_amount` (a number or `null`), `cost_currency` (ISO 4217, validated
