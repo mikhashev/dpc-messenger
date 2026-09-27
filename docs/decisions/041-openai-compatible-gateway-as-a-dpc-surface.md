@@ -920,6 +920,56 @@ narrow what the amendment said earlier the same day:
   now ends on `cost_amount: null` with a reason. Only the local types
   (`firewall.LOCAL_PROVIDER_TYPES`) are free by construction.)*
 
+*(**Amendment, 2026-09-28 — the tariff currency is per alias.** Mike's call,
+2026-09-28, option b. The 2026-09-10 amendment above made the tariff's unit a
+property of the node: one `compute.currency` for every alias it serves. A node
+that resells a NeuralDeep alias, bought in roubles, beside local aliases priced
+in dollars could therefore not price the first in the currency it pays for it.
+The ledger, the wire and the sums already carried a currency per row
+(`tariff_currency` on the row and in the answer, `tariff_amount` summed per
+currency); only the configuration held one unit.
+
+**The unit resolves per alias**, by one function —
+`ContextFirewall.tariff_currency_for(alias, provider)` — which the served call
+(`P2PCoordinator._tariff_for_call`), the menu row a peer reads
+(`menu_tariff_row`) and the gateway's quote (`CoreService.menu_tariff`) all
+read through `tariff_for`, in this order:
+
+1. an explicit `compute.tariff_currency.<alias>` — an ISO 4217 code, validated
+   at load and at save exactly as `compute.currency` is, the refusal naming the
+   alias;
+2. for an alias in `compute.serving_vendor`, the currency its provider bills in —
+   `pricing.vendor_ceiling_currency`, the function the daily ceiling already
+   reads, so NeuralDeep answers RUB and DeepSeek or Z.AI answer USD, and no
+   second type-to-currency table exists;
+3. `compute.currency`, which becomes the node **default** — for every local
+   alias, and for a vendor alias whose provider names no currency;
+4. nothing — no tariff declared, the gift, as before.
+
+Option b over a single node unit because an alias resold in the currency it is
+bought in keeps the owner's margin readable without an exchange rate: the rate
+and the vendor's price sit in one unit on the same row. Nothing converts
+between currencies, here or anywhere on the path.
+
+**What stays.** A local alias on a node that sets only `compute.currency`
+resolves exactly as before, and every test of that path passes unchanged. The
+dated entries of `serving_tariff` keep their shape `{from, in, out}`: the unit
+is per alias, not per dated line, because the default it overrides — the
+provider's currency — is itself per alias, and because a line carries no unit
+today, so a unit per line would change the shape every existing entry is
+written in. A rename of an alias follows its `tariff_currency` key, as it
+follows `serving_tariff` and `vendor_quotas`.
+
+**What moves, and the owner should check.** A vendor alias that was priced in
+`compute.currency` now takes its provider's currency unless it names its own:
+a DeepSeek alias priced at `in: 20` in a `RUB` node reads `20 USD` after this
+change. The numbers are not rewritten; setting
+`compute.tariff_currency.<alias>` to the old unit keeps the old price. Rows
+already written keep their frozen `tariff_currency`. The P2P door serves only
+`serving_local` today (`ContextFirewall.can_request_inference`) and a peer's
+menu lists only those, so the vendor default is visible in the gateway's quote
+and the Inference Sharing tab before it can reach a served row.)*
+
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
 Sharing a vendor-backed alias is a different act: **the node holding the key

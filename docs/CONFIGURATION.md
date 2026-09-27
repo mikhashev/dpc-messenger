@@ -327,17 +327,27 @@ charge its own machine:
 
 ```json
 "compute": {
-  "currency": "RUB",
+  "currency": "USD",
+  "tariff_currency": {"ollama_local": "RUB"},
   "serving_tariff": {"ollama_local": [{"from": "2026-09-01", "in": 20, "out": 60}]},
   "free_nodes": ["dpc-node-alice-123"],
   "free_groups": ["friends"]
 }
 ```
 
-- `currency` — the ISO 4217 code the rates below are in, checked against the standard's
-  list. Unset means no tariff is declared whatever `serving_tariff` says, and every served
-  call is a gift.
-- `serving_tariff` — per alias, dated entries `{from, in, out}` in that currency per 1M
+- `currency` — the **default** ISO 4217 code the rates below are in, checked against the
+  standard's list: it prices every local alias, and a vendor alias whose provider names no
+  billing currency.
+- `tariff_currency` — per alias, the ISO 4217 code that alias's tariff is in, over
+  everything else. Each alias resolves its unit in this order (ADR-041 D3, amendment of
+  2026-09-28): its own `tariff_currency` entry; for an alias in `serving_vendor`, the
+  currency its provider bills in — the same one its daily ceiling is counted in, so a
+  NeuralDeep alias is priced in RUB and a DeepSeek or Z.AI alias in USD; then `currency`;
+  then nothing, meaning no tariff is declared for that alias and every call on it is a gift.
+  An invalid code is refused at load and at save, naming the alias. Nothing is converted
+  between currencies: a rate is a number in its alias's unit. A vendor alias that used to
+  be priced in `currency` now takes its provider's unit unless it names its own here.
+- `serving_tariff` — per alias, dated entries `{from, in, out}` in that alias's currency per 1M
   prompt and per 1M output tokens. The newest entry whose `from` is on or before the call's
   UTC day applies; an alias with no entry is a gift. Reasoning is billable output at `out`.
   A rate that is negative, non-finite (`NaN` and `Infinity` are JSON literals) or malformed
