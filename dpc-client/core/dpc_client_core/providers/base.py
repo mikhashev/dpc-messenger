@@ -722,6 +722,8 @@ class AIProvider:
     # documentation, quoting the URL and the sentence in its docstring; where
     # the documentation does not settle it the answer stays `unknown`.
     DECLARED_OUTPUT_INCLUDES_THINKING: str = "unknown"
+    # See `billing_currency`; None for a provider with no per-call price.
+    BILLING_CURRENCY: Optional[str] = None
     # Wall-clock budget for `_retry_with_backoff`, overridden per instance from
     # config by the providers that retry.
     max_retry_seconds: float = 600
@@ -971,6 +973,13 @@ class AIProvider:
         stored = dict(usage)
         stored.setdefault("output_includes_thinking", self.DECLARED_OUTPUT_INCLUDES_THINKING)
         self._last_usage = stored
+
+    def billing_currency(self) -> Optional[str]:
+        """The ISO 4217 code this vendor bills in, or None for a provider that
+        bills nothing per call. A class that knows says so in `BILLING_CURRENCY`;
+        otherwise a `currency` in the alias's providers.json entry answers. It is
+        the unit of the alias's daily ceiling in `compute.vendor_quotas`."""
+        return self.BILLING_CURRENCY or (self.config or {}).get("currency") or None
 
     def supports_balance(self) -> bool:
         """Returns True if this provider can report account balance (pay-per-use APIs)."""

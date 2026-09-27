@@ -20,13 +20,17 @@ SEPT_2 = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
 AUG_31 = datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc)
 
 
+#: A call nobody priced: no amount, and so no currency and no basis.
+NO_PRICE = dict(cost_amount=None, cost_currency=None, cost_basis=None)
+
+
 def _row(started_at, **overrides):
     fields = dict(
         request_id="req-1", caller="agent_001", caller_kind="agent",
         alias="ds_flash", model="deepseek-v4-flash", route="local",
         prompt_tokens=100, completion_tokens=50, thinking_tokens=None,
         counts_source="engine", started_at=started_at, duration_s=1.0,
-        billing="pay_per_use", cost_usd=0.01,
+        billing="pay_per_use", cost_amount=0.01, cost_currency="USD", cost_basis="charged",
     )
     fields.update(overrides)
     return usage_row(**fields)
@@ -35,7 +39,7 @@ def _row(started_at, **overrides):
 def _empty_group() -> dict:
     return {
         "row_count": 0, "prompt_tokens": 0, "completion_tokens": 0, "thinking_tokens": 0,
-        "cost_usd": 0.0, "unpriced": 0,
+        "cost": {}, "cost_free": 0, "unpriced": 0,
         "peer_proved": {"true": 0, "false": 0, "none": 0},
         "output_includes_thinking": {"includes": 0, "excludes": 0, "unknown": 0},
     }
@@ -57,18 +61,18 @@ def test_three_rows_fold_exactly_by_caller_alias_and_month():
     agent_row = _row(
         SEPT_1, request_id="a1", caller="agent_001", caller_kind="agent",
         alias="ds_flash", route="local", prompt_tokens=100, completion_tokens=50,
-        cost_usd=0.01, peer_proved=None,
+        cost_amount=0.01, peer_proved=None,
     )
     proved_peer_row = _row(
         SEPT_1, request_id="p1", caller="dpc-node-alice", caller_kind="peer",
         alias="ds_pro", route="peer", prompt_tokens=200, completion_tokens=100,
-        cost_usd=None, billing="subscription", peer_proved=True,
+        **NO_PRICE, billing="subscription", peer_proved=True,
         peer_connection_type="ipv4_direct",
     )
     unproved_gateway_row = _row(
         SEPT_1, request_id="g1", caller="dpc-node-mallory", caller_kind="gateway",
         alias="ds_flash", route="peer", prompt_tokens=300, completion_tokens=150,
-        cost_usd=0.02, peer_proved=False, peer_connection_type="hub_webrtc",
+        cost_amount=0.02, peer_proved=False, peer_connection_type="hub_webrtc",
     )
     rows = [agent_row, proved_peer_row, unproved_gateway_row]
 
@@ -78,13 +82,13 @@ def test_three_rows_fold_exactly_by_caller_alias_and_month():
     assert set(result["by_caller"]) == {"agent_001", "dpc-node-alice", "dpc-node-mallory"}
     assert result["by_caller"]["agent_001"] == {
         **_empty_group(), "row_count": 1, "prompt_tokens": 100, "completion_tokens": 50,
-        "cost_usd": 0.01, "unpriced": 0,
+        "cost": {"USD": {"amount": 0.01, "rows": 1}}, "unpriced": 0,
         "peer_proved": {"true": 0, "false": 0, "none": 1},
         "output_includes_thinking": {"includes": 0, "excludes": 0, "unknown": 1},
     }
     assert result["by_caller"]["dpc-node-alice"] == {
         **_empty_group(), "row_count": 1, "prompt_tokens": 200, "completion_tokens": 100,
-        "cost_usd": 0.0, "unpriced": 1,
+        "cost": {}, "unpriced": 1,
         "peer_proved": {"true": 1, "false": 0, "none": 0},
         "output_includes_thinking": {"includes": 0, "excludes": 0, "unknown": 1},
     }
@@ -92,14 +96,14 @@ def test_three_rows_fold_exactly_by_caller_alias_and_month():
     ds_flash = result["by_alias"]["ds_flash"]
     assert ds_flash["row_count"] == 2
     assert ds_flash["prompt_tokens"] == 400 and ds_flash["completion_tokens"] == 200
-    assert ds_flash["cost_usd"] == pytest.approx(0.03)
+    assert ds_flash["cost"] == {"USD": {"amount": pytest.approx(0.03), "rows": 2}}
     assert ds_flash["unpriced"] == 0
     assert ds_flash["peer_proved"] == {"true": 0, "false": 1, "none": 1}
 
     ds_pro = result["by_alias"]["ds_pro"]
     assert ds_pro == {
         **_empty_group(), "row_count": 1, "prompt_tokens": 200, "completion_tokens": 100,
-        "cost_usd": 0.0, "unpriced": 1,
+        "cost": {}, "unpriced": 1,
         "peer_proved": {"true": 1, "false": 0, "none": 0},
         "output_includes_thinking": {"includes": 0, "excludes": 0, "unknown": 1},
     }

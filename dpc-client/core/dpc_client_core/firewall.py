@@ -186,7 +186,7 @@ class ServingLists:
     """The two lists after classification: what the doors may serve."""
     local: Tuple[str, ...]
     vendor: Tuple[str, ...]
-    quotas: Dict[str, float]  # alias -> USD per day, per caller
+    quotas: Dict[str, float]  # alias -> amount per day, per caller, in the alias's billing currency
 
     def owner_of(self, alias: str) -> Optional[str]:
         """`"local"`, `"vendor"`, or None for an alias in neither list."""
@@ -363,14 +363,14 @@ class ContextFirewall:
         known_quotas: Dict[str, float] = {}
         if quotas is not None:
             if not isinstance(quotas, dict):
-                errors.append(f"'compute.{VENDOR_QUOTAS_KEY}' must be an object of alias -> USD per day per caller")
+                errors.append(f"'compute.{VENDOR_QUOTAS_KEY}' must be an object of alias -> amount per day per caller, in the currency the alias bills in")
             else:
                 for alias, quota in quotas.items():
                     if alias.startswith('_'):
                         continue
                     if isinstance(quota, bool) or not isinstance(quota, (int, float)) or quota < 0:
                         errors.append(
-                            f"'compute.{VENDOR_QUOTAS_KEY}.{alias}' must be a non-negative number of USD per day, got {quota!r}"
+                            f"'compute.{VENDOR_QUOTAS_KEY}.{alias}' must be a non-negative amount per day in the currency the alias bills in, got {quota!r}"
                         )
                     else:
                         known_quotas[alias] = float(quota)
@@ -552,7 +552,7 @@ class ContextFirewall:
                 if provider_type is None:
                     raise ValueError(
                         f"compute.{key} names '{alias}', whose provider is not loaded, so what "
-                        "bounds it — the card or a daily ceiling in dollars — cannot be "
+                        "bounds it — the card or a daily ceiling in money — cannot be "
                         "established; it is refused rather than served on a guess (ADR-041 D5). "
                         "Either the alias is absent from providers.json, or the registry is not "
                         "up yet at this moment"
@@ -1445,7 +1445,7 @@ class ContextFirewall:
                     "allow_nodes": [],
                     "_allowed_models": "Empty = every model. Since the host designates serving_alias, this list can only refuse a peer that names a model; it never chooses one. A non-empty list that does not contain the serving alias's own model makes this node advertise nothing and refuse everything.",
                     "allowed_models": [],
-                    "_serving_alias": "Deprecated single form of serving_local, still read. What this node serves is serving_local (aliases on this machine; every one of them is served to peers, the first being what a request naming none gets) and serving_vendor (paid APIs, each needing a USD-per-day ceiling in vendor_quotas). Empty = share nothing (the opposite of allowed_models, where empty = all).",
+                    "_serving_alias": "Deprecated single form of serving_local, still read. What this node serves is serving_local (aliases on this machine; every one of them is served to peers, the first being what a request naming none gets) and serving_vendor (paid APIs, each needing a daily ceiling in vendor_quotas, in the currency that vendor bills in). Empty = share nothing (the opposite of allowed_models, where empty = all).",
                     "serving_alias": None,
                     "_currency": "ISO 4217 code of the unit the tariff below is priced in, e.g. \"USD\" or \"RUB\". Null = no tariff declared: every call served is a gift, whatever serving_tariff says.",
                     "currency": None,

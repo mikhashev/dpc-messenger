@@ -18,14 +18,17 @@ wire; None means no effort control was applied, which is not `off`, and a row
 written before the column reads as None), whether the node at the other end of
 the call had its key proved and over which tier (`peer_proved`,
 `peer_connection_type`; see `usage_row` for what «proved» means on each side)
-and what it cost (`billing`, `cost_usd`) —
+and what it cost (`billing`, `cost_amount` in `cost_currency` on a
+`cost_basis`, and `cost_unpriced_reason` where nobody could price it) —
 priced at `started_at` by the node that made the call and never re-priced,
 which is the invariant `dpc_agent/pricing.py` states for itself. A null
-`cost_usd` is a call nobody priced; a zero is a price.
+`cost_amount` is a call nobody priced; a zero is a price. Until 2026-09-28 the
+column was `cost_usd`, which no writer fills any more; `NodeLedger.rows()` reads
+an older row's `cost_usd` as a charged amount in USD.
 
 Two columns beyond D3's list, both optional: `task_id` and `conversation_id`.
 D3's own consistency rule — the sum of a task's rows equals the
-`task_complete.cost_usd` the burn series already carries — needs a join key,
+`task_complete` cost the burn series already carries — needs a join key,
 and the task id is it. One caveat on today's value rather than on the column:
 `agent.py` hands `run_llm_loop` the conversation id as its `task_id`, so on the
 chat path a row's `task_id` is the conversation, and the join to
@@ -38,8 +41,9 @@ Four more, optional and travelling as one group, with a fifth beside them:
 currency, because rows are forever and the declaration is not: the rates per
 1M tokens, the ISO 4217 unit they are in, and the `from` day of the entry that
 applied. Absent is «not declared», the gift; zero is «declared free»; more is
-paid (ADR-041 D3, amendment). `cost_usd` beside them is the host's own cost
-and stays USD — what the call cost this node, not what it charges for it.
+paid (ADR-041 D3, amendment). `cost_amount` beside them is the host's own
+cost in its vendor's currency — what the call cost this node, not what it
+charges for it.
 `tariff_amount` is what those rates came to on this call's own counts, in
 `tariff_currency` — computed by `tariff_amount_for` at write time and never
 again — or null where the counts' convention is unknown and nothing may be
@@ -115,6 +119,9 @@ def stated_thinking_source(value: Any, *, peer: str, log: logging.Logger) -> Opt
     )
     return None
 BILLINGS = ("subscription", "pay_per_use")
+# What a `cost_amount` is — the words of `pricing.COST_BASES`, named here where
+# the column lives. Only `charged` counts against a daily ceiling.
+COST_BASES = ("charged", "list_price_reference", "unknown")
 
 LOCK_TIMEOUT_S = 2.0
 LOCK_STALE_S = 10.0
@@ -145,7 +152,10 @@ def usage_row(
     started_at: datetime,
     duration_s: float,
     billing: str,
-    cost_usd: Any,
+    cost_amount: Any = None,
+    cost_currency: Optional[str] = None,
+    cost_basis: Optional[str] = None,
+    cost_unpriced_reason: Optional[str] = None,
     task_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     tariff_in: Any = None,
@@ -205,6 +215,12 @@ def usage_row(
     same way. `peer_connection_type` is the connection's own word for its
     tier, which is where the answer came from.
 
+    `cost_amount` is what the call cost this node, in `cost_currency` (ISO
+    4217) on a `cost_basis` from `COST_BASES`. A non-zero amount needs its
+    currency and a null amount may carry none: half a price is read as dollars
+    by one reader and as nothing by another. A zero may stand without one — a
+    local card's call costs nothing in no currency.
+
     `served_by` is the node that ran a call this node only consumed: the host
     id on a `route=peer` row, written beside the tariff group because the two
     answer one question together — what this call was charged and by whom. It
@@ -251,6 +267,7 @@ def usage_row(
         raise ValueError(f"peer_proved={peer_proved!r} is not True, False or None")
     if peer_connection_type is not None and not isinstance(peer_connection_type, str):
         raise ValueError(f"peer_connection_type={peer_connection_type!r} is not a connection's word for itself")
+    cost = _cost_columns(cost_amount, cost_currency, cost_basis, cost_unpriced_reason)
     row: Dict[str, Any] = {
         "request_id": str(request_id),
         "caller": caller,
@@ -270,9 +287,9 @@ def usage_row(
         "started_at": started_at.astimezone(timezone.utc).isoformat(),
         "duration_s": round(float(duration_s), 3),
         "billing": billing,
-        "cost_usd": None if cost_usd is None else float(cost_usd),
+        **cost,
     }
-    if billing == "pay_per_use" and cost_usd is None:
+    if billing == "pay_per_use" and cost["cost_amount"] is None:
         log.warning("Usage row %s is pay_per_use with no cost: the price was not computed", request_id)
     row.update(tariff)
     if served_by:
@@ -282,6 +299,44 @@ def usage_row(
     if conversation_id:
         row["conversation_id"] = conversation_id
     return row
+
+
+def _cost_columns(amount: Any, currency: Any, basis: Any, reason: Any) -> Dict[str, Any]:
+    """The four cost columns, or a ValueError naming what is wrong."""
+    if amount is not None:
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            raise ValueError(f"cost_amount={amount!r} is not a number")
+        if not math.isfinite(amount) or amount < 0:
+            raise ValueError(f"cost_amount={amount!r} is not a finite, non-negative amount")
+    if currency is not None and currency not in ISO_4217_CODES:
+        raise ValueError(f"cost_currency={currency!r} is not an ISO 4217 code")
+    if amount is None and currency is not None:
+        raise ValueError(f"cost_currency={currency!r} with no cost_amount: a currency needs an amount")
+    if amount and currency is None:
+        raise ValueError(f"cost_amount={amount!r} with no cost_currency: an amount needs its currency")
+    if basis is not None and basis not in COST_BASES:
+        raise ValueError(f"cost_basis={basis!r} is not one of {COST_BASES}")
+    return {
+        "cost_amount": None if amount is None else float(amount),
+        "cost_currency": currency,
+        "cost_basis": basis,
+        "cost_unpriced_reason": None if reason is None else str(reason),
+    }
+
+
+def _read_cost(row: Dict[str, Any]) -> None:
+    """Give a row read from disk the four cost columns. A row written before
+    2026-09-28 has only `cost_usd`: a number there was a charged amount in USD
+    (the only tables that priced were DeepSeek's and Z.AI's, per token), and a
+    null was a call nobody priced. `cost_usd` itself stays on the dict, as read."""
+    if "cost_amount" not in row and "cost_usd" in row:
+        legacy = row.get("cost_usd")
+        priced = isinstance(legacy, (int, float)) and not isinstance(legacy, bool)
+        row["cost_amount"] = float(legacy) if priced else None
+        row["cost_currency"] = "USD" if priced else None
+        row["cost_basis"] = "charged" if priced else None
+    for name in ("cost_amount", "cost_currency", "cost_basis", "cost_unpriced_reason"):
+        row.setdefault(name, None)
 
 
 def _thinking_inside_the_output(
@@ -540,6 +595,7 @@ class NodeLedger:
                             row.setdefault("served_effort", None)
                             row.setdefault("peer_proved", None)
                             row.setdefault("peer_connection_type", None)
+                            _read_cost(row)
                             yield row
             except FileNotFoundError:
                 continue
@@ -551,16 +607,20 @@ class NodeLedger:
         caller: Optional[str],
         caller_kind: Optional[str] = None,
         now: Optional[datetime] = None,
+        currency: str = "USD",
     ) -> float:
-        """USD this caller has spent on this alias in the current UTC day.
+        """What this caller has been charged on this alias in the current UTC
+        day, in `currency` — the unit of the alias's ceiling.
 
         The first reader of the ledger, and the one a vendor quota is checked
         against (ADR-041 D5). The ceiling is per caller — each caller's own
         sum, never a total over callers — so the caller is a required
         argument even where it has one value. `caller_kind` narrows further
-        when given. A null `cost_usd` is a call nobody priced and adds
-        nothing; the row's `started_at` is already UTC, so the day is its
-        first ten characters.
+        when given. Only rows whose `cost_basis` is `charged` and whose
+        `cost_currency` is `currency` add: a reference price was not debited,
+        another currency does not add to this one, and a null amount is a
+        call nobody priced. The row's `started_at` is already UTC, so the day
+        is its first ten characters.
         """
         moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         day = moment.date().isoformat()
@@ -572,7 +632,9 @@ class NodeLedger:
                 continue
             if not str(row.get("started_at", "")).startswith(day):
                 continue
-            cost = row.get("cost_usd")
+            if row.get("cost_basis") != "charged" or row.get("cost_currency") != currency:
+                continue
+            cost = row.get("cost_amount")
             if cost is not None:
                 total += float(cost)
         return total
@@ -585,10 +647,10 @@ def burn_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
 
     One predicate, `route == "local"`: this node made the vendor call itself,
     whoever asked — its own agent, its own gateway client, or a guest this node
-    served on its own key (the guest's tokens, this node's dollars; what the
-    guest is charged is `tariff_amount`, not `cost_usd`). `route=peer` is
+    served on its own key (the guest's tokens, this node's money; what the
+    guest is charged is `tariff_amount`, not `cost_amount`). `route=peer` is
     excluded regardless of `caller_kind`: the money stayed with the node that
-    ran the call. Filtered on `route`, not on `cost_usd is not None`, because
+    ran the call. Filtered on `route`, not on `cost_amount is not None`, because
     `route` is the row's own answer to who ran the call.
 
     Distinct from `own_rows`, which is this set minus the rows served to peers:
@@ -602,7 +664,7 @@ def burn_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
 def served_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
     """What this node ran for somebody else: `route == "local"` and
     `caller_kind == "peer"`. The owner's side of a shared call — the tokens are
-    the guest's, the dollars in `cost_usd` are this node's, and what the guest
+    the guest's, the money in `cost_amount` is this node's, and what the guest
     owes for them is `tariff_amount`. A `gateway` caller is not here: the
     gateway door is local, so its client is this node's own user (D3), and its
     rows belong to `own_rows`.
@@ -615,7 +677,7 @@ def served_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
 def consumed_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
     """What another node ran for this one: `route == "peer"`, whoever here
     asked — an agent, or a gateway client of this node's own door. The guest's
-    side: `cost_usd` is null by construction (this node priced nothing) and the
+    side: `cost_amount` is null by construction (this node priced nothing) and the
     tariff group is the host's copy of what it charges, so `tariff_amount` is
     what is owed and `served_by` is whom it is owed to.
     """
@@ -628,7 +690,7 @@ def own_rows(rows: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
     """This node's own consumption on its own hardware and its own key:
     `route == "local"` with a caller that is not a peer. The complement of
     `served_rows` inside `burn_rows`, which stays what the burn reader wants —
-    every local row, this node's dollars whoever asked.
+    every local row, this node's money whoever asked.
     """
     for row in rows:
         if row.get("route") == "local" and row.get("caller_kind") != "peer":
@@ -655,29 +717,41 @@ def _new_group_entry() -> Dict[str, Any]:
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "thinking_tokens": 0,
-        "cost_usd": 0.0,
+        "cost": {},
+        "cost_free": 0,
         "unpriced": 0,
         "peer_proved": {"true": 0, "false": 0, "none": 0},
         "output_includes_thinking": {"includes": 0, "excludes": 0, "unknown": 0},
     }
 
 
+def _fold_cost(entry: Dict[str, Any], row: Dict[str, Any]) -> None:
+    """Add a row's cost to its group as the row carries it (D3: never
+    re-priced): per `cost_currency` under `cost`, because two currencies do not
+    add. A zero in no currency — a local card's call — is counted under
+    `cost_free`, and a null under `unpriced`; neither is summed in as an amount."""
+    amount = row.get("cost_amount")
+    currency = row.get("cost_currency")
+    if amount is None:
+        entry["unpriced"] += 1
+    elif currency is None:
+        entry["cost_free"] += 1
+    else:
+        spent = entry["cost"].setdefault(str(currency), {"amount": 0.0, "rows": 0})
+        spent["amount"] += float(amount)
+        spent["rows"] += 1
+
+
 def _fold(bucket: Dict[str, Any], key: Any, row: Dict[str, Any]) -> None:
     # A missing group key lands under "none", matching how JSON renders a
-    # None dict key, so a direct call and a round trip agree. cost_usd is
-    # added as the row carries it (D3: never re-priced); a null adds to
-    # unpriced instead.
+    # None dict key, so a direct call and a round trip agree.
     group_key = str(key) if key is not None else "none"
     entry = bucket.setdefault(group_key, _new_group_entry())
     entry["row_count"] += 1
     entry["prompt_tokens"] += row.get("prompt_tokens") or 0
     entry["completion_tokens"] += row.get("completion_tokens") or 0
     entry["thinking_tokens"] += row.get("thinking_tokens") or 0
-    cost = row.get("cost_usd")
-    if cost is None:
-        entry["unpriced"] += 1
-    else:
-        entry["cost_usd"] += float(cost)
+    _fold_cost(entry, row)
     proved = row.get("peer_proved")
     proved_key = "true" if proved is True else "false" if proved is False else "none"
     entry["peer_proved"][proved_key] += 1
@@ -717,7 +791,8 @@ def _new_role_entry() -> Dict[str, Any]:
         "duration_s": 0.0,
         "counts_source": {"ours": 0, "engine": 0},
         "peer_proved": {"true": 0, "false": 0, "none": 0},
-        "cost_usd": 0.0,
+        "cost": {},
+        "cost_free": 0,
         "unpriced": 0,
         "tariff": {},
         "tariff_unpriceable": 0,
@@ -736,7 +811,8 @@ def _fold_role(
     add, and the two states that are not an amount are counted rather than
     summed as zero — `tariff_unpriceable` is a tariff that applied over counts
     nobody could price, `untariffed` is a call with no tariff declared, the
-    gift. `unpriced` does the same for a null `cost_usd`. A row whose
+    gift. The host's own cost folds the same way (`_fold_cost`): per
+    `cost_currency`, with `cost_free` and `unpriced` counted. A row whose
     `counts_source` is neither word counts into `row_count` and into neither
     side of that split.
     """
@@ -761,11 +837,7 @@ def _fold_role(
     proved_key = "true" if proved is True else "false" if proved is False else "none"
     entry["peer_proved"][proved_key] += 1
 
-    cost = row.get("cost_usd")
-    if cost is None:
-        entry["unpriced"] += 1
-    else:
-        entry["cost_usd"] += float(cost)
+    _fold_cost(entry, row)
 
     currency = row.get("tariff_currency")
     amount = row.get("tariff_amount")
@@ -814,10 +886,11 @@ def usage_by_role(
 
     * `served` — what this node ran for peers, by the peer that asked
       (`by_caller`, each carrying its own `by_alias`) and by the alias that
-      answered. `cost_usd` is what this node spent, `tariff` what it is owed.
+      answered. `cost` is what this node spent, `tariff` what it is owed,
+      each per currency.
     * `consumed` — what peers ran for this node, by `consumed_key`
       (`remote:<host>:<alias>`, the host `?` where the row names none), each
-      group echoing `node_id` and `alias` so no reader parses the key. `cost_usd` is
+      group echoing `node_id` and `alias` so no reader parses the key. `cost_amount` is
       null on every such row by construction, so the money here is `tariff`:
       what this node owes, per currency.
     * `own` — this node's own calls on its own key, by alias: no peer asked,
@@ -867,7 +940,7 @@ def summarize(
     touches no disk. Does not fold `tariff_amount`, and must never derive one:
     the amount is written once by the node that made the call, and computing it
     here from `tariff_in`/`tariff_out` would be the re-derivation D3 forbids
-    for `cost_usd`. Summing the amounts a row already carries is the reader's
+    for `cost_amount`. Summing the amounts a row already carries is the reader's
     own next step, and it has to sum per currency. `since`/`until` are ISO datetimes compared as
     datetimes, both bounds inclusive; a row whose `started_at` will not
     parse is excluded from a windowed summary.

@@ -314,7 +314,7 @@ async def test_a_local_completion_is_openai_shaped_and_leaves_one_gateway_row(tm
         assert (row["alias"], row["model"]) == (LOCAL, "qwen3:8b")
         assert (row["prompt_tokens"], row["completion_tokens"], row["thinking_tokens"]) == (12, 5, None)
         assert row["counts_source"] == "ours"
-        assert (row["billing"], row["cost_usd"]) == ("subscription", 0.0)
+        assert (row["billing"], row["cost_amount"], row["cost_currency"]) == ("subscription", 0.0, None)
         assert body["id"] == "chatcmpl-" + row["request_id"]
 
 
@@ -326,7 +326,7 @@ def _spend(ledger, *, cost, started_at, caller=NODE_ID, caller_kind="gateway", a
         request_id=request_id, caller=caller, caller_kind=caller_kind, alias=alias,
         model="deepseek-v4-flash", route="local", prompt_tokens=1, completion_tokens=1,
         thinking_tokens=None, counts_source="ours", started_at=started_at, duration_s=0.1,
-        billing="pay_per_use", cost_usd=cost,
+        billing="pay_per_use", cost_amount=cost, cost_currency="USD", cost_basis="charged",
     ))
 
 
@@ -353,8 +353,8 @@ async def test_a_vendor_alias_over_its_daily_quota_is_429_and_under_it_the_row_a
         seeded = {"earlier-today", "a-peers", "yesterday"}
         (row,) = [r for r in ledger.rows() if r["request_id"] not in seeded]
         assert row["caller_kind"] == "gateway" and row["billing"] == "pay_per_use"
-        assert row["cost_usd"] > 0
-        assert ledger.spent_today(VENDOR, caller=NODE_ID, caller_kind="gateway") == pytest.approx(before + row["cost_usd"])
+        assert row["cost_amount"] > 0 and row["cost_currency"] == "USD"
+        assert ledger.spent_today(VENDOR, caller=NODE_ID, caller_kind="gateway") == pytest.approx(before + row["cost_amount"])
 
         _spend(ledger, cost=quota, started_at=now, request_id="the-rest-of-the-day")
         status, text = await _request(server, "POST", "/v1/chat/completions", key=key, body=_chat(VENDOR))
@@ -369,7 +369,7 @@ async def test_a_vendor_alias_this_node_cannot_price_is_503_unrated_before_anyth
     tmp_path, caplog,
 ):
     """The ceiling is counted from the rows, and a row for an alias no rate
-    table knows carries $0.00 — so `vendor_quotas` on it guards nothing at all
+    table knows carries no charged amount — so `vendor_quotas` on it guards nothing at all
     and the meter is absent rather than slow (Ark, 2026-09-14). `unrated` and
     503, not the ceiling's 429: a client that retries a 429 tomorrow finds the
     same missing rate, and only this node's owner can write one."""
@@ -405,7 +405,7 @@ async def test_a_priced_vendor_alias_under_its_ceiling_is_served(tmp_path):
 
         assert status == 200
         (row,) = list(ledger.rows())
-        assert row["alias"] == VENDOR and row["cost_usd"] > 0
+        assert row["alias"] == VENDOR and row["cost_amount"] > 0
 
 
 # --- (7) stream: true ---------------------------------------------------------------

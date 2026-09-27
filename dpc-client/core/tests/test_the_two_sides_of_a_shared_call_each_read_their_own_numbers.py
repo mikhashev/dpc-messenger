@@ -45,7 +45,7 @@ def _row(started_at=SEPT_1, **overrides):
         prompt_tokens=100, completion_tokens=50, thinking_tokens=None,
         counts_source="engine", output_includes_thinking="excludes",
         started_at=started_at, duration_s=1.0,
-        billing="pay_per_use", cost_usd=0.01,
+        billing="pay_per_use", cost_amount=0.01, cost_currency="USD", cost_basis="charged",
     )
     fields.update(overrides)
     return usage_row(**fields)
@@ -67,7 +67,7 @@ SERVED_FIELDS = dict(
     alias="ollama_local", model="qwen3:8b", route="local",
     prompt_tokens=1000, completion_tokens=500, thinking_tokens=None,
     counts_source="ours", output_includes_thinking="excludes",
-    duration_s=4.0, billing="subscription", cost_usd=0.0,
+    duration_s=4.0, billing="subscription", cost_amount=0.0,
     peer_proved=True, peer_connection_type="ipv4_direct", **TARIFF,
 )
 CONSUMED_FIELDS = dict(
@@ -75,7 +75,7 @@ CONSUMED_FIELDS = dict(
     alias="bob_glm", model="glm-4.7", route="peer", served_by=BOB,
     prompt_tokens=200, completion_tokens=100, thinking_tokens=None,
     counts_source="engine", output_includes_thinking="excludes",
-    duration_s=2.0, billing="subscription", cost_usd=None,
+    duration_s=2.0, billing="subscription", cost_amount=None,
     peer_proved=True, peer_connection_type="ipv4_direct", **TARIFF,
 )
 
@@ -90,7 +90,7 @@ def _four_rows():
     the second consumed row is a call whose counts carry no convention, so its
     host wrote the tariff group with a null amount."""
     served = usage_row(started_at=SEPT_1, tariff_amount=_amount(SERVED_FIELDS), **SERVED_FIELDS)
-    own = _row(SEPT_1, request_id="own-1", cost_usd=0.02)
+    own = _row(SEPT_1, request_id="own-1", cost_amount=0.02)
     consumed = usage_row(
         started_at=SEPT_1, tariff_amount=_amount(CONSUMED_FIELDS), **CONSUMED_FIELDS
     )
@@ -108,7 +108,7 @@ def _empty_role_entry() -> dict:
         "duration_s": 0.0,
         "counts_source": {"ours": 0, "engine": 0},
         "peer_proved": {"true": 0, "false": 0, "none": 0},
-        "cost_usd": 0.0, "unpriced": 0,
+        "cost": {}, "cost_free": 0, "unpriced": 0,
         "tariff": {}, "tariff_unpriceable": 0, "untariffed": 0,
     }
 
@@ -187,14 +187,15 @@ def test_the_two_sides_of_a_shared_call_each_read_their_own_numbers():
     result = usage_by_role(_four_rows())
 
     # The owner's side: one peer, one alias, the tokens Alice spent and what
-    # she owes for them. cost_usd is a real zero — a local model costs the
-    # node nothing by construction — and `unpriced` stays 0 to say so.
+    # she owes for them. The cost is a real zero in no currency — a local
+    # model costs the node nothing by construction — so it is counted under
+    # `cost_free`, and `unpriced` stays 0 to say so.
     alice = {
         **_empty_role_entry(), "row_count": 1,
         "prompt_tokens": 1000, "completion_tokens": 500, "duration_s": 4.0,
         "counts_source": {"ours": 1, "engine": 0},
         "peer_proved": {"true": 1, "false": 0, "none": 0},
-        "cost_usd": 0.0, "unpriced": 0,
+        "cost": {}, "cost_free": 1, "unpriced": 0,
         "tariff": {"EUR": {"amount": pytest.approx(SERVED_AMOUNT), "rows": 1}},
     }
     assert result["served"]["by_caller"] == {
@@ -211,7 +212,7 @@ def test_the_two_sides_of_a_shared_call_each_read_their_own_numbers():
             "prompt_tokens": 400, "completion_tokens": 200, "duration_s": 4.0,
             "counts_source": {"ours": 0, "engine": 2},
             "peer_proved": {"true": 2, "false": 0, "none": 0},
-            "cost_usd": 0.0, "unpriced": 2,
+            "cost": {}, "unpriced": 2,
             "tariff": {"EUR": {"amount": pytest.approx(CONSUMED_AMOUNT), "rows": 1}},
             "tariff_unpriceable": 1,
             "node_id": BOB, "alias": "bob_glm",
@@ -226,7 +227,7 @@ def test_the_two_sides_of_a_shared_call_each_read_their_own_numbers():
             "prompt_tokens": 100, "completion_tokens": 50, "duration_s": 1.0,
             "counts_source": {"ours": 0, "engine": 1},
             "peer_proved": {"true": 0, "false": 0, "none": 1},
-            "cost_usd": 0.02, "untariffed": 1,
+            "cost": {"USD": {"amount": 0.02, "rows": 1}}, "untariffed": 1,
         },
     }
     assert result["since"] is None and result["until"] is None
@@ -341,7 +342,7 @@ def test_the_burn_summary_still_answers_exactly_what_it_did():
     assert set(summary["by_alias"]) == {"ollama_local", "ds_flash"}
     assert set(summary["by_caller"][ALICE]) == {
         "row_count", "prompt_tokens", "completion_tokens", "thinking_tokens",
-        "cost_usd", "unpriced", "peer_proved", "output_includes_thinking",
+        "cost", "cost_free", "unpriced", "peer_proved", "output_includes_thinking",
     }
 
 

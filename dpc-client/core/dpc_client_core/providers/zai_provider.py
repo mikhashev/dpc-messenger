@@ -91,6 +91,8 @@ class ZaiProvider(AIProvider):
     """
 
     RETRY_LABEL = "Z.AI"
+    # The unit of this vendor's price table and of its daily ceiling.
+    BILLING_CURRENCY = "USD"
 
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)

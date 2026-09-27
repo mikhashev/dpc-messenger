@@ -382,7 +382,8 @@ class P2PCoordinator:
         """Why this peer may not be served `serving_alias` today, or None.
 
         ADR-041 D5 on the peer door. A vendor alias is bounded by money —
-        `compute.vendor_quotas`, USD per day and per caller — summed from the
+        `compute.vendor_quotas`, per day and per caller, in the currency its
+        provider bills in — summed from the
         rows `_record_peer_call` wrote under this peer's own name, so a
         restart changes nothing and one peer's spending never counts against
         another's. A local alias is bounded by the card, which is the queue
@@ -398,7 +399,7 @@ class P2PCoordinator:
             REFUSAL_MISCONFIGURED,
             REFUSAL_UNRATED,
         )
-        from .gateway import vendor_alias_is_priced
+        from .dpc_agent.pricing import vendor_ceiling_currency
 
         try:
             lists = self._serving_lists()
@@ -412,21 +413,22 @@ class P2PCoordinator:
         if not isinstance(lists, ServingLists) or lists.owner_of(serving_alias) != "vendor":
             return None
         model = (self._provider_config(serving_alias) or {}).get("model")
+        currency = vendor_ceiling_currency(serving_alias, self._provider_for_alias(serving_alias))
         # No WARNING of its own: `handle_inference_request` logs every refusal
         # this returns, with this text in it, and one event deserves one line.
-        if not vendor_alias_is_priced(serving_alias, model):
+        if currency is None:
             return (
                 f"This node cannot serve '{serving_alias}': it is a vendor alias and this node "
                 f"has no rate for it (model {model!r}), so what a call spends cannot be counted "
                 "against the daily ceiling in compute.vendor_quotas — an unpriced alias is "
-                "refused rather than served against a ceiling that would read $0.00 for ever",
+                "refused rather than served against a ceiling that would read zero for ever",
                 REFUSAL_UNRATED,
             )
         # A vendor alias with no ceiling is refused when the rules are read, so
         # a missing one here is absent rather than unlimited.
         quota = float(lists.quotas.get(serving_alias) or 0.0)
         spent = (self._ledger or default_ledger()).spent_today(
-            serving_alias, caller=peer_id, caller_kind=PEER_CALLER_KIND,
+            serving_alias, caller=peer_id, caller_kind=PEER_CALLER_KIND, currency=currency,
         )
         # The call that crosses the line is served: the ceiling stops the call
         # *after* the one that reached it, so the overrun is at most one call
@@ -437,7 +439,8 @@ class P2PCoordinator:
             return None
         return (
             f"This node serves '{serving_alias}' behind a daily ceiling and yours is spent: "
-            f"${spent:.4f} of ${quota:.2f} today (compute.vendor_quotas, per caller); it is "
+            f"{spent:.4f} {currency} of {quota:.2f} {currency} today (compute.vendor_quotas, "
+            "per caller); it is "
             "served again after midnight UTC",
             REFUSAL_INSUFFICIENT_QUOTA,
         )
@@ -477,8 +480,9 @@ class P2PCoordinator:
         usage row under the peer's name (ADR-041 D3), naming the effort it ran
         at and whether the transport proved the name the row is written under.
 
-        Two prices, and only one of them leaves this node. `cost_usd` is what
-        the call cost us — a vendor's dollars, or zero for our own card — and
+        Two prices, and only one of them leaves this node. `cost_amount` is
+        what the call cost us — the provider's own price where it gave one, a
+        vendor's per-token price by its type, or zero for our own card — and
         stays on this row. The owner's tariff is what the guest is charged, is
         resolved for this peer at `started_at`, and travels: returned here as
         `(billing, tariff, tariff_amount)` for the response to carry.
@@ -486,18 +490,17 @@ class P2PCoordinator:
         A row that cannot be built is logged and does not fail the answer: the
         tokens have already been generated and paid for.
         """
-        from .dpc_agent.pricing import compute_cost_usd, get_billing_model
+        from .dpc_agent.pricing import price_call
         from .p2p_manager import peer_proof
 
         proved, connection_type = peer_proof(getattr(self.p2p_manager, "peers", None), peer_id)
-        billing = get_billing_model(serving_alias, model)
-        cost_usd = compute_cost_usd(
-            serving_alias,
-            result.get("prompt_tokens") or 0,
-            result.get("response_tokens") or 0,
-            model=model,
-            at=started_at,
+        price = price_call(
+            provider_type=self._provider_type(serving_alias),
+            alias=serving_alias, model=model,
+            prompt_tokens=result.get("prompt_tokens"), completion_tokens=result.get("response_tokens"),
+            reported=result, at=started_at,
         )
+        billing = price.pop("billing")
         output_includes_thinking = result.get("output_includes_thinking", "unknown")
         tariff = self._tariff_for_call(serving_alias, peer_id, started_at)
         tariff_amount = tariff_amount_for(
@@ -528,7 +531,7 @@ class P2PCoordinator:
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,
-                cost_usd=cost_usd,
+                **price,
                 tariff_in=tariff.in_per_1m if tariff else None,
                 tariff_out=tariff.out_per_1m if tariff else None,
                 tariff_currency=tariff.currency if tariff else None,

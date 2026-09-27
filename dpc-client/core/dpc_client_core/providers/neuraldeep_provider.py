@@ -13,7 +13,8 @@ from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages,
                    configured_reasoning_default, image_base64,
                    network_client_bounds, normalize_reasoning_effort,
                    numeric_setting, positive_ceiling)
-from ..dpc_agent.pricing import NEURALDEEP_CURRENCY, compute_cost_rub
+from ..dpc_agent.pricing import (COST_BASIS_CHARGED, COST_BASIS_LIST_PRICE_REFERENCE,
+                                 COST_BASIS_UNKNOWN, NEURALDEEP_CURRENCY, compute_cost_rub)
 from .neuraldeep_prices import REFRESH_INTERVAL, RETRY_AFTER_FAILURE, price_source
 
 logger = logging.getLogger(__name__)
@@ -32,10 +33,9 @@ _REASONING_MODELS = frozenset({
 # because the gateway drops `chat_template_kwargs.enable_thinking=false`.
 _NOREASON_TWINS = frozenset({"qwen3.8-27b", "qwen3.6-35b-a3b", "qwen3.6-fp8", "gemma-4-31b"})
 
-# `cost_basis` on a priced usage record: what the RUB amount is.
-COST_BASIS_CHARGED = "charged"  # a wallet key: the amount is debited
-COST_BASIS_LIST_PRICE_REFERENCE = "list_price_reference"  # a subscription key: not debited
-COST_BASIS_UNKNOWN = "unknown"  # /limits could not be read
+# `cost_basis` on a priced usage record (words from `pricing.COST_BASES`):
+# a wallet key is `charged`, a subscription key `list_price_reference`, and a
+# key whose /limits could not be read `unknown`.
 
 # The shared effort word -> what each model's `reasoning_effort` accepts, per
 # the vendor's "Reasoning по моделям" section. qwen3.8-27b does not know `high`
@@ -128,6 +128,9 @@ class NeuralDeepProvider(AIProvider):
     """
 
     RETRY_LABEL = "NeuralDeep"
+    # The unit of every `cost_amount` this provider reports, and of its daily
+    # ceiling in `compute.vendor_quotas`.
+    BILLING_CURRENCY = NEURALDEEP_CURRENCY
     # Probe 2026-09-26, qwen3.8-27b: completion_tokens=63 with reasoning_tokens=57,
     # i.e. reasoning is counted inside completion (vLLM counts every generated token).
     DECLARED_OUTPUT_INCLUDES_THINKING = "includes"

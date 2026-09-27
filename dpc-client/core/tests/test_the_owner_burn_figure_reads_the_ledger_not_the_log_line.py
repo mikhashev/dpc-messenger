@@ -23,13 +23,17 @@ pytestmark = pytest.mark.asyncio
 WHEN = datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc)
 
 
+#: A call nobody priced: no amount, and so no currency and no basis.
+NO_PRICE = dict(cost_amount=None, cost_currency=None, cost_basis=None)
+
+
 def _row(**overrides):
     fields = dict(
         request_id="req-1", caller="agent_001", caller_kind="agent",
         alias="ds_flash", model="deepseek-v4-flash", route="local",
         prompt_tokens=100, completion_tokens=50, thinking_tokens=None,
         counts_source="engine", started_at=WHEN, duration_s=1.0,
-        billing="pay_per_use", cost_usd=0.01,
+        billing="pay_per_use", cost_amount=0.01, cost_currency="USD", cost_basis="charged",
     )
     fields.update(overrides)
     return usage_row(**fields)
@@ -53,7 +57,7 @@ def test_burn_rows_keeps_the_three_local_shapes():
     rows = [
         _row(request_id="a", caller="agent_001", caller_kind="agent", route="local"),
         _row(request_id="g", caller="ide_key", caller_kind="gateway", route="local"),
-        _row(request_id="p", caller="dpc-node-alice", caller_kind="peer", route="local", cost_usd=0.02),
+        _row(request_id="p", caller="dpc-node-alice", caller_kind="peer", route="local", cost_amount=0.02),
     ]
     kept = list(burn_rows(rows))
     assert {r["request_id"] for r in kept} == {"a", "g", "p"}
@@ -63,8 +67,8 @@ def test_burn_rows_drops_a_call_routed_to_a_peer():
     """An agent asking a peer to run the call spends the peer's money, not
     this node's — `route == "peer"` is excluded regardless of `caller_kind`."""
     rows = [
-        _row(request_id="a", caller="agent_001", caller_kind="agent", route="local", cost_usd=0.01),
-        _row(request_id="p", caller="agent_001", caller_kind="agent", route="peer", cost_usd=None,
+        _row(request_id="a", caller="agent_001", caller_kind="agent", route="local", cost_amount=0.01),
+        _row(request_id="p", caller="agent_001", caller_kind="agent", route="peer", **NO_PRICE,
              billing="subscription"),
     ]
     kept = list(burn_rows(rows))
@@ -83,7 +87,7 @@ def test_burn_rows_and_own_rows_differ_by_exactly_the_rows_served_to_peers():
         _row(request_id="p1", caller="dpc-node-alice", caller_kind="peer", route="local"),
         _row(request_id="p2", caller="dpc-node-bob", caller_kind="peer", route="local"),
         _row(request_id="r", caller="agent_001", caller_kind="agent", route="peer",
-             cost_usd=None, billing="subscription"),
+             **NO_PRICE, billing="subscription"),
     ]
 
     burn = {r["request_id"] for r in burn_rows(rows)}
@@ -102,37 +106,37 @@ def test_burn_rows_and_own_rows_differ_by_exactly_the_rows_served_to_peers():
 async def test_a_peer_served_call_counts_in_the_owner_figure():
     """Serving a peer on this node's own DeepSeek key is this node's own
     money (ADR-041 D3 amendment, 2026-09-13): the tariff charged to the guest
-    is a separate number (`tariff_amount`), but `cost_usd` is what this node
+    is a separate number (`tariff_amount`), but `cost_amount` is what this node
     paid its vendor, and that belongs in the owner burn figure."""
     ledger = node_ledger.default_ledger()
     ledger.append(_row(request_id="host-served-peer", caller="dpc-node-alice",
-                        caller_kind="peer", route="local", cost_usd=0.05))
+                        caller_kind="peer", route="local", cost_amount=0.05))
 
     result = await _summary()
 
     assert result["row_count"] == 1
-    assert result["by_caller"]["dpc-node-alice"]["cost_usd"] == pytest.approx(0.05)
+    assert result["by_caller"]["dpc-node-alice"]["cost"]["USD"]["amount"] == pytest.approx(0.05)
 
 
 async def test_an_agents_own_call_counts_once():
     ledger = node_ledger.default_ledger()
     ledger.append(_row(request_id="own-call", caller="agent_001", caller_kind="agent",
-                        route="local", cost_usd=0.03))
+                        route="local", cost_amount=0.03))
 
     result = await _summary()
 
     assert result["row_count"] == 1
-    assert result["by_caller"]["agent_001"]["cost_usd"] == pytest.approx(0.03)
+    assert result["by_caller"]["agent_001"]["cost"]["USD"]["amount"] == pytest.approx(0.03)
 
 
 async def test_a_call_routed_to_a_peer_does_not_count():
     """The requester's own row for a peer-routed call already carries
-    `cost_usd=None` since `24f92837`; here it must not even reach `summarize`
+    `cost_usd=None` since `24f92837` (`cost_amount=None` now); here it must not even reach `summarize`
     — the money left with the peer that ran it, and the row is excluded by
     `route`, not merely by an absent cost."""
     ledger = node_ledger.default_ledger()
     ledger.append(_row(request_id="asked-a-peer", caller="agent_001", caller_kind="agent",
-                        route="peer", cost_usd=None, billing="subscription"))
+                        route="peer", **NO_PRICE, billing="subscription"))
 
     result = await _summary()
 
@@ -146,15 +150,15 @@ async def test_a_peer_call_and_an_own_call_do_not_mix():
     both count, kept apart by caller rather than folded into one figure."""
     ledger = node_ledger.default_ledger()
     ledger.append(_row(request_id="own", caller="agent_001", caller_kind="agent",
-                        route="local", cost_usd=0.01))
+                        route="local", cost_amount=0.01))
     ledger.append(_row(request_id="served", caller="dpc-node-alice", caller_kind="peer",
-                        route="local", cost_usd=0.05))
+                        route="local", cost_amount=0.05))
 
     result = await _summary()
 
     assert result["row_count"] == 2
-    assert result["by_caller"]["agent_001"]["cost_usd"] == pytest.approx(0.01)
-    assert result["by_caller"]["dpc-node-alice"]["cost_usd"] == pytest.approx(0.05)
+    assert result["by_caller"]["agent_001"]["cost"]["USD"]["amount"] == pytest.approx(0.01)
+    assert result["by_caller"]["dpc-node-alice"]["cost"]["USD"]["amount"] == pytest.approx(0.05)
 
 
 # --- the log line is no longer a source of figures ---
@@ -175,7 +179,7 @@ async def test_the_figure_comes_from_burn_rows_and_nothing_else(monkeypatch, cap
 
     ledger = node_ledger.default_ledger()
     ledger.append(_row(request_id="real", caller="agent_001", caller_kind="agent",
-                        route="local", cost_usd=0.01))
+                        route="local", cost_amount=0.01))
 
     monkeypatch.setattr(node_ledger, "burn_rows", lambda rows: iter([]))
 

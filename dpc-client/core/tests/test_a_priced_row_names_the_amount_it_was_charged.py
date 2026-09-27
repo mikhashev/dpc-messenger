@@ -13,7 +13,7 @@ applies is decided by the row's `output_includes_thinking`, not by
 
 `tariff_amount_for` is the one place that arithmetic lives, and it is called
 at write time only: D3 prices a call at `started_at` and never re-derives it,
-which is the same rule `cost_usd` and `dpc_agent/pricing.py:177` already keep.
+which is the same rule `cost_amount` and `dpc_agent/pricing.py:177` already keep.
 """
 
 from datetime import datetime, timezone
@@ -33,7 +33,7 @@ def _row(**overrides):
         alias="ollama_local", model="qwen3:8b", route="local",
         prompt_tokens=8, completion_tokens=1, thinking_tokens=56,
         counts_source="ours", started_at=NOW, duration_s=1.0,
-        billing="subscription", cost_usd=0.0,
+        billing="subscription", cost_amount=0.0,
     )
     fields.update(overrides)
     return usage_row(**fields)
@@ -110,7 +110,7 @@ def test_the_amount_is_written_after_the_tariff_group_it_belongs_to():
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
         "output_includes_thinking", "thinking_source", "served_effort", "peer_proved",
         "peer_connection_type",
-        "started_at", "duration_s", "billing", "cost_usd",
+        "started_at", "duration_s", "billing", "cost_amount", "cost_currency", "cost_basis", "cost_unpriced_reason",
         "tariff_in", "tariff_out", "tariff_currency", "tariff_at", "tariff_amount",
     ]
     assert row["tariff_amount"] == 0.00346

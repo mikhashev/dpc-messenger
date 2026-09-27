@@ -59,7 +59,7 @@ def _row(**overrides):
         alias="ds_flash", model="deepseek-v4-flash", route="local",
         prompt_tokens=8, completion_tokens=1, thinking_tokens=56,
         counts_source="ours", started_at=NOW, duration_s=1.0,
-        billing="subscription", cost_usd=0.0,
+        billing="subscription", cost_amount=0.0,
     )
     fields.update(overrides)
     return usage_row(**fields)

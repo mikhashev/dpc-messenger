@@ -151,7 +151,7 @@ def _rows(ledger):
     return list(ledger.rows())
 
 
-def _assert_requester_row(row, *, billing, cost_usd=None):
+def _assert_requester_row(row, *, billing, cost_amount=None):
     assert (row["caller"], row["caller_kind"], row["route"]) == (NODE_ID, "gateway", "peer")
     assert row["request_id"] == WIRE_ID, "the wire id, never one minted here"
     assert (row["alias"], row["model"]) == (REMOTE_ALIAS, HOST_MODEL)
@@ -162,7 +162,7 @@ def _assert_requester_row(row, *, billing, cost_usd=None):
     assert (row["prompt_tokens"], row["completion_tokens"], row["thinking_tokens"]) == (20, 10, None)
     assert row["counts_source"] == "engine"
     assert row["billing"] == billing
-    assert row["cost_usd"] == cost_usd
+    assert row["cost_amount"] == cost_amount
     assert row["duration_s"] >= 0
 
 
@@ -250,7 +250,7 @@ async def test_a_peer_completion_in_the_messages_form_is_messages_shaped_and_lea
 
 @pytest.mark.asyncio
 async def test_a_host_that_sent_no_price_leaves_cost_null_and_billing_from_the_fallback(tmp_path, caplog):
-    """This node did not run the call and does not price it (D3): `cost_usd`
+    """This node did not run the call and does not price it (D3): `cost_amount`
     stays null on every peer row — a zero would read as free — and `billing`
     falls back to this node's own table for the model the host named."""
     service = _peer_service(tmp_path, result=_unpriced_result())
@@ -259,7 +259,7 @@ async def test_a_host_that_sent_no_price_leaves_cost_null_and_billing_from_the_f
                                    key=_key(tmp_path), body=_chat(REMOTE_MODEL))
         assert status == 200
         (row,) = _rows(ledger)
-        assert row["cost_usd"] is None
+        assert row["cost_amount"] is None
         assert row["billing"] == "subscription"
         assert row["request_id"] == WIRE_ID
 

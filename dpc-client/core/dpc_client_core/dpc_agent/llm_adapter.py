@@ -30,7 +30,7 @@ from ..node_ledger import (
     stated_thinking_source,
     usage_row,
 )
-from .pricing import compute_cost_usd, get_billing_model
+from .pricing import COST_FIELDS, get_billing_model, price_call, usd_figure
 
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
@@ -334,6 +334,37 @@ class DpcLlmAdapter:
             self._last_call = {}
         self._last_call.update(facts)
 
+    def _price_usage(self, usage: Dict[str, Any], provider: Any, model_name: Optional[str]) -> None:
+        """Put the call's price into `usage` and its billing model into the row's facts.
+
+        `pricing.price_call` decides: the provider's own price where its usage
+        dict carries `cost_amount`, the provider type's otherwise. `cost` stays
+        what the loop's budget reads — dollars only, and absent for a price in
+        another currency or none at all, since a zero there would read as free.
+        """
+        config = getattr(provider, "config", None)
+        price = price_call(
+            provider_type=config.get("type") if isinstance(config, dict) else None,
+            alias=self._provider_alias or getattr(provider, "alias", None) or "",
+            model=model_name,
+            prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+            reported=usage,
+            cache_hit_tokens=int(usage.get("prompt_cache_hit_tokens", 0) or 0),
+            cache_miss_tokens=(
+                int(usage["prompt_cache_miss_tokens"])
+                if usage.get("prompt_cache_miss_tokens") is not None
+                else None
+            ),
+        )
+        self._note_call(billing=price.pop("billing"))
+        usage.update(price)
+        dollars = usd_figure(price)
+        if dollars is None:
+            usage.pop("cost", None)
+        else:
+            usage["cost"] = dollars
+
     def _write_usage_row(
         self,
         usage: Dict[str, Any],
@@ -377,10 +408,11 @@ class DpcLlmAdapter:
                 served_by=facts.get("served_by"),
                 started_at=started_at,
                 duration_s=duration_s,
-                # Priced by the route; on the peer route both are the host's copy
-                # from the wire, or absent: this node did not run the call (D3).
+                # Priced by the route (`_price_usage`); on the peer route the
+                # billing model is the host's copy from the wire and the cost is
+                # absent: this node did not run the call (D3).
                 billing=facts.get("billing") or get_billing_model(alias or "", model),
-                cost_usd=usage.get("cost"),
+                **{name: usage.get(name) for name in COST_FIELDS},
                 # Copied from the wire on the peer route, never computed here.
                 **{name: facts.get(name) for name in TARIFF_FIELDS},
                 task_id=task_id,
@@ -594,21 +626,7 @@ class DpcLlmAdapter:
             if reported:
                 self._note_call(counts_source="engine")
                 usage: Dict[str, Any] = dict(reported)
-                usage.setdefault(
-                    "cost",
-                    compute_cost_usd(
-                        self._provider_alias or "",
-                        int(usage.get("prompt_tokens", 0)),
-                        int(usage.get("completion_tokens", 0)),
-                        model=model_name,
-                        cache_hit_tokens=int(usage.get("prompt_cache_hit_tokens", 0) or 0),
-                        cache_miss_tokens=(
-                            int(usage["prompt_cache_miss_tokens"])
-                            if usage.get("prompt_cache_miss_tokens") is not None
-                            else None
-                        ),
-                    ),
-                )
+                self._price_usage(usage, provider, model_name)
                 return response_msg, usage
 
             # Count tokens accurately using TokenCountManager (reuse existing)
@@ -624,10 +642,10 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
                 # Counted over the visible text; the thinking, if any, was already apart from it.
                 "output_includes_thinking": "excludes",
             }
+            self._price_usage(usage, provider, model_name)
 
             self._note_call(counts_source="ours")
             return response_msg, usage
@@ -752,10 +770,10 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
                 # Counted over the visible text; the thinking, if any, was already apart from it.
                 "output_includes_thinking": "excludes",
             }
+            self._price_usage(usage, provider, model_name)
 
             self._note_call(counts_source="ours")
             return response_msg, usage
@@ -842,28 +860,14 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
                 # Counted over `content` alone; `thinking` came apart from it.
                 "output_includes_thinking": "excludes",
             }
             self._note_call(counts_source="ours")
         else:
             self._note_call(counts_source="engine")
-            usage.setdefault(
-                "cost",
-                compute_cost_usd(
-                    self._provider_alias or "",
-                    int(usage.get("prompt_tokens", 0)),
-                    int(usage.get("completion_tokens", 0)),
-                    model=self.default_model(),
-                    cache_hit_tokens=int(usage.get("prompt_cache_hit_tokens", 0) or 0),
-                    cache_miss_tokens=(
-                        int(usage["prompt_cache_miss_tokens"])
-                        if usage.get("prompt_cache_miss_tokens") is not None
-                        else None
-                    ),
-                ),
-            )
+            usage = dict(usage)
+        self._price_usage(usage, provider, self.default_model())
 
         return response_msg, usage
 
@@ -1135,8 +1139,8 @@ class DpcLlmAdapter:
                     "output_includes_thinking": "excludes",
                 }
             # The host's cost does not travel and is not copied: this node spent
-            # nothing of its own and prices nothing, so its row's cost_usd stays
-            # null (D3). What it owes is the tariff, noted above for the row.
+            # nothing of its own and prices nothing, so its row's cost_amount
+            # stays null (D3). What it owes is the tariff, noted above for the row.
             # The effort the host actually served, after its clamp (DPTP v1.7):
             # the only place this node can learn what depth it paid for. Set
             # whether or not the host counted, so the row carries it either way.

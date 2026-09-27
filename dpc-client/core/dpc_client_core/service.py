@@ -4563,7 +4563,9 @@ class CoreService:
         TWO-SERIES-CARRY-ONE-PAID-CALL-AND-THE-BURN-READER-STILL-READS-THE-
         OLD-ONE (Mike's call, 2026-09-13: the ledger is the record, not the
         `DeepSeek usage:` log line). `since`/`until` are optional ISO datetime
-        bounds. Response shape is unchanged from before the re-pointing."""
+        bounds. Each group's money is `cost`, per currency — since 2026-09-28,
+        when it replaced the single `cost_usd` sum — with `cost_free` and
+        `unpriced` counted beside it."""
         try:
             ledger = node_ledger.default_ledger()
             summary = node_ledger.summarize(

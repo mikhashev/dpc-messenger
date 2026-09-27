@@ -19,6 +19,7 @@ from .providers import (
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
 from .node_ledger import OUTPUT_INCLUDES_THINKING, THINKING_SOURCES
+from .dpc_agent.pricing import COST_FIELDS
 from .providers.base import image_blocks_in_turns, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,19 @@ def reported_counts(provider: Any) -> Optional[Tuple[int, int, str]]:
         return None
     convention = usage.get("output_includes_thinking")
     return prompt, completion, convention if convention in OUTPUT_INCLUDES_THINKING else "unknown"
+
+
+def reported_cost(provider: Any) -> Dict[str, Any]:
+    """The price the provider put on its last call, or {} where it put none.
+
+    Copied only when its usage dict carries the key `cost_amount`, even as
+    None: that is a provider pricing its own calls (NeuralDeep, in roubles),
+    and a None there is its word that it could not, which no writer may
+    replace with a price of its own (`pricing.price_call`)."""
+    usage = provider.get_last_usage() or {}
+    if "cost_amount" not in usage:
+        return {}
+    return {name: usage.get(name) for name in COST_FIELDS}
 
 
 def _tool_use_block(call: Any) -> Dict[str, Any]:
@@ -854,6 +868,8 @@ class LLMManager:
                 # ... and the rung the provider says it ran on, which is the
                 # word a usage row wants and the only one that cannot be wrong.
                 "provider_served_effort": reported_served_effort(provider),
+                # The provider's own price, where it prices its calls.
+                **reported_cost(provider),
             }
         return response
 
@@ -1024,6 +1040,8 @@ class LLMManager:
                 "tools_used": tools_used,
                 "tool_calls": tool_calls,
                 "finish_reason": finish_reason,
+                # The provider's own price, where it prices its calls.
+                **reported_cost(provider),
             }
         return response
 

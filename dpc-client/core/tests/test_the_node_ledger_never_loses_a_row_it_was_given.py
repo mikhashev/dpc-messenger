@@ -26,13 +26,17 @@ AUGUST = datetime(2026, 8, 31, 23, 59, 59, tzinfo=timezone.utc)
 SEPTEMBER = datetime(2026, 9, 1, 0, 0, 1, tzinfo=timezone.utc)
 
 
+#: A call nobody priced: no amount, and so no currency and no basis.
+NO_PRICE = dict(cost_amount=None, cost_currency=None, cost_basis=None)
+
+
 def _row(started_at, **overrides):
     fields = dict(
         request_id="req-1", caller="agent_001", caller_kind="agent",
         alias="ds_flash", model="deepseek-v4-flash", route="local",
         prompt_tokens=1000, completion_tokens=900, thinking_tokens=None,
         counts_source="engine", started_at=started_at, duration_s=1.25,
-        billing="pay_per_use", cost_usd=0.0041,
+        billing="pay_per_use", cost_amount=0.0041, cost_currency="USD", cost_basis="charged",
     )
     fields.update(overrides)
     return usage_row(**fields)
@@ -119,7 +123,7 @@ def test_every_column_of_d3_is_present_in_its_order():
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
         "output_includes_thinking", "thinking_source", "served_effort", "peer_proved",
         "peer_connection_type",
-        "started_at", "duration_s", "billing", "cost_usd",
+        "started_at", "duration_s", "billing", "cost_amount", "cost_currency", "cost_basis", "cost_unpriced_reason",
         "task_id", "conversation_id",
     ]
     assert row["started_at"] == "2026-09-01T00:00:01+00:00"
@@ -159,7 +163,7 @@ def test_a_partition_is_byte_identical_on_every_platform(tmp_path):
         request_id="r1", caller="a", caller_kind="agent", alias="x", model="m",
         route="local", prompt_tokens=1, completion_tokens=1, thinking_tokens=None,
         counts_source="ours", started_at=datetime.now(timezone.utc), duration_s=0.1,
-        billing="subscription", cost_usd=0.0,
+        billing="subscription", cost_amount=0.0,
     )
     path = ledger.append(row)
     ledger.append(row)
@@ -174,13 +178,13 @@ def test_a_row_nobody_priced_says_null_not_zero(tmp_path, caplog):
     that is a price that should have been computed."""
     ledger = NodeLedger(tmp_path / "ledger")
     with caplog.at_level(logging.WARNING, logger="dpc_client_core.node_ledger"):
-        unpriced = _row(SEPTEMBER, request_id="unpriced", billing="pay_per_use", cost_usd=None)
-        free = _row(SEPTEMBER, request_id="free", billing="subscription", cost_usd=None)
+        unpriced = _row(SEPTEMBER, request_id="unpriced", billing="pay_per_use", **NO_PRICE)
+        free = _row(SEPTEMBER, request_id="free", billing="subscription", **NO_PRICE)
     ledger.append(unpriced)
     ledger.append(free)
 
-    assert unpriced["cost_usd"] is None and free["cost_usd"] is None
-    assert [r["cost_usd"] for r in ledger.rows()] == [None, None]
+    assert unpriced["cost_amount"] is None and free["cost_amount"] is None
+    assert [r["cost_amount"] for r in ledger.rows()] == [None, None]
     warned = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warned) == 1 and "unpriced" in warned[0]
 
@@ -193,13 +197,13 @@ def test_spent_today_sums_this_callers_rows_on_this_alias_for_the_utc_day(tmp_pa
     ledger = NodeLedger(tmp_path / "ledger")
     noon = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
     just_before_midnight = datetime(2026, 9, 9, 23, 59, 59, tzinfo=timezone.utc)
-    ledger.append(_row(noon, request_id="ours-1", caller="us", caller_kind="gateway", cost_usd=0.25))
-    ledger.append(_row(noon, request_id="ours-2", caller="us", caller_kind="gateway", cost_usd=0.5))
-    ledger.append(_row(noon, request_id="ours-peer", caller="us", caller_kind="peer", cost_usd=4.0))
-    ledger.append(_row(noon, request_id="theirs", caller="them", caller_kind="gateway", cost_usd=8.0))
-    ledger.append(_row(noon, request_id="other-alias", caller="us", caller_kind="gateway", alias="ds_pro", cost_usd=16.0))
-    ledger.append(_row(just_before_midnight, request_id="yesterday", caller="us", caller_kind="gateway", cost_usd=32.0))
-    ledger.append(_row(noon, request_id="unpriced", caller="us", caller_kind="gateway", cost_usd=None))
+    ledger.append(_row(noon, request_id="ours-1", caller="us", caller_kind="gateway", cost_amount=0.25))
+    ledger.append(_row(noon, request_id="ours-2", caller="us", caller_kind="gateway", cost_amount=0.5))
+    ledger.append(_row(noon, request_id="ours-peer", caller="us", caller_kind="peer", cost_amount=4.0))
+    ledger.append(_row(noon, request_id="theirs", caller="them", caller_kind="gateway", cost_amount=8.0))
+    ledger.append(_row(noon, request_id="other-alias", caller="us", caller_kind="gateway", alias="ds_pro", cost_amount=16.0))
+    ledger.append(_row(just_before_midnight, request_id="yesterday", caller="us", caller_kind="gateway", cost_amount=32.0))
+    ledger.append(_row(noon, request_id="unpriced", caller="us", caller_kind="gateway", **NO_PRICE))
 
     assert ledger.spent_today("ds_flash", caller="us", caller_kind="gateway", now=noon) == pytest.approx(0.75)
     assert ledger.spent_today("ds_flash", caller="us", now=noon) == pytest.approx(4.75)
@@ -211,8 +215,8 @@ def test_the_tariff_columns_travel_as_one_group_or_not_at_all(tmp_path):
     """The owner's tariff (ADR-041 D3, amendment): a row carries the applied
     rates frozen with their currency and the dated entry they came from, or
     none of the four. A row with half a tariff would be read as a price by one
-    reader and as a gift by another, so a partial group is refused. `cost_usd`
-    stays what the call cost the host, in USD, beside them."""
+    reader and as a gift by another, so a partial group is refused. `cost_amount`
+    stays what the call cost the host, in its own currency, beside them."""
     ledger = NodeLedger(tmp_path / "ledger")
     priced = _row(SEPTEMBER, request_id="priced", tariff_in=20.0, tariff_out=60, tariff_currency="RUB",
                   tariff_at="2026-09-01", task_id="task-1")
@@ -226,11 +230,11 @@ def test_the_tariff_columns_travel_as_one_group_or_not_at_all(tmp_path):
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
         "output_includes_thinking", "thinking_source", "served_effort", "peer_proved",
         "peer_connection_type",
-        "started_at", "duration_s", "billing", "cost_usd",
+        "started_at", "duration_s", "billing", "cost_amount", "cost_currency", "cost_basis", "cost_unpriced_reason",
         "tariff_in", "tariff_out", "tariff_currency", "tariff_at", "tariff_amount", "task_id",
     ]
     assert (priced["tariff_in"], priced["tariff_out"]) == (20.0, 60.0)
-    assert isinstance(priced["tariff_out"], float) and priced["cost_usd"] == 0.0041
+    assert isinstance(priced["tariff_out"], float) and priced["cost_amount"] == 0.0041
     assert (free["tariff_in"], free["tariff_out"], free["tariff_currency"], free["tariff_at"]) == (0.0, 0.0, "USD", "2026-08-15")
     assert not [k for k in gift if k.startswith("tariff_")]
 

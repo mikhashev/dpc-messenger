@@ -124,7 +124,7 @@ from aiohttp import web
 from dpc_protocol.protocol import PeerRefused
 
 from .dpc_agent.llm_adapter import DpcLlmAdapter
-from .dpc_agent.pricing import compute_cost_usd, get_billing_model
+from .dpc_agent.pricing import get_billing_model, price_call, vendor_ceiling_currency
 from .firewall import ServingLists
 from .llm_manager import accepts_reasoning_effort, entry_point_for, flatten_messages
 from .node_ledger import (
@@ -491,20 +491,6 @@ def client_config_lines(
     ]
 
 
-def vendor_alias_is_priced(alias: str, model: Optional[str]) -> bool:
-    """Whether a call on this vendor alias would be written down with a price.
-
-    A daily ceiling is enforced by summing the `cost_usd` of the rows already
-    written (`NodeLedger.spent_today`), and `compute_cost_usd` answers 0.0 —
-    never an error — for an alias no rate table knows. So an unpriced vendor
-    alias is served against a ceiling that reads $0.00 for ever: the meter is
-    not slow, it is absent (Ark's review of `11b1de5c`, 2026-09-14). The
-    question is asked of the same function that fills the row, so the door and
-    the ledger cannot disagree about which aliases have a rate.
-    """
-    return get_billing_model(alias, model) == "pay_per_use"
-
-
 # A model name under this prefix is a peer's alias, `remote:<node_id>:<alias>`
 # — the form this node already gives a peer's provider for transcription and
 # in `remote_peer` configs, so one name means one thing everywhere.
@@ -567,9 +553,9 @@ class Completion:
 
     `alias` is the name the client asked for and both shapes echo — on the
     peer route the `remote:` form, while the row carries the alias as the
-    peer names it. `cost_usd` is always None on the peer route: this node did
-    not run the call and does not price it, and the host's own cost is not on
-    the wire (D3, amendment).
+    peer names it. `cost_amount` is always None on the peer route: this node
+    did not run the call and does not price it, and the host's own cost is not
+    on the wire (D3, amendment). `cost_currency` is its unit, None with it.
     """
     request_id: str
     alias: str
@@ -583,7 +569,8 @@ class Completion:
     started_at: datetime
     duration_s: float
     billing: str
-    cost_usd: Optional[float]
+    cost_amount: Optional[float]
+    cost_currency: Optional[str] = None
     # What the provider said it stopped on, in its own OpenAI vocabulary, or
     # None when it said nothing; each shape converts on its way to the wire.
     finish_reason: Optional[str] = None
@@ -960,14 +947,15 @@ class Gateway:
         ledger = self._ledger or default_ledger()
         caller = self.caller
         if owner == "vendor":
-            self._refuse_an_unpriced_vendor_alias(alias, providers[alias])
+            currency = self._refuse_an_unpriced_vendor_alias(alias, providers[alias])
             quota = lists.quotas[alias]
-            spent = ledger.spent_today(alias, caller=caller, caller_kind=CALLER_KIND)
+            spent = ledger.spent_today(alias, caller=caller, caller_kind=CALLER_KIND, currency=currency)
             if spent >= quota:
                 raise GatewayError(
                     429,
-                    f"model '{alias}' is refused: {caller} has spent ${spent:.4f} of its ${quota:.2f} daily "
-                    "ceiling (compute.vendor_quotas); it is served again after midnight UTC",
+                    f"model '{alias}' is refused: {caller} has spent {spent:.4f} {currency} of its "
+                    f"{quota:.2f} {currency} daily ceiling (compute.vendor_quotas); it is served again "
+                    "after midnight UTC",
                     "insufficient_quota",
                 )
             # Money bounds a vendor alias, not the card: no queue.
@@ -992,18 +980,22 @@ class Gateway:
         finally:
             self._inference_lock.release()
 
-    def _refuse_an_unpriced_vendor_alias(self, alias: str, provider: Any) -> None:
-        """A vendor alias this node cannot price is refused, not served free.
+    def _refuse_an_unpriced_vendor_alias(self, alias: str, provider: Any) -> str:
+        """The currency a vendor alias's ceiling is counted in; an alias this
+        node cannot price is refused, not served free.
 
-        The ceiling is money, and money is counted from the rows; an alias no
-        rate table knows writes $0.00 on every row, so its ceiling can never
-        be reached and `vendor_quotas` guards nothing. `unrated`, not the spent
-        ceiling's word: waiting adds no rate, so this is a 503 the owner clears
-        and not a 429 the client retries.
+        The ceiling is money, and money is counted from the charged rows; an
+        alias whose rows carry no charged amount can never reach its ceiling,
+        and `vendor_quotas` would guard nothing (Ark's review of `11b1de5c`,
+        2026-09-14). The currency comes from the provider
+        (`pricing.vendor_ceiling_currency`). `unrated`, not the spent
+        ceiling's word: waiting adds no rate, so this is a 503 the owner
+        clears and not a 429 the client retries.
         """
         model = getattr(provider, "model", None)
-        if vendor_alias_is_priced(alias, model):
-            return
+        currency = vendor_ceiling_currency(alias, provider)
+        if currency is not None:
+            return currency
         logger.warning(
             "Vendor alias '%s' (model %s) has no rate in this node's pricing tables, so its "
             "spend cannot be counted against compute.vendor_quotas; it is refused rather than "
@@ -1014,7 +1006,7 @@ class Gateway:
             f"model '{alias}' is refused: it is a vendor alias in compute.serving_vendor, and "
             f"this node has no rate for it (model {model!r}), so what it spends cannot be "
             "counted against its daily ceiling in compute.vendor_quotas — an unpriced alias is "
-            "refused rather than served against a ceiling that would read $0.00 for ever",
+            "refused rather than served against a ceiling that would read zero for ever",
             "unrated",
         )
 
@@ -1153,10 +1145,15 @@ class Gateway:
         prompt_tokens = result.get("prompt_tokens")
         completion_tokens = result.get("response_tokens")
         tool_calls = [call for call in result.get("tool_calls") or [] if isinstance(call, dict)]
-        billing = get_billing_model(alias, model)
-        cost_usd = compute_cost_usd(
-            alias, prompt_tokens or 0, completion_tokens or 0, model=model, at=started_at,
+        # The provider's own price where it gave one (`llm_manager.reported_cost`
+        # copies it into `result`), otherwise the provider type's.
+        provider = (getattr(self._core.llm_manager, "providers", None) or {}).get(alias)
+        price = price_call(
+            provider_type=(getattr(provider, "config", None) or {}).get("type"),
+            alias=alias, model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            reported=result, at=started_at,
         )
+        billing = price.pop("billing")
         request_id = request_id or str(uuid.uuid4())
         try:
             row = usage_row(
@@ -1183,7 +1180,7 @@ class Gateway:
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,
-                cost_usd=cost_usd,
+                **price,
             )
         except Exception:
             # The answer exists and is returned; the missing row is findable by id.
@@ -1195,7 +1192,8 @@ class Gateway:
             text=result.get("response") or "",
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=result.get("thinking_tokens"),
-            started_at=started_at, duration_s=duration_s, billing=billing, cost_usd=cost_usd,
+            started_at=started_at, duration_s=duration_s, billing=billing,
+            cost_amount=price["cost_amount"], cost_currency=price["cost_currency"],
             finish_reason=_finish_reason(result.get("finish_reason"), tool_calls),
             output_includes_thinking=result.get("output_includes_thinking", "unknown"),
             tool_calls=tool_calls,
@@ -1416,7 +1414,6 @@ class Gateway:
         # prices nothing, so the row's cost stays null (D3). What it owes is the
         # owner's tariff, copied as one group or not at all.
         billing = result.get("billing") or get_billing_model(remote_alias, model)
-        cost_usd = None
         tariff = {name: result.get(name) for name in TARIFF_FIELDS}
         if any(tariff[name] is None for name in TARIFF_FIELDS[:4]):
             tariff = {}
@@ -1460,7 +1457,6 @@ class Gateway:
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,
-                cost_usd=cost_usd,
                 **tariff,
             )
         except Exception:
@@ -1471,7 +1467,7 @@ class Gateway:
             request_id=request_id, alias=name, owner=peer_id, route="peer", model=model, text=text,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=result.get("thinking_tokens"),
-            started_at=started_at, duration_s=duration_s, billing=billing, cost_usd=cost_usd,
+            started_at=started_at, duration_s=duration_s, billing=billing, cost_amount=None,
             output_includes_thinking=output_includes_thinking,
             finish_reason=_finish_reason(result.get("finish_reason"), tool_calls),
             tool_calls=tool_calls,

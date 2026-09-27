@@ -4,7 +4,7 @@ ADR-041 D3, amendment: the host prices a peer's call with
 `ContextFirewall.tariff_for` at `started_at`, writes the applied rates, their
 currency, the dated entry and the amount into its own row, and sends the same
 group on the wire. The guest copies what arrived — it re-derives nothing — and
-its `cost_usd` stays null, because it spent nothing of its own and prices
+its `cost_amount` stays null, because it spent nothing of its own and prices
 nothing. What the call cost the host stays on the host's row.
 """
 
@@ -93,7 +93,7 @@ async def test_the_host_row_carries_the_applied_tariff_and_what_it_came_to(tmp_p
     assert (row["tariff_currency"], row["tariff_at"]) == ("RUB", "2026-09-01")
     assert row["tariff_amount"] == pytest.approx(EXPECTED)
     # The host's own cost is the host's, and it stays here.
-    assert row["cost_usd"] == 0.0
+    assert row["cost_amount"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -237,7 +237,7 @@ async def test_the_requester_row_copies_the_group_and_prices_nothing_itself(tmp_
     assert (row["tariff_in"], row["tariff_out"]) == (20.0, 60.0)
     assert (row["tariff_currency"], row["tariff_at"]) == ("RUB", "2026-09-01")
     assert row["tariff_amount"] == pytest.approx(EXPECTED)
-    assert row["cost_usd"] is None
+    assert row["cost_amount"] is None
 
 
 @pytest.mark.asyncio
@@ -249,7 +249,7 @@ async def test_a_host_that_sends_a_cost_is_not_believed_about_what_the_guest_spe
     await adapter.chat([{"role": "user", "content": "x"}])
 
     (row,) = ledger.rows()
-    assert row["cost_usd"] is None
+    assert row["cost_amount"] is None
 
 
 @pytest.mark.asyncio
@@ -261,7 +261,7 @@ async def test_a_gift_leaves_the_requester_row_without_a_tariff(tmp_path):
 
     (row,) = ledger.rows()
     assert not [key for key in row if key.startswith("tariff_")]
-    assert row["cost_usd"] is None
+    assert row["cost_amount"] is None
 
 
 # --- (4) the gateway's peer route writes the same row ------------------------------
@@ -286,7 +286,7 @@ async def test_the_gateways_peer_row_copies_the_tariff_and_leaves_cost_null(tmp_
         (row,) = _rows(ledger)
         assert (row["tariff_in"], row["tariff_currency"]) == (20.0, "RUB")
         assert row["tariff_amount"] == pytest.approx(EXPECTED)
-        assert row["cost_usd"] is None
+        assert row["cost_amount"] is None
 
 
 @pytest.mark.asyncio
@@ -306,4 +306,4 @@ async def test_an_older_host_sending_its_cost_does_not_price_the_gateways_row(tm
         assert status == 200, text
 
         (row,) = _rows(ledger)
-        assert row["cost_usd"] is None
+        assert row["cost_amount"] is None

@@ -25,7 +25,7 @@ from tests.test_p2p_coordinator import make_coordinator
 D3_COLUMNS = (
     "request_id", "caller", "caller_kind", "alias", "model", "route",
     "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
-    "started_at", "duration_s", "billing", "cost_usd",
+    "started_at", "duration_s", "billing", "cost_amount", "cost_currency", "cost_basis",
 )
 MESSAGES = [{"role": "user", "content": "x" * 4000}]
 PEER = "dpc-node-" + "b" * 32
@@ -84,7 +84,8 @@ async def test_an_agent_call_leaves_one_row_with_every_column_of_d3(tmp_path):
     assert row["thinking_tokens"] == 850
     assert row["counts_source"] == "engine"
     assert row["billing"] == "pay_per_use"
-    assert row["cost_usd"] > 0 and row["cost_usd"] == pytest.approx(usage["cost"])
+    assert row["cost_amount"] > 0 and row["cost_amount"] == pytest.approx(usage["cost"])
+    assert (row["cost_currency"], row["cost_basis"]) == ("USD", "charged")
     assert row["task_id"] == "task-1" and row["conversation_id"] == "conv-1"
     uuid.UUID(row["request_id"])
     started = datetime.fromisoformat(row["started_at"])
@@ -108,7 +109,7 @@ async def test_a_tasks_rows_add_up_to_the_cost_its_caller_accumulated(tmp_path):
     assert len(rows) == 4
     for task, total in accumulated.items():
         assert total > 0
-        assert sum(r["cost_usd"] for r in rows if r["task_id"] == task) == pytest.approx(total)
+        assert sum(r["cost_amount"] for r in rows if r["task_id"] == task) == pytest.approx(total)
 
 
 @pytest.mark.asyncio
@@ -130,7 +131,7 @@ async def test_a_call_routed_to_a_peer_is_this_agents_row_marked_peer(tmp_path):
     wire's request id, with the host's billing model and the host's tariff; the
     peer writes its own row under this node's name. The billing model on the
     wire wins over what this node's table would guess from the model name.
-    `cost_usd` stays null: the host's own cost is not on the wire and would not
+    `cost_amount` stays null: the host's own cost is not on the wire and would not
     be this node's to copy if it were (ADR-041 D3, amendment)."""
     ledger = NodeLedger(tmp_path / "ledger")
     service = SimpleNamespace(_request_inference_from_peer=AsyncMock(return_value={
@@ -155,7 +156,7 @@ async def test_a_call_routed_to_a_peer_is_this_agents_row_marked_peer(tmp_path):
     assert row["prompt_tokens"] == 40 and row["completion_tokens"] == 12
     assert row["request_id"] == "req-from-the-wire"
     assert row["billing"] == "pay_per_use"
-    assert row["cost_usd"] is None and "cost" not in usage
+    assert row["cost_amount"] is None and "cost" not in usage
     assert row["tariff_amount"] == 0.00152 and row["tariff_currency"] == "RUB"
 
 
@@ -179,7 +180,7 @@ async def test_a_peer_answer_without_a_price_leaves_the_row_unpriced_not_free(tm
         _msg, usage = await adapter.chat(MESSAGES, task_id="task-remote")
 
     (row,) = list(ledger.rows())
-    assert row["cost_usd"] is None
+    assert row["cost_amount"] is None
     assert "cost" not in usage
     uuid.UUID(row["request_id"])
     assert row["billing"] == "pay_per_use"
@@ -256,8 +257,8 @@ async def test_a_served_peer_call_is_written_under_the_peers_name_with_the_wires
     # Priced once, at the moment the call was made: pricing that moment again
     # gives the row's number, whatever hour this test runs at.
     at = datetime.fromisoformat(row["started_at"])
-    assert row["cost_usd"] > 0
-    assert row["cost_usd"] == pytest.approx(
+    assert row["cost_amount"] > 0 and row["cost_currency"] == "USD"
+    assert row["cost_amount"] == pytest.approx(
         compute_cost_usd("deepseek_pro", 1000, 500, model="deepseek-v4-pro", at=at)
     )
     # What the call cost us stays here: the wire carries the billing model and,
@@ -280,7 +281,7 @@ async def test_a_served_call_on_a_local_alias_costs_the_host_nothing_and_says_so
 
     (row,) = list(coord._ledger.rows())
     assert row["alias"] == "ollama_local" and row["billing"] == "subscription"
-    assert row["cost_usd"] == 0.0
+    assert (row["cost_amount"], row["cost_currency"]) == (0.0, None)
     sent = svc.p2p_manager.send_message_to_peer.call_args[0][1]
     assert "cost_usd" not in sent["payload"]
     assert sent["payload"]["billing"] == "subscription"

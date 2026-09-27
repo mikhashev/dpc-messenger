@@ -187,7 +187,7 @@ def _row(**overrides):
         alias="local_qwen38", model="qwen3:8b", route="local",
         prompt_tokens=8, completion_tokens=22, thinking_tokens=24,
         counts_source="engine", started_at=NOW, duration_s=1.0,
-        billing="subscription", cost_usd=0.0,
+        billing="subscription", cost_amount=0.0,
     )
     fields.update(overrides)
     return usage_row(**fields)

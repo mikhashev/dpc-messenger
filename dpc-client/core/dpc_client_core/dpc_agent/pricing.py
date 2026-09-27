@@ -21,8 +21,9 @@ completion_tokens alone.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, time, timedelta, timezone
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -266,8 +267,43 @@ def rates_at(model_key: str, moment: Optional[datetime] = None) -> Dict[str, flo
     return {k: v * PEAK_MULTIPLIER for k, v in base.items()}
 
 
-def _resolve_pay_model(provider_alias: str, model: Optional[str]) -> Optional[str]:
+# The provider type is asked before the model name: a llama-server card can load
+# a GGUF called `deepseek-v4-flash`, and NeuralDeep can serve a model whose id
+# reads like DeepSeek's (Mike's call, 2026-09-28).
+from ..firewall import ISO_4217_CODES, LOCAL_PROVIDER_TYPES  # noqa: E402  — local: 0.0, in no currency
+
+#: Types priced from the USD tables, each only from its own vendor's rows.
+USD_TABLE_TYPES: Dict[str, str] = {"deepseek": "deepseek", "zai": "zai"}
+#: Types that price their own calls (`cost_amount` in their usage dict).
+SELF_PRICED_TYPES = frozenset({"neuraldeep"})
+#: What a typed vendor bills in; the unit of its daily ceiling.
+TYPE_BILLING_CURRENCY: Dict[str, str] = {
+    "deepseek": "USD", "zai": "USD", "neuraldeep": NEURALDEEP_CURRENCY,
+}
+
+# `cost_basis`; only `charged` counts against a daily ceiling.
+COST_BASIS_CHARGED = "charged"
+COST_BASIS_LIST_PRICE_REFERENCE = "list_price_reference"
+COST_BASIS_UNKNOWN = "unknown"
+COST_BASES = (COST_BASIS_CHARGED, COST_BASIS_LIST_PRICE_REFERENCE, COST_BASIS_UNKNOWN)
+#: The four keys a price travels under — in a provider's usage dict, in the
+#: manager's result, on a usage row and in a task's burn line.
+COST_FIELDS = ("cost_amount", "cost_currency", "cost_basis", "cost_unpriced_reason")
+
+
+def _vendor_of(model_key: str) -> str:
+    return "zai" if model_key in ZAI_RATES else "deepseek"
+
+
+def _resolve_pay_model(
+    provider_alias: str, model: Optional[str], provider_type: Optional[str] = None,
+) -> Optional[str]:
     """Which pay-per-use model this call bills as, or None if not pay-per-use.
+
+    With a `provider_type`, the type decides first: a local or a self-priced
+    type never resolves, and a `deepseek`/`zai` type resolves only to its own
+    vendor's rows. Without one — an untyped caller, or a type with no pricing
+    of its own such as `openai_compatible` — the name is all there is.
 
     Resolves by model name first (authoritative — flash vs pro differ ~3x), then
     falls back to alias substring so a custom alias (e.g. "deepseek_pro") still
@@ -284,6 +320,17 @@ def _resolve_pay_model(provider_alias: str, model: Optional[str]) -> Optional[st
     reading zero because the model is unknown looks exactly like a cost meter
     reading zero because the calls were free (GLM 5.3, 2026-08-15).
     """
+    if provider_type in LOCAL_PROVIDER_TYPES or provider_type in SELF_PRICED_TYPES:
+        return None
+    key = _resolve_by_name(provider_alias, model)
+    vendor = USD_TABLE_TYPES.get(provider_type or "")
+    if vendor is not None and key is not None and _vendor_of(key) != vendor:
+        return None
+    return key
+
+
+def _resolve_by_name(provider_alias: str, model: Optional[str]) -> Optional[str]:
+    """The name half of `_resolve_pay_model`: model name first, alias substrings after."""
     if model:
         key = model.strip().lower()
         if key in PAY_PER_USE_RATES or key in PAY_PER_USE_RATES_FROM_2026_08_16:
@@ -358,9 +405,17 @@ def _resolve_provider_key(provider_alias: str) -> str:
     return provider_alias if provider_alias in PROVIDERS else "default"
 
 
-def get_billing_model(provider_alias: str, model: Optional[str] = None) -> str:
-    """Return 'pay_per_use' or 'subscription' for a provider alias/model."""
-    if _resolve_pay_model(provider_alias, model) is not None:
+def get_billing_model(
+    provider_alias: str, model: Optional[str] = None, *, provider_type: Optional[str] = None,
+) -> str:
+    """Return 'pay_per_use' or 'subscription' for a provider alias/model.
+
+    A typed vendor is pay-per-use whatever its model is called, a local type
+    never is; only an untyped caller or a type with no pricing of its own is
+    classified by name."""
+    if provider_type in USD_TABLE_TYPES or provider_type in SELF_PRICED_TYPES:
+        return "pay_per_use"
+    if _resolve_pay_model(provider_alias, model, provider_type) is not None:
         return "pay_per_use"
     key = _resolve_provider_key(provider_alias)
     return str(PROVIDERS[key]["billing"])
@@ -387,8 +442,13 @@ def compute_cost_usd(
     thinking_tokens: int = 0,
     output_includes_thinking: Optional[str] = None,
     at: Optional[datetime] = None,
-) -> float:
+    provider_type: Optional[str] = None,
+) -> Optional[float]:
     """Compute USD cost for a single LLM call.
+
+    `provider_type` narrows the tables as `_resolve_pay_model` says. A
+    self-priced type (NeuralDeep) answers None — its price is not in dollars
+    and is not this function's to give; every other case is a float.
 
     Pay-per-use (DeepSeek, z.ai): bills cache-hit + cache-miss input + output by the
     per-1M rates. When the cache split is not supplied, treats all prompt tokens
@@ -407,7 +467,9 @@ def compute_cost_usd(
     between 01:00-04:00 and 06:00-10:00 UTC — so a cost is no longer a function
     of tokens alone.
     """
-    pay_model = _resolve_pay_model(provider_alias, model)
+    if provider_type in SELF_PRICED_TYPES:
+        return None
+    pay_model = _resolve_pay_model(provider_alias, model, provider_type)
     if pay_model is not None:
         rates = rates_at(pay_model, at)
         hit = max(0, cache_hit_tokens or 0)
@@ -429,3 +491,126 @@ def compute_cost_usd(
     output_rate = float(entry["output_per_1k"])
     out = _billable_output(completion_tokens, thinking_tokens, output_includes_thinking)
     return (prompt_tokens / 1000.0) * input_rate + (out / 1000.0) * output_rate
+
+
+def _reported_price(reported: Mapping[str, Any]) -> Dict[str, Any]:
+    """The provider's own price, as far as a row can hold it.
+
+    A value a row would refuse is turned into an unpriced call with the reason
+    rather than passed on: the call has been made and paid for, and a refused
+    row would lose its record altogether.
+    """
+    amount = reported.get("cost_amount")
+    if amount is None:
+        return {"cost_amount": None, "cost_currency": None, "cost_basis": None,
+                "cost_unpriced_reason": reported.get("cost_unpriced_reason")
+                or "the provider reported no price for this call"}
+    currency, basis = reported.get("cost_currency"), reported.get("cost_basis")
+    problem = None
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount < 0:
+        problem = f"the provider reported cost_amount={amount!r}"
+    elif amount and currency not in ISO_4217_CODES:
+        problem = f"the provider reported cost_currency={currency!r}, which is not an ISO 4217 code"
+    elif basis is not None and basis not in COST_BASES:
+        problem = f"the provider reported cost_basis={basis!r}"
+    if problem:
+        logger.error("A provider's price could not be recorded: %s", problem)
+        return {"cost_amount": None, "cost_currency": None, "cost_basis": None,
+                "cost_unpriced_reason": problem}
+    return {"cost_amount": float(amount), "cost_currency": currency if currency in ISO_4217_CODES else None,
+            "cost_basis": basis, "cost_unpriced_reason": None}
+
+
+def price_call(
+    *,
+    provider_type: Optional[str],
+    alias: str,
+    model: Optional[str],
+    prompt_tokens: Any,
+    completion_tokens: Any,
+    reported: Optional[Mapping[str, Any]] = None,
+    cache_hit_tokens: Any = 0,
+    cache_miss_tokens: Optional[int] = None,
+    thinking_tokens: Any = 0,
+    output_includes_thinking: Optional[str] = None,
+    at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """The price of one call as a usage row carries it: `COST_FIELDS` and `billing`.
+
+    The order every writer follows (Mike's call, 2026-09-28):
+
+    1. `reported` — the provider's usage dict, or the manager's result that
+       copied it — carries the key `cost_amount`: the provider's own price is
+       the price, even when its value is None, and nothing here re-prices it.
+    2. Otherwise the provider type: `deepseek`/`zai` from the USD tables,
+       charged; a local type 0.0 in no currency; `neuraldeep` unpriced — it
+       never resolves to dollars, whatever its model is called.
+    3. A type with no pricing of its own, or no type at all, by name: the USD
+       tables where the name resolves, 0.0 in no currency where it does not.
+
+    `billing` follows the same order: a reference price is a subscription's.
+    Never raises.
+    """
+    if reported is not None and "cost_amount" in reported:
+        price = _reported_price(reported)
+        basis = price["cost_basis"]
+        price["billing"] = "subscription" if basis == COST_BASIS_LIST_PRICE_REFERENCE else "pay_per_use"
+        return price
+    if provider_type in LOCAL_PROVIDER_TYPES:
+        return {"cost_amount": 0.0, "cost_currency": None, "cost_basis": None,
+                "cost_unpriced_reason": None, "billing": "subscription"}
+    if provider_type in SELF_PRICED_TYPES:
+        return {"cost_amount": None, "cost_currency": None, "cost_basis": None,
+                "cost_unpriced_reason": f"the {provider_type} provider reported no price for this call",
+                "billing": "pay_per_use"}
+    if _resolve_pay_model(alias, model, provider_type) is not None:
+        amount = compute_cost_usd(
+            alias, int(prompt_tokens or 0), int(completion_tokens or 0), model=model,
+            cache_hit_tokens=int(cache_hit_tokens or 0), cache_miss_tokens=cache_miss_tokens,
+            thinking_tokens=int(thinking_tokens or 0), output_includes_thinking=output_includes_thinking,
+            at=at, provider_type=provider_type,
+        )
+        return {"cost_amount": amount, "cost_currency": "USD", "cost_basis": COST_BASIS_CHARGED,
+                "cost_unpriced_reason": None, "billing": "pay_per_use"}
+    if provider_type in USD_TABLE_TYPES:
+        return {"cost_amount": None, "cost_currency": None, "cost_basis": None,
+                "cost_unpriced_reason": f"no rate for model {model!r} in the {provider_type} table",
+                "billing": "pay_per_use"}
+    return {"cost_amount": 0.0, "cost_currency": None, "cost_basis": None,
+            "cost_unpriced_reason": None,
+            "billing": get_billing_model(alias, model, provider_type=provider_type)}
+
+
+def usd_figure(price: Mapping[str, Any]) -> Optional[float]:
+    """The dollars in a price, for the agent loop's USD budget: the amount when
+    it is in USD, 0.0 for a free call, None for anything else — roubles are not
+    dollars, and an unpriced call is not free."""
+    amount = price.get("cost_amount")
+    if amount is None:
+        return None
+    if price.get("cost_currency") == "USD" or not amount:
+        return float(amount)
+    return None
+
+
+def vendor_ceiling_currency(alias: str, provider: Any) -> Optional[str]:
+    """The currency a vendor alias's daily ceiling is counted in, or None.
+
+    None means the alias's spend cannot be counted — no row it leaves would
+    carry a charged amount — so a ceiling on it would guard nothing, and both
+    doors refuse it as `unrated`. A self-priced provider says its own currency
+    (`billing_currency()`, else a `currency` in its providers.json entry); a
+    provider the USD tables price answers USD.
+    """
+    config = getattr(provider, "config", None)
+    config = config if isinstance(config, dict) else {}
+    provider_type = config.get("type")
+    model = getattr(provider, "model", None) or config.get("model")
+    if provider_type in SELF_PRICED_TYPES:
+        method = getattr(provider, "billing_currency", None)
+        declared = method() if callable(method) else None
+        declared = declared or config.get("currency")
+        return declared if declared in ISO_4217_CODES else None
+    if _resolve_pay_model(alias, model, provider_type) is not None:
+        return "USD"
+    return None

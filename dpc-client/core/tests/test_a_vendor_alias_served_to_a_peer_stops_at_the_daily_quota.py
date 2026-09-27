@@ -1,8 +1,9 @@
 """A vendor alias served to a peer stops at the same daily ceiling the gateway enforces.
 
 ADR-041 D5: a local alias is bounded by the card, a vendor alias by money —
-`compute.vendor_quotas`, USD per day and per caller. The gateway's local route
-has enforced it since the quota shipped; the peer door had no quota at all, so
+`compute.vendor_quotas`, per day and per caller, in the vendor's currency. The
+gateway's local route has enforced it since the quota shipped; the peer door had
+no quota at all, so
 a peer calling a vendor alias this node serves could spend without bound.
 
 The ceiling is read from the node ledger rather than from a counter, which is
@@ -49,16 +50,17 @@ QUOTA = 1.00
 
 
 def _spend(
-    ledger: NodeLedger, caller: str, cost_usd: float, *,
+    ledger: NodeLedger, caller: str, usd: float, *,
     alias: str = VENDOR, caller_kind: str = PEER_CALLER_KIND, at: datetime = None,
 ) -> None:
     """One served call's row, as `_record_peer_call` writes it."""
     ledger.append(usage_row(
-        request_id=f"{caller}-{cost_usd}-{caller_kind}",
+        request_id=f"{caller}-{usd}-{caller_kind}",
         caller=caller, caller_kind=caller_kind, alias=alias, model="m",
         route="local", prompt_tokens=10, completion_tokens=5, thinking_tokens=None,
         counts_source="engine", started_at=at or datetime.now(timezone.utc),
-        duration_s=0.5, billing="pay_per_use", cost_usd=cost_usd,
+        duration_s=0.5, billing="pay_per_use",
+        cost_amount=usd, cost_currency="USD", cost_basis="charged",
     ))
 
 
@@ -143,13 +145,13 @@ async def test_a_peer_at_or_over_its_ceiling_is_refused_with_the_code_and_nothin
     svc.llm_manager.query.assert_not_awaited()
     payload = _refusal(svc)
     assert payload["code"] == "insufficient_quota"
-    assert VENDOR in payload["error"] and f"${spent:.4f}" in payload["error"]
-    assert "$1.00" in payload["error"] and "vendor_quotas" in payload["error"]
+    assert VENDOR in payload["error"] and f"{spent:.4f} USD" in payload["error"]
+    assert "1.00 USD" in payload["error"] and "vendor_quotas" in payload["error"]
     assert _requests(coord._ledger) == before, "a refused call is not a call"
     warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warned) == 1
     assert GUEST in warned[0] and VENDOR in warned[0]
-    assert f"${spent:.4f}" in warned[0] and "$1.00" in warned[0]
+    assert f"{spent:.4f} USD" in warned[0] and "1.00 USD" in warned[0]
 
 
 @pytest.mark.asyncio
