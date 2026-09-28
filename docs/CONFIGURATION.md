@@ -341,20 +341,54 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
     length — a 3h grid or an ISO week — never a rolling lookback). Counted against every
     alias sharing the same vendor account (an alias and its `-noreason` twin share one
     key), not only the one named. A subscription alias with neither field set is refused
-    to a guest with `insufficient_quota`, naming the missing setting — strict, because an
-    unbounded subscription alias would let a guest exhaust it.
+    to a guest with **`misconfigured`** (503, no `Retry-After`) rather than
+    `insufficient_quota` — naming the missing setting: this is a gap in the owner's own
+    configuration, and waiting does not close it the way a spent window does. **`0` on
+    either field means "no guest calls on this window at all"** and refuses every guest —
+    it is a deliberate ceiling, not "unset"; the Inference Sharing tab's badge reads
+    "guests off" rather than "0 / 3h" for it.
   - `vendor_token_quotas.<alias>.per_day` — prompt+completion tokens per guest per UTC
-    day; optional, a proxy for the vendor's money-based daily gate.
+    day; optional, a proxy for the vendor's money-based daily gate. `0` means the same
+    "no guest calls" as above.
   - `vendor_owner_reserve.<alias>` — a fraction in `[0, 1)` (default `0.25`) of the
-    vendor's own window kept out of reach of guests as a whole, checked against every
-    guest's rows on the account together, beside the per-guest ceiling above.
+    vendor's own window kept out of reach of guests as a whole. Checked against the
+    vendor's own **live `remaining`** for the window (from the provider's cached
+    `/v1/limits` read, accepted up to 5 minutes old — see below): a guest is admitted
+    only while `remaining - 1` still leaves `floor(reserve * limit)` untouched, which
+    covers the owner's own spend on the key and any other client of it, not only this
+    node's own guest rows (a purely row-counted reserve saw none of that spend). An
+    unreadable `remaining`, or a window with no usable `limit` at all, refuses
+    fail-closed rather than skip the check.
   - The vendor's own `daily_capacity.exhausted` (from `/v1/limits`) refuses every caller
     alike, guest or owner, since it is the vendor's own hard stop — the one guest ceiling
     here that also reaches the gateway's own loopback client.
+  - **A failed `/limits` read reaches for the last known-good read first** (P2b, ADR-041
+    D5 amendment 2026-09-29): `NeuralDeepProvider.get_balance()` accepts a cached read up
+    to 5 minutes old (`STALE_QUOTA_MAX_AGE`) before answering `billing_mode: null` —
+    `quota_age_sec` on the answer says how old it is. Past that age, or with nothing
+    cached, **the two doors answer differently on purpose**: the peer door has nothing
+    else standing between a guest and the vendor key and refuses fail-closed; the
+    gateway's own loopback client is the owner, for whom an unreadable vendor quota is
+    the vendor's stop and not this node's, so that path proceeds fail-open, unchanged
+    from before this amendment. The *rule* — what counts, and against what ceiling —
+    cannot diverge between the two doors, since both call the one function in
+    `guest_vendor_quota.py`; this fail-open/fail-closed split is the one place they are
+    meant to differ.
+  - An unread vendor account id (`CoreService._provider_account_id` answering `None` for
+    a loaded alias) refuses with `misconfigured` rather than falling back to counting the
+    alias alone, which could undercount an account shared with another alias.
+  - A `billing_mode` this node has never read off a vendor — anything but `subscription`
+    or the one wallet value documented above, `pay_per_use` — refuses rather than being
+    treated as a wallet by default.
   - Every refusal under this ceiling carries `retry_after_sec` when the host knows when it
-    clears (a window reset or seconds to UTC midnight): on the wire (`REMOTE_INFERENCE_RESPONSE`,
+    clears (a window reset or seconds to UTC midnight, recomputed from the window's own
+    `resets_at` at refusal time — never a value cached earlier), except `misconfigured`,
+    which carries none (waiting never clears it): on the wire (`REMOTE_INFERENCE_RESPONSE`,
     v1.8) for a peer, and as an HTTP `Retry-After` header on the gateway's `429`.
   - Keyed by alias like `vendor_quotas`, so an alias rename carries these keys too.
+  - The guest ceiling and the reserve floor are both an integer number of requests
+    (`floor()`ed, matching the Inference Sharing tab's own `guestShareOfWindow`): a limit
+    of 401 at a 25% reserve admits 300 guest requests, not 300.75.
   - Known, accepted drift: no per-guest requests-per-minute ceiling, so a host's own 429
     retry (card A-GUEST-WAITS-UP-TO-TEN-MINUTES-WHILE-THE-HOST-RETRIES-A-429-ON-A-SHARED-
     VENDOR-KEY) and calls a guest runs in parallel can still overrun these ceilings by a

@@ -1233,9 +1233,12 @@ nowhere before this.
 
 **The guest ceiling is counted in those units instead**, one function —
 `dpc_client_core.guest_vendor_quota.guest_vendor_quota_refusal` — called from
-both doors so they cannot diverge: `p2p_coordinator._vendor_quota_refusal`
+both doors so the *rule* cannot diverge: `p2p_coordinator._vendor_quota_refusal`
 (now `async`, since reading a fresh quota calls the provider's cached
-`get_balance()`) and `Gateway._refuse_vendor_daily_capacity_exhausted`. Three
+`get_balance()`) and `Gateway._refuse_vendor_daily_capacity_exhausted`. (The two
+*callers* still legitimately diverge on what happens when the ceiling cannot
+be read at all — see the 2026-09-29 fixes amendment below; "cannot diverge"
+was true of the rule only, and is stated that way now.) Three
 new keys in `privacy_rules.json` under `compute`, keyed by alias like
 `vendor_quotas` (`provider_alias_refs._FIREWALL_KEYED_BY_ALIAS` carries a
 rename): `vendor_request_quotas.<alias>` (`per_session`, `per_week` — request
@@ -1285,6 +1288,102 @@ can cross a ceiling together before the next is refused, the same
 check-then-act gap `spent_today`'s money ceiling already has). Not run live:
 no request has yet been served or refused through this path against a real
 vendor key.)*
+
+*(**Amendment, 2026-09-29 — review fixes: capability gate, iso-week, retry_after
+to the guest, and closing four gaps a review found in the ceiling above.**
+Same day as the design above; landed in a second pass once the design was in.
+
+- **P1a — the capability gate is `reports_billing_mode()`, not "has
+  `get_balance`".** Every `AIProvider` inherits a base `get_balance`, so
+  testing for its presence treated a DeepSeek-shaped wallet key as "cannot be
+  bounded" and refused it. `reports_billing_mode()` is the one question that
+  actually means "this provider can tell me a `billing_mode`"; a provider that
+  answers `False` is admitted here untouched; only one that answers `True` is
+  asked for a balance at all.
+- **P1b — NeuralDeep's own `iso-week` spelling is normalized to `week`**
+  alongside the raw wire word (`vendor_window`), which `guest_vendor_quota`'s
+  `per_week` check reads by the normalized name; before this, every guest with
+  a `per_week` ceiling was refused with a message blaming the vendor for a
+  window that in fact carried a `resets_at`.
+- **P1c — `retry_after_sec` reaches the guest through `PeerRefused` too.**
+  The wire has carried it since the design above; `RemoteInferenceResponseHandler`
+  built the exception without it, so a host's own `Retry-After` never reached
+  the *asking* node's gateway. Threaded through `PeerRefused` ->
+  `RemoteInferenceResponseHandler` -> `GatewayError` -> the HTTP header.
+- **P2b — a failed `/limits` read reaches for the last known-good read before
+  it reaches for `_error_balance()`.** `NeuralDeepProvider.get_balance()` now
+  tries the cache behind `STALE_QUOTA_MAX_AGE` (5 minutes) on any read failure
+  — a rejected/blocked key, an invalid payload, a plain non-2xx, a
+  cancellation — instead of only on the narrow set of cases `_read_limits`
+  already fell back to a cache for (and that fallback itself had no age bound
+  before this — a stale cache from hours earlier could stand in forever,
+  which this amendment also closes). `quota_age_sec` rides on every
+  `get_balance()` answer so a caller can tell how old the numbers are. Past
+  five minutes, or with no cache at all, the two doors are told to do
+  different things by design, not by accident: the peer door has nothing else
+  standing between a guest and the key and refuses fail-closed; the gateway's
+  owner path is the owner's own loopback client, for whom an unreadable vendor
+  quota is the vendor's stop and not this node's, and it proceeds fail-open, as
+  it already did before this amendment. Stated here because the module's own
+  docstring used to claim the two "cannot diverge" without qualification —
+  corrected in `guest_vendor_quota.py`'s own module docstring.
+- **P2c — the owner's reserve is read from the vendor's own live `remaining`,
+  not only from this node's guest rows.** The aggregate check introduced above
+  counted only rows this node itself wrote under `caller_kind="peer"`, which
+  sees nothing of the owner's own calls on the key, or of any other client of
+  the same key (another machine, another app). A guest is now admitted on a
+  window only when the vendor's own `remaining` for it, minus one more call,
+  still leaves `floor(reserve * limit)` intact; `remaining` unknown, or the
+  window's `limit` itself unusable, refuses fail-closed rather than skip the
+  reserve check silently.
+- **P3, six small fixes to the same function:**
+  - `vendor_request_quotas.<alias>.per_session` / `.per_week` = `0`, and
+    `vendor_token_quotas.<alias>.per_day` = `0`, mean **"no guest calls on
+    this window/day at all"** and refuse; the old `if not limit` read a zero
+    as "no ceiling configured" and skipped the check, i.e. served the alias
+    unbounded on exactly the setting meant to close it hardest. The Inference
+    Sharing tab's badges read "guests off" for `0` rather than "0 / 3h"
+    (`inferenceSharing.ts` `requestCeilingBadgeText`, `requestCeilingState`'s
+    new `'off'` state).
+  - A window with no usable `limit` at all now refuses rather than silently
+    skipping the aggregate/reserve check for that window.
+  - `CoreService._provider_account_id` answering `None` for an alias (as
+    opposed to the alias being altogether absent from the map, the ordinary
+    single-alias fallback) refuses with `misconfigured`, rather than falling
+    back to counting the alias alone — a guest ceiling counted per alias where
+    the account is in fact shared would undercount the account's real
+    traffic.
+  - A `billing_mode` that is neither `subscription` nor the one wallet value
+    this node has ever read off a vendor (`pay_per_use`,
+    `docs/CONFIGURATION.md`) now refuses, rather than being defaulted to "must
+    be a wallet, admit it".
+  - A missing `compute.vendor_request_quotas` entry on a subscription alias —
+    the owner's own configuration gap, not a spent window — now refuses with
+    `misconfigured` (503, no `Retry-After`) rather than `insufficient_quota`
+    (429, "come back later"): waiting does not close a gap only the owner can
+    close.
+  - The aggregate guest ceiling and the reserve floor are both `floor()`ed —
+    `guest_ceiling = floor((1 - reserve) * limit)` — matching
+    `inferenceSharing.ts`'s own `guestShareOfWindow` exactly; before this a
+    ceiling of e.g. `300.75` never tripped at the 300th guest row because
+    `300 >= 300.75` is false.
+  - `P2PCoordinator._guest_vendor_quota_refusal` now calls
+    `guest_vendor_quota_refusal` through `asyncio.to_thread`: the function
+    reads ledger partitions off disk synchronously
+    (`NodeLedger.rows_since`/`count_since`/`tokens_since`), and running it
+    in-loop stalled every other connection this node was serving at the same
+    moment.
+  - Which ledger rows count toward a guest's or the aggregate's counters is
+    now stated in `guest_vendor_quota.py`'s own module docstring rather than
+    left to be inferred: every row a guest ceiling can see was written by
+    `_record_peer_call`, always `route="local"` + `caller_kind="peer"`: the
+    one shape a served guest call takes, so no additional `route` filter is
+    needed or added.
+
+None of this changes the design's decided shape — the config keys, the
+account grouping, the window-start rule, the `insufficient_quota` wire word
+for every state that clears itself — only closes gaps a review found in its
+first landing.)*
 
 ### D6 — `aiohttp.web`, declared explicitly
 
