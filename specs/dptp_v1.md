@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.7
+# DPTP Specification: D-PC Transfer Protocol v1.8
 
-**Version:** 1.7
+**Version:** 1.8
 **Status:** Draft / PoC
 **Date:** September 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -446,7 +446,7 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
   - `onward_sharing_refused` — the alias the host would have served is itself somebody else's model, and what is shared is not shared onward (ADR-041 D7 part 1)
   - `invalid_value` — the request asked for something the host cannot take, refused at a gate before anything ran: a reasoning effort word the alias has no rung for (the text lists the words it accepts), or a `request_id` already in flight from this peer. A failure raised inside the host's own call carries no code, whatever its type: only a gate that names the guest's request sends a word that blames it
   - `tools_unsupported` — the request carried tools and the host's serving alias has no native tool-calling path, which is refused rather than answered without them; or it carried tools beside images on a path that cannot carry both — `image` blocks in `messages` on an alias that cannot see or has no tools path, or the `images` field, whose vision entry point takes no tools. One word for both, because a receiver acts on both the same way: change the request or the alias. Since 2026-09-17
-  - `insufficient_quota` — the alias the host serves is a vendor alias, bounded by money rather than by the card, and this guest has spent its daily ceiling on it (ADR-041 D5). The ceiling is per caller and counted from the host's own usage rows, so it is the guest's own spending and not the host's total; the text names what was spent and what the ceiling is, and the call is served again after midnight UTC
+  - `insufficient_quota` — the alias the host serves is a vendor alias and a ceiling on it is spent for this guest. On a metered (pay-per-use) key it is money: the per-caller daily ceiling in `compute.vendor_quotas`, counted from the host's own usage rows, so it is the guest's own spending and not the host's total, and it clears at UTC midnight. On a subscription key, where that money ceiling never trips (its rows are `list_price_reference`, ADR-041 D3's amendment), the same code covers four other causes instead (ADR-041 D5, amendment 2026-09-29): the vendor's own per-guest request window (`vendor_request_quotas`, a fixed session or week grid), the vendor's per-guest token-per-day proxy (`vendor_token_quotas`), the vendor's own `daily_capacity.exhausted` spend gate (binding every caller, guest or owner), and a subscription alias with no `vendor_request_quotas` entry configured for it (refused rather than served unbounded). The text names which of the five applies; `retry_after_sec` carries when it is known
   - `unrated` — the alias the host serves is a vendor alias, and the host has no rate for its model, so what a call spends cannot be counted against the ceiling in `compute.vendor_quotas`: the meter is absent rather than slow, and the alias is refused rather than served against a ceiling that would read zero for ever. The repair is on the host and is a rate, not time — nothing about waiting makes this call succeed
   - `misconfigured` — the host cannot classify its own serving lists, so the class of the alias it would serve is unknown, and an alias whose class is unknown is not served (a paying alias filed under `compute.serving_local` is the state that reaches this gate). The host's own configuration, repaired by editing it; this names no fault of the guest's and nothing the guest can do
 
@@ -464,7 +464,7 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
   | `not_allowed` | 403 | that host's door; ask a person |
   | `identity_unproved` | 403 | that host's door; ask a person |
   | `onward_sharing_refused` | 403 | that host's door; ask a person |
-  | `insufficient_quota` | 429 | your ceiling on that host, spent for today; come back tomorrow |
+  | `insufficient_quota` | 429 | your ceiling on that host, spent for now; `retry_after_sec`/`Retry-After` names when, where the host knows |
   | `unrated` | 503 | that host cannot price this alias; its owner must add a rate |
   | `misconfigured` | 503 | that host cannot read its own serving lists; its owner must fix them |
   | unknown or absent | 502 | refused, and nothing here can say why |
@@ -2602,6 +2602,21 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.8 (September 2026)
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — `retry_after_sec` (number, optional):
+  rides only on the error form, and only where the host knows when the
+  refusal clears — the vendor's own window reset, or seconds to UTC midnight
+  for a daily money gate (ADR-041 D5, amendment 2026-09-29: the per-guest
+  ceiling on a subscription vendor key, counted in the vendor's own request
+  and token units). Additive: a receiver that does not read the field is
+  unaffected, and the guest's own gateway sets it as the `Retry-After` header
+  on its 429 for `insufficient_quota`.
+- **`insufficient_quota`** now also covers four causes on a subscription
+  vendor key, where the money ceiling in `compute.vendor_quotas` never trips
+  (its rows are `list_price_reference`): a spent per-guest request window, a
+  spent per-guest token-per-day proxy, the vendor's own daily-capacity gate,
+  and a subscription alias configured with no per-guest request quota at all.
 
 ### v1.7 (September 2026)
 - **§3.10 GOSSIP_MESSAGE** — the source now signs at origin: required

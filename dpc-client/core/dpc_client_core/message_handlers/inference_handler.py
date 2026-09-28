@@ -136,6 +136,12 @@ class RemoteInferenceResponseHandler(MessageHandler):
         code = payload.get("code")
         if not isinstance(code, str):
             code = ""
+        # v1.8: when a resets, only ever on a refusal (protocol.py's
+        # create_remote_inference_response docstring). Not a string/int/float
+        # is not a value: guessed retry timing is worse than none.
+        retry_after_sec = payload.get("retry_after_sec")
+        if not isinstance(retry_after_sec, (int, float)) or isinstance(retry_after_sec, bool):
+            retry_after_sec = None
 
         # Extract token metadata
         tokens_used = payload.get("tokens_used")
@@ -219,7 +225,10 @@ class RemoteInferenceResponseHandler(MessageHandler):
                     # `.code` tells a bad request from a shut door, and every
                     # caller written before the code keeps what it had.
                     future.set_exception(
-                        PeerRefused(error or "Remote inference failed", code=code)
+                        PeerRefused(
+                            error or "Remote inference failed", code=code,
+                            retry_after_sec=retry_after_sec,
+                        )
                     )
             else:
                 self.logger.warning(

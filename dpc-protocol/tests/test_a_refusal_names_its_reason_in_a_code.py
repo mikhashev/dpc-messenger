@@ -93,3 +93,40 @@ def test_the_refusal_a_guest_raises_is_a_runtime_error_carrying_the_word():
 def test_a_refusal_with_no_word_says_so_with_an_empty_one():
     assert PeerRefused("refused").code == ""
     assert PeerRefused("refused", code=None).code == ""
+
+
+# --- retry_after_sec (v1.8, ADR-041 D5 amendment 2026-09-29) -----------------
+
+
+def test_retry_after_sec_rides_on_an_error_when_the_host_gives_one():
+    payload = _error(code="insufficient_quota", retry_after_sec=222)
+
+    assert payload["retry_after_sec"] == 222
+
+
+def test_retry_after_sec_is_absent_when_the_host_gives_none():
+    assert "retry_after_sec" not in _error(code="insufficient_quota")
+    assert "retry_after_sec" not in _error(code="insufficient_quota", retry_after_sec=None)
+
+
+def test_retry_after_sec_never_rides_on_a_served_answer():
+    payload = create_remote_inference_response(
+        "req-1", response="ok", retry_after_sec=222,
+    )["payload"]
+
+    assert payload["status"] == "success" and "retry_after_sec" not in payload
+
+
+def test_peer_refused_carries_retry_after_sec_from_the_wire_to_the_guests_own_code():
+    """P1c: the guest's own `RemoteInferenceResponseHandler` builds a
+    `PeerRefused` from the wire payload; before this field existed on
+    `PeerRefused`, `retry_after_sec` died at that edge and never reached the
+    guest's own gateway `Retry-After` header."""
+    refusal = PeerRefused("busy", code="insufficient_quota", retry_after_sec=222)
+
+    assert refusal.retry_after_sec == 222
+
+
+def test_peer_refused_with_no_retry_after_sec_carries_none():
+    assert PeerRefused("refused").retry_after_sec is None
+    assert PeerRefused("refused", code="not_allowed").retry_after_sec is None

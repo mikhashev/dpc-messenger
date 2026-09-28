@@ -1434,7 +1434,10 @@ class Gateway:
             }.get(e.code)
             if status is None:
                 raise GatewayError(502, f"peer {peer_id} refused: {e}", "peer_refused")
-            raise GatewayError(status, f"peer {peer_id} refused: {e}", e.code)
+            raise GatewayError(
+                status, f"peer {peer_id} refused: {e}", e.code,
+                getattr(e, "retry_after_sec", None),
+            )
         except RuntimeError as e:
             # A refusal from a host that predates the code, or from any other
             # caller in this tree that still raises the bare error.

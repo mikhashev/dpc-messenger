@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +114,14 @@ class PeerRefused(RuntimeError):
     reader that cannot name the cause says so rather than guessing one.
     """
 
-    def __init__(self, message: str, code: str = ""):
+    def __init__(self, message: str, code: str = "", retry_after_sec: Optional[float] = None):
         super().__init__(message)
         self.code = code or ""
+        # Carried from the wire's own `retry_after_sec` (v1.8) so a refusal
+        # that names a reset time (a spent vendor window, a daily-capacity
+        # gate) survives the hop from `PeerRefused` to the guest's own
+        # `Retry-After` header, instead of dying at this exception's edge.
+        self.retry_after_sec = retry_after_sec
 
 
 def create_remote_inference_request(

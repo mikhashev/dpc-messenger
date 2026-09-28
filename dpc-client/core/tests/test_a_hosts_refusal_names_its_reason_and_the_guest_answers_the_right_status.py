@@ -480,6 +480,29 @@ async def test_a_spent_ceiling_is_the_429_a_client_can_come_back_from(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_p1c_a_spent_ceilings_retry_after_reaches_the_guests_own_header(tmp_path):
+    """P1c: `retry_after_sec` used to die at `PeerRefused`'s edge — the wire's
+    REMOTE_INFERENCE_RESPONSE carried it (v1.8), but `PeerRefused` had no field
+    for it, so the gateway's 429 never carried `Retry-After` for a peer-routed
+    refusal. Through the same `PeerRefused` → `GatewayError` → HTTP hop as the
+    code itself, `retry_after_sec` must reach the response header."""
+    refusal = PeerRefused("your ceiling is spent", code="insufficient_quota", retry_after_sec=222)
+    service = _peer_service(tmp_path, fail=refusal)
+    async with _running(tmp_path, service) as (server, ledger):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{server.port}/v1/chat/completions",
+                json=_chat(REMOTE_MODEL),
+                headers={"Authorization": f"Bearer {_key(tmp_path)}"},
+            ) as resp:
+                status, text, headers = resp.status, await resp.text(), dict(resp.headers)
+
+        assert status == 429
+        assert headers.get("Retry-After") == "222"
+        assert json.loads(text)["error"]["code"] == "insufficient_quota"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("code,word", [
     ("unrated", "no rate for this alias"),
     ("misconfigured", "its serving lists cannot be read"),
