@@ -125,6 +125,38 @@ def test_a_rouble_row_and_a_dollar_row_are_two_amounts_never_one(tmp_path):
     assert ledger.spent_today("mixed", caller="us", now=NOON, currency="RUB") == pytest.approx(12.0)
 
 
+# --- THE-USAGE-SCREEN-SUMS-A-LIST-PRICE-REFERENCE-AS-IF-IT-WERE-SPENT -------
+
+
+def test_a_list_price_reference_row_is_kept_out_of_cost_and_reported_separately(tmp_path):
+    """A group with one charged row and one `list_price_reference` row in the
+    same currency: `cost` sums the charged row alone, `cost_reference` sums
+    the reference row alone — a price nobody paid must not read as spend."""
+    ledger = NodeLedger(tmp_path / "ledger")
+    ledger.append(_row(request_id="charged-1", caller="us", alias="nd",
+                       cost_amount=0.5, cost_currency="RUB", cost_basis="charged"))
+    ledger.append(_row(request_id="reference-1", caller="us", alias="nd",
+                       cost_amount=0.0082, cost_currency="RUB", cost_basis="list_price_reference"))
+
+    group = summarize(ledger.rows())["by_alias"]["nd"]
+    assert group["cost"] == {"RUB": {"amount": pytest.approx(0.5), "rows": 1}}
+    assert group["cost_reference"] == {"RUB": {"amount": pytest.approx(0.0082), "rows": 1}}
+
+
+def test_a_group_with_only_reference_rows_has_empty_cost(tmp_path):
+    """A group whose every row is `list_price_reference`: `cost` stays empty
+    — not a zero dressed as money — and `cost_reference` carries the total."""
+    ledger = NodeLedger(tmp_path / "ledger")
+    ledger.append(_row(request_id="reference-1", caller="us", alias="nd_only_ref",
+                       cost_amount=0.0082, cost_currency="RUB", cost_basis="list_price_reference"))
+    ledger.append(_row(request_id="reference-2", caller="us", alias="nd_only_ref",
+                       cost_amount=0.0018, cost_currency="RUB", cost_basis="list_price_reference"))
+
+    group = summarize(ledger.rows())["by_alias"]["nd_only_ref"]
+    assert group["cost"] == {}
+    assert group["cost_reference"] == {"RUB": {"amount": pytest.approx(0.01), "rows": 2}}
+
+
 # --- (vi) the ceiling counts what may have been charged --------------------
 
 

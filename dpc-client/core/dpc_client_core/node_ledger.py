@@ -731,6 +731,7 @@ def _new_group_entry() -> Dict[str, Any]:
         "completion_tokens": 0,
         "thinking_tokens": 0,
         "cost": {},
+        "cost_reference": {},
         "cost_free": 0,
         "unpriced": 0,
         "peer_proved": {"true": 0, "false": 0, "none": 0},
@@ -742,13 +743,24 @@ def _fold_cost(entry: Dict[str, Any], row: Dict[str, Any]) -> None:
     """Add a row's cost to its group as the row carries it (D3: never
     re-priced): per `cost_currency` under `cost`, because two currencies do not
     add. A zero in no currency — a local card's call — is counted under
-    `cost_free`, and a null under `unpriced`; neither is summed in as an amount."""
+    `cost_free`, and a null under `unpriced`; neither is summed in as an amount.
+
+    A `NOT_DEBITED_BASIS` row (`list_price_reference`) is a price quoted for a
+    call that debited no money — a subscription or free key covered it — so it
+    is kept out of `cost` and summed separately under `cost_reference`, same
+    shape, per currency. Folding it into `cost` would show a spend that never
+    happened (THE-USAGE-SCREEN-SUMS-A-LIST-PRICE-REFERENCE-AS-IF-IT-WERE-SPENT,
+    Mike's call, 2026-09-28)."""
     amount = row.get("cost_amount")
     currency = row.get("cost_currency")
     if amount is None:
         entry["unpriced"] += 1
     elif currency is None:
         entry["cost_free"] += 1
+    elif row.get("cost_basis") == NOT_DEBITED_BASIS:
+        reference = entry["cost_reference"].setdefault(str(currency), {"amount": 0.0, "rows": 0})
+        reference["amount"] += float(amount)
+        reference["rows"] += 1
     else:
         spent = entry["cost"].setdefault(str(currency), {"amount": 0.0, "rows": 0})
         spent["amount"] += float(amount)
@@ -805,6 +817,7 @@ def _new_role_entry() -> Dict[str, Any]:
         "counts_source": {"ours": 0, "engine": 0},
         "peer_proved": {"true": 0, "false": 0, "none": 0},
         "cost": {},
+        "cost_reference": {},
         "cost_free": 0,
         "unpriced": 0,
         "tariff": {},

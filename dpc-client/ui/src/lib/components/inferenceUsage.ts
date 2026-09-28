@@ -30,8 +30,13 @@ export interface WireGroup {
   duration_s?: number;
   counts_source?: { ours?: number; engine?: number };
   peer_proved?: { true?: number; false?: number; none?: number };
-  /** What the calls cost this node, per currency (`node_ledger._fold_cost`). */
+  /** What the calls cost this node, per currency (`node_ledger._fold_cost`).
+   *  Excludes `list_price_reference` rows — see `cost_reference`. */
   cost?: Record<string, WireAmount>;
+  /** The list price of calls a subscription or free key covered, per
+   *  currency — quoted, not spent (`node_ledger.NOT_DEBITED_BASIS`). Never
+   *  folded into `cost`. */
+  cost_reference?: Record<string, WireAmount>;
   /** Calls priced at zero in no currency — a local card's. */
   cost_free?: number;
   unpriced?: number;
@@ -97,6 +102,9 @@ export interface UsageRow {
   /** This node's own spend on these rows, per currency — empty on a consumed
    *  row by construction: the money stayed with the node that ran the call. */
   spent: Owed[];
+  /** The list price of calls in this row a subscription or free key covered —
+   *  quoted, never charged, and never added into `spent`. */
+  reference: Owed[];
   /** Calls that cost this node nothing, in no currency (a local card). */
   free: number;
   unpriced: number;
@@ -230,6 +238,15 @@ export function formatSpent(spent: readonly Owed[], free: number): string {
   return free > 0 ? 'free' : '—';
 }
 
+/** The reference line beside a spend figure: "list price 0.0082 RUB · not
+ *  charged", plural where more than one currency was quoted. Blank where the
+ *  group carries no reference amount, so a caller can render it only when
+ *  non-empty. */
+export function formatReference(reference: readonly Owed[]): string {
+  if (reference.length === 0) return '';
+  return `list price ${formatOwed(reference)} · not charged`;
+}
+
 export function formatDuration(seconds: number): string {
   const value = Number(seconds) || 0;
   if (value < 60) return `${value.toFixed(1)} s`;
@@ -301,6 +318,7 @@ function rowOf(
     thinkingTokens: number(group.thinking_tokens),
     durationS: number(group.duration_s),
     spent: amountsOf(group.cost),
+    reference: amountsOf(group.cost_reference),
     free: number(group.cost_free),
     unpriced: number(group.unpriced),
     owed: amountsOf(group.tariff),

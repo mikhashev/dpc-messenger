@@ -39,7 +39,7 @@ def _row(started_at, **overrides):
 def _empty_group() -> dict:
     return {
         "row_count": 0, "prompt_tokens": 0, "completion_tokens": 0, "thinking_tokens": 0,
-        "cost": {}, "cost_free": 0, "unpriced": 0,
+        "cost": {}, "cost_reference": {}, "cost_free": 0, "unpriced": 0,
         "peer_proved": {"true": 0, "false": 0, "none": 0},
         "output_includes_thinking": {"includes": 0, "excludes": 0, "unknown": 0},
     }

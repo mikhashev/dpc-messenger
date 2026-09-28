@@ -6,6 +6,7 @@ import {
   formatAmount,
   formatDuration,
   formatOwed,
+  formatReference,
   formatSpent,
   formatTokens,
   monthKey,
@@ -36,6 +37,7 @@ const group = (over: Partial<WireGroup> = {}): WireGroup => ({
   counts_source: { ours: 0, engine: 1 },
   peer_proved: { true: 1, false: 0, none: 0 },
   cost: {},
+  cost_reference: {},
   cost_free: 0,
   unpriced: 0,
   tariff: {},
@@ -414,5 +416,31 @@ describe('what this node spent', () => {
   it('says free for a local card and a dash where nothing was priced', () => {
     expect(formatSpent([], 3)).toBe('free');
     expect(formatSpent([], 0)).toBe('—');
+  });
+});
+
+describe('a list-price reference is not spend', () => {
+  it('keeps a quoted list price out of spent and shows it as a separate reference', () => {
+    const view = shapeUsage({
+      own: {
+        by_alias: {
+          neuraldeep: group({
+            cost: {},
+            cost_reference: { RUB: { amount: 0.0082, rows: 1 } },
+          }),
+        },
+      },
+    }, NAMES, '2026-09');
+    const row = view.lists[2].rows[0];
+    expect(row.spent).toEqual([]);
+    expect(row.reference).toEqual([{ currency: 'RUB', amount: 0.0082, rows: 1 }]);
+    // A group with only a reference amount is not shown as free spend, nor
+    // as a dash pretending nothing was priced — the reference line carries it.
+    expect(formatSpent(row.spent, row.free)).toBe('—');
+    expect(formatReference(row.reference)).toBe('list price 0.0082 RUB · not charged');
+  });
+
+  it('reads blank where the group carries no reference amount', () => {
+    expect(formatReference([])).toBe('');
   });
 });

@@ -108,7 +108,7 @@ def _empty_role_entry() -> dict:
         "duration_s": 0.0,
         "counts_source": {"ours": 0, "engine": 0},
         "peer_proved": {"true": 0, "false": 0, "none": 0},
-        "cost": {}, "cost_free": 0, "unpriced": 0,
+        "cost": {}, "cost_reference": {}, "cost_free": 0, "unpriced": 0,
         "tariff": {}, "tariff_unpriceable": 0, "untariffed": 0,
     }
 
@@ -342,7 +342,8 @@ def test_the_burn_summary_still_answers_exactly_what_it_did():
     assert set(summary["by_alias"]) == {"ollama_local", "ds_flash"}
     assert set(summary["by_caller"][ALICE]) == {
         "row_count", "prompt_tokens", "completion_tokens", "thinking_tokens",
-        "cost", "cost_free", "unpriced", "peer_proved", "output_includes_thinking",
+        "cost", "cost_reference", "cost_free", "unpriced", "peer_proved",
+        "output_includes_thinking",
     }
 
 

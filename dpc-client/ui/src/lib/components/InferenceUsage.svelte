@@ -18,6 +18,7 @@
     durationTitle,
     formatDuration,
     formatOwed,
+    formatReference,
     formatSpent,
     formatTokens,
     monthKey,
@@ -135,10 +136,12 @@
               {#if list.role === 'served'}
                 <span class="money">owed to this node {formatOwed(row.owed)}</span>
                 {#if row.spent.length > 0}<span>cost here {formatOwed(row.spent)}</span>{/if}
+                {#if row.reference.length > 0}<span class="muted">{formatReference(row.reference)}</span>{/if}
               {:else if list.role === 'consumed'}
                 <span class="money">owed to the host {formatOwed(row.owed)}</span>
               {:else}
                 <span class="money">{formatSpent(row.spent, row.free)}</span>
+                {#if row.reference.length > 0}<span class="muted">{formatReference(row.reference)}</span>{/if}
               {/if}
               {#if list.role !== 'consumed' && row.unpriced > 0}
                 <span>{row.unpriced} unpriced</span>

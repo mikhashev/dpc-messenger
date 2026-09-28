@@ -920,6 +920,19 @@ narrow what the amendment said earlier the same day:
   now ends on `cost_amount: null` with a reason. Only the local types
   (`firewall.LOCAL_PROVIDER_TYPES`) are free by construction.)*
 
+*(**Amendment, 2026-09-28 — the summary's `cost` excludes
+`list_price_reference`; it is reported separately as `cost_reference`.** Mike's
+call, 2026-09-28 (THE-USAGE-SCREEN-SUMS-A-LIST-PRICE-REFERENCE-AS-IF-IT-WERE-
+SPENT). `spent_today` already left `list_price_reference` rows out of the
+daily ceiling, but `summarize`'s and `usage_by_role`'s per-group `_fold_cost`
+folded them into `cost` beside `charged` rows regardless, so the Usage screen
+showed a spend for calls a subscription or free key had covered — e.g. a
+NeuralDeep call on a subscription key read as roubles spent when the wallet
+was untouched. `_fold_cost` now sends a `list_price_reference` amount to a
+sibling per-currency map, `cost_reference`, same shape as `cost`; `cost` sums
+only `charged` and `unknown` amounts (and a legacy row with no basis, kept as
+before). `cost_free`, `unpriced`, and every `tariff_*` sum are unchanged.)*
+
 *(**Amendment, 2026-09-28 — the tariff currency is per alias.** Mike's call,
 2026-09-28, option b. The 2026-09-10 amendment above made the tariff's unit a
 property of the node: one `compute.currency` for every alias it serves. A node
