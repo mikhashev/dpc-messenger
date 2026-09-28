@@ -81,6 +81,7 @@ import {
   setVendorOwnerReservePct,
   guestShareOfWindow,
   requestCeilingState,
+  requestCeilingBadgeText,
   subscriptionCeilingNote,
   missingRequestCeilingWarning,
   guestWindowSummaryLine,
@@ -1639,9 +1640,19 @@ describe('guest ceilings on a subscription vendor key (Mike\'s call, 2026-09-29)
     expect(requestCeilingState(null, null)).toBe('not-required');
     expect(requestCeilingState('subscription', null)).toBe('required-missing');
     expect(requestCeilingState('subscription', {})).toBe('required-missing');
-    expect(requestCeilingState('subscription', { per_session: 0 })).toBe('required-missing');
     const entry: VendorRequestQuota = { per_session: 100 };
     expect(requestCeilingState('subscription', entry)).toBe('set');
+  });
+
+  it('requestCeilingState: per_session 0 is its own "off" state, not "missing" (Mike\'s call, 2026-09-29)', () => {
+    expect(requestCeilingState('subscription', { per_session: 0 })).toBe('off');
+  });
+
+  it('requestCeilingBadgeText: 0 reads "guests off", a positive number keeps its unit, null renders nothing', () => {
+    expect(requestCeilingBadgeText(0, '/ 3h')).toBe('guests off');
+    expect(requestCeilingBadgeText(5, '/ 3h')).toBe('5 / 3h');
+    expect(requestCeilingBadgeText(null, '/ 3h')).toBe('');
+    expect(requestCeilingBadgeText(undefined, 'tokens/day')).toBe('');
   });
 
   it('subscriptionCeilingNote and missingRequestCeilingWarning speak only on a subscription key', () => {

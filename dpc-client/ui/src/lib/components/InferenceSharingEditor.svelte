@@ -49,6 +49,7 @@
     removeAllowedModel,
     removeServing,
     removeTariffEntry,
+    requestCeilingBadgeText,
     requestCeilingState,
     reserveFractionToPercent,
     selectedMenuEntry,
@@ -735,16 +736,16 @@
                   {:else}
                     <span class="badge" class:badge-quota={requestCeilingStateOf(alias) === 'set'} class:badge-missing={requestCeilingStateOf(alias) === 'required-missing'}>
                       {#if view.vendor_request_quotas?.[alias]?.per_session != null}
-                        {view.vendor_request_quotas[alias].per_session} / 3h
+                        {requestCeilingBadgeText(view.vendor_request_quotas[alias].per_session, '/ 3h')}
                       {:else}
                         no per-session ceiling
                       {/if}
                     </span>
                     {#if view.vendor_request_quotas?.[alias]?.per_week != null}
-                      <span class="badge badge-quota">{view.vendor_request_quotas[alias].per_week} / week</span>
+                      <span class="badge badge-quota">{requestCeilingBadgeText(view.vendor_request_quotas[alias].per_week, '/ week')}</span>
                     {/if}
                     {#if view.vendor_token_quotas?.[alias]?.per_day != null}
-                      <span class="badge badge-quota">{view.vendor_token_quotas[alias].per_day} tokens/day</span>
+                      <span class="badge badge-quota">{requestCeilingBadgeText(view.vendor_token_quotas[alias].per_day, 'tokens/day')}</span>
                     {/if}
                     <span class="muted">reserve {reservePctOf(alias)}%</span>
                   {/if}

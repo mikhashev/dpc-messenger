@@ -409,12 +409,14 @@ export function guestShareOfWindow(limit: number | null | undefined, reserve: nu
   return Math.floor(limit * (1 - r));
 }
 
-export type RequestCeilingState = 'not-required' | 'required-missing' | 'set';
+export type RequestCeilingState = 'not-required' | 'required-missing' | 'off' | 'set';
 
 /** Whether a request ceiling is needed before this alias can admit a guest:
  *  a wallet key never needs one (the money ceiling still binds); a
- *  subscription key is `'required-missing'` until `per_session` is a
- *  positive number, then `'set'`. `billingMode` is the same string
+ *  subscription key is `'required-missing'` until `per_session` is set,
+ *  `'off'` when it is explicitly `0` (Mike's call, 2026-09-29: zero is "no
+ *  guest calls", a deliberate choice, not a gap to fill), and `'set'` once it
+ *  is a positive number. `billingMode` is the same string
  *  `isSubscriptionAccount`/`accountLevel` read: `balance.quota.billing_mode
  *  ?? balance.billing_mode`. */
 export function requestCeilingState(
@@ -422,7 +424,20 @@ export function requestCeilingState(
   entry: VendorRequestQuota | null | undefined,
 ): RequestCeilingState {
   if (billingMode !== 'subscription') return 'not-required';
+  if (entry?.per_session === 0) return 'off';
   return typeof entry?.per_session === 'number' && entry.per_session > 0 ? 'set' : 'required-missing';
+}
+
+/** The badge text for one request/token ceiling value: `0` reads "guests
+ *  off" (Mike's call, 2026-09-29 — the backend refuses every guest call on
+ *  that window, it is not "no ceiling configured"), a positive number reads
+ *  as `"{value} {unit}"`, and `null`/`undefined` renders nothing (the caller
+ *  hides the badge). Shared by `per_session`, `per_week` and the token
+ *  `per_day` badges, so the three cannot drift into three different
+ *  spellings of the same zero. */
+export function requestCeilingBadgeText(value: number | null | undefined, unit: string): string {
+  if (value === 0) return 'guests off';
+  return typeof value === 'number' && Number.isFinite(value) ? `${value} ${unit}` : '';
 }
 
 /** The note shown beside the money-ceiling badge on a subscription alias:
