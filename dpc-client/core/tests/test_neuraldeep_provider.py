@@ -618,6 +618,28 @@ async def test_past_both_ttl_and_floor_fetches_again(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_dropped_key_billing_mode_is_reported_as_invalid(monkeypatch):
+    """A5: a vendor payload missing `key.billing_mode` must read as invalid,
+    not silently erase the last known billing_mode (e273cb0b guarded the
+    other side of this: a failed read keeps it; this guards the payload
+    itself from looking like a valid read with nothing there)."""
+    payload = {**_fixture_payload(), "key": {"status": "ok"}}
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(200, json=payload))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+    assert balance["error"] == "invalid"
+
+
+@pytest.mark.asyncio
+async def test_a_non_list_blocked_models_is_reported_as_invalid(monkeypatch):
+    payload = {**_fixture_payload(), "blocked_models": {"not": "a list"}}
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(200, json=payload))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+    assert balance["error"] == "invalid"
+
+
+@pytest.mark.asyncio
 async def test_schema_mismatch_is_reported_as_invalid_without_crashing(monkeypatch):
     payload = {**_fixture_payload(), "schema": 2}
     _patch_httpx(monkeypatch, lambda request: httpx.Response(200, json=payload))
@@ -674,8 +696,10 @@ async def test_retry_after_is_honored_before_the_next_automatic_read(monkeypatch
     second = await _REAL_GET_BALANCE(p)
     assert calls["n"] == 1
     assert second["error"] == "unavailable"
-    # Force the pause to have passed: the next read fetches again.
+    # Force the pause and the fetch floor to have both passed: the next
+    # read fetches again.
     p._limits_backoff_until -= timedelta(seconds=31)
+    p._limits_last_attempt_at -= timedelta(seconds=16)
     third = await _REAL_GET_BALANCE(p)
     assert calls["n"] == 2
     assert third["quota"]["tier"] == "free"
@@ -784,15 +808,146 @@ async def test_model_blocked_matches_the_exact_wire_name_only(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_model_blocked_defaults_to_this_alias_own_wire_model(monkeypatch):
+async def test_model_blocked_takes_the_callers_own_wire_model(monkeypatch):
+    """`model` is required — a caller passes its own `_wire_model(effort)`,
+    not this alias's default, since `effort=off` runs the `-noreason` twin."""
     _patch_httpx(monkeypatch, lambda request: httpx.Response(
         200, json=_payload_with_blocked_model(model="qwen3.8-27b")))
     p = _make()
     await _REAL_GET_BALANCE(p)
-    assert p.model_blocked() is not None  # default model is p.model itself
+    assert p.model_blocked(p._wire_model()) is not None
+    assert p.model_blocked(p.model) is not None
 
 
 def test_model_blocked_is_read_only_with_no_cache_yet():
     p = _make()
-    assert p.model_blocked() is None
     assert p.model_blocked("anything") is None
+
+
+# --- A1: a cancelled leader must not hang a joiner ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_leader_still_lets_a_later_read_complete(monkeypatch):
+    calls = {"n": 0}
+
+    async def handler(request):
+        calls["n"] += 1
+        await asyncio.sleep(1)
+        return httpx.Response(200, json=_fixture_payload())
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+
+    leader = asyncio.ensure_future(_REAL_GET_BALANCE(p))
+    await asyncio.sleep(0.01)  # let the leader start the HTTP call and register
+    leader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+
+    # A follower that had joined the same in-flight future must not hang.
+    result = await asyncio.wait_for(_REAL_GET_BALANCE(p), timeout=1)
+    assert result["error"] in ("unavailable",)
+    assert p._limits_inflight is None
+
+
+@pytest.mark.asyncio
+async def test_a_joiner_started_before_the_cancel_also_completes(monkeypatch):
+    async def handler(request):
+        await asyncio.sleep(1)
+        return httpx.Response(200, json=_fixture_payload())
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+
+    leader = asyncio.ensure_future(_REAL_GET_BALANCE(p))
+    await asyncio.sleep(0.01)
+    joiner = asyncio.ensure_future(_REAL_GET_BALANCE(p))
+    await asyncio.sleep(0.01)
+    leader.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+    joined = await asyncio.wait_for(joiner, timeout=1)
+    assert joined["error"] == "unavailable"
+
+
+# --- A2: null session/week/rpm blocks must not crash -------------------------
+
+
+@pytest.mark.asyncio
+async def test_null_session_week_rpm_blocks_do_not_crash(monkeypatch):
+    payload = {**_fixture_payload(),
+               "chat": {"session": None, "week": None, "rpm": None}}
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(200, json=payload))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+    assert balance["quota"]["windows"] == []
+
+
+# --- A3: the fetch floor holds after a failed fetch with no cache -----------
+
+
+@pytest.mark.asyncio
+async def test_the_floor_holds_after_a_failed_fetch_with_no_cache(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(503, json={"detail": "busy"})  # no Retry-After
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+    first = await _REAL_GET_BALANCE(p)
+    assert first["error"] == "unavailable"
+    assert calls["n"] == 1
+    # A moment later, still well inside the 15s floor: no second request.
+    second = await _REAL_GET_BALANCE(p)
+    assert calls["n"] == 1
+    assert second["error"] == "unavailable"
+
+
+# --- A4: the TTL clock starts at response arrival, not at fetch start --------
+
+
+@pytest.mark.asyncio
+async def test_the_cache_timestamp_is_the_arrival_time_not_the_start_time(monkeypatch):
+    payload = _fixture_payload()
+    calls = {"n": 0}
+
+    async def handler(request):
+        calls["n"] += 1
+        await asyncio.sleep(0.2)  # a slow response
+        return httpx.Response(200, json=payload)
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+    before = datetime.now(timezone.utc)
+    await _REAL_GET_BALANCE(p)
+    after = datetime.now(timezone.utc)
+    assert p._limits_cache_at is not None
+    assert before <= p._limits_cache_at <= after
+    assert p._limits_cache_at - before >= timedelta(seconds=0.15)
+
+
+# --- A6: 403 backs off instead of being polled on every automatic read ------
+
+
+@pytest.mark.asyncio
+async def test_403_backs_off_like_other_non_2xx_answers(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(403, json={"detail": "blocked"})
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+    first = await _REAL_GET_BALANCE(p)
+    assert first["error"] == "key_blocked"
+    assert calls["n"] == 1
+    assert p._limits_backoff_until is not None
+    # Still inside the backoff: the next automatic read makes no request.
+    second = await _REAL_GET_BALANCE(p)
+    assert calls["n"] == 1
+    assert second["error"] == "unavailable"  # backoff branch, not a fresh 403

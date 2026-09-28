@@ -440,6 +440,12 @@ class NeuralDeepProvider(AIProvider):
             raise NeuralDeepLimitsInvalid("payload without decision")
         if not isinstance(payload.get("chat"), dict):
             raise NeuralDeepLimitsInvalid("payload without chat")
+        key = payload.get("key")
+        if not isinstance(key, dict) or not str(key.get("billing_mode") or "").strip():
+            raise NeuralDeepLimitsInvalid("payload without key.billing_mode")
+        blocked_models = payload.get("blocked_models")
+        if blocked_models is not None and not isinstance(blocked_models, list):
+            raise NeuralDeepLimitsInvalid("blocked_models is not a list")
 
     @staticmethod
     def _parse_retry_after(headers: Any) -> Optional[timedelta]:
@@ -491,9 +497,12 @@ class NeuralDeepProvider(AIProvider):
                 return self._limits_cache
             raise NeuralDeepLimitsError(
                 f"NeuralDeep '{self.alias}': in backoff until {self._limits_backoff_until.isoformat()}")
-        if self._limits_cache is not None and self._limits_last_attempt_at is not None \
+        if self._limits_inflight is None and self._limits_last_attempt_at is not None \
                 and now - self._limits_last_attempt_at < LIMITS_FETCH_FLOOR:
-            return self._limits_cache
+            if self._limits_cache is not None:
+                return self._limits_cache
+            raise NeuralDeepLimitsError(
+                f"NeuralDeep '{self.alias}': under the fetch floor, no cache yet")
 
         return await self._read_limits_coalesced()
 
@@ -511,25 +520,39 @@ class NeuralDeepProvider(AIProvider):
         self._limits_inflight = fut
         try:
             payload = await self._fetch_limits()
+        except asyncio.CancelledError:
+            # The leader's own cancellation still propagates below, but a
+            # joiner must not see it as *its* cancellation — it gets a plain
+            # failure instead, same as any other unreadable fetch.
+            if not fut.done():
+                fut.set_exception(NeuralDeepLimitsError(
+                    f"NeuralDeep '{self.alias}': /limits fetch was cancelled"))
+                fut.exception()
+            raise
         except Exception as exc:
-            self._limits_inflight = None
             if not fut.done():
                 fut.set_exception(exc)
                 fut.exception()  # mark retrieved: no "exception never retrieved" if nobody joined
             raise
         else:
-            self._limits_inflight = None
             if not fut.done():
                 fut.set_result(payload)
             return payload
+        finally:
+            self._limits_inflight = None
 
     async def _fetch_limits(self) -> Dict[str, Any]:
-        """The one HTTP GET of `/v1/limits` a coalesced read performs."""
+        """The one HTTP GET of `/v1/limits` a coalesced read performs.
+
+        403 backs off like any other non-2xx (5 min cap absent a vendor
+        Retry-After) rather than raising once and being polled again every
+        floor interval forever; 401 alone is sticky, because only 401 means
+        the key itself is wrong."""
         import httpx
-        now = datetime.now(timezone.utc)
+        attempted_at = datetime.now(timezone.utc)
         url = self._base_url.rstrip("/") + "/limits"
         headers = {"Authorization": f"Bearer {self._api_key}"}
-        self._limits_last_attempt_at = now
+        self._limits_last_attempt_at = attempted_at
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(url, headers=headers)
 
@@ -537,12 +560,17 @@ class NeuralDeepProvider(AIProvider):
             self._limits_key_rejected = True
             raise NeuralDeepKeyRejected(f"NeuralDeep key for '{self.alias}' rejected (401)")
         if resp.status_code == 403:
+            arrived = datetime.now(timezone.utc)
+            retry_after = self._parse_retry_after(resp.headers)
+            capped = min(retry_after, LIMITS_BACKOFF_CAP) if retry_after is not None else LIMITS_BACKOFF_CAP
+            self._limits_backoff_until = arrived + capped
             raise NeuralDeepKeyBlocked(f"NeuralDeep key for '{self.alias}' blocked (403)")
         if resp.status_code < 200 or resp.status_code >= 300:
+            arrived = datetime.now(timezone.utc)
             retry_after = self._parse_retry_after(resp.headers)
             if retry_after is not None:
                 capped = min(retry_after, LIMITS_BACKOFF_CAP)
-                self._limits_backoff_until = now + capped
+                self._limits_backoff_until = arrived + capped
             if self._limits_cache is not None:
                 return self._limits_cache
             raise NeuralDeepLimitsError(
@@ -550,7 +578,8 @@ class NeuralDeepProvider(AIProvider):
 
         payload = resp.json()
         self._validate_limits_payload(payload)
-        self._limits_cache, self._limits_cache_at = payload, now
+        arrived = datetime.now(timezone.utc)
+        self._limits_cache, self._limits_cache_at = payload, arrived
         self._limits_backoff_until = None
         return payload
 
@@ -607,12 +636,17 @@ class NeuralDeepProvider(AIProvider):
             }
             if spent_30d is not None:
                 balance_info["spent_30d"] = f"{float(spent_30d):.2f}"
+        try:
+            quota = self._quota_from_limits(limits)
+        except Exception as exc:  # a quota block must never fail the whole read
+            logger.error("NeuralDeep %s: quota normalization failed", self.alias, exc_info=True)
+            quota = None
         return {
             "is_available": key.get("status", "ok") == "ok" and decision.get("can_request", True),
             "balance_infos": [] if balance_info is None else [balance_info],
             "billing_mode": key.get("billing_mode"),
             "limits": limits,
-            "quota": self._quota_from_limits(limits),
+            "quota": quota,
         }
 
     @staticmethod
@@ -639,10 +673,12 @@ class NeuralDeepProvider(AIProvider):
             }
 
         windows: List[Dict[str, Any]] = []
-        session = _window(chat.get("session"), chat.get("session", {}).get("window") or "3h")
+        session_raw = chat.get("session")
+        session = _window(session_raw, (session_raw or {}).get("window") or "3h")
         if session:
             windows.append(session)
-        week = _window(chat.get("week"), chat.get("week", {}).get("window") or "week")
+        week_raw = chat.get("week")
+        week = _window(week_raw, (week_raw or {}).get("window") or "week")
         if week:
             windows.append(week)
         rpm = _window(chat.get("rpm"), "minute")
@@ -680,9 +716,10 @@ class NeuralDeepProvider(AIProvider):
             "blocked_models": blocked_models,
         }
 
-    def model_blocked(self, model: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """The `blocked_models` entry naming `model` (default: this alias's
-        own wire model, `_wire_model()`), matched exactly and case-
+    def model_blocked(self, model: str) -> Optional[Dict[str, Any]]:
+        """The `blocked_models` entry naming `model` — required: pass the
+        wire model of the call in question (`_wire_model(effort)`), not this
+        alias's default model, matched exactly and case-
         insensitively against the raw block's `model` field — the same
         comparison coddy's own `modelBlocked` makes (external/cli/usage.go:
         139-153): no base/twin normalization on the block itself, so a block
@@ -694,7 +731,7 @@ class NeuralDeepProvider(AIProvider):
         first successful read)."""
         if not self._limits_cache:
             return None
-        want = (model if model is not None else self._wire_model()).strip().lower()
+        want = model.strip().lower()
         if not want:
             return None
         for entry in self._quota_from_limits(self._limits_cache).get("blocked_models", []):
@@ -702,19 +739,7 @@ class NeuralDeepProvider(AIProvider):
                 return entry
         return None
 
-    # --- retry ---
-
-    @staticmethod
-    def _is_retryable(error: Exception) -> bool:
-        err_str = str(error).lower()
-        return any(indicator in err_str for indicator in [
-            "429", "500", "502", "503",
-            "bad gateway", "service unavailable", "internal server error",
-            "timed out", "timeout", "connection reset", "connection error",
-            "overloaded", "rate limit",
-        ]) or isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in (
-            "APIConnectionError", "APITimeoutError", "InternalServerError",
-        )
+    # --- retry: uses AIProvider._is_retryable unchanged ---
 
     # --- plain text ---
 
