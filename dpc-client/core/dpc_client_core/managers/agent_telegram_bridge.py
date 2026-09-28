@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import inspect
 import logging
 import re
@@ -40,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 
 from ..dpc_agent.events import AgentEvent, EventType
 from ..telegram_format import send_rendered, strip_markdown
+from ..telegram_footer import build_footer, select_balance_for_alias
 
 # Bot tokens currently polled by a live bridge in this process. A second bridge on
 # the same token would trigger a Telegram getUpdates Conflict.
@@ -142,6 +144,7 @@ class AgentTelegramBridge:
         transcription_enabled: bool = True,
         agent_id: str = "",
         unified_conversation: bool = False,
+        footer_enabled: bool = True,
     ):
         """
         Initialize agent Telegram bridge.
@@ -155,6 +158,8 @@ class AgentTelegramBridge:
             agent_id: Agent ID this bridge belongs to (used for unified conversation)
             unified_conversation: When True, Telegram messages share conversation history
                                   with the DPC chat UI (conversation_id = agent_id)
+            footer_enabled: Append the context-window/balance footer after an
+                            agent reply (default: True)
         """
         self.bot_token = bot_token
         self.allowed_chat_ids = [str(cid) for cid in allowed_chat_ids]  # Ensure strings
@@ -163,6 +168,7 @@ class AgentTelegramBridge:
         self.transcription_enabled = transcription_enabled
         self._agent_id = agent_id
         self._unified_conversation = unified_conversation
+        self.footer_enabled = footer_enabled
 
         self._bot = None
         self._application = None  # telegram.ext.Application
@@ -1197,12 +1203,17 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.debug(f"send_chat_action({action}) failed, continuing: {e}")
 
-    async def _reply_markdown(self, update, text: str) -> None:
+    async def _reply_markdown(self, update, text: str, conversation_id: Optional[str] = None) -> None:
         """Answer the sender with the agent's Markdown rendered (see telegram_format).
 
         A chunk Telegram cannot parse is resent as plain text inside
         send_rendered; anything else that goes wrong still leaves the words
         delivered, markers stripped, rather than the reply lost.
+
+        When `conversation_id` is given, the context-window/balance footer
+        is sent as one more message right after every part of the reply —
+        so it always lands after the reply text and, when the reply was
+        split, after its last part too.
         """
         async def post(body: str, parse_mode):
             return await update.message.reply_text(body, parse_mode=parse_mode)
@@ -1212,6 +1223,58 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as send_err:
             log.warning(f"Rendered reply failed, falling back to plain text: {send_err}")
             await update.message.reply_text(strip_markdown(text or "")[:TELEGRAM_MESSAGE_MAX_LENGTH])
+
+        if conversation_id:
+            await self._send_stats_footer(post, conversation_id)
+
+    async def _build_footer_text(self, conversation_id: str) -> Optional[str]:
+        """The footer text for one reply in `conversation_id`, or None when
+        there is nothing to show yet. Balance lookup is best-effort and
+        capped at 3s; any failure or timeout drops the balance line, never
+        the footer's stats rows, and never the reply itself."""
+        agent_manager = self._agent_manager
+        if not agent_manager:
+            return None
+        session_state = agent_manager.get_session_state(conversation_id)
+        if not session_state:
+            return None
+
+        balance_label, balance = None, None
+        service = getattr(agent_manager, "service", None)
+        provider_alias = (getattr(agent_manager, "config", None) or {}).get("provider_alias")
+        if service and provider_alias:
+            try:
+                payload = await asyncio.wait_for(service.get_provider_balances(), timeout=3.0)
+                pair = select_balance_for_alias(payload, provider_alias)
+                if pair:
+                    balance_label, balance = pair
+            except Exception as e:
+                log.debug("Telegram footer: balance lookup failed/timed out (%s)", e)
+
+        return build_footer(
+            session_state,
+            context_agent=session_state.get("context_agent") or "",
+            balance_label=balance_label,
+            balance=balance,
+        )
+
+    async def _send_stats_footer(self, post, conversation_id: str) -> None:
+        """Send the footer built by `_build_footer_text`, if any. Any error
+        here is logged at debug and swallowed — the reply above it has
+        already been delivered."""
+        if not self.footer_enabled:
+            return
+        try:
+            footer = await self._build_footer_text(conversation_id)
+        except Exception as e:
+            log.debug("Telegram footer: build failed, omitting (%s)", e)
+            return
+        if not footer:
+            return
+        try:
+            await post(f"<pre>{html.escape(footer)}</pre>", "HTML")
+        except Exception as e:
+            log.debug("Telegram footer: send failed (%s)", e)
 
     def _start_new_cc_chain(self, conversation_id: str) -> None:
         """A human wrote from Telegram: this conversation gets a fresh CC<->agent chain.
@@ -1317,7 +1380,7 @@ Send a voice message and it will be transcribed and processed\\.
 
             # Send response (Markdown rendered as Telegram HTML, split if needed)
             try:
-                await self._reply_markdown(update, response)
+                await self._reply_markdown(update, response, conversation_id=conversation_id)
             finally:
                 # Always push updated history to DPC chat UI in unified_conversation mode
                 if self._unified_conversation and self._agent_manager:
@@ -1433,7 +1496,7 @@ Send a voice message and it will be transcribed and processed\\.
             )
 
             try:
-                await self._reply_markdown(update, response)
+                await self._reply_markdown(update, response, conversation_id=conversation_id)
             finally:
                 if self._unified_conversation and self._agent_manager:
                     await self._broadcast_history_to_ui(conversation_id)
@@ -1510,7 +1573,7 @@ Send a voice message and it will be transcribed and processed\\.
 
             # Send response
             try:
-                await self._reply_markdown(update, response)
+                await self._reply_markdown(update, response, conversation_id=conversation_id)
             finally:
                 if self._unified_conversation and self._agent_manager:
                     await self._broadcast_history_to_ui(conversation_id)
