@@ -329,14 +329,27 @@ class NeuralDeepProvider(AIProvider):
         return usage
 
     async def _billing_mode_now(self) -> Optional[str]:
-        """This key's `billing_mode`, re-read from /limits once a day."""
+        """This key's `billing_mode`, re-read from /limits once a day.
+
+        `get_balance()` no longer raises on a failed read (it returns an
+        `error`-carrying dict instead, see `_read_limits`/`_error_balance`),
+        so a failure is read off that `error` key here rather than off an
+        exception — a transient 503, an empty backoff, an invalid schema or
+        a rejected key must all still count as *failures* and keep the last
+        known `_billing_mode`, or a single bad read would flip every priced
+        call's `cost_basis` to `unknown` for a full day (the vendor ceiling
+        counts `unknown` as spend, which is exactly the wrong direction for
+        a subscription key)."""
         now = datetime.now(timezone.utc)
         if self._billing_mode_read_at and now - self._billing_mode_read_at < REFRESH_INTERVAL:
             return self._billing_mode
         if self._billing_mode_failed_at and now - self._billing_mode_failed_at < RETRY_AFTER_FAILURE:
             return self._billing_mode
         try:
-            self._billing_mode = (await self.get_balance()).get("billing_mode")
+            balance = await self.get_balance()
+            if balance.get("error"):
+                raise NeuralDeepLimitsError(balance.get("error_detail") or balance["error"])
+            self._billing_mode = balance.get("billing_mode")
             self._billing_mode_read_at = now
             self._billing_mode_failed_at = None
         except Exception as exc:

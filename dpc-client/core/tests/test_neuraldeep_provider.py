@@ -396,6 +396,58 @@ async def test_an_unreadable_limits_leaves_the_basis_unknown(_offline):
     assert _offline.balance.await_count == 1
 
 
+# --- regression, 1a2f0ad8: get_balance() failing no longer raises, so a
+# failed read must be read off `error`, not off an exception, or the last
+# known billing_mode is lost for a full day (REFRESH_INTERVAL) on one bad read.
+
+
+@pytest.mark.asyncio
+async def test_a_transient_limits_failure_keeps_the_known_billing_mode(monkeypatch):
+    monkeypatch.setattr(NeuralDeepProvider, "get_balance", _REAL_GET_BALANCE)
+    p = _make()
+    p._billing_mode = "subscription"
+    p._billing_mode_read_at = datetime.now(timezone.utc) - timedelta(hours=25)  # past REFRESH_INTERVAL
+
+    def handler(request):
+        return httpx.Response(503, json={"detail": "busy"})  # no Retry-After, no cache to fall back on
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+
+    mode = await p._billing_mode_now()
+    assert mode == "subscription"
+    assert p._billing_mode_failed_at is not None
+
+    _mock_create(p, _response())
+    await p.generate_response("ping")
+    assert p.get_last_usage()["cost_basis"] == COST_BASIS_LIST_PRICE_REFERENCE
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_schema_read_also_keeps_the_known_billing_mode(monkeypatch):
+    monkeypatch.setattr(NeuralDeepProvider, "get_balance", _REAL_GET_BALANCE)
+    p = _make()
+    p._billing_mode = "subscription"
+    p._billing_mode_read_at = datetime.now(timezone.utc) - timedelta(hours=25)
+
+    fixture_path = Path(__file__).parent / "fixtures" / "nd_limits_2026-09-28.json"
+    payload = {**json.loads(fixture_path.read_text(encoding="utf-8")), "schema": 2}
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(
+                            lambda request: httpx.Response(200, json=payload)), **kw))
+
+    mode = await p._billing_mode_now()
+    assert mode == "subscription"
+    assert p._billing_mode_failed_at is not None
+
+    _mock_create(p, _response())
+    await p.generate_response("ping")
+    assert p.get_last_usage()["cost_basis"] == COST_BASIS_LIST_PRICE_REFERENCE
+
+
 # --- balance -----------------------------------------------------------------
 
 
