@@ -14,9 +14,16 @@ import {
   doorAddress,
   formatContextWindow,
   formatQuotaBlockers,
+  formatQuotaDuration,
   formatQuotaLine,
+  formatQuotaLineTitle,
   formatQuotaWindow,
+  formatQuotaWindowTitle,
   foldServingAlias,
+  quotaHasWarning,
+  quotaWindowIsWarning,
+  quotaWindowPercent,
+  QUOTA_WARN_PERCENT,
   gatewayVerdict,
   groupGatewayMenu,
   isFree,
@@ -935,27 +942,81 @@ describe('formatQuotaWindow', () => {
     resets_at: '2026-09-28T11:59:59Z', ...over,
   });
 
-  it('reads as N / M unit left, with the window and a local reset time', () => {
+  it('reads coddy-style: label, rounded percent, local reset time', () => {
     const line = formatQuotaWindow(win());
-    expect(line).toContain('386 / 400 requests left');
-    expect(line).toContain('3h');
-    expect(line).toContain('resets');
+    expect(line).toBe(`3h ${Math.round((14 / 400) * 100)}% (resets ${new Date('2026-09-28T11:59:59Z').toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })})`);
   });
 
   it('the week window is labelled "this week", not the wire word "iso-week"', () => {
     const line = formatQuotaWindow(win({ name: 'iso-week', used: 14, limit: 2000, remaining: 1986 }));
-    expect(line).toContain('1986 / 2000 requests left (this week');
+    expect(line).toContain('this week');
+    expect(line).not.toContain('iso-week');
   });
 
-  it('a window missing remaining/limit renders nothing, never "undefined / undefined"', () => {
-    expect(formatQuotaWindow(win({ remaining: undefined }))).toBe('');
+  it('a window with no used/limit renders nothing, never "NaN%"', () => {
+    expect(formatQuotaWindow(win({ used: undefined }))).toBe('');
     expect(formatQuotaWindow(win({ limit: undefined }))).toBe('');
+    expect(formatQuotaWindow(win({ limit: 0 }))).toBe('');
   });
 
-  it('a bad resets_at is dropped rather than printed as "Invalid Date"', () => {
+  it('a bad resets_at drops just the reset clause, not the whole line', () => {
     const line = formatQuotaWindow(win({ resets_at: 'not-a-date' }));
     expect(line).not.toContain('Invalid Date');
     expect(line).not.toContain('resets');
+    expect(line).toContain('3h');
+  });
+
+  it('the percent is clamped to [0, 100] and rounded', () => {
+    expect(quotaWindowPercent({ name: '3h', unit: 'requests', used: 400, limit: 400 })).toBe(100);
+    expect(quotaWindowPercent({ name: '3h', unit: 'requests', used: 0, limit: 400 })).toBe(0);
+    expect(quotaWindowPercent({ name: '3h', unit: 'requests', used: -5, limit: 400 })).toBe(0);
+  });
+});
+
+describe('formatQuotaWindowTitle', () => {
+  it('carries the counts the compact line elides', () => {
+    expect(formatQuotaWindowTitle({ name: '3h', unit: 'requests', used: 14, limit: 400, remaining: 386 }))
+      .toBe('386 / 400 requests left');
+  });
+
+  it('is empty without remaining/limit', () => {
+    expect(formatQuotaWindowTitle({ name: '3h', unit: 'requests' })).toBe('');
+  });
+});
+
+describe('quotaWindowIsWarning and quotaHasWarning', () => {
+  it('is a warning at or past 80% used', () => {
+    expect(quotaWindowIsWarning({ name: '3h', unit: 'requests', used: 79, limit: 100 })).toBe(false);
+    expect(quotaWindowIsWarning({ name: '3h', unit: 'requests', used: 80, limit: 100 })).toBe(true);
+    expect(QUOTA_WARN_PERCENT).toBe(80);
+  });
+
+  it('an exhausted window warns even if a rounded percent would read under the threshold', () => {
+    expect(quotaWindowIsWarning({ name: '3h', unit: 'requests', used: 3, limit: 3 })).toBe(true);
+  });
+
+  it('quotaHasWarning reads any window in the quota, and is false with none', () => {
+    const balance: NonNullable<BalanceResult['balance']> = {
+      quota: {
+        windows: [
+          { name: '3h', unit: 'requests', used: 10, limit: 400 },
+          { name: 'iso-week', unit: 'requests', used: 1900, limit: 2000 },
+        ],
+      },
+    };
+    expect(quotaHasWarning(balance)).toBe(true);
+    expect(quotaHasWarning({ quota: { windows: [] } })).toBe(false);
+    expect(quotaHasWarning(null)).toBe(false);
+  });
+});
+
+describe('formatQuotaDuration', () => {
+  it('renders 42s, 12m 05s, 2h 10m like coddy\'s formatDuration', () => {
+    expect(formatQuotaDuration(42)).toBe('42s');
+    expect(formatQuotaDuration(725)).toBe('12m 05s');
+    expect(formatQuotaDuration(7800)).toBe('2h 10m');
+    expect(formatQuotaDuration(0)).toBe('0s');
+    expect(formatQuotaDuration(-5)).toBe('0s');
   });
 });
 
@@ -978,11 +1039,17 @@ describe('formatQuotaLine', () => {
   it('a subscription key shows the wallet labelled as not debited', () => {
     const line = formatQuotaLine(subscriptionBalance());
     expect(line).toContain('free tier');
-    expect(line).toContain('386 / 400 requests left');
-    expect(line).toContain('1986 / 2000 requests left');
+    expect(line).toContain('3h');
+    expect(line).toContain('this week');
     expect(line).toContain('3 parallel');
     expect(line).toContain('wallet 500.00 RUB');
     expect(line).toContain('not debited on subscription');
+  });
+
+  it('the tooltip carries the counts the compact line elided', () => {
+    const title = formatQuotaLineTitle(subscriptionBalance());
+    expect(title).toContain('386 / 400 requests left');
+    expect(title).toContain('1986 / 2000 requests left');
   });
 
   it('a wallet (charged) key shows a plain balance, no "not debited" claim', () => {
@@ -996,6 +1063,7 @@ describe('formatQuotaLine', () => {
 
   it('no quota block (e.g. DeepSeek) and no balance_infos yields an empty line', () => {
     expect(formatQuotaLine({ is_available: true })).toBe('');
+    expect(formatQuotaLineTitle({ is_available: true })).toBe('');
   });
 
   it('null/undefined balance yields an empty line rather than throwing', () => {
@@ -1009,10 +1077,9 @@ describe('formatQuotaBlockers', () => {
     expect(formatQuotaBlockers({ quota: { can_request: true, blockers: [] } })).toBe('');
   });
 
-  it('names the blockers when it cannot', () => {
+  it('an unclassified blocker id is shown verbatim, coddy\'s fallback', () => {
     const line = formatQuotaBlockers({ quota: { can_request: false, blockers: ['out_of_quota', 'cooldown'] } });
-    expect(line).toContain('out_of_quota');
-    expect(line).toContain('cooldown');
+    expect(line).toBe('blocked: out_of_quota');
   });
 
   it('a false can_request with no blockers still says the key is blocked', () => {
@@ -1023,5 +1090,27 @@ describe('formatQuotaBlockers', () => {
   it('no quota block, or can_request omitted, says nothing (never guesses blocked)', () => {
     expect(formatQuotaBlockers({})).toBe('');
     expect(formatQuotaBlockers({ quota: {} })).toBe('');
+  });
+
+  it('maps window/rate/key/wallet/account blockers the way coddy\'s blockedSegment does', () => {
+    expect(formatQuotaBlockers({ quota: { can_request: false, blockers: ['key_blocked'] } })).toBe('key blocked');
+    expect(formatQuotaBlockers({ quota: { can_request: false, blockers: ['wallet_empty'] } })).toBe('wallet empty');
+    expect(formatQuotaBlockers({ quota: { can_request: false, blockers: ['user_blocked'] } })).toBe('account blocked');
+    expect(formatQuotaBlockers({
+      quota: { can_request: false, blockers: ['rpm_exhausted'], retry_after_sec: 42 },
+    })).toBe('rate limited (retry in 42s)');
+    expect(formatQuotaBlockers({
+      quota: {
+        can_request: false, blockers: ['session_exhausted'],
+        windows: [{ name: '3h', unit: 'requests', resets_at: '2026-09-28T11:59:59Z' }],
+      },
+    })).toBe(`limit reached (resets ${new Date('2026-09-28T11:59:59Z').toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })})`);
+  });
+
+  it('a short window block (under a minute) reads as a rate-limit countdown instead of a reset time', () => {
+    const line = formatQuotaBlockers({
+      quota: { can_request: false, blockers: ['session_cooldown'], retry_after_sec: 30 },
+    });
+    expect(line).toBe('rate limited (retry in 30s)');
   });
 });

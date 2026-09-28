@@ -7,7 +7,7 @@ an answer that starts with "\\n\\n", and thinking that only stops on the
 `-noreason` model. No network: the price list and /limits are stubbed."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -403,8 +403,9 @@ async def test_an_unreadable_limits_leaves_the_basis_unknown(_offline):
 async def test_balance_reads_the_wallet_from_limits(monkeypatch):
     import httpx
 
-    payload = {"key": {"status": "ok", "billing_mode": "subscription"},
-               "decision": {"can_request": True},
+    payload = {"schema": 1, "tier": "free", "observed_at": "2026-09-28T10:41:49Z",
+               "key": {"status": "ok", "billing_mode": "subscription"},
+               "decision": {"can_request": True}, "chat": {},
                "wallet": {"balance_rub": 500.0, "spent_rub_30d": 0.0}}
     seen = {}
 
@@ -455,12 +456,13 @@ async def test_balance_normalizes_the_real_limits_payload_into_a_quota_block(mon
     assert quota["parallel_limit"] == 3
     assert quota["windows"] == [
         {"name": "3h", "unit": "requests", "used": 14, "limit": 400,
-         "remaining": 386, "resets_at": "2026-09-28T11:59:59Z"},
+         "remaining": 386, "resets_at": "2026-09-28T11:59:59Z", "reset_in_sec": 4690},
         {"name": "iso-week", "unit": "requests", "used": 14, "limit": 2000,
-         "remaining": 1986, "resets_at": "2026-10-05T00:00:00Z"},
+         "remaining": 1986, "resets_at": "2026-10-05T00:00:00Z", "reset_in_sec": 566291},
         {"name": "minute", "unit": "requests", "used": 0, "limit": 20,
-         "remaining": 20, "resets_at": None},
+         "remaining": 20, "resets_at": None, "reset_in_sec": 11},
     ]
+    assert quota["observed_at"] == "2026-09-28T10:41:49Z"
     assert balance["balance_infos"] == [
         {"currency": "RUB", "total_balance": "500.00", "spent_30d": "0.00"},
     ]
@@ -468,10 +470,13 @@ async def test_balance_normalizes_the_real_limits_payload_into_a_quota_block(mon
 
 @pytest.mark.asyncio
 async def test_balance_quota_survives_a_payload_with_no_chat_block(monkeypatch):
-    """A partial payload (a vendor outage, a schema change) must not crash the
-    normalization — windows just come back empty."""
-    payload = {"tier": "free", "key": {"status": "ok", "billing_mode": "subscription"},
-               "decision": {"can_request": False, "blockers": ["out_of_quota"]}}
+    """A schema-1 payload whose `chat` block is empty (a key with no volume
+    windows configured) must not crash the normalization — windows come back
+    empty, the rest of the decision still reads through."""
+    payload = {"schema": 1, "tier": "free", "observed_at": "2026-09-28T10:41:49Z",
+               "key": {"status": "ok", "billing_mode": "subscription"},
+               "decision": {"can_request": False, "blockers": ["out_of_quota"]},
+               "chat": {}}
 
     def handler(request):
         return httpx.Response(200, json=payload)
@@ -487,3 +492,146 @@ async def test_balance_quota_survives_a_payload_with_no_chat_block(monkeypatch):
     assert balance["quota"]["blockers"] == ["out_of_quota"]
     assert balance["quota"]["parallel_limit"] is None
     assert balance["balance_infos"] == []
+
+
+# --- /v1/limits reading policy: TTL, floor, schema validation, 401/403, backoff --
+
+
+def _fixture_payload():
+    fixture_path = Path(__file__).parent / "fixtures" / "nd_limits_2026-09-28.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _patch_httpx(monkeypatch, handler):
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+
+
+@pytest.mark.asyncio
+async def test_two_reads_inside_the_ttl_make_one_http_request(monkeypatch):
+    payload = _fixture_payload()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json=payload)
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+    first = await _REAL_GET_BALANCE(p)
+    second = await _REAL_GET_BALANCE(p)  # a moment later, well within the 20s TTL
+    assert calls["n"] == 1
+    assert first["quota"]["tier"] == second["quota"]["tier"] == "free"
+
+
+@pytest.mark.asyncio
+async def test_a_read_past_the_ttl_but_inside_the_floor_still_serves_the_cache(monkeypatch):
+    payload = _fixture_payload()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json=payload)
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+    await _REAL_GET_BALANCE(p)
+    assert calls["n"] == 1
+    # The cache looks stale (past the 20s TTL) but the one attempt so far is
+    # still inside the 15s floor: the floor wins, no second request.
+    p._limits_cache_at -= timedelta(seconds=25)
+    balance = await _REAL_GET_BALANCE(p)
+    assert calls["n"] == 1
+    assert balance["quota"]["tier"] == "free"
+
+
+@pytest.mark.asyncio
+async def test_past_both_ttl_and_floor_fetches_again(monkeypatch):
+    payload = _fixture_payload()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json=payload)
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+    await _REAL_GET_BALANCE(p)
+    p._limits_cache_at -= timedelta(seconds=25)
+    p._limits_last_attempt_at -= timedelta(seconds=25)
+    await _REAL_GET_BALANCE(p)
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_schema_mismatch_is_reported_as_invalid_without_crashing(monkeypatch):
+    payload = {**_fixture_payload(), "schema": 2}
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(200, json=payload))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+    assert balance["error"] == "invalid"
+    assert balance["quota"] is None
+    assert balance["is_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_401_rejects_the_key_and_the_next_read_makes_no_request(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(401, json={"detail": "invalid api key"})
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+    first = await _REAL_GET_BALANCE(p)
+    assert first["error"] == "key_rejected"
+    assert calls["n"] == 1
+    second = await _REAL_GET_BALANCE(p)
+    assert second["error"] == "key_rejected"
+    assert calls["n"] == 1  # sticky: no second HTTP request
+
+
+@pytest.mark.asyncio
+async def test_a_403_is_reported_as_key_blocked_not_a_generic_error(monkeypatch):
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(403, json={"detail": "blocked"}))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+    assert balance["error"] == "key_blocked"
+
+
+@pytest.mark.asyncio
+async def test_retry_after_is_honored_before_the_next_automatic_read(monkeypatch):
+    payload = _fixture_payload()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, headers={"Retry-After": "30"}, json={"detail": "busy"})
+        return httpx.Response(200, json=payload)
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+    first = await _REAL_GET_BALANCE(p)
+    assert first["error"] == "unavailable"
+    assert calls["n"] == 1
+    # Still inside the 30s pause: no second request, still the same error.
+    second = await _REAL_GET_BALANCE(p)
+    assert calls["n"] == 1
+    assert second["error"] == "unavailable"
+    # Force the pause to have passed: the next read fetches again.
+    p._limits_backoff_until -= timedelta(seconds=31)
+    third = await _REAL_GET_BALANCE(p)
+    assert calls["n"] == 2
+    assert third["quota"]["tier"] == "free"
+
+
+@pytest.mark.asyncio
+async def test_retry_after_is_capped_at_five_minutes(monkeypatch):
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(
+        503, headers={"Retry-After": "3600"}, json={"detail": "busy"}))
+    p = _make()
+    await _REAL_GET_BALANCE(p)
+    assert p._limits_backoff_until - p._limits_last_attempt_at <= timedelta(minutes=5)

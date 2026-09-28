@@ -25,6 +25,7 @@
     foldServingAlias,
     formatQuotaBlockers,
     formatQuotaLine,
+    formatQuotaLineTitle,
     gatewayVerdict,
     groupGatewayMenu,
     isFree,
@@ -36,6 +37,7 @@
     menuVerdict,
     MENU_IS_LIVE_NOTE,
     offeredProviders,
+    quotaHasWarning,
     removeAllowed,
     removeAllowedModel,
     removeServing,
@@ -126,6 +128,8 @@
   onMount(refreshQuota);
   $: quotaBlockersOf = (alias: string) => formatQuotaBlockers($providerBalances?.[alias]?.balance);
   $: quotaLineOf = (alias: string) => formatQuotaLine($providerBalances?.[alias]?.balance);
+  $: quotaLineTitleOf = (alias: string) => formatQuotaLineTitle($providerBalances?.[alias]?.balance);
+  $: quotaWarnOf = (alias: string) => quotaHasWarning($providerBalances?.[alias]?.balance);
 
   function addPicked(list: ServingList) {
     const alias = list === 'local' ? pickLocal : pickVendor;
@@ -567,7 +571,11 @@
                     <span class="badge badge-missing">{quotaBlockersOf(alias)}</span>
                   {/if}
                   {#if quotaLineOf(alias)}
-                    <span class="muted quota-line">{quotaLineOf(alias)}</span>
+                    <span
+                      class="muted quota-line"
+                      class:quota-line-warn={quotaWarnOf(alias)}
+                      title={quotaLineTitleOf(alias)}
+                    >{quotaLineOf(alias)}</span>
                   {/if}
                 </span>
                 <span class="quota-cell">
@@ -1195,6 +1203,7 @@
   .badge-first { background: #e3f2fd; color: #0d47a1; }
   .badge-missing { background: #fff3cd; color: #856404; }
   .quota-line { display: block; font-size: 0.85em; margin-top: 0.15rem; }
+  .quota-line-warn { color: #856404; font-weight: 600; }
   .badge-quota { background: #e8f5e9; color: #1b5e20; }
   .badge-gift { background: #f3e5f5; color: #4a148c; }
   .badge-live { background: #d4edda; color: #155724; }

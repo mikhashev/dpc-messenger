@@ -1018,6 +1018,7 @@ export interface QuotaWindow {
   limit?: number | null;
   remaining?: number | null;
   resets_at?: string | null;
+  reset_in_sec?: number | null;
 }
 
 /** `get_balance()`'s `quota` block, provider-neutral so a future vendor fills
@@ -1028,8 +1029,10 @@ export interface ProviderQuota {
   billing_mode?: string | null;
   can_request?: boolean | null;
   blockers?: string[] | null;
+  retry_after_sec?: number | null;
   windows?: QuotaWindow[] | null;
   parallel_limit?: number | null;
+  observed_at?: string | null;
 }
 
 /** One balance entry, exactly what `get_provider_balance(alias)` /
@@ -1057,20 +1060,144 @@ function windowLabel(name: string): string {
   return WINDOW_LABELS[name] ?? name;
 }
 
-/** One window as a compact fragment: `386 / 400 requests left (3h, resets
- *  14:59)`. Missing `remaining`/`limit` drop the fragment to nothing (the
- *  caller filters blanks) rather than print "undefined / undefined". */
-export function formatQuotaWindow(win: QuotaWindow, now: Date = new Date()): string {
-  if (typeof win.remaining !== 'number' || typeof win.limit !== 'number') return '';
+/** The percentage used, rounded and clamped to [0, 100] — coddy's
+ *  `usagePercent` (external/cli/usage.go:167-175): a negative or NaN input
+ *  reads as 0 rather than propagating a broken number onto the screen. */
+export function quotaWindowPercent(win: QuotaWindow): number | null {
+  if (typeof win.used !== 'number' || typeof win.limit !== 'number' || win.limit <= 0) return null;
+  const pct = (win.used / win.limit) * 100;
+  if (Number.isNaN(pct)) return 0;
+  return Math.round(Math.min(Math.max(pct, 0), 100));
+}
+
+/** The threshold a window's segment turns to the warning role at — coddy's
+ *  `usageWarnPercent` (external/cli/usage.go:31, "Claude Desktop's threshold"). */
+export const QUOTA_WARN_PERCENT = 80;
+
+function localResetTime(resetsAt: string | null | undefined): string {
+  if (typeof resetsAt !== 'string' || resetsAt.length === 0) return '';
+  const d = new Date(resetsAt);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+/** One window in coddy's own words: `3h 3% (resets 20:59)` (`windowSegment`,
+ *  external/cli/usage.go:409-422) — the label, the rounded percent used, and
+ *  the reset time in the reader's own clock when the vendor sent one. Empty
+ *  when there is no usable percentage (no `used`/`limit`, or a null/zero
+ *  limit), rather than printing "NaN%". */
+export function formatQuotaWindow(win: QuotaWindow, _now: Date = new Date()): string {
+  const pct = quotaWindowPercent(win);
+  if (pct === null) return '';
   const label = windowLabel(win.name);
-  let resets = '';
-  if (typeof win.resets_at === 'string' && win.resets_at.length > 0) {
-    const d = new Date(win.resets_at);
-    if (!Number.isNaN(d.getTime())) {
-      resets = `, resets ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
-    }
+  const resets = localResetTime(win.resets_at);
+  return `${label} ${pct}%${resets ? ` (resets ${resets})` : ''}`;
+}
+
+/** Whether a window's segment reads as a warning: at or past
+ *  `QUOTA_WARN_PERCENT`, or the window is exhausted outright (a used ≥ limit
+ *  that a rounded percentage could still show as 99%). */
+export function quotaWindowIsWarning(win: QuotaWindow): boolean {
+  const pct = quotaWindowPercent(win);
+  if (pct !== null && pct >= QUOTA_WARN_PERCENT) return true;
+  return typeof win.used === 'number' && typeof win.limit === 'number' && win.limit > 0 && win.used >= win.limit;
+}
+
+/** The counts a window's segment elides — for a title/tooltip attribute, not
+ *  the line itself: `386 / 400 left`. '' when there is nothing to count. */
+export function formatQuotaWindowTitle(win: QuotaWindow): string {
+  if (typeof win.remaining !== 'number' || typeof win.limit !== 'number') return '';
+  return `${win.remaining} / ${win.limit} ${win.unit} left`;
+}
+
+/** Whether any window in the quota is at or past the warning threshold — the
+ *  compact line's own role, so the caller can style it like the balance
+ *  pill's existing warning levels. `false` on a quota with no windows or no
+ *  quota at all. */
+export function quotaHasWarning(balance: BalanceResult['balance'] | null | undefined): boolean {
+  return (balance?.quota?.windows ?? []).some((w) => quotaWindowIsWarning(w));
+}
+
+/** A blocker id classified the way coddy's `blockerKind`
+ *  (external/cli/usage.go:285-300) reads the hub's own words: a window ran
+ *  out (has a reset), a short-lived rate limit, the key/account itself, or
+ *  the wallet. Unclassified ids fall through to the id itself. */
+function blockerKind(id: string): 'window' | 'rate' | 'key' | 'wallet' | 'account' | '' {
+  switch (id) {
+    case 'session_exhausted':
+    case 'week_exhausted':
+    case 'daily_capacity_exhausted':
+    case 'session_cooldown':
+    case 'abuse_cooldown':
+      return 'window';
+    case 'rpm_exhausted':
+      return 'rate';
+    case 'key_blocked':
+    case 'key_cap_blocked':
+      return 'key';
+    case 'wallet_empty':
+      return 'wallet';
+    case 'user_blocked':
+      return 'account';
+    default:
+      return '';
   }
-  return `${win.remaining} / ${win.limit} ${win.unit} left (${label}${resets})`;
+}
+
+/** A duration in whole seconds as coddy's `formatDuration`
+ *  (external/cli/usage.go:260-265): `42s`, `12m 05s`, `2h 10m`. */
+export function formatQuotaDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0s';
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
+/** The reason a blocked key is unusable right now, worded like coddy's
+ *  `blockedSegment` (external/cli/usage.go:302-331): `limit reached (resets
+ *  20:59)`, `rate limited (retry in 42s)`, `wallet empty`, `key blocked`,
+ *  `account blocked`; an unclassified blocker id is shown verbatim rather
+ *  than guessed at. Empty when the key can request. */
+export function formatQuotaBlockers(balance: BalanceResult['balance'] | null | undefined): string {
+  const quota = balance?.quota;
+  if (!quota || quota.can_request !== false) return '';
+  const blockers = (quota.blockers ?? []).filter((b): b is string => typeof b === 'string' && b.length > 0);
+  if (blockers.length === 0) return 'Cannot request right now.';
+
+  let kind: ReturnType<typeof blockerKind> = '';
+  for (const id of blockers) {
+    kind = blockerKind(id);
+    if (kind) break;
+  }
+  const retrySec = typeof quota.retry_after_sec === 'number' && quota.retry_after_sec > 0
+    ? quota.retry_after_sec : null;
+
+  switch (kind) {
+    case 'key':
+      return 'key blocked';
+    case 'wallet':
+      return 'wallet empty';
+    case 'account':
+      return 'account blocked';
+    case 'rate':
+      return retrySec !== null ? `rate limited (retry in ${formatQuotaDuration(retrySec)})` : 'rate limited';
+    case 'window': {
+      if (retrySec !== null && retrySec < 60) {
+        return `rate limited (retry in ${formatQuotaDuration(retrySec)})`;
+      }
+      const resetting = (quota.windows ?? []).find(
+        (w) => typeof w.resets_at === 'string' && w.resets_at.length > 0,
+      );
+      const resets = resetting ? localResetTime(resetting.resets_at) : '';
+      return `limit reached${resets ? ` (resets ${resets})` : ''}`;
+    }
+    default:
+      return `blocked: ${blockers[0]}`;
+  }
 }
 
 /** The one-line summary shown beside a serving_vendor alias: quota windows,
@@ -1100,17 +1227,14 @@ export function formatQuotaLine(balance: BalanceResult['balance'] | null | undef
   return parts.join(' · ');
 }
 
-/** The blockers line, shown ahead of the quota summary when the key cannot be
- *  used right now — `can_request === false` is the only condition that makes
- *  this non-empty; a payload with no `quota` (or `can_request` omitted) says
- *  nothing rather than guessing the key is blocked. */
-export function formatQuotaBlockers(balance: BalanceResult['balance'] | null | undefined): string {
-  const quota = balance?.quota;
-  if (!quota || quota.can_request !== false) return '';
-  const blockers = (quota.blockers ?? []).filter((b) => typeof b === 'string' && b.length > 0);
-  return blockers.length > 0
-    ? `Cannot request right now: ${blockers.join(', ')}`
-    : 'Cannot request right now.';
+/** The title/tooltip attribute to put beside `formatQuotaLine`'s compact
+ *  text: the counts each window's percentage elided, one per line —
+ *  `386 / 400 requests left`. '' when no window carries counts. */
+export function formatQuotaLineTitle(balance: BalanceResult['balance'] | null | undefined): string {
+  const lines = (balance?.quota?.windows ?? [])
+    .map((w) => formatQuotaWindowTitle(w))
+    .filter((line) => line.length > 0);
+  return lines.join('\n');
 }
 
 // --- Validate without saving ------------------------------------------------

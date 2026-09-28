@@ -4,7 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { sendCommand, peerProviders, providerBalance, getProviderBalance } from '$lib/coreService';
-  import { formatQuotaLine } from './inferenceSharing';
+  import { formatQuotaLine, formatQuotaLineTitle, quotaHasWarning } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
   import { trackRename } from '$lib/utils/aliasRenames';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
@@ -588,6 +588,8 @@
   $: hasPayPerUseProvider = payPerUseAliases.length > 0;
   $: balResult = $providerBalance;
   $: balanceQuotaLine = balResult?.status === 'success' ? formatQuotaLine(balResult.balance) : '';
+  $: balanceQuotaLineTitle = balResult?.status === 'success' ? formatQuotaLineTitle(balResult.balance) : '';
+  $: balanceQuotaWarn = balResult?.status === 'success' ? quotaHasWarning(balResult.balance) : false;
   $: balanceUnsupported = !!balResult && balResult.status === 'unsupported';
   $: balanceError = balResult && balResult.status === 'error' ? (balResult.message || 'error') : '';
   $: balanceInfo = balResult && balResult.status === 'success' && balResult.balance && Array.isArray(balResult.balance.balance_infos)
@@ -1049,7 +1051,11 @@
                   {#if !balanceAvailable}<span class="balance-flag">— insufficient</span>{/if}
                 </div>
                 {#if balanceQuotaLine}
-                  <div class="balance-value balance-muted quota-line">{balanceQuotaLine}</div>
+                  <div
+                    class="balance-value balance-muted quota-line"
+                    class:quota-line-warn={balanceQuotaWarn}
+                    title={balanceQuotaLineTitle}
+                  >{balanceQuotaLine}</div>
                 {/if}
               {:else}
                 <div class="balance-value balance-muted">Not checked yet — click “Check balance”.</div>
@@ -3003,6 +3009,7 @@
   .balance-label { font-weight: 600; color: #fff; }
   .balance-value { margin-top: 0.4rem; font-size: 1.05rem; color: #fff; font-variant-numeric: tabular-nums; }
   .balance-value.quota-line { font-size: 0.85rem; margin-top: 0.2rem; }
+  .balance-value.quota-line.quota-line-warn { color: #856404; font-weight: 600; }
   .balance-flag { margin-left: 0.5rem; font-size: 0.85rem; color: #bbb; }
   .balance-muted { color: #aaa; font-size: 0.9rem; }
   .balance-err { color: #ef9a9a; }

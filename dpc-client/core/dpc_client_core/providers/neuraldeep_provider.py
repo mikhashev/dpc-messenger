@@ -3,7 +3,7 @@
 import os
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Union
 
@@ -21,6 +21,48 @@ logger = logging.getLogger(__name__)
 
 NEURALDEEP_DEFAULT_BASE_URL = "https://api.neuraldeep.ru/v1"
 NOREASON_SUFFIX = "-noreason"
+
+# --- /v1/limits reading policy (coddy-agent's internal/session/provider_usage.go,
+# providerUsageTTL/providerUsageFloor/providerUsageBackoffCap) --------------------
+
+# An automatic read inside this age is served from the cache without a request.
+LIMITS_CACHE_TTL = timedelta(seconds=20)
+# The least gap between two actual /limits requests for one provider instance.
+LIMITS_FETCH_FLOOR = timedelta(seconds=15)
+# A vendor-requested pause (Retry-After / Retry-After-Ms) is honored up to this,
+# so a hub asking for hours cannot freeze reads until a restart.
+LIMITS_BACKOFF_CAP = timedelta(minutes=5)
+# The schema this decoder understands (coddy's neuralDeepUsageSchema); a
+# different number means fields may have been renamed, and reading it anyway
+# risks painting wrong numbers.
+LIMITS_SCHEMA = 1
+
+# `get_balance()`'s `error` values on a failed read; the shape stays backward
+# compatible (is_available/balance_infos/billing_mode/limits/quota) otherwise.
+ERROR_KEY_REJECTED = "key_rejected"
+ERROR_KEY_BLOCKED = "key_blocked"
+ERROR_INVALID = "invalid"
+ERROR_UNAVAILABLE = "unavailable"
+
+
+class NeuralDeepLimitsError(RuntimeError):
+    """A `/v1/limits` read failed; `kind` is one of the ERROR_* constants."""
+    kind = ERROR_UNAVAILABLE
+
+
+class NeuralDeepKeyRejected(NeuralDeepLimitsError):
+    """HTTP 401: the key is sticky-rejected until the provider is re-created."""
+    kind = ERROR_KEY_REJECTED
+
+
+class NeuralDeepKeyBlocked(NeuralDeepLimitsError):
+    """HTTP 403: the key/account is blocked, not merely out of quota."""
+    kind = ERROR_KEY_BLOCKED
+
+
+class NeuralDeepLimitsInvalid(NeuralDeepLimitsError):
+    """The payload does not look like a schema-1 `/v1/limits` answer."""
+    kind = ERROR_INVALID
 
 # Per model id, from the model list in https://neuraldeep.ru/llms-full.txt
 # (read 2026-09-26). Vision was also checked live on qwen3.8-27b.
@@ -166,6 +208,13 @@ class NeuralDeepProvider(AIProvider):
         self._billing_mode: Optional[str] = None
         self._billing_mode_read_at: Optional[datetime] = None
         self._billing_mode_failed_at: Optional[datetime] = None
+
+        # --- /v1/limits cache (see LIMITS_CACHE_TTL/LIMITS_FETCH_FLOOR above) ---
+        self._limits_cache: Optional[Dict[str, Any]] = None
+        self._limits_cache_at: Optional[datetime] = None
+        self._limits_last_attempt_at: Optional[datetime] = None
+        self._limits_key_rejected = False
+        self._limits_backoff_until: Optional[datetime] = None
 
     # --- capabilities ---
 
@@ -355,6 +404,120 @@ class NeuralDeepProvider(AIProvider):
     def supports_balance(self) -> bool:
         return True
 
+    @staticmethod
+    def _validate_limits_payload(payload: Any) -> None:
+        """Schema-1 validation, mirroring coddy's `NeuralDeepUsage.validate()`
+        (internal/llm/neuraldeep_usage.go:231-248): a renamed or dropped block
+        must read as invalid, never as an account with nothing left — a
+        missing `decision` must not be read as "blocked" and a missing `chat`
+        must not be read as "no windows"."""
+        if not isinstance(payload, dict):
+            raise NeuralDeepLimitsInvalid("payload is not an object")
+        if payload.get("schema") != LIMITS_SCHEMA:
+            raise NeuralDeepLimitsInvalid(f"schema {payload.get('schema')!r}, want {LIMITS_SCHEMA}")
+        if not str(payload.get("tier") or "").strip():
+            raise NeuralDeepLimitsInvalid("payload without tier")
+        if not isinstance(payload.get("decision"), dict):
+            raise NeuralDeepLimitsInvalid("payload without decision")
+        if not isinstance(payload.get("chat"), dict):
+            raise NeuralDeepLimitsInvalid("payload without chat")
+
+    @staticmethod
+    def _parse_retry_after(headers: Any) -> Optional[timedelta]:
+        """Retry-After (seconds or an HTTP-date) or Retry-After-Ms; None when
+        the response asked for no pause (coddy's `parseUsageRetryAfter`)."""
+        ms = headers.get("retry-after-ms")
+        if ms:
+            try:
+                value = float(ms)
+                if value > 0:
+                    return timedelta(milliseconds=value)
+            except (TypeError, ValueError):
+                pass
+        raw = (headers.get("retry-after") or "").strip()
+        if not raw:
+            return None
+        try:
+            seconds = float(raw)
+            return timedelta(seconds=seconds) if seconds > 0 else None
+        except ValueError:
+            pass
+        try:
+            from email.utils import parsedate_to_datetime
+            when = parsedate_to_datetime(raw)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            delta = when - datetime.now(timezone.utc)
+            return delta if delta.total_seconds() > 0 else None
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    async def _read_limits(self) -> Dict[str, Any]:
+        """The current `/v1/limits` payload, honoring the cache TTL, the fetch
+        floor, a vendor backoff and the sticky 401 (coddy's
+        `internal/session/provider_usage.go`). Raises a `NeuralDeepLimitsError`
+        subclass on failure and never performs more than one HTTP request per
+        `LIMITS_FETCH_FLOOR`, nor any once the key has been rejected."""
+        if self._limits_key_rejected:
+            raise NeuralDeepKeyRejected(
+                f"NeuralDeep key for '{self.alias}' was rejected (401); "
+                "re-create the provider (a config change or restart) to retry")
+
+        now = datetime.now(timezone.utc)
+        if self._limits_cache is not None and self._limits_cache_at is not None \
+                and now - self._limits_cache_at < LIMITS_CACHE_TTL:
+            return self._limits_cache
+        if self._limits_backoff_until is not None and now < self._limits_backoff_until:
+            if self._limits_cache is not None:
+                return self._limits_cache
+            raise NeuralDeepLimitsError(
+                f"NeuralDeep '{self.alias}': in backoff until {self._limits_backoff_until.isoformat()}")
+        if self._limits_cache is not None and self._limits_last_attempt_at is not None \
+                and now - self._limits_last_attempt_at < LIMITS_FETCH_FLOOR:
+            return self._limits_cache
+
+        import httpx
+        url = self._base_url.rstrip("/") + "/limits"
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        self._limits_last_attempt_at = now
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(url, headers=headers)
+
+        if resp.status_code == 401:
+            self._limits_key_rejected = True
+            raise NeuralDeepKeyRejected(f"NeuralDeep key for '{self.alias}' rejected (401)")
+        if resp.status_code == 403:
+            raise NeuralDeepKeyBlocked(f"NeuralDeep key for '{self.alias}' blocked (403)")
+        if resp.status_code < 200 or resp.status_code >= 300:
+            retry_after = self._parse_retry_after(resp.headers)
+            if retry_after is not None:
+                capped = min(retry_after, LIMITS_BACKOFF_CAP)
+                self._limits_backoff_until = now + capped
+            if self._limits_cache is not None:
+                return self._limits_cache
+            raise NeuralDeepLimitsError(
+                f"NeuralDeep '{self.alias}': /limits answered HTTP {resp.status_code}")
+
+        payload = resp.json()
+        self._validate_limits_payload(payload)
+        self._limits_cache, self._limits_cache_at = payload, now
+        self._limits_backoff_until = None
+        return payload
+
+    @staticmethod
+    def _error_balance(kind: str, detail: str) -> Dict[str, Any]:
+        """The shape `get_balance()` answers with on a failed read: the same
+        keys as a success, all empty/None, plus `error`/`error_detail`."""
+        return {
+            "is_available": False,
+            "balance_infos": [],
+            "billing_mode": None,
+            "limits": {},
+            "quota": None,
+            "error": kind,
+            "error_detail": detail,
+        }
+
     async def get_balance(self) -> Dict[str, Any]:
         """The wallet from GET /v1/limits, in the shape the balance pill reads.
 
@@ -363,14 +526,24 @@ class NeuralDeepProvider(AIProvider):
         wallet; the wallet balance exists either way. The raw payload rides
         along under `limits`, and `quota` (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-
         AND-NEVER-SHOWN) is the same facts normalized so a host serving this
-        key to a peer can see the request quota left, not only the wallet."""
-        import httpx
-        url = self._base_url.rstrip("/") + "/limits"
-        headers = {"Authorization": f"Bearer {self._api_key}"}
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-            limits = resp.json()
+        key to a peer can see the request quota left, not only the wallet.
+
+        The read goes through `_read_limits()`, so it is cached, floored and
+        never talks to the network past a rejected key: on failure this
+        returns `_error_balance()` instead of the usual shape, with `error`
+        naming the kind (`key_rejected`, `key_blocked`, `invalid`,
+        `unavailable`) rather than raising."""
+        try:
+            limits = await self._read_limits()
+        except NeuralDeepKeyRejected as exc:
+            return self._error_balance(ERROR_KEY_REJECTED, str(exc))
+        except NeuralDeepKeyBlocked as exc:
+            return self._error_balance(ERROR_KEY_BLOCKED, str(exc))
+        except NeuralDeepLimitsInvalid as exc:
+            return self._error_balance(ERROR_INVALID, str(exc))
+        except Exception as exc:
+            return self._error_balance(ERROR_UNAVAILABLE, str(exc))
+
         wallet = limits.get("wallet") or {}
         key = limits.get("key") or {}
         decision = limits.get("decision") or {}
@@ -412,6 +585,7 @@ class NeuralDeepProvider(AIProvider):
                 "limit": entry.get("limit"),
                 "remaining": entry.get("remaining"),
                 "resets_at": entry.get("resets_at"),
+                "reset_in_sec": entry.get("reset_in_sec"),
             }
 
         windows: List[Dict[str, Any]] = []
@@ -430,8 +604,10 @@ class NeuralDeepProvider(AIProvider):
             "billing_mode": key.get("billing_mode"),
             "can_request": decision.get("can_request"),
             "blockers": decision.get("blockers") or [],
+            "retry_after_sec": decision.get("retry_after_sec"),
             "windows": windows,
             "parallel_limit": limits.get("parallel_limit"),
+            "observed_at": limits.get("observed_at"),
         }
 
     # --- retry ---
