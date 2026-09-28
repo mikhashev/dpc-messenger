@@ -17,6 +17,7 @@ import {
   menuSummary,
   priceLine,
   settingsLines,
+  vendorLine,
   type MenuRow,
 } from './peerMenu';
 
@@ -216,5 +217,34 @@ describe('the one line the panel shows collapsed', () => {
     const row: MenuRow = { alias: 'llama', tariff: { ...paid, free: true } };
     expect(menuSummary(row, 'en-US'))
       .toBe('llama · free for you · ctx not stated · effort not stated');
+  });
+});
+
+/**
+ * A vendor model on a peer's menu. Since 2026-09-28 (Mike's call, ADR-041 D5
+ * amendment) a host serves its vendor aliases over P2P as well, and marks each
+ * row `provider_kind: 'vendor'`: the guest's prompt goes to that vendor under
+ * the host's key, and the guest is told so before it calls.
+ */
+describe('vendorLine', () => {
+  it('names the vendor a vendor row sends the prompt to', () => {
+    const row: MenuRow = { alias: 'qwen ND', type: 'neuraldeep', provider_kind: 'vendor' };
+    expect(vendorLine(row)).toBe('vendor model — your prompt goes to NeuralDeep');
+  });
+
+  it('says so in plain words for an OpenAI-compatible vendor', () => {
+    const row: MenuRow = { alias: 'oa', type: 'openai_compatible', provider_kind: 'vendor' };
+    expect(vendorLine(row)).toBe('vendor model — your prompt goes to an OpenAI-compatible API');
+  });
+
+  it('falls back to the type the host sent for a vendor this build does not name', () => {
+    const row: MenuRow = { alias: 'x', type: 'newvendor', provider_kind: 'vendor' };
+    expect(vendorLine(row)).toBe('vendor model — your prompt goes to newvendor');
+  });
+
+  it('is silent for the host\'s own card and for a host that states no kind', () => {
+    expect(vendorLine({ alias: 'llama', type: 'ollama', provider_kind: 'self_hosted' })).toBeNull();
+    expect(vendorLine({ alias: 'old', type: 'deepseek' })).toBeNull();
+    expect(vendorLine(null)).toBeNull();
   });
 });

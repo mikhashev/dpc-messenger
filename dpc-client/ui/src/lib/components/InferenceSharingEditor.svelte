@@ -65,7 +65,7 @@
     type ServingList,
     type TariffEntry,
   } from './inferenceSharing';
-  import { priceLine } from './peerMenu';
+  import { priceLine, vendorLine } from './peerMenu';
   import InferenceUsage from './InferenceUsage.svelte';
 
   export let displayCompute: ComputeRules | null = null;
@@ -470,14 +470,15 @@
         <div class="subsection">
           <h4>1. What I share</h4>
           <p class="help-text-small">
-            The aliases this node serves &mdash; every local one is served over P2P, and
+            The aliases this node serves &mdash; every one listed is served over P2P, and
             <strong>a vendor alias needs a daily ceiling</strong>.
           </p>
           <details class="why"><summary>why</summary>
             Two lists, by what an alias spends. A <strong>local</strong> alias (Ollama, llama.cpp) spends this
             card; every one listed is served to peers over P2P (Mike's call, 2026-09-18), the first being what
             a request naming no alias gets. A <strong>vendor</strong> alias spends money, so its ceiling is
-            per caller, per day, in the currency its provider bills in. A remote peer's model and an agent are never offered: what is shared is
+            per caller, per day, in the currency its provider bills in; it is served over P2P too
+            (Mike's call, 2026-09-28), only to a peer that names it, and never as the default. A remote peer's model and an agent are never offered: what is shared is
             not shared onward (ADR-041 D7). Whisper is shared under Transcription Sharing.
           </details>
 
@@ -501,7 +502,7 @@
                 {/if}
               </div>
             {:else}
-              <p class="empty-small">No local alias shared &mdash; peer inference is refused.</p>
+              <p class="empty-small">No local alias shared &mdash; a peer request naming no alias is refused.</p>
             {/each}
           </div>
           {#if editMode}
@@ -517,11 +518,16 @@
           {/if}
 
           <h5>Vendor (spends money; ceiling per caller, per day, in the provider's own currency)</h5>
+          <p class="help-text-small owner-duty">
+            A peer you allow sends its prompt through this node to the vendor, under your key. Whether
+            the vendor's terms permit that is yours to check &mdash; DPC does not read them.
+          </p>
           <div class="rule-list">
             {#each view.serving_vendor ?? [] as alias (alias)}
               <div class="rule-row">
                 <span class="alias-cell">
                   <code class="rule-path">{alias}</code>
+                  <span class="badge badge-first">served over P2P</span>
                   {#if providerByAlias.has(alias)}
                     <span class="muted">({providerByAlias.get(alias)?.model})</span>
                     {#if providerByAlias.get(alias)?.ceiling_currency === null}
@@ -1089,6 +1095,7 @@
                     {#if row.supports_vision}<span class="badge badge-first">vision</span>{/if}
                     {#if row.supports_voice}<span class="badge badge-first">voice</span>{/if}
                     {#if row.supports_tools}<span class="badge badge-first">tools</span>{/if}
+                    {#if vendorLine(row)}<span class="badge badge-quota">{vendorLine(row)}</span>{/if}
                   </span>
                   <span class="numbers-cell muted">
                     <span class="money">{priceLine(row.tariff).short}</span>
@@ -1113,6 +1120,7 @@
   .section h3 { margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #333; }
   .help-text { color: #666; font-size: 0.9rem; margin: 0 0 1rem 0; }
   .help-text-small { color: #666; font-size: 0.85rem; margin: 0.25rem 0 0.5rem 0; }
+  .owner-duty { color: #8d6e00; }
   /* The rationale each block used to print in full: kept, folded away
      (Mike's call, 2026-09-18 — the tab read like the ADR that designed it). */
   .why { color: #666; font-size: 0.85rem; margin: 0 0 0.5rem 0; }

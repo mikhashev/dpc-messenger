@@ -66,6 +66,9 @@ export interface MenuRow {
   reasoning_default?: string | null;
   tariff?: MenuTariff | null;
   settings?: MenuSettings | null;
+  /** Which of the host's serving lists the alias stands on, in the words of
+   *  the runtime budget: `vendor` or `self_hosted`. Absent on an older host. */
+  provider_kind?: string | null;
 }
 
 /**
@@ -268,4 +271,37 @@ export function menuSummary(row: MenuRow | null | undefined, locale?: string): s
     ? `effort ${String(row?.reasoning_default).trim()}`
     : 'effort not stated';
   return `${alias} · ${price} · ${ctx} · ${effort}`;
+}
+
+/**
+ * The vendor a provider type sends its calls to, as the Providers editor names
+ * it. A type this build does not know is shown as the host sent it rather than
+ * guessed at.
+ */
+const VENDOR_NAMES: Record<string, string> = {
+  openai_compatible: 'an OpenAI-compatible API',
+  anthropic: 'Anthropic',
+  zai: 'Z.AI',
+  deepseek: 'DeepSeek',
+  neuraldeep: 'NeuralDeep',
+  gemini: 'Google Gemini',
+  github_models: 'GitHub Models',
+  gigachat: 'GigaChat (Sberbank)',
+};
+
+/**
+ * The line a guest reads beside a vendor alias on a peer's menu, or null.
+ *
+ * Since 2026-09-28 (Mike's call, ADR-041 D5 amendment) a host serves its vendor
+ * aliases over P2P, and a call on one leaves the host for the vendor with the
+ * guest's prompt in it. The host says so on the row (`provider_kind`), and only
+ * the host's word is read: a row that states no kind is from a host that serves
+ * no vendor alias to peers, and a type alone cannot tell an OpenAI-compatible
+ * vendor from a server on the host's own card.
+ */
+export function vendorLine(row: MenuRow | null | undefined): string | null {
+  if (!row || row.provider_kind !== 'vendor') return null;
+  const type = typeof row.type === 'string' ? row.type.trim() : '';
+  const vendor = VENDOR_NAMES[type] ?? (type || 'the vendor');
+  return `vendor model — your prompt goes to ${vendor}`;
 }

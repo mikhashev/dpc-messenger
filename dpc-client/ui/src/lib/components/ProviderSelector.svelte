@@ -2,7 +2,7 @@
 <!-- Displays compute host, text provider, vision provider, and voice provider dropdowns for AI chats -->
 
 <script lang="ts">
-  import { menuSummary, priceLine, settingsLines, type MenuRow } from './peerMenu';
+  import { menuSummary, priceLine, settingsLines, vendorLine, type MenuRow } from './peerMenu';
   import { effectiveAgentVisionModel } from './agentVisionModel';
 
   // Provider type definition: one row of PROVIDERS_RESPONSE (DPTP §3.5), which
@@ -255,7 +255,13 @@
     {#if selectedPeerRow()}
       {@const row = selectedPeerRow()!}
       {@const price = priceLine(row.tariff)}
+      {@const vendor = vendorLine(row)}
       <div class="peer-menu">
+        <!-- Outside the collapse: where the prompt goes is not a detail
+             (Mike's call, 2026-09-28 — the peer door serves vendor aliases). -->
+        {#if vendor}
+          <p class="peer-menu-vendor">{vendor}</p>
+        {/if}
         <button
           type="button"
           class="peer-menu-summary"
@@ -370,6 +376,13 @@
     border-radius: 4px;
     background: #fafafa;
     font-size: 0.8rem;
+  }
+
+  .peer-menu-vendor {
+    margin: 0;
+    padding: 0.3rem 0.6rem 0;
+    color: #8d6e00;
+    font-weight: 600;
   }
 
   .peer-menu-summary {
