@@ -441,7 +441,15 @@ class P2PCoordinator:
         billing_mode = (balance or {}).get("billing_mode")
         quota = (balance or {}).get("quota")
         firewall = getattr(self.service, "firewall", None)
-        refusal = guest_vendor_quota_refusal(
+        # P3, 2026-09-29: `guest_vendor_quota_refusal` calls
+        # `NodeLedger.count_since`/`tokens_since`, which read ledger
+        # partitions off disk synchronously (`rows_since` -> `open()`/`read`);
+        # run off the event loop so a slow disk or a large partition does not
+        # stall every other connection this node is serving at the same
+        # moment. `asyncio.to_thread` takes the function and its kwargs
+        # directly, so this awaits a thread rather than blocking in-loop.
+        refusal = await asyncio.to_thread(
+            guest_vendor_quota_refusal,
             alias=serving_alias,
             caller=peer_id,
             billing_mode=billing_mode,

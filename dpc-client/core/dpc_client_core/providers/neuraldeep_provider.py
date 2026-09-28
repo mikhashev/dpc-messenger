@@ -33,6 +33,14 @@ LIMITS_FETCH_FLOOR = timedelta(seconds=15)
 # A vendor-requested pause (Retry-After / Retry-After-Ms) is honored up to this,
 # so a hub asking for hours cannot freeze reads until a restart.
 LIMITS_BACKOFF_CAP = timedelta(minutes=5)
+# P2b, ADR-041 D5 amendment 2026-09-29: how old the *last successful* /limits
+# read may be and still stand in for a read that just failed. Both doors ask
+# `get_balance()`, never `_read_limits()` directly, so one ceiling here is one
+# ceiling on both — the peer door and the gateway's owner path read the same
+# cache, aged the same way, and diverge only in what they do once it is too
+# old (the peer door refuses; the gateway's owner path proceeds, ADR-041 D3:
+# a guest's ceiling is bounded fail-closed, the owner's own loopback is not).
+STALE_QUOTA_MAX_AGE = timedelta(minutes=5)
 # The schema this decoder understands (coddy's neuralDeepUsageSchema); a
 # different number means fields may have been renamed, and reading it anyway
 # risks painting wrong numbers.
@@ -590,8 +598,9 @@ class NeuralDeepProvider(AIProvider):
             # 403 (ERROR_KEY_BLOCKED) must not survive to mislabel the next
             # backoff raise (line ~504) as key-blocked when it wasn't.
             self._limits_backoff_kind = None
-            if self._limits_cache is not None:
-                return self._limits_cache
+            stale = self._stale_cache_within(STALE_QUOTA_MAX_AGE)
+            if stale is not None:
+                return stale
             raise NeuralDeepLimitsError(
                 f"NeuralDeep '{self.alias}': /limits answered HTTP {resp.status_code}")
 
@@ -617,6 +626,27 @@ class NeuralDeepProvider(AIProvider):
             "error_detail": detail,
         }
 
+    def _stale_cache_within(self, max_age: timedelta) -> Optional[Dict[str, Any]]:
+        """The last successfully read `/limits` payload, if one exists and is
+        no older than `max_age`; None otherwise. Distinct from `_read_limits`'s
+        own short `LIMITS_CACHE_TTL`/backoff caches (which serve a *fresh*
+        read from cache to save a request): this is the P2b fallback a
+        *failed* read reaches for, so both doors see the same last-known-good
+        state instead of one building `billing_mode=None` from a transient
+        failure and the other reading its own separately-cached quota."""
+        if self._limits_cache is None or self._limits_cache_at is None:
+            return None
+        age = datetime.now(timezone.utc) - self._limits_cache_at
+        return self._limits_cache if age <= max_age else None
+
+    def _quota_age_sec(self) -> Optional[float]:
+        """How old the cache backing this `get_balance()` answer is, in
+        seconds — P2b: exposed so a caller can log or reason about staleness
+        rather than treat every answer as equally fresh."""
+        if self._limits_cache_at is None:
+            return None
+        return (datetime.now(timezone.utc) - self._limits_cache_at).total_seconds()
+
     async def get_balance(self) -> Dict[str, Any]:
         """The wallet from GET /v1/limits, in the shape the balance pill reads.
 
@@ -628,20 +658,39 @@ class NeuralDeepProvider(AIProvider):
         key to a peer can see the request quota left, not only the wallet.
 
         The read goes through `_read_limits()`, so it is cached, floored and
-        never talks to the network past a rejected key: on failure this
-        returns `_error_balance()` instead of the usual shape, with `error`
-        naming the kind (`key_rejected`, `key_blocked`, `invalid`,
-        `unavailable`) rather than raising."""
+        never talks to the network past a rejected key. On failure this method
+        first reaches for the last successfully read payload, if one is no
+        older than `STALE_QUOTA_MAX_AGE` (P2b, ADR-041 D5 amendment
+        2026-09-29): a `/limits` fetch failing for a few seconds must not make
+        this key read as `billing_mode=None` — which the peer door refuses
+        fail-closed and the gateway's owner path waves through fail-open — when
+        this node in fact knows, to within five minutes, what that key's
+        billing_mode and quota are. Only past that age, or with no cache at
+        all, does this return `_error_balance()`, with `error` naming the kind
+        (`key_rejected`, `key_blocked`, `invalid`, `unavailable`) rather than
+        raising. `quota_age_sec` on every answer says how old the underlying
+        read is — `0` (or close to it) on a fresh read, larger on a reused one,
+        `None` where nothing has ever been read."""
         try:
             limits = await self._read_limits()
-        except NeuralDeepKeyRejected as exc:
-            return self._error_balance(ERROR_KEY_REJECTED, str(exc))
-        except NeuralDeepKeyBlocked as exc:
-            return self._error_balance(ERROR_KEY_BLOCKED, str(exc))
-        except NeuralDeepLimitsInvalid as exc:
-            return self._error_balance(ERROR_INVALID, str(exc))
+        except NeuralDeepLimitsError as exc:
+            stale = self._stale_cache_within(STALE_QUOTA_MAX_AGE)
+            if stale is not None:
+                logger.warning(
+                    "NeuralDeep %s: /limits read failed (%s: %s); serving the last known-good "
+                    "read from %.0fs ago instead of billing_mode=None (P2b, <= %s)",
+                    self.alias, type(exc).__name__, exc, self._quota_age_sec() or 0.0,
+                    STALE_QUOTA_MAX_AGE,
+                )
+                limits = stale
+            else:
+                return self._error_balance(getattr(exc, "kind", ERROR_UNAVAILABLE), str(exc))
         except Exception as exc:
-            return self._error_balance(ERROR_UNAVAILABLE, str(exc))
+            stale = self._stale_cache_within(STALE_QUOTA_MAX_AGE)
+            if stale is not None:
+                limits = stale
+            else:
+                return self._error_balance(ERROR_UNAVAILABLE, str(exc))
 
         wallet = limits.get("wallet") or {}
         key = limits.get("key") or {}
@@ -667,6 +716,7 @@ class NeuralDeepProvider(AIProvider):
             "billing_mode": key.get("billing_mode"),
             "limits": limits,
             "quota": quota,
+            "quota_age_sec": self._quota_age_sec(),
         }
 
     @staticmethod

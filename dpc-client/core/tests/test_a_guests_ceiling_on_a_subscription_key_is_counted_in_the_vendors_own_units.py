@@ -29,6 +29,7 @@ from dpc_client_core.guest_vendor_quota import (
     guest_vendor_quota_refusal,
     seconds_to_utc_midnight,
 )
+from dpc_client_core.guest_vendor_quota import _retry_after_for_window
 from dpc_client_core.node_ledger import NodeLedger, usage_row
 from dpc_client_core.p2p_coordinator import PEER_CALLER_KIND
 from tests.test_p2p_coordinator import make_coordinator
@@ -203,6 +204,9 @@ def test_the_aggregate_reserve_is_reached_by_several_guests(tmp_path):
 
 
 def test_a_subscription_alias_without_a_request_quota_entry_is_refused(tmp_path):
+    """P3, 2026-09-29: a missing ceiling is the owner's own configuration gap
+    — waiting does not close it — so the code is `misconfigured` (503, no
+    Retry-After), not `insufficient_quota` (429, "come back later")."""
     ledger = NodeLedger(tmp_path / "ledger")
     refusal = guest_vendor_quota_refusal(
         alias=ALIAS, caller=GUEST, billing_mode="subscription",
@@ -210,7 +214,8 @@ def test_a_subscription_alias_without_a_request_quota_entry_is_refused(tmp_path)
         ledger=ledger, account_id_of={}, request_quotas={}, token_quotas={}, owner_reserve={},
     )
     assert refusal is not None
-    assert refusal["code"] == "insufficient_quota"
+    assert refusal["code"] == "misconfigured"
+    assert refusal["retry_after_sec"] is None
     assert "no" in refusal["message"] and "vendor_request_quotas" in refusal["message"]
 
 
@@ -243,7 +248,7 @@ def test_daily_capacity_exhausted_is_refused_with_seconds_to_utc_midnight(tmp_pa
         alias=ALIAS, caller=GUEST, billing_mode="subscription",
         quota=_quota(daily_capacity={"exhausted": True}),
         ledger=ledger, account_id_of={ALIAS: "acct-1"},
-        request_quotas={ALIAS: {"per_session": 0}}, token_quotas={}, owner_reserve={},
+        request_quotas={ALIAS: {"per_session": None, "per_week": None}}, token_quotas={}, owner_reserve={},
         now=now,
     )
     assert refusal is not None
@@ -261,7 +266,7 @@ def test_a_guest_token_per_day_ceiling_is_refused(tmp_path):
         alias=ALIAS, caller=GUEST, billing_mode="subscription",
         quota=_quota(),
         ledger=ledger, account_id_of={ALIAS: "acct-1"},
-        request_quotas={ALIAS: {"per_session": 0}},
+        request_quotas={ALIAS: {"per_session": None, "per_week": None}},
         token_quotas={ALIAS: {"per_day": 150}}, owner_reserve={},
         now=now,
     )
@@ -381,7 +386,7 @@ async def test_the_peer_door_refuses_a_guest_over_its_request_quota_with_retry_a
     svc.firewall = ContextFirewall(rules)
     svc.gateway = None
     svc.llm_manager.providers = {
-        ALIAS: _subscription_provider(_quota(_session_window(resets_at, used=1, limit=400, reset_in_sec=222))),
+        ALIAS: _subscription_provider(_quota(_session_window(resets_at, used=1, limit=400))),
     }
     svc.llm_manager.query = AsyncMock(return_value={"response": "pong", "model": "m"})
     coord._ledger = NodeLedger(tmp_path / "ledger")
@@ -394,7 +399,10 @@ async def test_the_peer_door_refuses_a_guest_over_its_request_quota_with_retry_a
     payload = message["payload"]
     assert payload["status"] == "error"
     assert payload["code"] == "insufficient_quota"
-    assert payload["retry_after_sec"] == 222
+    # P3, 2026-09-29: retry_after_sec is now recomputed from the window's own
+    # resets_at at refusal time, not read off the vendor's `reset_in_sec`
+    # snapshot — which by the time a refusal is built may already be stale.
+    assert payload["retry_after_sec"] == pytest.approx(3600, abs=5)
 
 
 def _wallet_provider_without_reports_billing_mode():
@@ -407,6 +415,45 @@ def _wallet_provider_without_reports_billing_mode():
         billing_currency=lambda: "USD",
         get_balance=AsyncMock(return_value={"balance": "12.34"}),
     )
+
+
+@pytest.mark.asyncio
+async def test_p3_the_peer_door_reads_the_ledger_off_the_event_loop(tmp_path, monkeypatch):
+    """`guest_vendor_quota_refusal` reads ledger partitions off disk
+    synchronously; the peer door must not block the event loop doing it, so
+    it is called through `asyncio.to_thread`."""
+    import asyncio as asyncio_module
+
+    import dpc_client_core.p2p_coordinator as p2p_coordinator_module
+
+    rules = tmp_path / "privacy_rules.json"
+    rules.write_text(json.dumps({"compute": {
+        "enabled": True, "allow_nodes": [GUEST], "serving_local": [], "serving_vendor": [ALIAS],
+        "vendor_quotas": {ALIAS: 1000.0}, "vendor_request_quotas": {ALIAS: {"per_session": 5}},
+    }}), encoding="utf-8")
+
+    coord, svc = make_coordinator()
+    svc.firewall = ContextFirewall(rules)
+    svc.gateway = None
+    svc.llm_manager.providers = {
+        ALIAS: _subscription_provider(_quota(_session_window(
+            datetime.now(timezone.utc) + timedelta(hours=1), used=0, limit=400))),
+    }
+    coord._ledger = NodeLedger(tmp_path / "ledger")
+
+    calls = []
+    real_to_thread = asyncio_module.to_thread
+
+    async def _spy(func, *args, **kwargs):
+        calls.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(p2p_coordinator_module.asyncio, "to_thread", _spy)
+
+    refusal = await coord._guest_vendor_quota_refusal(GUEST, ALIAS)
+
+    assert refusal is None
+    assert calls == [guest_vendor_quota_refusal], "the ledger read must go through asyncio.to_thread"
 
 
 @pytest.mark.asyncio
@@ -473,4 +520,178 @@ async def test_the_gateway_refuses_429_with_retry_after_on_daily_capacity_exhaus
     assert exc_info.value.status == 429
     assert exc_info.value.code == "insufficient_quota"
     assert exc_info.value.retry_after_sec == pytest.approx(seconds_to_utc_midnight(datetime.now(timezone.utc)), abs=5)
+
+
+# --- P3: retry_after_sec is recomputed from resets_at, not the vendor's own
+# reset_in_sec snapshot, and clamped to at least one second -----------------
+
+
+def test_p3_retry_after_is_recomputed_from_resets_at_not_reset_in_sec():
+    now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+    window = _session_window(now + timedelta(seconds=90), used=1, limit=10, reset_in_sec=99999)
+    assert _retry_after_for_window(window, now) == pytest.approx(90, abs=1)
+
+
+def test_p3_retry_after_clamps_to_at_least_one_second_in_the_past():
+    now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+    window = _session_window(now - timedelta(seconds=5), used=1, limit=10)
+    assert _retry_after_for_window(window, now) == 1.0
+
+
+# --- P2c: the owner's reserve is protected by the vendor's live `remaining` --
+
+
+def test_p2c_the_reserve_is_read_from_live_remaining_not_only_our_own_guest_rows(tmp_path):
+    """Mike's own example: remaining=50 of 400, reserve 25%, no guest rows at
+    all — refused, because the vendor's own remaining already shows the
+    owner (or another client of the key) has spent past the reserve line.
+    remaining=350 admits."""
+    now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+    resets_at = now + timedelta(hours=1)
+    ledger = NodeLedger(tmp_path / "ledger")
+
+    refused = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="subscription",
+        quota=_quota(_session_window(resets_at, used=350, limit=400)),
+        ledger=ledger, account_id_of={ALIAS: "acct-1"},
+        request_quotas={ALIAS: {"per_session": 100}}, token_quotas={}, owner_reserve={ALIAS: 0.25},
+        now=now,
+    )
+    assert refused is not None
+    assert "guest reserve" in refused["message"]
+
+    admitted = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="subscription",
+        quota=_quota(_session_window(resets_at, used=50, limit=400)),
+        ledger=ledger, account_id_of={ALIAS: "acct-1"},
+        request_quotas={ALIAS: {"per_session": 100}}, token_quotas={}, owner_reserve={ALIAS: 0.25},
+        now=now,
+    )
+    assert admitted is None
+
+
+def test_p2c_an_unknown_remaining_refuses_fail_closed(tmp_path):
+    now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+    resets_at = now + timedelta(hours=1)
+    window = _session_window(resets_at, used=1, limit=400)
+    del window["remaining"]
+    ledger = NodeLedger(tmp_path / "ledger")
+
+    refused = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="subscription",
+        quota=_quota(window),
+        ledger=ledger, account_id_of={ALIAS: "acct-1"},
+        request_quotas={ALIAS: {"per_session": 100}}, token_quotas={}, owner_reserve={},
+        now=now,
+    )
+    assert refused is not None
+
+
+# --- P3: a window with no usable `limit` refuses rather than skips ----------
+
+
+def test_p3_a_window_with_no_limit_refuses_rather_than_skips(tmp_path):
+    now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+    resets_at = now + timedelta(hours=1)
+    window = _session_window(resets_at, used=1, limit=400)
+    del window["limit"]
+    ledger = NodeLedger(tmp_path / "ledger")
+
+    refused = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="subscription",
+        quota=_quota(window),
+        ledger=ledger, account_id_of={ALIAS: "acct-1"},
+        request_quotas={ALIAS: {"per_session": 100}}, token_quotas={}, owner_reserve={},
+        now=now,
+    )
+    assert refused is not None
+
+
+# --- P3: per_session/per_week/per_day = 0 means "no guest calls" -----------
+
+
+def test_p3_a_zero_request_ceiling_refuses_every_guest(tmp_path):
+    ledger = NodeLedger(tmp_path / "ledger")
+    refused = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="subscription",
+        quota=_quota(),
+        ledger=ledger, account_id_of={ALIAS: "acct-1"},
+        request_quotas={ALIAS: {"per_session": 0}}, token_quotas={}, owner_reserve={},
+    )
+    assert refused is not None
+    assert refused["code"] == "insufficient_quota"
+
+
+def test_p3_a_zero_token_ceiling_refuses_every_guest(tmp_path):
+    ledger = NodeLedger(tmp_path / "ledger")
+    refused = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="subscription",
+        quota=_quota(),
+        ledger=ledger, account_id_of={ALIAS: "acct-1"},
+        request_quotas={ALIAS: {"per_session": None, "per_week": None}},
+        token_quotas={ALIAS: {"per_day": 0}}, owner_reserve={},
+    )
+    assert refused is not None
+
+
+# --- P3: an unread vendor account id refuses rather than counting per alias -
+
+
+def test_p3_an_unknown_account_id_refuses_rather_than_a_per_alias_counter(tmp_path):
+    """`account_id_of[alias] is None` is `_provider_account_id` explicitly
+    answering "I don't know" — different from `alias` being absent from the
+    map at all, which is the ordinary single-alias fallback."""
+    ledger = NodeLedger(tmp_path / "ledger")
+    refused = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="subscription",
+        quota=_quota(),
+        ledger=ledger, account_id_of={ALIAS: None},
+        request_quotas={ALIAS: {"per_session": 100}}, token_quotas={}, owner_reserve={},
+    )
+    assert refused is not None
+    assert refused["code"] == "misconfigured"
+
+
+# --- P3: an unknown billing_mode refuses rather than being read as a wallet -
+
+
+def test_p3_an_unknown_billing_mode_value_refuses(tmp_path):
+    ledger = NodeLedger(tmp_path / "ledger")
+    refused = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="postpaid", quota=_quota(),
+        ledger=ledger, account_id_of={}, request_quotas={}, token_quotas={}, owner_reserve={},
+    )
+    assert refused is not None
+
+
+def test_p3_the_pay_per_use_wallet_value_is_still_admitted(tmp_path):
+    ledger = NodeLedger(tmp_path / "ledger")
+    admitted = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="pay_per_use", quota=_quota(),
+        ledger=ledger, account_id_of={}, request_quotas={}, token_quotas={}, owner_reserve={},
+    )
+    assert admitted is None
+
+
+# --- P3: floor rounding matches the UI's Math.floor -------------------------
+
+
+def test_p3_the_guest_ceiling_is_floored(tmp_path):
+    """limit=401, reserve=0.25 -> floor(0.75 * 401) = 300, not 300.75: the
+    aggregate ceiling must be an integer count of requests."""
+    now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+    resets_at = now + timedelta(hours=1)
+    window_start = resets_at - timedelta(hours=3)
+    ledger = NodeLedger(tmp_path / "ledger")
+    for _ in range(300):
+        _row(ledger, caller=OTHER_GUEST, alias=ALIAS, at=window_start + timedelta(minutes=1))
+
+    refused = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="subscription",
+        quota=_quota(_session_window(resets_at, used=300, limit=401)),
+        ledger=ledger, account_id_of={ALIAS: "acct-1"},
+        request_quotas={ALIAS: {"per_session": 1000}}, token_quotas={}, owner_reserve={ALIAS: 0.25},
+        now=now,
+    )
+    assert refused is not None, "300 guest rows must already be at the floored ceiling of 300"
 

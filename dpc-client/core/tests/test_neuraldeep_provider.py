@@ -425,6 +425,66 @@ async def test_a_transient_limits_failure_keeps_the_known_billing_mode(monkeypat
     assert p.get_last_usage()["cost_basis"] == COST_BASIS_LIST_PRICE_REFERENCE
 
 
+# --- P2b, ADR-041 D5 amendment 2026-09-29: get_balance() falls back to the
+# last known-good /limits payload, up to 5 minutes old, instead of answering
+# billing_mode=None on a transient failure — the peer door refuses
+# fail-closed on that None and the gateway's owner path waves it through
+# fail-open, so the two diverge on exactly the case a fresh cache would have
+# prevented.
+
+
+@pytest.mark.asyncio
+async def test_p2b_a_failed_read_serves_the_stale_cache_within_five_minutes(monkeypatch):
+    monkeypatch.setattr(NeuralDeepProvider, "get_balance", _REAL_GET_BALANCE)
+    p = _make()
+
+    fixture_path = Path(__file__).parent / "fixtures" / "nd_limits_2026-09-28.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(
+                            lambda request: httpx.Response(200, json=payload)), **kw))
+    good = await _REAL_GET_BALANCE(p)
+    assert good["billing_mode"] == "subscription"
+
+    # Age the cache 4 minutes (< STALE_QUOTA_MAX_AGE) and make the next fetch fail.
+    p._limits_cache_at = datetime.now(timezone.utc) - timedelta(minutes=4)
+    p._limits_last_attempt_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(
+                            lambda request: httpx.Response(503)), **kw))
+
+    stale = await _REAL_GET_BALANCE(p)
+    assert stale.get("error") is None, "a cache under 5 minutes old must stand in, not error_balance"
+    assert stale["billing_mode"] == "subscription"
+    assert stale["quota"] is not None
+    assert stale["quota_age_sec"] == pytest.approx(240, abs=5)
+
+
+@pytest.mark.asyncio
+async def test_p2b_a_failed_read_past_five_minutes_still_errors(monkeypatch):
+    monkeypatch.setattr(NeuralDeepProvider, "get_balance", _REAL_GET_BALANCE)
+    p = _make()
+
+    fixture_path = Path(__file__).parent / "fixtures" / "nd_limits_2026-09-28.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(
+                            lambda request: httpx.Response(200, json=payload)), **kw))
+    await _REAL_GET_BALANCE(p)
+
+    p._limits_cache_at = datetime.now(timezone.utc) - timedelta(minutes=6)
+    p._limits_last_attempt_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(
+                            lambda request: httpx.Response(503)), **kw))
+
+    stale = await _REAL_GET_BALANCE(p)
+    assert stale.get("error") is not None
+    assert stale["billing_mode"] is None
+
+
 @pytest.mark.asyncio
 async def test_a_plain_failure_after_a_403_clears_the_key_blocked_kind(monkeypatch):
     """A 403 sets `_limits_backoff_kind` to ERROR_KEY_BLOCKED. Once that
