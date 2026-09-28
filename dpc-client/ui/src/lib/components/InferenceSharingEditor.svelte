@@ -199,7 +199,10 @@
 
   function confirmEntry() {
     if (!editCompute || !addingFor) return;
-    const entry: TariffEntry = { from: newFrom, in: newIn.trim() === '' ? NaN : Number(newIn), out: newOut.trim() === '' ? NaN : Number(newOut) };
+    // A number input bound with bind:value hands back a number, or null when
+    // empty — not the string these were declared as — so read it either way.
+    const rateOf = (v: unknown) => (v === null || v === undefined || String(v).trim() === '' ? NaN : Number(v));
+    const entry: TariffEntry = { from: newFrom, in: rateOf(newIn), out: rateOf(newOut) };
     newEntryErrors = tariffEntryErrors(editCompute.serving_tariff?.[addingFor], entry);
     if (newEntryErrors.length > 0) return;
     apply(addTariffEntry(editCompute, addingFor, entry));
