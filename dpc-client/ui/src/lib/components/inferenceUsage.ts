@@ -261,6 +261,8 @@ function amountsOf(amounts: Record<string, WireAmount> | undefined): Owed[] {
  *  to prove (`usage_row` writes `none`), and no tariff applies to a call a node
  *  makes for itself — an own row is priced by its `cost`, so 'gift' there would
  *  deny real spend. 'recounted' says who counted the tokens, true of any row.
+ *  A group can be partly gift: when only some of its rows were untariffed, the
+ *  badge names the count instead of claiming the whole group.
  */
 export function badgesOf(group: WireGroup, role: UsageRole): Badge[] {
   const badges: Badge[] = [];
@@ -270,7 +272,9 @@ export function badgesOf(group: WireGroup, role: UsageRole): Badge[] {
   if (role !== 'own') {
     const unpriceable = number(group.tariff_unpriceable);
     if (unpriceable > 0) badges.push({ kind: 'missing', text: `${unpriceable} unpriceable` });
-    if (rows > 0 && number(group.untariffed) === rows) badges.push({ kind: 'gift', text: 'gift' });
+    const untariffed = number(group.untariffed);
+    if (rows > 0 && untariffed === rows) badges.push({ kind: 'gift', text: 'gift' });
+    else if (untariffed > 0 && untariffed < rows) badges.push({ kind: 'gift', text: `${untariffed} gift` });
     const unproved = number(group.peer_proved?.false);
     if (unproved > 0) badges.push({ kind: 'missing', text: `${unproved} unproved` });
     const unknown = number(group.peer_proved?.none);

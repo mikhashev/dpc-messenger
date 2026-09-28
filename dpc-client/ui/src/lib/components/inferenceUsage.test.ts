@@ -200,11 +200,15 @@ describe('the badges a group earns', () => {
       .toContainEqual({ kind: 'missing', text: '2 unpriceable' });
   });
 
-  it('calls a group a gift only when every row of it was untariffed', () => {
+  it('names the count when only part of a group was untariffed, and the plain gift when all of it was', () => {
     expect(badgesOf(group({ row_count: 4, untariffed: 4 }), 'served'))
       .toContainEqual({ kind: 'gift', text: 'gift' });
     expect(badgesOf(group({ row_count: 4, untariffed: 3 }), 'served'))
       .not.toContainEqual({ kind: 'gift', text: 'gift' });
+    expect(badgesOf(group({ row_count: 4, untariffed: 3 }), 'served'))
+      .toContainEqual({ kind: 'gift', text: '3 gift' });
+    expect(badgesOf(group({ row_count: 4, untariffed: 0 }), 'served'))
+      .not.toContainEqual(expect.objectContaining({ kind: 'gift' }));
   });
 
   it('counts the calls whose far end was not proved, and those nobody asked', () => {
@@ -335,6 +339,8 @@ describe('an own row wears no tariff badge', () => {
       .not.toContainEqual({ kind: 'gift', text: 'gift' });
     expect(badgesOf(group({ row_count: 915, untariffed: 915 }), 'served'))
       .toContainEqual({ kind: 'gift', text: 'gift' });
+    expect(badgesOf(group({ row_count: 4, untariffed: 3 }), 'own'))
+      .not.toContainEqual(expect.objectContaining({ kind: 'gift' }));
   });
 
   it('counts no unpriceable tariff on an own group', () => {
