@@ -1018,6 +1018,14 @@ class AIProvider:
         """Returns True if this provider can report account balance (pay-per-use APIs)."""
         return False
 
+    def reports_billing_mode(self) -> bool:
+        """True when `get_balance()`'s result carries a `billing_mode`
+        (subscription vs wallet). Every provider has a `get_balance` (the
+        base one raises `NotImplementedError`), so that alone does not mean
+        this; DeepSeek overrides `get_balance()` but its balance carries no
+        `billing_mode`. Default False; override per provider."""
+        return False
+
     async def get_balance(self) -> Dict[str, Any]:
         """
         Return the provider account balance.

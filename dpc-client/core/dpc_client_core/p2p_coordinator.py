@@ -417,6 +417,16 @@ class P2PCoordinator:
         `billing_mode`.
         """
         provider = self._provider_for_alias(serving_alias)
+        # P1a (live): "has get_balance" is not "can report billing_mode" —
+        # every provider inherits a `get_balance` from the base class (it
+        # raises NotImplementedError), and DeepSeek overrides it with a
+        # balance that carries no billing_mode. A provider that cannot report
+        # billing_mode is a wallet key: the existing spent_today money
+        # ceiling is the whole answer, checked elsewhere, so it is admitted
+        # here untouched rather than refused as "cannot be bounded".
+        reports_billing_mode = getattr(provider, "reports_billing_mode", None)
+        if not callable(reports_billing_mode) or not reports_billing_mode():
+            return None
         get_balance = getattr(provider, "get_balance", None)
         if get_balance is None:
             return None

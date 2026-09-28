@@ -322,6 +322,31 @@ def test_tokens_since_sums_prompt_and_completion(tmp_path):
     assert total == 375
 
 
+def test_p1b_the_real_iso_week_fixture_is_admitted_through_per_week(tmp_path):
+    """P1b, live: the vendor's real /v1/limits payload spells the week window
+    "iso-week"; before normalization, `_WINDOW_LENGTHS` (only "3h"/"week")
+    missed it and every guest with a `per_week` quota was refused with a
+    message blaming the vendor ("carries no resets_at") for a window that in
+    fact carried one. Through the real parser and the real fixture, a guest
+    under both ceilings must be admitted."""
+    from dpc_client_core.providers.neuraldeep_provider import NeuralDeepProvider
+
+    fixture_path = Path(__file__).parent / "fixtures" / "nd_limits_2026-09-28.json"
+    limits = json.loads(fixture_path.read_text(encoding="utf-8"))
+    quota = NeuralDeepProvider._quota_from_limits(limits)
+
+    ledger = NodeLedger(tmp_path / "ledger")
+    refusal = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="subscription", quota=quota,
+        ledger=ledger, account_id_of={ALIAS: "acct-1"},
+        request_quotas={ALIAS: {"per_session": 5, "per_week": 50}},
+        token_quotas={}, owner_reserve={},
+        now=datetime(2026, 9, 28, 11, 0, tzinfo=timezone.utc),
+    )
+
+    assert refusal is None
+
+
 # --- through the peer door ---------------------------------------------------
 
 
@@ -330,6 +355,7 @@ def _subscription_provider(quota: dict):
         config={"type": "neuraldeep", "model": "qwen3.8-27b", "currency": "RUB"},
         model="qwen3.8-27b",
         billing_currency=lambda: "RUB",
+        reports_billing_mode=lambda: True,
         get_balance=AsyncMock(return_value={"billing_mode": "subscription", "quota": quota}),
     )
 
@@ -369,6 +395,47 @@ async def test_the_peer_door_refuses_a_guest_over_its_request_quota_with_retry_a
     assert payload["status"] == "error"
     assert payload["code"] == "insufficient_quota"
     assert payload["retry_after_sec"] == 222
+
+
+def _wallet_provider_without_reports_billing_mode():
+    """A DeepSeek-shaped double: `get_balance()` exists (every provider has
+    one) and answers a wallet with no `billing_mode` key at all, and it does
+    not override `reports_billing_mode` — the base class's `False` stands."""
+    return SimpleNamespace(
+        config={"type": "deepseek", "model": "deepseek-v4-flash", "currency": "USD"},
+        model="deepseek-v4-flash",
+        billing_currency=lambda: "USD",
+        get_balance=AsyncMock(return_value={"balance": "12.34"}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_p1a_a_wallet_provider_that_cannot_report_billing_mode_is_admitted(tmp_path):
+    """P1a, live: a guest call to a `deepseek_flash`-shaped alias must not be
+    refused as "cannot be bounded" merely because the provider has a
+    `get_balance` — every provider does. Only a provider whose
+    `reports_billing_mode()` is True is asked for one at all."""
+    rules = tmp_path / "privacy_rules.json"
+    rules.write_text(json.dumps({"compute": {
+        "enabled": True,
+        "allow_nodes": [GUEST],
+        "serving_local": [],
+        "serving_vendor": [ALIAS],
+        "vendor_quotas": {ALIAS: 1000.0},
+    }}), encoding="utf-8")
+
+    coord, svc = make_coordinator()
+    svc.firewall = ContextFirewall(rules)
+    svc.gateway = None
+    provider = _wallet_provider_without_reports_billing_mode()
+    svc.llm_manager.providers = {ALIAS: provider}
+    svc.llm_manager.query = AsyncMock(return_value={"response": "pong", "model": "m"})
+    coord._ledger = NodeLedger(tmp_path / "ledger")
+
+    refusal = await coord._guest_vendor_quota_refusal(GUEST, ALIAS)
+
+    assert refusal is None, "a wallet key that cannot report billing_mode must be admitted here"
+    provider.get_balance.assert_not_awaited()
 
 
 # --- through the gateway -----------------------------------------------------

@@ -429,6 +429,9 @@ class NeuralDeepProvider(AIProvider):
     def supports_balance(self) -> bool:
         return True
 
+    def reports_billing_mode(self) -> bool:
+        return True
+
     @staticmethod
     def _validate_limits_payload(payload: Any) -> None:
         """Schema-1 validation, mirroring coddy's `NeuralDeepUsage.validate()`
@@ -687,6 +690,10 @@ class NeuralDeepProvider(AIProvider):
                 "remaining": entry.get("remaining"),
                 "resets_at": entry.get("resets_at"),
                 "reset_in_sec": entry.get("reset_in_sec"),
+                # The raw wire word, kept beside the normalized `name` (P1b):
+                # the vendor spells the ISO week window "iso-week", and a
+                # consumer keyed only on the normalized name never sees it.
+                "vendor_window": entry.get("window"),
             }
 
         windows: List[Dict[str, Any]] = []
@@ -695,7 +702,13 @@ class NeuralDeepProvider(AIProvider):
         if session:
             windows.append(session)
         week_raw = chat.get("week")
-        week = _window(week_raw, (week_raw or {}).get("window") or "week")
+        # P1b: the vendor spells the week window "iso-week", not "week" —
+        # normalized here, once, so every downstream reader keyed on "week"
+        # (guest_vendor_quota's `_WINDOW_LENGTHS`, telegram_footer) finds it.
+        week_name = str((week_raw or {}).get("window") or "week").lower()
+        if week_name == "iso-week":
+            week_name = "week"
+        week = _window(week_raw, week_name)
         if week:
             windows.append(week)
         rpm = _window(chat.get("rpm"), "minute")

@@ -541,13 +541,18 @@ async def test_balance_normalizes_the_real_limits_payload_into_a_quota_block(mon
     assert quota["can_request"] is True
     assert quota["blockers"] == []
     assert quota["parallel_limit"] == 3
+    # P1b: the vendor spells the week window "iso-week"; normalized to "week"
+    # here (guest_vendor_quota's `_WINDOW_LENGTHS` only knows "3h"/"week"), the
+    # raw wire word kept beside it as `vendor_window`.
     assert quota["windows"] == [
         {"name": "3h", "unit": "requests", "used": 14, "limit": 400,
-         "remaining": 386, "resets_at": "2026-09-28T11:59:59Z", "reset_in_sec": 4690},
-        {"name": "iso-week", "unit": "requests", "used": 14, "limit": 2000,
-         "remaining": 1986, "resets_at": "2026-10-05T00:00:00Z", "reset_in_sec": 566291},
+         "remaining": 386, "resets_at": "2026-09-28T11:59:59Z", "reset_in_sec": 4690,
+         "vendor_window": "3h"},
+        {"name": "week", "unit": "requests", "used": 14, "limit": 2000,
+         "remaining": 1986, "resets_at": "2026-10-05T00:00:00Z", "reset_in_sec": 566291,
+         "vendor_window": "iso-week"},
         {"name": "minute", "unit": "requests", "used": 0, "limit": 20,
-         "remaining": 20, "resets_at": None, "reset_in_sec": 11},
+         "remaining": 20, "resets_at": None, "reset_in_sec": 11, "vendor_window": None},
     ]
     assert quota["observed_at"] == "2026-09-28T10:41:49Z"
     assert quota["daily_capacity"] == {
