@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import asdict
+import hashlib
 import json
 import logging
 import re
@@ -2428,31 +2429,84 @@ class CoreService:
             # class name is the one thing always present.
             return {"status": "error", "message": str(e) or type(e).__name__}
 
+    @staticmethod
+    def _provider_account_id(alias: str, provider) -> str:
+        """One id per wallet: same provider type, base_url and API key.
+
+        Falls back to `<type>:<alias>` (never shared with another alias) when
+        the provider carries no identifiable key/base_url — grouping only
+        happens where there is real evidence two aliases spend from the
+        same account."""
+        provider_type = ((getattr(provider, "config", None) or {}).get("type")
+                          or type(provider).__name__)
+        base_url = getattr(provider, "_base_url", None) or \
+            (getattr(provider, "config", None) or {}).get("base_url")
+        api_key = getattr(provider, "_api_key", None) or \
+            (getattr(provider, "config", None) or {}).get("api_key")
+        if not api_key:
+            return f"{provider_type}:{alias}"
+        key_digest = hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:12]
+        return f"{provider_type}:{base_url or ''}:{key_digest}"
+
     @slow_command
     async def get_provider_balances(self) -> Dict[str, Any]:
-        """Every balance-capable provider's `get_balance()`, by alias.
-
-        Where get_provider_balance() answers for one provider (the agent/
-        default, or a named alias), this answers for all of them at once — the
-        host serving a vendor alias to peers (compute.serving_vendor) needs to
-        see each key's own remaining quota, not just whichever one happens to
-        be the default. One alias's failure is that alias's own error entry,
-        never a failure of the whole call (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-
-        READ-AND-NEVER-SHOWN).
-        """
+        """Every balance-capable provider's `get_balance()`, by alias, plus
+        `accounts`: the same balances grouped by wallet (DeepSeek and
+        NeuralDeep each bill one wallet across every alias configured against
+        it — Mike's call, 2026-09-28). Only the first alias of each account
+        is queried; the others reuse its result, so one wallet never costs
+        more than one `/limits`-or-equivalent read. One alias's failure is
+        that alias's own error entry, never a failure of the whole call
+        (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-AND-NEVER-SHOWN)."""
         providers = getattr(self.llm_manager, "providers", {}) or {}
-        balances: Dict[str, Any] = {}
-        for alias, provider in providers.items():
-            if not getattr(provider, "supports_balance", lambda: False)():
-                continue
+        capable = [(alias, p) for alias, p in providers.items()
+                   if getattr(p, "supports_balance", lambda: False)()]
+
+        groups: Dict[str, Dict[str, Any]] = {}
+        for alias, provider in capable:
+            account_id = CoreService._provider_account_id(alias, provider)
+            group = groups.setdefault(account_id, {
+                "account": account_id,
+                "provider_type": ((getattr(provider, "config", None) or {}).get("type")
+                                   or type(provider).__name__),
+                "label": getattr(provider, "RETRY_LABEL", None) or type(provider).__name__,
+                "aliases": [],
+                "_provider": provider,
+            })
+            group["aliases"].append(alias)
+
+        async def _query(account_id: str, alias: str, provider) -> tuple:
             try:
                 balance = await provider.get_balance()
-                balances[alias] = {"status": "success", "alias": alias, "balance": balance}
+                return account_id, {"status": "success", "alias": alias, "balance": balance}
             except Exception as e:
                 logger.error("get_provider_balances: alias=%s failed: %s", alias, e)
-                balances[alias] = {"status": "error", "alias": alias,
-                                    "message": str(e) or type(e).__name__}
-        return {"status": "success", "balances": balances}
+                return account_id, {"status": "error", "alias": alias,
+                                     "message": str(e) or type(e).__name__}
+
+        results = await asyncio.gather(*[
+            _query(account_id, group["aliases"][0], group["_provider"])
+            for account_id, group in groups.items()
+        ])
+        result_by_account = dict(results)
+
+        balances: Dict[str, Any] = {}
+        accounts = []
+        for account_id, group in groups.items():
+            leader_result = result_by_account[account_id]
+            for alias in group["aliases"]:
+                entry = dict(leader_result)
+                entry["alias"] = alias
+                balances[alias] = entry
+            accounts.append({
+                "account": account_id,
+                "provider_type": group["provider_type"],
+                "label": group["label"],
+                "aliases": list(group["aliases"]),
+                "result": leader_result,
+            })
+
+        return {"status": "success", "balances": balances, "accounts": accounts}
 
     async def get_default_providers(self) -> Dict[str, Any]:
         """
