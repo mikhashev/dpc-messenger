@@ -123,7 +123,8 @@ export type {
 
 import { connectionStatus, nodeStatus, coreMessages } from './services/connection';
 import { p2pMessages, unreadMessageCounts } from './services/messaging';
-import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerRetries } from './services/providers';
+import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries } from './services/providers';
+import { accountRowsFromBalances, accountLevel, balanceErrorText, providerTypeLabel, type AccountRow } from './components/inferenceSharing';
 import { showNotificationIfBackground } from './notificationService';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded } from './services/voice';
@@ -139,7 +140,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 // services/providers.ts and re-export it here. See CLAUDE.md "UI Integration Pattern".
 export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
-export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerRetries };
+export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded };
 export { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed };
@@ -1474,56 +1475,70 @@ export async function getProviderBalances(): Promise<Record<string, any>> {
     const pending = sendCommand('get_provider_balances', {});
     if (pending === false) {
         providerBalances.set({});
+        providerAccounts.set([]);
         return {};
     }
     try {
-        const result = await pending;  // { status, balances: { [alias]: {...} } } | { status, message }
-        const balances = result && result.status === 'success' && result.balances ? result.balances : {};
+        const result = await pending;  // { status, balances: {...}, accounts?: [...] } | { status, message }
+        const ok = result && result.status === 'success';
+        const balances = ok && result.balances ? result.balances : {};
         providerBalances.set(balances);
+        providerAccounts.set(ok ? accountRowsFromBalances(result) : []);
         return balances;
     } catch (e) {
         providerBalances.set({});
+        providerAccounts.set([]);
         return {};
     }
 }
 
-// --- DeepSeek balance polling + threshold alerts (Phase 2b cut 2) ---
-// 5 min: no documented /user/balance rate limit; balance only moves on spend.
+// --- Provider account balance polling + low-balance alerts ---
+// Originally DeepSeek-only (Phase 2b cut 2); widened 2026-09-28 to every
+// balance-capable account (DeepSeek, NeuralDeep, ...) so the Sidebar's one
+// pill-per-account and its background alerts stay in sync — same interval,
+// no faster: no documented rate limit on these reads, but polling harder buys
+// nothing since a wallet only moves on spend.
 const BALANCE_POLL_MS = 5 * 60 * 1000;
 let balancePollTimer: ReturnType<typeof setInterval> | null = null;
-let lastBalanceLevel: 'ok' | 'low' | 'critical' | null = null;
-
-function balanceLevelOf(result: any): 'ok' | 'low' | 'critical' | null {
-    if (!result || result.status !== 'success' || !result.balance) return null;
-    const infos = result.balance.balance_infos;
-    const info = Array.isArray(infos) && infos.length ? infos[0] : null;
-    const total = info ? parseFloat(info.total_balance) : NaN;
-    const available = result.balance.is_available !== false;
-    if (!available || (!isNaN(total) && total < 1)) return 'critical';
-    if (!isNaN(total) && total < 3) return 'low';
-    return 'ok';
-}
+// One remembered level per account id, so a crossing is only announced once —
+// the same "notify on crossing, not on every poll" rule the old single-account
+// version used, kept per account instead of in one shared slot.
+const lastAccountLevel = new Map<string, 'ok' | 'low' | 'critical' | 'neutral'>();
 
 async function pollBalanceOnce() {
     if (get(connectionStatus) !== 'connected') return;
     const list: any[] = get(providersList) || [];
-    if (!list.some((p) => p && p.type === 'deepseek')) return;  // only poll when a pay-per-use provider exists
-    const result = await getProviderBalance();
-    const level = balanceLevelOf(result);
-    // Notify once per crossing into low/critical; the colored global indicator
-    // covers the foreground case, this covers backgrounded windows.
-    if ((level === 'low' || level === 'critical') && level !== lastBalanceLevel) {
-        const info = result?.balance?.balance_infos?.[0];
-        const amount = info ? `${info.currency || 'USD'} ${info.total_balance}` : '';
-        showNotificationIfBackground({
-            title: level === 'critical' ? 'DeepSeek balance critical' : 'DeepSeek balance low',
-            body: `Balance ${amount} — ${level === 'critical' ? 'below $1 / insufficient' : 'below $3'}. Top up to keep agents running.`,
-        });
+    // Only poll when a balance-capable provider exists (pay-per-use or
+    // subscription vendor types); local-only setups have nothing to check.
+    if (!list.some((p) => p && (p.type === 'deepseek' || p.type === 'neuraldeep'))) return;
+    await getProviderBalances();
+    const accounts: AccountRow[] = get(providerAccounts);
+    for (const row of accounts) {
+        const level = accountLevel(row.result?.balance);
+        const errorText = balanceErrorText(row.result);
+        const prev = lastAccountLevel.get(row.account);
+        // Notify once per crossing into low/critical, or into a hard error;
+        // the colored row covers the foreground case, this covers backgrounded
+        // windows. A subscription account's "neutral" wallet never alerts —
+        // only its quota-driven level does, and that already flows through
+        // accountLevel.
+        if (((level === 'low' || level === 'critical') || errorText) && level !== prev) {
+            const label = row.label || providerTypeLabel(row.provider_type);
+            const info = row.result?.balance?.balance_infos?.[0];
+            const amount = info ? `${info.currency || ''} ${info.total_balance}`.trim() : '';
+            const body = errorText
+                ? errorText
+                : `Balance ${amount} — ${level === 'critical' ? 'critical' : 'low'}. Top up to keep agents running.`;
+            showNotificationIfBackground({
+                title: `${label} balance ${level === 'critical' ? 'critical' : 'low'}`,
+                body,
+            });
+        }
+        lastAccountLevel.set(row.account, level);
     }
-    if (level) lastBalanceLevel = level;
 }
 
-/** Start periodic DeepSeek balance polling. Idempotent — safe to call on each (re)connect. */
+/** Start periodic provider-account balance polling. Idempotent — safe to call on each (re)connect. */
 export function startBalancePolling() {
     if (balancePollTimer) return;
     pollBalanceOnce();  // initial check shortly after connect

@@ -1061,7 +1061,168 @@ export interface BalanceResult {
     balance_infos?: Array<{ currency?: string; total_balance?: string; spent_30d?: string }>;
     billing_mode?: string | null;
     quota?: ProviderQuota | null;
+    /** A provider-side failure named by the vendor's own words, e.g.
+     *  "key_rejected" / "key_blocked" / "unavailable" / "invalid" — travels
+     *  beside `is_available: false` rather than replacing the status, so a
+     *  caller can tell a rejected key from a merely-empty wallet. */
+    error?: string | null;
+    error_detail?: string | null;
   };
+}
+
+// --- Multi-account balances (Sidebar row per account, ProvidersEditor list)
+// See CLAUDE.md request 2026-09-28: DeepSeek and NeuralDeep each carry one
+// wallet shared by every alias configured against it — an "account" — and the
+// UI shows one row per account, not one row per alias.
+
+/** One row of `get_provider_balances().accounts` (or its client-derived
+ *  fallback): a provider account (one wallet/key) and every alias configured
+ *  against it. `provider_type` is the wire's own word ("deepseek",
+ *  "neuraldeep", …); `label` is what a human calls it ("DeepSeek",
+ *  "NeuralDeep"). */
+export interface AccountRow {
+  account: string;
+  provider_type?: string | null;
+  label: string;
+  aliases: string[];
+  result: BalanceResult;
+}
+
+/** Human label for a provider type this build has no better word for — the
+ *  wire's own string, title-cased, rather than dropped. */
+function titleCase(word: string): string {
+  return word.length > 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word;
+}
+
+const PROVIDER_TYPE_LABELS: Record<string, string> = {
+  deepseek: 'DeepSeek',
+  neuraldeep: 'NeuralDeep',
+  zai: 'Z.AI',
+  gigachat: 'GigaChat',
+  openai_compatible: 'OpenAI-compatible',
+  anthropic: 'Anthropic',
+  gemini: 'Gemini',
+  github_models: 'GitHub Models',
+};
+
+export function providerTypeLabel(type: string | null | undefined): string {
+  if (!type) return 'Provider';
+  return PROVIDER_TYPE_LABELS[type] ?? titleCase(type);
+}
+
+/** `get_provider_balances()`'s response, exactly: `{status, balances, accounts?}`.
+ *  `accounts` is the backend's own grouping (one row per wallet/key); it is
+ *  absent on an older backend, in which case `accountRowsFromBalances` derives
+ *  one row per alias — the only grouping possible without the backend's help. */
+export interface ProviderBalancesResponse {
+  status?: 'success' | 'error';
+  balances?: Record<string, BalanceResult> | null;
+  accounts?: AccountRow[] | null;
+  message?: string;
+}
+
+/** The rows a Sidebar or ProvidersEditor renders: the backend's own `accounts`
+ *  when it sent one (even an empty array — that is a real "nothing configured"
+ *  answer, not a signal to fall back), else one row per alias in `balances`,
+ *  labelled by its own alias since no account/provider_type is known for it. */
+export function accountRowsFromBalances(
+  response: ProviderBalancesResponse | null | undefined,
+): AccountRow[] {
+  if (response?.accounts) return response.accounts;
+  const balances = response?.balances ?? {};
+  return Object.entries(balances).map(([alias, result]) => ({
+    account: alias,
+    label: alias,
+    aliases: [alias],
+    result,
+  }));
+}
+
+/** Whether an account's result carries a wallet not debited on this call —
+ *  the same test `formatQuotaLine` makes, exposed so the level function and
+ *  the UI ask it the same way. */
+export function isSubscriptionAccount(balance: BalanceResult['balance'] | null | undefined): boolean {
+  return (balance?.quota?.billing_mode ?? balance?.billing_mode) === 'subscription';
+}
+
+export type BalanceLevel = 'ok' | 'low' | 'critical' | 'neutral';
+
+/** Per-currency low/critical thresholds for a debited wallet. USD keeps the
+ *  values this UI already used; RUB 300/100 is a placeholder CC picked on
+ *  2026-09-28, roughly the USD pair at a rouble rate, not yet confirmed by
+ *  the owner. A currency absent here
+ *  reads `neutral`: no threshold means no claim about what's "low". */
+export const BALANCE_LEVEL_THRESHOLDS: Readonly<Record<string, { low: number; critical: number }>> = {
+  USD: { low: 3, critical: 1 },
+  RUB: { low: 300, critical: 100 },
+};
+
+/** The level a plain (non-subscription) wallet reads at: unavailable is
+ *  always critical regardless of the number; otherwise the currency's own
+ *  thresholds, or `neutral` when the currency carries none or the amount
+ *  cannot be read. */
+export function walletLevel(
+  currency: string | null | undefined,
+  total: number,
+  isAvailable: boolean,
+): BalanceLevel {
+  if (!isAvailable) return 'critical';
+  if (Number.isNaN(total)) return 'neutral';
+  const thresholds = BALANCE_LEVEL_THRESHOLDS[(currency ?? '').toUpperCase()];
+  if (!thresholds) return 'neutral';
+  if (total < thresholds.critical) return 'critical';
+  if (total < thresholds.low) return 'low';
+  return 'ok';
+}
+
+/** The level a subscription key reads at: the wallet is a reference price,
+ *  never debited, so it carries no level of its own (Do §2) — the quota
+ *  decides instead. `can_request: false` or a named blocker is critical (the
+ *  key cannot be used right now); any window at or past the warning
+ *  threshold is `low`; otherwise `neutral` — plenty of room left is not a
+ *  green "ok" claim this UI has grounds to make about somebody else's tier. */
+export function quotaLevel(quota: ProviderQuota | null | undefined): BalanceLevel {
+  if (!quota) return 'neutral';
+  if (quota.can_request === false) return 'critical';
+  if ((quota.blockers ?? []).length > 0) return 'critical';
+  if ((quota.windows ?? []).some((w) => quotaWindowIsWarning(w))) return 'low';
+  return 'neutral';
+}
+
+/** The level one account's balance result reads at, on screen: a subscription
+ *  key is judged by its quota (`quotaLevel`); anything else — including a
+ *  provider that reports no quota at all — by its wallet (`walletLevel`). A
+ *  result with no balance at all (not yet checked, or a provider error) is
+ *  `neutral`; the caller shows the error text separately. */
+export function accountLevel(balance: BalanceResult['balance'] | null | undefined): BalanceLevel {
+  if (!balance) return 'neutral';
+  if (isSubscriptionAccount(balance)) return quotaLevel(balance.quota);
+  const info = balance.balance_infos?.[0];
+  const total = info && typeof info.total_balance === 'string' ? parseFloat(info.total_balance) : NaN;
+  return walletLevel(info?.currency, total, balance.is_available !== false);
+}
+
+/** The coddy-worded reason a key cannot be read right now, from either shape
+ *  the backend may answer in: `balance.error` beside `is_available: false`
+ *  (the wallet call succeeded but the key itself is bad), or a top-level
+ *  `status: "error"` (the call itself failed). Checked in that order because
+ *  a named `balance.error` is the more specific of the two when both are
+ *  present. '' when the result carries neither. */
+export function balanceErrorText(result: BalanceResult | null | undefined): string {
+  const code = result?.balance?.error;
+  if (typeof code === 'string' && code.length > 0) {
+    switch (code) {
+      case 'key_rejected': return 'key rejected — update the API key';
+      case 'key_blocked': return 'key blocked';
+      case 'unavailable': return 'unavailable, retry later';
+      case 'invalid': return 'invalid response from the vendor';
+      default: return result?.balance?.error_detail || `error: ${code}`;
+    }
+  }
+  if (result?.status === 'error') {
+    return result.message || 'unavailable, retry later';
+  }
+  return '';
 }
 
 const WINDOW_LABELS: Record<string, string> = {
@@ -1086,23 +1247,40 @@ export function quotaWindowPercent(win: QuotaWindow): number | null {
  *  `usageWarnPercent` (external/cli/usage.go:31, "Claude Desktop's threshold"). */
 export const QUOTA_WARN_PERCENT = 80;
 
-function localResetTime(resetsAt: string | null | undefined): string {
+/** The one reset-time formatter both editors' quota lines go through —
+ *  ProvidersEditor's balance card and InferenceSharingEditor's quota column
+ *  alike, since both call `formatQuotaLine`/`formatQuotaWindow` rather than
+ *  formatting a timestamp of their own (Do §6: one formatter, used by both). */
+export function localResetTime(resetsAt: string | null | undefined): string {
   if (typeof resetsAt !== 'string' || resetsAt.length === 0) return '';
   const d = new Date(resetsAt);
   if (Number.isNaN(d.getTime())) return '';
   return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
+/** The vendor's per-minute request-rate window (`name: "minute"`, the "rpm"
+ *  window a caller's requests-per-minute cap): a percentage of a 20-request
+ *  ceiling ages within the same minute it is read, so counts read as
+ *  `rpm 0/20` (used/limit) rather than a percent that was already stale by
+ *  the time this line rendered (Do §6 — was rendering "min 0%"). */
+function isRpmWindow(win: QuotaWindow): boolean {
+  return win.name === 'minute';
+}
+
 /** One window in coddy's own words: `3h 3% (resets 20:59)` (`windowSegment`,
  *  external/cli/usage.go:409-422) — the label, the rounded percent used, and
  *  the reset time in the reader's own clock when the vendor sent one. Empty
  *  when there is no usable percentage (no `used`/`limit`, or a null/zero
- *  limit), rather than printing "NaN%". */
+ *  limit), rather than printing "NaN%". The per-minute (rpm) window is the
+ *  one exception: it renders as counts, not a percent (see `isRpmWindow`). */
 export function formatQuotaWindow(win: QuotaWindow, _now: Date = new Date()): string {
+  const resets = localResetTime(win.resets_at);
+  if (isRpmWindow(win) && typeof win.used === 'number' && typeof win.limit === 'number') {
+    return `rpm ${win.used}/${win.limit}${resets ? ` (resets ${resets})` : ''}`;
+  }
   const pct = quotaWindowPercent(win);
   if (pct === null) return '';
   const label = windowLabel(win.name);
-  const resets = localResetTime(win.resets_at);
   return `${label} ${pct}%${resets ? ` (resets ${resets})` : ''}`;
 }
 

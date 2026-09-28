@@ -2,21 +2,31 @@
 <!-- Displays connection status, node info, peer list, chat list, and action buttons -->
 
 <script lang="ts">
-  import { providerBalance, getProviderBalance } from '$lib/coreService';
+  import { providerAccounts, getProviderBalances } from '$lib/coreService';
   import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
+  import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
 
-  // DeepSeek account balance pill (Phase 2b cut 2) — always-visible operational indicator.
-  let balPill = $derived.by(() => {
-    const b = $providerBalance;
-    if (!b || b.status !== 'success' || !b.balance) return null;
-    const infos = b.balance.balance_infos;
-    const info = Array.isArray(infos) && infos.length ? infos[0] : null;
-    if (!info) return null;
-    const total = parseFloat(info.total_balance);
-    const available = b.balance.is_available !== false;
-    const level = (!available || (!isNaN(total) && total < 1)) ? 'critical'
-      : (!isNaN(total) && total < 3) ? 'low' : 'ok';
-    return { currency: info.currency || 'USD', total: info.total_balance, level };
+  // Account balance rows (one per DeepSeek/NeuralDeep/... account, 2026-09-28
+  // — was a single hard-coded DeepSeek pill with no provider name). Level
+  // colours the left border the same way the old pill did; a subscription
+  // account's wallet is not debited, so its level comes from the quota
+  // instead (accountLevel), never from the wallet number.
+  let balanceRows = $derived.by(() => {
+    return $providerAccounts.map((row) => {
+      const balance = row.result?.balance;
+      const info = balance?.balance_infos?.[0];
+      const label = row.label || providerTypeLabel(row.provider_type);
+      const quotaLine = balance ? formatQuotaLine(balance) : '';
+      return {
+        account: row.account,
+        label,
+        aliases: row.aliases,
+        currency: info?.currency ?? null,
+        total: info?.total_balance ?? null,
+        level: accountLevel(balance),
+        quotaLine,
+      };
+    });
   });
 
   // State for Telegram linking dialog
@@ -599,16 +609,18 @@
         Firewall and Privacy Rules
       </button>
 
-      {#if balPill}
+      {#each balanceRows as row (row.account)}
         <button
-          class="balance-pill balance-pill-{balPill.level}"
-          onclick={() => getProviderBalance()}
-          title="DeepSeek account balance — click to refresh"
+          class="balance-pill balance-pill-{row.level}"
+          onclick={() => getProviderBalances()}
+          title="{row.aliases.join(', ')}{row.quotaLine ? ` — ${row.quotaLine}` : ''} — click to refresh"
         >
-          <span class="balance-pill-label">💰 Balance</span>
-          <span class="balance-pill-amount">{balPill.currency} {balPill.total}</span>
+          <span class="balance-pill-label">💰 {row.label}</span>
+          <span class="balance-pill-amount">
+            {#if row.total !== null}{row.currency} {row.total}{:else}—{/if}
+          </span>
         </button>
-      {/if}
+      {/each}
 
       <button class="btn-context" onclick={onOpenProvidersEditor}>
         AI Providers
@@ -1484,6 +1496,9 @@
   .balance-pill-low .balance-pill-amount { color: #ffc107; }
   .balance-pill-critical { border-left-color: #e53935; }
   .balance-pill-critical .balance-pill-amount { color: #ff6b6b; }
+  /* A subscription wallet is not debited, so it carries no wallet-level
+     colour of its own — neutral unless its quota says otherwise. */
+  .balance-pill-neutral { border-left-color: #6c7086; }
 
   .btn-context {
     width: 100%;

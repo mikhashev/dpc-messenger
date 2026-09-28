@@ -60,10 +60,21 @@ import {
   validationDraft,
   vendorQuotaBadge,
   vendorQuotaLabel,
+  accountRowsFromBalances,
+  isSubscriptionAccount,
+  walletLevel,
+  quotaLevel,
+  accountLevel,
+  balanceErrorText,
+  providerTypeLabel,
+  localResetTime,
+  BALANCE_LEVEL_THRESHOLDS,
+  type AccountRow,
   type BalanceResult,
   type ComputeRules,
   type GatewayMenuEntry,
   type GatewayState,
+  type ProviderQuota,
   type QuotaWindow,
 } from './inferenceSharing';
 import type { MenuRow } from './peerMenu';
@@ -1159,5 +1170,234 @@ describe('blockedModelLine', () => {
       blocked_models: [{ model: 'qwen3.8-27b', blocker: 'x' }],
     };
     expect(blockedModelLine(quota, 'qwen3.8-27b')).toBe('qwen3.8-27b blocked');
+  });
+});
+
+// --- Multi-account balances (2026-09-28: DeepSeek + NeuralDeep in the same UI) ---
+
+describe('accountRowsFromBalances', () => {
+  const deepseekResult: BalanceResult = {
+    status: 'success',
+    alias: 'ds_flash',
+    balance: { is_available: true, balance_infos: [{ currency: 'USD', total_balance: '10.53' }] },
+  };
+  const neuraldeepResult: BalanceResult = {
+    status: 'success',
+    alias: 'qwen38',
+    balance: {
+      is_available: true,
+      billing_mode: 'subscription',
+      balance_infos: [{ currency: 'RUB', total_balance: '500.00' }],
+      quota: { tier: 'free', billing_mode: 'subscription', can_request: true, blockers: [] },
+    },
+  };
+
+  it("uses the backend's own accounts array when present, even with one alias each", () => {
+    const accounts: AccountRow[] = [
+      { account: 'acct-1', provider_type: 'deepseek', label: 'DeepSeek', aliases: ['ds_flash'], result: deepseekResult },
+      { account: 'acct-2', provider_type: 'neuraldeep', label: 'NeuralDeep', aliases: ['qwen38', 'deepseek-v4-pro'], result: neuraldeepResult },
+    ];
+    expect(accountRowsFromBalances({ status: 'success', accounts })).toBe(accounts);
+  });
+
+  it('an empty accounts array is a real answer, not a signal to fall back to balances', () => {
+    const rows = accountRowsFromBalances({ status: 'success', balances: { ds_flash: deepseekResult }, accounts: [] });
+    expect(rows).toEqual([]);
+  });
+
+  it('falls back to one row per alias when the backend sent no accounts (older backend)', () => {
+    const rows = accountRowsFromBalances({
+      status: 'success',
+      balances: { ds_flash: deepseekResult, qwen38: neuraldeepResult },
+    });
+    expect(rows).toEqual([
+      { account: 'ds_flash', label: 'ds_flash', aliases: ['ds_flash'], result: deepseekResult },
+      { account: 'qwen38', label: 'qwen38', aliases: ['qwen38'], result: neuraldeepResult },
+    ]);
+  });
+
+  it('no balances and no accounts yields no rows', () => {
+    expect(accountRowsFromBalances(null)).toEqual([]);
+    expect(accountRowsFromBalances({ status: 'error', message: 'x' })).toEqual([]);
+  });
+});
+
+describe('providerTypeLabel', () => {
+  it('names the two providers this request is about', () => {
+    expect(providerTypeLabel('deepseek')).toBe('DeepSeek');
+    expect(providerTypeLabel('neuraldeep')).toBe('NeuralDeep');
+  });
+
+  it('title-cases a type this build has no dedicated word for, rather than dropping it', () => {
+    expect(providerTypeLabel('some_new_vendor')).toBe('Some_new_vendor');
+  });
+
+  it('an absent type reads as a generic word, never blank', () => {
+    expect(providerTypeLabel(null)).toBe('Provider');
+    expect(providerTypeLabel(undefined)).toBe('Provider');
+  });
+});
+
+describe('isSubscriptionAccount', () => {
+  it('reads billing_mode off the quota first, then the balance', () => {
+    expect(isSubscriptionAccount({ quota: { billing_mode: 'subscription' } })).toBe(true);
+    expect(isSubscriptionAccount({ billing_mode: 'subscription' })).toBe(true);
+    expect(isSubscriptionAccount({ billing_mode: 'wallet', quota: { billing_mode: 'wallet' } })).toBe(false);
+    expect(isSubscriptionAccount(null)).toBe(false);
+  });
+});
+
+describe('walletLevel — per-currency thresholds', () => {
+  it('USD keeps the existing $3 / $1 thresholds', () => {
+    expect(walletLevel('USD', 10.53, true)).toBe('ok');
+    expect(walletLevel('USD', 2.99, true)).toBe('low');
+    expect(walletLevel('USD', 0.99, true)).toBe('critical');
+  });
+
+  it("RUB uses its own two-orders-of-magnitude thresholds (Mike's call, 2026-09-28)", () => {
+    expect(BALANCE_LEVEL_THRESHOLDS.RUB).toEqual({ low: 300, critical: 100 });
+    expect(walletLevel('RUB', 500.0, true)).toBe('ok');
+    expect(walletLevel('RUB', 299.99, true)).toBe('low');
+    expect(walletLevel('RUB', 99.99, true)).toBe('critical');
+  });
+
+  it('an unknown currency has no threshold to judge by: neutral, not a guessed color', () => {
+    expect(walletLevel('EUR', 0.01, true)).toBe('neutral');
+    expect(walletLevel(null, 10, true)).toBe('neutral');
+  });
+
+  it('is_available: false is always critical, whatever the number says', () => {
+    expect(walletLevel('USD', 999, false)).toBe('critical');
+  });
+
+  it('an unparseable amount is neutral, not a false "ok"', () => {
+    expect(walletLevel('USD', NaN, true)).toBe('neutral');
+  });
+
+  it('is exact at the boundary — critical is strictly less-than, not less-or-equal', () => {
+    expect(walletLevel('USD', 1, true)).toBe('low');
+    expect(walletLevel('USD', 3, true)).toBe('ok');
+  });
+});
+
+describe('quotaLevel — subscription wallets are judged by the quota, not the wallet', () => {
+  it('no quota at all is neutral', () => {
+    expect(quotaLevel(null)).toBe('neutral');
+  });
+
+  it('can_request: false is critical', () => {
+    expect(quotaLevel({ can_request: false })).toBe('critical');
+  });
+
+  it('a named blocker is critical even when can_request was not stated', () => {
+    expect(quotaLevel({ blockers: ['wallet_empty'] })).toBe('critical');
+  });
+
+  it('a window at or past the warning threshold is low', () => {
+    const quota: ProviderQuota = {
+      can_request: true, blockers: [],
+      windows: [{ name: '3h', unit: 'requests', used: 320, limit: 400 }],
+    };
+    expect(quotaWindowIsWarning(quota.windows![0])).toBe(true);
+    expect(quotaLevel(quota)).toBe('low');
+  });
+
+  it('plenty of headroom is neutral, not a green "ok" this UI has no grounds to claim', () => {
+    const quota: ProviderQuota = {
+      can_request: true, blockers: [],
+      windows: [{ name: '3h', unit: 'requests', used: 14, limit: 400 }],
+    };
+    expect(quotaLevel(quota)).toBe('neutral');
+  });
+});
+
+describe('accountLevel — the level a Sidebar/ProvidersEditor row is coloured by', () => {
+  it('a subscription account is judged by its quota, ignoring the wallet number entirely', () => {
+    const balance: NonNullable<BalanceResult['balance']> = {
+      is_available: true,
+      billing_mode: 'subscription',
+      balance_infos: [{ currency: 'RUB', total_balance: '0.00' }],
+      quota: { billing_mode: 'subscription', can_request: true, blockers: [], windows: [] },
+    };
+    expect(accountLevel(balance)).toBe('neutral');
+  });
+
+  it('a wallet (pay-per-use) account is judged by its balance and currency', () => {
+    const balance: NonNullable<BalanceResult['balance']> = {
+      is_available: true,
+      balance_infos: [{ currency: 'USD', total_balance: '10.53' }],
+    };
+    expect(accountLevel(balance)).toBe('ok');
+  });
+
+  it('no balance at all is neutral (not yet checked, or an error shown separately)', () => {
+    expect(accountLevel(null)).toBe('neutral');
+    expect(accountLevel(undefined)).toBe('neutral');
+  });
+});
+
+describe('balanceErrorText — coddy wording for a provider-side failure', () => {
+  it('translates each named balance.error into its sentence', () => {
+    expect(balanceErrorText({ balance: { error: 'key_rejected' } })).toBe('key rejected — update the API key');
+    expect(balanceErrorText({ balance: { error: 'key_blocked' } })).toBe('key blocked');
+    expect(balanceErrorText({ balance: { error: 'unavailable' } })).toBe('unavailable, retry later');
+    expect(balanceErrorText({ balance: { error: 'invalid' } })).toBe('invalid response from the vendor');
+  });
+
+  it('an unrecognised balance.error still shows something, with its detail if given', () => {
+    expect(balanceErrorText({ balance: { error: 'weird_code' } })).toBe('error: weird_code');
+    expect(balanceErrorText({ balance: { error: 'weird_code', error_detail: 'vendor said huh' } }))
+      .toBe('vendor said huh');
+  });
+
+  it('falls back to a top-level status: "error" when balance.error is absent', () => {
+    expect(balanceErrorText({ status: 'error', message: 'timed out' })).toBe('timed out');
+    expect(balanceErrorText({ status: 'error' })).toBe('unavailable, retry later');
+  });
+
+  it('a clean success result has no error text', () => {
+    expect(balanceErrorText({ status: 'success', balance: { is_available: true } })).toBe('');
+    expect(balanceErrorText(null)).toBe('');
+  });
+});
+
+// --- The rpm (per-minute) window renders as counts, not a stale percent ---
+
+describe('formatQuotaWindow — the rpm window (Do §6)', () => {
+  it('renders "rpm used/limit", not a percent, for the minute window', () => {
+    const win: QuotaWindow = { name: 'minute', unit: 'requests', used: 0, limit: 20, remaining: 20 };
+    expect(formatQuotaWindow(win)).toBe('rpm 0/20');
+  });
+
+  it('carries a reset clause when the vendor sent one, same as any other window', () => {
+    const win: QuotaWindow = {
+      name: 'minute', unit: 'requests', used: 14, limit: 20, resets_at: '2026-09-28T11:59:59Z',
+    };
+    expect(formatQuotaWindow(win)).toBe(
+      `rpm 14/20 (resets ${localResetTime('2026-09-28T11:59:59Z')})`,
+    );
+  });
+
+  it('a non-minute window is unaffected: still a percent', () => {
+    const win: QuotaWindow = { name: '3h', unit: 'requests', used: 14, limit: 400 };
+    expect(formatQuotaWindow(win)).toBe('3h 4%');
+  });
+
+  it('classifies by window name, not by unit', () => {
+    const win: QuotaWindow = { name: 'minute', unit: 'tokens', used: 5, limit: 100 };
+    expect(formatQuotaWindow(win)).toBe('rpm 5/100');
+  });
+});
+
+describe("localResetTime — the one formatter both editors' quota lines share", () => {
+  it("formats an ISO timestamp in the reader's own clock, hour:minute", () => {
+    const expected = new Date('2026-09-28T11:59:59Z').toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    expect(localResetTime('2026-09-28T11:59:59Z')).toBe(expected);
+  });
+
+  it('an absent or unparseable timestamp is empty, not "Invalid Date"', () => {
+    expect(localResetTime(null)).toBe('');
+    expect(localResetTime(undefined)).toBe('');
+    expect(localResetTime('not-a-date')).toBe('');
   });
 });

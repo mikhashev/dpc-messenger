@@ -43,6 +43,14 @@ export const providerBalance = writable<any>(null);
 // Sharing tab. Shape: { [alias]: { status, alias, balance?, message? } }.
 export const providerBalances = writable<Record<string, any>>({});
 
+// One row per provider account (wallet/key), grouped from `get_provider_balances()`
+// (the backend's own `accounts` array, or a client-derived one-row-per-alias
+// fallback on an older backend — see `accountRowsFromBalances` in
+// `components/inferenceSharing.ts`). This is what the Sidebar's balance rows
+// and the ProvidersEditor account list both read; `providerBalances` above
+// stays for any caller keyed on alias alone.
+export const providerAccounts = writable<import('$lib/components/inferenceSharing').AccountRow[]>([]);
+
 // The provider calls currently waiting out a backoff, by `retry_id`. A map
 // rather than one slot because an agent and a chat can be waiting at the same
 // time, and a single slot would let either one's closing notice clear the

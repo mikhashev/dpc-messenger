@@ -3,8 +3,11 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand, peerProviders, providerBalance, getProviderBalance } from '$lib/coreService';
-  import { blockedModelLine, formatQuotaLine, formatQuotaLineTitle, quotaHasWarning } from './inferenceSharing';
+  import { sendCommand, peerProviders, providerAccounts, getProviderBalances } from '$lib/coreService';
+  import {
+    blockedModelLine, formatQuotaLine, formatQuotaLineTitle, quotaHasWarning,
+    accountLevel, balanceErrorText, providerTypeLabel, type AccountRow,
+  } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
   import { trackRename } from '$lib/utils/aliasRenames';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
@@ -555,56 +558,81 @@
   // Get the config to display (edited or original)
   $: displayConfig = editedConfig || config;
 
-  // --- Account balance (pay-per-use providers, e.g. DeepSeek) — Phase 2b ---
-  const LOW_BALANCE_USD = 3;       // early-warning threshold
-  const CRITICAL_BALANCE_USD = 1;  // urgent threshold
+  // --- Account balances (pay-per-use / subscription vendor providers) ---
+  // 2026-09-28: was a single card for one hard-picked alias with a literal
+  // '$' and USD-only thresholds; now one row per account (DeepSeek,
+  // NeuralDeep, ... — whichever wallets/keys are configured), each showing
+  // its own currency, quota line, blocked-model line, and any provider-side
+  // error in place of a bare "insufficient".
   let balanceLoading = false;
-  // Which alias the balance card shows. A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-
-  // AND-NEVER-SHOWN: this used to always be the default/agent provider
-  // (getProviderBalance() with no alias); now it can show the alias being
-  // viewed/edited, or any other pay-per-use alias, picked from the dropdown.
-  let balanceAliasChoice = '';
 
   $: payPerUseAliases = (displayConfig?.providers ?? [])
     .filter((p) => p.type === 'deepseek' || p.type === 'neuraldeep')
     .map((p) => p.alias);
-  // Defaults to the first pay-per-use alias found, and stays there across
-  // re-renders unless that alias stopped existing (deleted, renamed) — never
-  // silently to "the default provider", which is what made this card only
-  // ever show one alias before. The dropdown lets the owner switch to another.
-  $: if (!balanceAliasChoice || !payPerUseAliases.includes(balanceAliasChoice)) {
-    balanceAliasChoice = payPerUseAliases[0] ?? '';
-  }
+  $: hasPayPerUseProvider = payPerUseAliases.length > 0;
 
-  async function refreshBalance() {
+  async function refreshBalances() {
     balanceLoading = true;
     try {
-      await getProviderBalance(balanceAliasChoice || undefined);
+      await getProviderBalances();
     } finally {
       balanceLoading = false;
     }
   }
 
-  $: hasPayPerUseProvider = payPerUseAliases.length > 0;
-  $: balResult = $providerBalance;
-  $: balanceQuotaLine = balResult?.status === 'success' ? formatQuotaLine(balResult.balance) : '';
-  $: balanceQuotaLineTitle = balResult?.status === 'success' ? formatQuotaLineTitle(balResult.balance) : '';
-  $: balanceQuotaWarn = balResult?.status === 'success' ? quotaHasWarning(balResult.balance) : false;
-  $: balanceAliasModel = (displayConfig?.providers ?? []).find((p) => p.alias === balanceAlias)?.model;
-  $: balanceBlockedModelLine = balResult?.status === 'success'
-    ? blockedModelLine(balResult.balance?.quota, balanceAliasModel) : '';
-  $: balanceUnsupported = !!balResult && balResult.status === 'unsupported';
-  $: balanceError = balResult && balResult.status === 'error' ? (balResult.message || 'error') : '';
-  $: balanceInfo = balResult && balResult.status === 'success' && balResult.balance && Array.isArray(balResult.balance.balance_infos)
-    ? balResult.balance.balance_infos[0] : null;
-  $: balanceAlias = (balResult && balResult.alias) || '';
-  $: balanceCurrency = balanceInfo ? (balanceInfo.currency || 'USD') : 'USD';
-  $: balanceTotal = balanceInfo ? balanceInfo.total_balance : null;
-  $: balanceAvailable = balResult && balResult.balance ? balResult.balance.is_available !== false : true;
-  $: balanceNum = balanceTotal !== null && balanceTotal !== undefined ? parseFloat(balanceTotal) : NaN;
-  $: balanceLevel = (!balanceAvailable || (!isNaN(balanceNum) && balanceNum < CRITICAL_BALANCE_USD)) ? 'critical'
-    : (!isNaN(balanceNum) && balanceNum < LOW_BALANCE_USD) ? 'low'
-    : 'ok';
+  function aliasModel(alias: string): string | undefined {
+    return (displayConfig?.providers ?? []).find((p) => p.alias === alias)?.model;
+  }
+
+  // Rows to render: the accounts store when it has something (populated by
+  // the same background poll the Sidebar reads), else this editor's own
+  // aliases with nothing checked yet — so opening the tab before the first
+  // poll still shows every configured account, just unchecked.
+  $: accountRows = $providerAccounts.length > 0
+    ? $providerAccounts
+    : payPerUseAliases.map((alias): AccountRow => ({
+        account: alias, label: alias, aliases: [alias], result: { status: 'unsupported' },
+      }));
+
+  function rowQuotaLine(row: AccountRow): string {
+    return row.result?.status === 'success' ? formatQuotaLine(row.result.balance) : '';
+  }
+  function rowQuotaLineTitle(row: AccountRow): string {
+    return row.result?.status === 'success' ? formatQuotaLineTitle(row.result.balance) : '';
+  }
+  function rowQuotaWarn(row: AccountRow): boolean {
+    return row.result?.status === 'success' ? quotaHasWarning(row.result.balance) : false;
+  }
+  function rowBlockedModelLine(row: AccountRow): string {
+    if (row.result?.status !== 'success') return '';
+    // A multi-alias account (e.g. one NeuralDeep key serving several
+    // aliases) is checked against each alias's own configured model in turn;
+    // the first that matches is shown.
+    for (const alias of row.aliases) {
+      const line = blockedModelLine(row.result.balance?.quota, aliasModel(alias));
+      if (line) return line;
+    }
+    return '';
+  }
+  function rowErrorText(row: AccountRow): string {
+    return balanceErrorText(row.result);
+  }
+  function rowUnsupported(row: AccountRow): boolean {
+    return row.result?.status === 'unsupported';
+  }
+  function rowLevel(row: AccountRow): 'ok' | 'low' | 'critical' | 'neutral' {
+    return accountLevel(row.result?.balance);
+  }
+  function rowCurrency(row: AccountRow): string {
+    return row.result?.balance?.balance_infos?.[0]?.currency || '';
+  }
+  function rowTotal(row: AccountRow): string | null {
+    const total = row.result?.balance?.balance_infos?.[0]?.total_balance;
+    return total !== undefined ? total : null;
+  }
+  function rowLabel(row: AccountRow): string {
+    return row.label || providerTypeLabel(row.provider_type);
+  }
 
   // Delete provider
   async function deleteProvider(index: number) {
@@ -1024,48 +1052,48 @@
 
       <div class="modal-body">
         {#if selectedTab === 'list'}
-          <!-- Account balance (pay-per-use providers, e.g. DeepSeek) — Phase 2b -->
+          <!-- Account balances (one row per DeepSeek/NeuralDeep/... account) -->
           {#if hasPayPerUseProvider}
-            <div class="balance-card balance-{balanceLevel}">
+            <div class="balance-accounts">
               <div class="balance-row">
-                <span class="balance-label">
-                  Account balance{balanceAlias ? ` (${balanceAlias})` : ''}
-                </span>
-                {#if payPerUseAliases.length > 1}
-                  <select class="inline-input" bind:value={balanceAliasChoice}>
-                    {#each payPerUseAliases as alias (alias)}
-                      <option value={alias}>{alias}</option>
-                    {/each}
-                  </select>
-                {/if}
-                <button class="btn btn-edit" on:click={refreshBalance} disabled={balanceLoading}>
-                  {balanceLoading ? 'Checking…' : 'Check balance'}
+                <span class="balance-label">Account balances</span>
+                <button class="btn btn-edit" on:click={refreshBalances} disabled={balanceLoading}>
+                  {balanceLoading ? 'Checking…' : 'Check balances'}
                 </button>
               </div>
-              {#if balanceError}
-                <div class="balance-value balance-err">⚠ {balanceError}</div>
-              {:else if balanceUnsupported}
-                <div class="balance-value balance-muted">No balance-capable provider</div>
-              {:else if balanceTotal !== null && balanceTotal !== undefined}
-                <div class="balance-value">
-                  {balanceCurrency} {balanceTotal}
-                  {#if balanceLevel === 'critical'}<span class="balance-flag">⚠ critical (&lt; ${CRITICAL_BALANCE_USD})</span>
-                  {:else if balanceLevel === 'low'}<span class="balance-flag">low (&lt; ${LOW_BALANCE_USD})</span>{/if}
-                  {#if !balanceAvailable}<span class="balance-flag">— insufficient</span>{/if}
+              {#each accountRows as row (row.account)}
+                <div class="balance-card balance-{rowLevel(row)}">
+                  <div class="balance-row">
+                    <span class="balance-label">
+                      {rowLabel(row)}
+                      {#if row.aliases.length > 0}<span class="balance-muted"> — {row.aliases.join(', ')}</span>{/if}
+                    </span>
+                  </div>
+                  {#if rowErrorText(row)}
+                    <div class="balance-value balance-err">⚠ {rowErrorText(row)}</div>
+                  {:else if rowUnsupported(row)}
+                    <div class="balance-value balance-muted">Not checked yet — click “Check balances”.</div>
+                  {:else if rowTotal(row) !== null}
+                    <div class="balance-value">
+                      {rowCurrency(row)} {rowTotal(row)}
+                      {#if rowLevel(row) === 'critical'}<span class="balance-flag">⚠ critical</span>
+                      {:else if rowLevel(row) === 'low'}<span class="balance-flag">low</span>{/if}
+                    </div>
+                  {:else}
+                    <div class="balance-value balance-muted">No wallet reported.</div>
+                  {/if}
+                  {#if rowQuotaLine(row)}
+                    <div
+                      class="balance-value balance-muted quota-line"
+                      class:quota-line-warn={rowQuotaWarn(row)}
+                      title={rowQuotaLineTitle(row)}
+                    >{rowQuotaLine(row)}</div>
+                  {/if}
+                  {#if rowBlockedModelLine(row)}
+                    <div class="balance-value balance-flag">{rowBlockedModelLine(row)}</div>
+                  {/if}
                 </div>
-                {#if balanceQuotaLine}
-                  <div
-                    class="balance-value balance-muted quota-line"
-                    class:quota-line-warn={balanceQuotaWarn}
-                    title={balanceQuotaLineTitle}
-                  >{balanceQuotaLine}</div>
-                {/if}
-                {#if balanceBlockedModelLine}
-                  <div class="balance-value balance-flag">{balanceBlockedModelLine}</div>
-                {/if}
-              {:else}
-                <div class="balance-value balance-muted">Not checked yet — click “Check balance”.</div>
-              {/if}
+              {/each}
             </div>
           {/if}
 
@@ -3024,6 +3052,11 @@
   .balance-low .balance-value { color: #ffc107; }
   .balance-critical { border-left: 4px solid #e53935; }
   .balance-critical .balance-value { color: #ff6b6b; }
+  /* A subscription wallet is a reference price, never debited — no level of
+     its own; its row is judged by the quota instead (see accountLevel). */
+  .balance-neutral { border-left: 4px solid #6c7086; }
+  .balance-accounts { margin-bottom: 1rem; }
+  .balance-accounts > .balance-row { margin-bottom: 0.5rem; }
   .modal-overlay {
     position: fixed;
     top: 0;

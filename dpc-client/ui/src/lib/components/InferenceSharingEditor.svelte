@@ -16,6 +16,7 @@
     addServing,
     addTariffEntry,
     anyTariffCurrency,
+    balanceErrorText,
     callerPriceBadge,
     blockedModelLine,
     clientLabel,
@@ -133,6 +134,11 @@
   $: quotaWarnOf = (alias: string) => quotaHasWarning($providerBalances?.[alias]?.balance);
   $: quotaBlockedModelOf = (alias: string) =>
     blockedModelLine($providerBalances?.[alias]?.balance?.quota, providerByAlias.get(alias)?.model);
+  // Today this alias's balance call itself failed (key rejected/blocked,
+  // vendor unavailable, ...) — shown in place of the quota line, which the
+  // failed call has nothing to report for (Do §5: was rendering nothing, or
+  // reading as plain "insufficient").
+  $: quotaErrorOf = (alias: string) => balanceErrorText($providerBalances?.[alias]);
 
   function addPicked(list: ServingList) {
     const alias = list === 'local' ? pickLocal : pickVendor;
@@ -576,7 +582,9 @@
                   {#if quotaBlockedModelOf(alias)}
                     <span class="badge badge-missing">{quotaBlockedModelOf(alias)}</span>
                   {/if}
-                  {#if quotaLineOf(alias)}
+                  {#if quotaErrorOf(alias)}
+                    <span class="badge badge-missing">⚠ {quotaErrorOf(alias)}</span>
+                  {:else if quotaLineOf(alias)}
                     <span
                       class="muted quota-line"
                       class:quota-line-warn={quotaWarnOf(alias)}
