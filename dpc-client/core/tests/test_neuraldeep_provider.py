@@ -516,9 +516,36 @@ async def test_balance_normalizes_the_real_limits_payload_into_a_quota_block(mon
          "remaining": 20, "resets_at": None, "reset_in_sec": 11},
     ]
     assert quota["observed_at"] == "2026-09-28T10:41:49Z"
+    assert quota["daily_capacity"] == {
+        "pct_used": 0.1, "exhausted": False, "resets_at": "2026-09-29T00:00:00+00:00",
+    }
+    assert quota["night"] == {
+        "active": False, "capacity_factor": 2, "window_start_msk": 0, "window_end_msk": 6,
+    }
     assert balance["balance_infos"] == [
         {"currency": "RUB", "total_balance": "500.00", "spent_30d": "0.00"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_balance_quota_daily_capacity_and_night_are_none_safe(monkeypatch):
+    """Absent or malformed daily_capacity/night blocks must not crash the
+    quota normalization — they just read as None."""
+    payload = {"schema": 1, "tier": "free",
+               "key": {"status": "ok", "billing_mode": "subscription"},
+               "decision": {"can_request": True}, "chat": {},
+               "daily_capacity": "not-a-dict", "night": None}
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+    assert balance["quota"]["daily_capacity"] is None
+    assert balance["quota"]["night"] is None
 
 
 @pytest.mark.asyncio
@@ -674,6 +701,30 @@ async def test_a_403_is_reported_as_key_blocked_not_a_generic_error(monkeypatch)
     p = _make()
     balance = await _REAL_GET_BALANCE(p)
     assert balance["error"] == "key_blocked"
+
+
+@pytest.mark.asyncio
+async def test_a_403_backoff_with_no_cache_still_reports_key_blocked_on_a_second_read(monkeypatch):
+    """A second get_balance() landing inside the 403 backoff window, with no
+    cached payload to fall back on, must not collapse to the generic
+    "unavailable" — it should still say key_blocked, the same kind the first
+    call reported."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(403, json={"detail": "blocked"})
+
+    _patch_httpx(monkeypatch, handler)
+    p = _make()
+    first = await _REAL_GET_BALANCE(p)
+    assert first["error"] == "key_blocked"
+    assert calls["n"] == 1
+    # Still inside the 5-minute backoff: no second HTTP request, but the
+    # error kind must still be key_blocked, not unavailable.
+    second = await _REAL_GET_BALANCE(p)
+    assert calls["n"] == 1
+    assert second["error"] == "key_blocked"
 
 
 @pytest.mark.asyncio
@@ -950,7 +1001,9 @@ async def test_403_backs_off_like_other_non_2xx_answers(monkeypatch):
     assert first["error"] == "key_blocked"
     assert calls["n"] == 1
     assert p._limits_backoff_until is not None
-    # Still inside the backoff: the next automatic read makes no request.
+    # Still inside the backoff: the next automatic read makes no request,
+    # and still reports key_blocked — the same kind the first 403 gave,
+    # not the generic "unavailable" (S-neuraldeep-403-backoff-kind).
     second = await _REAL_GET_BALANCE(p)
     assert calls["n"] == 1
-    assert second["error"] == "unavailable"  # backoff branch, not a fresh 403
+    assert second["error"] == "key_blocked"

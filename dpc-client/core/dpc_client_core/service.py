@@ -2436,7 +2436,12 @@ class CoreService:
         Falls back to `<type>:<alias>` (never shared with another alias) when
         the provider carries no identifiable key/base_url — grouping only
         happens where there is real evidence two aliases spend from the
-        same account."""
+        same account.
+
+        No provider in `providers/` takes a per-alias proxy setting (grepped
+        2026-09-28: only a comment in `zai_provider.py` mentions the word,
+        nothing configurable) — so unlike coddy's fingerprint, this id
+        carries no proxy component; there is nothing per-alias to include."""
         provider_type = ((getattr(provider, "config", None) or {}).get("type")
                           or type(provider).__name__)
         base_url = getattr(provider, "_base_url", None) or \

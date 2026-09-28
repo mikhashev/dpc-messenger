@@ -216,6 +216,12 @@ class NeuralDeepProvider(AIProvider):
         self._limits_last_attempt_at: Optional[datetime] = None
         self._limits_key_rejected = False
         self._limits_backoff_until: Optional[datetime] = None
+        # Which kind of failure put us into backoff (ERROR_KEY_BLOCKED for a
+        # 403, None for a plain non-2xx) — so a read that lands inside the
+        # backoff window with no cache to fall back on reports the same
+        # kind get_balance would have reported the first time, instead of
+        # collapsing to "unavailable".
+        self._limits_backoff_kind: Optional[str] = None
         # Concurrent readers (get_balance, _billing_mode_now, the
         # get_provider_balances fan-out) join this fetch instead of each
         # starting their own — coddy's `inflight` (internal/session/
@@ -495,6 +501,10 @@ class NeuralDeepProvider(AIProvider):
         if self._limits_backoff_until is not None and now < self._limits_backoff_until:
             if self._limits_cache is not None:
                 return self._limits_cache
+            if self._limits_backoff_kind == ERROR_KEY_BLOCKED:
+                raise NeuralDeepKeyBlocked(
+                    f"NeuralDeep '{self.alias}': in backoff (blocked, 403) "
+                    f"until {self._limits_backoff_until.isoformat()}")
             raise NeuralDeepLimitsError(
                 f"NeuralDeep '{self.alias}': in backoff until {self._limits_backoff_until.isoformat()}")
         if self._limits_inflight is None and self._limits_last_attempt_at is not None \
@@ -564,6 +574,7 @@ class NeuralDeepProvider(AIProvider):
             retry_after = self._parse_retry_after(resp.headers)
             capped = min(retry_after, LIMITS_BACKOFF_CAP) if retry_after is not None else LIMITS_BACKOFF_CAP
             self._limits_backoff_until = arrived + capped
+            self._limits_backoff_kind = ERROR_KEY_BLOCKED
             raise NeuralDeepKeyBlocked(f"NeuralDeep key for '{self.alias}' blocked (403)")
         if resp.status_code < 200 or resp.status_code >= 300:
             arrived = datetime.now(timezone.utc)
@@ -571,6 +582,7 @@ class NeuralDeepProvider(AIProvider):
             if retry_after is not None:
                 capped = min(retry_after, LIMITS_BACKOFF_CAP)
                 self._limits_backoff_until = arrived + capped
+                self._limits_backoff_kind = None
             if self._limits_cache is not None:
                 return self._limits_cache
             raise NeuralDeepLimitsError(
@@ -581,6 +593,7 @@ class NeuralDeepProvider(AIProvider):
         arrived = datetime.now(timezone.utc)
         self._limits_cache, self._limits_cache_at = payload, arrived
         self._limits_backoff_until = None
+        self._limits_backoff_kind = None
         return payload
 
     @staticmethod
@@ -714,6 +727,46 @@ class NeuralDeepProvider(AIProvider):
             # month of 429s on an account that read healthy). See
             # `model_blocked()` for the matching this list is read through.
             "blocked_models": blocked_models,
+            "daily_capacity": NeuralDeepProvider._daily_capacity_from_limits(limits),
+            "night": NeuralDeepProvider._night_from_limits(limits),
+        }
+
+    @staticmethod
+    def _daily_capacity_from_limits(limits: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Display-only: how much of today's *money* budget is used — a
+        spend ceiling, not a request-count window, so it is kept out of
+        `windows` rather than forced into that shape. `pct_used` arrives
+        already on a 0-100 scale: the hub computes it as
+        `round(min(spend/budget, 1) * 100, 1)` (coddy's plan,
+        docs/plans/neuraldeep-usage.md:290-291; its own test uses 12.5 to
+        mean 12.5%), so this must never be multiplied again before display.
+        None-safe — an absent or malformed `daily_capacity` block must read
+        as "not reported", never crash the whole quota normalization."""
+        entry = limits.get("daily_capacity")
+        if not isinstance(entry, dict):
+            return None
+        return {
+            "pct_used": entry.get("pct_used"),
+            "exhausted": entry.get("exhausted"),
+            "resets_at": entry.get("resets_at"),
+        }
+
+    @staticmethod
+    def _night_from_limits(limits: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Display-only: is the night capacity multiplier active right now,
+        and by how much. Every other number this payload carries is already
+        effective with the multiplier applied (coddy's plan, :156-157: "every
+        number is already effective (the night x2 is applied)") —
+        `capacity_factor` is informational only and must never be applied
+        again on top of a window's own numbers."""
+        entry = limits.get("night")
+        if not isinstance(entry, dict):
+            return None
+        return {
+            "active": entry.get("active"),
+            "capacity_factor": entry.get("capacity_factor"),
+            "window_start_msk": entry.get("window_start_msk"),
+            "window_end_msk": entry.get("window_end_msk"),
         }
 
     def model_blocked(self, model: str) -> Optional[Dict[str, Any]]:
