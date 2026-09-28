@@ -107,10 +107,12 @@ _WINDOW_LENGTHS = {
 
 DEFAULT_OWNER_RESERVE = 0.25
 
-#: The one wallet value this node has ever read off a vendor
-#: (`docs/CONFIGURATION.md`: "'subscription' or 'pay_per_use'"). Anything else
-#: is unknown and refused (P3, 2026-09-29) rather than treated as a wallet.
-KNOWN_WALLET_BILLING_MODE = "pay_per_use"
+#: The wallet values a vendor may report. NeuralDeep's own client shows its
+#: hub sending "wallet" (coddy-agent docs/plans/neuraldeep-usage.md, captured
+#: /limits payload); "pay_per_use" is this project's word for the same billing
+#: (docs/CONFIGURATION.md) and is accepted too. Anything else is unknown and
+#: refused (P3, 2026-09-29) rather than treated as a wallet.
+KNOWN_WALLET_BILLING_MODES = frozenset({"wallet", "pay_per_use"})
 
 
 def account_siblings(alias: str, account_id_of: Dict[str, Optional[str]]) -> list:
@@ -225,17 +227,14 @@ def guest_vendor_quota_refusal(
                 "key's billing_mode / quota from the vendor (unread, stale, or the provider "
                 "gives none); refused rather than served with no ceiling"
             )
-        if billing_mode != KNOWN_WALLET_BILLING_MODE:
-            # P3, 2026-09-29: the only two values this node has ever read off a
-            # vendor (`docs/CONFIGURATION.md` — 'subscription' or
-            # 'pay_per_use') are `subscription`, handled above, and
-            # `pay_per_use`, the wallet whose money ceiling already bounds it.
-            # Anything else is a value this node has never seen and cannot
-            # place on either side, so it is refused rather than defaulted to
-            # "must be a wallet".
+        if billing_mode not in KNOWN_WALLET_BILLING_MODES:
+            # P3, 2026-09-29: `subscription` is handled above; a wallet value
+            # (KNOWN_WALLET_BILLING_MODES) is bounded by the money ceiling.
+            # Anything else is a value this node cannot place on either side,
+            # so it is refused rather than defaulted to "must be a wallet".
             return _refusal(
                 f"model '{alias}' reports billing_mode={billing_mode!r}, which this node knows "
-                f"as neither 'subscription' nor {KNOWN_WALLET_BILLING_MODE!r}; refused rather "
+                f"as neither 'subscription' nor a wallet {sorted(KNOWN_WALLET_BILLING_MODES)}; refused rather "
                 "than guessed which ceiling — the guest one or the money one — applies"
             )
         # Wallet key: the existing spent_today money ceiling is the whole

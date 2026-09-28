@@ -673,6 +673,18 @@ def test_p3_the_pay_per_use_wallet_value_is_still_admitted(tmp_path):
     assert admitted is None
 
 
+def test_the_vendors_own_wallet_value_is_admitted(tmp_path):
+    """NeuralDeep's hub reports a wallet key as billing_mode "wallet" (the
+    payload captured in its own client's plan); refusing it as unknown would
+    shut every guest out of a wallet-billed ND key."""
+    ledger = NodeLedger(tmp_path / "ledger")
+    admitted = guest_vendor_quota_refusal(
+        alias=ALIAS, caller=GUEST, billing_mode="wallet", quota=_quota(),
+        ledger=ledger, account_id_of={}, request_quotas={}, token_quotas={}, owner_reserve={},
+    )
+    assert admitted is None
+
+
 # --- P3: floor rounding matches the UI's Math.floor -------------------------
 
 
