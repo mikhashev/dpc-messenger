@@ -322,6 +322,43 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   `cost_basis`: `charged` for a wallet key, `list_price_reference` for a key whose
   `/v1/limits` reports `billing_mode: subscription` (the amount is what the call would
   have cost, not a debit), `unknown` when `/v1/limits` could not be read.
+
+  **On a subscription key, `vendor_quotas`'s money ceiling never trips** — its rows are
+  `list_price_reference`, excluded from the sum by design above — so a guest served that
+  alias is bounded instead by the vendor's own request/token units (ADR-041 D5, amendment
+  2026-09-29):
+
+  ```json
+  "compute": {
+    "vendor_request_quotas": {"nd_free": {"per_session": 100, "per_week": 500}},
+    "vendor_token_quotas": {"nd_free": {"per_day": 200000}},
+    "vendor_owner_reserve": {"nd_free": 0.25}
+  }
+  ```
+
+  - `vendor_request_quotas.<alias>` — `per_session` and/or `per_week`, request counts
+    per guest inside the vendor's own fixed window (its `resets_at` minus the window's
+    length — a 3h grid or an ISO week — never a rolling lookback). Counted against every
+    alias sharing the same vendor account (an alias and its `-noreason` twin share one
+    key), not only the one named. A subscription alias with neither field set is refused
+    to a guest with `insufficient_quota`, naming the missing setting — strict, because an
+    unbounded subscription alias would let a guest exhaust it.
+  - `vendor_token_quotas.<alias>.per_day` — prompt+completion tokens per guest per UTC
+    day; optional, a proxy for the vendor's money-based daily gate.
+  - `vendor_owner_reserve.<alias>` — a fraction in `[0, 1)` (default `0.25`) of the
+    vendor's own window kept out of reach of guests as a whole, checked against every
+    guest's rows on the account together, beside the per-guest ceiling above.
+  - The vendor's own `daily_capacity.exhausted` (from `/v1/limits`) refuses every caller
+    alike, guest or owner, since it is the vendor's own hard stop — the one guest ceiling
+    here that also reaches the gateway's own loopback client.
+  - Every refusal under this ceiling carries `retry_after_sec` when the host knows when it
+    clears (a window reset or seconds to UTC midnight): on the wire (`REMOTE_INFERENCE_RESPONSE`,
+    v1.8) for a peer, and as an HTTP `Retry-After` header on the gateway's `429`.
+  - Keyed by alias like `vendor_quotas`, so an alias rename carries these keys too.
+  - Known, accepted drift: no per-guest requests-per-minute ceiling, so a host's own 429
+    retry (card A-GUEST-WAITS-UP-TO-TEN-MINUTES-WHILE-THE-HOST-RETRIES-A-429-ON-A-SHARED-
+    VENDOR-KEY) and calls a guest runs in parallel can still overrun these ceilings by a
+    few rows before the next request is refused.
   A NeuralDeep endpoint configured as `openai_compatible` is not supported for pricing:
   that type has no price of its own, so its calls are priced by model name against the
   USD tables — unpriced where the name matches nothing, in dollars where it reads like a

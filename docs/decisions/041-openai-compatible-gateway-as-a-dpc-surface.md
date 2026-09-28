@@ -1217,6 +1217,75 @@ twice, and the account id is a truncated hash of the key — never the key
 itself — so the wallet's identity is stable across restarts without exposing
 what unlocks it.)*
 
+*(**Amendment, 2026-09-29 — the guest ceiling on a subscription key, counted
+in the vendor's own units.** Mike's call, 2026-09-29 ("ну да логично" after
+CC's worked examples), the design points from Ark and Zcode's review the same
+day: `compute.vendor_quotas`'s money ceiling is compared against this node's
+own ledger rows, and on a `billing_mode: "subscription"` key those rows are
+always `list_price_reference` (D3's amendment above) — the ceiling never
+trips, and a vendor alias served to guests off a subscription key spends
+without bound. Observed 2026-09-28 on Mike's NeuralDeep FREE key: `/v1/limits`
+reports `chat.session` (400 requests per rolling "3h" grid), `chat.week`
+(2000, ISO week from Monday 00:00 UTC) and a `daily_capacity` money gate
+(`pct_used` 0–100, `exhausted`) — already parsed into `get_balance()`'s
+`quota` block (commits d3d89e8d, 1a2f0ad8, 76c00ca9, a809461a) but read
+nowhere before this.
+
+**The guest ceiling is counted in those units instead**, one function —
+`dpc_client_core.guest_vendor_quota.guest_vendor_quota_refusal` — called from
+both doors so they cannot diverge: `p2p_coordinator._vendor_quota_refusal`
+(now `async`, since reading a fresh quota calls the provider's cached
+`get_balance()`) and `Gateway._refuse_vendor_daily_capacity_exhausted`. Three
+new keys in `privacy_rules.json` under `compute`, keyed by alias like
+`vendor_quotas` (`provider_alias_refs._FIREWALL_KEYED_BY_ALIAS` carries a
+rename): `vendor_request_quotas.<alias>` (`per_session`, `per_week` — request
+counts per guest), `vendor_token_quotas.<alias>.per_day` (tokens per guest per
+UTC day, optional, a proxy for the money gate) and
+`vendor_owner_reserve.<alias>` (a fraction in `[0, 1)`, default `0.25`, kept
+from guests as a whole). Shape validated at load and at save
+(`ContextFirewall._vendor_guest_quota_errors`); *presence* is not, because the
+load path cannot tell a subscription key from a wallet one without a live
+provider read — a subscription alias with no `vendor_request_quotas` entry is
+instead refused at request time, strictly, naming the missing setting.
+
+**The resource is the vendor account, not the alias**: an alias and its
+`-noreason` twin share one key (`CoreService._provider_account_id`), so a
+count is taken over every alias on the same account, the limit still being
+the *called* alias's own entry. **The window is the vendor's own, never
+rolling**: start is `resets_at` minus the window's length (3h for the session
+grid, 7 days for the week), read from the window's own `name`; an unreadable
+`resets_at` refuses rather than guesses a start. `NodeLedger.rows_since` /
+`count_since` / `tokens_since` read every month partition a window can touch,
+because a window near the 1st of a month crosses the boundary
+`spent_today`'s single-partition read never had to. **The daily gate binds
+every caller alike**, guest or owner: `quota.daily_capacity.exhausted` (typed
+field first, `daily_capacity_exhausted` in `blockers` as fallback) refuses the
+gateway's own loopback call too, since it is the vendor's own hard stop and
+not a guest-only ceiling — the docstring calling `daily_capacity`
+"display-only" (`neuraldeep_provider.py`) no longer holds and is corrected.
+Every other check here — the per-guest and aggregate request/token ceilings —
+is skipped for the gateway's own caller (`is_owner_caller=True`), because they
+bound guests, not the owner's own use.
+
+**Every refusal under this ceiling carries `retry_after_sec`** where the
+clearing time is known — a window reset or seconds to UTC midnight — a new
+additive field on `REMOTE_INFERENCE_RESPONSE`'s error form (DPTP v1.8,
+`create_remote_inference_response`, `specs/dptp_v1.md` §3.4) and, on the
+gateway, an HTTP `Retry-After` header (`GatewayError.retry_after_sec`,
+threaded through `_error` / `_anthropic_error`). The word is still
+`insufficient_quota`: every state here clears by itself at a known time, which
+is the test the three-way split of 2026-09-15 drew.
+
+**What this does not do**, stated rather than silently absent: no per-guest
+requests-per-minute ceiling (a host's own 429 backoff retry hits the vendor
+more than once per ledger row — card
+A-GUEST-WAITS-UP-TO-TEN-MINUTES-WHILE-THE-HOST-RETRIES-A-429-ON-A-SHARED-
+VENDOR-KEY — and calls a guest runs in parallel are not serialised, so several
+can cross a ceiling together before the next is refused, the same
+check-then-act gap `spent_today`'s money ceiling already has). Not run live:
+no request has yet been served or refused through this path against a real
+vendor key.)*
+
 ### D6 — `aiohttp.web`, declared explicitly
 
 **Re-decided.** The first writing offered two options — hand-written asyncio
