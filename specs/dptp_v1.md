@@ -689,8 +689,10 @@ Returns a list of AI providers available on the peer's system.
     - `in`, `out` (number, required): the rates, in `unit`, for prompt and for output
       tokens. Reasoning is billable output at `out`, on the convention §3.4's
       `output_includes_thinking` states
-    - `currency` (string, required): ISO 4217, the sender's own `compute.currency`. The
-      protocol picks no currency, and parity between two nodes' units is their agreement
+    - `currency` (string, required): ISO 4217, the unit the sender resolved for this
+      alias — its own `compute.tariff_currency` entry, else for a vendor alias the currency
+      its provider bills in, else the node default `compute.currency`. The protocol picks
+      no currency, and parity between two nodes' units is their agreement
     - `from` (string, required): the `YYYY-MM-DD` day the dated entry that applied begins,
       so a receiver can see which line of the declaration it was quoted
     - `unit` (string, required): the unit of `in` and `out`. `per_1m_tokens` is the only
@@ -709,6 +711,15 @@ Returns a list of AI providers available on the peer's system.
     (string) — the build behind `model` where the sender can read one, such as a GGUF file
     name. `context_window` and `reasoning_default` stay where they are, at the top of the
     row, and are not repeated here
+  - `provider_kind` (string, optional, v1.7+): Which of the sender's serving lists the
+    alias stands on — `vendor` (a paid API: a call leaves the sender for the vendor named by
+    `type`, with the recipient's prompt in it, under the sender's key) or `self_hosted` (a
+    model on the sender's own hardware). The sender's statement, which a receiver reads
+    over any classification of its own by `type`: an `openai_compatible` alias may be
+    either, and only the sender knows which list it filed it under. A receiver shows a
+    `vendor` row as a vendor's model before it calls. Absent on a row on neither list, a
+    transcription row among them, and on a sender that predates the field — absent is not
+    `self_hosted`
 
 ---
 
@@ -2796,6 +2807,13 @@ DPTP is designed to be extensible. New commands can be added by:
   the prompt, the tools and the history gone without a word, and a guest refused the
   combination outright — so Claude Code, which attaches its tools to every request, could
   not show a peer's model a screenshot. Added 2026-09-17 while v1.7 is unreleased
+- **§3.5 PROVIDERS_RESPONSE** — optional `provider_kind` on a provider row: `vendor` or
+  `self_hosted`, the serving list the sender filed the alias under. A sender now serves its
+  vendor aliases to peers as well as its local ones (ADR-041 D5, amendment of 2026-09-28),
+  and a guest calling one sends its prompt on to that vendor; the row tells the guest so
+  before it calls, in the sender's own words rather than a guess from `type`. The
+  `tariff.currency` text is restated for the per-alias unit of the same date. Added
+  2026-09-28 while v1.7 is unreleased
 
 ### v1.6 (August 2026)
 - **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v2`; `v1` still read), added with

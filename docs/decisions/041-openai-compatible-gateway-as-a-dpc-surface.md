@@ -968,7 +968,11 @@ change. The numbers are not rewritten; setting
 already written keep their frozen `tariff_currency`. The P2P door serves only
 `serving_local` today (`ContextFirewall.can_request_inference`) and a peer's
 menu lists only those, so the vendor default is visible in the gateway's quote
-and the Inference Sharing tab before it can reach a served row.)*
+and the Inference Sharing tab before it can reach a served row. (Updated the
+same day: D5's amendment of 2026-09-28 opens the P2P door to `serving_vendor`,
+so the provider step now prices served rows and peers' menu rows as well — a
+NeuralDeep alias served to a peer is quoted and frozen in RUB unless
+`compute.tariff_currency` names another unit.))*
 
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
@@ -1038,7 +1042,14 @@ Mike's. And the lists classify the serving alias, which today is
 `serving_local[0]`: a paying alias misfiled there makes the lists a
 configuration error, and the door now refuses rather than guess the class,
 where before it served the call and paid for it. Guessing wrong spends the
-host's money, so the unknown class is refused.*
+host's money, so the unknown class is refused. (Updated 2026-09-28: the
+serving alias is no longer only `serving_local[0]` — the 2026-09-18
+amendment below made it any `serving_local` entry the guest names, and the
+second 2026-09-28 amendment below any `serving_vendor` entry too, with
+`serving_local[0]` left as the default for a request naming none. The
+misfiled case stands: a paying alias under `serving_local` is still a
+configuration error, refused as `misconfigured`, because its place is
+`serving_vendor` and the class decides what bounds it.)*
 
 *Follow-up, closed the same day: `_complete_via_peer` in `gateway.py` maps a
 host's refusal code to an HTTP status, and `insufficient_quota` landed there as
@@ -1103,6 +1114,45 @@ assumed to be USD, and rows whose `cost_basis` is `charged` or `unknown`
 count against it — never `list_price_reference`. `compute.currency` — the tariff an owner charges *peers* for a shared
 alias — is a different number answering a different question and does not
 move.)*
+
+*(**Amendment, 2026-09-28 — the P2P door serves vendor aliases, to the peers
+the owner allows.** Mike's call, 2026-09-28. Until now a vendor alias reached
+peers through nothing: `ContextFirewall.can_request_inference` admitted a named
+alias only from `compute.serving_local`, so the peer-door ceiling of the
+2026-09-14 amendment above guarded a state no configuration could reach, and a
+host could share a vendor model only with its own gateway.
+
+**What is served.** Every alias in either serving list. The gate is a
+membership test over both lists, and an alias in neither is refused there
+(`not_allowed`); the door then asks the gateway's own policy of the classified
+lists — `owner_of`, and for a `vendor` alias the ceiling in the currency its
+provider bills in (`pricing.vendor_ceiling_currency`), `spent_today(alias,
+caller=peer_id, caller_kind="peer", currency=…)`, `insufficient_quota` naming
+that currency, `unrated` for an alias nothing can price. As on the gateway's
+route, a vendor alias does not wait in the card's queue (the peer door's
+`Semaphore(1)`): money bounds it, not the card. The onward-sharing check (D7
+part 1) names the list the alias actually stands on.
+
+**Who may use it is the owner's choice**, through `compute.allow_nodes` /
+`allow_groups` and `allowed_models`, exactly as for a local alias — the same
+refusal, `not_allowed`, before any money gate. **DPC does not check the
+vendor's terms**: whether a vendor permits its key to serve third parties is
+the owner's to read, and the Inference Sharing tab says so beside the vendor
+list. The honesty runs the other way too: **the guest is told the prompt goes
+to the vendor.** A menu row carries `provider_kind` (`vendor` | `self_hosted`,
+DPTP §3.5) — the host's own statement of which list the alias stands on, read
+by the guest over its own type table — and the guest's screen shows «vendor
+model — your prompt goes to <vendor>» beside such a row, the vendor named from
+the row's `type`.
+
+**What does not change.** A request naming no alias is still served
+`serving_local[0]` and never a vendor alias: a guest that chose nothing is not
+sent to a vendor on the owner's key, and a node sharing only vendor aliases
+refuses such a request (`model_not_found`). A paying alias misfiled under
+`serving_local` is still `misconfigured`. A local alias is served exactly as
+before, the queue included. A served vendor call is priced from the provider's
+own report (D3's amendment of 2026-09-28), and its tariff takes the provider's
+unit unless `compute.tariff_currency` names one.)*
 
 ### D6 — `aiohttp.web`, declared explicitly
 
@@ -1330,9 +1380,9 @@ dependencies.
 - **D5, the peer door (2026-09-14):** serve a guest a vendor alias until its
   day's rows reach the ceiling, then restart this node and let it ask again —
   the second request must be refused with `insufficient_quota` naming what it
-  spent, and no new usage row may appear. Not run live: today
-  `compute_serving_alias` is `serving_local[0]`, so the classified-vendor path
-  is reached by the tests and not yet by a configuration.
+  spent, and no new usage row may appear. Not run live. Reachable by a
+  configuration since 2026-09-28 (D5 amendment): the guest names an alias in
+  `serving_vendor`.
 - **D7, the enforceable half:** point `compute.serving_alias` at a `remote_peer`
   alias and start the service — it must refuse at load, naming the type. Today
   it starts.

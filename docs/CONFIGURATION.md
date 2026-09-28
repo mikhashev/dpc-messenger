@@ -300,6 +300,14 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   a metered key, not a debit against this one. The day's spend is read from the node ledger (`~/.dpc/ledger/`),
   so it survives a restart; at or over the ceiling the gateway answers `429` naming the
   alias, the ceiling and the spend (ADR-041 D3, amendment 2026-09-28).
+  The P2P door serves these aliases too since 2026-09-28 (Mike's call, ADR-041 D5
+  amendment): to a peer that `allow_nodes` / `allow_groups` admits and that names the
+  alias — never as the default for a request naming none, which stays the first
+  `serving_local` entry — under the same ceiling counted per peer (`insufficient_quota`
+  on the wire) and without waiting for the card. A guest's prompt then leaves this node
+  for the vendor under the owner's key, and the guest's menu row says so
+  (`provider_kind: vendor`, the vendor named by `type`). Whether the vendor's terms allow
+  that is the owner's to check: DPC does not read them.
   A `neuraldeep` alias is priced in roubles: its usage rows carry `cost_amount` and
   `cost_currency: RUB` beside `cost_basis`, and its ceiling in `vendor_quotas` is compared
   in RUB, never folded into the USD tables the DeepSeek/Z.AI aliases price from — the
