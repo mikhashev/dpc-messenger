@@ -310,3 +310,45 @@ def test_the_guest_reads_the_kind_from_the_row_over_its_own_type_table():
 
     assert _peer_facts("oa", node, metadata)["provider_kind"] == "vendor"
     assert _peer_facts("old", node, metadata)["provider_kind"] == "unknown"
+
+
+def test_a_transcription_alias_on_the_local_list_carries_self_hosted(tmp_path):
+    """`provider_kind` is present if and only if the alias is on a serving
+    list, so a `local_whisper` alias the owner listed in compute.serving_local
+    is marked like any other card model (DPTP §3.5)."""
+    compute = dict(COMPUTE, serving_local=[LOCAL, "whisper_local"])
+    _, svc = _host(tmp_path, compute)
+    whisper = SimpleNamespace(
+        config={"type": "local_whisper", "model": "openai/whisper-large-v3"},
+        model="openai/whisper-large-v3", supports_vision=lambda: False,
+    )
+    service = _menu_service(svc.firewall, {"whisper_local": whisper})
+
+    listed = service.build_p2p_provider_info("whisper_local", whisper, peer_id=GUEST)
+    service.firewall.compute_serving_local = [LOCAL]
+    unlisted = service.build_p2p_provider_info("whisper_local", whisper, peer_id=GUEST)
+
+    assert listed["provider_kind"] == "self_hosted"
+    assert "provider_kind" not in unlisted
+
+
+# --- (v) what is shared is not shared onward, from either list ------------------
+
+
+@pytest.mark.asyncio
+async def test_an_onward_sharing_refusal_on_the_vendor_list_names_the_vendor_list(tmp_path):
+    """The sentence names the list the owner has to edit (ADR-041 D7 part 1)."""
+    compute = dict(
+        COMPUTE, serving_vendor=[ND, "relay"], vendor_quotas={ND: QUOTA_RUB, "relay": 1.0},
+    )
+    coord, svc = _host(tmp_path, compute)
+    svc.llm_manager.providers["relay"] = SimpleNamespace(
+        config={"type": "remote_peer", "model": "qwen3:8b"}, model="qwen3:8b",
+    )
+
+    await coord.handle_inference_request(GUEST, "req-1", "ping", provider="relay")
+
+    payload = _sent(svc)
+    assert payload["code"] == "onward_sharing_refused", payload
+    assert "compute.serving_vendor names 'relay'" in payload["error"]
+    svc.llm_manager.query.assert_not_awaited()
