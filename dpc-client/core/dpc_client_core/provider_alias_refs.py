@@ -230,7 +230,12 @@ def _rename_registry(home: Path, old: str, new: str) -> Tuple[int, List[str]]:
 # the old alias, and the next load refuses two keys that disagree; a tariff
 # left under the old name would price nothing and warn on every load.
 _FIREWALL_LISTS = ("serving_local", "serving_vendor")
-_FIREWALL_KEYED_BY_ALIAS = ("vendor_quotas", "serving_tariff", "tariff_currency")
+_FIREWALL_KEYED_BY_ALIAS = (
+    "vendor_quotas", "serving_tariff", "tariff_currency",
+    # ADR-041 D5, amendment 2026-09-29: the guest ceiling on a subscription
+    # vendor key, keyed by alias like vendor_quotas above.
+    "vendor_request_quotas", "vendor_token_quotas", "vendor_owner_reserve",
+)
 
 
 def _scan_firewall(home: Path) -> List[Tuple[str, str]]:

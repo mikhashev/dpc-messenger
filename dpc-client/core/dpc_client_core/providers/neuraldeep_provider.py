@@ -737,9 +737,13 @@ class NeuralDeepProvider(AIProvider):
 
     @staticmethod
     def _daily_capacity_from_limits(limits: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Display-only: how much of today's *money* budget is used — a
-        spend ceiling, not a request-count window, so it is kept out of
-        `windows` rather than forced into that shape. `pct_used` arrives
+        """How much of today's *money* budget is used — a spend ceiling, not
+        a request-count window, so it is kept out of `windows` rather than
+        forced into that shape. No longer display-only since ADR-041 D5's
+        amendment of 2026-09-29: `exhausted` is read by
+        `guest_vendor_quota.guest_vendor_quota_refusal` to refuse a call on
+        this key, guest or owner, once the vendor's own daily gate trips.
+        `pct_used` arrives
         already on a 0-100 scale: the hub computes it as
         `round(min(spend/budget, 1) * 100, 1)` (coddy's plan,
         docs/plans/neuraldeep-usage.md:290-291; its own test uses 12.5 to

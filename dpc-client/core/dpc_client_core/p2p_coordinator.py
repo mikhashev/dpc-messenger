@@ -22,6 +22,7 @@ from .firewall import (
     onward_sharing_refusal,
 )
 from .node_ledger import NodeLedger, default_ledger, tariff_amount_for, usage_row
+from .guest_vendor_quota import guest_vendor_quota_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -385,7 +386,67 @@ class P2PCoordinator:
         aliases = providers if isinstance(providers, dict) else {}
         return firewall.classify_serving_lists({a: self._provider_type(a) for a in aliases})
 
-    def _vendor_quota_refusal(
+    def _account_id_of(self) -> Dict[str, Optional[str]]:
+        """Every loaded provider alias mapped to its vendor account id
+        (`CoreService._provider_account_id`), for `guest_vendor_quota`'s
+        account-siblings grouping. Local import: `service.py` imports this
+        module at load time, so the reverse import must stay inside a
+        function (the same pattern `_serving_lists` uses for `Gateway`)."""
+        from .service import CoreService
+
+        providers = getattr(getattr(self.service, "llm_manager", None), "providers", None)
+        if not isinstance(providers, dict):
+            return {}
+        return {
+            alias: CoreService._provider_account_id(alias, provider)
+            for alias, provider in providers.items()
+        }
+
+    async def _guest_vendor_quota_refusal(
+        self, peer_id: str, serving_alias: str,
+    ) -> Optional[tuple]:
+        """The guest ceiling on a subscription-billed vendor alias, in the
+        vendor's own request/token units (ADR-041 D5, amendment 2026-09-29).
+
+        Returns `None` to admit, or `(error text, code)` to refuse — the same
+        shape `_vendor_quota_refusal`'s money check returns, so both slot into
+        the same caller unchanged. Reads the provider's cached quota
+        (`get_balance()`, which coalesces and caches — no extra HTTP request
+        per call); a provider with no `get_balance` (no quota to read) admits
+        untouched, since only a quota-capable provider can even report
+        `billing_mode`.
+        """
+        provider = self._provider_for_alias(serving_alias)
+        get_balance = getattr(provider, "get_balance", None)
+        if get_balance is None:
+            return None
+        try:
+            balance = await get_balance()
+        except Exception:
+            logger.error(
+                "Peer door: get_balance() failed for '%s'; the guest ceiling on it cannot be "
+                "read", serving_alias, exc_info=True,
+            )
+            balance = {}
+        billing_mode = (balance or {}).get("billing_mode")
+        quota = (balance or {}).get("quota")
+        firewall = getattr(self.service, "firewall", None)
+        refusal = guest_vendor_quota_refusal(
+            alias=serving_alias,
+            caller=peer_id,
+            billing_mode=billing_mode,
+            quota=quota,
+            ledger=(self._ledger or default_ledger()),
+            account_id_of=self._account_id_of(),
+            request_quotas=getattr(firewall, "compute_vendor_request_quotas", {}) or {},
+            token_quotas=getattr(firewall, "compute_vendor_token_quotas", {}) or {},
+            owner_reserve=getattr(firewall, "compute_vendor_owner_reserve", {}) or {},
+        )
+        if refusal is None:
+            return None
+        return refusal["message"], refusal["code"], refusal.get("retry_after_sec")
+
+    async def _vendor_quota_refusal(
         self, peer_id: str, serving_alias: str,
     ) -> tuple[Optional[str], Optional[tuple]]:
         """The alias's class, and why this peer may not be served it today.
@@ -411,12 +472,20 @@ class P2PCoordinator:
         - `("local", None)` or `(None, None)` — not a vendor alias (a local
           one, or one on neither list, which the gate has already refused):
           admit, and the card's queue bounds it;
-        - `(owner, (error text, refusal code))` — refuse: `owner` is
-          `"vendor"` for `unrated` and `insufficient_quota`, and None only for
-          `misconfigured`, where the serving lists could not be classified.
+        - `(owner, (error text, refusal code, retry_after_sec))` — refuse:
+          `owner` is `"vendor"` for `unrated` and `insufficient_quota`, and
+          None only for `misconfigured`, where the serving lists could not be
+          classified. `retry_after_sec` is `None` except where a window reset
+          or UTC midnight is known (ADR-041 D5, amendment 2026-09-29).
 
-        Three refusals under three words, because only the ceiling refills by
-        itself.
+        On a subscription-billed vendor key, the money ceiling in
+        `compute.vendor_quotas` never trips (its rows are
+        `list_price_reference`, ADR-041 D3's amendment): a guest ceiling
+        counted in the vendor's own request/token units and its daily-capacity
+        gate (`_guest_vendor_quota_refusal`) is checked first and is the
+        binding one on that key. Four refusals under one word
+        (`insufficient_quota`) plus two others, because only the ceilings and
+        the daily gate refill by themselves.
         """
         from dpc_protocol.protocol import (
             REFUSAL_INSUFFICIENT_QUOTA,
@@ -433,6 +502,7 @@ class P2PCoordinator:
                 f"refused as a configuration error ({e}), and an alias whose class is unknown "
                 "is not served",
                 REFUSAL_MISCONFIGURED,
+                None,
             )
         owner = lists.owner_of(serving_alias) if isinstance(lists, ServingLists) else None
         if owner != "vendor":
@@ -448,7 +518,16 @@ class P2PCoordinator:
                 "against the daily ceiling in compute.vendor_quotas — an unpriced alias is "
                 "refused rather than served against a ceiling that would read zero for ever",
                 REFUSAL_UNRATED,
+                None,
             )
+        # The guest ceiling in the vendor's own units (ADR-041 D5, amendment
+        # 2026-09-29): binding on a subscription key, where the money check
+        # below never trips. Checked before the money ceiling so a
+        # subscription key's real scarcity — requests and the daily-capacity
+        # gate — is what a guest is told it hit.
+        guest_refusal = await self._guest_vendor_quota_refusal(peer_id, serving_alias)
+        if guest_refusal is not None:
+            return owner, guest_refusal
         # A vendor alias with no ceiling is refused when the rules are read, so
         # a missing one here is absent rather than unlimited.
         quota = float(lists.quotas.get(serving_alias) or 0.0)
@@ -472,6 +551,7 @@ class P2PCoordinator:
             "per caller); it is "
             "served again after midnight UTC",
             REFUSAL_INSUFFICIENT_QUOTA,
+            None,
         )
 
     def _tariff_for_call(
@@ -738,12 +818,13 @@ class P2PCoordinator:
         # not a call — and the guest learns only that its own ceiling is spent.
         # What is read is finished calls only: calls still running are not in
         # it, so parallel calls overrun the ceiling (see `_vendor_quota_refusal`).
-        owner, quota_refusal = self._vendor_quota_refusal(peer_id, serving_alias)
+        owner, quota_refusal = await self._vendor_quota_refusal(peer_id, serving_alias)
         if quota_refusal:
-            error_text, code = quota_refusal
+            error_text, code, retry_after_sec = quota_refusal
             logger.warning("Peer inference refused for %s: %s", peer_id, error_text)
             error_response = create_remote_inference_response(
                 request_id=request_id, error=error_text, code=code or None,
+                retry_after_sec=retry_after_sec,
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)

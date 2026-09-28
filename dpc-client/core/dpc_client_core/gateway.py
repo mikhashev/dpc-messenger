@@ -126,6 +126,7 @@ from dpc_protocol.protocol import PeerRefused
 from .dpc_agent.llm_adapter import DpcLlmAdapter
 from .dpc_agent.pricing import get_billing_model, price_call, vendor_ceiling_currency
 from .firewall import ServingLists
+from .guest_vendor_quota import guest_vendor_quota_refusal
 from .llm_manager import accepts_reasoning_effort, entry_point_for, flatten_messages
 from .node_ledger import (
     TARIFF_FIELDS,
@@ -536,11 +537,15 @@ UNSERVED_ROUTES = {
 class GatewayError(Exception):
     """A request refused or failed; `status` is what the shape layer answers with."""
 
-    def __init__(self, status: int, message: str, code: str = ""):
+    def __init__(self, status: int, message: str, code: str = "", retry_after_sec: Optional[float] = None):
         super().__init__(message)
         self.status = status
         self.message = message
         self.code = code
+        # Seconds until the refusal clears — a vendor window reset or UTC
+        # midnight (ADR-041 D5, amendment 2026-09-29). Set only where known;
+        # `_guard` turns it into a `Retry-After` header.
+        self.retry_after_sec = retry_after_sec
 
 
 class GatewayConfigError(ValueError):
@@ -948,14 +953,15 @@ class Gateway:
         caller = self.caller
         if owner == "vendor":
             currency = self._refuse_an_unpriced_vendor_alias(alias, providers[alias])
-            quota = lists.quotas[alias]
+            await self._refuse_vendor_daily_capacity_exhausted(alias, providers[alias])
+            money_quota = lists.quotas[alias]
             spent = ledger.spent_today(alias, caller=caller, caller_kind=CALLER_KIND, currency=currency)
-            if spent >= quota:
+            if spent >= money_quota:
                 raise GatewayError(
                     429,
                     f"model '{alias}' is refused: {caller} has spent {spent:.4f} {currency} of its "
-                    f"{quota:.2f} {currency} daily ceiling (compute.vendor_quotas); it is served again "
-                    "after midnight UTC",
+                    f"{money_quota:.2f} {currency} daily ceiling (compute.vendor_quotas); it is served "
+                    "again after midnight UTC",
                     "insufficient_quota",
                 )
             # Money bounds a vendor alias, not the card: no queue. The bound is
@@ -1015,6 +1021,45 @@ class Gateway:
             "refused rather than served against a ceiling that would read zero for ever",
             "unrated",
         )
+
+    async def _refuse_vendor_daily_capacity_exhausted(self, alias: str, provider: Any) -> None:
+        """The vendor's own daily money gate (ADR-041 D5, amendment
+        2026-09-29): on a subscription key, `compute.vendor_quotas`'s money
+        ceiling never trips (its rows are `list_price_reference`), but the
+        vendor's own wallet can still be exhausted for the day, and that binds
+        the owner's own gateway call too. Reads the provider's cached
+        `get_balance()` — no extra HTTP request. A provider with no
+        `get_balance`, or one that cannot read it right now, is not refused
+        here: this is the vendor's stop, not this node's, and an unread state
+        is not evidence of it.
+        """
+        get_balance = getattr(provider, "get_balance", None)
+        if get_balance is None:
+            return
+        try:
+            balance = await get_balance()
+        except Exception:
+            logger.error(
+                "Gateway: get_balance() failed for '%s'; the vendor daily-capacity gate cannot "
+                "be read", alias, exc_info=True,
+            )
+            return
+        refusal = guest_vendor_quota_refusal(
+            alias=alias,
+            caller=self.caller,
+            billing_mode=(balance or {}).get("billing_mode"),
+            quota=(balance or {}).get("quota"),
+            ledger=self._ledger or default_ledger(),
+            account_id_of={},
+            request_quotas={},
+            token_quotas={},
+            owner_reserve={},
+            is_owner_caller=True,
+        )
+        if refusal is not None:
+            raise GatewayError(
+                429, refusal["message"], refusal["code"], refusal.get("retry_after_sec"),
+            )
 
     def _refuse_images_the_alias_cannot_take(
         self, alias: str, provider: Any, images: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],
@@ -1498,9 +1543,10 @@ class Gateway:
 # --- the OpenAI shape ------------------------------------------------------------
 
 
-def _error(status: int, message: str, code: str = "") -> web.Response:
+def _error(status: int, message: str, code: str = "", retry_after_sec: Optional[float] = None) -> web.Response:
     body = {"error": {"message": message, "type": _ERROR_TYPES.get(status, "server_error"), "code": code or None}}
-    return web.json_response(body, status=status)
+    headers = {"Retry-After": str(int(retry_after_sec))} if retry_after_sec is not None else None
+    return web.json_response(body, status=status, headers=headers)
 
 
 def _output_tokens(completion: Completion) -> Tuple[int, Optional[int]]:
@@ -2266,7 +2312,7 @@ class GatewayServer:
             return await handler(request)
         except GatewayError as e:
             _log_refusal(request, e)
-            return error(e.status, e.message, e.code)
+            return error(e.status, e.message, e.code, e.retry_after_sec)
         except GatewayConfigError as e:
             # Its own arm because it is a `ValueError` and not a `GatewayError`,
             # and through the same helper so it leaves the same line.
@@ -2382,6 +2428,7 @@ class GatewayServer:
             # OpenAI has no error event; its clients surface an `error` object on a data line.
             await stream.write(_sse_data({"error": {
                 "message": e.message, "type": _ERROR_TYPES.get(e.status, "server_error"), "code": e.code or None,
+                "retry_after_sec": e.retry_after_sec,
             }}))
             await stream.write(b"data: [DONE]\n\n")
             return await stream.close()
@@ -2511,12 +2558,16 @@ class GatewayServer:
 # --- the Anthropic Messages shape ------------------------------------------------
 
 
-def _anthropic_error(status: int, message: str, code: str = "") -> web.Response:
+def _anthropic_error(
+    status: int, message: str, code: str = "", retry_after_sec: Optional[float] = None,
+) -> web.Response:
     """The same refusal `_error` renders, in the Anthropic envelope; `code` is
     accepted so the guard can call either renderer alike, and is not sent —
-    the envelope has no field for it."""
+    the envelope has no field for it. `retry_after_sec` becomes the same
+    `Retry-After` header regardless of envelope."""
     body = {"type": "error", "error": {"type": _ANTHROPIC_ERROR_TYPES.get(status, "api_error"), "message": message}}
-    return web.json_response(body, status=status)
+    headers = {"Retry-After": str(int(retry_after_sec))} if retry_after_sec is not None else None
+    return web.json_response(body, status=status, headers=headers)
 
 
 # The provider's OpenAI word in the Anthropic vocabulary. An unmapped word

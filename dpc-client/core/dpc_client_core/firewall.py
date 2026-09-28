@@ -84,6 +84,12 @@ def _known_tool_names() -> Optional[Set[str]]:
 SERVING_LOCAL_KEY = 'serving_local'
 SERVING_VENDOR_KEY = 'serving_vendor'
 VENDOR_QUOTAS_KEY = 'vendor_quotas'
+# ADR-041 D5, amendment 2026-09-29: the guest ceiling on a subscription-billed
+# vendor alias, counted in the vendor's own request/token units rather than
+# money (see guest_vendor_quota.py). Keyed by alias, like VENDOR_QUOTAS_KEY.
+VENDOR_REQUEST_QUOTAS_KEY = 'vendor_request_quotas'
+VENDOR_TOKEN_QUOTAS_KEY = 'vendor_token_quotas'
+VENDOR_OWNER_RESERVE_KEY = 'vendor_owner_reserve'
 SERVING_ALIAS_KEY = 'serving_alias'
 
 # Which provider types may stand in which list, by the resource they spend:
@@ -287,6 +293,24 @@ class ContextFirewall:
             for alias, quota in (compute.get(VENDOR_QUOTAS_KEY) or {}).items()
             if not alias.startswith('_')
         }
+        # ADR-041 D5, amendment 2026-09-29 — the guest ceiling in the vendor's
+        # own units. Shape validated in `_compute_list_errors`; read as-is
+        # here, ints already checked non-negative.
+        self.compute_vendor_request_quotas: Dict[str, Dict[str, int]] = {
+            alias: dict(entry)
+            for alias, entry in (compute.get(VENDOR_REQUEST_QUOTAS_KEY) or {}).items()
+            if not alias.startswith('_') and isinstance(entry, dict)
+        }
+        self.compute_vendor_token_quotas: Dict[str, Dict[str, int]] = {
+            alias: dict(entry)
+            for alias, entry in (compute.get(VENDOR_TOKEN_QUOTAS_KEY) or {}).items()
+            if not alias.startswith('_') and isinstance(entry, dict)
+        }
+        self.compute_vendor_owner_reserve: Dict[str, float] = {
+            alias: float(fraction)
+            for alias, fraction in (compute.get(VENDOR_OWNER_RESERVE_KEY) or {}).items()
+            if not alias.startswith('_')
+        }
         # The tariff (ADR-041 D3, amendment). The shape was checked above; here
         # it is only read. Entries stay in the order written — `tariff_for`
         # sorts — and a free list is a subset of its allow list by the check
@@ -418,6 +442,94 @@ class ContextFirewall:
                 )
 
         errors.extend(ContextFirewall._tariff_errors(compute))
+        errors.extend(ContextFirewall._vendor_guest_quota_errors(compute))
+        return errors
+
+    @staticmethod
+    def _vendor_guest_quota_errors(compute: Dict[str, Any]) -> List[str]:
+        """Shape checks for the guest ceiling on a subscription vendor key
+        (ADR-041 D5, amendment 2026-09-29). Whether an alias actually *has*
+        one of these entries is not checked here — a subscription alias with
+        none is refused at request time, not at load, because the load path
+        cannot tell a subscription key from a wallet one without a live read
+        of the provider (`guest_vendor_quota.py`)."""
+        errors: List[str] = []
+
+        def _non_negative_int(value: Any) -> bool:
+            return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+        request_quotas = compute.get(VENDOR_REQUEST_QUOTAS_KEY)
+        if request_quotas is not None:
+            if not isinstance(request_quotas, dict):
+                errors.append(
+                    f"'compute.{VENDOR_REQUEST_QUOTAS_KEY}' must be an object of alias -> "
+                    "{per_session, per_week}, request counts per guest"
+                )
+            else:
+                for alias, entry in request_quotas.items():
+                    if alias.startswith('_'):
+                        continue
+                    if not isinstance(entry, dict) or not entry:
+                        errors.append(
+                            f"'compute.{VENDOR_REQUEST_QUOTAS_KEY}.{alias}' must be an object "
+                            "with at least one of per_session, per_week"
+                        )
+                        continue
+                    for field in ("per_session", "per_week"):
+                        if field in entry and not _non_negative_int(entry[field]):
+                            errors.append(
+                                f"'compute.{VENDOR_REQUEST_QUOTAS_KEY}.{alias}.{field}' must be "
+                                f"a non-negative integer request count, got {entry[field]!r}"
+                            )
+                    unknown = set(entry) - {"per_session", "per_week"}
+                    if unknown:
+                        errors.append(
+                            f"'compute.{VENDOR_REQUEST_QUOTAS_KEY}.{alias}' has unknown field(s) "
+                            f"{sorted(unknown)!r}: only per_session, per_week"
+                        )
+
+        token_quotas = compute.get(VENDOR_TOKEN_QUOTAS_KEY)
+        if token_quotas is not None:
+            if not isinstance(token_quotas, dict):
+                errors.append(
+                    f"'compute.{VENDOR_TOKEN_QUOTAS_KEY}' must be an object of alias -> "
+                    "{per_day}, a token count per guest per UTC day"
+                )
+            else:
+                for alias, entry in token_quotas.items():
+                    if alias.startswith('_'):
+                        continue
+                    if not isinstance(entry, dict) or "per_day" not in entry:
+                        errors.append(
+                            f"'compute.{VENDOR_TOKEN_QUOTAS_KEY}.{alias}' must be an object with "
+                            "a per_day field"
+                        )
+                    elif not _non_negative_int(entry["per_day"]):
+                        errors.append(
+                            f"'compute.{VENDOR_TOKEN_QUOTAS_KEY}.{alias}.per_day' must be a "
+                            f"non-negative integer token count, got {entry['per_day']!r}"
+                        )
+
+        reserve = compute.get(VENDOR_OWNER_RESERVE_KEY)
+        if reserve is not None:
+            if not isinstance(reserve, dict):
+                errors.append(
+                    f"'compute.{VENDOR_OWNER_RESERVE_KEY}' must be an object of alias -> a "
+                    "fraction in [0, 1) of each vendor window kept for the owner"
+                )
+            else:
+                for alias, fraction in reserve.items():
+                    if alias.startswith('_'):
+                        continue
+                    if (
+                        isinstance(fraction, bool)
+                        or not isinstance(fraction, (int, float))
+                        or not (0 <= fraction < 1)
+                    ):
+                        errors.append(
+                            f"'compute.{VENDOR_OWNER_RESERVE_KEY}.{alias}' must be a fraction in "
+                            f"[0, 1), got {fraction!r}"
+                        )
         return errors
 
     @staticmethod

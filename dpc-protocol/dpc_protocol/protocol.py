@@ -218,6 +218,7 @@ def create_remote_inference_response(
     tool_calls: list = None,
     finish_reason: str = None,
     code: str = None,
+    retry_after_sec: float = None,
 ) -> Dict[str, Any]:
     """Creates a remote inference response message with optional token, model, and thinking metadata.
 
@@ -263,6 +264,12 @@ def create_remote_inference_response(
     the providers' own vocabulary (`stop`, `length`, `tool_calls`); a receiver
     rendering the Messages form converts it. Both optional, both v1.7, and
     neither is sent on an error.
+
+    `retry_after_sec` rides only on an error, and only where the host knows
+    when the refusal clears -- the vendor own window reset, or seconds to
+    UTC midnight for a daily gate (ADR-041 D5, amendment 2026-09-29). Absent
+    means the host has no such time; a receiver that does not read the field
+    is unaffected (additive, v1.8).
     """
     payload = {"request_id": request_id}
     if response is not None:
@@ -312,6 +319,8 @@ def create_remote_inference_response(
         payload["status"] = "error"
         if code:
             payload["code"] = code
+        if retry_after_sec is not None:
+            payload["retry_after_sec"] = retry_after_sec
     return {"command": "REMOTE_INFERENCE_RESPONSE", "payload": payload}
 
 def create_remote_transcription_request(

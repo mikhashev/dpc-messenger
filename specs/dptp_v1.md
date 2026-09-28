@@ -471,6 +471,8 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
 
   The two 503s carry no `Retry-After`: neither state ends with time, and a 429 there would set an auto-retrying client looping against a host only its owner can repair. Before the code every row above was the same 502, and an IDE could not tell a request it should fix from a door it should ask a person about.
 
+- `retry_after_sec` (number, optional, v1.8+): rides only on the error form, and only where the host knows when the refusal clears — the vendor's own window reset (`resets_at` minus the read window's length) or seconds to UTC midnight for a daily money gate (ADR-041 D5, amendment 2026-09-29, the per-guest ceiling counted in a subscription vendor's own request and token units). Absent means the host has no such time, which `misconfigured` and `unrated` never do. Additive: a receiver that does not read the field is unaffected, and the gateway's own `Retry-After` header for `insufficient_quota` (429) is set from it when present.
+
 ---
 
 ### 3.4.1 Remote Audio Transcription
