@@ -165,25 +165,18 @@ class ZaiProvider(AIProvider):
 
     # --- retry helpers ---
 
-    @staticmethod
-    def _is_retryable(error: Exception) -> bool:
+    @classmethod
+    def _is_retryable(cls, error: Exception) -> bool:
         err_str = str(error).lower()
-        # 1313 is the Coding Plan's Fair-Usage code. On the prepaid platform API it
-        # should be unreachable, so seeing it does not mean "retry later" — it means
-        # this call reached the subscription, which is the thing this provider exists
-        # to stop. Kept non-retryable, and shouted about at the call sites, because a
-        # retry would spend a second violation on the same mistake.
+        # 1313 is the Coding Plan's Fair-Usage code; unreachable on the prepaid
+        # platform API, so seeing it means "stop", not "retry later".
         if "1313" in err_str:
             return False
-        return any(indicator in err_str for indicator in [
-            "429", "500", "502", "503",
-            "bad gateway", "service unavailable", "internal server error",
-            "timed out", "timeout", "connection reset", "connection error",
-            "overloaded", "rate limit", "internal network failure",
-            "high traffic", "high concurrency", "high frequency",
-        ]) or isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in (
-            "APIConnectionError", "APITimeoutError", "InternalServerError",
-        )
+        if any(p in err_str for p in (
+            "internal network failure", "high traffic", "high concurrency", "high frequency",
+        )):
+            return True
+        return super()._is_retryable(error)
 
     def _on_non_retryable(self, error: Exception) -> None:
         """A 1313 from here is a canary, not a hiccup — say so at ERROR."""

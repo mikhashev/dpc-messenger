@@ -276,18 +276,14 @@ class DeepSeekProvider(AIProvider):
 
     # --- retry helpers (DeepSeek is pay-per-token; no 1313 Fair-Usage penalty) ---
 
-    @staticmethod
-    def _is_retryable(error: Exception) -> bool:
+    @classmethod
+    def _is_retryable(cls, error: Exception) -> bool:
         err_str = str(error).lower()
-        return any(indicator in err_str for indicator in [
-            "429", "500", "502", "503",
-            "bad gateway", "service unavailable", "internal server error",
-            "timed out", "timeout", "connection reset", "connection error",
-            "overloaded", "rate limit", "internal network failure",
-            "high traffic", "high concurrency", "high frequency",
-        ]) or isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in (
-            "APIConnectionError", "APITimeoutError", "InternalServerError",
-        )
+        if any(p in err_str for p in (
+            "internal network failure", "high traffic", "high concurrency", "high frequency",
+        )):
+            return True
+        return super()._is_retryable(error)
 
     @staticmethod
     def _normalize_effort(value: Optional[str]) -> Optional[str]:

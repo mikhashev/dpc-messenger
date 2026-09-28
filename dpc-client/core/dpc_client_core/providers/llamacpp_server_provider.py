@@ -26,6 +26,7 @@ dictionary comes from the model's jinja file.
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
@@ -520,24 +521,32 @@ class LlamaServerProvider(DeepSeekProvider):
             settings["variant"] = variant
         return settings
 
-    @staticmethod
-    def _is_retryable(error: Exception) -> bool:
-        """Connection-class failures only.
-
-        The template's refusal of an unknown effort word arrives as HTTP 500
-        with a deterministic jinja exception — retrying it burns the whole
-        backoff budget to hear the same refusal again, so `500`/`internal
-        server error` are deliberately absent from this list (they are present
-        in the DeepSeek version this class otherwise inherits from)."""
+    @classmethod
+    def _is_retryable(cls, error: Exception) -> bool:
+        """500 stays out of the retryable set: the template's refusal of an
+        unknown effort word arrives as HTTP 500 with a deterministic jinja
+        exception, and retrying it just burns the backoff budget to hear the
+        same refusal again."""
+        code = cls._error_status_code(error)
+        if code == 500:
+            return False
+        if code is not None:
+            return code in {429, 502, 503, 504}
+        if isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in (
+            "APIConnectionError", "APITimeoutError",
+        ):
+            return True
         err_str = str(error).lower()
-        return any(indicator in err_str for indicator in [
-            "429", "502", "503",
+        if "internal server error" in err_str:
+            return False
+        if any(p in err_str for p in (
             "bad gateway", "service unavailable",
             "timed out", "timeout", "connection reset", "connection error",
             "overloaded", "rate limit",
-        ]) or isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in (
-            "APIConnectionError", "APITimeoutError",
-        )
+        )):
+            return True
+        return bool(re.search(r'\b(429|502|503|504)\b', err_str) and
+                    any(w in err_str for w in ("status", "error code", "http")))
 
     @staticmethod
     def _speed_payload(

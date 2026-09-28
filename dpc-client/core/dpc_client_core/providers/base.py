@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import logging
+import re
 from typing import Dict, Any, Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
@@ -740,6 +741,38 @@ class AIProvider:
         A provider with something to say about a particular failure says it here
         rather than by owning a copy of the loop.
         """
+
+    _RETRYABLE_HTTP_STATUS = frozenset({429, 500, 502, 503, 504})
+    _RETRYABLE_EXC_TYPES = ("APIConnectionError", "APITimeoutError", "InternalServerError")
+    _RETRYABLE_TEXT_PHRASES = (
+        "bad gateway", "service unavailable", "internal server error",
+        "timed out", "timeout", "connection reset", "connection error",
+        "overloaded", "rate limit",
+    )
+
+    @staticmethod
+    def _error_status_code(error: Exception) -> Optional[int]:
+        code = getattr(error, "status_code", None)
+        if isinstance(code, int):
+            return code
+        response = getattr(error, "response", None)
+        code = getattr(response, "status_code", None) if response is not None else None
+        return code if isinstance(code, int) else None
+
+    @classmethod
+    def _is_retryable(cls, error: Exception) -> bool:
+        code = cls._error_status_code(error)
+        if code is not None:
+            return code in cls._RETRYABLE_HTTP_STATUS
+        if isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in cls._RETRYABLE_EXC_TYPES:
+            return True
+        err_str = str(error).lower()
+        if any(phrase in err_str for phrase in cls._RETRYABLE_TEXT_PHRASES):
+            return True
+        if re.search(r'\b(429|500|502|503|504)\b', err_str) and \
+                any(word in err_str for word in ("status", "error code", "http")):
+            return True
+        return False
 
     async def _retry_with_backoff(self, fn, last_error: Exception):
         """Retry `fn` on a growing delay until the wall-clock budget is spent.
