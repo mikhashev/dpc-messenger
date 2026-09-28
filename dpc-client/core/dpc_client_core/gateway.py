@@ -958,7 +958,13 @@ class Gateway:
                     "after midnight UTC",
                     "insufficient_quota",
                 )
-            # Money bounds a vendor alias, not the card: no queue.
+            # Money bounds a vendor alias, not the card: no queue. The bound is
+            # loose: `spent` is summed from rows `_call` appends after a call
+            # returns, so requests this caller has running at once all pass on
+            # the same figure and together overrun the ceiling by as many as run
+            # in parallel. Nothing here bounds that today; the caller is this
+            # node's own loopback client, and the peer door has the same gap
+            # (A-VENDOR-KEY-HAS-NO-PARALLEL-CAP-SO-GUESTS-CAN-EXHAUST-THE-VENDORS-LIMIT-AND-OVERRUN-THE-CEILING).
             return await self._call(alias, owner, prompt, ledger, caller, request_id,
                                     messages=messages, system=system, tools=tools, on_chunk=on_chunk,
                                     images=images, reasoning_effort=reasoning_effort)

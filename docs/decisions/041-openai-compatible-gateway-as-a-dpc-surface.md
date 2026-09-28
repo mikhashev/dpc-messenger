@@ -1143,7 +1143,10 @@ to the vendor.** A menu row carries `provider_kind` (`vendor` | `self_hosted`,
 DPTP §3.5) — the host's own statement of which list the alias stands on, read
 by the guest over its own type table — and the guest's screen shows «vendor
 model — your prompt goes to <vendor>» beside such a row, the vendor named from
-the row's `type`.
+the row's `type`. The guest's budget therefore repeats the host's word rather than
+judging for itself: `provider_facts._peer_facts` reads the row's `provider_kind` first
+and falls back to its own type table only for an older host that sends none, where an
+`openai_compatible` row, carrying no base_url, stays `unknown`.
 
 **What does not change.** A request naming no alias is still served
 `serving_local[0]` and never a vendor alias: a guest that chose nothing is not

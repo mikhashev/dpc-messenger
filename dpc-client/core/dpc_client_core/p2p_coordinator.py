@@ -405,10 +405,18 @@ class P2PCoordinator:
         refused: with the class unknown, «not a vendor alias» is a guess, and
         the wrong guess spends the host's money.
 
-        Returns `(owner, refusal)`: `owner` is `"local"`, `"vendor"` or None
-        where the lists could not say; `refusal` is `(error text, refusal
-        code)` or None — three refusals under three words, because only the
-        ceiling refills by itself.
+        Returns `(owner, refusal)`, one of:
+
+        - `("vendor", None)` — a vendor alias under its ceiling: admit;
+        - `("local", None)` or `(None, None)` — not a vendor alias (a local
+          one, or one on neither list, which the gate has already refused):
+          admit, and the card's queue bounds it;
+        - `(owner, (error text, refusal code))` — refuse: `owner` is
+          `"vendor"` for `unrated` and `insufficient_quota`, and None only for
+          `misconfigured`, where the serving lists could not be classified.
+
+        Three refusals under three words, because only the ceiling refills by
+        itself.
         """
         from dpc_protocol.protocol import (
             REFUSAL_INSUFFICIENT_QUOTA,
@@ -447,11 +455,15 @@ class P2PCoordinator:
         spent = (self._ledger or default_ledger()).spent_today(
             serving_alias, caller=peer_id, caller_kind=PEER_CALLER_KIND, currency=currency,
         )
-        # The call that crosses the line is served: the ceiling stops the call
-        # *after* the one that reached it, so the overrun is at most one call
-        # — and under streaming a call is long by construction, so «at most
-        # one» is not «by a little». A per-call ceiling is the other half and
-        # is not decided (ADR-041 D5, open).
+        # The call that crosses the line is served, and it is not the only one:
+        # this check reads rows `_record_peer_call` writes *after* a call
+        # returns, a vendor call takes no queue, and `_in_flight_requests` is
+        # keyed by request_id, so every call this peer has in flight at once
+        # passes on the same `spent`. The overrun is as many calls as the guest
+        # opens in parallel, each as long as streaming makes it; nothing at
+        # this door bounds that today
+        # (A-VENDOR-KEY-HAS-NO-PARALLEL-CAP-SO-GUESTS-CAN-EXHAUST-THE-VENDORS-LIMIT-AND-OVERRUN-THE-CEILING).
+        # A per-call ceiling is a separate half and is not decided (ADR-041 D5, open).
         if spent < quota:
             return owner, None
         return owner, (
@@ -699,7 +711,11 @@ class P2PCoordinator:
         # this door asks the same predicate here, before the router and before
         # any usage row: an alias that is somebody else's model is not served.
         # The key is the list the alias stands on, so the sentence names the
-        # list the owner has to edit.
+        # list the owner has to edit. It is read from the raw list, not from
+        # `_serving_lists().owner_of`: classification raises on this very
+        # predicate, so the classified owner is None exactly when this refusal
+        # applies. Membership is unambiguous — an alias on both lists is
+        # refused when the rules are read.
         vendor_list = getattr(self.service.firewall, "compute_serving_vendor", None) or ()
         list_key = SERVING_VENDOR_KEY if serving_alias in vendor_list else SERVING_LOCAL_KEY
         refusal = onward_sharing_refusal(list_key, serving_alias, self._provider_type(serving_alias))
@@ -720,6 +736,8 @@ class P2PCoordinator:
         # already spent on a vendor alias today is read from the ledger and
         # weighed against its ceiling. Nothing is written — a refused call is
         # not a call — and the guest learns only that its own ceiling is spent.
+        # What is read is finished calls only: calls still running are not in
+        # it, so parallel calls overrun the ceiling (see `_vendor_quota_refusal`).
         owner, quota_refusal = self._vendor_quota_refusal(peer_id, serving_alias)
         if quota_refusal:
             error_text, code = quota_refusal

@@ -717,9 +717,10 @@ Returns a list of AI providers available on the peer's system.
     model on the sender's own hardware). The sender's statement, which a receiver reads
     over any classification of its own by `type`: an `openai_compatible` alias may be
     either, and only the sender knows which list it filed it under. A receiver shows a
-    `vendor` row as a vendor's model before it calls. Absent on a row on neither list, a
-    transcription row among them, and on a sender that predates the field — absent is not
-    `self_hosted`
+    `vendor` row as a vendor's model before it calls. Present if and only if the alias is on
+    one of the sender's serving lists, so a transcription alias listed in
+    `compute.serving_local` carries `self_hosted`; absent on a row on neither list and on a
+    sender that predates the field — absent is not `self_hosted`
 
 ---
 

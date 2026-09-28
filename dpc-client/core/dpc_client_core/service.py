@@ -2585,8 +2585,10 @@ class CoreService:
         `compute.serving_local` — in the words of the guest's own runtime
         budget (`dpc_agent/provider_facts.py`), so a guest is told before it
         calls that a vendor model's prompt goes to that vendor, named by
-        `type` (Mike's call, 2026-09-28). Absent on an alias on neither list,
-        a transcription row among them. The host's word, not the type's: an
+        `type` (Mike's call, 2026-09-28). Present if and only if the alias is
+        on a serving list: a transcription alias listed in
+        `compute.serving_local` therefore carries `self_hosted`, and one on
+        neither list carries nothing. The host's word, not the type's: an
         `openai_compatible` alias may be a vendor or a server on the host's
         own card, and only the host knows which list it filed it under.
         """

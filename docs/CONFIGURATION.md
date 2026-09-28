@@ -425,6 +425,9 @@ partition. A tariff that applied over counts nobody could price (`tariff_unprice
 a call with no tariff declared at all (`untariffed`) are counted apart from the money and
 never added into it as a zero. The Inference Sharing tab of the firewall dialog reads
 `get_inference_usage` for the current month and shows the three series as three lists.
+Both shapes changed on 2026-09-28 with no version bump: a group's `cost_usd` became
+`cost` keyed per currency, with `cost_free` counted beside `unpriced`; the only caller in
+this tree is the UI (`InferenceUsage.svelte`, `get_inference_usage`).
 
 **Shape and limits.** `model` in a request is the alias; `/v1/models` lists the aliases
 with `owned_by` `local` or `vendor`. `stream: true` yields the text as it is made,
