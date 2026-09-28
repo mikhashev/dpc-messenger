@@ -1035,6 +1035,30 @@ export interface QuotaBlockedModel {
   reset_in_sec?: number | null;
 }
 
+/** `quota.daily_capacity` (`NeuralDeepProvider._daily_capacity_from_limits`):
+ *  a money-budget ceiling for the day, not a request-count window — coddy's
+ *  hub already computes `pct_used` on a 0-100 scale
+ *  (`round(min(spend/budget,1)*100,1)`, docs/plans/neuraldeep-usage.md:290-291),
+ *  so `0.1` means 0.1%, not 10%: never multiply it before display. */
+export interface QuotaDailyCapacity {
+  pct_used?: number | null;
+  exhausted?: boolean | null;
+  resets_at?: string | null;
+}
+
+/** `quota.night` (`NeuralDeepProvider._night_from_limits`): whether the
+ *  night capacity multiplier is active right now. The vendor's numbers
+ *  elsewhere in the payload are already effective with the multiplier
+ *  applied (coddy's plan, :156-157: "every number is already effective (the
+ *  night x2 is applied)") — `capacity_factor` is informational only, never
+ *  a factor to apply again. */
+export interface QuotaNight {
+  active?: boolean | null;
+  capacity_factor?: number | null;
+  window_start_msk?: number | null;
+  window_end_msk?: number | null;
+}
+
 export interface ProviderQuota {
   tier?: string | null;
   billing_mode?: string | null;
@@ -1045,6 +1069,8 @@ export interface ProviderQuota {
   parallel_limit?: number | null;
   observed_at?: string | null;
   blocked_models?: QuotaBlockedModel[] | null;
+  daily_capacity?: QuotaDailyCapacity | null;
+  night?: QuotaNight | null;
 }
 
 /** One balance entry, exactly what `get_provider_balance(alias)` /
@@ -1121,12 +1147,43 @@ export interface ProviderBalancesResponse {
   message?: string;
 }
 
+/** Whether a balance result actually answered — `status: 'success'` and no
+ *  `balance.error` — as opposed to a failed read (wrong key, blocked,
+ *  unreachable). Two failed reads of two different keys usually look alike
+ *  (the same error, or both a 0.00 that a broken read reports as the
+ *  balance): that resemblance is not evidence they are the same wallet, so a
+ *  failed result is never merged into another row by resemblance. */
+function isBalanceResultSuccessful(result: BalanceResult): boolean {
+  return result.status === 'success' && !result.balance?.error;
+}
+
+/** The three fields that decide whether two *successful* results of the same
+ *  provider type are one wallet or two: currency, the balance figure itself,
+ *  and billing mode. Two aliases of one vendor sharing a key answer with the
+ *  same three every time; two different keys of that vendor answering with
+ *  the same three at the moment of the read is the coincidence a merge
+ *  should not risk — but there is no better signal without the backend's own
+ *  `accounts` grouping, so equality on these three is what this fallback
+ *  goes by. `null` when the result carries nothing to compare (no
+ *  balance_infos), which never matches anything, including itself. */
+function successResultSignature(result: BalanceResult): string | null {
+  const info = result.balance?.balance_infos?.[0];
+  if (!info || typeof info.total_balance !== 'string') return null;
+  const billingMode = result.balance?.quota?.billing_mode ?? result.balance?.billing_mode ?? '';
+  return `${info.currency ?? ''}|${info.total_balance}|${billingMode}`;
+}
+
 /** The rows a Sidebar or ProvidersEditor renders: the backend's own `accounts`
  *  when it sent one (even an empty array — that is a real "nothing configured"
  *  answer, not a signal to fall back). Otherwise one row per provider type,
  *  from `typeOf` (alias → type, from the providers list): a vendor's wallet is
  *  shared by every model on it, so a row per alias would repeat one balance
- *  under several names. An alias of unknown type keeps a row of its own. */
+ *  under several names — but only while every alias merged into it actually
+ *  agrees (see `successResultSignature`). A failed read, or a successful one
+ *  whose currency/balance/billing_mode differs from what is already in that
+ *  type's row, gets a row of its own labelled `<Vendor> (<alias>)` instead of
+ *  silently taking on the first alias's numbers. An alias of unknown type
+ *  keeps a row of its own too. */
 export function accountRowsFromBalances(
   response: ProviderBalancesResponse | null | undefined,
   typeOf: (alias: string) => string | null | undefined = () => null,
@@ -1134,18 +1191,41 @@ export function accountRowsFromBalances(
   if (response?.accounts) return response.accounts;
   const balances = response?.balances ?? {};
   const rows = new Map<string, AccountRow>();
+  // type -> signature of the row currently merged under `type:<type>`, so a
+  // later alias of the same type can tell whether it still agrees.
+  const mergedSignature = new Map<string, string>();
   for (const [alias, result] of Object.entries(balances)) {
     const type = typeOf(alias);
-    const key = type ? `type:${type}` : `alias:${alias}`;
-    const row = rows.get(key);
-    if (row) {
-      row.aliases.push(alias);
-      continue;
+    const successful = type ? isBalanceResultSuccessful(result) : false;
+    const sig = successful ? successResultSignature(result) : null;
+    const typeKey = type ? `type:${type}` : null;
+
+    if (typeKey && sig !== null) {
+      const existingSig = mergedSignature.get(typeKey);
+      if (existingSig === undefined) {
+        mergedSignature.set(typeKey, sig);
+        rows.set(typeKey, {
+          account: typeKey,
+          provider_type: type ?? undefined,
+          label: providerTypeLabel(type),
+          aliases: [alias],
+          result,
+        });
+        continue;
+      }
+      if (existingSig === sig) {
+        rows.get(typeKey)!.aliases.push(alias);
+        continue;
+      }
+      // Same type, but this alias's number disagrees with the row already
+      // built for it: it gets its own row rather than being folded in.
     }
+
+    const key = `alias:${alias}`;
     rows.set(key, {
       account: key,
       provider_type: type ?? undefined,
-      label: type ? providerTypeLabel(type) : alias,
+      label: type ? `${providerTypeLabel(type)} (${alias})` : alias,
       aliases: [alias],
       result,
     });
@@ -1200,7 +1280,11 @@ export function quotaLevel(quota: ProviderQuota | null | undefined): BalanceLeve
   if (!quota) return 'neutral';
   if (quota.can_request === false) return 'critical';
   if ((quota.blockers ?? []).length > 0) return 'critical';
+  if (quota.daily_capacity?.exhausted) return 'critical';
   if ((quota.windows ?? []).some((w) => quotaWindowIsWarning(w))) return 'low';
+  if (typeof quota.daily_capacity?.pct_used === 'number' && quota.daily_capacity.pct_used >= QUOTA_WARN_PERCENT) {
+    return 'low';
+  }
   return 'neutral';
 }
 
@@ -1454,6 +1538,14 @@ export function formatQuotaLine(balance: BalanceResult['balance'] | null | undef
       if (line) parts.push(line);
     }
     if (typeof quota.parallel_limit === 'number') parts.push(`${quota.parallel_limit} parallel`);
+    const cap = quota.daily_capacity;
+    if (cap && typeof cap.pct_used === 'number') {
+      const resets = localResetTime(cap.resets_at);
+      parts.push(`day ${cap.pct_used}%${resets ? ` (resets ${resets})` : ''}`);
+    }
+    if (quota.night?.active) {
+      parts.push('night hours: limits doubled, already counted');
+    }
   }
   const info = balance.balance_infos?.[0];
   if (info && typeof info.total_balance === 'string') {

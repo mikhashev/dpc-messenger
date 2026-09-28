@@ -1082,6 +1082,29 @@ describe('formatQuotaLine', () => {
     expect(formatQuotaLine(null)).toBe('');
     expect(formatQuotaLine(undefined)).toBe('');
   });
+
+  it('daily_capacity renders pct_used as-is, never multiplied (it is already 0-100)', () => {
+    const balance = subscriptionBalance();
+    balance.quota!.daily_capacity = { pct_used: 0.1, exhausted: false, resets_at: '2026-09-29T00:00:00Z' };
+    const line = formatQuotaLine(balance);
+    expect(line).toContain('day 0.1%');
+    expect(line).not.toContain('day 10%');
+  });
+
+  it('night only renders while active, and says the numbers are already counted', () => {
+    const balance = subscriptionBalance();
+    balance.quota!.night = { active: true, capacity_factor: 2, window_start_msk: 0, window_end_msk: 6 };
+    const line = formatQuotaLine(balance);
+    expect(line).toContain('already counted');
+    expect(line).not.toContain('night ×2');
+  });
+
+  it('night is silent when not active', () => {
+    const balance = subscriptionBalance();
+    balance.quota!.night = { active: false, capacity_factor: 2, window_start_msk: 0, window_end_msk: 6 };
+    const line = formatQuotaLine(balance);
+    expect(line).not.toContain('night');
+  });
 });
 
 describe('formatQuotaBlockers', () => {
@@ -1228,6 +1251,48 @@ describe('accountRowsFromBalances', () => {
     expect(accountRowsFromBalances(null)).toEqual([]);
     expect(accountRowsFromBalances({ status: 'error', message: 'x' })).toEqual([]);
   });
+
+  it('two different keys of one vendor with different balances get their own rows, not a merged one', () => {
+    const keyA: BalanceResult = {
+      status: 'success', alias: 'ds_a',
+      balance: { is_available: true, balance_infos: [{ currency: 'USD', total_balance: '10.53' }] },
+    };
+    const keyB: BalanceResult = {
+      status: 'success', alias: 'ds_b',
+      balance: { is_available: true, balance_infos: [{ currency: 'USD', total_balance: '42.00' }] },
+    };
+    const types: Record<string, string> = { ds_a: 'deepseek', ds_b: 'deepseek' };
+    const rows = accountRowsFromBalances({
+      status: 'success',
+      balances: { ds_a: keyA, ds_b: keyB },
+    }, (alias) => types[alias]);
+    // The first alias seen seeds the type's row as usual; the second, whose
+    // number disagrees, gets its own row instead of overwriting it.
+    expect(rows).toEqual([
+      { account: 'type:deepseek', provider_type: 'deepseek', label: 'DeepSeek', aliases: ['ds_a'], result: keyA },
+      { account: 'alias:ds_b', provider_type: 'deepseek', label: 'DeepSeek (ds_b)', aliases: ['ds_b'], result: keyB },
+    ]);
+  });
+
+  it('two different keys of one vendor that both failed stay two rows, not merged by matching errors', () => {
+    const failA: BalanceResult = {
+      status: 'error', alias: 'ds_a', message: 'key_rejected',
+      balance: { is_available: false, balance_infos: [], error: 'key_rejected' },
+    };
+    const failB: BalanceResult = {
+      status: 'error', alias: 'ds_b', message: 'key_rejected',
+      balance: { is_available: false, balance_infos: [], error: 'key_rejected' },
+    };
+    const types: Record<string, string> = { ds_a: 'deepseek', ds_b: 'deepseek' };
+    const rows = accountRowsFromBalances({
+      status: 'success',
+      balances: { ds_a: failA, ds_b: failB },
+    }, (alias) => types[alias]);
+    expect(rows).toEqual([
+      { account: 'alias:ds_a', provider_type: 'deepseek', label: 'DeepSeek (ds_a)', aliases: ['ds_a'], result: failA },
+      { account: 'alias:ds_b', provider_type: 'deepseek', label: 'DeepSeek (ds_b)', aliases: ['ds_b'], result: failB },
+    ]);
+  });
 });
 
 describe('providerTypeLabel', () => {
@@ -1262,7 +1327,7 @@ describe('walletLevel — per-currency thresholds', () => {
     expect(walletLevel('USD', 0.99, true)).toBe('critical');
   });
 
-  it("RUB uses its own two-orders-of-magnitude thresholds (Mike's call, 2026-09-28)", () => {
+  it('RUB uses its own two-orders-of-magnitude thresholds (a placeholder CC picked 2026-09-28, awaiting the owner)', () => {
     expect(BALANCE_LEVEL_THRESHOLDS.RUB).toEqual({ low: 300, critical: 100 });
     expect(walletLevel('RUB', 500.0, true)).toBe('ok');
     expect(walletLevel('RUB', 299.99, true)).toBe('low');
@@ -1314,6 +1379,30 @@ describe('quotaLevel — subscription wallets are judged by the quota, not the w
     const quota: ProviderQuota = {
       can_request: true, blockers: [],
       windows: [{ name: '3h', unit: 'requests', used: 14, limit: 400 }],
+    };
+    expect(quotaLevel(quota)).toBe('neutral');
+  });
+
+  it('an exhausted daily_capacity is critical', () => {
+    const quota: ProviderQuota = {
+      can_request: true, blockers: [],
+      daily_capacity: { pct_used: 100, exhausted: true, resets_at: null },
+    };
+    expect(quotaLevel(quota)).toBe('critical');
+  });
+
+  it('daily_capacity pct_used at or past the warning threshold is low', () => {
+    const quota: ProviderQuota = {
+      can_request: true, blockers: [],
+      daily_capacity: { pct_used: 82, exhausted: false, resets_at: null },
+    };
+    expect(quotaLevel(quota)).toBe('low');
+  });
+
+  it('daily_capacity below the warning threshold does not push the level up', () => {
+    const quota: ProviderQuota = {
+      can_request: true, blockers: [],
+      daily_capacity: { pct_used: 12.5, exhausted: false, resets_at: null },
     };
     expect(quotaLevel(quota)).toBe('neutral');
   });
