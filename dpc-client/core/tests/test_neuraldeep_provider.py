@@ -711,7 +711,10 @@ async def test_retry_after_is_capped_at_five_minutes(monkeypatch):
         503, headers={"Retry-After": "3600"}, json={"detail": "busy"}))
     p = _make()
     await _REAL_GET_BALANCE(p)
-    assert p._limits_backoff_until - p._limits_last_attempt_at <= timedelta(minutes=5)
+    # The attempt is stamped before the request and the backoff after the
+    # response, so the gap is the cap plus the fetch time — a second covers it
+    # while a 3600 s Retry-After left uncapped would still fail.
+    assert p._limits_backoff_until - p._limits_last_attempt_at <= timedelta(minutes=5, seconds=1)
 
 
 @pytest.mark.asyncio
