@@ -40,7 +40,7 @@ def test_stats_footer_matches_the_uis_four_rows():
     text = build_stats_footer(SESSION_STATE)
     lines = text.splitlines()
     assert lines[0].startswith("DIALOG")
-    assert "4,818" in lines[0] and "938,609" in lines[0] and "(1%)" in lines[0]
+    assert "≈4,818" in lines[0] and "938,609" in lines[0] and "(1%)" in lines[0]
     assert lines[1].startswith("TOTAL")
     assert "66,209" in lines[1] and "1,000,000" in lines[1] and "(7%)" in lines[1]
     assert lines[2].startswith("NON-DIALOG") and "≈61,391" in lines[2]
@@ -75,6 +75,16 @@ def test_neuraldeep_subscription_quota_line():
         },
     }
     assert format_balance_line("NeuralDeep", balance) == "NeuralDeep free · 3h 4% · day 0.1%"
+
+
+def test_daily_capacity_pct_used_as_a_bool_is_not_shown_as_a_day_percent():
+    """`isinstance(x, (int, float))` accepts `bool` (a `bool` is an `int`
+    subclass in Python) — a `daily_capacity.pct_used` of `True` must not
+    render as "day True%"."""
+    from dpc_client_core.telegram_footer import format_quota_line
+    quota = {"tier": "free", "daily_capacity": {"pct_used": True}}
+    assert "True" not in format_quota_line(quota)
+    assert "day" not in format_quota_line(quota)
 
 
 def test_local_provider_without_supports_balance_has_no_balance_line():

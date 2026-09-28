@@ -100,7 +100,11 @@ def build_stats_footer(
     label = non_dialog_label(context_agent, breakdown).upper()
 
     lines = [
-        f"DIALOG      {_fmt_int(effective_history)} / {_fmt_int(dialog_available)} ({round(dialog_pct)}%)",
+        # DIALOG is an estimate too: effective_history is history_tokens, the
+        # chars/4 estimator (module docstring), clamped against the measured
+        # total — never itself measured. NON-DIALOG already carries "≈" for
+        # the same reason; DIALOG gets it here to match.
+        f"DIALOG      ≈{_fmt_int(effective_history)} / {_fmt_int(dialog_available)} ({round(dialog_pct)}%)",
         f"TOTAL       {_fmt_int(tokens_after)} / {_fmt_int(effective_limit)} ({round(total_pct)}%)",
         f"{label:<10} ≈{_fmt_int(static_memory)}",
         f"MESSAGES    {message_count}",
@@ -161,8 +165,9 @@ def format_quota_line(quota: Dict[str, Any]) -> str:
     if isinstance(quota.get("parallel_limit"), (int, float)):
         parts.append(f"{int(quota['parallel_limit'])} parallel")
     cap = quota.get("daily_capacity") or {}
-    if isinstance(cap.get("pct_used"), (int, float)):
-        parts.append(f"day {cap['pct_used']}%")
+    pct_used = cap.get("pct_used")
+    if isinstance(pct_used, (int, float)) and not isinstance(pct_used, bool):
+        parts.append(f"day {pct_used}%")
     if (quota.get("night") or {}).get("active"):
         parts.append("night hours: limits doubled, already counted")
     return " · ".join(parts)
