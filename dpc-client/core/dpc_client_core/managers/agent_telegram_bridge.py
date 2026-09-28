@@ -1241,7 +1241,13 @@ Send a voice message and it will be transcribed and processed\\.
 
         balance_label, balance = None, None
         service = getattr(agent_manager, "service", None)
-        provider_alias = (getattr(agent_manager, "config", None) or {}).get("provider_alias")
+        # The alias that actually served this reply, not the agent's
+        # configured default — a mid-session Main LLM switch, or a reply
+        # served via a per-agent provider override, means those two can
+        # differ, and showing the configured one's wallet mislabels whose
+        # balance the reply spent. When the serving alias cannot be
+        # determined, the balance line is omitted rather than guessed.
+        provider_alias = session_state.get("serving_provider_alias")
         if service and provider_alias:
             try:
                 payload = await asyncio.wait_for(service.get_provider_balances(), timeout=3.0)

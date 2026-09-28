@@ -1495,6 +1495,16 @@ class DpcAgentManager:
         # is its last request in any chat.
         context_breakdown = getattr(self, "_last_breakdowns", {}).get(conversation_id)
 
+        # The alias that actually served the last reply in this agent — from
+        # the agent instance `process_message` last ran (which, on a
+        # per-agent provider override, is not `self.agent`/`self.config`),
+        # read off its own LLM adapter rather than the possibly-stale
+        # `provider_alias` in config (S148 follow-up, Telegram footer balance
+        # line).
+        _last_agent = getattr(self, "_last_used_agent", None)
+        _get_serving_alias = getattr(_last_agent, "last_serving_provider_alias", None)
+        serving_provider_alias = _get_serving_alias() if callable(_get_serving_alias) else None
+
         return {
             "history_tokens": history_tokens,
             "history_usage_percent": round(history_tokens / token_limit * 100, 2) if token_limit else 0,
@@ -1506,6 +1516,7 @@ class DpcAgentManager:
             "tokens_limit": token_limit,
             "messages_count": len(monitor.message_history),
             "context_breakdown": context_breakdown,
+            "serving_provider_alias": serving_provider_alias,
         }
 
     def reset_conversation(self, conversation_id: str) -> bool:

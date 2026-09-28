@@ -112,6 +112,13 @@ class DpcLlmAdapter:
     _caller_kind: str = "agent"
     _ledger: Optional[NodeLedger] = None
     _last_call: Optional[Dict[str, Any]] = None
+    # The alias the last `chat()` call actually served with — set from the
+    # same `facts`/`self._provider_alias` resolution the usage row is priced
+    # and written with, so a reader after the call (the Telegram footer, S148
+    # follow-up) reports the account this reply really billed, not whatever
+    # `self._provider_alias` has drifted to since (a mid-session Main LLM
+    # switch, or a per-agent provider override).
+    _last_serving_alias: Optional[str] = None
 
     def __init__(
         self,
@@ -382,6 +389,7 @@ class DpcLlmAdapter:
         facts = self._last_call or {}
         try:
             alias = facts.get("alias") or self._provider_alias
+            self._last_serving_alias = alias
             model = facts["model"] if "model" in facts else self.default_model()
             row = usage_row(
                 # The wire id on the peer route, so both nodes' rows join on it.

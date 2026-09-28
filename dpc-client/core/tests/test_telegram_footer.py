@@ -29,6 +29,7 @@ SESSION_STATE = {
     "tokens_limit": 1_000_000,
     "messages_count": 6,
     "context_breakdown": None,
+    "serving_provider_alias": "ds1",
 }
 
 
@@ -112,13 +113,17 @@ def _ctx():
     return SimpleNamespace(bot=SimpleNamespace(send_chat_action=AsyncMock()))
 
 
-def _bridge_with_agent_manager(get_balances=None):
+def _bridge_with_agent_manager(get_balances=None, session_state=None):
     bridge = AgentTelegramBridge(bot_token="t", allowed_chat_ids=[CHAT])
     bridge._enabled = True
     bridge._bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
     service = SimpleNamespace(get_provider_balances=get_balances) if get_balances else SimpleNamespace()
+    state = dict(session_state) if session_state is not None else dict(SESSION_STATE)
     agent_manager = SimpleNamespace(
-        get_session_state=lambda conv_id: dict(SESSION_STATE),
+        get_session_state=lambda conv_id: dict(state),
+        # The agent's *configured* default — deliberately different from
+        # SESSION_STATE's "serving_provider_alias" in the mismatch test below,
+        # so a footer built from this field instead would be caught.
         config={"provider_alias": "ds1"},
         service=service,
     )
@@ -146,6 +151,61 @@ async def test_reply_carries_the_footer_after_the_text():
     texts = _texts(update)
     assert texts[0] == "Done."
     assert "DIALOG" in texts[-1] and "DeepSeek USD 10.42" in texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_mid_session_provider_switch_shows_the_alias_that_served_not_the_configured_one():
+    """The agent is configured for "ds1" (the fixture's config, per
+    `_bridge_with_agent_manager`), but this reply was actually served by a
+    provider switched to mid-session — "zai2". The footer must show zai2's
+    account, never ds1's, and must not silently show ds1's balance for a
+    reply zai2 produced (S148 follow-up, MAIN)."""
+    async def balances():
+        return {"accounts": [
+            {"aliases": ["ds1"], "label": "DeepSeek",
+             "result": {"status": "success",
+                        "balance": {"is_available": True,
+                                    "balance_infos": [{"currency": "USD", "total_balance": "10.42"}]}}},
+            {"aliases": ["zai2"], "label": "Z.AI",
+             "result": {"status": "success",
+                        "balance": {"is_available": True,
+                                    "balance_infos": [{"currency": "USD", "total_balance": "3.14"}]}}},
+        ]}
+
+    state = dict(SESSION_STATE)
+    state["serving_provider_alias"] = "zai2"
+    bridge = _bridge_with_agent_manager(get_balances=balances, session_state=state)
+    bridge._message_handler = AsyncMock(return_value="Done.")
+    update = _update()
+    await bridge._handle_message(update, _ctx())
+
+    texts = _texts(update)
+    assert "Z.AI USD 3.14" in texts[-1]
+    assert "DeepSeek" not in texts[-1] and "10.42" not in texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_when_the_serving_alias_is_unknown_the_balance_line_is_omitted():
+    """No `serving_provider_alias` in session_state (e.g. before any reply
+    has been produced) means the account that answered cannot be named — the
+    footer must omit the balance line rather than fall back to guessing from
+    the agent's static config."""
+    async def balances():
+        return {"accounts": [{"aliases": ["ds1"], "label": "DeepSeek",
+                               "result": {"status": "success",
+                                          "balance": {"is_available": True,
+                                                      "balance_infos": [{"currency": "USD", "total_balance": "10.42"}]}}}]}
+
+    state = dict(SESSION_STATE)
+    state.pop("serving_provider_alias", None)
+    bridge = _bridge_with_agent_manager(get_balances=balances, session_state=state)
+    bridge._message_handler = AsyncMock(return_value="Done.")
+    update = _update()
+    await bridge._handle_message(update, _ctx())
+
+    texts = _texts(update)
+    assert "DIALOG" in texts[-1]
+    assert "DeepSeek" not in texts[-1] and "10.42" not in texts[-1]
 
 
 @pytest.mark.asyncio

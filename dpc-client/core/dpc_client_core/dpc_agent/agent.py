@@ -302,6 +302,14 @@ class DpcAgent:
         """Attach this agent to a remote peer, or detach it, at runtime — the counterpart of `set_provider_alias`, without which a model switch left the running adapter pinned to the previous peer."""
         self.llm.set_compute_host(compute_host)
 
+    def last_serving_provider_alias(self) -> Optional[str]:
+        """The provider alias that actually answered this agent's most recent
+        `process()` call — from the LLM adapter's own usage-row bookkeeping,
+        not `self._provider_alias`, which is the current configuration and may
+        have moved on since (a mid-session Main LLM switch, or a reply served
+        by a different per-agent provider override). None before any call."""
+        return getattr(self.llm, "_last_serving_alias", None)
+
     async def process(
         self,
         message: str,
