@@ -278,6 +278,12 @@ class DeepSeekProvider(AIProvider):
 
     @classmethod
     def _is_retryable(cls, error: Exception) -> bool:
+        # Status first: a carried status code is decisive (the base class's
+        # table), so a deterministic 4xx whose body happens to quote one of
+        # the phrases below is never retried. Phrases are consulted only when
+        # no status code is available at all.
+        if cls._error_status_code(error) is not None:
+            return super()._is_retryable(error)
         err_str = str(error).lower()
         if any(p in err_str for p in (
             "internal network failure", "high traffic", "high concurrency", "high frequency",

@@ -169,9 +169,16 @@ class ZaiProvider(AIProvider):
     def _is_retryable(cls, error: Exception) -> bool:
         err_str = str(error).lower()
         # 1313 is the Coding Plan's Fair-Usage code; unreachable on the prepaid
-        # platform API, so seeing it means "stop", not "retry later".
+        # platform API, so seeing it means "stop", not "retry later" —
+        # checked before anything else, status code included.
         if "1313" in err_str:
             return False
+        # Status next: a carried status code is decisive (the base class's
+        # table), so a deterministic 4xx whose body happens to quote one of
+        # the phrases below is never retried. Phrases are consulted only
+        # when no status code is available at all.
+        if cls._error_status_code(error) is not None:
+            return super()._is_retryable(error)
         if any(p in err_str for p in (
             "internal network failure", "high traffic", "high concurrency", "high frequency",
         )):

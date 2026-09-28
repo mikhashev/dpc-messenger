@@ -72,3 +72,24 @@ def test_deepseek_still_retries_its_own_extra_phrases():
 def test_zai_1313_stays_non_retryable_even_with_a_429_status_code():
     err = _err_with_status(429, "code 1313 fair usage")
     assert ZaiProvider._is_retryable(err) is False
+
+
+def test_deepseek_deterministic_400_quoting_a_phrase_is_not_retried():
+    # A status code is decisive; a phrase in the body must not override it.
+    err = _err_with_status(400, "high traffic on our end, please slow down")
+    assert DeepSeekProvider._is_retryable(err) is False
+
+
+def test_deepseek_phrase_without_a_status_code_is_still_retried():
+    err = Exception("high traffic on our end, please slow down")
+    assert DeepSeekProvider._is_retryable(err) is True
+
+
+def test_zai_deterministic_400_quoting_a_phrase_is_not_retried():
+    err = _err_with_status(400, "high traffic on our end, please slow down")
+    assert ZaiProvider._is_retryable(err) is False
+
+
+def test_zai_phrase_without_a_status_code_is_still_retried():
+    err = Exception("high traffic on our end, please slow down")
+    assert ZaiProvider._is_retryable(err) is True
