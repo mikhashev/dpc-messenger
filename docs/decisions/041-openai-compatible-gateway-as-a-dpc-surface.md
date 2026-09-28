@@ -1191,10 +1191,13 @@ successful or not, so a failing endpoint is never hit faster than that even
 with no cache to fall back on; a schema version guards against a silently
 renamed or dropped vendor field being read as "nothing left" rather than as
 unreadable; a 401 is sticky (the key itself is wrong, no further attempts
-until the provider is re-created) while a 403 or any other non-2xx backs off
-on the vendor's `Retry-After` capped at 5 minutes, or the full 5 minutes
-absent one — 403 is not sticky because a blocked key is not necessarily a
-wrong one. Concurrent readers on one provider instance (`get_balance`, the
+until the provider is re-created) while a 403 backs off for the full 5
+minutes even absent a vendor `Retry-After` (a blocked key is not necessarily
+a wrong one, so it is not sticky like a 401 — but it also is not assumed to
+clear soon). Any other non-2xx only pauses when the vendor sends
+`Retry-After`, capped at the same 5 minutes; without one it falls back to the
+15s floor between attempts, not a 5-minute wait. Concurrent readers on one
+provider instance (`get_balance`, the
 daily `billing_mode` re-check, the `get_provider_balances` fan-out) join one
 in-flight fetch rather than each starting their own, and a reader that is
 itself cancelled mid-fetch still resolves every joiner instead of leaving them

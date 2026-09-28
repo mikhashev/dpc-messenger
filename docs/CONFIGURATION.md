@@ -1774,8 +1774,9 @@ sync_interval = 600          # Sync every 10 minutes
 ## Balance / Quota Commands (WebSocket API)
 
 Two read-only commands query a balance-capable provider's `get_balance()`
-(pay-per-use providers: DeepSeek, NeuralDeep, Z.AI; a subscription or local
-provider answers `unsupported`).
+(`supports_balance()` returns `True` only for DeepSeek and NeuralDeep;
+Z.AI, llama.cpp and every other provider answer `unsupported` — Z.AI's
+prepaid balance is not read through this path yet).
 
 - **`get_provider_balance(alias=None)`** — one provider: the named `alias`,
   or the agent/default provider when `alias` is omitted. Returns
@@ -1786,7 +1787,10 @@ provider answers `unsupported`).
   so two aliases sharing a key are read once, not twice; `accounts` is
   `[{account, provider_type, label, aliases, result}]`, where `account` is a
   provider type, its base_url, and a truncated hash of the key — never the
-  key itself. `balances` (by alias) is kept for backward compatibility; one
+  key itself. That hash is a sha256 prefix of the API key, meant to let the
+  loopback UI tell two keys of the same vendor apart; it is a key
+  fingerprint, not an opaque id, and must never be forwarded off the node.
+  `balances` (by alias) is kept for backward compatibility; one
   alias's failure is that alias's own error entry, never a failure of the
   whole call.
 
