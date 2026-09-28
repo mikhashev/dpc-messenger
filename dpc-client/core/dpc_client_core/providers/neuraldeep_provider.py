@@ -1,5 +1,6 @@
 # dpc_client_core/providers/neuraldeep_provider.py
 
+import asyncio
 import os
 import json
 import logging
@@ -215,6 +216,11 @@ class NeuralDeepProvider(AIProvider):
         self._limits_last_attempt_at: Optional[datetime] = None
         self._limits_key_rejected = False
         self._limits_backoff_until: Optional[datetime] = None
+        # Concurrent readers (get_balance, _billing_mode_now, the
+        # get_provider_balances fan-out) join this fetch instead of each
+        # starting their own — coddy's `inflight` (internal/session/
+        # provider_usage.go:452-510).
+        self._limits_inflight: Optional["asyncio.Future[Dict[str, Any]]"] = None
 
     # --- capabilities ---
 
@@ -489,7 +495,38 @@ class NeuralDeepProvider(AIProvider):
                 and now - self._limits_last_attempt_at < LIMITS_FETCH_FLOOR:
             return self._limits_cache
 
+        return await self._read_limits_coalesced()
+
+    async def _read_limits_coalesced(self) -> Dict[str, Any]:
+        """Concurrent callers join one in-flight `/limits` fetch instead of
+        each starting their own — coddy's `usageStartFetchLocked`/`inflight`
+        (internal/session/provider_usage.go:452-510): a burst of readers
+        (`get_balance`, `_billing_mode_now`, the `get_provider_balances`
+        fan-out) must cost exactly one HTTP request, not one per caller.
+        No `await` happens between checking `self._limits_inflight` and
+        setting it, so this is race-free on the single-threaded event loop."""
+        if self._limits_inflight is not None:
+            return await self._limits_inflight
+        fut: "asyncio.Future[Dict[str, Any]]" = asyncio.get_event_loop().create_future()
+        self._limits_inflight = fut
+        try:
+            payload = await self._fetch_limits()
+        except Exception as exc:
+            self._limits_inflight = None
+            if not fut.done():
+                fut.set_exception(exc)
+                fut.exception()  # mark retrieved: no "exception never retrieved" if nobody joined
+            raise
+        else:
+            self._limits_inflight = None
+            if not fut.done():
+                fut.set_result(payload)
+            return payload
+
+    async def _fetch_limits(self) -> Dict[str, Any]:
+        """The one HTTP GET of `/v1/limits` a coalesced read performs."""
         import httpx
+        now = datetime.now(timezone.utc)
         url = self._base_url.rstrip("/") + "/limits"
         headers = {"Authorization": f"Bearer {self._api_key}"}
         self._limits_last_attempt_at = now
@@ -612,6 +649,20 @@ class NeuralDeepProvider(AIProvider):
         if rpm:
             windows.append(rpm)
 
+        blocked_models: List[Dict[str, Any]] = []
+        for entry in limits.get("blocked_models") or []:
+            if not isinstance(entry, dict):
+                continue
+            model = str(entry.get("model") or "").strip()
+            if not model:
+                continue
+            blocked_models.append({
+                "model": model,
+                "blocker": entry.get("blocker"),
+                "resets_at": entry.get("resets_at"),
+                "reset_in_sec": entry.get("reset_in_sec"),
+            })
+
         return {
             "tier": limits.get("tier"),
             "billing_mode": key.get("billing_mode"),
@@ -621,7 +672,35 @@ class NeuralDeepProvider(AIProvider):
             "windows": windows,
             "parallel_limit": limits.get("parallel_limit"),
             "observed_at": limits.get("observed_at"),
+            # A model gate covers part of the catalogue, not the chat class as
+            # a whole: `decision.can_request` stays true while only one model
+            # is closed (coddy's own scar, external/cli/usage.go:136-138 — a
+            # month of 429s on an account that read healthy). See
+            # `model_blocked()` for the matching this list is read through.
+            "blocked_models": blocked_models,
         }
+
+    def model_blocked(self, model: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """The `blocked_models` entry naming `model` (default: this alias's
+        own wire model, `_wire_model()`), matched exactly and case-
+        insensitively against the raw block's `model` field — the same
+        comparison coddy's own `modelBlocked` makes (external/cli/usage.go:
+        139-153): no base/twin normalization on the block itself, so a block
+        on `qwen3.8-27b-noreason` matches only that wire name, and a block on
+        the base matches only the base.
+
+        Read-only: this never triggers a network call, only looks at
+        whatever `/v1/limits` payload is already cached (`None` before the
+        first successful read)."""
+        if not self._limits_cache:
+            return None
+        want = (model if model is not None else self._wire_model()).strip().lower()
+        if not want:
+            return None
+        for entry in self._quota_from_limits(self._limits_cache).get("blocked_models", []):
+            if str(entry.get("model", "")).strip().lower() == want:
+                return entry
+        return None
 
     # --- retry ---
 

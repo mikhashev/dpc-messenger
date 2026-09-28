@@ -4,7 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { sendCommand, peerProviders, providerBalance, getProviderBalance } from '$lib/coreService';
-  import { formatQuotaLine, formatQuotaLineTitle, quotaHasWarning } from './inferenceSharing';
+  import { blockedModelLine, formatQuotaLine, formatQuotaLineTitle, quotaHasWarning } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
   import { trackRename } from '$lib/utils/aliasRenames';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
@@ -590,6 +590,9 @@
   $: balanceQuotaLine = balResult?.status === 'success' ? formatQuotaLine(balResult.balance) : '';
   $: balanceQuotaLineTitle = balResult?.status === 'success' ? formatQuotaLineTitle(balResult.balance) : '';
   $: balanceQuotaWarn = balResult?.status === 'success' ? quotaHasWarning(balResult.balance) : false;
+  $: balanceAliasModel = (displayConfig?.providers ?? []).find((p) => p.alias === balanceAlias)?.model;
+  $: balanceBlockedModelLine = balResult?.status === 'success'
+    ? blockedModelLine(balResult.balance?.quota, balanceAliasModel) : '';
   $: balanceUnsupported = !!balResult && balResult.status === 'unsupported';
   $: balanceError = balResult && balResult.status === 'error' ? (balResult.message || 'error') : '';
   $: balanceInfo = balResult && balResult.status === 'success' && balResult.balance && Array.isArray(balResult.balance.balance_infos)
@@ -1056,6 +1059,9 @@
                     class:quota-line-warn={balanceQuotaWarn}
                     title={balanceQuotaLineTitle}
                   >{balanceQuotaLine}</div>
+                {/if}
+                {#if balanceBlockedModelLine}
+                  <div class="balance-value balance-flag">{balanceBlockedModelLine}</div>
                 {/if}
               {:else}
                 <div class="balance-value balance-muted">Not checked yet — click “Check balance”.</div>

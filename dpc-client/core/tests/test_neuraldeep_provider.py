@@ -6,6 +6,7 @@ chunk, `reasoning_tokens` sometimes null and once above `completion_tokens`,
 an answer that starts with "\\n\\n", and thinking that only stops on the
 `-noreason` model. No network: the price list and /limits are stubbed."""
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -687,3 +688,111 @@ async def test_retry_after_is_capped_at_five_minutes(monkeypatch):
     p = _make()
     await _REAL_GET_BALANCE(p)
     assert p._limits_backoff_until - p._limits_last_attempt_at <= timedelta(minutes=5)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_get_balance_calls_coalesce_into_one_http_request(monkeypatch):
+    """Coddy's own join of parallel readers (internal/session/provider_usage.go
+    :275-281, `inflight`): a burst of callers on one provider instance must
+    cost exactly one HTTP request, all reading the same result."""
+    payload = _fixture_payload()
+    calls = {"n": 0}
+
+    async def handler(request):
+        calls["n"] += 1
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json=payload)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    p = _make()
+    results = await asyncio.gather(*[_REAL_GET_BALANCE(p) for _ in range(8)])
+    assert calls["n"] == 1
+    for r in results:
+        assert r["quota"]["tier"] == "free"
+        assert r["balance_infos"] == [{"currency": "RUB", "total_balance": "500.00", "spent_30d": "0.00"}]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_coalesced_fetch_reaches_every_joiner(monkeypatch):
+    """The exception, not just the success, reaches every joined caller."""
+    calls = {"n": 0}
+
+    async def handler(request):
+        calls["n"] += 1
+        await asyncio.sleep(0.05)
+        return httpx.Response(403, json={"detail": "blocked"})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    p = _make()
+    results = await asyncio.gather(*[_REAL_GET_BALANCE(p) for _ in range(4)])
+    assert calls["n"] == 1
+    for r in results:
+        assert r["error"] == "key_blocked"
+
+
+# --- blocked_models: a model-level gate, decision.can_request stays true -----
+
+
+def _payload_with_blocked_model(model="qwen3.8-27b-noreason", blocker="model_cap_blocked"):
+    payload = _fixture_payload()
+    payload["blocked_models"] = [
+        {"model": model, "blocker": blocker,
+         "resets_at": "2026-09-28T12:00:00Z", "reset_in_sec": 900},
+    ]
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_blocked_models_is_parsed_into_the_quota_block(monkeypatch):
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(200, json=_payload_with_blocked_model()))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+    assert balance["quota"]["can_request"] is True  # the account itself is fine
+    assert balance["quota"]["blocked_models"] == [
+        {"model": "qwen3.8-27b-noreason", "blocker": "model_cap_blocked",
+         "resets_at": "2026-09-28T12:00:00Z", "reset_in_sec": 900},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_blocked_models_survives_a_malformed_entry(monkeypatch):
+    payload = _fixture_payload()
+    payload["blocked_models"] = [{"blocker": "x"}, "not-a-dict", {"model": "  "}]
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(200, json=payload))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+    assert balance["quota"]["blocked_models"] == []
+
+
+@pytest.mark.asyncio
+async def test_model_blocked_matches_the_exact_wire_name_only(monkeypatch):
+    """A block on the `-noreason` twin matches only that wire name — coddy's
+    own `modelBlocked` does no base/twin normalization on the block itself."""
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(
+        200, json=_payload_with_blocked_model(model="qwen3.8-27b-noreason")))
+    p = _make()  # model: qwen3.8-27b
+    await _REAL_GET_BALANCE(p)  # populates p._limits_cache
+
+    assert p.model_blocked("qwen3.8-27b") is None  # base is not blocked
+    entry = p.model_blocked("qwen3.8-27b-noreason")
+    assert entry is not None and entry["blocker"] == "model_cap_blocked"
+    assert p.model_blocked("QWEN3.8-27B-NOREASON") is not None  # case-insensitive
+
+
+@pytest.mark.asyncio
+async def test_model_blocked_defaults_to_this_alias_own_wire_model(monkeypatch):
+    _patch_httpx(monkeypatch, lambda request: httpx.Response(
+        200, json=_payload_with_blocked_model(model="qwen3.8-27b")))
+    p = _make()
+    await _REAL_GET_BALANCE(p)
+    assert p.model_blocked() is not None  # default model is p.model itself
+
+
+def test_model_blocked_is_read_only_with_no_cache_yet():
+    p = _make()
+    assert p.model_blocked() is None
+    assert p.model_blocked("anything") is None

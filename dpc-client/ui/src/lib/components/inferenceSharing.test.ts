@@ -5,6 +5,7 @@ import {
   addAllowedModel,
   addServing,
   addTariffEntry,
+  blockedModelLine,
   callerPriceBadge,
   classifyProviderType,
   clientLabel,
@@ -1112,5 +1113,51 @@ describe('formatQuotaBlockers', () => {
       quota: { can_request: false, blockers: ['session_cooldown'], retry_after_sec: 30 },
     });
     expect(line).toBe('rate limited (retry in 30s)');
+  });
+});
+
+// blocked_models: a model-level gate that leaves can_request true (coddy's
+// own scar, external/cli/usage.go:136-138).
+describe('blockedModelLine', () => {
+  const resetsAt = '2026-09-28T12:00:00Z';
+  const localReset = new Date(resetsAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const quotaWith = (model: string): NonNullable<BalanceResult['balance']>['quota'] => ({
+    blocked_models: [{ model, blocker: 'model_cap_blocked', resets_at: resetsAt, reset_in_sec: 900 }],
+  });
+
+  it('names the alias\'s own model, blocked, with a local reset time — coddy\'s wording', () => {
+    expect(blockedModelLine(quotaWith('qwen3.8-27b'), 'qwen3.8-27b'))
+      .toBe(`qwen3.8-27b blocked (resets ${localReset})`);
+  });
+
+  it('a block on the -noreason twin is shown for the alias configured as the base', () => {
+    expect(blockedModelLine(quotaWith('qwen3.8-27b-noreason'), 'qwen3.8-27b'))
+      .toBe(`qwen3.8-27b-noreason blocked (resets ${localReset})`);
+  });
+
+  it('a block on the base does not match an alias configured as the -noreason twin', () => {
+    expect(blockedModelLine(quotaWith('qwen3.8-27b'), 'qwen3.8-27b-noreason')).toBe('');
+  });
+
+  it('a block on an unrelated model names nothing for this alias', () => {
+    expect(blockedModelLine(quotaWith('gpt-oss-120b'), 'qwen3.8-27b')).toBe('');
+  });
+
+  it('the match is case-insensitive', () => {
+    expect(blockedModelLine(quotaWith('QWEN3.8-27B'), 'qwen3.8-27b')).toContain('blocked');
+  });
+
+  it('no quota, no blocked_models, or no provider model each yield an empty line', () => {
+    expect(blockedModelLine(null, 'qwen3.8-27b')).toBe('');
+    expect(blockedModelLine({}, 'qwen3.8-27b')).toBe('');
+    expect(blockedModelLine(quotaWith('qwen3.8-27b'), null)).toBe('');
+    expect(blockedModelLine(quotaWith('qwen3.8-27b'), '')).toBe('');
+  });
+
+  it('a missing resets_at drops the reset clause but still names the model blocked', () => {
+    const quota: NonNullable<BalanceResult['balance']>['quota'] = {
+      blocked_models: [{ model: 'qwen3.8-27b', blocker: 'x' }],
+    };
+    expect(blockedModelLine(quota, 'qwen3.8-27b')).toBe('qwen3.8-27b blocked');
   });
 });

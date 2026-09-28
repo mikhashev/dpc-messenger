@@ -1024,6 +1024,17 @@ export interface QuotaWindow {
 /** `get_balance()`'s `quota` block, provider-neutral so a future vendor fills
  *  the same shape. Absent entirely on providers that do not report one
  *  (DeepSeek etc.) — callers check for the key, not for a sentinel value. */
+/** One `quota.blocked_models` entry (`NeuralDeepProvider._quota_from_limits`):
+ *  a model-level gate that leaves `can_request` true — the account is fine,
+ *  only this model is closed (coddy's own scar, external/cli/usage.go:136-138:
+ *  a month of 429s on an account whose footer read healthy). */
+export interface QuotaBlockedModel {
+  model: string;
+  blocker?: string | null;
+  resets_at?: string | null;
+  reset_in_sec?: number | null;
+}
+
 export interface ProviderQuota {
   tier?: string | null;
   billing_mode?: string | null;
@@ -1033,6 +1044,7 @@ export interface ProviderQuota {
   windows?: QuotaWindow[] | null;
   parallel_limit?: number | null;
   observed_at?: string | null;
+  blocked_models?: QuotaBlockedModel[] | null;
 }
 
 /** One balance entry, exactly what `get_provider_balance(alias)` /
@@ -1198,6 +1210,39 @@ export function formatQuotaBlockers(balance: BalanceResult['balance'] | null | u
     default:
       return `blocked: ${blockers[0]}`;
   }
+}
+
+/** A provider alias's own wire model and its `-noreason` twin — the only two
+ *  wire names a `blocked_models` entry could name for a NeuralDeep alias
+ *  (`NeuralDeepProvider.model_blocked`'s own comment): exact strings, no
+ *  base normalization on the entry itself. `providerModel` already ends in
+ *  `-noreason` when the alias is configured as the twin, so that case names
+ *  only itself. */
+function modelAndTwin(providerModel: string | null | undefined): string[] {
+  const base = (providerModel ?? '').trim();
+  if (!base) return [];
+  return base.toLowerCase().endsWith('-noreason') ? [base] : [base, `${base}-noreason`];
+}
+
+/** `<model> blocked (resets HH:MM)` — coddy's own wording (`blockedModelSegment`,
+ *  external/cli/usage.go:155-164) — for the first `blocked_models` entry that
+ *  names `providerModel` or its `-noreason` twin, matched exactly and
+ *  case-insensitively (the same comparison `model_blocked()` makes on the
+ *  backend). '' when nothing matches, or no `providerModel` was given. This
+ *  is display only: it names the model the account itself still answers for
+ *  everything else, so a caller must not read this as the key being blocked. */
+export function blockedModelLine(
+  quota: ProviderQuota | null | undefined,
+  providerModel: string | null | undefined,
+): string {
+  const names = new Set(modelAndTwin(providerModel).map((m) => m.toLowerCase()));
+  if (names.size === 0) return '';
+  const entry = (quota?.blocked_models ?? []).find(
+    (b): b is QuotaBlockedModel => typeof b?.model === 'string' && names.has(b.model.trim().toLowerCase()),
+  );
+  if (!entry) return '';
+  const resets = localResetTime(entry.resets_at);
+  return `${entry.model} blocked${resets ? ` (resets ${resets})` : ''}`;
 }
 
 /** The one-line summary shown beside a serving_vendor alias: quota windows,

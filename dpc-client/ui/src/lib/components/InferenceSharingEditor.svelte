@@ -17,6 +17,7 @@
     addTariffEntry,
     anyTariffCurrency,
     callerPriceBadge,
+    blockedModelLine,
     clientLabel,
     computeBlockErrors,
     computeErrorsOf,
@@ -130,6 +131,8 @@
   $: quotaLineOf = (alias: string) => formatQuotaLine($providerBalances?.[alias]?.balance);
   $: quotaLineTitleOf = (alias: string) => formatQuotaLineTitle($providerBalances?.[alias]?.balance);
   $: quotaWarnOf = (alias: string) => quotaHasWarning($providerBalances?.[alias]?.balance);
+  $: quotaBlockedModelOf = (alias: string) =>
+    blockedModelLine($providerBalances?.[alias]?.balance?.quota, providerByAlias.get(alias)?.model);
 
   function addPicked(list: ServingList) {
     const alias = list === 'local' ? pickLocal : pickVendor;
@@ -569,6 +572,9 @@
                   {/if}
                   {#if quotaBlockersOf(alias)}
                     <span class="badge badge-missing">{quotaBlockersOf(alias)}</span>
+                  {/if}
+                  {#if quotaBlockedModelOf(alias)}
+                    <span class="badge badge-missing">{quotaBlockedModelOf(alias)}</span>
                   {/if}
                   {#if quotaLineOf(alias)}
                     <span
