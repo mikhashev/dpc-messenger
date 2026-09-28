@@ -47,7 +47,30 @@ export interface ComputeRules {
   serving_tariff?: Record<string, TariffEntry[]> | null;
   free_nodes?: string[] | null;
   free_groups?: string[] | null;
+  /** Guest ceilings on a subscription vendor key, in the vendor's own units
+   *  (Mike's call, 2026-09-29): requests per guest per vendor window, keyed
+   *  by alias like `vendor_quotas`. `per_session` is the vendor's own window
+   *  (3h for NeuralDeep); `per_week` is the ISO week. A subscription alias
+   *  with no `per_session` here refuses every guest. */
+  vendor_request_quotas?: Record<string, VendorRequestQuota> | null;
+  /** Tokens per guest per UTC day, by alias. Optional even on a subscription
+   *  alias — request quotas alone are enough to admit a guest. */
+  vendor_token_quotas?: Record<string, VendorTokenQuota> | null;
+  /** Fraction 0..1 of each vendor window kept for the owner, by alias.
+   *  Absent means `DEFAULT_OWNER_RESERVE` (0.25). */
+  vendor_owner_reserve?: Record<string, number> | null;
   [key: string]: unknown;
+}
+
+/** One alias's entry of `compute.vendor_request_quotas`. */
+export interface VendorRequestQuota {
+  per_session?: number | null;
+  per_week?: number | null;
+}
+
+/** One alias's entry of `compute.vendor_token_quotas`. */
+export interface VendorTokenQuota {
+  per_day?: number | null;
 }
 
 // --- Provider types and their place (firewall.py :88-95) -----------------
@@ -125,6 +148,26 @@ export function foldServingAlias(compute: ComputeRules): ComputeRules {
   for (const [alias, code] of Object.entries(compute.tariff_currency ?? {})) {
     if (!alias.startsWith('_') && typeof code === 'string') perAlias[alias] = code;
   }
+  const requestQuotas: Record<string, VendorRequestQuota> = {};
+  for (const [alias, entry] of Object.entries(compute.vendor_request_quotas ?? {})) {
+    if (alias.startsWith('_') || !entry || typeof entry !== 'object') continue;
+    const cleaned: VendorRequestQuota = {};
+    if (isNonNegativeInt(entry.per_session)) cleaned.per_session = entry.per_session;
+    if (isNonNegativeInt(entry.per_week)) cleaned.per_week = entry.per_week;
+    if (Object.keys(cleaned).length > 0) requestQuotas[alias] = cleaned;
+  }
+  const tokenQuotas: Record<string, VendorTokenQuota> = {};
+  for (const [alias, entry] of Object.entries(compute.vendor_token_quotas ?? {})) {
+    if (alias.startsWith('_') || !entry || typeof entry !== 'object') continue;
+    if (isNonNegativeInt(entry.per_day)) tokenQuotas[alias] = { per_day: entry.per_day };
+  }
+  const ownerReserve: Record<string, number> = {};
+  for (const [alias, fraction] of Object.entries(compute.vendor_owner_reserve ?? {})) {
+    if (alias.startsWith('_')) continue;
+    if (typeof fraction === 'number' && Number.isFinite(fraction) && fraction >= 0 && fraction < 1) {
+      ownerReserve[alias] = fraction;
+    }
+  }
   return {
     ...compute,
     enabled: !!compute.enabled,
@@ -140,6 +183,9 @@ export function foldServingAlias(compute: ComputeRules): ComputeRules {
     serving_tariff: tariff,
     free_nodes: cleanList(compute.free_nodes),
     free_groups: cleanList(compute.free_groups),
+    vendor_request_quotas: requestQuotas,
+    vendor_token_quotas: tokenQuotas,
+    vendor_owner_reserve: ownerReserve,
   };
 }
 
@@ -274,6 +320,173 @@ export function vendorQuotaBadge(quota: number, provider: ProviderInfo | null | 
   return currency
     ? `${quota} ${currency}/day per caller`
     : `${quota} per day — unrated, refused: no rate to count it in`;
+}
+
+// --- Guest ceilings on a subscription vendor key (Mike's call, 2026-09-29) -
+
+/** The reserve fraction the backend applies when an alias names none
+ *  (`vendor_owner_reserve`, absent = 0.25). */
+export const DEFAULT_OWNER_RESERVE = 0.25;
+/** The same default, as the percent the input shows. */
+export const DEFAULT_OWNER_RESERVE_PCT = 25;
+
+/** A whole, non-negative number — the shape every request/token quota field
+ *  takes. `undefined`/`null`/a fraction/a negative all fail. */
+export function isNonNegativeInt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+}
+
+/** A reserve typed as a whole percent, 0-99 — the input's own unit; the
+ *  block itself stores the fraction (`reservePercentToFraction`). 100 is
+ *  refused: a window with nothing left for guests is a request ceiling of
+ *  zero, not a 100% reserve. */
+export function isValidReservePercent(pct: unknown): pct is number {
+  return typeof pct === 'number' && Number.isFinite(pct) && Number.isInteger(pct) && pct >= 0 && pct <= 99;
+}
+
+export function reserveFractionToPercent(fraction: number | null | undefined): number {
+  const f = typeof fraction === 'number' && Number.isFinite(fraction) && fraction >= 0 && fraction < 1
+    ? fraction : DEFAULT_OWNER_RESERVE;
+  return Math.round(f * 100);
+}
+
+export function reservePercentToFraction(pct: number): number {
+  return pct / 100;
+}
+
+/** The reserve fraction in force for `alias`: its own entry, or the default. */
+export function vendorOwnerReserveFraction(compute: ComputeRules | null | undefined, alias: string): number {
+  const v = compute?.vendor_owner_reserve?.[alias];
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1 ? v : DEFAULT_OWNER_RESERVE;
+}
+
+/** `null` removes the field; a request quota with neither field left is
+ *  dropped from the map entirely (an empty `{}` would read back as "guests
+ *  are admitted with no ceiling", which is not what removing both fields
+ *  means). */
+export function setVendorRequestQuota(
+  compute: ComputeRules,
+  alias: string,
+  field: 'per_session' | 'per_week',
+  value: number | null,
+): ComputeRules {
+  const table = { ...(compute.vendor_request_quotas ?? {}) };
+  const entry: VendorRequestQuota = { ...(table[alias] ?? {}) };
+  if (value === null || Number.isNaN(value)) delete entry[field];
+  else entry[field] = value;
+  if (entry.per_session == null && entry.per_week == null) delete table[alias];
+  else table[alias] = entry;
+  return { ...compute, vendor_request_quotas: table };
+}
+
+/** `null` removes the token ceiling for `alias` (optional even on a
+ *  subscription key). */
+export function setVendorTokenQuota(compute: ComputeRules, alias: string, perDay: number | null): ComputeRules {
+  const table = { ...(compute.vendor_token_quotas ?? {}) };
+  if (perDay === null || Number.isNaN(perDay)) delete table[alias];
+  else table[alias] = { per_day: perDay };
+  return { ...compute, vendor_token_quotas: table };
+}
+
+/** `null` (or the default percent) removes the alias's own reserve entry,
+ *  which is not the same as setting it to the default explicitly — either
+ *  reads the same until the default changes, but only one of them survives
+ *  that change, so the input clears the key rather than writing 25 back. */
+export function setVendorOwnerReservePct(compute: ComputeRules, alias: string, pct: number | null): ComputeRules {
+  const table = { ...(compute.vendor_owner_reserve ?? {}) };
+  if (pct === null || Number.isNaN(pct)) delete table[alias];
+  else table[alias] = reservePercentToFraction(pct);
+  return { ...compute, vendor_owner_reserve: table };
+}
+
+/** The guests' combined share of one window's limit, after the owner's
+ *  reserve: `floor(limit * (1 - reserve))`. `null` when there is no limit to
+ *  share (the window is absent, or the vendor sent no `limit`). */
+export function guestShareOfWindow(limit: number | null | undefined, reserve: number | null | undefined): number | null {
+  if (typeof limit !== 'number' || !Number.isFinite(limit) || limit < 0) return null;
+  const r = typeof reserve === 'number' && Number.isFinite(reserve) && reserve >= 0 && reserve < 1
+    ? reserve : DEFAULT_OWNER_RESERVE;
+  return Math.floor(limit * (1 - r));
+}
+
+export type RequestCeilingState = 'not-required' | 'required-missing' | 'set';
+
+/** Whether a request ceiling is needed before this alias can admit a guest:
+ *  a wallet key never needs one (the money ceiling still binds); a
+ *  subscription key is `'required-missing'` until `per_session` is a
+ *  positive number, then `'set'`. `billingMode` is the same string
+ *  `isSubscriptionAccount`/`accountLevel` read: `balance.quota.billing_mode
+ *  ?? balance.billing_mode`. */
+export function requestCeilingState(
+  billingMode: string | null | undefined,
+  entry: VendorRequestQuota | null | undefined,
+): RequestCeilingState {
+  if (billingMode !== 'subscription') return 'not-required';
+  return typeof entry?.per_session === 'number' && entry.per_session > 0 ? 'set' : 'required-missing';
+}
+
+/** The note shown beside the money-ceiling badge on a subscription alias:
+ *  that ceiling counts nothing there, so it must not read as a working
+ *  limit. `''` on a wallet key, where the money ceiling still binds. */
+export function subscriptionCeilingNote(billingMode: string | null | undefined): string {
+  return billingMode === 'subscription' ? 'not counted on a subscription key' : '';
+}
+
+/** The red line under a subscription alias with no `per_session` set: what
+ *  refuses every guest right now, and what closes it. `''` once a ceiling is
+ *  set, or on a wallet key. */
+export function missingRequestCeilingWarning(
+  billingMode: string | null | undefined,
+  entry: VendorRequestQuota | null | undefined,
+): string {
+  return requestCeilingState(billingMode, entry) === 'required-missing'
+    ? 'guests are refused until a request ceiling is set'
+    : '';
+}
+
+/** One window of `quota.windows` matching `name`, or `undefined`. The vendor
+ *  spells the ISO week window either `week` or `iso-week` (`formatQuotaWindow`
+ *  reads both under the label "this week"); both are read here for the same
+ *  reason. */
+function findWindow(quota: ProviderQuota | null | undefined, names: readonly string[]): QuotaWindow | undefined {
+  return (quota?.windows ?? []).find((w) => names.includes(w.name));
+}
+
+/** The live context shown beside the vendor inputs: the vendor's own window
+ *  limits, and what a 25%-or-whatever reserve leaves the guests together —
+ *  e.g. "vendor window: 400 / 3h, 2000 / week — with 25% reserve, guests
+ *  together get up to 300 / 3h". `''` when the quota carries neither window's
+ *  limit (nothing to say yet — the balance has not been read, or the vendor
+ *  reports none). */
+export function guestWindowSummaryLine(
+  quota: ProviderQuota | null | undefined,
+  reserve: number | null | undefined,
+): string {
+  const session = findWindow(quota, ['3h']);
+  const week = findWindow(quota, ['week', 'iso-week']);
+  const pieces: string[] = [];
+  if (typeof session?.limit === 'number') pieces.push(`${session.limit} / 3h`);
+  if (typeof week?.limit === 'number') pieces.push(`${week.limit} / week`);
+  if (pieces.length === 0) return '';
+  const share = guestShareOfWindow(session?.limit, reserve);
+  const pct = reserveFractionToPercent(reserve);
+  const tail = share !== null
+    ? ` — with ${pct}% reserve, guests together get up to ${share} / 3h`
+    : '';
+  return `vendor window: ${pieces.join(', ')}${tail}`;
+}
+
+/** Whether one guest's `per_session` ceiling alone would exceed what the
+ *  reserve leaves for every guest combined — the warning `guestWindowSummaryLine`
+ *  is shown beside. `false` when there is no session window to compare
+ *  against, or no ceiling set yet. */
+export function perSessionExceedsGuestShare(
+  quota: ProviderQuota | null | undefined,
+  reserve: number | null | undefined,
+  perSession: number | null | undefined,
+): boolean {
+  const share = guestShareOfWindow(findWindow(quota, ['3h'])?.limit, reserve);
+  return share !== null && typeof perSession === 'number' && perSession > share;
 }
 
 // --- Which models the door accepts -----------------------------------------

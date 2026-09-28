@@ -69,6 +69,22 @@ import {
   providerTypeLabel,
   localResetTime,
   BALANCE_LEVEL_THRESHOLDS,
+  DEFAULT_OWNER_RESERVE,
+  DEFAULT_OWNER_RESERVE_PCT,
+  isNonNegativeInt,
+  isValidReservePercent,
+  reserveFractionToPercent,
+  reservePercentToFraction,
+  vendorOwnerReserveFraction,
+  setVendorRequestQuota,
+  setVendorTokenQuota,
+  setVendorOwnerReservePct,
+  guestShareOfWindow,
+  requestCeilingState,
+  subscriptionCeilingNote,
+  missingRequestCeilingWarning,
+  guestWindowSummaryLine,
+  perSessionExceedsGuestShare,
   type AccountRow,
   type BalanceResult,
   type ComputeRules,
@@ -76,6 +92,7 @@ import {
   type GatewayState,
   type ProviderQuota,
   type QuotaWindow,
+  type VendorRequestQuota,
 } from './inferenceSharing';
 import type { MenuRow } from './peerMenu';
 
@@ -1542,5 +1559,135 @@ describe("localResetTime — the one formatter both editors' quota lines share",
     expect(localResetTime(null)).toBe('');
     expect(localResetTime(undefined)).toBe('');
     expect(localResetTime('not-a-date')).toBe('');
+  });
+});
+
+describe('guest ceilings on a subscription vendor key (Mike\'s call, 2026-09-29)', () => {
+  it('non-negative int validator accepts whole numbers >= 0, refuses everything else', () => {
+    expect(isNonNegativeInt(0)).toBe(true);
+    expect(isNonNegativeInt(100)).toBe(true);
+    expect(isNonNegativeInt(-1)).toBe(false);
+    expect(isNonNegativeInt(1.5)).toBe(false);
+    expect(isNonNegativeInt(NaN)).toBe(false);
+    expect(isNonNegativeInt('5')).toBe(false);
+    expect(isNonNegativeInt(null)).toBe(false);
+  });
+
+  it('reserve percent validator accepts whole 0..99, refuses 100 and above, and fractions', () => {
+    expect(isValidReservePercent(0)).toBe(true);
+    expect(isValidReservePercent(25)).toBe(true);
+    expect(isValidReservePercent(99)).toBe(true);
+    expect(isValidReservePercent(100)).toBe(false);
+    expect(isValidReservePercent(-1)).toBe(false);
+    expect(isValidReservePercent(25.5)).toBe(false);
+  });
+
+  it('the default reserve is 25%, both ways', () => {
+    expect(DEFAULT_OWNER_RESERVE).toBe(0.25);
+    expect(DEFAULT_OWNER_RESERVE_PCT).toBe(25);
+    expect(reserveFractionToPercent(undefined)).toBe(25);
+    expect(reserveFractionToPercent(null)).toBe(25);
+    expect(reservePercentToFraction(25)).toBe(0.25);
+    expect(reserveFractionToPercent(0.1)).toBe(10);
+  });
+
+  it('vendorOwnerReserveFraction reads the alias\'s own entry, else the default', () => {
+    const block = { ...emptyBlock(), vendor_owner_reserve: { nd: 0.1 } };
+    expect(vendorOwnerReserveFraction(block, 'nd')).toBe(0.1);
+    expect(vendorOwnerReserveFraction(block, 'other')).toBe(DEFAULT_OWNER_RESERVE);
+    expect(vendorOwnerReserveFraction(null, 'nd')).toBe(DEFAULT_OWNER_RESERVE);
+  });
+
+  it('setVendorRequestQuota sets one field, keeps the other, and clears the alias when both are gone', () => {
+    let block = emptyBlock();
+    block = setVendorRequestQuota(block, 'nd', 'per_session', 100);
+    expect(block.vendor_request_quotas).toEqual({ nd: { per_session: 100 } });
+    block = setVendorRequestQuota(block, 'nd', 'per_week', 500);
+    expect(block.vendor_request_quotas).toEqual({ nd: { per_session: 100, per_week: 500 } });
+    block = setVendorRequestQuota(block, 'nd', 'per_session', null);
+    expect(block.vendor_request_quotas).toEqual({ nd: { per_week: 500 } });
+    block = setVendorRequestQuota(block, 'nd', 'per_week', null);
+    expect(block.vendor_request_quotas).toEqual({});
+  });
+
+  it('setVendorTokenQuota sets or clears the per-day ceiling', () => {
+    let block = emptyBlock();
+    block = setVendorTokenQuota(block, 'nd', 20000);
+    expect(block.vendor_token_quotas).toEqual({ nd: { per_day: 20000 } });
+    block = setVendorTokenQuota(block, 'nd', null);
+    expect(block.vendor_token_quotas).toEqual({});
+  });
+
+  it('setVendorOwnerReservePct stores the fraction, and clearing removes the alias\'s own entry', () => {
+    let block = emptyBlock();
+    block = setVendorOwnerReservePct(block, 'nd', 10);
+    expect(block.vendor_owner_reserve).toEqual({ nd: 0.1 });
+    block = setVendorOwnerReservePct(block, 'nd', null);
+    expect(block.vendor_owner_reserve).toEqual({});
+  });
+
+  it('guestShareOfWindow is floor(limit * (1 - reserve)), null with no limit', () => {
+    expect(guestShareOfWindow(400, 0.25)).toBe(300);
+    expect(guestShareOfWindow(400, undefined)).toBe(300); // default reserve
+    expect(guestShareOfWindow(null, 0.25)).toBe(null);
+    expect(guestShareOfWindow(undefined, 0.25)).toBe(null);
+    expect(guestShareOfWindow(10, 0.5)).toBe(5);
+  });
+
+  it('requestCeilingState: not-required on a wallet, required-missing then set on a subscription', () => {
+    expect(requestCeilingState('wallet', null)).toBe('not-required');
+    expect(requestCeilingState(null, null)).toBe('not-required');
+    expect(requestCeilingState('subscription', null)).toBe('required-missing');
+    expect(requestCeilingState('subscription', {})).toBe('required-missing');
+    expect(requestCeilingState('subscription', { per_session: 0 })).toBe('required-missing');
+    const entry: VendorRequestQuota = { per_session: 100 };
+    expect(requestCeilingState('subscription', entry)).toBe('set');
+  });
+
+  it('subscriptionCeilingNote and missingRequestCeilingWarning speak only on a subscription key', () => {
+    expect(subscriptionCeilingNote('wallet')).toBe('');
+    expect(subscriptionCeilingNote('subscription')).toBe('not counted on a subscription key');
+    expect(missingRequestCeilingWarning('wallet', null)).toBe('');
+    expect(missingRequestCeilingWarning('subscription', null)).toBe('guests are refused until a request ceiling is set');
+    expect(missingRequestCeilingWarning('subscription', { per_session: 100 })).toBe('');
+  });
+
+  it('guestWindowSummaryLine names both windows and the guests\' combined 3h share', () => {
+    const quota: ProviderQuota = {
+      windows: [
+        { name: '3h', unit: 'requests', limit: 400 },
+        { name: 'week', unit: 'requests', limit: 2000 },
+      ],
+    };
+    expect(guestWindowSummaryLine(quota, 0.25)).toBe(
+      'vendor window: 400 / 3h, 2000 / week — with 25% reserve, guests together get up to 300 / 3h',
+    );
+  });
+
+  it('guestWindowSummaryLine is empty with no window limit to report', () => {
+    expect(guestWindowSummaryLine(null, 0.25)).toBe('');
+    expect(guestWindowSummaryLine({ windows: [] }, 0.25)).toBe('');
+  });
+
+  it('perSessionExceedsGuestShare warns only when one guest could take more than the guests\' combined share', () => {
+    const quota: ProviderQuota = { windows: [{ name: '3h', unit: 'requests', limit: 400 }] };
+    expect(perSessionExceedsGuestShare(quota, 0.25, 100)).toBe(false);
+    expect(perSessionExceedsGuestShare(quota, 0.25, 300)).toBe(false);
+    expect(perSessionExceedsGuestShare(quota, 0.25, 301)).toBe(true);
+    expect(perSessionExceedsGuestShare(null, 0.25, 999)).toBe(false);
+    expect(perSessionExceedsGuestShare(quota, 0.25, null)).toBe(false);
+  });
+
+  it('foldServingAlias normalizes the three new blocks and drops underscore-prefixed and malformed entries', () => {
+    const raw = {
+      ...emptyBlock(),
+      vendor_request_quotas: { nd: { per_session: 100, per_week: 500 }, _comment: {} },
+      vendor_token_quotas: { nd: { per_day: 20000 }, bad: { per_day: -1 } },
+      vendor_owner_reserve: { nd: 0.1, bad: 1.5 },
+    } as ComputeRules;
+    const folded = foldServingAlias(raw);
+    expect(folded.vendor_request_quotas).toEqual({ nd: { per_session: 100, per_week: 500 } });
+    expect(folded.vendor_token_quotas).toEqual({ nd: { per_day: 20000 } });
+    expect(folded.vendor_owner_reserve).toEqual({ nd: 0.1 });
   });
 });

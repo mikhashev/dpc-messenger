@@ -23,6 +23,7 @@
     computeBlockErrors,
     computeErrorsOf,
     contextWindowLine,
+    DEFAULT_OWNER_RESERVE_PCT,
     doorAddress,
     foldServingAlias,
     formatQuotaBlockers,
@@ -30,27 +31,37 @@
     formatQuotaLineTitle,
     gatewayVerdict,
     groupGatewayMenu,
+    guestWindowSummaryLine,
     isFree,
     isIso4217,
     ISO_4217_CODES,
+    isSubscriptionAccount,
     knownGroups,
     knownNodes,
     maskedHeader,
     menuVerdict,
     MENU_IS_LIVE_NOTE,
+    missingRequestCeilingWarning,
     offeredProviders,
+    perSessionExceedsGuestShare,
     quotaHasWarning,
     removeAllowed,
     removeAllowedModel,
     removeServing,
     removeTariffEntry,
+    requestCeilingState,
+    reserveFractionToPercent,
     selectedMenuEntry,
     SERVES_NO_LOCAL_ALIAS,
     setAliasCurrency,
     setCurrency,
     setFree,
+    setVendorOwnerReservePct,
     setVendorQuota,
+    setVendorRequestQuota,
+    setVendorTokenQuota,
     soleMenuChoiceLine,
+    subscriptionCeilingNote,
     tariffAliases,
     tariffCurrencyOf,
     tariffCurrencySourceLabel,
@@ -60,6 +71,7 @@
     unmatchedModels,
     utcToday,
     validationDraft,
+    vendorOwnerReserveFraction,
     vendorQuotaBadge,
     vendorQuotaLabel,
     type CallerKind,
@@ -139,6 +151,49 @@
   // failed call has nothing to report for (Do §5: was rendering nothing, or
   // reading as plain "insufficient").
   $: quotaErrorOf = (alias: string) => balanceErrorText($providerBalances?.[alias]);
+
+  // --- Guest ceilings on a subscription vendor key (Mike's call, 2026-09-29)
+  // Everything below reads the same $providerBalances[alias] the quota line
+  // above reads, so a guest ceiling and its warnings speak of the same
+  // balance read a caller would see.
+  $: billingModeOf = (alias: string) => {
+    const balance = $providerBalances?.[alias]?.balance;
+    return balance?.quota?.billing_mode ?? balance?.billing_mode ?? null;
+  };
+  $: isSubscriptionOf = (alias: string) => isSubscriptionAccount($providerBalances?.[alias]?.balance);
+  $: requestCeilingStateOf = (alias: string) =>
+    requestCeilingState(billingModeOf(alias), view?.vendor_request_quotas?.[alias]);
+  $: missingCeilingWarningOf = (alias: string) =>
+    missingRequestCeilingWarning(billingModeOf(alias), view?.vendor_request_quotas?.[alias]);
+  $: subscriptionNoteOf = (alias: string) => subscriptionCeilingNote(billingModeOf(alias));
+  $: reserveFractionOf = (alias: string) => (view ? vendorOwnerReserveFraction(view, alias) : DEFAULT_OWNER_RESERVE_PCT / 100);
+  $: reservePctOf = (alias: string) => reserveFractionToPercent(reserveFractionOf(alias));
+  $: windowSummaryOf = (alias: string) =>
+    guestWindowSummaryLine($providerBalances?.[alias]?.balance?.quota, reserveFractionOf(alias));
+  $: perSessionTooHighOf = (alias: string) =>
+    perSessionExceedsGuestShare(
+      $providerBalances?.[alias]?.balance?.quota,
+      reserveFractionOf(alias),
+      view?.vendor_request_quotas?.[alias]?.per_session,
+    );
+
+  function requestQuotaInput(alias: string, field: 'per_session' | 'per_week', raw: string) {
+    if (!editCompute) return;
+    const text = raw.trim();
+    apply(setVendorRequestQuota(editCompute, alias, field, text.length === 0 ? null : Number(text)));
+  }
+
+  function tokenQuotaInput(alias: string, raw: string) {
+    if (!editCompute) return;
+    const text = raw.trim();
+    apply(setVendorTokenQuota(editCompute, alias, text.length === 0 ? null : Number(text)));
+  }
+
+  function reserveInput(alias: string, raw: string) {
+    if (!editCompute) return;
+    const text = raw.trim();
+    apply(setVendorOwnerReservePct(editCompute, alias, text.length === 0 ? null : Number(text)));
+  }
 
   function addPicked(list: ServingList) {
     const alias = list === 'local' ? pickLocal : pickVendor;
@@ -612,8 +667,97 @@
                   {:else}
                     <span class="badge badge-missing">no ceiling &mdash; refused</span>
                   {/if}
+                  {#if subscriptionNoteOf(alias)}
+                    <span class="badge muted" title="A subscription key is not debited per call; the money ceiling above counts nothing.">{subscriptionNoteOf(alias)}</span>
+                  {/if}
                 </span>
               </div>
+              {#if missingCeilingWarningOf(alias)}
+                <p class="rule-warning">{missingCeilingWarningOf(alias)}</p>
+              {/if}
+
+              <!-- Guest ceilings on a subscription vendor key, in the vendor's
+                   own units (Mike's call, 2026-09-29): request windows are
+                   `vendor_request_quotas`, required ('strict') once the alias
+                   is billed by subscription; the token ceiling and the owner's
+                   reserve are optional on either billing mode. -->
+              <div class="rule-row guest-ceiling-row">
+                <span class="alias-cell muted">
+                  guest ceilings ({isSubscriptionOf(alias) ? 'subscription — request ceiling required' : 'wallet — request ceiling optional'})
+                </span>
+                <span class="quota-cell">
+                  {#if editMode && editCompute}
+                    <label class="muted" for="compute-req-session-{alias}">requests / guest / 3h window</label>
+                    <input
+                      id="compute-req-session-{alias}"
+                      class="inline-input quota-input"
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder={isSubscriptionOf(alias) ? 'required' : 'optional'}
+                      value={view.vendor_request_quotas?.[alias]?.per_session ?? ''}
+                      on:input={(e) => requestQuotaInput(alias, 'per_session', e.currentTarget.value)}
+                    />
+                    <label class="muted" for="compute-req-week-{alias}">per week</label>
+                    <input
+                      id="compute-req-week-{alias}"
+                      class="inline-input quota-input"
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="optional"
+                      value={view.vendor_request_quotas?.[alias]?.per_week ?? ''}
+                      on:input={(e) => requestQuotaInput(alias, 'per_week', e.currentTarget.value)}
+                    />
+                    <label class="muted" for="compute-tok-day-{alias}">tokens / guest / day</label>
+                    <input
+                      id="compute-tok-day-{alias}"
+                      class="inline-input quota-input"
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="optional"
+                      value={view.vendor_token_quotas?.[alias]?.per_day ?? ''}
+                      on:input={(e) => tokenQuotaInput(alias, e.currentTarget.value)}
+                    />
+                    <label class="muted" for="compute-reserve-{alias}">owner reserve %</label>
+                    <input
+                      id="compute-reserve-{alias}"
+                      class="inline-input quota-input"
+                      type="number"
+                      min="0"
+                      max="99"
+                      step="1"
+                      placeholder={String(DEFAULT_OWNER_RESERVE_PCT)}
+                      value={view.vendor_owner_reserve?.[alias] != null ? reservePctOf(alias) : ''}
+                      on:input={(e) => reserveInput(alias, e.currentTarget.value)}
+                    />
+                  {:else}
+                    <span class="badge" class:badge-quota={requestCeilingStateOf(alias) === 'set'} class:badge-missing={requestCeilingStateOf(alias) === 'required-missing'}>
+                      {#if view.vendor_request_quotas?.[alias]?.per_session != null}
+                        {view.vendor_request_quotas[alias].per_session} / 3h
+                      {:else}
+                        no per-session ceiling
+                      {/if}
+                    </span>
+                    {#if view.vendor_request_quotas?.[alias]?.per_week != null}
+                      <span class="badge badge-quota">{view.vendor_request_quotas[alias].per_week} / week</span>
+                    {/if}
+                    {#if view.vendor_token_quotas?.[alias]?.per_day != null}
+                      <span class="badge badge-quota">{view.vendor_token_quotas[alias].per_day} tokens/day</span>
+                    {/if}
+                    <span class="muted">reserve {reservePctOf(alias)}%</span>
+                  {/if}
+                </span>
+              </div>
+              {#if windowSummaryOf(alias)}
+                <p class="help-text-small muted">
+                  {windowSummaryOf(alias)}
+                  {#if perSessionTooHighOf(alias)}
+                    <span class="rule-warning">— this guest's per-session ceiling exceeds the guests' combined share.</span>
+                  {/if}
+                </p>
+              {/if}
             {:else}
               <p class="empty-small">No vendor alias shared.</p>
             {/each}
@@ -1221,6 +1365,8 @@
   .badge-quota { background: #e8f5e9; color: #1b5e20; }
   .badge-gift { background: #f3e5f5; color: #4a148c; }
   .badge-live { background: #d4edda; color: #155724; }
+  .rule-warning { color: #dc3545; font-size: 0.85rem; margin: 0.15rem 0 0.5rem 0; }
+  .guest-ceiling-row { flex-wrap: wrap; }
   .free-toggle { display: flex; align-items: center; gap: 0.25rem; font-size: 0.85rem; color: #333; cursor: pointer; }
   .currency-row { margin-bottom: 0.75rem; }
   .currency-cell { display: inline-flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
