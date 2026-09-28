@@ -1170,10 +1170,21 @@ function isBalanceResultSuccessful(result: BalanceResult): boolean {
  *  goes by. `null` when the result carries nothing to compare (no
  *  balance_infos), which never matches anything, including itself. */
 function successResultSignature(result: BalanceResult): string | null {
-  const info = result.balance?.balance_infos?.[0];
-  if (!info || typeof info.total_balance !== 'string') return null;
+  const infos = result.balance?.balance_infos;
+  if (!infos || infos.length === 0) return null;
+  // Every entry, not just the first — a key holding two currencies must
+  // agree on both before two aliases are folded into one row; comparing only
+  // balance_infos[0] let a second entry (a second currency, or a stale one
+  // from a previous read) differ unnoticed. Order-insensitive: the vendor is
+  // not promised to answer with its currencies in the same order every time.
+  const parts: string[] = [];
+  for (const info of infos) {
+    if (typeof info.total_balance !== 'string') return null;
+    parts.push(`${info.currency ?? ''}:${info.total_balance}`);
+  }
+  parts.sort();
   const billingMode = result.balance?.quota?.billing_mode ?? result.balance?.billing_mode ?? '';
-  return `${info.currency ?? ''}|${info.total_balance}|${billingMode}`;
+  return `${parts.join(',')}|${billingMode}`;
 }
 
 /** The rows a Sidebar or ProvidersEditor renders: the backend's own `accounts`

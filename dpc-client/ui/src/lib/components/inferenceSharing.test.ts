@@ -1274,6 +1274,52 @@ describe('accountRowsFromBalances', () => {
     ]);
   });
 
+  it('one key failed, the other succeeded — two rows, never merged', () => {
+    const okA: BalanceResult = {
+      status: 'success', alias: 'ds_a',
+      balance: { is_available: true, balance_infos: [{ currency: 'USD', total_balance: '10.53' }] },
+    };
+    const failB: BalanceResult = {
+      status: 'error', alias: 'ds_b', message: 'key_rejected',
+      balance: { is_available: false, balance_infos: [], error: 'key_rejected' },
+    };
+    const types: Record<string, string> = { ds_a: 'deepseek', ds_b: 'deepseek' };
+    const rows = accountRowsFromBalances({
+      status: 'success',
+      balances: { ds_a: okA, ds_b: failB },
+    }, (alias) => types[alias]);
+    expect(rows).toEqual([
+      { account: 'type:deepseek', provider_type: 'deepseek', label: 'DeepSeek', aliases: ['ds_a'], result: okA },
+      { account: 'alias:ds_b', provider_type: 'deepseek', label: 'DeepSeek (ds_b)', aliases: ['ds_b'], result: failB },
+    ]);
+  });
+
+  it('two keys agreeing on a first currency but not a second stay two rows, not merged on balance_infos[0] alone', () => {
+    const keyA: BalanceResult = {
+      status: 'success', alias: 'ds_a',
+      balance: { is_available: true, balance_infos: [
+        { currency: 'USD', total_balance: '10.53' },
+        { currency: 'RUB', total_balance: '500.00' },
+      ] },
+    };
+    const keyB: BalanceResult = {
+      status: 'success', alias: 'ds_b',
+      balance: { is_available: true, balance_infos: [
+        { currency: 'USD', total_balance: '10.53' },
+        { currency: 'RUB', total_balance: '999.00' },
+      ] },
+    };
+    const types: Record<string, string> = { ds_a: 'deepseek', ds_b: 'deepseek' };
+    const rows = accountRowsFromBalances({
+      status: 'success',
+      balances: { ds_a: keyA, ds_b: keyB },
+    }, (alias) => types[alias]);
+    expect(rows).toEqual([
+      { account: 'type:deepseek', provider_type: 'deepseek', label: 'DeepSeek', aliases: ['ds_a'], result: keyA },
+      { account: 'alias:ds_b', provider_type: 'deepseek', label: 'DeepSeek (ds_b)', aliases: ['ds_b'], result: keyB },
+    ]);
+  });
+
   it('two different keys of one vendor that both failed stay two rows, not merged by matching errors', () => {
     const failA: BalanceResult = {
       status: 'error', alias: 'ds_a', message: 'key_rejected',
