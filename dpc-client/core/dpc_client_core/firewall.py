@@ -334,7 +334,7 @@ class ContextFirewall:
                      self.compute_enabled, len(self.compute_allowed_nodes),
                      len(self.compute_allowed_groups), len(self.compute_allowed_models),
                      self.compute_serving_local, self.compute_serving_vendor)
-        if self.compute_enabled and not self.compute_serving_alias:
+        if self.compute_enabled and not self.compute_serving_alias and not self.compute_serving_vendor:
             logger.warning(
                 "Compute sharing is enabled but compute.serving_local is empty (and the older "
                 "serving_alias unset) — peer inference requests will be refused. Name the alias "
@@ -348,7 +348,9 @@ class ContextFirewall:
         The two doors read one list. Since 2026-09-18 (Mike's call, ADR-041
         amendment) every entry in `serving_local` is served over P2P, not only
         this one; this stays the default for a request that carries no
-        provider, and the state line reads it.
+        provider, and the state line reads it. Since 2026-09-28 the vendor
+        list is served over P2P as well, and is never this default: a guest
+        that names no alias is not sent to a vendor on the owner's key.
         """
         return self.compute_serving_local[0] if self.compute_serving_local else None
 
@@ -654,14 +656,15 @@ class ContextFirewall:
         """
         if not self.compute_enabled:
             logger.info("Compute sharing: disabled")
-        elif not self.compute_serving_alias:
+        elif not self.compute_serving_alias and not self.compute_serving_vendor:
             logger.warning(
                 "Compute sharing is enabled but compute.serving_local is empty (and the older "
                 "serving_alias unset) — peer inference requests will be refused. Name the alias "
                 "this node should serve peers from in privacy_rules.json under compute.serving_local."
             )
         elif known_aliases is not None and (
-                unknown := [a for a in self.compute_serving_local if a not in set(known_aliases)]):
+                unknown := [a for a in self.compute_serving_local + self.compute_serving_vendor
+                            if a not in set(known_aliases)]):
             # A name that resolves to nothing used to read like a name that
             # works: the line below would announce it, the peer-facing provider
             # list would filter to it and come out empty, and the failure would
@@ -676,11 +679,17 @@ class ContextFirewall:
             )
         else:
             # Every listed alias is served since 2026-09-18, so the line names
-            # them all; the first is only what a request naming none gets.
+            # them all; the first local one is only what a request naming none
+            # gets. Vendor aliases reach peers too since 2026-09-28.
+            vendor = (
+                " and vendor alias(es) %s, whose prompts go to the vendor"
+                % ", ".join(repr(a) for a in self.compute_serving_vendor)
+                if self.compute_serving_vendor else ""
+            )
             logger.info(
-                "Compute sharing: enabled, serving peers from %s (%d node(s), %d group(s) allowed)",
-                ", ".join(repr(a) for a in self.compute_serving_local),
-                len(self.compute_allowed_nodes), len(self.compute_allowed_groups),
+                "Compute sharing: enabled, serving peers from %s%s (%d node(s), %d group(s) allowed)",
+                ", ".join(repr(a) for a in self.compute_serving_local) or "no local alias",
+                vendor, len(self.compute_allowed_nodes), len(self.compute_allowed_groups),
             )
 
     def _parse_transcription_settings(self):
@@ -1990,8 +1999,11 @@ class ContextFirewall:
             requester_node_id: The node_id of the requesting peer
             model: Optional model name to check if allowed
             provider: Optional provider alias the peer named. Only an alias
-                this node lists in `compute.serving_local` is accepted;
-                anything else is refused, including when no model is given.
+                this node lists in `compute.serving_local` or
+                `compute.serving_vendor` is accepted; anything else is
+                refused, including when no model is given. Whether a listed
+                alias may actually run — its class, its ceiling, its rate —
+                is the door's next question, not this one.
 
         Returns:
             True if the peer can request inference (and use the specified model if provided)
@@ -2007,13 +2019,17 @@ class ContextFirewall:
         # named alias even when serving_local is empty — nothing designated,
         # nothing served. Since 2026-09-18 the owner may list any number of
         # local aliases and every one of them is served (Mike's call, ADR-041
-        # amendment), so this is a membership test, not an equality one.
-        if provider is not None and provider not in self.compute_serving_local:
+        # amendment), so this is a membership test, not an equality one. Since
+        # 2026-09-28 the vendor list is served too (Mike's call, ADR-041 D5
+        # amendment): who may spend the owner's vendor key is the allow lists
+        # below, and the ceiling, the rate and the class are the door's.
+        served = list(self.compute_serving_local) + list(self.compute_serving_vendor)
+        if provider is not None and provider not in served:
             logger.warning(
                 "Compute denied for %s: named provider '%s' is in none of this node's served "
                 "aliases (%s)",
                 requester_node_id, provider,
-                ", ".join(self.compute_serving_local) or "none",
+                ", ".join(served) or "none",
             )
             return False
 

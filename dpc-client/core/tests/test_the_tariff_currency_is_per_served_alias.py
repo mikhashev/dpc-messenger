@@ -197,11 +197,11 @@ def _sent(svc):
 
 
 def test_a_served_neuraldeep_call_freezes_roubles_on_the_row_and_in_what_the_wire_sends(tmp_path):
-    """The row writer, called directly: the P2P door admits only
-    `serving_local` aliases (`ContextFirewall.can_request_inference`), so a
-    vendor alias reaches no peer through it today. `_record_peer_call` is where
-    a served call's tariff is resolved and frozen, and the `tariff` it returns
-    is the object the response's tariff group is built from."""
+    """The row writer, called directly. `_record_peer_call` is where a served
+    call's tariff is resolved and frozen, and the `tariff` it returns is the
+    object the response's tariff group is built from. The same call through
+    the door — which serves `serving_vendor` aliases since 2026-09-28 — is
+    `test_the_peer_door_serves_a_vendor_alias_the_owner_allows.py`."""
     coord, _ = _host(tmp_path, COMPUTE)
 
     _, tariff, amount = coord._record_peer_call(

@@ -99,7 +99,11 @@ def _peer_payer(row: Optional[Dict[str, Any]], kind: str) -> str:
 
 def _peer_facts(alias: Optional[str], node_id: str, peer_metadata) -> Dict[str, Any]:
     row = _peer_row(peer_metadata, node_id, alias)
-    kind = provider_kind(row.get("type") if row else None)
+    # The host's own word first: it knows which serving list the alias is on,
+    # where the type alone cannot tell an `openai_compatible` vendor from a
+    # server on the host's card. An older host sends none; the type decides.
+    stated = row.get("provider_kind") if row else None
+    kind = stated if stated in ("self_hosted", "vendor") else provider_kind(row.get("type") if row else None)
     return {
         "provider_alias": alias or "unknown",
         "route": "peer",

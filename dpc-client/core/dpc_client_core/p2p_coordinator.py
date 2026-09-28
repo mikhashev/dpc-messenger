@@ -7,13 +7,20 @@ Expanded in Phase C Step 5 with incoming P2P request handlers.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import websockets
 
-from .firewall import SERVING_LOCAL_KEY, AppliedTariff, ServingLists, onward_sharing_refusal
+from .firewall import (
+    SERVING_LOCAL_KEY,
+    SERVING_VENDOR_KEY,
+    AppliedTariff,
+    ServingLists,
+    onward_sharing_refusal,
+)
 from .node_ledger import NodeLedger, default_ledger, tariff_amount_for, usage_row
 
 logger = logging.getLogger(__name__)
@@ -378,10 +385,17 @@ class P2PCoordinator:
         aliases = providers if isinstance(providers, dict) else {}
         return firewall.classify_serving_lists({a: self._provider_type(a) for a in aliases})
 
-    def _vendor_quota_refusal(self, peer_id: str, serving_alias: str) -> Optional[tuple]:
-        """Why this peer may not be served `serving_alias` today, or None.
+    def _vendor_quota_refusal(
+        self, peer_id: str, serving_alias: str,
+    ) -> tuple[Optional[str], Optional[tuple]]:
+        """The alias's class, and why this peer may not be served it today.
 
-        ADR-041 D5 on the peer door. A vendor alias is bounded by money —
+        ADR-041 D5 on the peer door, the gateway's own policy: `owner_of` on
+        the classified lists, and for a vendor alias the ceiling. Since
+        2026-09-28 (Mike's call) a vendor alias reaches this door at all —
+        before, `can_request_inference` admitted `serving_local` alone. The
+        class is returned beside the refusal because the queue below reads it:
+        a vendor alias does not wait for the card. A vendor alias is bounded by money —
         `compute.vendor_quotas`, per day and per caller, in the currency its
         provider bills in — summed from the
         rows `_record_peer_call` wrote under this peer's own name, so a
@@ -391,8 +405,10 @@ class P2PCoordinator:
         refused: with the class unknown, «not a vendor alias» is a guess, and
         the wrong guess spends the host's money.
 
-        Returns `(error text, refusal code)` or None — three refusals under
-        three words, because only the ceiling refills by itself.
+        Returns `(owner, refusal)`: `owner` is `"local"`, `"vendor"` or None
+        where the lists could not say; `refusal` is `(error text, refusal
+        code)` or None — three refusals under three words, because only the
+        ceiling refills by itself.
         """
         from dpc_protocol.protocol import (
             REFUSAL_INSUFFICIENT_QUOTA,
@@ -404,20 +420,21 @@ class P2PCoordinator:
         try:
             lists = self._serving_lists()
         except ValueError as e:
-            return (
+            return None, (
                 f"This node cannot serve '{serving_alias}': its compute serving lists are "
                 f"refused as a configuration error ({e}), and an alias whose class is unknown "
                 "is not served",
                 REFUSAL_MISCONFIGURED,
             )
-        if not isinstance(lists, ServingLists) or lists.owner_of(serving_alias) != "vendor":
-            return None
+        owner = lists.owner_of(serving_alias) if isinstance(lists, ServingLists) else None
+        if owner != "vendor":
+            return owner, None
         model = (self._provider_config(serving_alias) or {}).get("model")
         currency = vendor_ceiling_currency(serving_alias, self._provider_for_alias(serving_alias))
         # No WARNING of its own: `handle_inference_request` logs every refusal
         # this returns, with this text in it, and one event deserves one line.
         if currency is None:
-            return (
+            return owner, (
                 f"This node cannot serve '{serving_alias}': it is a vendor alias and this node "
                 f"has no rate for it (model {model!r}), so what a call spends cannot be counted "
                 "against the daily ceiling in compute.vendor_quotas — an unpriced alias is "
@@ -436,8 +453,8 @@ class P2PCoordinator:
         # one» is not «by a little». A per-call ceiling is the other half and
         # is not decided (ADR-041 D5, open).
         if spent < quota:
-            return None
-        return (
+            return owner, None
+        return owner, (
             f"This node serves '{serving_alias}' behind a daily ceiling and yours is spent: "
             f"{spent:.4f} {currency} of {quota:.2f} {currency} today (compute.vendor_quotas, "
             "per caller); it is "
@@ -652,8 +669,11 @@ class P2PCoordinator:
         # Since 2026-09-18 every alias in compute.serving_local is served
         # (Mike's call, ADR-041 amendment), so a peer that names one gets that
         # one — the gate above has already refused any alias not on the list,
-        # which is why the name may be trusted here. A request naming none
-        # falls to the first entry, as it always did.
+        # which is why the name may be trusted here. Since 2026-09-28 the
+        # vendor list is served the same way (Mike's call, ADR-041 D5
+        # amendment). A request naming none falls to the first local entry, as
+        # it always did, and never to a vendor alias: a guest that chose
+        # nothing is not sent to a vendor on this node's key.
         serving_alias = provider or self.service.firewall.compute_serving_alias
         if not serving_alias:
             logger.warning(
@@ -678,7 +698,11 @@ class P2PCoordinator:
         # loader cannot, because no registry exists when they are parsed, so
         # this door asks the same predicate here, before the router and before
         # any usage row: an alias that is somebody else's model is not served.
-        refusal = onward_sharing_refusal(SERVING_LOCAL_KEY, serving_alias, self._provider_type(serving_alias))
+        # The key is the list the alias stands on, so the sentence names the
+        # list the owner has to edit.
+        vendor_list = getattr(self.service.firewall, "compute_serving_vendor", None) or ()
+        list_key = SERVING_VENDOR_KEY if serving_alias in vendor_list else SERVING_LOCAL_KEY
+        refusal = onward_sharing_refusal(list_key, serving_alias, self._provider_type(serving_alias))
         if refusal:
             logger.warning("Peer inference refused for %s: %s", peer_id, refusal)
             error_response = create_remote_inference_response(
@@ -696,7 +720,7 @@ class P2PCoordinator:
         # already spent on a vendor alias today is read from the ledger and
         # weighed against its ceiling. Nothing is written — a refused call is
         # not a call — and the guest learns only that its own ceiling is spent.
-        quota_refusal = self._vendor_quota_refusal(peer_id, serving_alias)
+        owner, quota_refusal = self._vendor_quota_refusal(peer_id, serving_alias)
         if quota_refusal:
             error_text, code = quota_refusal
             logger.warning("Peer inference refused for %s: %s", peer_id, error_text)
@@ -820,7 +844,13 @@ class P2PCoordinator:
                 )
                 seq += 1
 
-            async with self._peer_inference_lock:
+            # Money bounds a vendor alias, not the card: no queue, as on the
+            # gateway's route (ADR-041 D5). A local alias waits for the card
+            # as before, and so does anything the lists did not class.
+            queue = (
+                contextlib.nullcontext() if owner == "vendor" else self._peer_inference_lock
+            )
+            async with queue:
                 # Clocked inside the lock: the wait is not part of the call, and
                 # the price depends on the hour the call is made (ADR-041 D3).
                 started_at = datetime.now(timezone.utc)

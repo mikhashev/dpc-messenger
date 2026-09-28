@@ -2579,6 +2579,16 @@ class CoreService:
         absent, and absent means «not stated», not «free» or «none applies».
         `peer_id` is who the row is for: without one there is no free list to
         resolve and the row carries no tariff.
+
+        `provider_kind` says which of this node's serving lists the alias
+        stands on — `vendor` for `compute.serving_vendor`, `self_hosted` for
+        `compute.serving_local` — in the words of the guest's own runtime
+        budget (`dpc_agent/provider_facts.py`), so a guest is told before it
+        calls that a vendor model's prompt goes to that vendor, named by
+        `type` (Mike's call, 2026-09-28). Absent on an alias on neither list,
+        a transcription row among them. The host's word, not the type's: an
+        `openai_compatible` alias may be a vendor or a server on the host's
+        own card, and only the host knows which list it filed it under.
         """
         info = {
             "alias": alias,
@@ -2598,7 +2608,13 @@ class CoreService:
             info["reasoning_words"] = words
             info["reasoning_default"] = effective_reasoning_default(provider)
 
-        tariff = menu_tariff_row(getattr(self, "firewall", None), alias, peer_id, provider)
+        firewall = getattr(self, "firewall", None)
+        if alias in (getattr(firewall, "compute_serving_vendor", None) or ()):
+            info["provider_kind"] = "vendor"
+        elif alias in (getattr(firewall, "compute_serving_local", None) or ()):
+            info["provider_kind"] = "self_hosted"
+
+        tariff = menu_tariff_row(firewall, alias, peer_id, provider)
         if tariff is not None:
             info["tariff"] = tariff
         settings = menu_settings_row(provider)
@@ -2616,7 +2632,9 @@ class CoreService:
         needs inference permission on its model and must be one of the aliases
         this node lists in compute.serving_local — every one of them is served
         since 2026-09-18 (Mike's call, ADR-041 amendment), so a second shared
-        local model reaches the peer too. The second element is the sentence a
+        local model reaches the peer too — or in compute.serving_vendor, served
+        over P2P since 2026-09-28 (Mike's call) and marked on its row as a
+        vendor's model. The second element is the sentence a
         log line or a preview card says when the list is shorter than the owner
         expects.
         """
@@ -2631,6 +2649,7 @@ class CoreService:
             )
 
         served_local = list(getattr(firewall, "compute_serving_local", None) or [])
+        served = served_local + list(getattr(firewall, "compute_serving_vendor", None) or [])
         rows: List[Dict[str, Any]] = []
         for alias, provider in self.llm_manager.providers.items():
             info = self.build_p2p_provider_info(alias, provider, peer_id=peer_id)
@@ -2638,20 +2657,21 @@ class CoreService:
                 if has_transcription and firewall.can_request_transcription(peer_id, info["model"]):
                     rows.append(info)
             elif (has_compute
-                    and alias in served_local
+                    and alias in served
                     and firewall.can_request_inference(peer_id, info["model"])):
                 rows.append(info)
 
         if rows:
             return rows, None
-        if has_compute and not served_local:
+        if has_compute and not served:
             return rows, (
                 "inference sharing is on and this peer is allowed, but no alias is designated "
-                "in compute.serving_local, so there is nothing to offer"
+                "in compute.serving_local or compute.serving_vendor, so there is nothing to offer"
             )
         return rows, (
             "no configured provider passes this peer's permissions: the designated aliases "
-            "(compute.serving_local) and compute.allowed_models decide the inference rows, "
+            "(compute.serving_local, compute.serving_vendor) and compute.allowed_models decide "
+            "the inference rows, "
             "and the transcription permissions decide a transcription one"
         )
 

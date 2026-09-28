@@ -6,6 +6,12 @@ gateway's local route has enforced it since the quota shipped; the peer door had
 no quota at all, so
 a peer calling a vendor alias this node serves could spend without bound.
 
+Since 2026-09-28 (Mike's call, ADR-041 D5 amendment) the peer door admits an
+alias in `compute.serving_vendor` at all — `can_request_inference` used to
+accept `serving_local` alone — so these tests reach the ceiling through the
+real `ContextFirewall` and its real gate, with the guest naming the vendor
+alias as a guest does; nothing stands in for the gate that used to refuse it.
+
 The ceiling is read from the node ledger rather than from a counter, which is
 what makes it survive a restart: the sum is over the rows
 `_record_peer_call` wrote under that peer's own name with
@@ -64,29 +70,34 @@ def _spend(
     ))
 
 
-def _vendor_host(tmp_path: Path, *, quotas=None):
-    """A door whose serving alias is a vendor alias with a ceiling.
+def _vendor_host(tmp_path: Path, *, quota: float = QUOTA):
+    """A door serving a vendor alias with a ceiling, from a real rules file.
 
-    The lists are stood in rather than written into a rules file: today
-    `compute_serving_alias` is `serving_local[0]`, so the load path cannot
-    reach this state, and the gate under test is what the door does once the
-    alias it serves is classified `vendor`.
+    The guest is allowed by `allow_nodes`, the owner's own choice; the alias
+    stands in `serving_vendor` beside a local one. The requests below name the
+    vendor alias, because a request naming none is served the first local one.
     """
-    coord, svc = make_coordinator()
-    svc.firewall.can_request_inference.return_value = True
-    svc.firewall.compute_serving_alias = VENDOR
-    svc.firewall.classify_serving_lists.return_value = ServingLists(
-        local=(LOCAL,), vendor=(VENDOR,),
-        quotas={VENDOR: QUOTA} if quotas is None else quotas,
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    coord, svc = _real_firewall_host(
+        tmp_path,
+        {
+            "allow_nodes": [GUEST],
+            "serving_local": [LOCAL],
+            "serving_vendor": [VENDOR],
+            "vendor_quotas": {VENDOR: quota},
+        },
+        # The model is in the config because that is where providers.json puts
+        # it, and the door reads it to ask whether the alias can be priced.
+        {
+            LOCAL: SimpleNamespace(config={"type": "ollama"}),
+            VENDOR: SimpleNamespace(config={"type": "deepseek", "model": VENDOR_MODEL}),
+        },
     )
-    # The model is in the config because that is where providers.json puts it,
-    # and the door reads it to ask whether the alias can be priced at all.
-    svc.llm_manager.providers = {
-        VENDOR: SimpleNamespace(config={"type": "deepseek", "model": VENDOR_MODEL}),
-    }
-    svc.llm_manager.query = AsyncMock(return_value={"response": "pong", "model": "m"})
-    coord._ledger = NodeLedger(tmp_path / "ledger")
     return coord, svc
+
+
+async def _ask(coord, request_id: str = "req-1", peer: str = GUEST) -> None:
+    await coord.handle_inference_request(peer, request_id, "ping", provider=VENDOR)
 
 
 def _real_firewall_host(tmp_path: Path, compute: dict, providers: dict):
@@ -95,6 +106,7 @@ def _real_firewall_host(tmp_path: Path, compute: dict, providers: dict):
     rules.write_text(json.dumps({"compute": dict(compute, enabled=True)}), encoding="utf-8")
     coord, svc = make_coordinator()
     svc.firewall = ContextFirewall(rules)
+    svc.gateway = None
     svc.llm_manager.providers = providers
     svc.llm_manager.query = AsyncMock(return_value={"response": "pong", "model": "m"})
     coord._ledger = NodeLedger(tmp_path / "ledger")
@@ -120,7 +132,7 @@ async def test_a_peer_under_its_ceiling_is_served(tmp_path):
     coord, svc = _vendor_host(tmp_path)
     _spend(coord._ledger, GUEST, 0.99)
 
-    await coord.handle_inference_request(GUEST, "req-1", "ping")
+    await _ask(coord)
 
     svc.llm_manager.query.assert_awaited_once()
     payload = svc.p2p_manager.send_message_to_peer.call_args[0][1]["payload"]
@@ -140,7 +152,7 @@ async def test_a_peer_at_or_over_its_ceiling_is_refused_with_the_code_and_nothin
     before = _requests(coord._ledger)
 
     with caplog.at_level(logging.WARNING, logger="dpc_client_core.p2p_coordinator"):
-        await coord.handle_inference_request(GUEST, "req-1", "ping")
+        await _ask(coord)
 
     svc.llm_manager.query.assert_not_awaited()
     payload = _refusal(svc)
@@ -164,7 +176,7 @@ async def test_the_ceiling_counts_this_callers_own_rows_and_no_others(tmp_path):
     _spend(coord._ledger, GUEST, 5.00, alias=LOCAL)
     _spend(coord._ledger, GUEST, 0.99)
 
-    await coord.handle_inference_request(GUEST, "req-1", "ping")
+    await _ask(coord)
 
     svc.llm_manager.query.assert_awaited_once()
 
@@ -174,7 +186,7 @@ async def test_yesterdays_spending_does_not_bind_today(tmp_path):
     coord, svc = _vendor_host(tmp_path)
     _spend(coord._ledger, GUEST, 9.00, at=datetime.now(timezone.utc) - timedelta(days=1))
 
-    await coord.handle_inference_request(GUEST, "req-1", "ping")
+    await _ask(coord)
 
     svc.llm_manager.query.assert_awaited_once()
 
@@ -189,7 +201,7 @@ async def test_a_restart_changes_nothing_because_the_ledger_is_the_source(tmp_pa
 
     second, svc = _vendor_host(tmp_path)
     assert second._ledger is not first._ledger
-    await second.handle_inference_request(GUEST, "req-1", "ping")
+    await _ask(second)
 
     svc.llm_manager.query.assert_not_awaited()
     assert _refusal(svc)["code"] == "insufficient_quota"
@@ -198,11 +210,27 @@ async def test_a_restart_changes_nothing_because_the_ledger_is_the_source(tmp_pa
 @pytest.mark.asyncio
 async def test_a_vendor_alias_with_no_ceiling_serves_nothing(tmp_path):
     """Absent is not unlimited. A vendor alias without a ceiling is refused
-    when the rules are read, so a list that reaches the door without one never
-    passed that check and is not trusted here."""
-    coord, svc = _vendor_host(tmp_path, quotas={})
+    when the rules are read; and lists that reach the door without one — here
+    from a gateway object whose classification lost it — are not trusted
+    either."""
+    rules = tmp_path / "no_ceiling.json"
+    rules.write_text(json.dumps({"compute": {
+        "enabled": True, "allow_nodes": [GUEST], "serving_vendor": [VENDOR],
+    }}), encoding="utf-8")
+    with pytest.raises(ValueError, match="vendor_quotas"):
+        ContextFirewall(rules)
 
-    await coord.handle_inference_request(GUEST, "req-1", "ping")
+    coord, svc = _vendor_host(tmp_path)
+    lost = SimpleNamespace(
+        firewall=SimpleNamespace(
+            classify_serving_lists=lambda types: ServingLists(
+                local=(LOCAL,), vendor=(VENDOR,), quotas={}),
+        ),
+        llm_manager=SimpleNamespace(providers=svc.llm_manager.providers),
+    )
+    svc.gateway = SimpleNamespace(gateway=Gateway(lost))
+
+    await _ask(coord)
 
     svc.llm_manager.query.assert_not_awaited()
     assert _refusal(svc)["code"] == "insufficient_quota"
@@ -214,7 +242,7 @@ async def test_the_lists_come_from_the_gateways_own_object_when_this_node_has_on
     second core service, whose ceiling is zero, only so that the two can be
     told apart: the door refuses, which the coordinator's own firewall — quota
     $9 and nothing spent — would not have done."""
-    coord, svc = _vendor_host(tmp_path, quotas={VENDOR: 9.00})
+    coord, svc = _vendor_host(tmp_path, quota=9.00)
     strict = SimpleNamespace(
         firewall=SimpleNamespace(
             classify_serving_lists=lambda types: ServingLists(
@@ -224,7 +252,7 @@ async def test_the_lists_come_from_the_gateways_own_object_when_this_node_has_on
     )
     svc.gateway = SimpleNamespace(gateway=Gateway(strict))
 
-    await coord.handle_inference_request(GUEST, "req-1", "ping")
+    await _ask(coord)
 
     svc.llm_manager.query.assert_not_awaited()
     assert _refusal(svc)["code"] == "insufficient_quota"
@@ -283,12 +311,12 @@ async def test_a_vendor_alias_this_node_cannot_price_is_refused_before_it_runs(t
     review of `11b1de5c`, 2026-09-14). `unrated` and not the ceiling's word:
     no amount of waiting writes a rate."""
     coord, svc = _vendor_host(tmp_path)
-    svc.llm_manager.providers = {
-        VENDOR: SimpleNamespace(config={"type": "anthropic", "model": "claude-sonnet-4-5"}),
-    }
+    svc.llm_manager.providers[VENDOR] = SimpleNamespace(
+        config={"type": "anthropic", "model": "claude-sonnet-4-5"},
+    )
 
     with caplog.at_level(logging.WARNING, logger="dpc_client_core.p2p_coordinator"):
-        await coord.handle_inference_request(GUEST, "req-1", "ping")
+        await _ask(coord)
 
     svc.llm_manager.query.assert_not_awaited()
     payload = _refusal(svc)
@@ -307,7 +335,7 @@ async def test_a_priced_vendor_alias_under_its_ceiling_is_still_served(tmp_path)
     table, not about vendor aliases."""
     coord, svc = _vendor_host(tmp_path)
 
-    await coord.handle_inference_request(GUEST, "req-1", "ping")
+    await _ask(coord)
 
     svc.llm_manager.query.assert_awaited_once()
     assert "req-1" in _requests(coord._ledger)
@@ -324,13 +352,13 @@ async def test_the_three_money_gates_send_three_different_words(tmp_path):
     429 — «come back tomorrow» — which is true only of the first."""
     ceiling, svc_ceiling = _vendor_host(tmp_path / "a")
     _spend(ceiling._ledger, GUEST, QUOTA)
-    await ceiling.handle_inference_request(GUEST, "req-1", "ping")
+    await _ask(ceiling)
 
     rateless, svc_rateless = _vendor_host(tmp_path / "b")
-    svc_rateless.llm_manager.providers = {
-        VENDOR: SimpleNamespace(config={"type": "anthropic", "model": "claude-sonnet-4-5"}),
-    }
-    await rateless.handle_inference_request(GUEST, "req-1", "ping")
+    svc_rateless.llm_manager.providers[VENDOR] = SimpleNamespace(
+        config={"type": "anthropic", "model": "claude-sonnet-4-5"},
+    )
+    await _ask(rateless)
 
     lists_dir = tmp_path / "c"
     lists_dir.mkdir()
