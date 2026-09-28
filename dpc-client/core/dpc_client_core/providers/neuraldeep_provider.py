@@ -582,7 +582,11 @@ class NeuralDeepProvider(AIProvider):
             if retry_after is not None:
                 capped = min(retry_after, LIMITS_BACKOFF_CAP)
                 self._limits_backoff_until = arrived + capped
-                self._limits_backoff_kind = None
+            # Reset regardless of whether a Retry-After header was present —
+            # this is a non-403 failure, so a kind left over from an earlier
+            # 403 (ERROR_KEY_BLOCKED) must not survive to mislabel the next
+            # backoff raise (line ~504) as key-blocked when it wasn't.
+            self._limits_backoff_kind = None
             if self._limits_cache is not None:
                 return self._limits_cache
             raise NeuralDeepLimitsError(

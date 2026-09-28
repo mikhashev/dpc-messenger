@@ -51,6 +51,14 @@ _SUBSCRIPTION_BASE_URLS = (
 # version number followed by `v` — and a hard list goes stale one release later
 # while a text model never accidentally grows a `v`.
 _ZAI_VISION_RE = re.compile(r"glm-\d+(?:\.\d+)?v\b|glm-ocr", re.I)
+# The Fair-Usage code, matched as a code (word boundaries on both sides) —
+# not a bare substring, which a 429 body quoting "13130 tokens" or similar
+# would also contain, stopping a legitimate retry over an unrelated number.
+_ZAI_FAIR_USAGE_1313_RE = re.compile(r"(?<!\d)1313(?!\d)")
+
+
+def _is_fair_usage_1313(error: Exception) -> bool:
+    return bool(_ZAI_FAIR_USAGE_1313_RE.search(str(error).lower()))
 
 
 def _is_subscription_url(base_url: str) -> bool:
@@ -171,7 +179,7 @@ class ZaiProvider(AIProvider):
         # 1313 is the Coding Plan's Fair-Usage code; unreachable on the prepaid
         # platform API, so seeing it means "stop", not "retry later" —
         # checked before anything else, status code included.
-        if "1313" in err_str:
+        if _is_fair_usage_1313(error):
             return False
         # Status next: a carried status code is decisive (the base class's
         # table), so a deterministic 4xx whose body happens to quote one of
@@ -187,7 +195,7 @@ class ZaiProvider(AIProvider):
 
     def _on_non_retryable(self, error: Exception) -> None:
         """A 1313 from here is a canary, not a hiccup — say so at ERROR."""
-        if "1313" in str(error).lower():
+        if _is_fair_usage_1313(error):
             logger.error(
                 "Z.AI provider '%s' received Fair-Usage 1313 from %s. That code belongs "
                 "to the GLM Coding Plan subscription, which this product may not use — "

@@ -52,6 +52,15 @@ def test_transient_errors_are_retryable():
     assert ZaiProvider._is_retryable(Exception("connection reset")) is True
 
 
+def test_a_number_merely_containing_1313_is_not_the_fair_usage_code():
+    """A bare substring match on "1313" would stop a legitimate retry over an
+    unrelated number that happens to contain those four digits — e.g. a 429
+    body quoting a token count. The canary must match 1313 as a code (word
+    boundaries), not wherever it appears inside a longer number."""
+    err = Exception("HTTP 429: rate limit exceeded, request used 13130 tokens this minute")
+    assert ZaiProvider._is_retryable(err) is True
+
+
 def test_tools_anthropic_to_openai():
     anthropic_tools = [
         {"name": "read_file", "description": "Read a file",

@@ -426,6 +426,40 @@ async def test_a_transient_limits_failure_keeps_the_known_billing_mode(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_a_plain_failure_after_a_403_clears_the_key_blocked_kind(monkeypatch):
+    """A 403 sets `_limits_backoff_kind` to ERROR_KEY_BLOCKED. Once that
+    backoff has expired, a later non-2xx failure that is NOT a 403 — here a
+    plain 500 with no Retry-After header — must clear the stale kind too, or
+    the next in-backoff raise (line ~504) mislabels an ordinary limits
+    failure as "key blocked" forever, since nothing else resets it absent a
+    Retry-After header."""
+    from dpc_client_core.providers.neuraldeep_provider import NeuralDeepKeyBlocked
+
+    monkeypatch.setattr(NeuralDeepProvider, "get_balance", _REAL_GET_BALANCE)
+    p = _make()
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(
+                            transport=httpx.MockTransport(lambda request: httpx.Response(403)), **kw))
+    with pytest.raises(NeuralDeepKeyBlocked):
+        await p._fetch_limits()
+    assert p._limits_backoff_kind == "key_blocked"
+
+    # The 403 backoff has not naturally expired — force past it, the way a
+    # later call after the window would find it.
+    p._limits_backoff_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(
+                            transport=httpx.MockTransport(lambda request: httpx.Response(500)), **kw))
+    with pytest.raises(Exception):
+        await p._fetch_limits()
+
+    assert p._limits_backoff_kind is None
+
+
+@pytest.mark.asyncio
 async def test_an_invalid_schema_read_also_keeps_the_known_billing_mode(monkeypatch):
     monkeypatch.setattr(NeuralDeepProvider, "get_balance", _REAL_GET_BALANCE)
     p = _make()
