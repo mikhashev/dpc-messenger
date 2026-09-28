@@ -9,7 +9,7 @@
 
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { providersList, nodeStatus, sendCommand, firewallRulesUpdated } from '$lib/coreService';
+  import { providersList, nodeStatus, sendCommand, firewallRulesUpdated, getProviderBalances, providerBalances } from '$lib/coreService';
   import {
     addAllowed,
     addAllowedModel,
@@ -23,6 +23,8 @@
     contextWindowLine,
     doorAddress,
     foldServingAlias,
+    formatQuotaBlockers,
+    formatQuotaLine,
     gatewayVerdict,
     groupGatewayMenu,
     isFree,
@@ -109,6 +111,21 @@
   $: providerByAlias = new Map(($providersList || []).map((p) => [p.alias, p]));
   let pickLocal = '';
   let pickVendor = '';
+
+  // A vendor alias's request quota (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-AND-
+  // NEVER-SHOWN): fetched once on mount — /v1/limits-style reads spend no
+  // quota, but this still calls every alias's endpoint — and again on demand
+  // from the refresh button. Read out of the shared `providerBalances` store
+  // (also filled by ProvidersEditor) rather than a local copy, so the two
+  // tabs never show two different answers for the same alias.
+  let quotaLoading = false;
+  async function refreshQuota() {
+    quotaLoading = true;
+    try { await getProviderBalances(); } finally { quotaLoading = false; }
+  }
+  onMount(refreshQuota);
+  $: quotaBlockersOf = (alias: string) => formatQuotaBlockers($providerBalances?.[alias]?.balance);
+  $: quotaLineOf = (alias: string) => formatQuotaLine($providerBalances?.[alias]?.balance);
 
   function addPicked(list: ServingList) {
     const alias = list === 'local' ? pickLocal : pickVendor;
@@ -525,6 +542,13 @@
             A peer you allow sends its prompt through this node to the vendor, under your key. Whether
             the vendor's terms permit that is yours to check &mdash; DPC does not read them.
           </p>
+          {#if (view.serving_vendor ?? []).length > 0}
+            <div class="inline-input-row">
+              <button class="btn-small" on:click={refreshQuota} disabled={quotaLoading}>
+                {quotaLoading ? 'Checking quotas…' : 'Refresh vendor quotas'}
+              </button>
+            </div>
+          {/if}
           <div class="rule-list">
             {#each view.serving_vendor ?? [] as alias (alias)}
               <div class="rule-row">
@@ -538,6 +562,12 @@
                     {/if}
                   {:else}
                     <span class="badge badge-missing">not in providers.json</span>
+                  {/if}
+                  {#if quotaBlockersOf(alias)}
+                    <span class="badge badge-missing">{quotaBlockersOf(alias)}</span>
+                  {/if}
+                  {#if quotaLineOf(alias)}
+                    <span class="muted quota-line">{quotaLineOf(alias)}</span>
                   {/if}
                 </span>
                 <span class="quota-cell">
@@ -1164,6 +1194,7 @@
   .badge { padding: 0.1rem 0.5rem; border-radius: 10px; font-size: 0.75rem; white-space: nowrap; }
   .badge-first { background: #e3f2fd; color: #0d47a1; }
   .badge-missing { background: #fff3cd; color: #856404; }
+  .quota-line { display: block; font-size: 0.85em; margin-top: 0.15rem; }
   .badge-quota { background: #e8f5e9; color: #1b5e20; }
   .badge-gift { background: #f3e5f5; color: #4a148c; }
   .badge-live { background: #d4edda; color: #155724; }

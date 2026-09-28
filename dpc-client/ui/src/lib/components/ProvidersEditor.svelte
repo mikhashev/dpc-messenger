@@ -4,6 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { sendCommand, peerProviders, providerBalance, getProviderBalance } from '$lib/coreService';
+  import { formatQuotaLine } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
   import { trackRename } from '$lib/utils/aliasRenames';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
@@ -558,18 +559,35 @@
   const LOW_BALANCE_USD = 3;       // early-warning threshold
   const CRITICAL_BALANCE_USD = 1;  // urgent threshold
   let balanceLoading = false;
+  // Which alias the balance card shows. A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-
+  // AND-NEVER-SHOWN: this used to always be the default/agent provider
+  // (getProviderBalance() with no alias); now it can show the alias being
+  // viewed/edited, or any other pay-per-use alias, picked from the dropdown.
+  let balanceAliasChoice = '';
+
+  $: payPerUseAliases = (displayConfig?.providers ?? [])
+    .filter((p) => p.type === 'deepseek' || p.type === 'neuraldeep')
+    .map((p) => p.alias);
+  // Defaults to the first pay-per-use alias found, and stays there across
+  // re-renders unless that alias stopped existing (deleted, renamed) — never
+  // silently to "the default provider", which is what made this card only
+  // ever show one alias before. The dropdown lets the owner switch to another.
+  $: if (!balanceAliasChoice || !payPerUseAliases.includes(balanceAliasChoice)) {
+    balanceAliasChoice = payPerUseAliases[0] ?? '';
+  }
 
   async function refreshBalance() {
     balanceLoading = true;
     try {
-      await getProviderBalance();
+      await getProviderBalance(balanceAliasChoice || undefined);
     } finally {
       balanceLoading = false;
     }
   }
 
-  $: hasPayPerUseProvider = !!displayConfig?.providers?.some((p) => p.type === 'deepseek' || p.type === 'neuraldeep');
+  $: hasPayPerUseProvider = payPerUseAliases.length > 0;
   $: balResult = $providerBalance;
+  $: balanceQuotaLine = balResult?.status === 'success' ? formatQuotaLine(balResult.balance) : '';
   $: balanceUnsupported = !!balResult && balResult.status === 'unsupported';
   $: balanceError = balResult && balResult.status === 'error' ? (balResult.message || 'error') : '';
   $: balanceInfo = balResult && balResult.status === 'success' && balResult.balance && Array.isArray(balResult.balance.balance_infos)
@@ -1008,6 +1026,13 @@
                 <span class="balance-label">
                   Account balance{balanceAlias ? ` (${balanceAlias})` : ''}
                 </span>
+                {#if payPerUseAliases.length > 1}
+                  <select class="inline-input" bind:value={balanceAliasChoice}>
+                    {#each payPerUseAliases as alias (alias)}
+                      <option value={alias}>{alias}</option>
+                    {/each}
+                  </select>
+                {/if}
                 <button class="btn btn-edit" on:click={refreshBalance} disabled={balanceLoading}>
                   {balanceLoading ? 'Checking…' : 'Check balance'}
                 </button>
@@ -1023,6 +1048,9 @@
                   {:else if balanceLevel === 'low'}<span class="balance-flag">low (&lt; ${LOW_BALANCE_USD})</span>{/if}
                   {#if !balanceAvailable}<span class="balance-flag">— insufficient</span>{/if}
                 </div>
+                {#if balanceQuotaLine}
+                  <div class="balance-value balance-muted quota-line">{balanceQuotaLine}</div>
+                {/if}
               {:else}
                 <div class="balance-value balance-muted">Not checked yet — click “Check balance”.</div>
               {/if}
@@ -2974,6 +3002,7 @@
   }
   .balance-label { font-weight: 600; color: #fff; }
   .balance-value { margin-top: 0.4rem; font-size: 1.05rem; color: #fff; font-variant-numeric: tabular-nums; }
+  .balance-value.quota-line { font-size: 0.85rem; margin-top: 0.2rem; }
   .balance-flag { margin-left: 0.5rem; font-size: 0.85rem; color: #bbb; }
   .balance-muted { color: #aaa; font-size: 0.9rem; }
   .balance-err { color: #ef9a9a; }

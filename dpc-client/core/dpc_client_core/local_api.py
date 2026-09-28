@@ -85,6 +85,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "query_provider_models",
     "query_remote_providers",
     "get_provider_balance",
+    "get_provider_balances",
     # Personal context & instructions
     "get_personal_context",
     "save_personal_context",

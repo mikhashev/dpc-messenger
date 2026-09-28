@@ -35,6 +35,14 @@ export const firewallRulesUpdated = writable<Record<string, any> | null>(null);
 // balance = { is_available, balance_infos: [{currency, total_balance, ...}] }.
 export const providerBalance = writable<any>(null);
 
+// Every balance-capable provider's balance, by alias, populated by
+// getProviderBalances() in coreService (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-
+// AND-NEVER-SHOWN). Separate from `providerBalance` (the single default/agent
+// provider the Sidebar pill and its poll read) because a host serving several
+// vendor aliases needs to see each key's own quota at once, in the Inference
+// Sharing tab. Shape: { [alias]: { status, alias, balance?, message? } }.
+export const providerBalances = writable<Record<string, any>>({});
+
 // The provider calls currently waiting out a backoff, by `retry_id`. A map
 // rather than one slot because an agent and a chat can be waiting at the same
 // time, and a single slot would let either one's closing notice clear the

@@ -8,6 +8,7 @@ an answer that starts with "\\n\\n", and thinking that only stops on the
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -420,6 +421,69 @@ async def test_balance_reads_the_wallet_from_limits(monkeypatch):
     balance = await _REAL_GET_BALANCE(p)
     assert seen["url"] == "https://api.neuraldeep.ru/v1/limits"
     assert seen["auth"] == "Bearer test-key"
-    assert balance["balance_infos"] == [{"currency": "RUB", "total_balance": "500.00"}]
+    assert balance["balance_infos"] == [
+        {"currency": "RUB", "total_balance": "500.00", "spent_30d": "0.00"},
+    ]
     assert balance["is_available"] is True
     assert balance["billing_mode"] == "subscription"
+    assert balance["quota"]["billing_mode"] == "subscription"
+    assert balance["quota"]["can_request"] is True
+    assert balance["quota"]["windows"] == []  # payload carries no `chat` block
+
+
+@pytest.mark.asyncio
+async def test_balance_normalizes_the_real_limits_payload_into_a_quota_block(monkeypatch):
+    """A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-AND-NEVER-SHOWN: the fixture is a
+    real /v1/limits response (captured 2026-09-28, no secrets)."""
+    fixture_path = Path(__file__).parent / "fixtures" / "nd_limits_2026-09-28.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+
+    quota = balance["quota"]
+    assert quota["tier"] == "free"
+    assert quota["billing_mode"] == "subscription"
+    assert quota["can_request"] is True
+    assert quota["blockers"] == []
+    assert quota["parallel_limit"] == 3
+    assert quota["windows"] == [
+        {"name": "3h", "unit": "requests", "used": 14, "limit": 400,
+         "remaining": 386, "resets_at": "2026-09-28T11:59:59Z"},
+        {"name": "iso-week", "unit": "requests", "used": 14, "limit": 2000,
+         "remaining": 1986, "resets_at": "2026-10-05T00:00:00Z"},
+        {"name": "minute", "unit": "requests", "used": 0, "limit": 20,
+         "remaining": 20, "resets_at": None},
+    ]
+    assert balance["balance_infos"] == [
+        {"currency": "RUB", "total_balance": "500.00", "spent_30d": "0.00"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_balance_quota_survives_a_payload_with_no_chat_block(monkeypatch):
+    """A partial payload (a vendor outage, a schema change) must not crash the
+    normalization — windows just come back empty."""
+    payload = {"tier": "free", "key": {"status": "ok", "billing_mode": "subscription"},
+               "decision": {"can_request": False, "blockers": ["out_of_quota"]}}
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    p = _make()
+    balance = await _REAL_GET_BALANCE(p)
+
+    assert balance["quota"]["windows"] == []
+    assert balance["quota"]["can_request"] is False
+    assert balance["quota"]["blockers"] == ["out_of_quota"]
+    assert balance["quota"]["parallel_limit"] is None
+    assert balance["balance_infos"] == []

@@ -123,7 +123,7 @@ export type {
 
 import { connectionStatus, nodeStatus, coreMessages } from './services/connection';
 import { p2pMessages, unreadMessageCounts } from './services/messaging';
-import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerRetries } from './services/providers';
+import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerRetries } from './services/providers';
 import { showNotificationIfBackground } from './notificationService';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded } from './services/voice';
@@ -139,7 +139,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 // services/providers.ts and re-export it here. See CLAUDE.md "UI Integration Pattern".
 export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
-export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerRetries };
+export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerRetries };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded };
 export { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed };
@@ -1459,6 +1459,31 @@ export async function getProviderBalance(alias?: string): Promise<any> {
         const r = { status: 'error', message: e instanceof Error ? e.message : String(e) };
         providerBalance.set(r);
         return r;
+    }
+}
+
+/**
+ * Fetch every balance-capable provider's balance (backend `get_provider_balances`)
+ * and publish the per-alias map to `providerBalances`. Used by the Inference
+ * Sharing tab, which needs each vendor alias's own quota rather than only the
+ * default/agent provider `getProviderBalance()` reports. `/v1/limits`-style
+ * reads spend no quota, but this still fetches every alias's endpoint, so the
+ * caller decides its own refresh cadence rather than this function polling.
+ */
+export async function getProviderBalances(): Promise<Record<string, any>> {
+    const pending = sendCommand('get_provider_balances', {});
+    if (pending === false) {
+        providerBalances.set({});
+        return {};
+    }
+    try {
+        const result = await pending;  // { status, balances: { [alias]: {...} } } | { status, message }
+        const balances = result && result.status === 'success' && result.balances ? result.balances : {};
+        providerBalances.set(balances);
+        return balances;
+    } catch (e) {
+        providerBalances.set({});
+        return {};
     }
 }
 

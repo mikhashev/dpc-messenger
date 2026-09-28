@@ -1004,6 +1004,115 @@ export function menuVerdict(result: PeerMenuResult | null | undefined): MenuVerd
   };
 }
 
+// --- A vendor key's request quota (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-AND-
+// NEVER-SHOWN) ---------------------------------------------------------------
+
+/** One window of `NeuralDeepProvider._quota_from_limits` (or another
+ *  provider's future equivalent) — `get_balance()`'s normalized `quota.windows`
+ *  entry. Every field but `name`/`unit` is optional: a payload the vendor
+ *  changed shape on is shown with what it has, never thrown away. */
+export interface QuotaWindow {
+  name: string;
+  unit: string;
+  used?: number | null;
+  limit?: number | null;
+  remaining?: number | null;
+  resets_at?: string | null;
+}
+
+/** `get_balance()`'s `quota` block, provider-neutral so a future vendor fills
+ *  the same shape. Absent entirely on providers that do not report one
+ *  (DeepSeek etc.) — callers check for the key, not for a sentinel value. */
+export interface ProviderQuota {
+  tier?: string | null;
+  billing_mode?: string | null;
+  can_request?: boolean | null;
+  blockers?: string[] | null;
+  windows?: QuotaWindow[] | null;
+  parallel_limit?: number | null;
+}
+
+/** One balance entry, exactly what `get_provider_balance(alias)` /
+ *  `get_provider_balances()` return per alias: `{status, alias?, balance?,
+ *  message?}` where `balance = {is_available, balance_infos, billing_mode,
+ *  quota?, limits}`. Free-form on purpose, mirroring `providerBalance` in
+ *  `services/providers.ts` — this is the shape read out of it, not a new one. */
+export interface BalanceResult {
+  status?: 'success' | 'unsupported' | 'error';
+  alias?: string;
+  message?: string;
+  balance?: {
+    is_available?: boolean;
+    balance_infos?: Array<{ currency?: string; total_balance?: string; spent_30d?: string }>;
+    billing_mode?: string | null;
+    quota?: ProviderQuota | null;
+  };
+}
+
+const WINDOW_LABELS: Record<string, string> = {
+  '3h': '3h', minute: 'min', week: 'this week', 'iso-week': 'this week',
+};
+
+function windowLabel(name: string): string {
+  return WINDOW_LABELS[name] ?? name;
+}
+
+/** One window as a compact fragment: `386 / 400 requests left (3h, resets
+ *  14:59)`. Missing `remaining`/`limit` drop the fragment to nothing (the
+ *  caller filters blanks) rather than print "undefined / undefined". */
+export function formatQuotaWindow(win: QuotaWindow, now: Date = new Date()): string {
+  if (typeof win.remaining !== 'number' || typeof win.limit !== 'number') return '';
+  const label = windowLabel(win.name);
+  let resets = '';
+  if (typeof win.resets_at === 'string' && win.resets_at.length > 0) {
+    const d = new Date(win.resets_at);
+    if (!Number.isNaN(d.getTime())) {
+      resets = `, resets ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+    }
+  }
+  return `${win.remaining} / ${win.limit} ${win.unit} left (${label}${resets})`;
+}
+
+/** The one-line summary shown beside a serving_vendor alias: quota windows,
+ *  parallel limit, and — because a `subscription` key's wallet is a reference
+ *  price, never a debit (see `_billing_mode_now` / `COST_BASIS_LIST_PRICE_
+ *  REFERENCE`) — a wallet number labelled so it is not read as being spent.
+ *  Returns '' when there is nothing to say (no `quota`, e.g. DeepSeek). */
+export function formatQuotaLine(balance: BalanceResult['balance'] | null | undefined, now: Date = new Date()): string {
+  if (!balance) return '';
+  const quota = balance.quota;
+  const parts: string[] = [];
+  if (quota) {
+    if (quota.tier) parts.push(`${quota.tier} tier`);
+    for (const win of quota.windows ?? []) {
+      const line = formatQuotaWindow(win, now);
+      if (line) parts.push(line);
+    }
+    if (typeof quota.parallel_limit === 'number') parts.push(`${quota.parallel_limit} parallel`);
+  }
+  const info = balance.balance_infos?.[0];
+  if (info && typeof info.total_balance === 'string') {
+    const subscription = (quota?.billing_mode ?? balance.billing_mode) === 'subscription';
+    parts.push(subscription
+      ? `wallet ${info.total_balance} ${info.currency ?? ''}, not debited on subscription`.trim()
+      : `balance ${info.total_balance} ${info.currency ?? ''}`.trim());
+  }
+  return parts.join(' · ');
+}
+
+/** The blockers line, shown ahead of the quota summary when the key cannot be
+ *  used right now — `can_request === false` is the only condition that makes
+ *  this non-empty; a payload with no `quota` (or `can_request` omitted) says
+ *  nothing rather than guessing the key is blocked. */
+export function formatQuotaBlockers(balance: BalanceResult['balance'] | null | undefined): string {
+  const quota = balance?.quota;
+  if (!quota || quota.can_request !== false) return '';
+  const blockers = (quota.blockers ?? []).filter((b) => typeof b === 'string' && b.length > 0);
+  return blockers.length > 0
+    ? `Cannot request right now: ${blockers.join(', ')}`
+    : 'Cannot request right now.';
+}
+
 // --- Validate without saving ------------------------------------------------
 
 /**

@@ -13,6 +13,9 @@ import {
   contextWindowLine,
   doorAddress,
   formatContextWindow,
+  formatQuotaBlockers,
+  formatQuotaLine,
+  formatQuotaWindow,
   foldServingAlias,
   gatewayVerdict,
   groupGatewayMenu,
@@ -49,9 +52,11 @@ import {
   validationDraft,
   vendorQuotaBadge,
   vendorQuotaLabel,
+  type BalanceResult,
   type ComputeRules,
   type GatewayMenuEntry,
   type GatewayState,
+  type QuotaWindow,
 } from './inferenceSharing';
 import type { MenuRow } from './peerMenu';
 
@@ -918,5 +923,105 @@ describe('each alias in the Tariff section names its own currency and where it c
     expect(tab).toContain('tariffCurrencyOf(');
     expect(tab).toContain('Default currency');
     expect(tab).not.toMatch(/tariffState\([^)]*view\.currency/);
+  });
+});
+
+// --- A vendor key's request quota (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-AND-
+// NEVER-SHOWN) ---------------------------------------------------------------
+
+describe('formatQuotaWindow', () => {
+  const win = (over: Partial<QuotaWindow> = {}): QuotaWindow => ({
+    name: '3h', unit: 'requests', used: 14, limit: 400, remaining: 386,
+    resets_at: '2026-09-28T11:59:59Z', ...over,
+  });
+
+  it('reads as N / M unit left, with the window and a local reset time', () => {
+    const line = formatQuotaWindow(win());
+    expect(line).toContain('386 / 400 requests left');
+    expect(line).toContain('3h');
+    expect(line).toContain('resets');
+  });
+
+  it('the week window is labelled "this week", not the wire word "iso-week"', () => {
+    const line = formatQuotaWindow(win({ name: 'iso-week', used: 14, limit: 2000, remaining: 1986 }));
+    expect(line).toContain('1986 / 2000 requests left (this week');
+  });
+
+  it('a window missing remaining/limit renders nothing, never "undefined / undefined"', () => {
+    expect(formatQuotaWindow(win({ remaining: undefined }))).toBe('');
+    expect(formatQuotaWindow(win({ limit: undefined }))).toBe('');
+  });
+
+  it('a bad resets_at is dropped rather than printed as "Invalid Date"', () => {
+    const line = formatQuotaWindow(win({ resets_at: 'not-a-date' }));
+    expect(line).not.toContain('Invalid Date');
+    expect(line).not.toContain('resets');
+  });
+});
+
+describe('formatQuotaLine', () => {
+  const subscriptionBalance = (): NonNullable<BalanceResult['balance']> => ({
+    is_available: true,
+    billing_mode: 'subscription',
+    balance_infos: [{ currency: 'RUB', total_balance: '500.00', spent_30d: '0.00' }],
+    quota: {
+      tier: 'free', billing_mode: 'subscription', can_request: true, blockers: [],
+      parallel_limit: 3,
+      windows: [
+        { name: '3h', unit: 'requests', used: 14, limit: 400, remaining: 386, resets_at: '2026-09-28T11:59:59Z' },
+        { name: 'iso-week', unit: 'requests', used: 14, limit: 2000, remaining: 1986, resets_at: '2026-10-05T00:00:00Z' },
+        { name: 'minute', unit: 'requests', used: 0, limit: 20, remaining: 20, resets_at: null },
+      ],
+    },
+  });
+
+  it('a subscription key shows the wallet labelled as not debited', () => {
+    const line = formatQuotaLine(subscriptionBalance());
+    expect(line).toContain('free tier');
+    expect(line).toContain('386 / 400 requests left');
+    expect(line).toContain('1986 / 2000 requests left');
+    expect(line).toContain('3 parallel');
+    expect(line).toContain('wallet 500.00 RUB');
+    expect(line).toContain('not debited on subscription');
+  });
+
+  it('a wallet (charged) key shows a plain balance, no "not debited" claim', () => {
+    const balance = subscriptionBalance();
+    balance.billing_mode = 'wallet';
+    balance.quota!.billing_mode = 'wallet';
+    const line = formatQuotaLine(balance);
+    expect(line).toContain('balance 500.00 RUB');
+    expect(line).not.toContain('not debited');
+  });
+
+  it('no quota block (e.g. DeepSeek) and no balance_infos yields an empty line', () => {
+    expect(formatQuotaLine({ is_available: true })).toBe('');
+  });
+
+  it('null/undefined balance yields an empty line rather than throwing', () => {
+    expect(formatQuotaLine(null)).toBe('');
+    expect(formatQuotaLine(undefined)).toBe('');
+  });
+});
+
+describe('formatQuotaBlockers', () => {
+  it('says nothing when the key can request', () => {
+    expect(formatQuotaBlockers({ quota: { can_request: true, blockers: [] } })).toBe('');
+  });
+
+  it('names the blockers when it cannot', () => {
+    const line = formatQuotaBlockers({ quota: { can_request: false, blockers: ['out_of_quota', 'cooldown'] } });
+    expect(line).toContain('out_of_quota');
+    expect(line).toContain('cooldown');
+  });
+
+  it('a false can_request with no blockers still says the key is blocked', () => {
+    expect(formatQuotaBlockers({ quota: { can_request: false, blockers: [] } }))
+      .toBe('Cannot request right now.');
+  });
+
+  it('no quota block, or can_request omitted, says nothing (never guesses blocked)', () => {
+    expect(formatQuotaBlockers({})).toBe('');
+    expect(formatQuotaBlockers({ quota: {} })).toBe('');
   });
 });

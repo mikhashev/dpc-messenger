@@ -1,0 +1,90 @@
+{
+ "schema": 1,
+ "observed_at": "2026-09-28T10:41:49Z",
+ "tier": "free",
+ "tier_expires_at": null,
+ "unlimited_volume": false,
+ "options": [],
+ "bypass": false,
+ "fair_use": true,
+ "key": {
+  "name": "primary",
+  "status": "ok",
+  "billing_mode": "subscription",
+  "cap": null
+ },
+ "decision": {
+  "scope": "chat",
+  "can_request": true,
+  "blockers": [],
+  "retry_after_sec": null
+ },
+ "blocked_models": [],
+ "chat": {
+  "session": {
+   "used": 14,
+   "limit": 400,
+   "remaining": 386,
+   "reset_in_sec": 4690,
+   "resets_at": "2026-09-28T11:59:59Z",
+   "window": "3h"
+  },
+  "week": {
+   "used": 14,
+   "limit": 2000,
+   "remaining": 1986,
+   "reset_in_sec": 566291,
+   "resets_at": "2026-10-05T00:00:00Z",
+   "window": "iso-week"
+  },
+  "rpm": {
+   "used": 0,
+   "limit": 20,
+   "remaining": 20,
+   "reset_in_sec": 11
+  },
+  "cooldown_sec": 0,
+  "scope": "account"
+ },
+ "vector": {
+  "session": {
+   "used": 0,
+   "limit": 5000,
+   "remaining": 5000,
+   "reset_in_sec": 4690,
+   "resets_at": "2026-09-28T11:59:59Z",
+   "window": "3h"
+  },
+  "week": {
+   "used": 0,
+   "limit": 40000,
+   "remaining": 40000,
+   "reset_in_sec": 566291,
+   "resets_at": "2026-10-05T00:00:00Z",
+   "window": "iso-week"
+  },
+  "rpm_limit": 30,
+  "inflight_limit": 8,
+  "cooldown_sec": 0,
+  "scope": "account"
+ },
+ "parallel_limit": 3,
+ "abuse_cooldown_sec": 0,
+ "daily_capacity": {
+  "pct_used": 0.1,
+  "exhausted": false,
+  "resets_at": "2026-09-29T00:00:00+00:00"
+ },
+ "night": {
+  "enabled": true,
+  "active": false,
+  "capacity_factor": 2,
+  "window_start_msk": 0,
+  "window_end_msk": 6
+ },
+ "wallet": {
+  "balance_rub": 500.0,
+  "spent_rub_30d": 0.0
+ },
+ "kimi": null
+}

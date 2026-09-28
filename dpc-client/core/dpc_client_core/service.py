@@ -2428,6 +2428,32 @@ class CoreService:
             # class name is the one thing always present.
             return {"status": "error", "message": str(e) or type(e).__name__}
 
+    @slow_command
+    async def get_provider_balances(self) -> Dict[str, Any]:
+        """Every balance-capable provider's `get_balance()`, by alias.
+
+        Where get_provider_balance() answers for one provider (the agent/
+        default, or a named alias), this answers for all of them at once — the
+        host serving a vendor alias to peers (compute.serving_vendor) needs to
+        see each key's own remaining quota, not just whichever one happens to
+        be the default. One alias's failure is that alias's own error entry,
+        never a failure of the whole call (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-
+        READ-AND-NEVER-SHOWN).
+        """
+        providers = getattr(self.llm_manager, "providers", {}) or {}
+        balances: Dict[str, Any] = {}
+        for alias, provider in providers.items():
+            if not getattr(provider, "supports_balance", lambda: False)():
+                continue
+            try:
+                balance = await provider.get_balance()
+                balances[alias] = {"status": "success", "alias": alias, "balance": balance}
+            except Exception as e:
+                logger.error("get_provider_balances: alias=%s failed: %s", alias, e)
+                balances[alias] = {"status": "error", "alias": alias,
+                                    "message": str(e) or type(e).__name__}
+        return {"status": "success", "balances": balances}
+
     async def get_default_providers(self) -> Dict[str, Any]:
         """
         Get default provider configuration for UI initialization.

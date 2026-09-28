@@ -361,7 +361,9 @@ class NeuralDeepProvider(AIProvider):
         Documented in https://neuraldeep.ru/llms-full.txt ("Остатки лимитов"):
         read-only, spends no quota. `billing_mode` is `subscription` or the
         wallet; the wallet balance exists either way. The raw payload rides
-        along under `limits`."""
+        along under `limits`, and `quota` (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-
+        AND-NEVER-SHOWN) is the same facts normalized so a host serving this
+        key to a peer can see the request quota left, not only the wallet."""
         import httpx
         url = self._base_url.rstrip("/") + "/limits"
         headers = {"Authorization": f"Bearer {self._api_key}"}
@@ -373,14 +375,63 @@ class NeuralDeepProvider(AIProvider):
         key = limits.get("key") or {}
         decision = limits.get("decision") or {}
         balance = wallet.get("balance_rub")
-        return {
-            "is_available": key.get("status", "ok") == "ok" and decision.get("can_request", True),
-            "balance_infos": [] if balance is None else [{
+        spent_30d = wallet.get("spent_rub_30d")
+        balance_info = None
+        if balance is not None:
+            balance_info = {
                 "currency": NEURALDEEP_CURRENCY,
                 "total_balance": f"{float(balance):.2f}",
-            }],
+            }
+            if spent_30d is not None:
+                balance_info["spent_30d"] = f"{float(spent_30d):.2f}"
+        return {
+            "is_available": key.get("status", "ok") == "ok" and decision.get("can_request", True),
+            "balance_infos": [] if balance_info is None else [balance_info],
             "billing_mode": key.get("billing_mode"),
             "limits": limits,
+            "quota": self._quota_from_limits(limits),
+        }
+
+    @staticmethod
+    def _quota_from_limits(limits: Dict[str, Any]) -> Dict[str, Any]:
+        """Provider-neutral normalization of the vendor's raw `/v1/limits` shape
+        (see `get_balance`'s docstring), so another provider can fill the same
+        shape later. Missing fields are omitted / None, never a crash — a host
+        showing this should never break on a payload shape it hasn't seen yet."""
+        key = limits.get("key") or {}
+        decision = limits.get("decision") or {}
+        chat = limits.get("chat") or {}
+
+        def _window(entry: Optional[Dict[str, Any]], name: str, unit: str = "requests") -> Optional[Dict[str, Any]]:
+            if not isinstance(entry, dict):
+                return None
+            return {
+                "name": name,
+                "unit": unit,
+                "used": entry.get("used"),
+                "limit": entry.get("limit"),
+                "remaining": entry.get("remaining"),
+                "resets_at": entry.get("resets_at"),
+            }
+
+        windows: List[Dict[str, Any]] = []
+        session = _window(chat.get("session"), chat.get("session", {}).get("window") or "3h")
+        if session:
+            windows.append(session)
+        week = _window(chat.get("week"), chat.get("week", {}).get("window") or "week")
+        if week:
+            windows.append(week)
+        rpm = _window(chat.get("rpm"), "minute")
+        if rpm:
+            windows.append(rpm)
+
+        return {
+            "tier": limits.get("tier"),
+            "billing_mode": key.get("billing_mode"),
+            "can_request": decision.get("can_request"),
+            "blockers": decision.get("blockers") or [],
+            "windows": windows,
+            "parallel_limit": limits.get("parallel_limit"),
         }
 
     # --- retry ---
