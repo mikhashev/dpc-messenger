@@ -71,9 +71,9 @@ import logging
 import math
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from .firewall import ISO_4217_CODES, parse_iso_date
 
@@ -650,6 +650,86 @@ class NodeLedger:
             cost = row.get("cost_amount")
             if cost is not None:
                 total += float(cost)
+        return total
+
+    def rows_since(
+        self, since: datetime, *, until: Optional[datetime] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Every row whose `started_at` falls in `[since, until]` (`until`
+        defaults to now), read from every month partition the window can
+        touch — never assumes the window sits inside one calendar month
+        (ADR-041 D5, amendment 2026-09-29: a guest's request-window count can
+        cross a month boundary near the 1st)."""
+        since = since.astimezone(timezone.utc)
+        until = (until or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        months: List[str] = []
+        cur = since.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        while cur <= until:
+            months.append(cur.strftime("%Y-%m"))
+            cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+        for month in months:
+            for row in self.rows(month=month):
+                started = row.get("started_at")
+                if not started:
+                    continue
+                try:
+                    started_dt = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if started_dt.tzinfo is None:
+                    started_dt = started_dt.replace(tzinfo=timezone.utc)
+                if since <= started_dt <= until:
+                    yield row
+
+    def count_since(
+        self,
+        *,
+        aliases: Iterable[str],
+        since: datetime,
+        caller: Optional[str] = None,
+        caller_kind: Optional[str] = None,
+        until: Optional[datetime] = None,
+    ) -> int:
+        """How many rows on any of `aliases` fall in the window, optionally
+        narrowed to one caller and/or `caller_kind` — the guest-window request
+        count of ADR-041 D5's amendment. `aliases` is the called alias plus
+        its account siblings (an alias and its -noreason twin share one key),
+        because the vendor counts requests against the account, not the
+        alias."""
+        alias_set = set(aliases)
+        n = 0
+        for row in self.rows_since(since, until=until):
+            if row.get("alias") not in alias_set:
+                continue
+            if caller is not None and row.get("caller") != caller:
+                continue
+            if caller_kind is not None and row.get("caller_kind") != caller_kind:
+                continue
+            n += 1
+        return n
+
+    def tokens_since(
+        self,
+        *,
+        aliases: Iterable[str],
+        since: datetime,
+        caller: Optional[str] = None,
+        caller_kind: Optional[str] = None,
+        until: Optional[datetime] = None,
+    ) -> int:
+        """Prompt + completion tokens on any of `aliases` in the window — the
+        proxy this ceiling uses for the vendor's own money-based daily gate
+        (ADR-041 D5's amendment: `vendor_token_quotas`)."""
+        alias_set = set(aliases)
+        total = 0
+        for row in self.rows_since(since, until=until):
+            if row.get("alias") not in alias_set:
+                continue
+            if caller is not None and row.get("caller") != caller:
+                continue
+            if caller_kind is not None and row.get("caller_kind") != caller_kind:
+                continue
+            total += int(row.get("prompt_tokens") or 0) + int(row.get("completion_tokens") or 0)
         return total
 
 
