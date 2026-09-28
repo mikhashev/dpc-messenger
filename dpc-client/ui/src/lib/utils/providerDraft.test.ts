@@ -96,9 +96,9 @@ describe('suggestProviderAlias', () => {
 
   it('strips a llamacpp_server GGUF path down to its file name, no extension', () => {
     expect(suggestProviderAlias('C:\\models\\qwen3-32b.Q4_K_M.gguf', 'llamacpp_server', []))
-      .toBe('qwen3-32b.Q4_K_M Llamacpp_server');
+      .toBe('qwen3-32b.Q4_K_M llama.cpp');
     expect(suggestProviderAlias('/models/qwen3-32b.gguf', 'llamacpp_server', []))
-      .toBe('qwen3-32b Llamacpp_server');
+      .toBe('qwen3-32b llama.cpp');
   });
 
   it('is empty with no model, no type, or type dpc_agent (no model field)', () => {

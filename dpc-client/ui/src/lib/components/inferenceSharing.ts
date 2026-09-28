@@ -1129,6 +1129,9 @@ const PROVIDER_TYPE_LABELS: Record<string, string> = {
   anthropic: 'Anthropic',
   gemini: 'Gemini',
   github_models: 'GitHub Models',
+  ollama: 'Ollama',
+  llamacpp_server: 'llama.cpp',
+  local_whisper: 'Whisper',
 };
 
 export function providerTypeLabel(type: string | null | undefined): string {
