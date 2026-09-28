@@ -1123,19 +1123,34 @@ export interface ProviderBalancesResponse {
 
 /** The rows a Sidebar or ProvidersEditor renders: the backend's own `accounts`
  *  when it sent one (even an empty array — that is a real "nothing configured"
- *  answer, not a signal to fall back), else one row per alias in `balances`,
- *  labelled by its own alias since no account/provider_type is known for it. */
+ *  answer, not a signal to fall back). Otherwise one row per provider type,
+ *  from `typeOf` (alias → type, from the providers list): a vendor's wallet is
+ *  shared by every model on it, so a row per alias would repeat one balance
+ *  under several names. An alias of unknown type keeps a row of its own. */
 export function accountRowsFromBalances(
   response: ProviderBalancesResponse | null | undefined,
+  typeOf: (alias: string) => string | null | undefined = () => null,
 ): AccountRow[] {
   if (response?.accounts) return response.accounts;
   const balances = response?.balances ?? {};
-  return Object.entries(balances).map(([alias, result]) => ({
-    account: alias,
-    label: alias,
-    aliases: [alias],
-    result,
-  }));
+  const rows = new Map<string, AccountRow>();
+  for (const [alias, result] of Object.entries(balances)) {
+    const type = typeOf(alias);
+    const key = type ? `type:${type}` : `alias:${alias}`;
+    const row = rows.get(key);
+    if (row) {
+      row.aliases.push(alias);
+      continue;
+    }
+    rows.set(key, {
+      account: key,
+      provider_type: type ?? undefined,
+      label: type ? providerTypeLabel(type) : alias,
+      aliases: [alias],
+      result,
+    });
+  }
+  return [...rows.values()];
 }
 
 /** Whether an account's result carries a wallet not debited on this call —

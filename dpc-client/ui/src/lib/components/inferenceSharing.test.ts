@@ -1205,14 +1205,22 @@ describe('accountRowsFromBalances', () => {
     expect(rows).toEqual([]);
   });
 
-  it('falls back to one row per alias when the backend sent no accounts (older backend)', () => {
+  it('without backend accounts, groups aliases by provider type: one wallet, one row', () => {
+    const types: Record<string, string> = { ds_flash: 'deepseek', ds_pro: 'deepseek', qwen38: 'neuraldeep' };
     const rows = accountRowsFromBalances({
       status: 'success',
-      balances: { ds_flash: deepseekResult, qwen38: neuraldeepResult },
-    });
+      balances: { ds_flash: deepseekResult, ds_pro: deepseekResult, qwen38: neuraldeepResult },
+    }, (alias) => types[alias]);
     expect(rows).toEqual([
-      { account: 'ds_flash', label: 'ds_flash', aliases: ['ds_flash'], result: deepseekResult },
-      { account: 'qwen38', label: 'qwen38', aliases: ['qwen38'], result: neuraldeepResult },
+      { account: 'type:deepseek', provider_type: 'deepseek', label: 'DeepSeek', aliases: ['ds_flash', 'ds_pro'], result: deepseekResult },
+      { account: 'type:neuraldeep', provider_type: 'neuraldeep', label: 'NeuralDeep', aliases: ['qwen38'], result: neuraldeepResult },
+    ]);
+  });
+
+  it('an alias of unknown type keeps a row of its own, named by the alias', () => {
+    const rows = accountRowsFromBalances({ status: 'success', balances: { odd: deepseekResult } });
+    expect(rows).toEqual([
+      { account: 'alias:odd', provider_type: undefined, label: 'odd', aliases: ['odd'], result: deepseekResult },
     ]);
   });
 

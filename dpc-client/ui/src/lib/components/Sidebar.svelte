@@ -615,7 +615,7 @@
           onclick={() => getProviderBalances()}
           title="{row.aliases.join(', ')}{row.quotaLine ? ` — ${row.quotaLine}` : ''} — click to refresh"
         >
-          <span class="balance-pill-label">💰 {row.label}</span>
+          <span class="balance-pill-label">{row.label}</span>
           <span class="balance-pill-amount">
             {#if row.total !== null}{row.currency} {row.total}{:else}—{/if}
           </span>

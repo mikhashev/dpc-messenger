@@ -1483,7 +1483,9 @@ export async function getProviderBalances(): Promise<Record<string, any>> {
         const ok = result && result.status === 'success';
         const balances = ok && result.balances ? result.balances : {};
         providerBalances.set(balances);
-        providerAccounts.set(ok ? accountRowsFromBalances(result) : []);
+        const types = new Map<string, string>(
+            (get(providersList) || []).map((p: any) => [p.alias, p.type] as [string, string]));
+        providerAccounts.set(ok ? accountRowsFromBalances(result, (alias) => types.get(alias)) : []);
         return balances;
     } catch (e) {
         providerBalances.set({});
