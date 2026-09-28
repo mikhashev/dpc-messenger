@@ -1771,6 +1771,36 @@ sync_interval = 600          # Sync every 10 minutes
 
 ---
 
+## Balance / Quota Commands (WebSocket API)
+
+Two read-only commands query a balance-capable provider's `get_balance()`
+(pay-per-use providers: DeepSeek, NeuralDeep, Z.AI; a subscription or local
+provider answers `unsupported`).
+
+- **`get_provider_balance(alias=None)`** — one provider: the named `alias`,
+  or the agent/default provider when `alias` is omitted. Returns
+  `{status: success|unsupported|error, alias, balance}`.
+- **`get_provider_balances()`** — every balance-capable provider at once, by
+  alias, plus `accounts`: the same balances grouped by wallet. DeepSeek and
+  NeuralDeep each bill one wallet across every alias configured against them,
+  so two aliases sharing a key are read once, not twice; `accounts` is
+  `[{account, provider_type, label, aliases, result}]`, where `account` is a
+  provider type, its base_url, and a truncated hash of the key — never the
+  key itself. `balances` (by alias) is kept for backward compatibility; one
+  alias's failure is that alias's own error entry, never a failure of the
+  whole call.
+
+For NeuralDeep, `balance` also carries a `quota` block — the vendor's
+`/v1/limits` normalized into `tier`, `billing_mode`, `can_request`,
+`blockers`, `windows` (session/week/per-minute, each `used`/`limit`/
+`remaining`/`resets_at`), `parallel_limit` and `blocked_models` — read every
+20s at most, floored at 15s between actual vendor requests, backing off on a
+403 or other non-2xx and sticky on a 401. See
+[decisions/041, amendment 2026-09-28](decisions/041-openai-compatible-gateway-as-a-dpc-surface.md#d5--api-backed-models-are-shareable-and-the-quota-is-a-financial-control)
+and the glossary's **quota block** / **vendor account** rows.
+
+---
+
 ## See Also
 
 - [Quick Start Guide](../QUICK_START.md) — at the repository root, not in `docs/`

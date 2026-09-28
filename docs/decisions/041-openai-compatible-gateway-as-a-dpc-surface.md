@@ -1170,6 +1170,50 @@ before, the queue included. A served vendor call is priced from the provider's
 own report (D3's amendment of 2026-09-28), and its tariff takes the provider's
 unit unless `compute.tariff_currency` names one.)*
 
+*(**Amendment, 2026-09-28 — a vendor's own `/v1/limits` reading feeds the same
+quota block a host or a peer reads, and is read the way the vendor's own
+client reads it.** Landed for NeuralDeep (`d3d89e8d`, `1a2f0ad8`, `e273cb0b`,
+`87cacb72`): `NeuralDeepProvider.get_balance()` now normalizes the vendor's raw
+`/v1/limits` payload into a **quota block** — `tier`, `billing_mode`,
+`can_request`, `blockers`, `retry_after_sec`, `windows` (named request/volume
+windows: session, week, per-minute, each with `used`/`limit`/`remaining`/
+`resets_at`), `parallel_limit`, `observed_at`, and `blocked_models` (a
+model-level gate that leaves `can_request` true, so a host reading only the
+account-level decision would miss it — coddy's own scar, a month of 429s on an
+account that read healthy). This is what the owner sees for a key serving
+peers (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-AND-NEVER-SHOWN): the request
+quota left, not only the wallet.
+
+**Read policy, taken from coddy's own client rather than invented here**
+(`internal/session/provider_usage.go`): a 20s cache TTL serves repeat readers
+without a request; a 15s floor holds between any two actual HTTP attempts,
+successful or not, so a failing endpoint is never hit faster than that even
+with no cache to fall back on; a schema version guards against a silently
+renamed or dropped vendor field being read as "nothing left" rather than as
+unreadable; a 401 is sticky (the key itself is wrong, no further attempts
+until the provider is re-created) while a 403 or any other non-2xx backs off
+on the vendor's `Retry-After` capped at 5 minutes, or the full 5 minutes
+absent one — 403 is not sticky because a blocked key is not necessarily a
+wrong one. Concurrent readers on one provider instance (`get_balance`, the
+daily `billing_mode` re-check, the `get_provider_balances` fan-out) join one
+in-flight fetch rather than each starting their own, and a reader that is
+itself cancelled mid-fetch still resolves every joiner instead of leaving them
+waiting on a future nobody will ever complete.
+
+`blocked_models` is display-only: it says which models this key currently
+cannot reach and why, and is read through `model_blocked(model)`, which takes
+the *caller's* wire model for the call in question — a call running with
+`effort=off` checks the `-noreason` twin, not the alias's own default model.
+
+**Wallets are grouped per account, not per alias.** `service.
+get_provider_balances` now returns `accounts: [{account, provider_type, label,
+aliases, result}]` beside the existing per-alias `balances` map: DeepSeek and
+NeuralDeep each bill one wallet across every alias configured against them
+(Mike's call, 2026-09-28), so two aliases sharing a key are read once, not
+twice, and the account id is a truncated hash of the key — never the key
+itself — so the wallet's identity is stable across restarts without exposing
+what unlocks it.)*
+
 ### D6 — `aiohttp.web`, declared explicitly
 
 **Re-decided.** The first writing offered two options — hand-written asyncio
