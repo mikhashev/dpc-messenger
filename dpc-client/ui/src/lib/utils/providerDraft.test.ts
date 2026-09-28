@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isProviderDraftFilled, validateProviderDraftForAdd } from './providerDraft';
+import { isProviderDraftFilled, validateProviderDraftForAdd, suggestProviderAlias } from './providerDraft';
 
 describe('isProviderDraftFilled', () => {
   it('is unfilled on the pristine form (default type, everything else empty)', () => {
@@ -69,5 +69,52 @@ describe('validateProviderDraftForAdd', () => {
     );
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/already exists/i);
+  });
+
+  it('rejects a duplicate alias that only differs in case or surrounding whitespace', () => {
+    const result = validateProviderDraftForAdd(
+      { alias: '  My-ND  ', type: 'neuraldeep', model: 'x' },
+      ['my-nd'],
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/already exists/i);
+  });
+});
+
+describe('suggestProviderAlias', () => {
+  it('builds "<model> <provider label>" for neuraldeep', () => {
+    expect(suggestProviderAlias('qwen3.8-27b', 'neuraldeep', [])).toBe('qwen3.8-27b NeuralDeep');
+  });
+
+  it('builds "<model> <provider label>" for deepseek', () => {
+    expect(suggestProviderAlias('deepseek-v4-pro', 'deepseek', [])).toBe('deepseek-v4-pro DeepSeek');
+  });
+
+  it('uses the ollama provider label', () => {
+    expect(suggestProviderAlias('llama3.1:8b', 'ollama', [])).toBe('llama3.1:8b Ollama');
+  });
+
+  it('strips a llamacpp_server GGUF path down to its file name, no extension', () => {
+    expect(suggestProviderAlias('C:\\models\\qwen3-32b.Q4_K_M.gguf', 'llamacpp_server', []))
+      .toBe('qwen3-32b.Q4_K_M Llamacpp_server');
+    expect(suggestProviderAlias('/models/qwen3-32b.gguf', 'llamacpp_server', []))
+      .toBe('qwen3-32b Llamacpp_server');
+  });
+
+  it('is empty with no model, no type, or type dpc_agent (no model field)', () => {
+    expect(suggestProviderAlias('', 'neuraldeep', [])).toBe('');
+    expect(suggestProviderAlias('qwen3.8-27b', '', [])).toBe('');
+    expect(suggestProviderAlias('', 'dpc_agent', [])).toBe('');
+    expect(suggestProviderAlias('anything', 'dpc_agent', [])).toBe('');
+  });
+
+  it('appends " 2", " 3", … when the suggestion is already taken (case-insensitive, trimmed)', () => {
+    expect(suggestProviderAlias('qwen3.8-27b', 'neuraldeep', ['qwen3.8-27b NeuralDeep']))
+      .toBe('qwen3.8-27b NeuralDeep 2');
+    expect(suggestProviderAlias('qwen3.8-27b', 'neuraldeep', ['QWEN3.8-27B NEURALDEEP ']))
+      .toBe('qwen3.8-27b NeuralDeep 2');
+    expect(suggestProviderAlias('qwen3.8-27b', 'neuraldeep', [
+      'qwen3.8-27b NeuralDeep', 'qwen3.8-27b NeuralDeep 2',
+    ])).toBe('qwen3.8-27b NeuralDeep 3');
   });
 });

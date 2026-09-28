@@ -12,7 +12,7 @@
   import { trackRename } from '$lib/utils/aliasRenames';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
   import { envNameOrUndefined, looksLikeKey } from '$lib/utils/apiKeyEnv';
-  import { isProviderDraftFilled, validateProviderDraftForAdd } from '$lib/utils/providerDraft';
+  import { isProviderDraftFilled, validateProviderDraftForAdd, suggestProviderAlias } from '$lib/utils/providerDraft';
 
   export let open: boolean = false;
 
@@ -413,6 +413,22 @@
     peer_id: '',  // For dpc_agent remote inference
     think: false, // Reasoning is opt-in on a new provider — see the form's help text
   };
+
+  // Whether the alias field was typed by hand — while false, it is kept in
+  // sync with suggestProviderAlias(); clearing it resumes the suggestion.
+  let aliasTouched = false;
+
+  $: existingProviderAliases = editedConfig?.providers.map((p) => p.alias) ?? [];
+  $: addProviderValidation = validateProviderDraftForAdd(newProvider, existingProviderAliases);
+
+  $: if (!aliasTouched) {
+    const suggested = suggestProviderAlias(newProvider.model, newProvider.type, existingProviderAliases);
+    if (newProvider.alias !== suggested) newProvider.alias = suggested;
+  }
+
+  function onAliasInput() {
+    aliasTouched = newProvider.alias.trim() !== '';
+  }
 
   let effortWords: Record<string, { words: string[]; default: string | null }> = {};
 
@@ -841,6 +857,7 @@
       peer_id: '',  // For dpc_agent remote inference
       think: false, // Reasoning is opt-in on a new provider — see the form's help text
     };
+    aliasTouched = false;
   }
 
   // Add new provider
@@ -2657,8 +2674,12 @@
                 id="new-alias"
                 type="text"
                 bind:value={newProvider.alias}
+                on:input={onAliasInput}
                 placeholder="my_provider"
               />
+              {#if newProvider.alias && !addProviderValidation.valid && addProviderValidation.reason && /alias/i.test(addProviderValidation.reason)}
+                <p class="error-text">{addProviderValidation.reason}</p>
+              {/if}
             </div>
 
             <div class="form-group">
@@ -2941,7 +2962,7 @@
             <button
               class="btn btn-primary"
               on:click={addNewProvider}
-              disabled={!newProvider.alias || (newProvider.type !== 'dpc_agent' && !newProvider.model) || looksLikeKey(newProvider.api_key_env)}
+              disabled={!addProviderValidation.valid}
             >
               Add Provider
             </button>

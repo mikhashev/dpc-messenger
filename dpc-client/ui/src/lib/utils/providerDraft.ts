@@ -11,6 +11,7 @@
  */
 
 import { looksLikeKey } from './apiKeyEnv';
+import { providerTypeLabel } from '../components/inferenceSharing';
 
 /** The subset of the new-provider form this module reasons about. */
 export interface ProviderDraft {
@@ -22,6 +23,12 @@ export interface ProviderDraft {
 }
 
 const isBlank = (v: string | undefined | null): boolean => (v ?? '').trim() === '';
+
+/** The alias comparison both `validateProviderDraftForAdd` (duplicate check)
+ *  and `suggestProviderAlias` (collision check) use: trimmed and
+ *  case-insensitive, so "My Alias" and " my alias " name the same provider
+ *  (Mike's call, 2026-09-29). */
+const normalizeAlias = (a: string): string => a.trim().toLowerCase();
 
 /**
  * A draft is "filled" when the user has typed something that would be lost
@@ -70,8 +77,43 @@ export function validateProviderDraftForAdd(
       reason: 'The API Key field holds a key, not an environment variable name — fix it before adding.',
     };
   }
-  if (existingAliases.includes(alias)) {
+  const normalized = normalizeAlias(alias);
+  if (existingAliases.some((existing) => normalizeAlias(existing) === normalized)) {
     return { valid: false, reason: `A provider named "${alias}" already exists — pick a different alias.` };
   }
   return { valid: true };
+}
+
+/** `llamacpp_server`'s model field is a GGUF path, not a model id. */
+function ggufBaseName(path: string): string {
+  const base = path.split(/[\\/]/).pop() ?? path;
+  return base.replace(/\.[^./\\]+$/, '').trim();
+}
+
+/**
+ * The alias suggested while the user has not typed one by hand:
+ * `<model> <provider label>`, e.g. `qwen3.8-27b NeuralDeep`. Empty for no
+ * type, `dpc_agent` (no model field), or a blank model. A taken suggestion
+ * gets " 2", " 3", … appended.
+ */
+export function suggestProviderAlias(
+  model: string | undefined | null,
+  type: string | undefined | null,
+  existingAliases: readonly string[],
+): string {
+  if (!type || type === 'dpc_agent') return '';
+  let modelPart = (model ?? '').trim();
+  if (isBlank(modelPart)) return '';
+  if (type === 'llamacpp_server') {
+    modelPart = ggufBaseName(modelPart);
+    if (isBlank(modelPart)) return '';
+  }
+
+  const base = `${modelPart} ${providerTypeLabel(type)}`;
+  const taken = new Set(existingAliases.map(normalizeAlias));
+  if (!taken.has(normalizeAlias(base))) return base;
+
+  let suffix = 2;
+  while (taken.has(normalizeAlias(`${base} ${suffix}`))) suffix += 1;
+  return `${base} ${suffix}`;
 }
