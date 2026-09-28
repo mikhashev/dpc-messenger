@@ -12,6 +12,7 @@
   import { trackRename } from '$lib/utils/aliasRenames';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
   import { envNameOrUndefined, looksLikeKey } from '$lib/utils/apiKeyEnv';
+  import { isProviderDraftFilled, validateProviderDraftForAdd } from '$lib/utils/providerDraft';
 
   export let open: boolean = false;
 
@@ -226,6 +227,11 @@
       console.error('[ProvidersEditor] file dialog failed:', err);
     }
   }
+
+  // Save-time draft confirmation (Mike, 2026-09-28: Save used to drop a
+  // filled-but-not-added new-provider draft silently)
+  let showDraftConfirm: boolean = false;
+  let draftConfirmReason: string = '';
 
   // Model info query state
   let showModelInfo: boolean = false;
@@ -462,8 +468,48 @@
     resetNewProviderForm();
   }
 
-  // Save changes
+  // Save changes — gated on the new-provider draft first (see showDraftConfirm)
   async function saveChanges() {
+    if (!editedConfig) return;
+
+    if (isProviderDraftFilled(newProvider)) {
+      draftConfirmReason = '';
+      showDraftConfirm = true;
+      return;
+    }
+
+    await doSave();
+  }
+
+  /** "Add '<alias>' and save" — reuses addNewProvider()'s own logic, then saves. */
+  async function confirmAddDraftAndSave() {
+    if (!editedConfig) return;
+    const existingAliases = editedConfig.providers.map((p) => p.alias);
+    const validation = validateProviderDraftForAdd(newProvider, existingAliases);
+    if (!validation.valid) {
+      draftConfirmReason = validation.reason ?? 'The new provider cannot be added as filled in.';
+      return;
+    }
+    showDraftConfirm = false;
+    draftConfirmReason = '';
+    addNewProvider();
+    await doSave();
+  }
+
+  /** "Discard the draft and save" */
+  async function confirmDiscardDraftAndSave() {
+    showDraftConfirm = false;
+    draftConfirmReason = '';
+    resetNewProviderForm();
+    await doSave();
+  }
+
+  function cancelDraftConfirm() {
+    showDraftConfirm = false;
+    draftConfirmReason = '';
+  }
+
+  async function doSave() {
     if (!editedConfig) return;
 
     const keyInEnvField = editedConfig.providers.find((p) => looksLikeKey(p.api_key_env));
@@ -2910,6 +2956,39 @@
   </div>
 {/if}
 
+<!-- New-provider draft confirmation (Save pressed with a filled but not-added draft) -->
+{#if showDraftConfirm}
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="modal-overlay" role="presentation">
+    <div class="modal draft-confirm-modal" role="dialog" aria-labelledby="draft-confirm-title" tabindex="-1">
+      <div class="modal-header">
+        <h2 id="draft-confirm-title">Unsaved new provider</h2>
+        <button class="close-btn" on:click={cancelDraftConfirm} aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <p>
+          {#if newProvider.alias}
+            You filled in a new provider ("{newProvider.alias}") but never clicked "Add Provider".
+          {:else}
+            You filled in part of a new provider but never clicked "Add Provider".
+          {/if}
+          Saving now would discard it. What should happen to it?
+        </p>
+        {#if draftConfirmReason}
+          <p class="error-text">{draftConfirmReason}</p>
+        {/if}
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-save" on:click={confirmAddDraftAndSave}>
+          Add "{newProvider.alias || '(unnamed)'}" and save
+        </button>
+        <button class="btn btn-cancel" on:click={confirmDiscardDraftAndSave}>Discard the draft and save</button>
+        <button class="btn btn-cancel" on:click={cancelDraftConfirm}>Cancel</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <!-- Model Info Modal -->
 {#if showModelInfo}
   <!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -3202,6 +3281,19 @@
     padding: 20px;
     overflow-y: auto;
     flex: 1;
+  }
+
+  .modal-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 20px;
+    border-top: 1px solid #333;
+    justify-content: flex-end;
+  }
+
+  .draft-confirm-modal {
+    max-width: 500px;
   }
 
   .providers-list {
