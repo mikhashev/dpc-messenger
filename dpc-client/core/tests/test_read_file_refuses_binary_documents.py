@@ -67,3 +67,37 @@ def test_description_names_the_tools_the_refusal_names(ctx):
     img = read_file(ctx, _put(ctx, "a.jpg", b"x"))
     assert "read_document" in pdf and "read_document" in desc
     assert "describe_image" in img and "describe_image" in desc
+
+
+TEXT = "Привет, мир\nline two\nline three\n"
+CRLF_TEXT = TEXT.replace("\n", "\r\n")
+LE, BE, U8 = b"\xff\xfe", b"\xfe\xff", b"\xef\xbb\xbf"
+
+
+@pytest.mark.parametrize("name,data", [
+    ("le.txt", LE + TEXT.encode("utf-16-le")),
+    ("be.txt", BE + TEXT.encode("utf-16-be")),
+    ("bom8.txt", U8 + TEXT.encode("utf-8")),
+])
+def test_bom_text_reads_as_text(ctx, name, data):
+    assert read_file(ctx, _put(ctx, name, data)) == TEXT
+
+
+def test_crlf_utf16_reads_the_same_on_every_platform(ctx):
+    # bytes in, bytes decoded: the decode never goes through the locale or newline translation
+    out = read_file(ctx, _put(ctx, "crlf.txt", LE + CRLF_TEXT.encode("utf-16-le")))
+    assert out == CRLF_TEXT
+
+
+def test_utf16_pagination_counts_lines(ctx):
+    name = _put(ctx, "p16.txt", LE + TEXT.encode("utf-16-le"))
+    out = read_file(ctx, name, offset=1, limit=1)
+    assert "line two" in out and "line three" not in out
+
+
+def test_extended_path_read_decodes_utf16(ctx, tmp_path):
+    from dpc_client_core.dpc_agent.tools.core import extended_path_read
+    f = tmp_path / "ext16.txt"
+    f.write_bytes(LE + TEXT.encode("utf-16-le"))
+    ctx.validate_extended_path = lambda path, require_write=False: f
+    assert extended_path_read(ctx, str(f)) == TEXT

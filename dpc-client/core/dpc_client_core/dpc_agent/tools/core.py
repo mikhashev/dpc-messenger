@@ -192,6 +192,24 @@ def _refuse_unreadable(file_path: Path, path: str) -> Optional[str]:
     return f"{head} read_document does not support this format yet (PDF and DjVu only)."
 
 
+def _read_text_decoding_bom(file_path: Path) -> str:
+    """Text of a file, honouring a byte-order mark: UTF-16/UTF-32 are decoded, a UTF-8 BOM is dropped.
+
+    Without a BOM the bytes are UTF-8 as before. Decoding happens before pagination,
+    so offset/limit count lines of the decoded text, never bytes.
+    """
+    raw = file_path.read_bytes()
+    if raw.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        codec = "utf-32"
+    elif raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        codec = "utf-16"
+    elif raw.startswith(b"\xef\xbb\xbf"):
+        codec = "utf-8-sig"
+    else:
+        codec = "utf-8"
+    return raw.decode(codec, errors="replace")
+
+
 def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
     """
     Read a file. Relative paths resolve to sandbox, absolute paths
@@ -219,7 +237,7 @@ def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int
         if refusal:
             return refusal
 
-        content = file_path.read_text(encoding="utf-8", errors="replace")
+        content = _read_text_decoding_bom(file_path)
         _record_knowledge_read(ctx, file_path)
         import os
         truncate_limit = 100000 if os.path.isabs(path) else 50000
@@ -1716,7 +1734,7 @@ def extended_path_read(ctx: ToolContext, path: str, offset: int | None = None, l
         if refusal:
             return refusal
 
-        content = file_path.read_text(encoding="utf-8", errors="replace")
+        content = _read_text_decoding_bom(file_path)
         return _paginate_content(content, path, offset, limit, fallback_truncate=100000)
 
     except PermissionError as e:
