@@ -296,9 +296,11 @@ refactor the scripts import from a module shaped for a tool.
     cites, with its locator (Q0-b). Nothing reads the kb today — the agent read gate admits
     only top-level `.md` in `knowledge/` — so a reader and a widened gate are new work owed
     by the integration phase, not a side effect.
-  - *Open:* whether records carry history — Zcode's proposal of a git repository scoped to
-    `~/.dpc/kb` (index ignored, a bare clone on a second node as the backup), never at the
-    root of `~/.dpc`, which holds `node.key`. Not decided.
+  - *History (Mike's call, 2026-09-29, Zcode's proposal):* records are versioned in a git
+    repository scoped to `~/.dpc/kb` — `index/` ignored by that repository, a bare clone on
+    a second node as the backup — and never in a repository at the root of `~/.dpc`, which
+    holds `node.key`. The repository is created with the first record written there, not
+    before; nothing lives in `~/.dpc/kb` today.
 - **Q3 — engine.** dpc-library 0007 is open and its measurement designed but not run, so
   the router ships with one route to the configured vision provider and a seam where an
   engine choice goes. That measurement now owes a language-coverage column (R1c). — @Ark
