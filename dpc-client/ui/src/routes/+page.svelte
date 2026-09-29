@@ -928,8 +928,8 @@
 
   // handleCreateGroup, handleLeaveGroup, handleDeleteGroup moved to GroupManagementPanel.svelte
   async function handleCreateGroup(event: CustomEvent) { groupManagementPanelRef?.handleCreateGroup(event); }
-  async function handleLeaveGroup(groupId: string) { groupManagementPanelRef?.handleLeaveGroup(groupId, activeChatId); }
-  async function handleDeleteGroup(groupId: string) { groupManagementPanelRef?.handleDeleteGroup(groupId, activeChatId, ask); }
+  async function handleLeaveGroup(groupId: string): Promise<boolean> { return (await groupManagementPanelRef?.handleLeaveGroup(groupId, activeChatId)) ?? false; }
+  async function handleDeleteGroup(groupId: string): Promise<boolean> { return (await groupManagementPanelRef?.handleDeleteGroup(groupId, activeChatId, ask)) ?? false; }
 
     // Model download dialog handlers (v0.13.5)
   // handleModelDownload + handleModelDownloadCancel moved to ModelDownloadPanel.svelte (Step 8)
@@ -1076,8 +1076,6 @@
       onDisconnectPeer={handleDisconnectPeer}
       groupChats={$groupChats}
       onCreateGroup={() => showNewGroupDialog = true}
-      onLeaveGroup={handleLeaveGroup}
-      onDeleteGroup={handleDeleteGroup}
       selfNodeId={$nodeStatus?.node_id || ""}
       agents={$agentsList}
       onSelectAgent={handleSelectAgent}
@@ -1486,6 +1484,8 @@
   {whisperModelLoading}
   on:addMember={handleGroupAddMember}
   on:removeMember={handleGroupRemoveMember}
+  on:leaveGroup={async (e) => { if (await handleLeaveGroup(e.detail.group_id)) showGroupSettingsDialog = false; }}
+  on:deleteGroup={async (e) => { if (await handleDeleteGroup(e.detail.group_id)) showGroupSettingsDialog = false; }}
   on:toggleAutoTranscribe={() => { autoTranscribeEnabled = !autoTranscribeEnabled; voicePanelComp?.saveAutoTranscribeSetting(); }}
   on:updateAgents={async (e) => {
     const result = await sendCommand('set_group_agents', { group_id: e.detail.group_id, agent_ids: e.detail.agent_ids });

@@ -4,7 +4,7 @@
 <!-- Exports: handleCreateGroup(), handleLeaveGroup(), handleDeleteGroup(), handleGroupAddMember(), handleGroupRemoveMember() -->
 
 <script lang="ts">
-  import type { Writable } from 'svelte/store';
+  import { get, type Writable } from 'svelte/store';
   import {
     groupChats,
     createGroupChat,
@@ -62,7 +62,16 @@
     }
   }
 
-  export async function handleLeaveGroup(groupId: string, activeChatId: string) {
+  // Returns true when the group was left, false when cancelled or failed.
+  export async function handleLeaveGroup(groupId: string, activeChatId: string): Promise<boolean> {
+    const name = get(groupChats).get(groupId)?.name || 'this group';
+    const shouldLeave = await confirmAsync(
+      `Leave '${name}'? Your local copy of this group — its history and received files — will be deleted from this device. Other members keep theirs. If the creator adds you again, the group comes back.`,
+      { title: 'Leave group', kind: 'warning' }
+    );
+
+    if (!shouldLeave) return false;
+
     try {
       await leaveGroup(groupId);
       if (activeChatId === groupId) {
@@ -78,18 +87,22 @@
         newMap.delete(groupId);
         return newMap;
       });
+      return true;
     } catch (e) {
       console.error('Failed to leave group:', e);
+      return false;
     }
   }
 
-  export async function handleDeleteGroup(groupId: string, activeChatId: string, _ask?: any) {
+  // Returns true when the group was deleted, false when cancelled or failed.
+  export async function handleDeleteGroup(groupId: string, activeChatId: string, _ask?: any): Promise<boolean> {
+    const name = get(groupChats).get(groupId)?.name || 'this group chat';
     const shouldDelete = await confirmAsync(
-      'Delete this group chat? This will permanently remove all messages and data for all members.',
+      `Delete '${name}'? This will permanently remove all messages and data for all members.`,
       { title: 'Confirm Group Deletion', kind: 'warning' }
     );
 
-    if (!shouldDelete) return;
+    if (!shouldDelete) return false;
 
     try {
       await deleteGroup(groupId);
@@ -106,8 +119,10 @@
         newMap.delete(groupId);
         return newMap;
       });
+      return true;
     } catch (e) {
       console.error('Failed to delete group:', e);
+      return false;
     }
   }
 

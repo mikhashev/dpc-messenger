@@ -186,6 +186,16 @@
     }
   }
 
+  // Leave / Delete: the parent asks for confirmation, runs the action and
+  // closes this dialog only when it went through.
+  function handleLeaveGroup() {
+    dispatch('leaveGroup', { group_id: group?.group_id });
+  }
+
+  function handleDeleteGroup() {
+    dispatch('deleteGroup', { group_id: group?.group_id });
+  }
+
   function handleClose() {
     showAddMember = false;
     agentsDirty = false;
@@ -421,6 +431,25 @@
             <button class="btn-save" on:click={saveAgents}>Save</button>
           </div>
         {/if}
+
+        <!-- Danger zone: Leave (member) or Delete (creator) -->
+        <div class="section danger-zone">
+          <div class="section-header">
+            <h3>Danger zone</h3>
+          </div>
+          {#if isCreator}
+            <p class="danger-hint">
+              Deleting the group removes its messages and data for every member.
+            </p>
+            <button class="btn-danger" on:click={handleDeleteGroup}>Delete group</button>
+          {:else}
+            <p class="danger-hint">
+              Leaving deletes this group's history and received files from this device only.
+              Other members keep theirs.
+            </p>
+            <button class="btn-danger" on:click={handleLeaveGroup}>Leave group</button>
+          {/if}
+        </div>
       </div>
     </div>
   </div>
@@ -824,6 +853,31 @@
     font-size: 0.75rem;
   }
   .btn-topic-cancel:hover { color: #cdd6f4; border-color: #6c7086; }
+  .danger-zone {
+    margin-top: 20px;
+    padding-top: 12px;
+    border-top: 1px solid #45475a;
+  }
+  .danger-hint {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: #a6adc8;
+    line-height: 1.45;
+  }
+  .btn-danger {
+    padding: 8px 16px;
+    border: 1px solid #f38ba8;
+    border-radius: 6px;
+    background: transparent;
+    color: #f38ba8;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .btn-danger:hover {
+    background: #f38ba8;
+    color: #1e1e2e;
+  }
   .topic-char-count {
     font-size: 0.7rem;
     color: #6c7086;

@@ -357,8 +357,6 @@
     onDisconnectPeer,
     groupChats = new Map(),
     onCreateGroup,
-    onLeaveGroup,
-    onDeleteGroup,
     selfNodeId = "",
     // Agent list (Phase 4)
     agents = [],
@@ -396,8 +394,6 @@
     onDisconnectPeer: (peerId: string) => void;
     groupChats?: Map<string, any>;
     onCreateGroup?: () => void;
-    onLeaveGroup?: (groupId: string) => void;
-    onDeleteGroup?: (groupId: string) => void;
     selfNodeId?: string;
     // Agent list (Phase 4)
     agents?: AgentInfo[];
@@ -894,21 +890,6 @@
                 {#if (unreadMessageCounts.get(group.group_id) ?? 0) > 0}
                   <span class="unread-badge">{unreadMessageCounts.get(group.group_id)}</span>
                 {/if}
-              </button>
-              <button
-                type="button"
-                class="disconnect-btn"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  if (group.created_by === selfNodeId) {
-                    onDeleteGroup?.(group.group_id);
-                  } else {
-                    onLeaveGroup?.(group.group_id);
-                  }
-                }}
-                title={group.created_by === selfNodeId ? "Delete group" : "Leave group"}
-              >
-                ×
               </button>
             </li>
           {/each}
