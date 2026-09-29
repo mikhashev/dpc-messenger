@@ -204,6 +204,40 @@ async def test_bootstrap_partial_failure(seed_network):
         await new_node.stop()
 
 
+@pytest.mark.asyncio
+async def test_bootstrap_keeps_fast_answer_when_another_seed_hangs(seed_network):
+    """A seed that answered before the deadline counts even if another seed hangs.
+
+    wait_for(gather(...)) used to cancel everything at the deadline and drop the
+    PONG that had already arrived.
+    """
+    new_node = DHTManager(
+        node_id="dpc-node-33333333333333333333333333333333",
+        ip="127.0.0.1",
+        port=0,
+        config=DHTConfig(bootstrap_timeout=1.0)
+    )
+    await new_node.start(host="127.0.0.1", port=0)
+
+    fast_port = seed_network[0].rpc_handler.transport.get_extra_info('sockname')[1]
+    real_ping = new_node._ping_node
+
+    async def ping(ip, port):
+        if port == 1:  # the hanging seed
+            await asyncio.sleep(3600)
+        return await real_ping(ip, port)
+
+    new_node._ping_node = ping
+
+    try:
+        seeds = [("127.0.0.1", 1), ("127.0.0.1", fast_port)]
+        result = await asyncio.wait_for(new_node.bootstrap(seeds), timeout=20)
+        assert result is True
+        assert new_node.routing_table.get_node_count() > 0
+    finally:
+        await new_node.stop()
+
+
 # ===== Iterative Lookup Tests =====
 
 @pytest.mark.asyncio

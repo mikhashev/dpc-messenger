@@ -62,7 +62,6 @@ jobs:
         working-directory: dpc-client/core
         run: >
           uv run python -m pytest -q
-          --deselect tests/dht/test_manager.py::test_bootstrap_partial_failure
           --deselect tests/test_turn.py::test_turn_connectivity
 
   protocol:

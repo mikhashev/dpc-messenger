@@ -213,26 +213,30 @@ class DHTManager:
             for ip, port in seed_nodes
         ]
 
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*ping_tasks, return_exceptions=True),
-                timeout=self.config.bootstrap_timeout
+        # A shared deadline, not a wait_for around a gather: on timeout wait_for
+        # cancels the whole gather and discards the PONGs that had already arrived,
+        # so one dead seed (~15 s of retries) failed a bootstrap that a live seed
+        # had answered in milliseconds. Diagnosis: CC_linux, 2026-09-30.
+        results, timed_out = await self._gather_within(
+            ping_tasks, self.config.bootstrap_timeout
+        )
+        if timed_out:
+            logger.warning(
+                "Bootstrap PING phase: deadline of %.1fs reached, keeping the answers "
+                "that had arrived", self.config.bootstrap_timeout
             )
 
-            # Three outcomes, not two: a seed can answer and be added, answer and
-            # turn out to be this node, or not answer. Counting the middle one as
-            # silence is what produced «no responsive seed nodes» over a seed that
-            # had replied, and sent the reader after a network fault.
-            for (ip, port), result in zip(seed_nodes, results):
-                if not result or isinstance(result, Exception):
-                    continue
-                if result.get("node_id") == self.node_id:
-                    self_seeds.append((ip, port))
-                else:
-                    responsive_seeds += 1
-
-        except asyncio.TimeoutError:
-            logger.warning("Bootstrap PING phase timed out after %.1fs", self.config.bootstrap_timeout)
+        # Three outcomes, not two: a seed can answer and be added, answer and
+        # turn out to be this node, or not answer. Counting the middle one as
+        # silence is what produced «no responsive seed nodes» over a seed that
+        # had replied, and sent the reader after a network fault.
+        for (ip, port), result in zip(seed_nodes, results):
+            if not result or isinstance(result, BaseException):
+                continue
+            if result.get("node_id") == self.node_id:
+                self_seeds.append((ip, port))
+            else:
+                responsive_seeds += 1
 
         if responsive_seeds == 0:
             if self_seeds:
@@ -269,6 +273,42 @@ class DHTManager:
         )
 
         return True
+
+    @staticmethod
+    async def _gather_within(coros, timeout: float):
+        """
+        Run coroutines concurrently under one shared deadline.
+
+        Unlike ``wait_for(gather(...))``, answers that arrived before the deadline
+        are kept. Returns ``(results, timed_out)``: ``results`` is in input order,
+        with ``None`` for a coroutine still pending at the deadline and the
+        exception object for one that raised. Pending tasks are cancelled and
+        awaited, so none is left to be destroyed while pending.
+        """
+        tasks = [asyncio.ensure_future(c) for c in coros]
+        if not tasks:
+            return [], False
+        try:
+            _, pending = await asyncio.wait(tasks, timeout=timeout)
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        results = []
+        for t in tasks:
+            if t in pending:
+                results.append(None)
+            elif t.cancelled():
+                results.append(None)
+            else:
+                exc = t.exception()
+                results.append(exc if exc is not None else t.result())
+        return results, bool(pending)
 
     async def _retry_bootstrap(self):
         """
@@ -368,14 +408,11 @@ class DHTManager:
                 queried.add(node.node_id)
 
             # Wait for responses
-            try:
-                results = await asyncio.wait_for(
-                    asyncio.gather(*lookup_tasks, return_exceptions=True),
-                    timeout=self.config.lookup_timeout
-                )
-            except asyncio.TimeoutError:
+            results, timed_out = await self._gather_within(
+                lookup_tasks, self.config.lookup_timeout
+            )
+            if timed_out:
                 logger.debug("Lookup timed out after %.1fs", self.config.lookup_timeout)
-                break
 
             # Process results
             new_nodes_found = False
@@ -388,6 +425,9 @@ class DHTManager:
                         if node.node_id not in {n.node_id for n in shortlist}:
                             shortlist.append(node)
                             new_nodes_found = True
+
+            if timed_out:
+                break
 
             # Re-sort shortlist by distance to target
             from .distance import xor_distance
