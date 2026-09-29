@@ -53,9 +53,10 @@ jobs:
         run: uv run playwright install --with-deps chromium
       # Baseline measured on Windows 2026-08-20: 4 failed · 2086 passed · 3 skipped (160s).
       # They were deselected by name, not hidden by a bare `|| true`, and each one has a
-      # backlog entry (CI-BASELINE-FOUR-TESTS-FAIL-BEFORE-THE-FIRST-RUN). Two remain: the two
+      # backlog entry (CI-BASELINE-FOUR-TESTS-FAIL-BEFORE-THE-FIRST-RUN). One remains: the two
       # web-audit tests were renamed on 2026-09-11 and their lines matched nothing, so they
-      # were removed on 2026-09-28. A gate that is red
+      # were removed on 2026-09-28; test_bootstrap_partial_failure was a real bootstrap
+      # defect, fixed and un-deselected in 9b07645d on 2026-09-30. A gate that is red
       # for reasons unrelated to the change teaches everyone to ignore it; a silent skip
       # teaches that the suite is green. Neither — name them here and delete lines as they fix.
       - name: Pytest
