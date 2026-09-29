@@ -106,7 +106,12 @@ def _tree_memory_mb(process: "subprocess.Popen") -> float:
     return total
 
 
-def _watch_memory(process: "subprocess.Popen", ceiling_mb: int, verdict: dict) -> None:
+def _watch_memory(
+    process: "subprocess.Popen",
+    ceiling_mb: int,
+    verdict: dict,
+    stop: Optional[threading.Event] = None,
+) -> None:
     """Kill the tree if it grows past the ceiling. Runs on a daemon thread.
 
     Polling rather than an OS limit on purpose: a Windows Job Object and a
@@ -116,6 +121,11 @@ def _watch_memory(process: "subprocess.Popen", ceiling_mb: int, verdict: dict) -
     same number on all three platforms; its cost is granularity, and against a
     process that spent nine and a half hours above the line, granularity of two
     seconds is not the weak part.
+
+    `stop` wakes the sleep the moment the caller has its answer. Without it the
+    caller's `join` waited out the rest of a poll interval after every process
+    that ended sooner - measured 2026-09-29: 2.02 s added to each djvutxt and
+    djvused call of `read_document`, about 4 s per DjVu page.
     """
     while process.poll() is None:
         used = _tree_memory_mb(process)
@@ -128,7 +138,11 @@ def _watch_memory(process: "subprocess.Popen", ceiling_mb: int, verdict: dict) -
             # The real verdict: a partial kill must not be reported as a full one.
             verdict["killed"] = _kill_process_tree(process)
             return
-        time.sleep(_MEMORY_POLL_SECONDS)
+        if stop is not None:
+            if stop.wait(_MEMORY_POLL_SECONDS):
+                return
+        else:
+            time.sleep(_MEMORY_POLL_SECONDS)
 
 
 def _parent_map_from_proc() -> dict:
@@ -363,10 +377,11 @@ def run_supervised(
 
     verdict: dict = {}
     watch_thread: Optional[threading.Thread] = None
+    watch_stop = threading.Event()
     if ceiling and ceiling > 0:
         watch_thread = threading.Thread(
             target=_watch_memory,
-            args=(process, ceiling, verdict),
+            args=(process, ceiling, verdict, watch_stop),
             name=f"dpc-memory-watch-{process.pid}",
             daemon=True,
         )
@@ -383,6 +398,9 @@ def run_supervised(
         run.returncode = process.returncode
     if watch_thread is not None:
         # communicate() can return before the watcher has written its verdict.
+        # A watcher mid-kill finishes it (it is past its sleep); one asleep is
+        # woken and leaves without a poll, so a short command costs no interval.
+        watch_stop.set()
         watch_thread.join(timeout=15)
     if verdict.get("exceeded_mb"):
         run.exceeded_mb = verdict["exceeded_mb"]
