@@ -850,6 +850,54 @@ def test_a_full_page_of_text_beside_images_is_not_a_facsimile(monkeypatch):
     assert entry.get("note") is None
 
 
+def _thin_page_entry(monkeypatch, inventory):
+    monkeypatch.setattr(D, "_page_inventory", lambda page: inventory)
+    monkeypatch.setattr(D, "_char_fonts", lambda textpage: None)
+
+    class _TextPage:
+        def get_text_range(self):
+            return "running header"
+
+    class _Page:
+        def get_textpage(self):
+            return _TextPage()
+
+    class _Doc:
+        def __getitem__(self, index):
+            return _Page()
+
+    return D._read_page(_Doc(), 1)
+
+
+def test_one_full_page_image_under_a_thin_layer_is_a_facsimile(monkeypatch):
+    """An ordinary scan: one image, the whole page, a header for a text layer."""
+    inv = {"fonts": set(), "images": 1, "n_long_vec": 0, "img_area_share": 0.95}
+    entry = _thin_page_entry(monkeypatch, inv)
+    assert D._is_thin_facsimile(entry)
+    assert "covering 95% of the page" in entry["note"]
+
+
+def test_one_small_image_under_a_thin_layer_is_not_a_facsimile(monkeypatch):
+    inv = {"fonts": set(), "images": 1, "n_long_vec": 0, "img_area_share": 0.05}
+    entry = _thin_page_entry(monkeypatch, inv)
+    assert not D._is_thin_facsimile(entry)
+    assert entry.get("note") is None
+
+
+def test_four_long_vectors_under_a_thin_layer_are_a_facsimile(monkeypatch):
+    inv = {"fonts": set(), "images": 0, "n_long_vec": 4, "img_area_share": 0.0}
+    entry = _thin_page_entry(monkeypatch, inv)
+    assert D._is_thin_facsimile(entry)
+    assert "4 long vector lines" in entry["note"]
+
+
+def test_unmeasured_fields_do_not_satisfy_any_disjunct(monkeypatch):
+    inv = {"fonts": set(), "images": None, "n_long_vec": None, "img_area_share": None}
+    entry = _thin_page_entry(monkeypatch, inv)
+    assert not D._is_thin_facsimile(entry)
+    assert D._thin_facsimile_reason({"route": "text", "chars": 10, "images": 3}) == "images"
+
+
 def test_the_thin_boundary_is_the_one_the_library_measured_with():
     """Both numbers are borrowed, not invented: dpc-library's re-measurement
     sorts pages under 300 characters as thin, and its Stage 3 routing rule

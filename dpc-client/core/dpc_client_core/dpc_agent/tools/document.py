@@ -103,14 +103,17 @@ SUSPECT_BELOW = 0x2000
 # this tool calls thin is the same page that measurement calls thin.
 THIN_TEXT_CHARS = 300
 
-# ...and how many images beside a thin layer make the page worth doubting.
+# ...and what beside a thin layer makes the page worth doubting.
 # dpc-library's `docs/plan.md` Stage 3 checks every page of a born-digital book
 # against an escalation signal — `n_long_vec >= 4 OR img_area_share >= 0.30 OR
 # n_images >= 3` — before it is trusted on the cheap text-extraction path.
-# n_images >= 3 is the disjunct that can be read from pdfium's own object
-# inventory here, so it is the one used. Observed 2026-09-22 on pages 29/31/33
-# of a four-volume scan: 34 characters of running header beside 10-11 image
-# objects, returned as text with nothing said about the page underneath.
+# The flag now uses all three disjuncts (`_thin_facsimile_reason`); a disjunct
+# whose measurement is None did not fire. Only n_images was usable at first, and
+# an ordinary scan — one full-page image under a header-sized layer — was never
+# flagged. Observed 2026-09-22 on pages 29/31/33 of a four-volume scan: 34
+# characters of running header beside 10-11 image objects, returned as text with
+# nothing said about the page underneath. DjVu carries raster chunk counts only,
+# so for it the image count is still the one disjunct.
 FACSIMILE_MIN_IMAGES = 3
 
 # The other two disjuncts of the same signal, with 0014's and plan.md's numbers. A
@@ -441,34 +444,55 @@ def _clean_text_layer(text: str) -> str:
     return text.translate(_NONCHARACTERS)
 
 
+def _thin_facsimile_reason(entry: Dict[str, Any]) -> Optional[str]:
+    """Which disjunct of the escalation signal fired for a thin text-route page.
+
+    "images", "image area" or "long vectors"; None when the page is not thin or
+    no disjunct fired. A None measurement (unmeasured, or a DjVu page that has no
+    vector or area at all) never satisfies its disjunct.
+    """
+    chars = entry.get("chars") or 0
+    if not (entry.get("route") == "text" and 0 < chars < THIN_TEXT_CHARS):
+        return None
+    images = entry.get("images")
+    share = entry.get("img_area_share")
+    vec = entry.get("n_long_vec")
+    if images is not None and images >= FACSIMILE_MIN_IMAGES:
+        return "images"
+    if share is not None and share >= DIAGRAM_MIN_IMG_AREA_SHARE:
+        return "image area"
+    if vec is not None and vec >= DIAGRAM_MIN_LONG_VEC:
+        return "long vectors"
+    return None
+
+
 def _is_thin_facsimile(entry: Dict[str, Any]) -> bool:
     """Did the text route return a running header where a page was?
 
     Such a page comes back looking like a success — route `text`, a count above
-    zero — with the page itself unread. `not images` covers None as well as
-    zero: a page nobody could measure is not one this may call a facsimile.
+    zero — with the page itself unread.
     """
-    chars = entry.get("chars") or 0
-    images = entry.get("images")
-    return (
-        entry.get("route") == "text"
-        and 0 < chars < THIN_TEXT_CHARS
-        and bool(images)
-        and images >= FACSIMILE_MIN_IMAGES
-    )
+    return _thin_facsimile_reason(entry) is not None
 
 
 def _thin_facsimile_note(entry: Dict[str, Any], unit: str) -> Optional[str]:
     """The sentence for such a page, or None if it is not one.
 
     `unit` is what was counted: a PDF page carries image objects, a DjVu page
-    raster chunks. The rest of the sentence is the same on both.
+    raster chunks. The sentence names the disjunct that fired.
     """
-    if not _is_thin_facsimile(entry):
+    reason = _thin_facsimile_reason(entry)
+    if reason is None:
         return None
+    if reason == "images":
+        beside = f"{entry['images']} {unit}s"
+    elif reason == "image area":
+        beside = f"images covering {round(entry['img_area_share'] * 100)}% of the page"
+    else:
+        beside = f"{entry['n_long_vec']} long vector lines"
     return (
         f"page {entry['page']} has only {entry['chars']} characters of text layer "
-        f"beside {entry['images']} {unit}s — likely a scan or facsimile with a "
+        f"beside {beside} — likely a scan or facsimile with a "
         f"header-only layer; the layer was returned, the page itself was not read. "
         f"mode='vision' reads it."
     )
