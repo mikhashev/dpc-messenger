@@ -324,7 +324,9 @@
     }
     .speed-counter {
         display: inline-flex;
-        gap: 8px;
+        flex-wrap: wrap;
+        min-width: 0;
+        gap: 2px 8px;
         align-items: baseline;
         margin-left: 8px;
         font-size: 0.85em;
@@ -358,8 +360,12 @@
 
     .tool-calls-header {
         display: inline-flex;
+        flex-wrap: wrap;
+        max-width: 100%;
+        box-sizing: border-box;
+        text-align: left;
         align-items: center;
-        gap: 8px;
+        gap: 2px 8px;
         background: none;
         border: none;
         cursor: pointer;
@@ -376,16 +382,21 @@
     .agent-label {
         font-weight: 700;
         color: #ffffff;
+        white-space: nowrap;
+        flex-shrink: 0;
     }
 
     .action-count {
         color: #e2e8f0;
         font-weight: 500;
+        white-space: nowrap;
+        flex-shrink: 0;
     }
 
     .expand-icon {
         font-size: 0.8em;
         color: #94a3b8;
+        flex-shrink: 0;
     }
 
     .stop-btn {
