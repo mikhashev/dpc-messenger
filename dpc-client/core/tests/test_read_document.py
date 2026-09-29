@@ -1146,3 +1146,72 @@ def test_an_inventory_without_a_path_walk_says_it_could_not_run(ctx, drawn, tmp_
     assert page["n_long_vec"] is None and page["diagram"] is None
     assert page["reason"] == "inventory_unavailable" and out["blank_pages"] == []
     assert out["inventory_check"] == "not_runnable:inventory_unavailable"
+
+
+# ----------------------------------- image share in the page's own frame (review)
+
+def _pdf_box(box, body, rotate=0):
+    """One page with its own MediaBox and /Rotate, built by hand like `_pdf`."""
+    objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        f"<< /Type /Page /Parent 2 0 R /MediaBox [{box}] /Rotate {rotate} /Contents 4 0 R "
+        f"/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>",
+        f"<< /Length {len(body)} >>\nstream\n{body}\nendstream",
+    ]
+    out = "%PDF-1.4\n" + "".join(f"{i + 1} 0 obj {o} endobj\n" for i, o in enumerate(objs))
+    return (out + f"trailer << /Root 1 0 R /Size {len(objs) + 1} >>\n%%EOF").encode("latin-1")
+
+
+_THIN = "BT /F1 12 Tf 1010 1280 Td (running header text) Tj ET"
+
+
+def test_a_full_page_image_on_a_nonzero_origin_box_is_measured_as_covering(ctx, tmp_path):
+    p = tmp_path / "offset.pdf"
+    p.write_bytes(_pdf_box(
+        "1000 1000 1400 1300",
+        _THIN + " q 400 0 0 300 1000 1000 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x80 EI Q",
+    ))
+    page = _read(ctx, p, "1", mode="text")["per_page"][0]
+    assert page["img_area_share"] == pytest.approx(1.0, abs=0.01)
+    assert D._is_thin_facsimile(page)
+
+
+@pytest.mark.parametrize("rotate", [90, 270])
+def test_a_rotated_page_measures_the_image_share_in_one_frame(ctx, tmp_path, rotate):
+    p = tmp_path / f"rot{rotate}.pdf"
+    p.write_bytes(_pdf_box(
+        "0 0 400 300",
+        "q 400 0 0 300 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x80 EI Q",
+        rotate=rotate,
+    ))
+    page = _read(ctx, p, "1", mode="text")["per_page"][0]
+    assert page["img_area_share"] == pytest.approx(1.0, abs=0.01)
+
+
+def test_a_failed_path_walk_with_no_images_is_not_called_blank(monkeypatch):
+    class _TextPage:
+        def get_text_range(self):
+            return ""
+
+    class _Page:
+        def get_textpage(self):
+            return _TextPage()
+
+    class _Doc:
+        def __getitem__(self, index):
+            return _Page()
+
+    monkeypatch.setattr(D, "_char_fonts", lambda textpage: None)
+    monkeypatch.setattr(D, "_page_inventory", lambda page: {
+        "fonts": set(), "images": 0, "n_long_vec": None, "img_area_share": 0.0})
+    entry = D._read_page(_Doc(), 1)
+    assert entry["route"] == "no_text_layer"
+    assert "genuinely blank" not in entry["note"]
+    assert "could not be counted" in entry["note"]
+
+
+def test_unreadable_pages_wording_is_exact_about_text_layers():
+    src = Path(D.__file__).read_text(encoding="utf-8")
+    assert "UNION of every way" not in src
+    assert "keeps route \"text\"" in src

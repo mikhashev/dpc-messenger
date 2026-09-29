@@ -329,7 +329,12 @@ def _page_inventory(page) -> Dict[str, Any]:
     covered = 0.0
     try:
         objects = list(page.get_objects() or [])
-        width, height = page.get_size()
+        # The image bounds below are in unrotated page space and keep the box's
+        # origin, so the page box must be too: get_bbox() is the same frame,
+        # where get_size() is rotated and always starts at (0, 0). The area is
+        # rotation-invariant, so the share is the same on a /Rotate 90 page.
+        box_l, box_b, box_r, box_t = page.get_bbox()
+        width, height = box_r - box_l, box_t - box_b
     except Exception as exc:  # pragma: no cover
         log.debug("page object inventory unavailable: %s", exc)
         return {"fonts": fonts, "images": None, "n_long_vec": None, "img_area_share": None}
@@ -339,8 +344,8 @@ def _page_inventory(page) -> Dict[str, Any]:
             if kind == 3:  # FPDF_PAGEOBJ_IMAGE
                 images += 1
                 left, bottom, right, top = obj.get_bounds()
-                w = min(right, width) - max(left, 0.0)
-                h = min(top, height) - max(bottom, 0.0)
+                w = min(right, box_r) - max(left, box_l)
+                h = min(top, box_t) - max(bottom, box_b)
                 if w > 0 and h > 0:
                     covered += w * h
                 continue
@@ -542,6 +547,8 @@ def _read_page(doc, number: int) -> Dict[str, Any]:
                     f"; it carries {entry['n_long_vec']} long vector segment(s) and no "
                     "image, so it is a drawing and needs an eye"
                 )
+            elif inv["n_long_vec"] is None and images == 0:
+                tail = "; and its drawings could not be counted, so whether it is blank is unknown"
             else:
                 tail = "; and no image either — the page is genuinely blank"
             entry["note"] = "no text layer on this page" + tail
@@ -1192,9 +1199,11 @@ async def read_document(
 
     Returns:
         JSON with per-page routes, character counts, image counts, the pages
-        nothing could be read from (`unreadable_pages`, the union of
-        `blank_pages`, `failed_pages`, `vision_failed_pages`, refused and unsent
-        scans), `not_sent_to_vision`, `math_check`, `inventory_check`, `diagram_pages`, the pages whose mathematics
+        nothing could be read from (`unreadable_pages`: the pages routed
+        no_text_layer, failed, vision_failed or vision_refused, so `blank_pages`,
+        `failed_pages`, `vision_failed_pages`, and refused or unsent scans only
+        when they have no text layer; a page with a text layer that vision was
+        refused or not sent for keeps route text and is not in it), `not_sent_to_vision`, `math_check`, `inventory_check`, `diagram_pages`, the pages whose mathematics
         is unreliable,
         and `thin_layer_pages` — pages that returned a header-sized text layer
         beside several images, which the text route reports rather than reroutes.
@@ -1344,9 +1353,11 @@ async def read_document(
                     requested=(mode == "vision"),
                 )
 
-        # `unreadable_pages` is the UNION of every way a page ended with no text
-        # of its own: blank, failed, vision_failed, vision_refused, or a scan that
-        # was not sent. The split lists below say which; route on those.
+        # `unreadable_pages` is the union of the pages whose route ended without a
+        # text of their own: no_text_layer (blank, or a scan/drawing not sent),
+        # failed, vision_failed and vision_refused. A page that HAD a text layer and
+        # was refused vision or not sent keeps route "text", so it is not in it. The
+        # split lists below say which; route on those.
         unreadable = [
             p["page"] for p in per_page
             if p["route"] in ("no_text_layer", "failed", "vision_failed", "vision_refused")
@@ -1552,7 +1563,7 @@ def get_tools() -> List[ToolEntry]:
                     "the vector and image-area counts ran (not on DjVu); `diagram_pages` "
                     "lists text pages that carry drawings or figures. Page routes: text, vision, "
                     "no_text_layer, vision_failed, vision_refused, failed; "
-                    "`unreadable_pages` is their union, split into `blank_pages`, "
+                    "`unreadable_pages` is the pages routed no_text_layer, failed, vision_failed or vision_refused, split into `blank_pages`, "
                     "`failed_pages` and `vision_failed_pages`, and `not_sent_to_vision` "
                     "lists pages the auto route skipped. Local "
                     "only: no network."
