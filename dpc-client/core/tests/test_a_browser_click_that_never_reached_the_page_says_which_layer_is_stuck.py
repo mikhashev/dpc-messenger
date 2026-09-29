@@ -493,7 +493,13 @@ def test_a_click_wait_is_capped_so_the_probes_fit_inside_the_tool_limit(
     twenty more."""
     worst = browser_mod._CLICK_WAIT_CEILING_MS + browser_mod._CLICK_SLOW_PAGE_RESERVE_MS
     assert worst == browser_mod._CLICK_TOOL_TIMEOUT_SEC * 1000
-    assert browser_mod._CLICK_WAIT_CEILING_MS < 30000
+    assert browser_mod._CLICK_WAIT_CEILING_MS == 33000
+    # the ref identity read runs before the click and is inside the reserve
+    assert browser_mod._REF_IDENTITY_TIMEOUT_MS <= browser_mod._CLICK_SLOW_PAGE_RESERVE_MS
+    assert (
+        browser_mod._CLICK_WAIT_CEILING_MS
+        + browser_mod._CLICK_SLOW_PAGE_RESERVE_MS
+    ) <= browser_mod._CLICK_TOOL_TIMEOUT_SEC * 1000
     seen = {}
     real = _session._page.locator
 
@@ -509,12 +515,12 @@ def test_a_click_wait_is_capped_so_the_probes_fit_inside_the_tool_limit(
         return loc
 
     _session._page.locator = spy
-    answer = _click(_session, _ctx(_agent_root), "#plain", timeout=30000)
+    answer = _click(_session, _ctx(_agent_root), "#plain", timeout=40000)
     assert seen["timeout"] == browser_mod._CLICK_WAIT_CEILING_MS
     assert "The wait was cut to" in answer
     row = [r for r in _audit if r.get("action") == "click"][-1]
     assert row["waited_ms"] == browser_mod._CLICK_WAIT_CEILING_MS
-    assert row["asked_ms"] == 30000
+    assert row["asked_ms"] == 40000
 
 
 def test_a_short_wait_is_left_alone(_session, _agent_root, _painted):

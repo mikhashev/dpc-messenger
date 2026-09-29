@@ -1839,10 +1839,17 @@ _CLICK_FACTS_JS = """
 # whose main thread is not answering. The wait is therefore capped at what is
 # left after the worst case of everything that follows it, and the ToolEntry
 # reads the same constant so the two cannot drift apart.
-_CLICK_TOOL_TIMEOUT_SEC = 45
+# The identity read of an @eN ref (`_check_ref_identity`, up to 3 s) runs
+# before the click and was missing from that sum: 3 + 5 + 21 + 17 = 46 s
+# against 45. It is now in the reserve, and the limit is 60 s: reserve
+# 27 s (4 x 5 + 3 + 2 + 2, as listed below), ceiling 60 - 27 = 33 s
+# (Zcode's review, 2026-09-30).
+_CLICK_TOOL_TIMEOUT_SEC = 60
 _CLICK_TARGET_PROBE_MS = 2000
+_REF_IDENTITY_TIMEOUT_MS = 3000
 _CLICK_SLOW_PAGE_RESERVE_MS = (
-    _CLICK_PROBE_TIMEOUT_MS          # the fact read before the click
+    _REF_IDENTITY_TIMEOUT_MS         # the ref identity read before the click
+    + _CLICK_PROBE_TIMEOUT_MS        # the fact read before the click
     + _CLICK_PROBE_TIMEOUT_MS        # evaluate probe
     + _CLICK_PROBE_TIMEOUT_MS        # the fact read after it
     + _CLICK_TARGET_PROBE_MS         # what sits on the target
@@ -4141,7 +4148,9 @@ class AuthBrowser:
         snapshot recorded them; a mismatch raises ValueError naming both.
         A read that fails decides nothing, as with `count()`."""
         try:
-            now = locator.first.evaluate(_REF_IDENTITY_JS, timeout=3000)
+            now = locator.first.evaluate(
+                _REF_IDENTITY_JS, timeout=_REF_IDENTITY_TIMEOUT_MS,
+            )
         except Exception:
             return
         if not isinstance(now, dict):
