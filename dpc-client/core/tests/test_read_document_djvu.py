@@ -760,3 +760,12 @@ def test_a_djvu_scan_over_the_cap_is_refused_on_its_page_record(ctx, book, libre
     assert [p["route"] for p in out["per_page"]] == ["vision_refused"] * 3
     assert {p["reason"] for p in out["per_page"]} == {"over_max_vision_pages"}
     assert out["unreadable_pages"] == [1, 2, 3] and out["blank_pages"] == []
+
+
+def test_a_djvu_says_the_vector_and_area_counts_cannot_run(ctx, book, libre):
+    libre(_DjVuLibre(pages=1, text={1: "some prose"}))
+    out = _read(ctx, book, "1")
+    page = out["per_page"][0]
+    assert out["inventory_check"] == "not_runnable:djvu" and out["diagram_pages"] == []
+    assert page["n_long_vec"] is None and page["img_area_share"] is None
+    assert page["diagram"] is None, "a signal that could not be computed is not one that is off"

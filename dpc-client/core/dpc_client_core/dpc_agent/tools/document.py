@@ -113,6 +113,15 @@ THIN_TEXT_CHARS = 300
 # objects, returned as text with nothing said about the page underneath.
 FACSIMILE_MIN_IMAGES = 3
 
+# The other two disjuncts of the same signal, with 0014's and plan.md's numbers. A
+# "long" vector is a straight segment (or a rectangle's longer side) of at least
+# MIN_VEC_LEN_PT, measured as dpc-library's `tools/step2_escalation.py` measures it:
+# shorter ones are the overbars and fraction rules of ordinary mathematics, which
+# fire on nearly every page of a maths book if they are counted.
+MIN_VEC_LEN_PT = 50.0
+DIAGRAM_MIN_LONG_VEC = 4
+DIAGRAM_MIN_IMG_AREA_SHARE = 0.30
+
 # The vision route, and every number here is a bound rather than a preference.
 VISION_DPI = 150                    # 2162 image tokens for an A4 page, measured
 DEFAULT_MAX_VISION_PAGES = 2        # per call; the caller raises it deliberately
@@ -254,24 +263,95 @@ def _suspect_characters(
     return "ran", sum(bad.values()), sorted(bad)
 
 
-def _page_fonts_and_images(page) -> Tuple[Set[str], Optional[int]]:
-    """Font base names and the image count, or None when nothing could be counted.
+def _long_segments(obj) -> int:
+    """How many long straight segments this path object draws, in page space.
 
-    None rather than 0 for the same reason the check above has three states: a
-    page reported as carrying no images, when in truth nobody could look, is
-    how "there is no figure here" gets said about a figure.
+    A closed axis-aligned four-sided path counts once, by its longer side, the way
+    the library's measurement counts a PDF `re` operator; every other straight
+    segment counts by its own length. Curves are not counted. The object's own
+    matrix is applied, so a path drawn small and scaled up is measured as drawn.
+    Points of a path inside a form XObject stay in the form's space.
+    """
+    import ctypes
+
+    import pypdfium2.raw as C
+
+    raw = obj.raw
+    n = C.FPDFPath_CountSegments(raw)
+    if n <= 0:
+        return 0
+    a, b, c, d, e, f = obj.get_matrix().get()
+    x = ctypes.c_float()
+    y = ctypes.c_float()
+    kinds: List[int] = []
+    xs: List[float] = []
+    ys: List[float] = []
+    for i in range(n):
+        seg = C.FPDFPath_GetPathSegment(raw, i)
+        kind = C.FPDFPathSegment_GetType(seg)
+        if kind == C.FPDF_SEGMENT_BEZIERTO:
+            continue
+        C.FPDFPathSegment_GetPoint(seg, ctypes.byref(x), ctypes.byref(y))
+        kinds.append(kind)
+        xs.append(a * x.value + c * y.value + e)
+        ys.append(b * x.value + d * y.value + f)
+    count = len(kinds)
+    if count in (4, 5) and kinds[0] == C.FPDF_SEGMENT_MOVETO:
+        closes = count == 4 or (abs(xs[4] - xs[0]) + abs(ys[4] - ys[0]) <= 0.01)
+        cx = {round(v, 1) for v in xs[:4]}
+        cy = {round(v, 1) for v in ys[:4]}
+        if closes and len(cx) == 2 and len(cy) == 2 and len(set(zip(
+                (round(v, 1) for v in xs[:4]), (round(v, 1) for v in ys[:4])))) == 4:
+            side = max(max(xs[:4]) - min(xs[:4]), max(ys[:4]) - min(ys[:4]))
+            return 1 if side >= MIN_VEC_LEN_PT else 0
+    total = 0
+    for i in range(1, count):
+        if kinds[i] == C.FPDF_SEGMENT_LINETO:
+            if ((xs[i] - xs[i - 1]) ** 2 + (ys[i] - ys[i - 1]) ** 2) ** 0.5 >= MIN_VEC_LEN_PT:
+                total += 1
+    return total
+
+
+def _page_inventory(page) -> Dict[str, Any]:
+    """Fonts, image count, long-vector count and image area share, in one pass.
+
+    Every measured field is None when nothing could be counted, for the reason
+    below: a page reported as carrying no images or no drawings, when in truth
+    nobody could look, is how "there is no figure here" gets said about a figure.
+    The vector count is None on its own when only the path walk failed.
     """
     fonts: Set[str] = set()
     images = 0
+    vectors: Optional[int] = 0
+    covered = 0.0
     try:
         objects = list(page.get_objects() or [])
+        width, height = page.get_size()
     except Exception as exc:  # pragma: no cover
         log.debug("page object inventory unavailable: %s", exc)
-        return fonts, None
+        return {"fonts": fonts, "images": None, "n_long_vec": None, "img_area_share": None}
     for obj in objects:
         try:
-            if int(obj.type) == 3:  # FPDF_PAGEOBJ_IMAGE
+            kind = int(obj.type)
+            if kind == 3:  # FPDF_PAGEOBJ_IMAGE
                 images += 1
+                left, bottom, right, top = obj.get_bounds()
+                w = min(right, width) - max(left, 0.0)
+                h = min(top, height) - max(bottom, 0.0)
+                if w > 0 and h > 0:
+                    covered += w * h
+                continue
+            if kind == 2:  # FPDF_PAGEOBJ_PATH
+                if vectors is not None:
+                    left, bottom, right, top = obj.get_bounds()
+                    # A segment cannot be longer than the box's diagonal, so a
+                    # small box is skipped without walking its segments.
+                    if ((right - left) ** 2 + (top - bottom) ** 2) ** 0.5 >= MIN_VEC_LEN_PT:
+                        try:
+                            vectors += _long_segments(obj)
+                        except Exception as exc:  # pragma: no cover
+                            log.debug("path walk unavailable: %s", exc)
+                            vectors = None
                 continue
             font = getattr(obj, "get_font", None)
             if font is None:
@@ -281,7 +361,36 @@ def _page_fonts_and_images(page) -> Tuple[Set[str], Optional[int]]:
                 fonts.add(f.get_base_name())
         except Exception:
             continue
-    return fonts, images
+    area = width * height
+    share = None if area <= 0 else round(min(1.0, covered / area), 4)
+    return {"fonts": fonts, "images": images, "n_long_vec": vectors, "img_area_share": share}
+
+
+def _page_fonts_and_images(page) -> Tuple[Set[str], Optional[int]]:
+    """Font base names and the image count, or None when nothing could be counted."""
+    inv = _page_inventory(page)
+    return inv["fonts"], inv["images"]
+
+
+def _is_diagram(entry: Dict[str, Any]) -> Optional[bool]:
+    """0014's diagram signal: n_long_vec >= 4 OR img_area_share >= 0.30 OR n_images >= 3.
+
+    None when the page carries no vector or area measurement (DjVu, or an inventory
+    that failed): a signal that could not be computed is not a signal that is off.
+    """
+    vec = entry.get("n_long_vec")
+    share = entry.get("img_area_share")
+    if vec is None or share is None:
+        return None
+    return bool(
+        vec >= DIAGRAM_MIN_LONG_VEC
+        or share >= DIAGRAM_MIN_IMG_AREA_SHARE
+        or (entry.get("images") or 0) >= FACSIMILE_MIN_IMAGES
+    )
+
+
+def _has_drawing(entry: Dict[str, Any]) -> bool:
+    return (entry.get("n_long_vec") or 0) >= DIAGRAM_MIN_LONG_VEC
 
 
 def _fit_to_budget(
@@ -377,7 +486,8 @@ def _read_page(doc, number: int) -> Dict[str, Any]:
         page = doc[number - 1]
         textpage = page.get_textpage()
         raw = textpage.get_text_range() or ""
-        fonts, images = _page_fonts_and_images(page)
+        inv = _page_inventory(page)
+        fonts, images = inv["fonts"], inv["images"]
         char_fonts = _char_fonts(textpage)
         # The detector reads the untouched string on purpose: attribution is per index
         # against pdfium's own character list, so cleaning first shifts every index past
@@ -389,6 +499,8 @@ def _read_page(doc, number: int) -> Dict[str, Any]:
         entry.update(
             chars=len(text),
             images=images,
+            n_long_vec=inv["n_long_vec"],
+            img_area_share=inv["img_area_share"],
             fonts=sorted(fonts)[:12],
             suspect_chars=suspect if detector == "ran" else None,
             suspect_fonts=suspect_fonts,
@@ -401,6 +513,11 @@ def _read_page(doc, number: int) -> Dict[str, Any]:
                 tail = "; and this page's objects could not be counted, so whether it carries an image is unknown"
             elif images:
                 tail = f"; it carries {images} image object(s), so it is a scan and needs an eye"
+            elif _has_drawing(entry):
+                tail = (
+                    f"; it carries {entry['n_long_vec']} long vector segment(s) and no "
+                    "image, so it is a drawing and needs an eye"
+                )
             else:
                 tail = "; and no image either — the page is genuinely blank"
             entry["note"] = "no text layer on this page" + tail
@@ -418,6 +535,7 @@ def _read_page(doc, number: int) -> Dict[str, Any]:
                 f"and are returned as extracted, unrepaired"
             )
 
+        entry["diagram"] = _is_diagram(entry)
         facsimile = _thin_facsimile_note(entry, "image object")
         if facsimile:
             entry["note"] = (
@@ -727,6 +845,9 @@ def _read_djvu_page(tools: Dict[str, str], source: Path, number: int) -> Dict[st
         entry.update(
             chars=len(text),
             images=images,
+            n_long_vec=None,
+            img_area_share=None,
+            diagram=None,
             fonts=[],
             suspect_chars=None,
             suspect_fonts=[],
@@ -1049,7 +1170,7 @@ async def read_document(
         JSON with per-page routes, character counts, image counts, the pages
         nothing could be read from (`unreadable_pages`, the union of
         `blank_pages`, `failed_pages`, `vision_failed_pages`, refused and unsent
-        scans), `not_sent_to_vision`, `math_check`, the pages whose mathematics
+        scans), `not_sent_to_vision`, `math_check`, `inventory_check`, `diagram_pages`, the pages whose mathematics
         is unreliable,
         and `thin_layer_pages` — pages that returned a header-sized text layer
         beside several images, which the text route reports rather than reroutes.
@@ -1156,14 +1277,21 @@ async def read_document(
         if mode == "vision":
             candidates = [p for p in per_page if p["route"] != "failed"]
         elif mode == "auto":
-            candidates = [p for p in per_page if p["route"] == "no_text_layer" and p.get("images")]
-            # Not sent, and said so on the page: a page whose inventory came back
-            # 0 or None is skipped by the routing rule above (that rule is gap 2's),
-            # and a driver can only force it through mode='vision' if it can find it.
+            # A scan (an image) or a drawing (long vectors, 0014's threshold) with
+            # no text layer is a page nobody has read.
+            candidates = [
+                p for p in per_page
+                if p["route"] == "no_text_layer" and (p.get("images") or _has_drawing(p))
+            ]
+            # Not sent, and said so on the page, so a driver can find it and force
+            # it through mode='vision'. On a PDF a vector count that could not be
+            # taken is as unknown as an image count that could not be taken.
             for p in per_page:
-                if p["route"] == "no_text_layer" and not p.get("images"):
-                    if p.get("images") is None:
+                if p["route"] == "no_text_layer" and not (p.get("images") or _has_drawing(p)):
+                    if p.get("images") is None or (fmt == "pdf" and p.get("n_long_vec") is None):
                         p["reason"] = "inventory_unavailable"
+                    elif p.get("n_long_vec"):
+                        p["reason"] = "vectors_below_threshold"
                     else:
                         p["reason"] = "no_images_detected"
                     not_sent.append(p["page"])
@@ -1202,7 +1330,8 @@ async def read_document(
         # Genuinely empty by the page's own inventory: no text, and zero images.
         blank_pages = [
             p["page"] for p in per_page
-            if p["route"] == "no_text_layer" and p.get("images") == 0
+            if p["route"] == "no_text_layer" and p.get("images") == 0 and not p.get("n_long_vec")
+            and (fmt == "djvu" or p.get("n_long_vec") == 0)
         ]
         failed_pages = [
             {"page": p["page"], "error": p.get("error")} for p in per_page if p["route"] == "failed"
@@ -1223,6 +1352,24 @@ async def read_document(
             for p in per_page
             if p.get("images") and p["route"] == "text"
         ]
+        # 0014's diagram signal on pages that kept their text layer, from the same
+        # inventory. Only meaningful where `inventory_check` is "ran".
+        diagram_pages = [
+            {
+                "page": p["page"],
+                "images": p["images"],
+                "n_long_vec": p["n_long_vec"],
+                "img_area_share": p["img_area_share"],
+            }
+            for p in per_page
+            if p.get("diagram") and p["route"] == "text"
+        ]
+        if fmt == "djvu":
+            inventory_check = "not_runnable:djvu"
+        elif any(p.get("n_long_vec") is not None for p in per_page):
+            inventory_check = "ran"
+        else:
+            inventory_check = "not_runnable:inventory_unavailable"
         # A field rather than a sentence, so a pipeline routes on it without
         # reading prose. Computed after the vision pass: a page the model has since
         # read is no longer a layer standing in for a page.
@@ -1301,6 +1448,8 @@ async def read_document(
             "vision_failed_pages": vision_failed_pages,
             "not_sent_to_vision": not_sent,
             "math_check": math_check,
+            "inventory_check": inventory_check,
+            "diagram_pages": diagram_pages,
             "pages_with_unreliable_math": wants_eye,
             "figures_not_seen": figures_unseen,
             "thin_layer_pages": thin_layer,
@@ -1375,7 +1524,9 @@ def get_tools() -> List[ToolEntry]:
                     "file and only the metadata comes back. DjVu needs DjVuLibre "
                     "installed (djvutxt/ddjvu/djvused) and carries no font "
                     "information, so the mathematics check does not run on one "
-                    "(`math_check` says whether it ran). Page routes: text, vision, "
+                    "(`math_check` says whether it ran). `inventory_check` says whether "
+                    "the vector and image-area counts ran (not on DjVu); `diagram_pages` "
+                    "lists text pages that carry drawings or figures. Page routes: text, vision, "
                     "no_text_layer, vision_failed, vision_refused, failed; "
                     "`unreadable_pages` is their union, split into `blank_pages`, "
                     "`failed_pages` and `vision_failed_pages`, and `not_sent_to_vision` "

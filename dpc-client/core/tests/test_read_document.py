@@ -96,6 +96,11 @@ class _Vision:
         return {"response": self.answer, "model": provider_alias or "test-vl"}
 
 
+def _inventory(images):
+    """What `_page_inventory` returns for a page carrying this many images."""
+    return {"fonts": set(), "images": images, "n_long_vec": 0, "img_area_share": 0.0}
+
+
 def _ctx_with_vision(ctx, vision, tmp_path):
     ctx.dpc_service = SimpleNamespace(llm_manager=vision)
     ctx.agent_root = tmp_path / "agent"
@@ -283,7 +288,7 @@ def test_a_letter_font_producing_a_letter_is_not():
 def test_an_uncountable_page_does_not_claim_there_is_no_figure(ctx, tiny, monkeypatch):
     """The same rule as the detector, one field over: nobody looked is not
     the same statement as nothing is there."""
-    monkeypatch.setattr(D, "_page_fonts_and_images", lambda page: (set(), None))
+    monkeypatch.setattr(D, "_page_inventory", lambda page: {"fonts": set(), "images": None, "n_long_vec": None, "img_area_share": None})
     page = _read(ctx, tiny, "2")["per_page"][0]
     assert page["images"] is None
     assert "unknown" in page["note"]
@@ -780,7 +785,7 @@ def test_a_header_only_layer_beside_images_is_named_a_facsimile(
     ten image objects came back as route=text with nothing said about the page
     underneath. The routing stays as it is — auto must not spend a shared GPU
     on a book being leafed through — so the answer has to say what it sees."""
-    monkeypatch.setattr(D, "_page_fonts_and_images", lambda page: (set(), 10))
+    monkeypatch.setattr(D, "_page_inventory", lambda page: _inventory(10))
     vision = _Vision()
     out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "1", mode="auto")
     page = out["per_page"][0]
@@ -804,8 +809,8 @@ def test_a_thin_page_with_no_images_is_not_called_a_facsimile(ctx, tiny):
 
 def test_two_images_is_below_the_count_a_facsimile_needs(ctx, tiny, monkeypatch):
     monkeypatch.setattr(
-        D, "_page_fonts_and_images",
-        lambda page: (set(), D.FACSIMILE_MIN_IMAGES - 1),
+        D, "_page_inventory",
+        lambda page: _inventory(D.FACSIMILE_MIN_IMAGES - 1),
     )
     out = _read(ctx, tiny, "1")
     assert out["thin_layer_pages"] == []
@@ -815,7 +820,7 @@ def test_two_images_is_below_the_count_a_facsimile_needs(ctx, tiny, monkeypatch)
 def test_a_page_nobody_could_count_is_not_called_a_facsimile(ctx, tiny, monkeypatch):
     """The same rule the image count already holds: nobody looked is not a
     statement about what is there."""
-    monkeypatch.setattr(D, "_page_fonts_and_images", lambda page: (set(), None))
+    monkeypatch.setattr(D, "_page_inventory", lambda page: {"fonts": set(), "images": None, "n_long_vec": None, "img_area_share": None})
     out = _read(ctx, tiny, "1")
     assert out["per_page"][0]["images"] is None
     assert out["thin_layer_pages"] == []
@@ -824,7 +829,7 @@ def test_a_page_nobody_could_count_is_not_called_a_facsimile(ctx, tiny, monkeypa
 def test_a_full_page_of_text_beside_images_is_not_a_facsimile(monkeypatch):
     """The false-positive side: a real page of prose with figures on it is the
     ordinary case, and it already has `figures_not_seen` to report the figures."""
-    monkeypatch.setattr(D, "_page_fonts_and_images", lambda page: (set(), 10))
+    monkeypatch.setattr(D, "_page_inventory", lambda page: _inventory(10))
     monkeypatch.setattr(D, "_char_fonts", lambda textpage: None)
     body = "полный текст страницы " * 40
 
@@ -965,7 +970,7 @@ def test_a_page_the_auto_route_skipped_says_why(ctx, tiny, tmp_path):
 
 
 def test_a_page_with_an_unreadable_inventory_says_why_it_was_skipped(ctx, tiny, tmp_path, monkeypatch):
-    monkeypatch.setattr(D, "_page_fonts_and_images", lambda page: (set(), None))
+    monkeypatch.setattr(D, "_page_inventory", lambda page: {"fonts": set(), "images": None, "n_long_vec": None, "img_area_share": None})
     out = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), tiny, "2", mode="auto")
     assert out["per_page"][0]["reason"] == "inventory_unavailable"
     assert out["not_sent_to_vision"] == [2] and out["blank_pages"] == []
@@ -989,3 +994,107 @@ def test_unreliable_math_lists_only_pages_still_on_the_text_route(ctx, tiny, tmp
     read = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), tiny, "1", mode="vision")
     assert read["per_page"][0]["route"] == "vision"
     assert read["pages_with_unreliable_math"] == [], "a transcription is not a flagged layer"
+
+
+# ------------------------------------------- the diagram signal (gap 2, decision 0014)
+
+def _pdf(*pages):
+    """A PDF whose pages are the given content streams, on a 400 x 400 MediaBox."""
+    objs = ["<< /Type /Catalog /Pages 2 0 R >>"]
+    kids = " ".join(f"{3 + 2 * i} 0 R" for i in range(len(pages)))
+    objs.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>")
+    for i, body in enumerate(pages):
+        n = 3 + 2 * i
+        objs.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] /Contents {n + 1} 0 R "
+            f"/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>"
+        )
+        objs.append(f"<< /Length {len(body)} >>\nstream\n{body}\nendstream")
+    out = "%PDF-1.4\n" + "".join(f"{i + 1} 0 obj {o} endobj\n" for i, o in enumerate(objs))
+    return (out + f"trailer << /Root 1 0 R /Size {len(objs) + 1} >>\n%%EOF").encode("latin-1")
+
+
+def _lines(n, length=100):
+    return " ".join(f"10 {10 + 20 * i} m {10 + length} {10 + 20 * i} l S" for i in range(n))
+
+
+TEXT = "BT /F1 12 Tf 20 380 Td (Hello) Tj ET"
+IMAGE = "q 300 0 0 200 50 50 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x80 EI Q"
+
+
+@pytest.fixture
+def drawn(tmp_path):
+    p = tmp_path / "drawn.pdf"
+    p.write_bytes(_pdf(
+        _lines(5),                       # 1: a drawing, no text
+        _lines(3),                       # 2: a few long lines, below the threshold
+        _lines(12, length=10),           # 3: only short strokes, like overbars
+        TEXT + " " + _lines(5),          # 4: text and a drawing
+        "10 10 200 200 re S",            # 5: one rectangle
+        IMAGE,                           # 6: a scan
+        TEXT + " " + IMAGE,              # 7: text and a figure covering 25% of the page
+    ))
+    return p
+
+
+def test_the_inventory_counts_long_vectors_and_the_area_images_cover(ctx, drawn):
+    pages = _read(ctx, drawn, "1-7", mode="text")["per_page"]
+    assert [p["n_long_vec"] for p in pages] == [5, 3, 0, 5, 1, 0, 0]
+    assert pages[5]["images"] == 1 and pages[5]["img_area_share"] == pytest.approx(0.375)
+    assert pages[0]["img_area_share"] == 0.0
+
+
+def test_short_strokes_are_not_a_drawing(ctx, drawn):
+    """Overbars and fraction rules are what the 50 pt floor exists to ignore."""
+    page = _read(ctx, drawn, "3", mode="text")["per_page"][0]
+    assert page["n_long_vec"] == 0
+
+
+def test_a_page_with_only_a_drawing_is_sent_to_the_eye_in_auto(ctx, drawn, tmp_path):
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), drawn, "1", mode="auto")
+    assert out["per_page"][0]["route"] == "vision"
+    assert out["not_sent_to_vision"] == [] and len(vision.calls) == 1
+
+
+def test_a_few_long_lines_are_not_sent_and_are_not_called_blank(ctx, drawn, tmp_path):
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), drawn, "2", mode="auto")
+    assert vision.calls == []
+    assert out["per_page"][0]["reason"] == "vectors_below_threshold"
+    assert out["not_sent_to_vision"] == [2] and out["blank_pages"] == []
+
+
+def test_a_page_with_no_images_and_no_vectors_is_still_no_images_detected(ctx, drawn, tmp_path):
+    out = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), drawn, "3", mode="auto")
+    assert out["per_page"][0]["reason"] == "no_images_detected"
+    assert out["blank_pages"] == [3] and out["not_sent_to_vision"] == [3]
+
+
+def test_a_text_page_with_a_drawing_is_listed_and_keeps_its_text(ctx, drawn, tmp_path):
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), drawn, "4,7", mode="auto")
+    assert vision.calls == []
+    assert [p["route"] for p in out["per_page"]] == ["text", "text"]
+    assert out["per_page"][0]["diagram"] is True
+    assert out["diagram_pages"] == [
+        {"page": 4, "images": 0, "n_long_vec": 5, "img_area_share": 0.0},
+        {"page": 7, "images": 1, "n_long_vec": 0, "img_area_share": pytest.approx(0.375)},
+    ]
+    assert out["inventory_check"] == "ran"
+
+
+def test_a_rectangle_is_one_vector_not_four(ctx, drawn):
+    assert _read(ctx, drawn, "5", mode="text")["per_page"][0]["n_long_vec"] == 1
+
+
+def test_an_inventory_without_a_path_walk_says_it_could_not_run(ctx, drawn, tmp_path, monkeypatch):
+    def broken(obj):
+        raise RuntimeError("no segments on this build")
+
+    monkeypatch.setattr(D, "_long_segments", broken)
+    out = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), drawn, "1", mode="auto")
+    page = out["per_page"][0]
+    assert page["n_long_vec"] is None and page["diagram"] is None
+    assert page["reason"] == "inventory_unavailable" and out["blank_pages"] == []
+    assert out["inventory_check"] == "not_runnable:inventory_unavailable"
