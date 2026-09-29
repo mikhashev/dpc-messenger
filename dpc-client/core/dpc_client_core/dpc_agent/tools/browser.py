@@ -1832,6 +1832,76 @@ _CLICK_FACTS_JS = """
 })
 """
 
+# The harness ends `browser_click` at this many seconds and the answer is lost
+# with it: on 2026-09-30 five clicks in one session were reported as
+# TOOL_TIMEOUT at 45 s with no probe lines, because the click's own 30 s wait
+# plus a fact read and the probes below add up to more than 45 s on a page
+# whose main thread is not answering. The wait is therefore capped at what is
+# left after the worst case of everything that follows it, and the ToolEntry
+# reads the same constant so the two cannot drift apart.
+_CLICK_TOOL_TIMEOUT_SEC = 45
+_CLICK_TARGET_PROBE_MS = 2000
+_CLICK_SLOW_PAGE_RESERVE_MS = (
+    _CLICK_PROBE_TIMEOUT_MS          # the fact read before the click
+    + _CLICK_PROBE_TIMEOUT_MS        # evaluate probe
+    + _CLICK_PROBE_TIMEOUT_MS        # the fact read after it
+    + _CLICK_TARGET_PROBE_MS         # what sits on the target
+    + _CLICK_PROBE_TIMEOUT_MS        # js_click
+    + 2000                           # margin: thread hand-off, audit write
+)
+_CLICK_WAIT_CEILING_MS = _CLICK_TOOL_TIMEOUT_SEC * 1000 - _CLICK_SLOW_PAGE_RESERVE_MS
+
+# Painted window, responsive page, and Playwright's click still ran out its
+# wait while a JS click passed (2026-09-30, quiz page, raf 17-18). The
+# engine's own call log says why - "not stable", "<div> intercepts pointer
+# events" - and was thrown away with everything after the first line. This
+# reads three things from the page itself: what is on top of the element's
+# centre, whether the element moved between two samples, and whether it is
+# animating. `sample` is the gap between the samples in ms.
+_CLICK_TARGET_STATE_JS = """
+(el, sample) => new Promise(resolve => {
+  const r1 = el.getBoundingClientRect();
+  setTimeout(() => {
+    const r2 = el.getBoundingClientRect();
+    const cx = r2.left + r2.width / 2;
+    const cy = r2.top + r2.height / 2;
+    const inView = cx >= 0 && cy >= 0 && cx <= window.innerWidth
+      && cy <= window.innerHeight;
+    const label = (n) => {
+      let s = n.tagName.toLowerCase();
+      if (n.id) s += '#' + n.id;
+      const c = (typeof n.className === 'string' ? n.className : '').trim();
+      if (c) s += '.' + c.split(/\\s+/).slice(0, 2).join('.');
+      return s.slice(0, 80);
+    };
+    let hit = 'offscreen';
+    if (inView) {
+      const top = document.elementFromPoint(cx, cy);
+      if (!top) hit = 'nothing';
+      else if (top === el || el.contains(top)) hit = 'target';
+      else if (top.contains(el)) hit = 'ancestor ' + label(top);
+      else hit = 'other ' + label(top);
+    }
+    let animating = null;
+    try {
+      animating = el.getAnimations
+        ? el.getAnimations().filter(a => a.playState === 'running').length
+        : null;
+    } catch (e) { animating = null; }
+    const style = window.getComputedStyle(el);
+    resolve({
+      hit: hit,
+      moved: Math.round(Math.hypot(r2.left - r1.left, r2.top - r1.top)),
+      animating: animating,
+      pointer: style ? style.pointerEvents : '',
+      disabled: !!el.disabled,
+      w: Math.round(r2.width), h: Math.round(r2.height),
+    });
+  }, sample);
+})
+"""
+_CLICK_TARGET_SAMPLE_MS = 100
+
 _CLICK_DELIVERY_MOUSE = "mouse"
 _CLICK_DELIVERY_EVENT = "dom_event"
 
@@ -1849,6 +1919,32 @@ def _window_is_starved(facts: dict) -> bool:
     reading that never arrived decides nothing: the ordinary click stands."""
     raf = (facts or {}).get("raf")
     return isinstance(raf, (int, float)) and raf < _RAF_STARVED_BELOW
+
+
+def _call_log_tail(exc: BaseException, keep: int = 6, width: int = 160) -> str:
+    """What Playwright wrote under the first line of its error: the
+    actionability steps it took and, when it was refused, who intercepted the
+    pointer. The first line only says that time ran out; this says what it
+    ran out waiting for. Bounded, one line."""
+    lines = [ln.strip() for ln in str(exc).split("\n")[1:] if ln.strip()]
+    lines = [ln for ln in lines if ln.lower() != "call log:"]
+    return " | ".join(_one_line(ln, width) for ln in lines[-keep:])
+
+
+def _target_state_line(state: Optional[dict]) -> str:
+    """The `target:` probe line: what covers the element, whether it moved,
+    whether it animates."""
+    if not isinstance(state, dict):
+        return "target: failed(no answer)"
+    animating = state.get("animating")
+    return (
+        f"target: hit={state.get('hit')}, moved={state.get('moved')}px in "
+        f"{_CLICK_TARGET_SAMPLE_MS}ms, "
+        f"animations={'?' if animating is None else animating}, "
+        f"pointer-events={state.get('pointer') or '?'}, "
+        f"disabled={'yes' if state.get('disabled') else 'no'}, "
+        f"size={state.get('w')}x{state.get('h')}"
+    )
 
 
 def _is_timeout(exc: BaseException) -> bool:
@@ -3169,6 +3265,14 @@ class AuthBrowser:
         locator = None
         facts: dict = {}
         starved = False
+        # A click that asks the probes afterwards must leave room for them
+        # inside the tool's own limit; download() has its own budget.
+        wait_ms = timeout
+        if probe_on_timeout:
+            wait_ms = (
+                _CLICK_WAIT_CEILING_MS if timeout <= 0
+                else min(timeout, _CLICK_WAIT_CEILING_MS)
+            )
         try:
             locator = self._resolve_ref(ref_or_selector)
             facts = self._click_target_facts(locator)
@@ -3188,23 +3292,36 @@ class AuthBrowser:
                     self._agent_id, ref_or_selector, facts.get("raf"),
                     _RAF_SAMPLE_MS,
                 )
-                locator.dispatch_event("click", timeout=timeout)
+                locator.dispatch_event("click", timeout=wait_ms)
                 delivery = _CLICK_DELIVERY_EVENT
             else:
-                locator.click(timeout=timeout)
+                locator.click(timeout=wait_ms)
                 delivery = _CLICK_DELIVERY_MOUSE
         except Exception as exc:
             probes = None
+            call_log = ""
             if locator is not None and probe_on_timeout and _is_timeout(exc):
                 probes, _file, _by = self._click_probes(locator)
+            if locator is not None and _is_timeout(exc):
+                call_log = _call_log_tail(exc)
+                log.warning(
+                    "click timed out (agent=%s, selector=%s, waited=%dms, "
+                    "asked=%dms, raf=%s): call_log=%s; probes=%s",
+                    self._agent_id, ref_or_selector, wait_ms, timeout,
+                    facts.get("raf"), call_log or "<none>",
+                    " / ".join(probes) if probes else "<none>",
+                )
             if locator is not None:
                 setattr(exc, _CLICK_DIAGNOSIS_ATTR, {
                     "probes": probes, "raf": facts.get("raf"), "starved": starved,
+                    "call_log": call_log,
+                    "waited_ms": wait_ms, "asked_ms": timeout,
                 })
             self._audit_action(
                 "click", url, "failed",
                 selector=ref_or_selector, mode=mode, probes=probes,
-                raf=facts.get("raf"), **_audit_error(exc),
+                raf=facts.get("raf"), call_log=call_log or None,
+                waited_ms=wait_ms, asked_ms=timeout, **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -3260,6 +3377,16 @@ class AuthBrowser:
                 + (" (starved — the window is not being painted)"
                    if _window_is_starved(facts) else "")
             )
+
+        # Before js_click, which may move the page: what covers the element,
+        # whether it moved, whether it animates. One line, its own bound.
+        try:
+            lines.append(_target_state_line(locator.evaluate(
+                _CLICK_TARGET_STATE_JS, _CLICK_TARGET_SAMPLE_MS,
+                timeout=_CLICK_TARGET_PROBE_MS,
+            )))
+        except Exception as exc:
+            lines.append(f"target: failed({type(exc).__name__})")
 
         outcome = None
         try:
@@ -5256,6 +5383,19 @@ async def browser_click(
             ]
             if diagnosis.get("starved"):
                 lines.append(_WINDOW_NOT_PAINTED)
+            asked = diagnosis.get("asked_ms")
+            waited = diagnosis.get("waited_ms")
+            if asked and waited and waited < asked:
+                lines.append(
+                    f"The wait was cut to {waited // 1000}s (asked "
+                    f"{asked // 1000}s) so that this answer arrives inside "
+                    f"the {_CLICK_TOOL_TIMEOUT_SEC}s tool limit."
+                )
+            if diagnosis.get("call_log"):
+                lines.append(
+                    "The browser engine's log of the wait: "
+                    f"{_one_line(diagnosis['call_log'], 700)}"
+                )
             lines.extend(_probe_answer_lines(diagnosis.get("probes")))
             return "\n".join(lines)
     if isinstance(outcome, dict) and outcome.get("delivery") == _CLICK_DELIVERY_EVENT:
@@ -5590,7 +5730,7 @@ def _probe_answer_lines(probes: Optional[List[str]]) -> List[str]:
     return [
         "The click never reached the page; js_click below is also an "
         "attempt, so a pass there may have acted on it:"
-    ] + [f"  {line}" for line in probes[:3]]
+    ] + [f"  {line}" for line in probes]
 
 
 def _download_answer(
@@ -6218,7 +6358,7 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             handler=browser_click,
-            timeout_sec=45,
+            timeout_sec=_CLICK_TOOL_TIMEOUT_SEC,
             default_enabled=False,
         ),
 

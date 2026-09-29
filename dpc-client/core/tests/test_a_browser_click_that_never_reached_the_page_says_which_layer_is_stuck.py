@@ -210,7 +210,7 @@ def _download(session, ctx, selector, **kwargs):
 def _probe_lines(answer: str) -> list[str]:
     return [
         line.strip() for line in answer.splitlines()
-        if line.strip().startswith(("evaluate:", "raf:", "js_click:"))
+        if line.strip().startswith(("evaluate:", "raf:", "target:", "js_click:"))
     ]
 
 
@@ -300,13 +300,15 @@ def test_a_click_the_mouse_never_delivers_reports_the_probes(
     assert answer.startswith("⚠️ Click failed")
     assert "TimeoutError" in answer
     lines = _probe_lines(answer)
-    assert len(lines) == 3, answer
+    assert len(lines) == 4, answer
     # The main thread answers, the window IS being painted, and a click
     # dispatched from JS gets through: the mouse alone was stuck.
     assert lines[0] == "evaluate: passed"
     assert lines[1].startswith("raf: ")
     assert "starved" not in lines[1]
-    assert lines[2] == "js_click: passed"
+    # What the mouse hit instead: the film over the page, named.
+    assert lines[2].startswith("target: hit=other div#cover"), lines[2]
+    assert lines[3] == "js_click: passed"
     # The rescue really pressed the button — the answer says it acts.
     assert _session._page.title() == "pressed"
     assert "also an attempt" in answer
@@ -316,10 +318,10 @@ def test_the_click_answer_stays_bounded_and_keeps_the_probes_on_own_lines(
     _session, _agent_root, _painted,
 ):
     answer = _click(_session, _ctx(_agent_root), "#plain")
-    # Playwright's own message carries a call log dozens of lines long.
-    assert len(answer.splitlines()) <= 6, answer
+    # Playwright's own message carries a call log dozens of lines long; the
+    # answer keeps its tail on one line and the probes on their own.
+    assert len(answer.splitlines()) <= 8, answer
     assert "Call log" not in answer
-    assert "performing click action" not in answer
 
 
 def test_the_probe_outcomes_reach_the_audit_row(
@@ -464,4 +466,62 @@ def test_a_stuck_click_with_no_download_still_reports_its_probes(
     lines = _probe_lines(answer)
     assert lines[0] == "evaluate: passed"
     assert lines[1].startswith("raf: ")
-    assert lines[2] == "js_click: passed"
+    assert lines[-1] == "js_click: passed"
+
+
+def test_the_engines_call_log_reaches_the_answer_and_names_the_interceptor(
+    _session, _agent_root, _audit, _painted,
+):
+    """The first line of Playwright's error says only that time ran out. The
+    lines under it say what it waited for - here, the film that intercepts
+    the pointer - and used to be thrown away."""
+    answer = _click(_session, _ctx(_agent_root), "#plain")
+    log_line = [
+        ln for ln in answer.splitlines() if ln.startswith("The browser engine's log")
+    ]
+    assert len(log_line) == 1, answer
+    assert "intercepts pointer events" in log_line[0]
+    row = [r for r in _audit if r.get("action") == "click"][-1]
+    assert "intercepts pointer events" in row["call_log"]
+
+
+def test_a_click_wait_is_capped_so_the_probes_fit_inside_the_tool_limit(
+    _session, _agent_root, _audit, _painted,
+):
+    """Five clicks in the 2026-09-30 session hit the 45 s harness limit and
+    lost their probe lines: the wait asked for 30 s and the probes need up to
+    twenty more."""
+    worst = browser_mod._CLICK_WAIT_CEILING_MS + browser_mod._CLICK_SLOW_PAGE_RESERVE_MS
+    assert worst == browser_mod._CLICK_TOOL_TIMEOUT_SEC * 1000
+    assert browser_mod._CLICK_WAIT_CEILING_MS < 30000
+    seen = {}
+    real = _session._page.locator
+
+    def spy(selector):
+        loc = real(selector)
+        orig = loc.click
+
+        def click(**kw):
+            seen["timeout"] = kw.get("timeout")
+            return orig(**kw)
+
+        loc.click = click
+        return loc
+
+    _session._page.locator = spy
+    answer = _click(_session, _ctx(_agent_root), "#plain", timeout=30000)
+    assert seen["timeout"] == browser_mod._CLICK_WAIT_CEILING_MS
+    assert "The wait was cut to" in answer
+    row = [r for r in _audit if r.get("action") == "click"][-1]
+    assert row["waited_ms"] == browser_mod._CLICK_WAIT_CEILING_MS
+    assert row["asked_ms"] == 30000
+
+
+def test_a_short_wait_is_left_alone(_session, _agent_root, _painted):
+    answer = _click(_session, _ctx(_agent_root), "#plain", timeout=1000)
+    assert "The wait was cut to" not in answer
+
+
+def test_the_tool_entry_and_the_ceiling_read_one_limit():
+    tools = {t.name: t for t in browser_mod.get_tools()}
+    assert tools["browser_click"].timeout_sec == browser_mod._CLICK_TOOL_TIMEOUT_SEC
