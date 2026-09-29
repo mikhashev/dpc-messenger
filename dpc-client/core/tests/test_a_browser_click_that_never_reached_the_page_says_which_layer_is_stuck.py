@@ -42,6 +42,8 @@ _COVERED = """<!doctype html>
 <style>#cover { position: fixed; inset: 0; z-index: 9; background: transparent; }</style>
 </head><body>
   <div id="cover"></div>
+  <input id="locked" type="text" disabled>
+  <input id="free" type="text">
   <button id="plain" type="button" onclick="document.title = 'pressed'">Press me</button>
   <form id="form" action="/landed.html" method="get">
     <button id="submit" type="submit">Send the form</button>
@@ -531,3 +533,56 @@ def test_a_short_wait_is_left_alone(_session, _agent_root, _painted):
 def test_the_tool_entry_and_the_ceiling_read_one_limit():
     tools = {t.name: t for t in browser_mod.get_tools()}
     assert tools["browser_click"].timeout_sec == browser_mod._CLICK_TOOL_TIMEOUT_SEC
+
+
+def _fill(session, ctx, selector, text="hello"):
+    a, b, c = _direct_session(session)
+    with a, b, c:
+        return _step_to_completion(browser_mod.browser_fill(ctx, selector, text))
+
+
+def test_a_fill_ceiling_and_its_identity_read_fit_inside_the_tool_limit():
+    """browser_fill kept its 30 s limit and took a lower ceiling: the identity
+    read (up to 3 s) and the wait must sum to no more than the limit."""
+    limit = browser_mod._FILL_TOOL_TIMEOUT_SEC * 1000
+    assert browser_mod._FILL_WAIT_CEILING_MS == 25000
+    assert (
+        browser_mod._FILL_WAIT_CEILING_MS + browser_mod._REF_IDENTITY_TIMEOUT_MS
+    ) < limit
+    assert (
+        browser_mod._FILL_WAIT_CEILING_MS + browser_mod._FILL_SLOW_PAGE_RESERVE_MS
+    ) == limit
+    tools = {t.name: t for t in browser_mod.get_tools()}
+    assert tools["browser_fill"].timeout_sec == browser_mod._FILL_TOOL_TIMEOUT_SEC
+    # wait_for takes the agent's timeout: its ceiling leaves the identity read
+    assert (
+        browser_mod._WAIT_FOR_CEILING_MS + browser_mod._REF_IDENTITY_TIMEOUT_MS
+    ) < browser_mod._WAIT_FOR_TOOL_TIMEOUT_SEC * 1000
+    assert (
+        tools["browser_wait_for"].timeout_sec
+        == browser_mod._WAIT_FOR_TOOL_TIMEOUT_SEC
+    )
+
+
+def test_a_fill_that_times_out_says_the_wait_was_cut_and_keeps_the_call_log(
+    _session, _agent_root, _audit, monkeypatch,
+):
+    """A disabled field is never editable, so Playwright waits for it until its
+    timeout - the answer must arrive, say so, and name what it waited for."""
+    monkeypatch.setattr(browser_mod, "_FILL_WAIT_CEILING_MS", 1000)
+    answer = _fill(_session, _ctx(_agent_root), "#locked")
+    assert "Fill failed" in answer, answer
+    assert "The wait was cut to 1s" in answer
+    log_line = [
+        ln for ln in answer.splitlines() if ln.startswith("The browser engine's log")
+    ]
+    assert len(log_line) == 1, answer
+    assert "enabled" in log_line[0].lower()
+    row = [r for r in _audit if r.get("action") == "fill"][-1]
+    assert row["waited_ms"] == 1000
+    assert row["call_log"]
+
+
+def test_a_fill_that_fits_the_wait_is_unchanged(_session, _agent_root):
+    answer = _fill(_session, _ctx(_agent_root), "#free", "abc")
+    assert answer == "Filled #free (3 chars)"

@@ -1858,6 +1858,27 @@ _CLICK_SLOW_PAGE_RESERVE_MS = (
 )
 _CLICK_WAIT_CEILING_MS = _CLICK_TOOL_TIMEOUT_SEC * 1000 - _CLICK_SLOW_PAGE_RESERVE_MS
 
+# browser_fill keeps its 30 s tool limit and takes a lower wait ceiling
+# instead of a longer limit: a field that is not actionable after 25 s is
+# stuck, and a longer limit only lengthens the stall of the agent loop.
+# Playwright's own default wait is 30 s, and the ref identity read (up to
+# 3 s) comes before it, so a slow fill used to reach the harness timeout with
+# no answer at all. Reserve = identity read + 2 s margin (thread hand-off,
+# audit write); there are no probes after a failed fill, so none is reserved.
+# ceiling = 30 - 5 = 25 s.
+_FILL_TOOL_TIMEOUT_SEC = 30
+_FILL_SLOW_PAGE_RESERVE_MS = _REF_IDENTITY_TIMEOUT_MS + 2000
+_FILL_WAIT_CEILING_MS = _FILL_TOOL_TIMEOUT_SEC * 1000 - _FILL_SLOW_PAGE_RESERVE_MS
+_FILL_DIAGNOSIS_ATTR = "_dpc_fill_diagnosis"
+
+# browser_wait_for takes its timeout from the agent, and 3 s of identity read
+# comes on top of it inside a 45 s limit: an ask above 40 s reached the
+# harness timeout with no answer. Same reserve as fill, its own limit.
+_WAIT_FOR_TOOL_TIMEOUT_SEC = 45
+_WAIT_FOR_CEILING_MS = (
+    _WAIT_FOR_TOOL_TIMEOUT_SEC * 1000 - _REF_IDENTITY_TIMEOUT_MS - 2000
+)
+
 # Painted window, responsive page, and Playwright's click still ran out its
 # wait while a JS click passed (2026-09-30, quiz page, raf 17-18). The
 # engine's own call log says why - "not stable", "<div> intercepts pointer
@@ -3693,20 +3714,43 @@ class AuthBrowser:
                 self._agent_id, type(exc).__name__, exc,
             )
 
-    def fill(self, ref_or_selector: str, text: str) -> None:
+    def fill(
+        self,
+        ref_or_selector: str,
+        text: str,
+        timeout: int = _FILL_WAIT_CEILING_MS,
+    ) -> None:
         """Fill an input element. Accepts a `@eN` ref or CSS selector.
-        Audit logs text_length, not the value."""
+        Audit logs text_length, not the value.
+
+        The wait is capped at `_FILL_WAIT_CEILING_MS` so that the identity
+        read plus the wait fit inside the tool's own limit; when it times out
+        the engine's call log rides on the exception."""
         self._require_open()
         url = self._page.url
         text_length = len(text)
         mode = "ref" if ref_or_selector.startswith("@e") else "css"
+        wait_ms = (
+            _FILL_WAIT_CEILING_MS if timeout <= 0
+            else min(timeout, _FILL_WAIT_CEILING_MS)
+        )
+        locator = None
         try:
-            self._resolve_ref(ref_or_selector).fill(text)
+            locator = self._resolve_ref(ref_or_selector)
+            locator.fill(text, timeout=wait_ms)
         except Exception as exc:
+            call_log = ""
+            if locator is not None and _is_timeout(exc):
+                call_log = _call_log_tail(exc)
+                setattr(exc, _FILL_DIAGNOSIS_ATTR, {
+                    "call_log": call_log,
+                    "waited_ms": wait_ms, "asked_ms": timeout,
+                })
             self._audit_action(
                 "fill", url, "failed",
                 selector=ref_or_selector, mode=mode,
-                text_length=text_length, **_audit_error(exc),
+                text_length=text_length, call_log=call_log or None,
+                waited_ms=wait_ms, **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -3900,6 +3944,10 @@ class AuthBrowser:
         self._require_open()
         url = self._page.url
         mode = "ref" if ref_or_selector.startswith("@e") else "css"
+        timeout = (
+            _WAIT_FOR_CEILING_MS if timeout <= 0
+            else min(timeout, _WAIT_FOR_CEILING_MS)
+        )
         try:
             self._resolve_ref(ref_or_selector).wait_for(
                 timeout=timeout, state="visible",
@@ -5434,7 +5482,24 @@ async def browser_fill(
                 "fill failed (agent=%s): %s: %s",
                 agent_id, type(e).__name__, str(e).split(chr(10))[0],
             )
-            return f"⚠️ Fill failed: {type(e).__name__}: {e}"
+            diagnosis = getattr(e, _FILL_DIAGNOSIS_ATTR, None) or {}
+            lines = [
+                f"⚠️ Fill failed: {type(e).__name__}: "
+                f"{_one_line(str(e).split(chr(10))[0])}"
+            ]
+            waited = diagnosis.get("waited_ms")
+            if waited:
+                lines.append(
+                    f"The wait was cut to {waited // 1000}s so that this "
+                    f"answer arrives inside the {_FILL_TOOL_TIMEOUT_SEC}s "
+                    f"tool limit."
+                )
+            if diagnosis.get("call_log"):
+                lines.append(
+                    "The browser engine's log of the wait: "
+                    f"{_one_line(diagnosis['call_log'], 700)}"
+                )
+            return chr(10).join(lines)
     return f"Filled {ref_or_selector} ({len(text)} chars)"
 
 
@@ -6386,7 +6451,7 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             handler=browser_fill,
-            timeout_sec=30,
+            timeout_sec=_FILL_TOOL_TIMEOUT_SEC,
             default_enabled=False,
         ),
 
@@ -6459,7 +6524,7 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             handler=browser_wait_for,
-            timeout_sec=45,
+            timeout_sec=_WAIT_FOR_TOOL_TIMEOUT_SEC,
             default_enabled=False,
         ),
 
