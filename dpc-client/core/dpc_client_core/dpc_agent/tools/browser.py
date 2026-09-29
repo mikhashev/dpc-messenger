@@ -1082,8 +1082,9 @@ _SECRET_FIELD_JS = """
 """
 
 
-_A11Y_DOM_SNAPSHOT_JS = """
-(serial) => {
+# The role rules of the snapshot walk, kept on their own so that a ref can be
+# checked against the very rules that named it (`_REF_IDENTITY_JS`).
+_A11Y_ROLE_JS = """
   const TAG_TO_ROLE = {
     'a': 'link', 'button': 'button',
     'input': 'textbox', 'textarea': 'textbox',
@@ -1111,7 +1112,18 @@ _A11Y_DOM_SNAPSHOT_JS = """
     }
     return TAG_TO_ROLE[tag] || '';
   }
-""" + _SECRET_FIELD_JS + """
+"""
+
+
+# What the element under a `data-dpc-el` mark is called right now: the role and
+# the name the snapshot recorded for its ref, read by the same code.
+_REF_IDENTITY_JS = "(el) => {\n" + _A11Y_ROLE_JS + _SECRET_FIELD_JS + """
+  return {role: getRole(el) || 'generic', name: getName(el)};
+}
+"""
+
+
+_A11Y_DOM_SNAPSHOT_JS = "(serial) => {\n" + _A11Y_ROLE_JS + _SECRET_FIELD_JS + """
   // Printing an input's value is opt-in, by type. The snapshot is assembled
   // into the agent's prompt and travels from there to a model provider, so a
   // type this list does not name — password, file, hidden, or whatever HTML
@@ -3990,6 +4002,37 @@ class AuthBrowser:
             result_dict["warning"] = f"{dupes_skipped} duplicates skipped, consider specifying unique attribute for dedup_by"
         return result_dict
 
+    def _check_ref_identity(self, ref: str, node: dict, locator) -> None:
+        """Refuse a ref whose element is no longer the one the snapshot named.
+
+        The mark survives a re-render that reuses the DOM node for other
+        content — React does this to a button whose siblings come and go —
+        so `count() > 0` says the node exists and nothing about it being the
+        node the agent read. Seen 2026-09-29 on a quiz page: a banner came
+        and went, `@e20` was "Skip" and then "Answer", and the click
+        pressed the second. Role and accessible name are compared as the
+        snapshot recorded them; a mismatch raises ValueError naming both.
+        A read that fails decides nothing, as with `count()`."""
+        try:
+            now = locator.first.evaluate(_REF_IDENTITY_JS, timeout=3000)
+        except Exception:
+            return
+        if not isinstance(now, dict):
+            return
+        was_role = node.get("role", "")
+        was_name = _one_line(str(node.get("name", "") or ""), 200)
+        now_role = now.get("role", "")
+        now_name = _one_line(str(now.get("name", "") or ""), 200)
+        if was_role == now_role and was_name == now_name:
+            return
+        raise ValueError(
+            f"ref {ref!r} no longer points at the element the snapshot "
+            f"showed: it was {was_role} \"{was_name}\", it is now "
+            f"{now_role} \"{now_name}\". The page re-rendered, so nothing was "
+            "done; call a11y_snapshot() (browser_snapshot) for fresh refs "
+            "and act on those"
+        )
+
     def _resolve_ref(self, ref_or_selector: str):
         """Map a `@eN` ref against the last snapshot to a Playwright
         locator; fall back to treating the string as a CSS selector.
@@ -4039,6 +4082,8 @@ class AuthBrowser:
                     f"ref {ref_or_selector!r} is stale — the page changed "
                     "since the snapshot; call a11y_snapshot() to refresh"
                 )
+            if present > 0:
+                self._check_ref_identity(ref_or_selector, node, locator)
             return locator
         return self._page.locator(ref_or_selector)
 

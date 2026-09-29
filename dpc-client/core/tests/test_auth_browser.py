@@ -2012,3 +2012,169 @@ def test_the_writeback_does_not_call_storage_state(vault_home):
 
     assert ctx.storage_state_calls == []
     assert ctx.cookies_calls == 1
+
+
+# ─────────────────────────────────────────────────────────────
+# A ref names the element the snapshot showed, not just a number
+# that still has an element behind it (2026-09-29, Johnny, a quiz page:
+# a banner came and went, @e20 was "Skip" and then "Answer").
+# ─────────────────────────────────────────────────────────────
+
+
+from types import SimpleNamespace
+
+
+class _ReRenderingPage:
+    """A page whose marked elements can change under their marks — what a
+    framework does when it reuses a DOM node for other content."""
+
+    url = "https://quiz.example/q7"
+
+    def __init__(self, dom):
+        self.dom = dom  # mark -> {"role": ..., "name": ...}
+        self.evaluated: list = []
+        self.acted: list = []
+
+    def title(self):
+        return "quiz"
+
+    def expect_download(self, **kw):
+        import contextlib
+
+        return contextlib.nullcontext(SimpleNamespace(value=None))
+
+    def locator(self, selector):
+        page = self
+        mark = selector.split('"')[1] if 'data-dpc-el="' in selector else None
+
+        class _Loc:
+            @property
+            def first(self_inner):
+                return self_inner
+
+            def count(self_inner):
+                return 1 if mark in page.dom else 0
+
+            def evaluate(self_inner, js, *args, **kwargs):
+                from dpc_client_core.dpc_agent.tools import browser as mod
+                assert js == mod._REF_IDENTITY_JS
+                page.evaluated.append(mark)
+                return dict(page.dom[mark])
+
+            def click(self_inner, **kw):
+                page.acted.append(("click", mark))
+
+            def fill(self_inner, text, **kw):
+                page.acted.append(("fill", mark))
+
+            def wait_for(self_inner, **kw):
+                page.acted.append(("wait_for", mark))
+
+            def dispatch_event(self_inner, *a, **kw):
+                page.acted.append(("click", mark))
+
+        return _Loc()
+
+
+def _quiz_browser(dom, refs):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[])
+    ab._page = _ReRenderingPage(dom)
+    ab._last_refs = refs
+    return ab
+
+
+_SKIP_REF = {"@e20": {"role": "button", "name": "Skip", "el": "4:20"}}
+
+
+def test_a_ref_whose_element_is_unchanged_proceeds(vault_home):
+    ab = _quiz_browser({"4:20": {"role": "button", "name": "Skip"}}, _SKIP_REF)
+    ab._resolve_ref("@e20")
+    assert ab._page.evaluated == ["4:20"]
+
+
+def test_a_ref_whose_element_became_another_button_is_refused(vault_home):
+    """Same mark, same number, different content: the count check passes and
+    the identity check is what stops the click."""
+    ab = _quiz_browser({"4:20": {"role": "button", "name": "Answer"}}, _SKIP_REF)
+    with pytest.raises(ValueError) as exc:
+        ab._resolve_ref("@e20")
+    text = str(exc.value)
+    assert 'button "Skip"' in text and 'button "Answer"' in text
+    assert "@e20" in text
+    assert "a11y_snapshot" in text
+
+
+def test_a_changed_role_alone_is_refused(vault_home):
+    ab = _quiz_browser({"4:20": {"role": "link", "name": "Skip"}}, _SKIP_REF)
+    with pytest.raises(ValueError):
+        ab._resolve_ref("@e20")
+
+
+def test_whitespace_in_a_name_is_not_a_change(vault_home):
+    ab = _quiz_browser(
+        {"4:20": {"role": "button", "name": "Skip  \n"}}, _SKIP_REF,
+    )
+    ab._resolve_ref("@e20")
+
+
+def test_an_identity_read_that_fails_decides_nothing(vault_home):
+    ab = _quiz_browser({"4:20": {"role": "button", "name": "Answer"}}, _SKIP_REF)
+    page = ab._page
+    real = page.locator
+
+    def locator(selector):
+        loc = real(selector)
+        loc.evaluate = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("gone"))
+        return loc
+
+    page.locator = locator
+    ab._resolve_ref("@e20")
+
+
+def test_a_css_selector_is_not_identity_checked(vault_home):
+    ab = _quiz_browser({}, {})
+    ab._resolve_ref("button.primary")
+    assert ab._page.evaluated == []
+
+
+@pytest.mark.parametrize("action", ["click", "fill", "select", "wait_for", "download"])
+def test_every_action_that_takes_a_ref_refuses_a_shifted_one(vault_home, action, tmp_path):
+    ab = _quiz_browser({"4:20": {"role": "button", "name": "Answer"}}, _SKIP_REF)
+    calls = {
+        "click": lambda: ab.click("@e20"),
+        "fill": lambda: ab.fill("@e20", "x"),
+        "select": lambda: ab.select("@e20", "value", "a"),
+        "wait_for": lambda: ab.wait_for("@e20"),
+        "download": lambda: ab.download("@e20", str(tmp_path)),
+    }
+    with pytest.raises(ValueError, match="no longer points at"):
+        calls[action]()
+    assert ab._page.acted == []
+
+
+def test_the_tool_answers_a_shifted_ref_with_a_warning_and_clicks_nothing(vault_home):
+    from types import SimpleNamespace
+
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    ab = _quiz_browser({"4:20": {"role": "button", "name": "Answer"}}, _SKIP_REF)
+    ctx = SimpleNamespace(agent_root=SimpleNamespace(name="agent_quiz"))
+    mod._active_browser_sessions["agent_quiz"] = ab
+    try:
+        out = asyncio.run(mod.browser_click(ctx, "@e20"))
+    finally:
+        mod._active_browser_sessions.pop("agent_quiz", None)
+    assert out.startswith("⚠️")
+    assert "Skip" in out and "Answer" in out
+    assert ab._page.acted == []
+
+
+def test_the_identity_read_uses_the_snapshots_own_role_and_name_rules():
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    assert mod._A11Y_ROLE_JS in mod._REF_IDENTITY_JS
+    assert mod._A11Y_ROLE_JS in mod._A11Y_DOM_SNAPSHOT_JS
+    assert mod._SECRET_FIELD_JS in mod._REF_IDENTITY_JS
+    assert "getRole(el)" in mod._REF_IDENTITY_JS and "getName(el)" in mod._REF_IDENTITY_JS
