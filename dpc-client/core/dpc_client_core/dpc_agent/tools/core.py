@@ -127,6 +127,71 @@ def _resolve_file_path(ctx: ToolContext, path: str, require_write: bool = False)
     return ctx.repo_path(path)
 
 
+# What read_file refuses: binary documents, containers and images come back as
+# UTF-8-with-replacement garbage (measured 2026-09-29: .docx/.epub 37-44% U+FFFD, no
+# Cyrillic word surviving). .fb2 and .rtf are text on disk but belong to the document
+# route (read_document), so they are refused by suffix only.
+_PDF_KIND = "a PDF/DjVu document"
+_OFFICE_KIND = "an office/ebook document"
+_IMAGE_KIND = "an image"
+_ARCHIVE_KIND = "an archive"
+
+UNREADABLE_SUFFIXES: Dict[str, str] = {
+    **{s: _PDF_KIND for s in (".pdf", ".djvu", ".djv")},
+    **{s: _OFFICE_KIND for s in (
+        ".epub", ".fb2", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
+        ".odt", ".ods", ".odp", ".rtf")},
+    **{s: _IMAGE_KIND for s in (
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff")},
+    **{s: _ARCHIVE_KIND for s in (".zip", ".7z", ".rar", ".gz")},
+}
+
+# Leading bytes; the check reads 16 bytes, so a renamed file is caught too.
+_SIGNATURES: tuple = (
+    (b"%PDF", _PDF_KIND),
+    (b"AT&TFORM", _PDF_KIND),
+    (b"PK\x03\x04", _OFFICE_KIND),  # docx/pptx/xlsx/epub/odt; a plain zip lands here too
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", _OFFICE_KIND),  # OLE: doc/xls/ppt
+    (b"\x89PNG", _IMAGE_KIND),
+    (b"\xff\xd8\xff", _IMAGE_KIND),
+    (b"GIF8", _IMAGE_KIND),
+    (b"7z\xbc\xaf\x27\x1c", _ARCHIVE_KIND),
+    (b"Rar!", _ARCHIVE_KIND),
+    (b"\x1f\x8b", _ARCHIVE_KIND),
+)
+
+
+def _unreadable_kind(file_path: Path) -> Optional[str]:
+    """Kind of binary this file is, by suffix then by its first 16 bytes; None for text."""
+    kind = UNREADABLE_SUFFIXES.get(file_path.suffix.lower())
+    if kind:
+        return kind
+    with open(file_path, "rb") as fh:
+        head = fh.read(16)
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return _IMAGE_KIND
+    for magic, found in _SIGNATURES:
+        if head.startswith(magic):
+            return found
+    return None
+
+
+def _refuse_unreadable(file_path: Path, path: str) -> Optional[str]:
+    """The refusal text for a binary file, or None. Starts with the warning prefix the
+    agent loop reads as an error (loop.py)."""
+    kind = _unreadable_kind(file_path)
+    if kind is None:
+        return None
+    head = f"⚠️ '{path}' is {kind}; read_file reads text files only."
+    if kind == _PDF_KIND:
+        return f"{head} Use read_document."
+    if kind == _IMAGE_KIND:
+        return f"{head} Use describe_image."
+    if kind == _ARCHIVE_KIND:
+        return f"{head} Archives are not read."
+    return f"{head} read_document does not support this format yet (PDF and DjVu only)."
+
+
 def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
     """
     Read a file. Relative paths resolve to sandbox, absolute paths
@@ -149,6 +214,10 @@ def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int
 
         if not file_path.is_file():
             return f"⚠️ Not a file: {path}"
+
+        refusal = _refuse_unreadable(file_path, path)
+        if refusal:
+            return refusal
 
         content = file_path.read_text(encoding="utf-8", errors="replace")
         _record_knowledge_read(ctx, file_path)
@@ -1643,6 +1712,10 @@ def extended_path_read(ctx: ToolContext, path: str, offset: int | None = None, l
         if not file_path.is_file():
             return f"⚠️ Not a file: {path}"
 
+        refusal = _refuse_unreadable(file_path, path)
+        if refusal:
+            return refusal
+
         content = file_path.read_text(encoding="utf-8", errors="replace")
         return _paginate_content(content, path, offset, limit, fallback_truncate=100000)
 
@@ -2016,7 +2089,7 @@ def get_tools() -> List[ToolEntry]:
             name="read_file",
             schema={
                 "name": "read_file",
-                "description": "Read a file. Relative paths read from sandbox, absolute paths are checked against firewall (sandbox_extensions). Supports line-based pagination via offset/limit for large files.",
+                "description": "Read a text file (source, markdown, json, csv, logs, config). Relative paths read from sandbox, absolute paths are checked against firewall (sandbox_extensions). Supports line-based pagination via offset/limit for large files. Documents and images are refused with a pointer: PDF/DjVu use read_document, images use describe_image; office/ebook formats and archives are not read.",
                 "parameters": {
                     "type": "object",
                     "properties": {
