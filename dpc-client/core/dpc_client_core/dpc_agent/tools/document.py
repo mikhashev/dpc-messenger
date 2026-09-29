@@ -879,6 +879,28 @@ def _render_page(
         )
 
 
+def _vision_failed(
+    entry: Dict[str, Any], had_layer: bool, reason: str, error: str, note: str
+) -> None:
+    """Mark a page the model was asked to read and did not.
+
+    A page that had no text layer is now `route="vision_failed"`: left as
+    `no_text_layer` it read exactly like a blank page, and a driver routing on
+    the page record alone could not tell "nothing there" from "the eye failed".
+    A page that *did* have a layer (mode='vision' on a text page) keeps
+    `route="text"` -- its own characters are still in `text` and still good --
+    and carries the failure as `vision_error` / `vision_reason` instead.
+    """
+    entry["note"] = note
+    if had_layer:
+        entry["vision_error"] = error
+        entry["vision_reason"] = reason
+    else:
+        entry["route"] = "vision_failed"
+        entry["reason"] = reason
+        entry["error"] = error
+
+
 async def _read_page_with_vision(
     ctx: ToolContext,
     render: Callable[[int, int], Tuple[Optional[bytes], Optional[str], Optional[str]]],
@@ -919,12 +941,15 @@ async def _read_page_with_vision(
 
     llm = getattr(getattr(ctx, "dpc_service", None), "llm_manager", None)
     if llm is None:
-        entry["note"] = f"page {number} needs an eye and no model is reachable from here"
+        msg = f"page {number} needs an eye and no model is reachable from here"
+        _vision_failed(entry, had_layer, "no_model_reachable", msg, msg)
         return
 
     image, mime, problem = render(number, dpi)
     if image is None:
-        entry["note"] = problem
+        _vision_failed(
+            entry, had_layer, "render_failed", problem or "the page could not be rendered", problem
+        )
         return
 
     started = time.perf_counter()
@@ -945,7 +970,8 @@ async def _read_page_with_vision(
             temperature=VISION_TEMPERATURE,
         )
     except Exception as exc:
-        entry["note"] = f"page {number}: the vision model failed — {type(exc).__name__}: {exc}"
+        msg = f"page {number}: the vision model failed — {type(exc).__name__}: {exc}"
+        _vision_failed(entry, had_layer, "model_raised", f"{type(exc).__name__}: {exc}", msg)
         entry["seconds"] = round(time.perf_counter() - started, 1)
         return
     seconds = round(time.perf_counter() - started, 1)
@@ -957,10 +983,11 @@ async def _read_page_with_vision(
         # empty answer is what it is: the page was not read, and saying so is the
         # whole point of the exercise.
         entry.update(seconds=seconds, model=used)
-        entry["note"] = (
+        msg = (
             f"page {number}: the vision model returned nothing after {seconds} s — "
             f"the page is unread, not empty"
         )
+        _vision_failed(entry, had_layer, "model_returned_empty", msg, msg)
         return
 
     if had_layer:
@@ -1020,7 +1047,10 @@ async def read_document(
 
     Returns:
         JSON with per-page routes, character counts, image counts, the pages
-        nothing could be read from, the pages whose mathematics is unreliable,
+        nothing could be read from (`unreadable_pages`, the union of
+        `blank_pages`, `failed_pages`, `vision_failed_pages`, refused and unsent
+        scans), `not_sent_to_vision`, `math_check`, the pages whose mathematics
+        is unreliable,
         and `thin_layer_pages` — pages that returned a header-sized text layer
         beside several images, which the text route reports rather than reroutes.
     """
@@ -1101,6 +1131,13 @@ async def read_document(
             notes = notes or ["no readable page numbers in the range"]
 
         per_page = [read_one(n) for n in wanted]
+        if fmt == "djvu":
+            # Structural, not a prose accident: a DjVu text layer has no fonts, so
+            # `pages_with_unreliable_math` is empty whatever the pages hold.
+            math_check = "not_runnable:djvu"
+        else:
+            # Settled below from what each page's detector reported.
+            math_check = "ran"
         if fmt == "djvu" and any(p["route"] == "text" for p in per_page):
             notes.append(
                 "a DjVu text layer carries no font information, so the "
@@ -1115,16 +1152,32 @@ async def read_document(
         if mode not in ("auto", "text", "vision"):
             notes.append(f"mode '{mode}' is not one of auto/text/vision; read as text only")
             mode = "text"
+        not_sent: List[int] = []
         if mode == "vision":
             candidates = [p for p in per_page if p["route"] != "failed"]
         elif mode == "auto":
             candidates = [p for p in per_page if p["route"] == "no_text_layer" and p.get("images")]
+            # Not sent, and said so on the page: a page whose inventory came back
+            # 0 or None is skipped by the routing rule above (that rule is gap 2's),
+            # and a driver can only force it through mode='vision' if it can find it.
+            for p in per_page:
+                if p["route"] == "no_text_layer" and not p.get("images"):
+                    if p.get("images") is None:
+                        p["reason"] = "inventory_unavailable"
+                    else:
+                        p["reason"] = "no_images_detected"
+                    not_sent.append(p["page"])
         else:
             candidates = []
 
         refused_pages: List[int] = []
         if len(candidates) > max(0, max_vision_pages):
             refused_pages = [p["page"] for p in candidates]
+            for p in candidates:
+                # A page that has a layer keeps its route: its text is still good.
+                if p["route"] == "no_text_layer":
+                    p["route"] = "vision_refused"
+                p["reason"] = "over_max_vision_pages"
             notes.append(
                 f"{len(candidates)} pages were put to the vision model and this call allows "
                 f"{max_vision_pages}: pages {refused_pages} were not looked at. That would "
@@ -1139,8 +1192,32 @@ async def read_document(
                     requested=(mode == "vision"),
                 )
 
-        unreadable = [p["page"] for p in per_page if p["route"] in ("no_text_layer", "failed")]
-        wants_eye = [p["page"] for p in per_page if p.get("suspect_chars")]
+        # `unreadable_pages` is the UNION of every way a page ended with no text
+        # of its own: blank, failed, vision_failed, vision_refused, or a scan that
+        # was not sent. The split lists below say which; route on those.
+        unreadable = [
+            p["page"] for p in per_page
+            if p["route"] in ("no_text_layer", "failed", "vision_failed", "vision_refused")
+        ]
+        # Genuinely empty by the page's own inventory: no text, and zero images.
+        blank_pages = [
+            p["page"] for p in per_page
+            if p["route"] == "no_text_layer" and p.get("images") == 0
+        ]
+        failed_pages = [
+            {"page": p["page"], "error": p.get("error")} for p in per_page if p["route"] == "failed"
+        ]
+        vision_failed_pages = [
+            {"page": p["page"], "reason": p.get("reason"), "error": p.get("error")}
+            for p in per_page if p["route"] == "vision_failed"
+        ]
+        # Only pages still on the text route: a page the model has since read is
+        # a transcription, and its suspect_chars describe a layer nobody used.
+        wants_eye = [
+            p["page"] for p in per_page if p.get("suspect_chars") and p["route"] == "text"
+        ]
+        if fmt == "pdf" and not any(p.get("detector") == "ran" for p in per_page):
+            math_check = "not_runnable:no_font_attribution"
         figures_unseen = [
             {"page": p["page"], "images": p["images"]}
             for p in per_page
@@ -1218,7 +1295,12 @@ async def read_document(
             "per_page": kept,
             "pages_omitted_for_size": omitted,
             "saved_to": saved_to,
-            "unreadable_pages": unreadable,
+            "unreadable_pages": unreadable,  # the union of the split lists below
+            "blank_pages": blank_pages,
+            "failed_pages": failed_pages,
+            "vision_failed_pages": vision_failed_pages,
+            "not_sent_to_vision": not_sent,
+            "math_check": math_check,
             "pages_with_unreliable_math": wants_eye,
             "figures_not_seen": figures_unseen,
             "thin_layer_pages": thin_layer,
@@ -1292,7 +1374,12 @@ def get_tools() -> List[ToolEntry]:
                     "into a conversation, pass save_to: the pages are written to that "
                     "file and only the metadata comes back. DjVu needs DjVuLibre "
                     "installed (djvutxt/ddjvu/djvused) and carries no font "
-                    "information, so the mathematics check does not run on one. Local "
+                    "information, so the mathematics check does not run on one "
+                    "(`math_check` says whether it ran). Page routes: text, vision, "
+                    "no_text_layer, vision_failed, vision_refused, failed; "
+                    "`unreadable_pages` is their union, split into `blank_pages`, "
+                    "`failed_pages` and `vision_failed_pages`, and `not_sent_to_vision` "
+                    "lists pages the auto route skipped. Local "
                     "only: no network."
                 ),
                 "parameters": {

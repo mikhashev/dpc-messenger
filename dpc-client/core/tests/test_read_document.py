@@ -238,7 +238,9 @@ def test_a_figure_on_a_readable_page_is_still_reported(ctx):
 def test_a_scan_is_reported_as_a_scan(ctx):
     out = _read(ctx, SCANNED, "2")
     page = out["per_page"][0]
-    assert page["route"] == "no_text_layer"
+    # No model in this ctx, so the scan reaches the eye and finds none: that is
+    # `vision_failed`, no longer indistinguishable from a blank page.
+    assert page["route"] == "vision_failed" and page["reason"] == "no_model_reachable"
     assert page["images"] >= 1
     assert "needs an eye" in page["note"]
     assert out["unreadable_pages"] == [2]
@@ -876,3 +878,114 @@ def test_a_page_that_really_had_no_layer_still_says_so(ctx, tiny, tmp_path):
     note = out["per_page"][0]["note"]
     assert "has no text layer and was transcribed by a vision model" in note
     assert "a transcription, not the document's own characters" in note
+
+
+# ------------------------------------------- routable fields (N1, N2, N3, N5, gaps 3-4)
+
+def test_a_failed_vision_read_is_not_a_blank_page_no_model(ctx, tiny):
+    out = _read(ctx, tiny, "2", mode="vision")
+    page = out["per_page"][0]
+    assert page["route"] == "vision_failed"
+    assert page["reason"] == "no_model_reachable" and page["error"]
+    assert out["vision_failed_pages"] == [
+        {"page": 2, "reason": "no_model_reachable", "error": page["error"]}
+    ]
+    assert out["blank_pages"] == [] and out["failed_pages"] == []
+    assert 2 in out["unreadable_pages"], "the union keeps the page"
+
+
+def test_a_failed_vision_read_is_not_a_blank_page_render(ctx, tiny, tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "_render_page", lambda doc, n, dpi: (None, None, "render blew up"))
+    out = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), tiny, "2", mode="vision")
+    page = out["per_page"][0]
+    assert page["route"] == "vision_failed" and page["reason"] == "render_failed"
+    assert page["note"] == "render blew up"
+    assert [e["page"] for e in out["vision_failed_pages"]] == [2]
+
+
+def test_a_failed_vision_read_is_not_a_blank_page_raised(ctx, tiny, tmp_path):
+    out = _read(_ctx_with_vision(ctx, _Vision(fail=True), tmp_path), tiny, "2", mode="vision")
+    page = out["per_page"][0]
+    assert page["route"] == "vision_failed" and page["reason"] == "model_raised"
+    assert "model is on fire" in page["error"]
+
+
+def test_a_failed_vision_read_is_not_a_blank_page_empty(ctx, tiny, tmp_path):
+    out = _read(_ctx_with_vision(ctx, _Vision(answer="  "), tmp_path), tiny, "2", mode="vision")
+    page = out["per_page"][0]
+    assert page["route"] == "vision_failed" and page["reason"] == "model_returned_empty"
+    assert "unread, not empty" in page["note"]
+    assert out["blank_pages"] == []
+
+
+def test_a_text_page_whose_vision_read_failed_keeps_its_text_route(ctx, tiny, tmp_path):
+    out = _read(_ctx_with_vision(ctx, _Vision(fail=True), tmp_path), tiny, "1", mode="vision")
+    page = out["per_page"][0]
+    assert page["route"] == "text" and "Hello document" in page["text"]
+    assert page["vision_reason"] == "model_raised" and "model is on fire" in page["vision_error"]
+    assert out["vision_failed_pages"] == [] and out["unreadable_pages"] == []
+
+
+def test_unreadable_pages_is_the_union_of_the_split_lists(ctx, tiny, monkeypatch):
+    out = _read(ctx, tiny, "2", mode="text")
+    assert out["blank_pages"] == [2]
+    assert out["failed_pages"] == [] and out["vision_failed_pages"] == []
+    assert out["unreadable_pages"] == [2]
+
+
+def test_a_page_that_raised_is_a_failed_page_with_its_error(ctx, tiny, monkeypatch):
+    def boom(textpage):
+        raise ValueError("bad textpage")
+
+    monkeypatch.setattr(D, "_char_fonts", boom)
+    out = _read(ctx, tiny, "1")
+    assert out["per_page"][0]["route"] == "failed"
+    assert out["failed_pages"] == [{"page": 1, "error": "ValueError: bad textpage"}]
+    assert out["blank_pages"] == [] and out["unreadable_pages"] == [1]
+
+
+def test_pages_over_the_cap_say_so_on_the_page_record(ctx, tiny, tmp_path):
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "1-2", mode="vision",
+                max_vision_pages=1)
+    first, second = out["per_page"]
+    # The page with a layer keeps its text route; the blank one becomes refused.
+    assert first["route"] == "text" and first["reason"] == "over_max_vision_pages"
+    assert second["route"] == "vision_refused" and second["reason"] == "over_max_vision_pages"
+    assert out["vision_pages_refused"] == [1, 2]
+    assert 2 in out["unreadable_pages"] and 1 not in out["unreadable_pages"]
+
+
+def test_a_page_the_auto_route_skipped_says_why(ctx, tiny, tmp_path):
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "2", mode="auto")
+    assert vision.calls == []
+    assert out["per_page"][0]["reason"] == "no_images_detected"
+    assert out["not_sent_to_vision"] == [2]
+
+
+def test_a_page_with_an_unreadable_inventory_says_why_it_was_skipped(ctx, tiny, tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "_page_fonts_and_images", lambda page: (set(), None))
+    out = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), tiny, "2", mode="auto")
+    assert out["per_page"][0]["reason"] == "inventory_unavailable"
+    assert out["not_sent_to_vision"] == [2] and out["blank_pages"] == []
+    # ... and mode='vision' is the way through, which is the point of listing it.
+    forced = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), tiny, "2", mode="vision")
+    assert forced["per_page"][0]["route"] == "vision" and forced["not_sent_to_vision"] == []
+
+
+def test_the_math_check_says_it_ran_on_a_pdf(ctx, tiny):
+    assert _read(ctx, tiny, "1")["math_check"] == "ran"
+
+
+def test_the_math_check_says_when_a_pdf_had_no_font_attribution(ctx, tiny, monkeypatch):
+    monkeypatch.setattr(D, "_char_fonts", lambda tp: None)
+    assert _read(ctx, tiny, "1")["math_check"] == "not_runnable:no_font_attribution"
+
+
+def test_unreliable_math_lists_only_pages_still_on_the_text_route(ctx, tiny, tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "_suspect_characters", lambda raw, fonts: ("ran", 3, ["CMSY10"]))
+    assert _read(ctx, tiny, "1", mode="text")["pages_with_unreliable_math"] == [1]
+    read = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), tiny, "1", mode="vision")
+    assert read["per_page"][0]["route"] == "vision"
+    assert read["pages_with_unreliable_math"] == [], "a transcription is not a flagged layer"

@@ -734,3 +734,29 @@ def test_with_no_ascii_directory_anywhere_the_answer_names_the_setting(
     assert out.startswith("⚠️")
     assert D.ASCII_TMP_ENV in out
     assert "PDF reading is unaffected" in out
+
+
+# ------------------------------------------------ routable fields (gap 3, N2, N3)
+
+def test_a_djvu_says_the_math_check_cannot_run(ctx, book, libre):
+    libre(_DjVuLibre(pages=1, text={1: "some prose"}))
+    out = _read(ctx, book, "1")
+    assert out["math_check"] == "not_runnable:djvu"
+    assert out["pages_with_unreliable_math"] == []
+
+
+def test_a_djvu_blank_page_is_listed_blank_and_not_sent(ctx, book, libre):
+    libre(_DjVuLibre(pages=2, raster={1: 0}))
+    out = _read(ctx, book, "1")
+    assert out["blank_pages"] == [1] and out["not_sent_to_vision"] == [1]
+    assert out["per_page"][0]["reason"] == "no_images_detected"
+
+
+def test_a_djvu_scan_over_the_cap_is_refused_on_its_page_record(ctx, book, libre, tmp_path):
+    libre(_DjVuLibre(pages=3))
+    ctx.dpc_service = SimpleNamespace(llm_manager=_Vision())
+    ctx.agent_root = tmp_path / "agent"
+    out = _read(ctx, book, "1-3", mode="auto", max_vision_pages=1)
+    assert [p["route"] for p in out["per_page"]] == ["vision_refused"] * 3
+    assert {p["reason"] for p in out["per_page"]} == {"over_max_vision_pages"}
+    assert out["unreadable_pages"] == [1, 2, 3] and out["blank_pages"] == []
