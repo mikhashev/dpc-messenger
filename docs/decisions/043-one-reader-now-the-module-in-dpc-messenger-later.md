@@ -279,6 +279,26 @@ refactor the scripts import from a module shaped for a tool.
 - **Q2 — where records land for a user**, as opposed to for a measurement. `~/.dpc/`
   holds per-peer conversation files today; a knowledge base built from a user's book
   collection is larger and is not conversation. — @Mike
+  **Answered provisionally, 2026-09-29 (Mike's call); the pilot confirms or overturns it**,
+  as Consequences asks for record location.
+  - *Records and index are two objects.* Records (`records.jsonl` per source, the shape in
+    `dpc-library/docs/page-record.md`) are an artefact: a vision read costs hours of GPU and
+    is not recomputed. The FAISS + BM25 index (ADR-010) is derived from them and rebuilt;
+    it is neither versioned nor backed up.
+  - *Location: `~/.dpc/kb/`, not under `~/.dpc/knowledge/`.* `knowledge/` is the
+    human-signed namespace (ADR-009); book records are machine verdicts. Today every walk of
+    that directory is one level deep with a file filter, so a subfolder would be invisible
+    rather than swept in (verified by Zcode, 2026-09-29) — the separation guards against a
+    later `glob` → `rglob`, and keeps the meaning of the namespace.
+  - *Layout:* `~/.dpc/kb/<collection>/<stem>/records.jsonl` and `manifest.jsonl`;
+    `~/.dpc/kb/index/` for the derived index.
+  - *Local only.* The kb is not synced to peers; what leaves the node is what an agent
+    cites, with its locator (Q0-b). Nothing reads the kb today — the agent read gate admits
+    only top-level `.md` in `knowledge/` — so a reader and a widened gate are new work owed
+    by the integration phase, not a side effect.
+  - *Open:* whether records carry history — Zcode's proposal of a git repository scoped to
+    `~/.dpc/kb` (index ignored, a bare clone on a second node as the backup), never at the
+    root of `~/.dpc`, which holds `node.key`. Not decided.
 - **Q3 — engine.** dpc-library 0007 is open and its measurement designed but not run, so
   the router ships with one route to the configured vision provider and a seam where an
   engine choice goes. That measurement now owes a language-coverage column (R1c). — @Ark
