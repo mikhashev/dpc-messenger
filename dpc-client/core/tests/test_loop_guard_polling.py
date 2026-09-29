@@ -161,3 +161,40 @@ class TestLoopGuardBrowserSnapshot:
         first_stop = next((i for i, r in enumerate(results) if r is not None), None)
         assert first_stop == 4
         assert results[first_stop] == HookAction.STOP_LOOP
+
+
+CLICK = "browser_click"
+
+
+def click_round_ctx(page_output=None):
+    """A round that clicks the one ref every page reuses; ``page_output`` is the
+    previous round's browser_snapshot result (the click itself always answers
+    'Clicked @e15')."""
+    ctx = HookContext(
+        agent_id="t", task_id="t", session_id="t", round_idx=1, state=LoopState()
+    )
+    ctx.state.recent_tool_args = [{"name": CLICK, "args": {"ref_or_selector": "@e15"}}]
+    results = []
+    if page_output is not None:
+        results.append({"name": CLICK, "output": "Clicked @e15"})
+        results.append({"name": SNAPSHOT, "output": page_output})
+    ctx.state.recent_tool_results = results
+    return ctx
+
+
+class TestLoopGuardBrowserClick:
+    @pytest.mark.asyncio
+    async def test_same_ref_on_advancing_pages_does_not_stop(self):
+        """A quiz reusing @e15 for Next: eight clicks, page changing between."""
+        g = LoopGuard(max_duplicate_calls=5)
+        assert await g.after_llm_call(click_round_ctx(None)) is None
+        for q in range(1, 9):
+            assert await g.after_llm_call(click_round_ctx(f"- question {q}")) is None
+
+    @pytest.mark.asyncio
+    async def test_same_click_on_unchanged_page_still_stops(self):
+        g = LoopGuard(max_duplicate_calls=5)
+        results = [await g.after_llm_call(click_round_ctx(None))]
+        for _ in range(8):
+            results.append(await g.after_llm_call(click_round_ctx("- same page")))
+        assert next(i for i, r in enumerate(results) if r is not None) == 4

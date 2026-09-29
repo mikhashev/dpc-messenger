@@ -125,6 +125,21 @@ _OUTPUT_KEYED_TOOLS = frozenset({
     "comfyui_progress", "comfyui_wait", "comfyui_check", "browser_snapshot",
 })
 
+# Browser tools whose result reads the page, so a changed result means the
+# page moved on. The action tools are absent on purpose: browser_click answers
+# "Clicked @e15" every time, whatever the page did, so its own output says
+# nothing. A site that reuses one ref for its Next button on every page makes
+# the click fingerprint identical for the whole task.
+_PAGE_STATE_TOOLS = frozenset({
+    "browser_snapshot", "browser_navigate", "browser_extract",
+    "browser_switch_tab", "browser_collect",
+})
+# Action tools whose repeat counters are reset when the page state advanced.
+_BROWSER_ACTION_TOOLS = frozenset({
+    "browser_click", "browser_fill", "browser_select", "browser_wait_for",
+    "browser_scroll",
+})
+
 
 class LoopGuard(GuardMiddleware):
     """Stop if a single (tool, args) fingerprint repeats too many times.
@@ -140,6 +155,11 @@ class LoopGuard(GuardMiddleware):
     counter for that tool is reset, so monitoring a slow generation — or
     walking a browser session page by page — is not killed. Output that
     stops changing (done/stuck/same page) still trips the cap.
+
+    Same idea for :data:`_BROWSER_ACTION_TOOLS`: when a page-reading browser
+    result (:data:`_PAGE_STATE_TOOLS`) differs from that tool's previous one,
+    the page advanced, and the action counters reset. The same click five
+    times on a page that never changes still trips.
     """
 
     def __init__(self, max_duplicate_calls: int = 5) -> None:
@@ -150,6 +170,7 @@ class LoopGuard(GuardMiddleware):
         # ComfyUI instance per agent; a multi-instance setup would need to key
         # by (name, api_url) to avoid cross-instance output clobbering.
         self._last_poll_output: dict[str, str] = {}
+        self._last_page_output: dict[str, str] = {}
 
     @staticmethod
     def _fingerprint(call: dict) -> str:
@@ -175,6 +196,13 @@ class LoopGuard(GuardMiddleware):
             if not isinstance(res, dict):
                 continue
             name = res.get("name", "")
+            if name in _PAGE_STATE_TOOLS:
+                page_out = res.get("output", "")
+                if self._last_page_output.get(name) not in (None, page_out):
+                    for k in list(self._counts):
+                        if k.split("::", 1)[0] in _BROWSER_ACTION_TOOLS:
+                            self._counts[k] = 0
+                self._last_page_output[name] = page_out
             if name not in _OUTPUT_KEYED_TOOLS:
                 continue
             out = res.get("output", "")
