@@ -8,6 +8,7 @@
   import type { Writable } from 'svelte/store';
   import GroupInviteDialog from '$lib/components/GroupInviteDialog.svelte';
   import MentionAutocomplete from '$lib/components/MentionAutocomplete.svelte';
+  import { confirmAsync } from '$lib/utils/dialog';
   import {
     groupChats,
     groupInviteReceived,
@@ -130,6 +131,12 @@
 
   async function handleGroupInviteDecline(event: CustomEvent<{ group_id: string }>) {
     const groupId = event.detail.group_id;
+    const name = pendingGroupInvite?.name || $groupChats.get(groupId)?.name || 'this group';
+    const shouldDecline = await confirmAsync(
+      `Decline the invitation to '${name}'? Your local copy of this group, including any history already merged and received files, will be deleted from this device. Other members keep theirs. If the creator adds you again, the group comes back.`,
+      { title: 'Decline invitation', kind: 'warning' }
+    );
+    if (!shouldDecline) return;
     await leaveGroup(groupId);
     pendingGroupInvite = null;
     showGroupInviteDialog = false;

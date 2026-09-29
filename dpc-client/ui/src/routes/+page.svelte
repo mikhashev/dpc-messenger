@@ -1076,7 +1076,6 @@
       onDisconnectPeer={handleDisconnectPeer}
       groupChats={$groupChats}
       onCreateGroup={() => showNewGroupDialog = true}
-      selfNodeId={$nodeStatus?.node_id || ""}
       agents={$agentsList}
       onSelectAgent={handleSelectAgent}
       onDeleteAgent={handleDeleteAgent}

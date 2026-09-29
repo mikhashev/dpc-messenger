@@ -357,7 +357,6 @@
     onDisconnectPeer,
     groupChats = new Map(),
     onCreateGroup,
-    selfNodeId = "",
     // Agent list (Phase 4)
     agents = [],
     onSelectAgent,
@@ -394,7 +393,6 @@
     onDisconnectPeer: (peerId: string) => void;
     groupChats?: Map<string, any>;
     onCreateGroup?: () => void;
-    selfNodeId?: string;
     // Agent list (Phase 4)
     agents?: AgentInfo[];
     onSelectAgent?: (agentId: string) => void;
