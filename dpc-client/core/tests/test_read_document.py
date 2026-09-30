@@ -167,6 +167,19 @@ def test_a_page_with_no_text_is_marked_rather_than_returned_empty(ctx, tiny):
     assert "blank" in page["note"]
 
 
+def test_pages_with_text_counts_the_pages_that_came_back_with_text(ctx, tiny):
+    """`pages_read` lists the pages asked for; this field says how many yielded text."""
+    mixed = _read(ctx, tiny, "1-2")   # page 1 has text, page 2 is blank
+    assert mixed["pages_read"] == [1, 2]
+    assert mixed["pages_with_text"] == 1
+
+
+def test_pages_with_text_is_zero_when_no_page_came_back(ctx, tiny):
+    out = _read(ctx, tiny, "2")
+    assert out["pages_read"] == [2]
+    assert out["pages_with_text"] == 0
+
+
 def test_the_envelope_says_the_content_is_untrusted(ctx, tiny):
     """A document can ask the agent for anything; the answer is that a document
     is data. Nothing else in the repository carries this field yet."""

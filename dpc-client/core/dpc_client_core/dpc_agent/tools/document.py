@@ -1207,6 +1207,9 @@ async def read_document(
         is unreliable,
         and `thin_layer_pages` — pages that returned a header-sized text layer
         beside several images, which the text route reports rather than reroutes.
+        `pages_read` is the list of pages asked for; `pages_with_text` is how many
+        of them came back with text (route text or vision, chars > 0), so 0 means
+        an answer in which no page was read.
     """
     started = time.perf_counter()
     try:
@@ -1450,6 +1453,15 @@ async def read_document(
         # Tallied before save_to empties the list below, or a save reports the
         # model's pages and seconds as none.
         vision_pages = [p["page"] for p in per_page if p["route"] == "vision"]
+        # Pages that came back with text: route text or vision AND chars > 0. A
+        # blank text page, a scan with no layer, a failure and a refusal are all
+        # excluded. A caller that must tell "a page came back" from "an answer
+        # came back" reads this rather than guessing from the JSON shape;
+        # `pages_read` is the list of pages ASKED for, so it cannot say it.
+        pages_with_text = sum(
+            1 for p in per_page
+            if p["route"] in ("text", "vision") and (p.get("chars") or 0) > 0
+        )
         vision_seconds = round(sum(p.get("seconds") or 0 for p in per_page), 1)
         kept: List[Dict[str, Any]] = []
         omitted: List[int] = []
@@ -1474,6 +1486,7 @@ async def read_document(
             "sha256": digest,
             "pages_total": total,
             "pages_read": wanted,
+            "pages_with_text": pages_with_text,
             "per_page": kept,
             "pages_omitted_for_size": omitted,
             "saved_to": saved_to,
@@ -1565,7 +1578,9 @@ def get_tools() -> List[ToolEntry]:
                     "no_text_layer, vision_failed, vision_refused, failed; "
                     "`unreadable_pages` is the pages routed no_text_layer, failed, vision_failed or vision_refused, split into `blank_pages`, "
                     "`failed_pages` and `vision_failed_pages`, and `not_sent_to_vision` "
-                    "lists pages the auto route skipped. Local "
+                    "lists pages the auto route skipped. `pages_with_text` counts the "
+                    "pages that came back with text (route text or vision, chars > 0); "
+                    "`pages_read` lists the pages asked for. Local "
                     "only: no network."
                 ),
                 "parameters": {

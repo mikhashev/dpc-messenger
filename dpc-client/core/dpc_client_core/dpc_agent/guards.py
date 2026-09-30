@@ -79,10 +79,27 @@ class ToolLimitGuard(GuardMiddleware):
 # paging a document (read_document pages, read_file offset) or visiting a URL
 # nobody visited yet. The key is the tool name plus the args that identify
 # the piece read; a repeat of the same key is not new ground.
+#
+# Read-only exploration tools (search, listing, repository history, session
+# archive) are in the set too: each call with new args reads something new, and
+# a repeat does not count. run_shell is OUT on purpose. A shell loop is the very
+# spiral this guard exists for, and command strings do not normalise reliably
+# (one command spelled two ways is two "new" calls), so keying on them would
+# turn every rephrased retry into progress.
 _NEW_CALL_PROGRESS_TOOLS = frozenset({
     "read_document", "read_file", "extended_path_read",
     "browse_page", "browser_navigate", "fetch_json",
+    "search_in_file", "search_files", "list_dir",
+    "git_log", "git_diff", "git_show",
+    "read_session_detail", "search_session_archives",
 })
+# A tool whose answer is JSON that is not an error string even when nothing was
+# read: read_document with every page failed still returns its envelope, with
+# the per-page failures inside it. For it, "non-error output" is not enough;
+# progress needs this named integer field to be above zero. The guard is coupled
+# to that one field of read_document (`pages_with_text`, tools/document.py). An
+# unparseable answer or a missing field is NOT progress (fails closed).
+_JSON_PROGRESS_FIELD = {"read_document": "pages_with_text"}
 # Tools that read live state with no identifying args: progress is a result
 # that differs from that tool's previous one (the LoopGuard idea).
 _NEW_OUTPUT_PROGRESS_TOOLS = frozenset({"browser_snapshot", "browser_extract"})
@@ -135,7 +152,11 @@ class ResearchLimitGuard(GuardMiddleware):
 
     def __init__(self, max_consecutive: int = 15, max_silent_total: int = 60) -> None:
         self._max = max_consecutive
+        # A policy, not a measurement: past 60 silent rounds the agent must
+        # write text, and any text resets both counters.
         self._max_total = max_silent_total
+        # Valid for one task only: run_llm_loop builds a fresh guard per run
+        # (loop.py:1019), so nothing here outlives the task it counted.
         self._counter = 0
         self._silent_total = 0
         self._ceiling_hit = False
@@ -164,6 +185,12 @@ class ResearchLimitGuard(GuardMiddleware):
                     progress = True
             elif name in _NEW_CALL_PROGRESS_TOOLS and args is not None:
                 key = _call_key(name, args)
+                field = _JSON_PROGRESS_FIELD.get(name)
+                if field and not failed:
+                    try:
+                        failed = not (json.loads(out).get(field, 0) > 0)
+                    except (ValueError, AttributeError, TypeError):
+                        failed = True
                 # Only a success closes the key: a failed fetch may be retried
                 # and the retry is new ground if it works.
                 if not failed:

@@ -7,6 +7,8 @@ must leave these passing unchanged.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from dpc_client_core.dpc_agent.hooks import (
@@ -109,6 +111,9 @@ class TestResearchLimitGuard:
             assert await g.after_llm_call(empty_ctx) is None
 
 
+_DOC_OK = json.dumps({"pages_with_text": 1})  # read_document answer with a page read
+
+
 class _Rounds:
     """Drive ResearchLimitGuard the way run_llm_loop does: AFTER_LLM_CALL of
     round N sees round N's calls but round N-1's results."""
@@ -144,7 +149,7 @@ class TestResearchLimitGuardProgress:
         r = _Rounds(ResearchLimitGuard())
         for page in range(1, 31):
             v = await r.silent(
-                "read_document", {"path": "a.pdf", "pages": str(page)}, "text of page"
+                "read_document", {"path": "a.pdf", "pages": str(page)}, _DOC_OK
             )
             assert v is None, f"tripped at page {page}"
 
@@ -152,7 +157,7 @@ class TestResearchLimitGuardProgress:
     async def test_same_page_repeated_trips(self):
         r = _Rounds(ResearchLimitGuard())
         verdicts = [
-            await r.silent("read_document", {"path": "a.pdf", "pages": "1"}, "p1")
+            await r.silent("read_document", {"path": "a.pdf", "pages": "1"}, _DOC_OK)
             for _ in range(16)  # the first read of page 1 was new ground
         ]
         assert verdicts[-1] == HookAction.STOP_LOOP
@@ -174,10 +179,10 @@ class TestResearchLimitGuardProgress:
         r = _Rounds(ResearchLimitGuard())
         for page in range(1, 11):
             assert await r.silent(
-                "read_document", {"path": "a.pdf", "pages": str(page)}, "ok"
+                "read_document", {"path": "a.pdf", "pages": str(page)}, _DOC_OK
             ) is None
         verdicts = [
-            await r.silent("read_document", {"path": "a.pdf", "pages": "10"}, "ok")
+            await r.silent("read_document", {"path": "a.pdf", "pages": "10"}, _DOC_OK)
             for _ in range(16)
         ]
         # The first repeat is settled against page 10's fresh result, so the
@@ -190,7 +195,7 @@ class TestResearchLimitGuardProgress:
         verdict = None
         for page in range(1, 100):
             verdict = await r.silent(
-                "read_document", {"path": "a.pdf", "pages": str(page)}, "ok"
+                "read_document", {"path": "a.pdf", "pages": str(page)}, _DOC_OK
             )
             if verdict is not None:
                 break
@@ -202,7 +207,7 @@ class TestResearchLimitGuardProgress:
     async def test_text_round_resets_both_counters(self):
         r = _Rounds(ResearchLimitGuard(max_consecutive=3, max_silent_total=5))
         for _ in range(2):
-            await r.silent("read_document", {"path": "a.pdf", "pages": "1"}, "ok")
+            await r.silent("read_document", {"path": "a.pdf", "pages": "1"}, _DOC_OK)
         await r.text()
         for _ in range(2):
             assert await r.silent(
@@ -215,6 +220,54 @@ class TestResearchLimitGuardProgress:
         for i in range(10):
             assert await r.silent("browser_snapshot", {}, f"page {i}") is None
         verdicts = [await r.silent("browser_snapshot", {}, "same") for _ in range(5)]
+        assert HookAction.STOP_LOOP in verdicts
+
+    @pytest.mark.asyncio
+    async def test_all_failed_read_document_rounds_trip(self):
+        # The envelope is JSON, not a warning string, but pages_with_text is 0.
+        failed = json.dumps({"pages_with_text": 0, "pages_read": [1]})
+        r = _Rounds(ResearchLimitGuard())
+        verdicts = [
+            await r.silent("read_document", {"path": "a.pdf", "pages": str(i)}, failed)
+            for i in range(1, 17)
+        ]
+        assert verdicts[-1] == HookAction.STOP_LOOP
+
+    @pytest.mark.asyncio
+    async def test_read_document_without_the_field_or_unparseable_is_not_progress(self):
+        for out in ('{"per_page": []}', "not json at all"):
+            r = _Rounds(ResearchLimitGuard())
+            verdicts = [
+                await r.silent("read_document", {"path": "a.pdf", "pages": str(i)}, out)
+                for i in range(1, 17)
+            ]
+            assert verdicts[-1] == HookAction.STOP_LOOP
+
+    @pytest.mark.asyncio
+    async def test_read_document_with_pages_with_text_is_progress(self):
+        ok = json.dumps({"pages_with_text": 3})
+        r = _Rounds(ResearchLimitGuard())
+        for i in range(1, 31):
+            assert await r.silent(
+                "read_document", {"path": "a.pdf", "pages": str(i)}, ok
+            ) is None
+
+    @pytest.mark.asyncio
+    async def test_exploration_tools_progress_on_new_args_only(self):
+        r = _Rounds(ResearchLimitGuard(max_consecutive=3))
+        for i in range(10):
+            assert await r.silent("search_files", {"pattern": f"p{i}"}, "hits") is None
+        verdicts = [
+            await r.silent("search_files", {"pattern": "p9"}, "hits") for _ in range(5)
+        ]
+        assert HookAction.STOP_LOOP in verdicts
+
+    @pytest.mark.asyncio
+    async def test_run_shell_is_never_progress(self):
+        r = _Rounds(ResearchLimitGuard(max_consecutive=3))
+        verdicts = [
+            await r.silent("run_shell", {"command": f"echo {i}"}, "ok") for i in range(5)
+        ]
         assert HookAction.STOP_LOOP in verdicts
 
     @pytest.mark.asyncio
