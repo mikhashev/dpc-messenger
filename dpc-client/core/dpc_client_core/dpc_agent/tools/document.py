@@ -42,6 +42,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -133,6 +134,7 @@ DEFAULT_MAX_VISION_PAGES = 2        # per call; the caller raises it deliberatel
 # lower is a good surprise, and `vision_seconds` reports what it actually was.
 VISION_SECONDS_PER_PAGE = 40
 MAX_RENDER_MEGAPIXELS = 40          # a hostile MediaBox renders into whatever it likes
+MIN_FIT_RENDER_DPI = 72             # below this text is unreadable to a model; and a hostile MediaBox is refused
 VISION_PROMPT = (
     "Transcribe this page exactly as printed, in reading order. Write any "
     "mathematics as LaTeX. Output only the transcription."
@@ -914,10 +916,36 @@ def _read_djvu_page(tools: Dict[str, str], source: Path, number: int) -> Dict[st
     return entry
 
 
+def _fit_render_dpi(
+    number: int, megapixels: float, dpi: int
+) -> Tuple[int, Optional[str], Optional[str]]:
+    """(dpi to render at, note about a reduction, refusal) for a page of this size.
+
+    A page over the limit is rendered at the largest dpi that fits rather than
+    refused: archive facsimiles carry real oversized sheets (folded maps and
+    tables, 41-52 MP at 150 dpi) that are worth reading at a lower resolution.
+    Only a page that would need less than MIN_FIT_RENDER_DPI is refused.
+    """
+    if megapixels <= MAX_RENDER_MEGAPIXELS:
+        return dpi, None, None
+    fit = int(dpi * math.sqrt(MAX_RENDER_MEGAPIXELS / megapixels))
+    if fit < MIN_FIT_RENDER_DPI:
+        return dpi, None, (
+            f"page {number} would render to {megapixels:.0f} megapixels at "
+            f"{dpi} dpi, over the {MAX_RENDER_MEGAPIXELS} limit; not rendered"
+        )
+    return fit, (
+        f"rendered at {fit} dpi instead of {dpi} to stay under the "
+        f"{MAX_RENDER_MEGAPIXELS}-megapixel limit"
+    ), None
+
+
 def _render_djvu_page(
     tools: Dict[str, str], source: Path, number: int, dpi: int
-) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
-    """A DjVu page as PNG bytes, or the reason it was not rendered.
+) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str]]:
+    """A DjVu page as (PNG bytes, media type, error, note), the bytes None on error.
+
+    The note says when the page was rendered below the requested dpi.
 
     ddjvu's -scale is a dpi against the page's own resolution, so the size is
     known before anything is allocated — the same guard the PDF route applies
@@ -927,16 +955,15 @@ def _render_djvu_page(
     if "error" in shape:
         return None, None, (
             f"page {number} could not be measured before rendering: {shape['error']}"
-        )
+        ), None
     width, height, own_dpi = shape.get("width"), shape.get("height"), shape.get("dpi")
+    render_note = None
     if width and height and own_dpi:
         scale = dpi / own_dpi
         megapixels = (width * scale) * (height * scale) / 1_000_000
-        if megapixels > MAX_RENDER_MEGAPIXELS:
-            return None, None, (
-                f"page {number} would render to {megapixels:.0f} megapixels at "
-                f"{dpi} dpi, over the {MAX_RENDER_MEGAPIXELS} limit; not rendered"
-            )
+        dpi, render_note, refusal = _fit_render_dpi(number, megapixels, dpi)
+        if refusal:
+            return None, None, refusal, None
 
     with tempfile.TemporaryDirectory(prefix="dpc-djvu-") as folder:
         target = Path(folder) / f"page-{number}.pnm"
@@ -954,7 +981,7 @@ def _render_djvu_page(
             return None, None, (
                 f"page {number} could not be rendered: "
                 f"{_first_line(err, f'ddjvu exited {rc} and wrote nothing')}"
-            )
+            ), None
         raw = target.read_bytes()
 
     # Pillow is a core dependency of this package, not an extra; if it is gone
@@ -972,17 +999,17 @@ def _render_djvu_page(
             f"accepts image/x-portable-anymap or image/tiff — labelling one as PNG "
             f"would be a lie. Pillow is a required dependency: `uv sync --all-extras` "
             f"in dpc-client/core restores it."
-        )
+        ), None
     try:
         with Image.open(io.BytesIO(raw)) as image:
             buffer = io.BytesIO()
             image.save(buffer, format="PNG")
-        return buffer.getvalue(), "image/png", None
+        return buffer.getvalue(), "image/png", None, render_note
     except Exception as exc:
         return None, None, (
             f"page {number} rendered but the PNM could not be converted to PNG: "
             f"{type(exc).__name__}: {exc}"
-        )
+        ), None
 
 
 def _cache_path(ctx: ToolContext, digest: str, page: int, model: str, dpi: int) -> Path:
@@ -1002,33 +1029,33 @@ def _cache_path(ctx: ToolContext, digest: str, page: int, model: str, dpi: int) 
 
 def _render_page(
     doc, number: int, dpi: int
-) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
-    """A PDF page as (PNG bytes, media type), or (None, None, why not).
+) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str]]:
+    """A PDF page as (PNG bytes, media type, error, note); bytes None on error.
 
     The size is asked for before anything is allocated: a page's MediaBox is
     whatever the document says it is, and a hostile one asks for a bitmap the
     size of the machine's memory. 40 megapixels is far above any real page —
-    A4 at 150 dpi is 2.2 — and far below anything that hurts.
+    A4 at 150 dpi is 2.2 — and far below anything that hurts. A page over it is
+    rendered at the largest dpi that fits (the note says so) and refused only
+    when that would be under MIN_FIT_RENDER_DPI.
     """
     try:
         page = doc[number - 1]
         width_pt, height_pt = page.get_size()
         megapixels = (width_pt * dpi / 72) * (height_pt * dpi / 72) / 1_000_000
-        if megapixels > MAX_RENDER_MEGAPIXELS:
-            return None, None, (
-                f"page {number} would render to {megapixels:.0f} megapixels at "
-                f"{dpi} dpi, over the {MAX_RENDER_MEGAPIXELS} limit; not rendered"
-            )
+        dpi, render_note, refusal = _fit_render_dpi(number, megapixels, dpi)
+        if refusal:
+            return None, None, refusal, None
         import io
 
         image = page.render(scale=dpi / 72).to_pil()
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
-        return buffer.getvalue(), "image/png", None
+        return buffer.getvalue(), "image/png", None, render_note
     except Exception as exc:
         return None, None, (
             f"page {number} could not be rendered: {type(exc).__name__}: {exc}"
-        )
+        ), None
 
 
 def _vision_failed(
@@ -1064,8 +1091,8 @@ async def _read_page_with_vision(
 ) -> None:
     """Fill a page's text in by looking at it. Mutates `entry` in place.
 
-    `render` hands back image bytes and their media type, or the reason there
-    are none. What produced them — pdfium here, ddjvu in a subprocess — is the
+    `render` hands back image bytes, their media type, an error and an optional
+    note (a reduced dpi), or the reason there are no bytes. What produced them — pdfium here, ddjvu in a subprocess — is the
     caller's business; from here a page is a picture with a type on it.
 
     `requested` says the caller asked for the model (mode='vision') rather than
@@ -1097,7 +1124,7 @@ async def _read_page_with_vision(
         _vision_failed(entry, had_layer, "no_model_reachable", msg, msg)
         return
 
-    image, mime, problem = render(number, dpi)
+    image, mime, problem, render_note = render(number, dpi)
     if image is None:
         _vision_failed(
             entry, had_layer, "render_failed", problem or "the page could not be rendered", problem
@@ -1154,6 +1181,8 @@ async def _read_page_with_vision(
             f"page {number} has no text layer and was transcribed by a vision model "
             f"in {seconds} s — a transcription, not the document's own characters"
         )
+    if render_note:
+        note = f"{note}; {render_note}"
     entry.update(
         route="vision", text=text, chars=len(text), model=used, cached=False,
         seconds=seconds, note=note,

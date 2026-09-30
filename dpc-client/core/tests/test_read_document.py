@@ -462,6 +462,69 @@ def test_a_page_too_large_to_render_is_refused_before_it_is_rendered(ctx, tmp_pa
     assert "megapixels" in out["per_page"][0]["note"]
 
 
+def test_an_oversized_sheet_is_rendered_at_a_lower_dpi_not_refused(ctx, tmp_path):
+    """An archive fold-out sheet: ~50 MP at 150 dpi. It is read, at the largest
+    dpi under the limit, and the entry says so."""
+    sheet = tmp_path / "sheet.pdf"
+    sheet.write_bytes(TINY_PDF.replace(b"/MediaBox [0 0 200 200]", b"/MediaBox [0 0 3400 3400]"))
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), sheet, "2", mode="vision")
+    assert len(vision.calls) == 1, "the sheet was refused instead of rendered"
+    page = out["per_page"][0]
+    assert page["route"] == "vision"
+    assert "rendered at 133 dpi instead of 150" in page["note"]
+    assert "40-megapixel limit" in page["note"]
+
+
+def test_the_reduced_pdf_bitmap_stays_under_the_limit():
+    class _Bitmap:
+        def to_pil(self):
+            from PIL import Image
+            return Image.new("L", (int(self.size[0]), int(self.size[1])))
+
+    class _Page:
+        def get_size(self):
+            return 3400, 3400
+
+        def render(self, scale):
+            bitmap = _Bitmap()
+            bitmap.size = (3400 * scale, 3400 * scale)
+            self.scale = scale
+            return bitmap
+
+    page = _Page()
+    image, mime, err, note = D._render_page([page], 1, 150)
+    assert err is None and mime == "image/png" and "133 dpi" in note
+    assert (3400 * page.scale) ** 2 / 1_000_000 <= D.MAX_RENDER_MEGAPIXELS
+
+
+def test_a_djvu_sheet_over_the_limit_is_scaled_down_and_a_hostile_one_refused(monkeypatch):
+    monkeypatch.setattr(
+        D, "_djvu_page_shape", lambda tools, source, n: {"width": 7500, "height": 7500, "dpi": 300}
+    )
+    seen = []
+
+    def fake_run(exe, args):
+        seen.append(args)
+        Path(args[-1]).write_bytes(b"P6\n1 1\n255\n\xff\xff\xff")
+        return 0, "", ""
+
+    monkeypatch.setattr(D, "_run_djvu", fake_run)
+    # 7500 px at 300 dpi is 25 in; at 150 dpi that is 3750 px square, 14 MP: fits.
+    image, _, err, note = D._render_djvu_page({"ddjvu": "ddjvu"}, Path("x.djvu"), 1, 150)
+    assert image and err is None and note is None
+    # Asked for 600 dpi the same sheet is 225 MP, so it is scaled down.
+    image, _, err, note = D._render_djvu_page({"ddjvu": "ddjvu"}, Path("x.djvu"), 1, 300 * 2)
+    assert image and err is None and "instead of 600" in note
+    assert any(a == "-scale=" + note.split("at ")[1].split(" dpi")[0] for a in seen[-1])
+    # A page whose fit would fall under the floor is still refused.
+    monkeypatch.setattr(
+        D, "_djvu_page_shape", lambda tools, source, n: {"width": 900000, "height": 900000, "dpi": 300}
+    )
+    image, _, err, note = D._render_djvu_page({"ddjvu": "ddjvu"}, Path("x.djvu"), 1, 150)
+    assert image is None and "not rendered" in err and note is None
+
+
 def test_an_unknown_mode_reads_text_and_says_so(ctx, tiny, tmp_path):
     vision = _Vision()
     out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "2", mode="clairvoyance")
@@ -961,7 +1024,7 @@ def test_a_failed_vision_read_is_not_a_blank_page_no_model(ctx, tiny):
 
 
 def test_a_failed_vision_read_is_not_a_blank_page_render(ctx, tiny, tmp_path, monkeypatch):
-    monkeypatch.setattr(D, "_render_page", lambda doc, n, dpi: (None, None, "render blew up"))
+    monkeypatch.setattr(D, "_render_page", lambda doc, n, dpi: (None, None, "render blew up", None))
     out = _read(_ctx_with_vision(ctx, _Vision(), tmp_path), tiny, "2", mode="vision")
     page = out["per_page"][0]
     assert page["route"] == "vision_failed" and page["reason"] == "render_failed"
