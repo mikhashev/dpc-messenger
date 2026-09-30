@@ -632,7 +632,12 @@ class TelegramBridge:
                     "codec": "opus",
                     "recorded_at": datetime.now(timezone.utc).isoformat()
                 },
-                "transcription": transcription_text if transcription_text else None,
+                # Same {text, provider} shape the player reads for a DPC 1:1
+                # voice message; a plain string rendered as an empty box.
+                "transcription": (
+                    {"text": transcription_text, "provider": transcription_provider or "unknown"}
+                    if transcription_text else None
+                ),
                 "transcription_provider": transcription_provider,
                 "source": "telegram",
                 "telegram_message_id": message.message_id
@@ -682,6 +687,10 @@ class TelegramBridge:
                 "conversation_id": conversation_id,
                 "telegram_chat_id": chat_id,
                 "sender_name": sender_name,
+                # The id and time of the stored copy, so the UI replaces it
+                # instead of drawing a second entry beside it.
+                "message_id": conv_message.message_id,
+                "timestamp": msg_timestamp,
                 "filename": voice_filename,
                 "file_path": str(voice_path),  # Include actual file path for playback
                 "duration_seconds": duration,
@@ -846,6 +855,8 @@ class TelegramBridge:
                 "conversation_id": conversation_id,
                 "telegram_chat_id": chat_id,
                 "sender_name": sender_name,
+                "message_id": conv_message.message_id,
+                "timestamp": msg_timestamp,
                 "filename": photo_filename,
                 "file_path": str(photo_path),
                 "caption": caption
@@ -952,6 +963,8 @@ class TelegramBridge:
                 "conversation_id": conversation_id,
                 "telegram_chat_id": chat_id,
                 "sender_name": sender_name,
+                "message_id": conv_message.message_id,
+                "timestamp": msg_timestamp,
                 "filename": filename,
                 "file_path": str(file_path),
                 "caption": caption,
@@ -1059,6 +1072,8 @@ class TelegramBridge:
                 "conversation_id": conversation_id,
                 "telegram_chat_id": chat_id,
                 "sender_name": sender_name,
+                "message_id": conv_message.message_id,
+                "timestamp": msg_timestamp,
                 "filename": filename,
                 "file_path": str(file_path),
                 "caption": caption,

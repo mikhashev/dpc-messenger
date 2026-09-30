@@ -12,6 +12,7 @@
     telegramFileReceived,
   } from '$lib/coreService';
   import { showNotificationIfBackground } from '$lib/notificationService';
+  import { normalizeTranscription, telegramBubbleId, telegramBubbleTime, upsertById } from '$lib/utils/telegramLiveMessage';
 
   // ---------------------------------------------------------------------------
   // Types
@@ -113,39 +114,38 @@
   // Handle Telegram voice messages
   $effect(() => {
     if ($telegramVoiceReceived) {
-      const { conversation_id, telegram_chat_id, sender_name, filename, file_path, duration_seconds, transcription } = $telegramVoiceReceived;
+      const { conversation_id, telegram_chat_id, sender_name, filename, file_path, duration_seconds, transcription, transcription_provider } = $telegramVoiceReceived;
+      const voiceEvent = $telegramVoiceReceived;
       console.log(`[Telegram] Adding voice message to chat ${conversation_id}: ${filename}`);
 
       ensureTelegramChat(conversation_id, sender_name);
 
+      const voiceTime = telegramBubbleTime(voiceEvent);
       chatHistories.update(map => {
         const newMap = new Map(map);
         const currentMessages = newMap.get(conversation_id) || [];
-        newMap.set(conversation_id, [
-          ...currentMessages,
-          {
-            id: `telegram-voice-${Date.now()}`,
-            sender: `telegram-${telegram_chat_id}`,
-            senderName: sender_name,
-            text: transcription ? `Voice message: ${transcription}` : 'Voice message',
-            timestamp: Date.now(),
-            attachments: [{
-              type: 'voice',
-              filename: filename,
-              file_path: file_path,
-              size_bytes: 0,
-              mime_type: 'audio/ogg',
-              voice_metadata: {
-                duration_seconds: duration_seconds,
-                sample_rate: 48000,
-                channels: 1,
-                codec: 'opus',
-                recorded_at: new Date().toISOString()
-              },
-              transcription: transcription ? { text: transcription, provider: 'unknown' } : undefined
-            }]
-          }
-        ]);
+        newMap.set(conversation_id, upsertById(currentMessages, {
+          id: telegramBubbleId(voiceEvent, 'voice'),
+          sender: `telegram-${telegram_chat_id}`,
+          senderName: sender_name,
+          text: transcription ? transcription : 'Voice message',
+          timestamp: voiceTime,
+          attachments: [{
+            type: 'voice',
+            filename: filename,
+            file_path: file_path,
+            size_bytes: 0,
+            mime_type: 'audio/ogg',
+            voice_metadata: {
+              duration_seconds: duration_seconds,
+              sample_rate: 48000,
+              channels: 1,
+              codec: 'opus',
+              recorded_at: new Date(voiceTime).toISOString()
+            },
+            transcription: normalizeTranscription(transcription, transcription_provider || 'unknown')
+          }]
+        }));
         return newMap;
       });
 
@@ -166,6 +166,7 @@
     const imageEvent = $telegramImageReceived;
     if (imageEvent) {
       const { conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes } = imageEvent;
+      const imageTime = telegramBubbleTime(imageEvent);
       console.log(`[Telegram] Adding image to chat ${conversation_id}: ${filename}`);
 
       ensureTelegramChat(conversation_id, sender_name);
@@ -173,22 +174,19 @@
       chatHistories.update(map => {
         const newMap = new Map(map);
         const currentMessages = newMap.get(conversation_id) || [];
-        newMap.set(conversation_id, [
-          ...currentMessages,
-          {
-            id: `telegram-image-${Date.now()}`,
-            sender: `telegram-${telegram_chat_id}`,
-            senderName: sender_name,
-            text: caption || "Image",
-            timestamp: Date.now(),
-            attachments: [{
-              type: 'image',
-              filename: filename,
-              file_path: file_path,
-              size_bytes: size_bytes || 0
-            }]
-          }
-        ]);
+        newMap.set(conversation_id, upsertById(currentMessages, {
+          id: telegramBubbleId(imageEvent, 'image'),
+          sender: `telegram-${telegram_chat_id}`,
+          senderName: sender_name,
+          text: caption || "Image",
+          timestamp: imageTime,
+          attachments: [{
+            type: 'image',
+            filename: filename,
+            file_path: file_path,
+            size_bytes: size_bytes || 0
+          }]
+        }));
         return newMap;
       });
 
@@ -209,6 +207,7 @@
     const fileEvent = $telegramFileReceived;
     if (fileEvent) {
       const { conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes, mime_type } = fileEvent;
+      const fileTime = telegramBubbleTime(fileEvent);
       console.log(`[Telegram] Adding file to chat ${conversation_id}: ${filename}`);
 
       ensureTelegramChat(conversation_id, sender_name);
@@ -218,23 +217,20 @@
       chatHistories.update(map => {
         const newMap = new Map(map);
         const currentMessages = newMap.get(conversation_id) || [];
-        newMap.set(conversation_id, [
-          ...currentMessages,
-          {
-            id: `telegram-file-${Date.now()}`,
-            sender: `telegram-${telegram_chat_id}`,
-            senderName: sender_name,
-            text: caption || filename,
-            timestamp: Date.now(),
-            attachments: [{
-              type: isImage ? 'image' : 'file',
-              filename: filename,
-              file_path: file_path,
-              size_bytes: size_bytes || 0,
-              mime_type: mime_type
-            }]
-          }
-        ]);
+        newMap.set(conversation_id, upsertById(currentMessages, {
+          id: telegramBubbleId(fileEvent, 'file'),
+          sender: `telegram-${telegram_chat_id}`,
+          senderName: sender_name,
+          text: caption || filename,
+          timestamp: fileTime,
+          attachments: [{
+            type: isImage ? 'image' : 'file',
+            filename: filename,
+            file_path: file_path,
+            size_bytes: size_bytes || 0,
+            mime_type: mime_type
+          }]
+        }));
         return newMap;
       });
 

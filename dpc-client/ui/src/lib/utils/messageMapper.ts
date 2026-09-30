@@ -6,6 +6,8 @@
  * HistorySyncPanel (group sync), +page.svelte (1:1 reloads).
  */
 
+import { normalizeAttachments } from './telegramLiveMessage';
+
 export interface MappedMessage {
     id: string;
     sender: string;
@@ -149,7 +151,7 @@ export function mapBackendMessage(msg: any, opts: MapOptions = {}): MappedMessag
         senderName: resolved?.senderName || opts.fallbackSenderName || msg.sender_name || '',
         text: msg.content || msg.text || '',
         timestamp: ts,
-        attachments: msg.attachments || [],
+        attachments: normalizeAttachments(msg.attachments),
         msg_index: msg.msg_index || 0,
         tool_calls: msg.tool_calls || opts.local?.tool_calls || [],
         thinking: msg.thinking ?? opts.local?.thinking,

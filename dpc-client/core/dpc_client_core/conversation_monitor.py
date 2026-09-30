@@ -1949,6 +1949,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             for attachment in attachments:
                 if attachment.get("type") == "voice":
                     transcription = attachment.get("transcription")
+                    if isinstance(transcription, str):
+                        # Older Telegram history stored the bare text.
+                        transcription = {"text": transcription}
                     if transcription and transcription.get("text"):
                         # Format: "Voice message from [sender]: [transcription text]"
                         role = msg.get("role", "user")

@@ -513,13 +513,20 @@ export interface TelegramVoiceEvent {
     file_path?: string;
     transfer_id?: string;
     duration_seconds?: number;
-    transcription?: MessageAttachment['transcription'];
+    /** The wire carries the bare text; the panel wraps it as {text, provider}. */
+    transcription?: string;
+    transcription_provider?: string;
+    /** Id and time of the stored copy (`telegram-voice-<id>`, Telegram's send time). */
+    message_id?: string;
+    timestamp?: string;
 }
 
 export interface TelegramImageEvent {
     conversation_id: string;
     telegram_chat_id: string;
     sender_name: string;
+    message_id?: string;
+    timestamp?: string;
     filename: string;
     caption?: string;
     file_path?: string;
@@ -530,6 +537,8 @@ export interface TelegramFileEvent {
     conversation_id: string;
     telegram_chat_id: string;
     sender_name: string;
+    message_id?: string;
+    timestamp?: string;
     filename: string;
     caption?: string;
     file_path?: string;
