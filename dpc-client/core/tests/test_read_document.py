@@ -476,6 +476,19 @@ def test_an_oversized_sheet_is_rendered_at_a_lower_dpi_not_refused(ctx, tmp_path
     assert "40-megapixel limit" in page["note"]
 
 
+def test_a_cached_oversized_page_still_says_it_was_rendered_at_a_lower_dpi(ctx, tmp_path):
+    """The cache hit replaced the note wholesale, so the second read of a fold-out
+    sheet no longer said the model had seen a 133 dpi bitmap."""
+    sheet = tmp_path / "sheet.pdf"
+    sheet.write_bytes(TINY_PDF.replace(b"/MediaBox [0 0 200 200]", b"/MediaBox [0 0 3400 3400]"))
+    vision = _Vision()
+    c = _ctx_with_vision(ctx, vision, tmp_path)
+    _read(c, sheet, "2", mode="vision")
+    again = _read(c, sheet, "2", mode="vision")["per_page"][0]
+    assert len(vision.calls) == 1 and again["cached"] is True
+    assert "rendered at 133 dpi instead of 150" in again["note"]
+
+
 def test_the_reduced_pdf_bitmap_stays_under_the_limit():
     class _Bitmap:
         def to_pil(self):

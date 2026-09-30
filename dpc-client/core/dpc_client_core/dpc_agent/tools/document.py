@@ -1109,10 +1109,13 @@ async def _read_page_with_vision(
     if cache.exists():
         try:
             cached = json.loads(cache.read_text(encoding="utf-8"))
+            note = f"page {number} was read by a vision model earlier and is served from cache"
+            if cached.get("render_note"):
+                # the reduced dpi is a fact about the bitmap the model saw, so it travels
+                note = f"{note}; {cached['render_note']}"
             entry.update(
                 route="vision", text=cached["text"], chars=len(cached["text"]),
-                model=cached.get("model"), cached=True, seconds=0.0,
-                note=f"page {number} was read by a vision model earlier and is served from cache",
+                model=cached.get("model"), cached=True, seconds=0.0, note=note,
             )
             return
         except Exception as exc:
@@ -1189,7 +1192,10 @@ async def _read_page_with_vision(
     )
     try:
         cache.write_text(
-            json.dumps({"text": text, "model": used, "seconds": seconds}, ensure_ascii=False),
+            json.dumps(
+                {"text": text, "model": used, "seconds": seconds, "render_note": render_note},
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
     except Exception as exc:
