@@ -109,6 +109,124 @@ class TestResearchLimitGuard:
             assert await g.after_llm_call(empty_ctx) is None
 
 
+class _Rounds:
+    """Drive ResearchLimitGuard the way run_llm_loop does: AFTER_LLM_CALL of
+    round N sees round N's calls but round N-1's results."""
+
+    def __init__(self, guard):
+        self.g = guard
+        self.prev_results: list = []
+
+    async def silent(self, name, args, output):
+        ctx = make_ctx(
+            last_response_has_text=False,
+            tool_calls_this_turn=1,
+            recent_tool_args=[{"name": name, "args": args}],
+            recent_tool_results=self.prev_results,
+        )
+        verdict = await self.g.after_llm_call(ctx)
+        self.prev_results = [{"name": name, "output": output}]
+        return verdict
+
+    async def text(self):
+        ctx = make_ctx(
+            last_response_has_text=True,
+            tool_calls_this_turn=0,
+            recent_tool_args=[],
+            recent_tool_results=self.prev_results,
+        )
+        return await self.g.after_llm_call(ctx)
+
+
+class TestResearchLimitGuardProgress:
+    @pytest.mark.asyncio
+    async def test_paging_a_document_does_not_trip(self):
+        r = _Rounds(ResearchLimitGuard())
+        for page in range(1, 31):
+            v = await r.silent(
+                "read_document", {"path": "a.pdf", "pages": str(page)}, "text of page"
+            )
+            assert v is None, f"tripped at page {page}"
+
+    @pytest.mark.asyncio
+    async def test_same_page_repeated_trips(self):
+        r = _Rounds(ResearchLimitGuard())
+        verdicts = [
+            await r.silent("read_document", {"path": "a.pdf", "pages": "1"}, "p1")
+            for _ in range(16)  # the first read of page 1 was new ground
+        ]
+        assert verdicts[-1] == HookAction.STOP_LOOP
+        assert all(v is None for v in verdicts[:-1])
+
+    @pytest.mark.asyncio
+    async def test_error_results_trip(self):
+        r = _Rounds(ResearchLimitGuard())
+        verdicts = [
+            await r.silent(
+                "browse_page", {"url": f"https://x.test/{i}"}, "⚠️ 403 refused"
+            )
+            for i in range(15)
+        ]
+        assert verdicts[-1] == HookAction.STOP_LOOP
+
+    @pytest.mark.asyncio
+    async def test_progress_then_no_progress_trips_after_fifteen(self):
+        r = _Rounds(ResearchLimitGuard())
+        for page in range(1, 11):
+            assert await r.silent(
+                "read_document", {"path": "a.pdf", "pages": str(page)}, "ok"
+            ) is None
+        verdicts = [
+            await r.silent("read_document", {"path": "a.pdf", "pages": "10"}, "ok")
+            for _ in range(16)
+        ]
+        # The first repeat is settled against page 10's fresh result, so the
+        # counter starts over there: 15 no-progress rounds after that.
+        assert verdicts.index(HookAction.STOP_LOOP) == 14
+
+    @pytest.mark.asyncio
+    async def test_absolute_ceiling_trips_even_with_progress(self):
+        r = _Rounds(ResearchLimitGuard())
+        verdict = None
+        for page in range(1, 100):
+            verdict = await r.silent(
+                "read_document", {"path": "a.pdf", "pages": str(page)}, "ok"
+            )
+            if verdict is not None:
+                break
+        assert verdict == HookAction.STOP_LOOP
+        assert page == 60
+        assert "60 rounds" in r.g.stop_message()
+
+    @pytest.mark.asyncio
+    async def test_text_round_resets_both_counters(self):
+        r = _Rounds(ResearchLimitGuard(max_consecutive=3, max_silent_total=5))
+        for _ in range(2):
+            await r.silent("read_document", {"path": "a.pdf", "pages": "1"}, "ok")
+        await r.text()
+        for _ in range(2):
+            assert await r.silent(
+                "read_document", {"path": "b.pdf", "pages": "1"}, "⚠️ no"
+            ) is None
+
+    @pytest.mark.asyncio
+    async def test_snapshot_progress_only_when_output_changes(self):
+        r = _Rounds(ResearchLimitGuard(max_consecutive=3))
+        for i in range(10):
+            assert await r.silent("browser_snapshot", {}, f"page {i}") is None
+        verdicts = [await r.silent("browser_snapshot", {}, "same") for _ in range(5)]
+        assert HookAction.STOP_LOOP in verdicts
+
+    @pytest.mark.asyncio
+    async def test_url_keyed_ignores_size_preset(self):
+        r = _Rounds(ResearchLimitGuard(max_consecutive=3))
+        v = [
+            await r.silent("browse_page", {"url": "https://x.test", "size": s}, "ok")
+            for s in ("s", "m", "l", "f", "s")
+        ]
+        assert HookAction.STOP_LOOP in v
+
+
 class TestLoopGuard:
     @pytest.mark.asyncio
     async def test_same_fingerprint_fires_at_max(self):

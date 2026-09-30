@@ -75,8 +75,40 @@ class ToolLimitGuard(GuardMiddleware):
         )
 
 
+# Tools whose result counts as progress when the CALL is new to this task:
+# paging a document (read_document pages, read_file offset) or visiting a URL
+# nobody visited yet. The key is the tool name plus the args that identify
+# the piece read; a repeat of the same key is not new ground.
+_NEW_CALL_PROGRESS_TOOLS = frozenset({
+    "read_document", "read_file", "extended_path_read",
+    "browse_page", "browser_navigate", "fetch_json",
+})
+# Tools that read live state with no identifying args: progress is a result
+# that differs from that tool's previous one (the LoopGuard idea).
+_NEW_OUTPUT_PROGRESS_TOOLS = frozenset({"browser_snapshot", "browser_extract"})
+# For the URL tools the URL is the identity; size presets and the like are not.
+_URL_KEYED_TOOLS = frozenset({"browse_page", "browser_navigate"})
+# A refusal or error result starts with a warning sign or a cross mark.
+_FAILURE_PREFIXES = ("⚠", "❌")
+
+
+def _call_key(name: str, raw_args) -> str:
+    """Identity of a call for progress purposes, stable across arg order."""
+    if isinstance(raw_args, str):
+        try:
+            raw_args = json.loads(raw_args)
+        except Exception:
+            return f"{name}::{raw_args}"
+    if isinstance(raw_args, dict):
+        if name in _URL_KEYED_TOOLS:
+            raw_args = {"url": raw_args.get("url", "")}
+        return f"{name}::{json.dumps(raw_args, sort_keys=True, default=str)}"
+    return f"{name}::{raw_args}"
+
+
 class ResearchLimitGuard(GuardMiddleware):
-    """Force a final answer after too many consecutive tool-only rounds.
+    """Force a final answer after too many consecutive tool-only rounds
+    that made no progress.
 
     Counter lives on the instance (per ADR-007: guard-specific state
     does not leak into :class:`HookContext`). Reset on any round that
@@ -85,21 +117,89 @@ class ResearchLimitGuard(GuardMiddleware):
 
     Uses non-strict ``>=``: the counter is incremented before the check,
     so the Nth consecutive tool-only round triggers the stop.
+
+    Progress reset: paging a long document is silent work, not a spiral. A
+    round whose tool results show new ground resets the counter: a page
+    range, offset or URL not seen before in this task with a successful
+    result, or a browser_snapshot / browser_extract result that differs from
+    the tool's previous one. A refusal or error (starts with a warning or
+    cross mark) and a repeat of an earlier call are not progress.
+
+    Timing: AFTER_LLM_CALL fires before the round's tools run, so it sees the
+    calls of this round but the results of the previous one. The guard keeps
+    the previous round's calls itself and pairs them with those results.
+
+    Ceiling: progress cannot run forever. ``max_silent_total`` (60) tool-only
+    rounds since the last text stop the run even when every one made progress.
     """
 
-    def __init__(self, max_consecutive: int = 15) -> None:
+    def __init__(self, max_consecutive: int = 15, max_silent_total: int = 60) -> None:
         self._max = max_consecutive
+        self._max_total = max_silent_total
         self._counter = 0
+        self._silent_total = 0
+        self._ceiling_hit = False
+        self._seen_calls: set[str] = set()
+        self._last_output: dict[str, str] = {}
+        self._prev_calls: list[dict] = []
+
+    def _round_made_progress(self, results: list) -> bool:
+        """Did the previous round's results show new ground?"""
+        queues: dict[str, list] = {}
+        for c in self._prev_calls:
+            queues.setdefault(c.get("name", ""), []).append(c.get("args", {}))
+        progress = False
+        for res in results or []:
+            if not isinstance(res, dict):
+                continue
+            name = res.get("name", "")
+            out = res.get("output", "")
+            out = out if isinstance(out, str) else str(out)
+            failed = out.lstrip().startswith(_FAILURE_PREFIXES)
+            args = queues[name].pop(0) if queues.get(name) else None
+            if name in _NEW_OUTPUT_PROGRESS_TOOLS:
+                prev = self._last_output.get(name)
+                self._last_output[name] = out
+                if not failed and prev != out:
+                    progress = True
+            elif name in _NEW_CALL_PROGRESS_TOOLS and args is not None:
+                key = _call_key(name, args)
+                # Only a success closes the key: a failed fetch may be retried
+                # and the retry is new ground if it works.
+                if not failed:
+                    if key not in self._seen_calls:
+                        progress = True
+                    self._seen_calls.add(key)
+        return progress
 
     async def after_llm_call(self, ctx: HookContext) -> Optional[HookAction]:
+        if self._prev_calls and self._round_made_progress(ctx.recent_tool_results):
+            self._counter = 0
+        self._prev_calls = [
+            c for c in (ctx.recent_tool_args or []) if isinstance(c, dict)
+        ]
+
         if ctx.last_response_has_text:
             self._counter = 0
+            self._silent_total = 0
+            self._prev_calls = []
         elif ctx.tool_calls_this_turn > 0:
             self._counter += 1
+            self._silent_total += 1
 
+        if self._silent_total >= self._max_total:
+            self._ceiling_hit = True
+            log.warning(
+                "ResearchLimitGuard: %d tool-only rounds since the last text "
+                "reached the ceiling %d",
+                self._silent_total,
+                self._max_total,
+            )
+            return HookAction.STOP_LOOP
         if self._counter >= self._max:
             log.warning(
-                "ResearchLimitGuard: %d consecutive tool-only rounds reached max=%d",
+                "ResearchLimitGuard: %d consecutive tool-only rounds without "
+                "progress reached max=%d",
                 self._counter,
                 self._max,
             )
@@ -107,11 +207,18 @@ class ResearchLimitGuard(GuardMiddleware):
         return None
 
     def stop_message(self) -> str:
+        if self._ceiling_hit:
+            return (
+                f"[RESEARCH_LIMIT] You have spent {self._silent_total} rounds "
+                "calling tools without providing any text response to the "
+                "user. Stop researching. Summarise your findings and give "
+                "your answer now."
+            )
         return (
             f"[RESEARCH_LIMIT] You have spent {self._counter} consecutive "
-            "rounds calling tools without providing any text response to "
-            "the user. Stop researching. Summarise your findings and give "
-            "your answer now."
+            "rounds calling tools without progress and without providing any "
+            "text response to the user. Stop researching. Summarise your "
+            "findings and give your answer now."
         )
 
 
