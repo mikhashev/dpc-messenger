@@ -9750,11 +9750,13 @@ class CoreService:
             agent_id = self._get_default_agent_id()
         return await self.agent_service.cancel_agent_task(agent_id, task_id)
 
-    async def interrupt_agent(self, agent_id: str = "", conversation_id: str = "") -> Dict[str, Any]:
+    async def interrupt_agent(self, agent_id: str = "", conversation_id: str = "", force: bool = False) -> Dict[str, Any]:
         """Stop an active agent loop gracefully (L1 Interrupt API).
 
         Works for both 1:1 (conversation_id=agent_xxx) and group chats
         (conversation_id=group-xxx) by routing via explicit agent_id.
+        `force` (the Kill button, a second press) also cancels the model call
+        in flight instead of waiting for it to return.
         """
         logger.info("interrupt_agent called: agent_id=%r, conversation_id=%r", agent_id, conversation_id)
         if not agent_id and conversation_id.startswith("agent_"):
@@ -9781,7 +9783,7 @@ class CoreService:
             else:
                 targets = [aid for aid, m in managers.items()
                            if m.has_active_loop(conversation_id)]
-            stopped = [aid for aid in targets if managers[aid].interrupt(conversation_id)]
+            stopped = [aid for aid in targets if managers[aid].interrupt(conversation_id, kill=bool(force))]
             if stopped and agent_id not in stopped:
                 logger.warning(
                     "interrupt_agent: request named %r, which runs no loop in %s; stopped %s instead",

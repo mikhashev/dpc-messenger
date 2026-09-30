@@ -872,6 +872,39 @@ async def _execute_with_timeout(
         gc.collect()
 
 
+class CallKilled(Exception):
+    """The user pressed Kill while a model call was in flight."""
+
+
+async def _chat_unless_killed(coro, kill_event: Optional[asyncio.Event]):
+    """Await `coro`; if `kill_event` fires first, cancel it and raise CallKilled.
+
+    Cancelling the call task unwinds through the provider's `async with`, which
+    closes the HTTP connection, and llama-server frees the slot when the client
+    disconnects. Because `llm.chat` is abandoned before it returns, the usage
+    row it writes afterwards is never written. Plain asyncio, same on every OS.
+    """
+    if kill_event is None:
+        return await coro
+    chat_task = asyncio.ensure_future(coro)
+    kill_task = asyncio.ensure_future(kill_event.wait())
+    try:
+        await asyncio.wait({chat_task, kill_task}, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        chat_task.cancel()
+        raise
+    finally:
+        kill_task.cancel()
+    if chat_task.done():
+        return chat_task.result()
+    chat_task.cancel()
+    # Let the cancellation reach the HTTP layer, but never hang on it.
+    await asyncio.wait({chat_task}, timeout=2.0)
+    if chat_task.done() and not chat_task.cancelled():
+        chat_task.exception()  # retrieved, so it is not logged as never retrieved
+    raise CallKilled()
+
+
 async def _finalize_after_guard_stop(
     hooks: HookRegistry,
     messages: List[Dict[str, Any]],
@@ -959,9 +992,14 @@ async def run_llm_loop(
     reasoning_effort: Optional[str] = None,
     context_window: Optional[int] = None,
     context_reserve: Optional[int] = None,
+    kill_event: Optional[asyncio.Event] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
+
+    `kill_event` (second Stop press) abandons the model call that is in flight
+    instead of waiting for it: the call task is cancelled, the HTTP request
+    closes, and no usage row is written because `llm.chat` never returns.
 
     Sends messages to LLM, executes tool calls, repeats until final response.
 
@@ -1105,13 +1143,16 @@ async def run_llm_loop(
 
             # --- LLM call ---
             try:
-                msg, usage = await llm.chat(
-                    messages,
-                    tools=tool_schemas,
-                    on_stream_chunk=on_stream_chunk,
-                    conversation_id=conversation_id,
-                    reasoning_effort=reasoning_effort,
-                    task_id=task_id or None,
+                msg, usage = await _chat_unless_killed(
+                    llm.chat(
+                        messages,
+                        tools=tool_schemas,
+                        on_stream_chunk=on_stream_chunk,
+                        conversation_id=conversation_id,
+                        reasoning_effort=reasoning_effort,
+                        task_id=task_id or None,
+                    ),
+                    kill_event,
                 )
                 accumulate_call_usage(accumulated_usage, usage)
                 round_prompt_tokens = accumulated_usage["last_prompt_tokens"]
@@ -1134,6 +1175,16 @@ async def run_llm_loop(
                     prompt_tokens=round_prompt_tokens,
                     context_window=context_window,
                     context_reserve=context_reserve,
+                )
+            except CallKilled:
+                log.warning("Agent killed by user mid-call in round %d", round_idx)
+                llm_trace["stopped_by_user"] = True
+                llm_trace["killed_mid_call"] = True
+                llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
+                return (
+                    f"⚠️ Stopped by user: killed mid-call in round {round_idx} "
+                    f"(the model's answer was not waited for).",
+                    accumulated_usage, llm_trace,
                 )
             except Exception as e:
                 log.error(f"LLM error: {e}", exc_info=True)

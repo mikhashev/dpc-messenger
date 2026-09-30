@@ -338,6 +338,7 @@ class DpcAgent:
         reader_identity: Optional[Dict[str, str]] = None,
         trigger_message_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        kill_event: Optional[asyncio.Event] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -559,6 +560,7 @@ class DpcAgent:
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
             stop_event=stop_event,
+            kill_event=kill_event,
             reasoning_effort=reasoning_effort,
             # The live strip carries the same pair this guard has just decided
             # on: the window every round is measured against, and the headroom

@@ -9,6 +9,9 @@
     import { occupancyFromSpeed, occupancyLabel, occupancyTitle } from '$lib/utils/contextOccupancy';
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
     import { sendCommand } from '$lib/coreService';
+    import {
+        pressAction, stopButtonLabel, stopButtonTitle, stopButtonDisabled, type StopState,
+    } from '$lib/utils/stopButton';
 
     interface ToolCall {
         tool: string;
@@ -71,7 +74,7 @@
     // Stop used to be fire-and-forget: the envelope said OK while the payload
     // could say error/no_active_loop, and a miss looked identical to a hit.
     // The handler answers {status: stopped | no_active_loop | error}.
-    let stopState = $state<'idle' | 'stopping' | 'miss' | 'error'>('idle');
+    let stopState = $state<StopState>('idle');
     let stopNote = $state('');
     // A new round invalidates a stale 'miss' from the previous one: the loop
     // is demonstrably running again, so the button returns to a live Stop.
@@ -92,15 +95,18 @@
     });
     async function requestStop(e: Event) {
         e.stopPropagation();
-        if (stopState === 'stopping') return;
-        stopState = 'stopping';
+        const action = pressAction(stopState);
+        if (action === 'ignore') return;
+        // Second press on a run that is already stopping: abort the model call now.
+        const force = action === 'kill';
+        stopState = force ? 'killing' : 'stopping';
         try {
             const res: any = await sendCommand('interrupt_agent', {
-                agent_id: agentId, conversation_id: conversationId,
+                agent_id: agentId, conversation_id: conversationId, force,
             });
             const st = res?.status || res?.payload?.status;
             if (st === 'stopped') {
-                stopNote = 'stopping…';
+                stopNote = force ? 'killing…' : 'stopping…';
             } else if (st === 'no_active_loop') {
                 stopState = 'miss';
                 stopNote = 'no active loop';
@@ -196,10 +202,10 @@
         {#if isLive && conversationId && !expanded}
             <button
                 class="stop-btn"
-                title={stopNote || 'Stop agent'}
-                disabled={stopState === 'stopping'}
+                title={stopButtonTitle(stopState, stopNote)}
+                disabled={stopButtonDisabled(stopState)}
                 onclick={requestStop}
-            >{stopState === 'stopping' ? 'Stopping…' : stopState === 'miss' ? 'No active loop' : 'Stop'}</button>
+            >{stopButtonLabel(stopState)}</button>
         {/if}
 
         {#if expanded}
@@ -272,10 +278,10 @@
                     <div class="stop-footer">
                         <button
                             class="stop-btn"
-                            title={stopNote || 'Stop agent'}
-                            disabled={stopState === 'stopping'}
+                            title={stopButtonTitle(stopState, stopNote)}
+                            disabled={stopButtonDisabled(stopState)}
                             onclick={requestStop}
-                        >{stopState === 'stopping' ? 'Stopping…' : stopState === 'miss' ? 'No active loop' : 'Stop'}</button>
+                        >{stopButtonLabel(stopState)}</button>
                         {#if stopState === 'error'}
                             <span class="stop-note error">{stopNote}</span>
                         {/if}

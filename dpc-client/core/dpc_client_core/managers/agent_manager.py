@@ -84,6 +84,8 @@ class DpcAgentManager:
         self._agent_display_name: str | None = None  # Cached display name from config.json
         self._stop_event = threading.Event()
         self._interrupt_events: Dict[str, asyncio.Event] = {}
+        # Second press: abandon the model call in flight (loop.py _chat_unless_killed).
+        self._kill_events: Dict[str, asyncio.Event] = {}
 
         # Get firewall reference from CoreService
         self.firewall = getattr(service, "firewall", None)
@@ -929,11 +931,19 @@ class DpcAgentManager:
         """True while this agent runs a loop in that conversation."""
         return conversation_id in self._interrupt_events
 
-    def interrupt(self, conversation_id: str) -> bool:
-        """Signal the active agent loop to stop after the current LLM call/tool finishes."""
+    def interrupt(self, conversation_id: str, kill: bool = False) -> bool:
+        """Signal the active agent loop to stop after the current LLM call/tool finishes.
+
+        With `kill` the model call in flight is cancelled at once instead.
+        """
         ev = self._interrupt_events.get(conversation_id)
         if ev:
             ev.set()
+            if kill:
+                kev = self._kill_events.get(conversation_id)
+                if kev:
+                    kev.set()
+                    log.info("Kill signal sent for conversation %s", conversation_id)
             log.info("Interrupt signal sent for conversation %s", conversation_id)
             return True
         log.warning("No active agent loop for conversation %s", conversation_id)
@@ -1152,6 +1162,8 @@ class DpcAgentManager:
             try:
                 interrupt_ev = asyncio.Event()
                 self._interrupt_events[conversation_id] = interrupt_ev
+                kill_ev = asyncio.Event()
+                self._kill_events[conversation_id] = kill_ev
                 response = await agent.process(
                     message=message,
                     conversation_id=conversation_id,
@@ -1168,6 +1180,7 @@ class DpcAgentManager:
                     message_source=message_source,
                     chat_context=chat_context,
                     stop_event=interrupt_ev,
+                    kill_event=kill_ev,
                     reader_identity={
                         "agent_id": self.agent_id or "",
                         "display_name": agent_display_name,
@@ -1178,6 +1191,7 @@ class DpcAgentManager:
                 )
             finally:
                 self._interrupt_events.pop(conversation_id, None)
+                self._kill_events.pop(conversation_id, None)
                 # ADR-022 Task 07: update daily token counter
                 last_usage = getattr(agent, '_last_usage', None)
                 if last_usage and quota_limit:
