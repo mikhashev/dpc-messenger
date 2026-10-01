@@ -64,7 +64,7 @@ _FLAG_KEYS = (
     "gguf_path", "binary_path", "n_ctx", "cache_type_k", "cache_type_v",
     "n_gpu_layers", "flash_attn", "mmproj", "spec_type", "spec_draft_n_max",
     "n_batch", "n_ubatch", "ctx_checkpoints", "checkpoint_min_step",
-    "n_parallel", "kv_unified", "cache_reuse", "cache_ram_mib",
+    "n_parallel", "kv_unified", "cache_reuse", "cache_ram_mib", "image_max_tokens",
     "slot_save_path", "jinja",
     "extra_args",
 )
@@ -216,6 +216,11 @@ class LlamaServerProvider(DeepSeekProvider):
             )
         self._reasoning_budget = config.get("reasoning_budget_tokens")
         self._mmproj = config.get("mmproj")
+        # What the alias asked the child to cap one image at, or None when the
+        # flag is not sent. It is the configured value, not a read-back of what
+        # the child kept; the pixel limit that follows from it is not computed
+        # here.
+        self.image_max_tokens = config.get("image_max_tokens")
         self.top_p = config.get("top_p")
         self.top_k = config.get("top_k")
         self._temperature_explicit = config.get("temperature")

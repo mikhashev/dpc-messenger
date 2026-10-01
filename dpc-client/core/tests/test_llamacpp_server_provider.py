@@ -154,6 +154,16 @@ class TestConstruction:
         assert second.supervisor is not first.supervisor
         assert _ACTIVE_SUPERVISORS["local_qwen38"] is second.supervisor
 
+    def test_the_configured_image_token_cap_is_readable_and_unset_is_none(self):
+        assert _provider().image_max_tokens is None
+        assert _provider(image_max_tokens=16384).image_max_tokens == 16384
+
+    def test_changing_the_image_token_cap_is_a_flag_change_and_does_not_adopt(self):
+        first = _provider()
+        first.supervisor.props = {"total_slots": 1}
+        second = _provider(image_max_tokens=8192)
+        assert second.supervisor is not first.supervisor
+
 
 class TestDrainingBeforeReplacement:
     """Mike's rule, 2026-08-22: a settings save applies at once, but the child

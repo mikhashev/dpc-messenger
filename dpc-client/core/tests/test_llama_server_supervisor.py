@@ -314,6 +314,25 @@ class TestTheKvLadder:
         off = _sup(cache_reuse=0).build_command(BINARY, 1)
         assert off[off.index("--cache-reuse") + 1] == "0"
 
+    def test_the_image_token_cap_is_sent_only_when_named(self):
+        """Unset means the child reads the limit from the model (4082 tokens on
+        the Qwen3.8 projector, b11146); naming it raises or lowers it."""
+        cmd = _sup(image_max_tokens=16384).build_command(BINARY, 1)
+        assert cmd[cmd.index("--image-max-tokens") + 1] == "16384"
+        bare = _sup().build_command(BINARY, 1)
+        assert "--image-max-tokens" not in bare
+        assert "--image-min-tokens" not in cmd
+
+    @pytest.mark.parametrize("bad", [0, -1, True, "many", 2.5, "", [8192]])
+    def test_a_bad_image_token_cap_is_refused_by_name(self, bad):
+        with pytest.raises(LlamaServerError, match="image_max_tokens"):
+            _sup(image_max_tokens=bad).build_command(BINARY, 1)
+
+    def test_a_whole_number_in_another_dress_is_accepted(self):
+        for ok in ("8192", 8192.0):
+            cmd = _sup(image_max_tokens=ok).build_command(BINARY, 1)
+            assert cmd[cmd.index("--image-max-tokens") + 1] == "8192"
+
     def test_cache_ram_and_slot_save_path(self):
         cmd = _sup(cache_ram_mib=24576, slot_save_path="D:/kv").build_command(BINARY, 1)
         assert cmd[cmd.index("--cache-ram") + 1] == "24576"

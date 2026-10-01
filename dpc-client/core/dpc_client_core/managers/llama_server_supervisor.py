@@ -105,6 +105,15 @@ DEFAULTS: Dict[str, Any] = {
     # 0 is expressible and means off, which is why the guard tests None.
     "cache_reuse": None,
     "cache_ram_mib": None,
+    # The most tokens one image may take in the vision encoder; None = the flag
+    # is not sent and the child reads the limit from the model file. On b11146
+    # with the Qwen3.8 projector that default is 4082 tokens, one token being a
+    # 32x32 px cell (patch 16 x merge 2), so anything above ~4.2 MP reaches the
+    # model downsized (measured 2026-09-30, board card
+    # AN-IMAGE-REACHES-THE-VISION-MODEL-THROUGH-FOUR-DOORS). Named after the
+    # flag, `--image-max-tokens`. The floor, `--image-min-tokens`, is not a key
+    # here: it has its own card and nothing measured it yet.
+    "image_max_tokens": None,
     # What a loaded context costs beyond weights and attention-KV, in MiB. None
     # uses the figure below, which was measured on one model: every term in it
     # is model-shaped, so an alias serving a different model owns its own.
@@ -123,6 +132,25 @@ class LlamaServerError(RuntimeError):
         tail = "".join(f"\n  | {line}" for line in (log_lines or [])[-12:])
         super().__init__(f"{message}{tail}")
         self.log_lines = log_lines or []
+
+
+def _positive_int(name: str, value: Any) -> int:
+    """A count the child would otherwise reject after a 30 GB load attempt.
+
+    A bool is an int in Python and `str(True)` is not a number; a float or a
+    string that is not a whole number would reach the binary as an argument
+    error. Refuse them here, where the alias is named."""
+    if isinstance(value, bool):
+        raise LlamaServerError(f"{name} must be a positive whole number, got {value!r}")
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise LlamaServerError(f"{name} must be a positive whole number, got {value!r}") from None
+    if n != value and str(n) != str(value).strip():
+        raise LlamaServerError(f"{name} must be a positive whole number, got {value!r}")
+    if n < 1:
+        raise LlamaServerError(f"{name} must be a positive whole number, got {value!r}")
+    return n
 
 
 def _flash_attn_value(value: Any) -> Optional[str]:
@@ -609,6 +637,8 @@ class LlamaServerSupervisor:
             cmd += ["--cache-reuse", str(c["cache_reuse"])]
         if c["cache_ram_mib"] is not None:
             cmd += ["--cache-ram", str(c["cache_ram_mib"])]
+        if c["image_max_tokens"] is not None:
+            cmd += ["--image-max-tokens", str(_positive_int("image_max_tokens", c["image_max_tokens"]))]
         if c["slot_save_path"]:
             cmd += ["--slot-save-path", str(c["slot_save_path"])]
         # `--jinja` is the binary's default, so emitting nothing for False left
@@ -837,7 +867,7 @@ class LlamaServerSupervisor:
             "llama-server[%s] starting on :%s (binary=%s, n_ctx=%s, context_window=%s, "
             "kv=%s, flash_attn=%s, cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, "
             "n_ubatch=%s, cache_reuse=%s, spec_type=%s, spec_draft_n_max=%s, "
-            "vram_overhead=%s)",
+            "image_max_tokens=%s, vram_overhead=%s)",
             self.alias, self.port, binary if binary is not None else "unknown",
             n_ctx, _fmt_knob(window),
             cache_type or "configured",
@@ -852,6 +882,7 @@ class LlamaServerSupervisor:
             _fmt_knob(self.config.get("cache_reuse")),
             _fmt_knob(self.config.get("spec_type")),
             _fmt_knob(self.config.get("spec_draft_n_max")),
+            _fmt_knob(self.config.get("image_max_tokens")),
             f"{self._overhead_mib()} MiB"
             + ("" if self.config.get("vram_overhead_mib") else " (measured elsewhere)"),
         )
