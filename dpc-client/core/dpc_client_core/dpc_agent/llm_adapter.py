@@ -30,6 +30,8 @@ from ..node_ledger import (
     stated_thinking_source,
     usage_row,
 )
+from ..providers.base import image_pixel_limit_of
+from ..utils.image_utils import normalise_flat_images, normalise_turn_images
 from .pricing import COST_FIELDS, get_billing_model, price_call, usd_figure
 
 if TYPE_CHECKING:
@@ -710,6 +712,9 @@ class DpcLlmAdapter:
                 f"images={len(images)} ({image_sizes} base64 chars)"
             )
 
+            images, image_notes = await normalise_flat_images(images, image_pixel_limit_of(provider))
+            for image_note in image_notes:
+                log.info("Image for '%s': %s", provider.alias, image_note)
             response = await provider.generate_with_vision(
                 prompt=prompt,
                 images=images,
@@ -828,6 +833,10 @@ class DpcLlmAdapter:
             len(messages), len(anthropic_messages), len(anthropic_tools),
         )
 
+        anthropic_messages, image_notes = await normalise_turn_images(
+            anthropic_messages, image_pixel_limit_of(provider))
+        for image_note in image_notes:
+            log.info("Image for '%s': %s", getattr(provider, "alias", "?"), image_note)
         gw_kwargs: Dict[str, Any] = {}
         if reasoning_effort is not None:
             gw_kwargs["reasoning_effort"] = reasoning_effort

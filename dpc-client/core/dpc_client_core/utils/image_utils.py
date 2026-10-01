@@ -4,10 +4,15 @@ Image processing utilities for thumbnail generation and dimension extraction.
 Uses Pillow (PIL) for cross-platform image handling.
 """
 
+import asyncio
+import hashlib
 import logging
+import math
+import threading
+from collections import OrderedDict
 from pathlib import Path
-from typing import Dict
-from PIL import Image
+from typing import Any, Dict, List, Optional, Tuple
+from PIL import Image, ImageOps
 from io import BytesIO
 import base64
 
@@ -101,3 +106,245 @@ def validate_image_format(image_path: Path) -> bool:
             return img.format.lower() in ("png", "jpeg", "jpg", "webp", "gif")
     except Exception:
         return False
+
+
+# --- One decision about an image on its way to a model ----------------------
+# Called from every function on llm_manager.IMAGE_ENTRY_POINTS of kind
+# provider_call or chat_entry; the test beside that list checks it.
+
+_MB = 1024 * 1024
+_ORIENTATION_TAG = 0x0112
+_JPEG_QUALITY = 95
+_CACHE_MAX_ENTRIES = 16
+_CACHE_MAX_BYTES = 64 * _MB
+
+
+class ImageTooLarge(ValueError):
+    """The image weighs more than `[vision] max_image_size_mb` allows."""
+
+
+def exceeds_byte_cap(size_bytes: int, max_bytes: Optional[int]) -> bool:
+    """The one comparison behind `[vision] max_image_size_mb`.
+
+    The P2P door (`service.py`), the gateway door (`gateway.py`) and
+    `normalise_image` all ask this, so the byte cap is decided in one place.
+    `None` means no cap is asked for here."""
+    return max_bytes is not None and size_bytes > max_bytes
+
+
+def byte_cap_refusal(size_bytes: int, max_bytes: int) -> str:
+    """The sentence a refusal over the byte cap carries."""
+    return f"Image too large ({round(size_bytes / _MB, 2)}MB). Max: {max_bytes / _MB:g}MB"
+
+
+def _eight_bit(img: Image.Image) -> Image.Image:
+    """A 16-bit, integer or float greyscale image as 8-bit "L".
+
+    16-bit data (I;16, and the I that a 16-bit PNG may open as) is divided by
+    256, which is what the format means; anything else is stretched between its
+    own extrema, because it has no fixed range to divide by."""
+    lo, hi = img.getextrema()
+    if img.mode.startswith("I") and lo >= 0 and hi <= 65535:
+        scale, offset = 1 / 256, 0.0
+    elif hi > lo:
+        scale, offset = 255.0 / (hi - lo), -lo * 255.0 / (hi - lo)
+    else:
+        scale, offset = 0.0, 0.0
+    return img.point(lambda i: i * scale + offset).convert("L")
+
+
+def _normalise(data: bytes, mime: str, pixel_limit: Optional[int]) -> Tuple[bytes, str, Optional[str]]:
+    img = Image.open(BytesIO(data))
+    source_format = (img.format or "").upper()
+    frames = getattr(img, "n_frames", 1) or 1
+    notes: List[str] = []
+
+    orientation = img.getexif().get(_ORIENTATION_TAG, 1)
+    turned = orientation in (2, 3, 4, 5, 6, 7, 8)
+    width, height = img.size
+    if orientation in (5, 6, 7, 8):
+        width, height = height, width  # the limit is read on the upright picture
+    needs_resize = bool(pixel_limit) and width * height > pixel_limit
+    mode_fix = img.mode in ("CMYK", "I", "F", "P", "PA", "1") or img.mode.startswith("I;")
+    if not (frames > 1 or turned or mode_fix or needs_resize):
+        return data, mime, None
+
+    if frames > 1:
+        notes.append(f"frame 1 of {frames}")
+    img.seek(0)
+    img.load()
+    if turned:
+        img = ImageOps.exif_transpose(img)
+        notes.append("turned upright by its EXIF orientation")
+    mode = img.mode
+    has_alpha = mode in ("RGBA", "LA", "PA") or (mode == "P" and "transparency" in img.info)
+    if mode == "CMYK":
+        img = img.convert("RGB")
+        notes.append("CMYK converted to RGB")
+    elif mode in ("I", "F") or mode.startswith("I;"):
+        img = _eight_bit(img)
+        notes.append("16-bit pixels reduced to 8-bit")
+    elif mode in ("P", "PA"):
+        img = img.convert("RGBA" if has_alpha else "RGB")
+        notes.append(f"palette image converted to {img.mode}")
+    elif mode == "1":
+        img = img.convert("L")
+        notes.append("1-bit image converted to greyscale")
+    elif mode not in ("L", "LA", "RGB", "RGBA"):
+        img = img.convert("RGBA" if has_alpha else "RGB")
+        notes.append(f"{mode} converted to {img.mode}")
+
+    if needs_resize:
+        scale = math.sqrt(pixel_limit / (width * height))
+        new_w, new_h = max(1, int(width * scale)), max(1, int(height * scale))
+        old = img.size
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        notes.append(
+            f"downscaled from {old[0]}x{old[1]} to {new_w}x{new_h} to fit the route's "
+            f"{pixel_limit / 1_000_000:.1f} MP image limit"
+        )
+
+    buffer = BytesIO()
+    if source_format == "JPEG" and img.mode in ("L", "RGB"):
+        img.save(buffer, format="JPEG", quality=_JPEG_QUALITY)
+        out_mime = "image/jpeg"
+    else:
+        img.save(buffer, format="PNG")  # takes L/LA/RGB/RGBA and keeps alpha
+        out_mime = "image/png"
+    return buffer.getvalue(), out_mime, "; ".join(notes) or None
+
+
+def normalise_image(
+    data: bytes, mime: str, pixel_limit: Optional[int] = None, max_bytes: Optional[int] = None,
+) -> Tuple[bytes, str, Optional[str]]:
+    """(bytes, mime, note) for an image about to reach a model; note is None when untouched.
+
+    Order: decode; EXIF orientation applied before any size is read; mode fixes
+    (CMYK, 16-bit and palette; alpha kept only in PNG output); an animated
+    image is cut to frame 1 and the note says so; then, when `pixel_limit` is
+    set and the picture is larger, a LANCZOS downscale to fit with the aspect
+    kept. `pixel_limit=None` means the limit is unknown: nothing is
+    downscaled, and an ordinary JPEG/PNG leaves byte-identical (a picture that
+    needs no change is not decoded past its header).
+
+    The byte cap is judged last, on what would be sent: an image the pixel
+    limit brought under it passes, one still over raises `ImageTooLarge`. A
+    picture Pillow cannot decode comes back as it was, with a note saying so;
+    Pillow never raises out of here."""
+    try:
+        out, out_mime, note = _normalise(data, mime, pixel_limit)
+    except Exception as exc:
+        out, out_mime = data, mime
+        note = f"could not be normalised ({type(exc).__name__}: {exc}); sent as it was"
+    if exceeds_byte_cap(len(out), max_bytes):
+        raise ImageTooLarge(byte_cap_refusal(len(out), max_bytes))
+    return out, out_mime, note
+
+
+_cache: "OrderedDict[Tuple[str, Optional[int], Optional[int]], Tuple[bytes, str, Optional[str]]]" = OrderedDict()
+_cache_bytes = 0
+_cache_lock = threading.Lock()
+
+
+def _normalise_cached(
+    data: bytes, mime: str, pixel_limit: Optional[int], max_bytes: Optional[int],
+) -> Tuple[bytes, str, Optional[str]]:
+    """`normalise_image` behind a small LRU keyed by the sha256 of the original
+    bytes and the limits: an agent's image block is sent again every tool round."""
+    global _cache_bytes
+    key = (hashlib.sha256(data).hexdigest(), pixel_limit, max_bytes)
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            _cache.move_to_end(key)
+            return hit
+    result = normalise_image(data, mime, pixel_limit, max_bytes)
+    with _cache_lock:
+        if key not in _cache:
+            _cache[key] = result
+            _cache_bytes += len(result[0])
+            while _cache and (len(_cache) > _CACHE_MAX_ENTRIES or _cache_bytes > _CACHE_MAX_BYTES):
+                _, evicted = _cache.popitem(last=False)
+                _cache_bytes -= len(evicted[0])
+    return result
+
+
+async def normalise_image_async(
+    data: bytes, mime: str, pixel_limit: Optional[int] = None, max_bytes: Optional[int] = None,
+) -> Tuple[bytes, str, Optional[str]]:
+    """`normalise_image` off the event loop (a 60 MP decode is 0.66 s of CPU), cached."""
+    return await asyncio.to_thread(_normalise_cached, data, mime, pixel_limit, max_bytes)
+
+
+def _raw_base64(value: str) -> bytes:
+    return base64.b64decode(value.split(",", 1)[1] if value.startswith("data:") else value)
+
+
+async def normalise_flat_images(
+    images: List[Dict[str, Any]], pixel_limit: Optional[int], max_bytes: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """The flat `images` list (`{base64, mime_type, ...}`) a vision call takes,
+    and the notes: the same dicts where nothing changed, a copy where something
+    did. An entry with no readable base64 is left for the provider to refuse."""
+    out: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    for index, img in enumerate(images):
+        raw = img.get("base64") if isinstance(img, dict) else None
+        try:
+            data = _raw_base64(raw) if isinstance(raw, str) and raw else None
+        except Exception:
+            data = None
+        if data is None:
+            out.append(img)
+            continue
+        new, mime, note = await normalise_image_async(
+            data, img.get("mime_type") or "image/png", pixel_limit, max_bytes)
+        if note is None:
+            out.append(img)
+            continue
+        out.append({**img, "base64": base64.b64encode(new).decode("ascii"), "mime_type": mime})
+        notes.append(f"image {index + 1}: {note}" if len(images) > 1 else note)
+    return out, notes
+
+
+async def normalise_turn_images(
+    messages: List[Dict[str, Any]], pixel_limit: Optional[int], max_bytes: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Image blocks in Anthropic-shaped turns, in a turn and inside a
+    `tool_result`, normalised; the notes. `messages` itself is not mutated."""
+    notes: List[str] = []
+
+    async def block(b: Any) -> Any:
+        if not isinstance(b, dict):
+            return b
+        if b.get("type") == "image":
+            source = b.get("source")
+            if isinstance(source, dict) and source.get("type") == "base64" \
+                    and isinstance(source.get("data"), str):
+                try:
+                    data = _raw_base64(source["data"])
+                except Exception:
+                    return b
+                new, mime, note = await normalise_image_async(
+                    data, source.get("media_type") or "image/png", pixel_limit, max_bytes)
+                if note is not None:
+                    notes.append(note)
+                    return {**b, "source": {**source, "data": base64.b64encode(new).decode("ascii"),
+                                            "media_type": mime}}
+            return b
+        inner = b.get("content") if b.get("type") == "tool_result" else None
+        if isinstance(inner, list):
+            fixed = [await block(x) for x in inner]
+            if any(f is not o for f, o in zip(fixed, inner)):
+                return {**b, "content": fixed}
+        return b
+
+    out: List[Dict[str, Any]] = []
+    for turn in messages:
+        content = turn.get("content") if isinstance(turn, dict) else None
+        if isinstance(content, list):
+            fixed = [await block(x) for x in content]
+            if any(f is not o for f, o in zip(fixed, content)):
+                turn = {**turn, "content": fixed}
+        out.append(turn)
+    return out, notes

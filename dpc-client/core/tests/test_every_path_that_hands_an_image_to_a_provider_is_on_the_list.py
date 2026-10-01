@@ -124,3 +124,38 @@ def test_a_listed_function_that_stops_handing_the_image_over_is_seen():
         "provider.generate_with_vision(", "provider.generate_response(")
     assert declared() - scan(sources) == {
         ("provider_call", "dpc_agent/llm_adapter.py", "DpcLlmAdapter._chat_with_native_vision")}
+
+
+NORMALISERS = {"normalise_flat_images", "normalise_turn_images"}
+
+
+def _function_node(text: str, qualified: str):
+    owner, _, name = qualified.rpartition(".")
+    tree = ast.parse(text)
+    scope = tree.body
+    if owner:
+        scope = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == owner).body
+    return next(n for n in scope if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+
+
+def _without_normaliser(sources: dict) -> list:
+    """Listed provider_call / chat_entry functions that never call a normaliser."""
+    missing = []
+    for e in IMAGE_ENTRY_POINTS:
+        if e.kind not in ("provider_call", "chat_entry"):
+            continue
+        node = _function_node(sources[e.file], e.function)
+        if not any(isinstance(n, ast.Call) and _called_name(n) in NORMALISERS for n in ast.walk(node)):
+            missing.append(e.id)
+    return missing
+
+
+def test_every_listed_hand_off_to_a_provider_normalises_the_image_first():
+    assert _without_normaliser(package_sources()) == []
+
+
+def test_a_hand_off_that_loses_its_normaliser_is_seen():
+    sources = package_sources()
+    sources["llm_manager.py"] = sources["llm_manager.py"].replace(
+        "await normalise_turn_images(", "await (lambda *a: (a[0], []))(")
+    assert _without_normaliser(sources) == ["IMG-CHAT"]

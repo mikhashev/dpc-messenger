@@ -633,6 +633,19 @@ def anthropic_to_openai_messages(
     return out
 
 
+def image_pixel_limit_of(provider: Any) -> Optional[int]:
+    """`provider.image_pixel_limit()` where it answers with a positive whole
+    number, else None: a provider without the method, a stand-in, or an answer
+    that is not a number all mean the limit is unknown, and unknown never
+    downscales."""
+    getter = getattr(provider, "image_pixel_limit", None)
+    try:
+        value = getter() if callable(getter) else None
+    except Exception:
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 def image_blocks_in_turns(messages: Any) -> int:
     """How many `image` blocks the Anthropic-shaped turns hold: those standing
     in a turn, and those a tool returned inside its `tool_result`.
@@ -894,6 +907,14 @@ class AIProvider:
     def supports_vision(self) -> bool:
         """Returns True if this provider supports vision API (multimodal queries)."""
         return False
+
+    def image_pixel_limit(self) -> Optional[int]:
+        """The most pixels (width x height) one image may carry to this model, or None.
+
+        None means unknown, and an unknown limit never downscales: the picture
+        goes as it is, under the byte cap alone. An instance is one model, so a
+        provider answers for the model it was built for."""
+        return None
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """

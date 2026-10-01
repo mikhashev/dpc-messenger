@@ -175,12 +175,18 @@ async def describe_image(
     if not description.strip():
         return "⚠️ Vision model returned no description."
 
-    return json.dumps({
+    answer = {
         "image_path": str(source),
         "model": used_model,
         "question": question or None,
         "description": description,
-    }, ensure_ascii=False)
+    }
+    image_notes = meta.get("image_notes") if isinstance(meta, dict) else None
+    if image_notes:
+        # What was done to the picture before the model saw it: the answer is
+        # about that picture, not about the file on disk.
+        answer["image_notes"] = [str(n) for n in image_notes]
+    return json.dumps(answer, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

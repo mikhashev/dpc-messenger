@@ -146,6 +146,7 @@ from .providers.base import (
     normalize_reasoning_effort,
     reasoning_word_for,
 )
+from .utils.image_utils import exceeds_byte_cap
 
 if TYPE_CHECKING:
     from .service import CoreService
@@ -561,6 +562,9 @@ class Completion:
     peer names it. `cost_amount` is always None on the peer route: this node
     did not run the call and does not price it, and the host's own cost is not
     on the wire (D3, amendment). `cost_currency` is its unit, None with it.
+    A picture resized or converted on its way to the model (`image_notes` of
+    `LLMManager.query`) is not reported here: neither wire shape has a field
+    for it and the wire formats are not changed, so the note stays in the log.
     """
     request_id: str
     alias: str
@@ -1800,7 +1804,7 @@ def _image_for_the_door(data: Any, mime_type: Any, *, what: str, max_bytes: int)
         raw = base64.b64decode(data, validate=True)
     except (binascii.Error, ValueError) as e:
         raise GatewayError(400, f"{what} is not base64: {e}", "invalid_request_error")
-    if len(raw) > max_bytes:
+    if exceeds_byte_cap(len(raw), max_bytes):
         raise GatewayError(
             413,
             f"{what} is {len(raw) / (1024 * 1024):.2f} MB, past the "

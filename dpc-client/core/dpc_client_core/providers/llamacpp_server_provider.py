@@ -39,7 +39,7 @@ from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
 from ..managers.llama_server_supervisor import LlamaServerSupervisor
-from ..managers.llama_server_supervisor import gguf_effort_dictionary
+from ..managers.llama_server_supervisor import gguf_effort_dictionary, gguf_integer_keys
 
 logger = logging.getLogger(__name__)
 
@@ -761,6 +761,28 @@ class LlamaServerProvider(DeepSeekProvider):
             if isinstance(modal, dict) and modal.get("vision"):
                 return True
         return bool(self._mmproj)
+
+    def image_pixel_limit(self) -> Optional[int]:
+        """image_max_tokens x (patch_size x spatial_merge_size)^2, or None.
+
+        Both factors are read from the mmproj header. With no `image_max_tokens`
+        the child picks its own cap from the model, which is a default nobody
+        configured and not a number this alias can state, so the answer is None
+        and nothing is downscaled. A projector that names no merge size does
+        not merge patches, and counts 1."""
+        try:
+            tokens = int(self.image_max_tokens) if self.image_max_tokens is not None else 0
+        except (TypeError, ValueError):
+            return None
+        if tokens <= 0 or not self._mmproj:
+            return None
+        geometry = gguf_integer_keys(
+            str(self._mmproj), ("clip.vision.patch_size", "clip.vision.spatial_merge_size"))
+        patch = geometry.get("clip.vision.patch_size")
+        if not patch or patch <= 0:
+            return None
+        merge = geometry.get("clip.vision.spatial_merge_size") or 1
+        return tokens * (patch * merge) ** 2
 
     def supports_thinking(self) -> bool:
         return True

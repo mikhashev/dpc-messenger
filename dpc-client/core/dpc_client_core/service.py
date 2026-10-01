@@ -7728,7 +7728,9 @@ class CoreService:
         import mimetypes
         from pathlib import Path
         from datetime import datetime, timezone
-        from .utils.image_utils import generate_thumbnail, get_image_dimensions, validate_image_format
+        from .utils.image_utils import (
+            byte_cap_refusal, exceeds_byte_cap, generate_thumbnail, get_image_dimensions, validate_image_format,
+        )
 
         # Parse data URL
         if not image_base64.startswith("data:"):
@@ -7744,8 +7746,8 @@ class CoreService:
 
         # Check size limit from config (vision.max_image_size_mb)
         max_size_mb = self.settings.get_vision_max_image_size_mb()
-        if size_bytes > max_size_mb * 1024 * 1024:
-            raise ValueError(f"Image too large ({round(size_bytes / (1024 * 1024), 2)}MB). Max: {max_size_mb}MB")
+        if exceeds_byte_cap(size_bytes, max_size_mb * 1024 * 1024):
+            raise ValueError(byte_cap_refusal(size_bytes, max_size_mb * 1024 * 1024))
 
         # Save to temporary file for processing
         suffix = Path(filename).suffix or ".png"

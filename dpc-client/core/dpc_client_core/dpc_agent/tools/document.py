@@ -1012,17 +1012,24 @@ def _render_djvu_page(
         ), None
 
 
-def _cache_path(ctx: ToolContext, digest: str, page: int, model: str, dpi: int) -> Path:
+def _cache_path(
+    ctx: ToolContext, digest: str, page: int, model: str, dpi: int,
+    pixel_limit: Optional[int] = None,
+) -> Path:
     """Where a page already read by the model is kept.
 
     Keyed by the file's own hash rather than its name, so the same document
-    read from two places is read once, and by model, dpi and prompt version,
-    because changing any of those changes the answer.
+    read from two places is read once, and by model, dpi, prompt version and
+    the model's pixel limit, because changing any of those changes the answer.
+    An unknown limit adds nothing to the key, so entries written before the
+    limit existed still hold.
     """
     root = getattr(ctx, "agent_root", None) or Path.home() / ".dpc"
     folder = Path(root) / "state" / "doc_cache"
     folder.mkdir(parents=True, exist_ok=True)
     stamp = f"{digest[:16]}-p{page}-{model}-{dpi}-v{VISION_PROMPT_VERSION}"
+    if pixel_limit:
+        stamp += f"-px{pixel_limit}"
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in stamp)
     return folder / f"{safe}.json"
 
@@ -1080,6 +1087,20 @@ def _vision_failed(
         entry["error"] = error
 
 
+def _pixel_limit_for(llm: Any, model: Optional[str]) -> Optional[int]:
+    """The pixel limit of the model a page picture goes to, or None when unknown.
+
+    The page picture reaches the provider through `LLMManager.query`, which
+    normalises it to this limit; the allocator guard `MAX_RENDER_MEGAPIXELS` is
+    a different number and stays in the renderers."""
+    ask = getattr(llm, "image_pixel_limit_for", None)
+    try:
+        value = ask(model) if callable(ask) else None
+    except Exception:
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 async def _read_page_with_vision(
     ctx: ToolContext,
     render: Callable[[int, int], Tuple[Optional[bytes], Optional[str], Optional[str]]],
@@ -1105,7 +1126,9 @@ async def _read_page_with_vision(
     had_layer = entry.get("route") == "text"
     layer_chars = entry.get("chars") or 0
     alias = model or "default"
-    cache = _cache_path(ctx, digest, number, alias, dpi)
+    llm = getattr(getattr(ctx, "dpc_service", None), "llm_manager", None)
+    pixel_limit = _pixel_limit_for(llm, model)
+    cache = _cache_path(ctx, digest, number, alias, dpi, pixel_limit)
     if cache.exists():
         try:
             cached = json.loads(cache.read_text(encoding="utf-8"))
@@ -1113,6 +1136,8 @@ async def _read_page_with_vision(
             if cached.get("render_note"):
                 # the reduced dpi is a fact about the bitmap the model saw, so it travels
                 note = f"{note}; {cached['render_note']}"
+            if cached.get("image_notes"):
+                note = f"{note}; {'; '.join(cached['image_notes'])}"
             entry.update(
                 route="vision", text=cached["text"], chars=len(cached["text"]),
                 model=cached.get("model"), cached=True, seconds=0.0, note=note,
@@ -1121,7 +1146,6 @@ async def _read_page_with_vision(
         except Exception as exc:
             log.debug("unreadable cache entry %s: %s", cache, exc)
 
-    llm = getattr(getattr(ctx, "dpc_service", None), "llm_manager", None)
     if llm is None:
         msg = f"page {number} needs an eye and no model is reachable from here"
         _vision_failed(entry, had_layer, "no_model_reachable", msg, msg)
@@ -1186,6 +1210,9 @@ async def _read_page_with_vision(
         )
     if render_note:
         note = f"{note}; {render_note}"
+    image_notes = [str(n) for n in (meta.get("image_notes") or [])] if isinstance(meta, dict) else []
+    if image_notes:
+        note = f"{note}; {'; '.join(image_notes)}"
     entry.update(
         route="vision", text=text, chars=len(text), model=used, cached=False,
         seconds=seconds, note=note,
@@ -1193,7 +1220,8 @@ async def _read_page_with_vision(
     try:
         cache.write_text(
             json.dumps(
-                {"text": text, "model": used, "seconds": seconds, "render_note": render_note},
+                {"text": text, "model": used, "seconds": seconds, "render_note": render_note,
+                 "image_notes": image_notes},
                 ensure_ascii=False,
             ),
             encoding="utf-8",

@@ -20,7 +20,8 @@ from .providers import (
 )
 from .node_ledger import OUTPUT_INCLUDES_THINKING, THINKING_SOURCES
 from .dpc_agent.pricing import COST_FIELDS
-from .providers.base import image_blocks_in_turns, normalize_reasoning_effort
+from .providers.base import image_blocks_in_turns, image_pixel_limit_of, normalize_reasoning_effort
+from .utils.image_utils import normalise_flat_images, normalise_turn_images
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,14 @@ def entry_point_for(provider: Any, *, tools: bool, streaming: bool, images: bool
     return "generate_response", None if images else getattr(provider, "generate_response", None)
 
 
+def _log_image_notes(alias: str, notes: List[str]) -> None:
+    """What was done to a picture is told to the caller where the caller has a
+    field for it (`image_notes` in the metadata); the gateway's Completion has
+    none, so there it stays in this log line."""
+    for note in notes:
+        logger.info("Image for provider '%s': %s", alias, note)
+
+
 class ImageEntryPoint(NamedTuple):
     """One function through which an image meets a model provider, or asks to.
 
@@ -214,7 +223,8 @@ IMAGE_ENTRY_POINTS: Tuple[ImageEntryPoint, ...] = (
                     "the agent's turns, image blocks and all, straight to generate_with_tools"),
     ImageEntryPoint("IMG-PEER-SEND", "wire", "p2p_coordinator.py",
                     "P2PCoordinator.request_inference_from_peer",
-                    "the sender's one place that writes `images` into a REMOTE_INFERENCE_REQUEST"),
+                    "the sender's one place that writes `images` into a REMOTE_INFERENCE_REQUEST; "
+                    "not normalised here, the serving peer owns its limit and applies it in its own LLMManager.query"),
     ImageEntryPoint("IMG-GATE-GATEWAY-IMAGES", "gate", "gateway.py",
                     "Gateway._refuse_images_the_alias_cannot_take",
                     "the gateway's refusal of images beside tools"),
@@ -765,29 +775,9 @@ class LLMManager:
                       model, MODEL_CONTEXT_WINDOWS['default'])
         return MODEL_CONTEXT_WINDOWS["default"]
 
-    async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False,
-                    images: Optional[List[Dict[str, Any]]] = None, **kwargs):
-        """
-        Routes a query to the specified provider, or auto-selects based on query type.
-
-        Auto-selection logic (when provider_alias is None):
-        - If images present and vision_provider configured → use vision_provider
-        - If images present and no vision_provider → find first vision-capable provider
-        - If no images → use default_provider
-
-        Args:
-            prompt: The prompt to send to the LLM
-            provider_alias: Optional provider alias to use (overrides auto-selection)
-            return_metadata: If True, returns dict with 'response', 'provider', 'model', 'tokens_used', 'model_max_tokens'. If False, returns just the response string.
-            images: Optional list of image dicts for vision API (multimodal queries). Each dict should contain:
-                - path: str (absolute path to image file)
-                - mime_type: str (e.g., "image/png")
-                - base64: str (optional, if already encoded)
-            **kwargs: Additional parameters passed to vision API (temperature, max_tokens, etc.)
-
-        Returns:
-            str if return_metadata=False, dict if return_metadata=True
-        """
+    def _alias_for_query(self, provider_alias: str | None, images: bool) -> str:
+        """The alias `query` will use: the one named, else the vision provider or the
+        first vision-capable one for images, else the default. Raises as `query` does."""
         # Auto-select provider based on query type
         if provider_alias is None:
             if images:
@@ -818,8 +808,42 @@ class LLMManager:
 
         if alias_to_use not in self.providers:
             raise ValueError(f"Provider '{alias_to_use}' is not configured or failed to load.")
+        return alias_to_use
 
+    def image_pixel_limit_for(self, provider_alias: str | None) -> Optional[int]:
+        """The pixel limit of the model an image `query` to `provider_alias` reaches,
+        or None when it is unknown or no provider can take the image."""
+        try:
+            return image_pixel_limit_of(self.providers[self._alias_for_query(provider_alias, True)])
+        except (ValueError, KeyError):
+            return None
+
+    async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False,
+                    images: Optional[List[Dict[str, Any]]] = None, **kwargs):
+        """
+        Routes a query to the specified provider, or auto-selects based on query type.
+
+        Auto-selection logic (when provider_alias is None):
+        - If images present and vision_provider configured → use vision_provider
+        - If images present and no vision_provider → find first vision-capable provider
+        - If no images → use default_provider
+
+        Args:
+            prompt: The prompt to send to the LLM
+            provider_alias: Optional provider alias to use (overrides auto-selection)
+            return_metadata: If True, returns dict with 'response', 'provider', 'model', 'tokens_used', 'model_max_tokens'. If False, returns just the response string.
+            images: Optional list of image dicts for vision API (multimodal queries). Each dict should contain:
+                - path: str (absolute path to image file)
+                - mime_type: str (e.g., "image/png")
+                - base64: str (optional, if already encoded)
+            **kwargs: Additional parameters passed to vision API (temperature, max_tokens, etc.)
+
+        Returns:
+            str if return_metadata=False, dict if return_metadata=True
+        """
+        alias_to_use = self._alias_for_query(provider_alias, bool(images))
         provider = self.providers[alias_to_use]
+        image_notes: List[str] = []
 
         # Check if vision is requested but provider doesn't support it
         if images:
@@ -828,6 +852,8 @@ class LLMManager:
                                f"Use a vision-capable model like gpt-4o, gpt-4-turbo, or claude-3+.")
             logger.info("Routing vision query to provider '%s' with model '%s' (%d images)",
                        alias_to_use, provider.model, len(images))
+            images, image_notes = await normalise_flat_images(images, image_pixel_limit_of(provider))
+            _log_image_notes(alias_to_use, image_notes)
             response = await provider.generate_with_vision(prompt, images, **kwargs)
         else:
             logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
@@ -901,6 +927,7 @@ class LLMManager:
                 "response_tokens": response_tokens,
                 "model_max_tokens": context_window,
                 "vision_used": bool(images),  # Indicate if vision API was used
+                "image_notes": image_notes,  # what was done to the pictures before the model saw them
                 "thinking": thinking_content,  # Thinking/reasoning content (if any)
                 "thinking_tokens": thinking_tokens,  # Tokens used for thinking
                 # ... and who made that number: the engine where it reported the
@@ -1003,6 +1030,10 @@ class LLMManager:
                     "on this path."
                 )
             effort_kwargs["reasoning_effort"] = reasoning_effort
+        image_notes: List[str] = []
+        if image_count:
+            messages, image_notes = await normalise_turn_images(messages, image_pixel_limit_of(provider))
+            _log_image_notes(alias_to_use, image_notes)
         if path == "generate_with_tools":
             logger.info("Routing tool query to provider '%s' with model '%s' (%d tools)",
                         alias_to_use, provider.model, len(tools))
@@ -1075,6 +1106,7 @@ class LLMManager:
                 "response_tokens": response_tokens,
                 "model_max_tokens": self.get_context_window(provider.model),
                 "vision_used": image_count > 0,  # a refusal above leaves no other way here
+                "image_notes": image_notes,
                 "thinking": thinking_content,
                 "thinking_tokens": thinking_tokens,
                 "thinking_source": thinking_source,  # `query`'s rule, same two copies

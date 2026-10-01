@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .llama_server_fetcher import DPC_HOME, ensure_binary, find_cuda_backend, install_root
 
@@ -297,6 +297,67 @@ def _total_vram_mib() -> Optional[int]:
 
 
 _GGUF_VALUE_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+
+_GGUF_INT_FORMATS = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 10: "<Q", 11: "<q"}
+_gguf_int_cache: Dict[Tuple[str, int, int, Tuple[str, ...]], Dict[str, int]] = {}
+
+
+def gguf_integer_keys(path: str, keys: Iterable[str]) -> Dict[str, int]:
+    """The integer metadata `keys` a GGUF header holds, by key; a key it lacks is absent.
+
+    Header only, no tensor is read. An unreadable file answers `{}`. Cached per
+    path, mtime, size and key set, because a provider asks on every image."""
+    wanted = tuple(sorted(set(keys)))
+    try:
+        info = os.stat(path)
+    except OSError:
+        return {}
+    cache_key = (path, info.st_mtime_ns, info.st_size, wanted)
+    if cache_key in _gguf_int_cache:
+        return _gguf_int_cache[cache_key]
+    found: Dict[str, int] = {}
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF" or struct.unpack("<I", f.read(4))[0] < 2:
+                return {}
+            _, n_kv = struct.unpack("<QQ", f.read(16))
+
+            def read_str():
+                n = struct.unpack("<Q", f.read(8))[0]
+                return f.read(n).decode("utf-8", errors="replace")
+
+            for _ in range(n_kv):
+                key = read_str()
+                t = struct.unpack("<I", f.read(4))[0]
+                if t in _GGUF_INT_FORMATS:
+                    fmt = _GGUF_INT_FORMATS[t]
+                    value = struct.unpack(fmt, f.read(struct.calcsize(fmt)))[0]
+                    if key in wanted:
+                        found[key] = value
+                elif t == 8:
+                    read_str()
+                elif t == 9:
+                    et = struct.unpack("<I", f.read(4))[0]
+                    cnt = struct.unpack("<Q", f.read(8))[0]
+                    if et == 8:
+                        for _ in range(cnt):
+                            read_str()
+                    elif et in _GGUF_VALUE_SIZES:
+                        f.seek(_GGUF_VALUE_SIZES[et] * cnt, 1)
+                    else:
+                        break
+                elif t in _GGUF_VALUE_SIZES:
+                    f.seek(_GGUF_VALUE_SIZES[t], 1)
+                else:
+                    break
+                if len(found) == len(wanted):
+                    break
+    except Exception as e:
+        logger.warning("GGUF header unreadable in %s: %s", path, e)
+        return {}
+    _gguf_int_cache[cache_key] = found
+    return found
 
 
 def gguf_effort_dictionary(path: str) -> Optional[Tuple[Tuple[str, ...], Optional[str]]]:
