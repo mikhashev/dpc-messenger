@@ -1428,10 +1428,35 @@
                         </div>
                         <p class="help-text">
                           The vision projector file passed to llama-server as --mmproj. With it
-                          the server serves images at full context; without it the alias is
-                          text-only. The projector's VRAM is not counted by the admission
-                          arithmetic (see VRAM overhead below); its fit beside a q8_0 KV cache
-                          is unmeasured.
+                          the server accepts images; without it the alias is text-only. The
+                          projector's own VRAM is not counted by the admission arithmetic (see
+                          VRAM overhead below), so leave room for it.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="image-max-tokens-{i}">Image token cap (optional)</label>
+                        <input
+                          id="image-max-tokens-{i}"
+                          type="number"
+                          min="1"
+                          step="256"
+                          value={editedConfig.providers[i].image_max_tokens ?? ''}
+                          placeholder="server default (about 4096)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].image_max_tokens = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          The most tokens one image may take (--image-max-tokens). Empty keeps the
+                          server's own limit, about 4096 image tokens; larger pages arrive
+                          downsized. A higher cap reads small print better, but each image takes
+                          longer and uses more VRAM. It only matters when an mmproj is set above.
+                          To measure it, send the same page at two caps and compare the time per
+                          page and the child's VRAM. Changing it restarts the server child.
                         </p>
                       </div>
 
@@ -1456,10 +1481,11 @@
                           <strong>one pool shared by every slot</strong> (with Unified KV pool on,
                           the default), not a per-conversation limit — «Context Window» below is
                           what a single conversation may occupy, and nothing derives one from the
-                          other; two agents at 137 616 + 139 819 tokens did not fit the default
-                          pool, and the parked one was re-read from zero. Costs VRAM — ≈18 KiB per
-                          cell with q4_0 KV, computed for qwen3.8-27B (16 attention layers × 1024
-                          wide); other models differ.
+                          other. If the conversations running at once add up to more than the
+                          pool, the one that is parked loses its cache and is re-read from zero.
+                          Costs VRAM in proportion to the pool: per cell it depends on the
+                          model's attention layers, head width and the KV type, so measure it —
+                          load, read the child's VRAM, change n_ctx, load again, subtract.
                         </p>
                       </div>
 
@@ -1480,12 +1506,12 @@
                           }}
                         />
                         <p class="help-text">
-                          How many tokens the server reads at once inside a prompt (-ub). The gain
-                          needs depth: on one card and one build (RTX PRO 4500, b10472, a 27B at
-                          Q4_K_M) 1024 beat the default 512 by 5.6 % at a 60 000-token prefill and
-                          2048 added 2.8 %, while below ~8 000 tokens it changed nothing. Those are
-                          our numbers, not yours — and it costs VRAM (683 MiB for that step here),
-                          so measure on your own install before raising it.
+                          How many tokens the server reads at once inside a prompt (-ub). A
+                          larger step can speed up reading a long prompt, but it does little
+                          for short ones, and it costs VRAM for the bigger compute buffers. The
+                          gain depends on card, build and model, so measure on your own install
+                          before raising it: send the same long prompt at each value and compare
+                          the child's <code>prompt processing</code> rate and its VRAM.
                         </p>
                       </div>
 
@@ -1508,8 +1534,8 @@
                         <p class="help-text">
                           The logical batch (-b) the micro-batch is cut from, so it is the ceiling
                           on the field above: a micro-batch larger than this is silently clamped.
-                          We measured no effect from changing it on its own — it is here so that
-                          raising the micro-batch past 2048 is possible rather than quietly ignored.
+                          On its own it rarely changes speed — it is here so that raising the
+                          micro-batch past this value is possible rather than quietly ignored.
                         </p>
                       </div>
 
@@ -1535,37 +1561,10 @@
                           default, and with it off one changed line early in a prompt costs a
                           re-read of everything behind it — which matters if your prompt rebuilds
                           anything ahead of the conversation. <strong>The child ignores it</strong>
-                          when an mmproj is loaded, and on models whose KV memory cannot shift —
-                          the qwen3.8 hybrids refuse it even without a projector. On this machine
-                          it has been disabled on every start (47 of 47 in the qwen3.8 27b log,
-                          b10964–b11146). Check the child's start log for
+                          when an mmproj is loaded, and on models whose KV memory cannot shift
+                          (hybrid and recurrent architectures refuse it even without a
+                          projector). Check the child's start log for
                           <code>will be disabled</code> before counting on it.
-                        </p>
-                      </div>
-
-                      <div class="form-group">
-                        <label for="image-max-tokens-{i}">Image token cap (optional)</label>
-                        <input
-                          id="image-max-tokens-{i}"
-                          type="number"
-                          min="1"
-                          step="256"
-                          value={editedConfig.providers[i].image_max_tokens ?? ''}
-                          placeholder="server default (about 4096)"
-                          on:input={(e) => {
-                            if (!editedConfig) return;
-                            const raw = (e.currentTarget as HTMLInputElement).value;
-                            const n = parseInt(raw, 10);
-                            editedConfig.providers[i].image_max_tokens = raw === '' || isNaN(n) ? undefined : n;
-                          }}
-                        />
-                        <p class="help-text">
-                          The most tokens one image may take (--image-max-tokens). Empty keeps the
-                          server's own limit, about 4096 image tokens; larger pages arrive
-                          downsized. A higher cap reads small print better, but each image takes
-                          longer and uses more VRAM. Measured here (Qwen3.8-27B, 2026-10-01): 8192
-                          cost about +0.6 GB and +10 s per page, 16384 about +1.9 GB and +43 s.
-                          Changing it restarts the server child.
                         </p>
                       </div>
 
@@ -1603,14 +1602,14 @@
                                the path exists, not that it is fast. -->
                           <option value="">Auto (q8_0, else q4_0 — by the card's VRAM arithmetic)</option>
                           <option value="f32">f32 — 32 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
-                          <option value="f16">f16 — 16 bit, kernel present (paged to 47–51 tok/s on a full card, b10472)</option>
-                          <option value="bf16">bf16 — 16 bit, kernel present (speed unmeasured here)</option>
-                          <option value="q8_0">q8_0 — 8.5 bit, kernel present (~708–834 tok/s prefill at 130–162K, b10472)</option>
+                          <option value="f16">f16 — 16 bit, kernel present (on a full card the OS may page it to system RAM)</option>
+                          <option value="bf16">bf16 — 16 bit, kernel present</option>
+                          <option value="q8_0">q8_0 — 8.5 bit, kernel present</option>
                           <option value="q5_1">q5_1 — 6 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
                           <option value="q5_0">q5_0 — 5.5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
                           <option value="q4_1">q4_1 — 5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
                           <option value="iq4_nl">iq4_nl — 4.5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
-                          <option value="q4_0">q4_0 — 4.5 bit — kernel present, and what this fleet runs</option>
+                          <option value="q4_0">q4_0 — 4.5 bit — kernel present, the smallest one that has it</option>
                         </select>
                         <p class="help-text">
                           Auto tries q8_0, then q4_0, admitting a rung when weights + KV +
@@ -1624,10 +1623,9 @@
                           <br />
                           Cost scales with bits per element, so q8_0 is roughly twice q4_0 and
                           f16 roughly four times. <strong>Memory is not the only cost:</strong>
-                          the parser accepts all nine, but the CUDA build (b10472, b11146) has
+                          the parser accepts all nine, but the CUDA builds we checked have
                           attention kernels for four; the five marked «no kernel» move attention
-                          onto the CPU — on 2026-08-22, b10472, <code>iq4_nl</code> took prefill
-                          from ~1200–2500 tok/s to 66 and falling. A kernel is not a measurement:
+                          onto the CPU and prefill falls by an order of magnitude. A kernel is not a measurement:
                           after changing the type, send a long prompt and read the child's
                           <code>prompt processing</code> rate.
                         </p>
@@ -1656,10 +1654,9 @@
                         />
                         <p class="help-text">
                           Empty sends nothing, and the build's own default for <code>-np</code>
-                          is <code>-1</code>, meaning auto — not a fixed number. Auto gave 4
-                          unified slots on older builds (b10472, 2026-08-19); what it gives on the current pin
-                          (b11146) is unmeasured, because this fleet sets 2. The child's own log
-                          prints the count (<code>n_slots = 2</code>); DPC's start line does not.
+                          is <code>-1</code>, meaning auto — not a fixed number. The count auto
+                          picks depends on the build, so read it from the child's own log
+                          (<code>n_slots = …</code>); DPC's start line does not print it.
                           An explicit value is always sent — set 1 to serialize every request
                           through one slot.
                         </p>
@@ -1727,8 +1724,8 @@
                           placeholder="e.g. 10000"
                         />
                         <p class="help-text">
-                          Caps thinking per request. Without it the template's own default
-                          effort (xhigh for qwen3.8) is unbounded — on deep context it can spend the whole
+                          Caps thinking per request. Without it a model whose template defaults
+                          to a high effort is unbounded — on deep context it can spend the whole
                           window thinking and answer nothing.
                         </p>
                       </div>
@@ -1777,35 +1774,30 @@
                                  the menu still matches the binary. -->
                             <option value="">default (draft-mtp)</option>
                             <option value="none">none — plain decoding</option>
-                            <option value="draft-mtp">draft-mtp — head inside the GGUF, measured here</option>
-                            <option value="draft-dflash">draft-dflash — this is DFlash2; loaded on b10809, but kills image requests beside an mmproj</option>
-                            <option value="draft-eagle3">draft-eagle3 — needs a drafter file (unverified here)</option>
-                            <option value="draft-simple">draft-simple — needs a drafter file (unverified here)</option>
-                            <option value="draft-dspark">draft-dspark — needs a drafter file (unverified here)</option>
-                            <option value="ngram-simple">ngram-simple — no drafter file (unverified here)</option>
-                            <option value="ngram-cache">ngram-cache — no drafter file (unverified here)</option>
-                            <option value="ngram-map-k">ngram-map-k — no drafter file (unverified here)</option>
-                            <option value="ngram-map-k4v">ngram-map-k4v — no drafter file (unverified here)</option>
-                            <option value="ngram-mod">ngram-mod — no drafter file (unverified here)</option>
+                            <option value="draft-mtp">draft-mtp — head inside the GGUF, needs a model that ships one</option>
+                            <option value="draft-dflash">draft-dflash — this is DFlash2; may not work beside an mmproj</option>
+                            <option value="draft-eagle3">draft-eagle3 — needs a drafter file</option>
+                            <option value="draft-simple">draft-simple — needs a drafter file</option>
+                            <option value="draft-dspark">draft-dspark — needs a drafter file</option>
+                            <option value="ngram-simple">ngram-simple — no drafter file</option>
+                            <option value="ngram-cache">ngram-cache — no drafter file</option>
+                            <option value="ngram-map-k">ngram-map-k — no drafter file</option>
+                            <option value="ngram-map-k4v">ngram-map-k4v — no drafter file</option>
+                            <option value="ngram-mod">ngram-mod — no drafter file</option>
                           </select>
                           <p class="help-text">
-                            <code>draft-mtp</code> needs nothing else: the head ships inside the
-                            GGUF, and it is the one value measured on this fleet — on 7 547
-                            production tasks depth 4 gave 3.35 tokens per target pass against
-                            depth 3's 2.78. Everything beginning <code>draft-</code> other than
-                            that needs a separate drafter file, named through
-                            <code>--spec-draft-model</code> in Extra flags below — and a drafter
-                            beside an mmproj killed every request carrying an image (measured on
-                            b10684).
+                            <code>draft-mtp</code> needs nothing else when the model ships the
+                            head inside its GGUF. Everything beginning <code>draft-</code> other
+                            than that needs a separate drafter file, named through
+                            <code>--spec-draft-model</code> in Extra flags below. A drafter beside
+                            an mmproj has been seen to break requests that carry an image on some
+                            builds, so try an image request before relying on it.
                             <br />
                             <code>draft-dflash</code> is DFlash2 (upstream never put the 2 in the
-                            value name). It loaded on b10809 (2026-09-10, CPU-only on a spare
-                            port) and has never been benchmarked here, so it belongs on a
-                            text-only alias and its speed against <code>draft-mtp</code> is
-                            <strong>unmeasured</strong>. Everything else is accepted by the
-                            parser and <strong>unverified here</strong>: the parser's list is not
-                            evidence that the path works — the same trap the KV menu above
-                            documents.
+                            value name); prefer a text-only alias for it. The parser accepting a
+                            value is not evidence that the path works — the same trap the KV menu
+                            above documents. Compare speeds by the child's
+                            <code>mean len</code> on your own prompts.
                           </p>
                         </div>
 
@@ -1838,8 +1830,8 @@
                             placeholder="default 999 (all)"
                           />
                           <p class="help-text">
-                            999 puts every context fully on the card, which was measured worth
-                            +11.3 % of prefill here. Lower it only for a card that cannot hold
+                            999 puts every layer on the card, which is normally the fastest
+                            setting for prefill. Lower it only for a card that cannot hold
                             the whole model — a partial split disables fused kernels on the
                             layers that land on the CPU side.
                           </p>
@@ -1900,8 +1892,7 @@
                           />
                           <p class="help-text">
                             A checkpoint snapshots the recurrent state, and its size grows with
-                            depth: ~150 MiB near the start to ~920 MiB at ~196K tokens
-                            (qwen3.8-27B, b11146, child log 2026-09-24…28). So the count decides
+                            depth (the child's log prints each one's size). So the count decides
                             how many parked conversations fit rather than whether resuming works
                             at all.
                           </p>
@@ -1957,11 +1948,11 @@
                             the CUDA context. The admission arithmetic adds it before deciding
                             whether a KV rung fits, so a wrong figure either refuses a
                             configuration that would have run or admits one that does not.
-                            Empty uses 4608 MiB, measured on qwen3.8-27B at 262 144 — every
-                            term in that sum belongs to that model, so a different one should
-                            carry its own. The arithmetic counts only the GGUF path's weights, so
-                            an mmproj and its buffers are not in it — add them here. Measure it
-                            the same way: load, read the process's VRAM, subtract weights and KV. The start line prints which figure
+                            Empty uses a default measured on one model at the default pool —
+                            every term in that sum depends on the model, so a different one
+                            should carry its own. The arithmetic counts only the GGUF path's weights, so
+                            an mmproj and its buffers are not in it — add them here. Measure it:
+                            load, read the process's VRAM, subtract weights and KV. The start line prints which figure
                             was used and whether it came from here. It is not a flag the child is
                             started with, so a running server keeps the figure it began
                             with until it next starts.

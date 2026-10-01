@@ -33,6 +33,12 @@ describe('image_max_tokens field', () => {
   it('is declared on the provider type', () => {
     expect(src).toMatch(/image_max_tokens\?: number;/);
   });
+  it('sits right after the mmproj field, since it only matters with a projector', () => {
+    const labels = [...src.matchAll(/<label for="([a-z-]+)-\{i\}">/g)].map((m) => m[1]);
+    const at = labels.indexOf('mmproj');
+    expect(at).toBeGreaterThan(-1);
+    expect(labels[at + 1]).toBe('image-max-tokens');
+  });
   it('a hand-written key survives the edit copy and the save payload', () => {
     const cfg = { providers: [{ alias: 'a', image_max_tokens: 8192 }] };
     const edited = JSON.parse(JSON.stringify(cfg));
