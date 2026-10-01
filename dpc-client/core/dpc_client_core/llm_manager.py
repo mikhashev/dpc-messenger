@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Callable, Tuple
+from typing import Dict, Any, Optional, List, Callable, NamedTuple, Tuple
 
 from .providers import (
     AIProvider, ModelNotCachedError, parse_thinking_tags,
@@ -175,6 +175,58 @@ def entry_point_for(provider: Any, *, tools: bool, streaming: bool, images: bool
     if streaming and hasattr(provider, "generate_response_stream"):
         return "generate_response_stream", None if images else provider.generate_response_stream
     return "generate_response", None if images else getattr(provider, "generate_response", None)
+
+
+class ImageEntryPoint(NamedTuple):
+    """One function through which an image meets a model provider, or asks to.
+
+    `kind` is how the function touches the picture: `provider_call` calls
+    `generate_with_vision` / `generate_with_tools` itself; `chat_entry` calls
+    the entry point `entry_point_for` chose; `wire` puts `images` into the DPTP
+    request a peer will serve; `gate` only asks `entry_point_for` and hands
+    nothing over. `file` is relative to this package, `function` is
+    `Class.method` or the bare function name.
+    """
+    id: str
+    kind: str
+    file: str
+    function: str
+    path: str
+
+
+# Every place an image reaches a provider, listed so that a normaliser
+# (AN-IMAGE-REACHES-THE-VISION-MODEL-THROUGH-FOUR-DOORS-..., step 3) is hung on
+# all of them and a new one cannot appear unseen: the test beside this list
+# (tests/test_every_path_that_hands_an_image_to_a_provider_is_on_the_list.py)
+# finds them in the source and fails on a difference either way. The doors above
+# (describe_image, read_document, the two pre-analysers) all reach
+# `LLMManager.query`, so they stand under IMG-QUERY and are not listed again.
+IMAGE_ENTRY_POINTS: Tuple[ImageEntryPoint, ...] = (
+    ImageEntryPoint("IMG-QUERY", "provider_call", "llm_manager.py", "LLMManager.query",
+                    "flat `images` to the provider's generate_with_vision"),
+    ImageEntryPoint("IMG-CHAT", "chat_entry", "llm_manager.py", "LLMManager.query_messages",
+                    "image blocks in the turns to the entry point entry_point_for chose"),
+    ImageEntryPoint("IMG-AGENT-VISION", "provider_call", "dpc_agent/llm_adapter.py",
+                    "DpcLlmAdapter._chat_with_native_vision",
+                    "the 1:1 agent's images straight to generate_with_vision, past LLMManager"),
+    ImageEntryPoint("IMG-AGENT-TOOLS", "provider_call", "dpc_agent/llm_adapter.py",
+                    "DpcLlmAdapter._chat_native_tools",
+                    "the agent's turns, image blocks and all, straight to generate_with_tools"),
+    ImageEntryPoint("IMG-PEER-SEND", "wire", "p2p_coordinator.py",
+                    "P2PCoordinator.request_inference_from_peer",
+                    "the sender's one place that writes `images` into a REMOTE_INFERENCE_REQUEST"),
+    ImageEntryPoint("IMG-GATE-GATEWAY-IMAGES", "gate", "gateway.py",
+                    "Gateway._refuse_images_the_alias_cannot_take",
+                    "the gateway's refusal of images beside tools"),
+    ImageEntryPoint("IMG-GATE-GATEWAY-EFFORT", "gate", "gateway.py",
+                    "Gateway._refuse_effort_the_path_cannot_take",
+                    "the gateway's effort check against the path images take"),
+    ImageEntryPoint("IMG-GATE-PEER-HOST", "gate", "p2p_coordinator.py",
+                    "P2PCoordinator.handle_inference_request",
+                    "the host's refusal before serving a peer's images through its serving alias"),
+    ImageEntryPoint("IMG-GATE-MENU", "gate", "service.py", "CoreService.build_p2p_provider_info",
+                    "the menu row's serves_images_with_tools"),
+)
 
 
 def accepts_reasoning_effort(entry_point: Any) -> bool:
