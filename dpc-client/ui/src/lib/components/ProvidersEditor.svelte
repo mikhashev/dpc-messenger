@@ -56,6 +56,7 @@
     n_ubatch?: number;       // micro-batch; unset = the build's 512
     n_batch?: number;        // logical batch, the micro-batch's ceiling
     cache_reuse?: number;    // KV-shift reuse chunk; unset = the build's 0 (off)
+    image_max_tokens?: number; // image-token cap (--image-max-tokens); unset = the server's own (~4096)
     // The rest of the supervisor's DEFAULTS. They were reachable only by hand-
     // editing providers.json, which is how a measured MTP experiment came to be
     // set on the wrong field: `spec_draft_n_max` had no control, so "n=4" landed
@@ -1539,6 +1540,32 @@
                           it has been disabled on every start (47 of 47 in the qwen3.8 27b log,
                           b10964–b11146). Check the child's start log for
                           <code>will be disabled</code> before counting on it.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="image-max-tokens-{i}">Image token cap (optional)</label>
+                        <input
+                          id="image-max-tokens-{i}"
+                          type="number"
+                          min="1"
+                          step="256"
+                          value={editedConfig.providers[i].image_max_tokens ?? ''}
+                          placeholder="server default (about 4096)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].image_max_tokens = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          The most tokens one image may take (--image-max-tokens). Empty keeps the
+                          server's own limit, about 4096 image tokens; larger pages arrive
+                          downsized. A higher cap reads small print better, but each image takes
+                          longer and uses more VRAM. Measured here (Qwen3.8-27B, 2026-10-01): 8192
+                          cost about +0.6 GB and +10 s per page, 16384 about +1.9 GB and +43 s.
+                          Changing it restarts the server child.
                         </p>
                       </div>
 
