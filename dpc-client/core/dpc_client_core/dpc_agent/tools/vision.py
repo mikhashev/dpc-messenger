@@ -28,7 +28,10 @@ from .registry import ToolEntry, ToolContext
 
 log = logging.getLogger(__name__)
 
-_MAX_IMAGE_MB = 20
+# The most bytes describe_image reads from disk and sends to the provider. It does
+# NOT guard decode memory (a 60 MP JPEG can weigh ~1 MB): that is guarded by pixels
+# in utils/image_utils.py (MAX_DECODE_PIXELS).
+_MAX_READ_AND_SEND_MB = 20
 _SUPPORTED_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 
@@ -125,8 +128,8 @@ async def describe_image(
         )
 
     size_mb = source.stat().st_size / (1024 * 1024)
-    if size_mb > _MAX_IMAGE_MB:
-        return f"⚠️ Image too large ({size_mb:.1f} MB > {_MAX_IMAGE_MB} MB)."
+    if size_mb > _MAX_READ_AND_SEND_MB:
+        return f"⚠️ Image too large ({size_mb:.1f} MB > {_MAX_READ_AND_SEND_MB} MB)."
 
     try:
         image_b64 = base64.b64encode(source.read_bytes()).decode("ascii")

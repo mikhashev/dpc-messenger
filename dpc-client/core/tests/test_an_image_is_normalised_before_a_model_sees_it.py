@@ -388,3 +388,61 @@ def test_a_changed_cap_does_not_serve_a_stale_page_and_the_note_reaches_the_answ
     served = dict(entry)
     asyncio.run(D._read_page_with_vision(ctx, render, served, "d" * 64, None, 150))
     assert served["cached"] is True and "downscaled from 9x9" in served["note"]
+
+
+# ------------------------- decode memory is guarded by pixels, not by bytes
+
+def _bmp_header(width, height):
+    """A 54-byte 24-bit BMP header and no pixels: Image.open reads the size
+    from it and nothing is decoded, so a test of 400 MP stays light."""
+    return (b"BM" + struct.pack("<IHHI", 54, 0, 0, 54)
+            + struct.pack("<IiiHHIIiiII", 40, width, height, 1, 24, 0, 0, 0, 0, 0, 0))
+
+
+def test_a_60_mp_jpeg_weighing_about_a_megabyte_is_downscaled_under_a_limit_and_untouched_without_one():
+    data = _encode(Image.new("L", (10_000, 6_000), 128), format="JPEG")
+    assert len(data) < 3 * 1024 * 1024, "the premise: 60 MP, a few MB at most"
+    out, _mime, note = normalise_image(data, "image/jpeg", pixel_limit=1_000_000)
+    width, height = _opened(out).size
+    assert width * height <= 1_000_000 and "downscaled from 10000x6000" in note
+    assert normalise_image(data, "image/jpeg", pixel_limit=None) == (data, "image/jpeg", None)
+
+
+def test_an_image_declared_above_the_ceiling_is_refused_before_any_decode(monkeypatch):
+    # Pillow's own bomb check is switched off, so this is our header check alone.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", None)
+    data = _bmp_header(20_000, 20_000)  # 400 MP
+    with pytest.raises(image_utils.ImageTooManyPixels, match="too many pixels"):
+        normalise_image(data, "image/bmp", pixel_limit=None)
+    with pytest.raises(ImageTooLarge):  # a sibling: one except covers both
+        normalise_image(data, "image/bmp", pixel_limit=1_000_000)
+
+
+def test_pillows_own_bomb_error_is_a_refusal_too_not_a_passthrough():
+    with pytest.raises(image_utils.ImageTooManyPixels):
+        normalise_image(_bmp_header(20_000, 20_000), "image/bmp")
+
+
+def test_the_band_between_pillows_warning_and_the_ceiling_is_processed_quietly(recwarn):
+    data = _bmp_header(12_000, 12_000)  # 144 MP: Pillow warns, we accept
+    assert 89_478_485 < 12_000 * 12_000 < image_utils.MAX_DECODE_PIXELS
+    assert normalise_image(data, "image/bmp", pixel_limit=None) == (data, "image/bmp", None)
+    assert not [w for w in recwarn if issubclass(w.category, Image.DecompressionBombWarning)]
+
+
+def test_the_hand_off_path_does_not_apply_the_door_byte_cap(tmp_path):
+    # 5 MB is the [vision] cap at the door, on the incoming original. After
+    # that the hand-off to a provider passes max_bytes=None: a picture the
+    # door let in is never refused for its weight on its way to the model.
+    import base64 as b64
+    import os
+    big = _encode(Image.frombytes("RGB", (1400, 1400), os.urandom(1400 * 1400 * 3)), format="PNG")
+    assert len(big) > 5 * 1024 * 1024
+    provider = _Seeing(limit=None)
+    manager = _manager(tmp_path, provider)
+    asyncio.run(manager.query(
+        "look", provider_alias="seer", return_metadata=True,
+        images=[{"base64": b64.b64encode(big).decode(), "mime_type": "image/png"}]))
+    assert len(provider.vision_images) == 1
+    with pytest.raises(ImageTooLarge):  # the cap exists, it is just not asked for here
+        normalise_image(big, "image/png", max_bytes=5 * 1024 * 1024)

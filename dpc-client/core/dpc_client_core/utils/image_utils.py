@@ -9,6 +9,7 @@ import hashlib
 import logging
 import math
 import threading
+import warnings
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -119,8 +120,26 @@ _CACHE_MAX_ENTRIES = 16
 _CACHE_MAX_BYTES = 64 * _MB
 
 
+# Decode memory is guarded by pixels, not bytes: a 60 MP JPEG can weigh ~1 MB.
+# Pillow's own default is Image.MAX_IMAGE_PIXELS = 89_478_485: a
+# DecompressionBombWarning above it, a DecompressionBombError above twice that.
+# Mike kept Pillow's value (2026-10-01): up to ~179 MP is processed, above it
+# the image is refused from its header before any decode. We name the numbers
+# here instead of leaning on a library default that can be changed under us.
+PILLOW_WARN_PIXELS = 89_478_485
+MAX_DECODE_PIXELS = 2 * PILLOW_WARN_PIXELS  # ~179 MP, refused above this
+
+
 class ImageTooLarge(ValueError):
     """The image weighs more than `[vision] max_image_size_mb` allows."""
+
+
+class ImageTooManyPixels(ImageTooLarge):
+    """The image declares more pixels than `MAX_DECODE_PIXELS` (~179 MP).
+
+    A sibling of `ImageTooLarge` (so one `except ImageTooLarge` covers both),
+    raised from the header before any decode. Unlike a decode failure it is never
+    passed through: sending the original would hand the bomb to the model."""
 
 
 def exceeds_byte_cap(size_bytes: int, max_bytes: Optional[int]) -> bool:
@@ -153,8 +172,32 @@ def _eight_bit(img: Image.Image) -> Image.Image:
     return img.point(lambda i: i * scale + offset).convert("L")
 
 
+def _open_guarded(data: bytes) -> Image.Image:
+    """Image.open, with the decode-memory guard read from the header.
+
+    Image.open is lazy, so `.size` is known before any pixel is decoded. The
+    89-179 MP band that makes Pillow warn is processed on purpose (Mike's call),
+    so the warning is silenced here rather than left to spam the log
+    (`catch_warnings` is process-wide, a brief race with another thread's
+    warnings is accepted). Above `MAX_DECODE_PIXELS`, or when Pillow's own
+    check raises DecompressionBombError, `ImageTooManyPixels` is raised."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            img = Image.open(BytesIO(data))
+    except Image.DecompressionBombError as exc:
+        raise ImageTooManyPixels(
+            f"Image has too many pixels (more than {MAX_DECODE_PIXELS / 1_000_000:.0f} MP): {exc}") from exc
+    pixels = img.size[0] * img.size[1]
+    if pixels > MAX_DECODE_PIXELS:
+        raise ImageTooManyPixels(
+            f"Image has too many pixels ({img.size[0]}x{img.size[1]} = {pixels / 1_000_000:.0f} MP; "
+            f"max {MAX_DECODE_PIXELS / 1_000_000:.0f} MP)")
+    return img
+
+
 def _normalise(data: bytes, mime: str, pixel_limit: Optional[int]) -> Tuple[bytes, str, Optional[str]]:
-    img = Image.open(BytesIO(data))
+    img = _open_guarded(data)
     source_format = (img.format or "").upper()
     frames = getattr(img, "n_frames", 1) or 1
     notes: List[str] = []
@@ -229,10 +272,13 @@ def normalise_image(
 
     The byte cap is judged last, on what would be sent: an image the pixel
     limit brought under it passes, one still over raises `ImageTooLarge`. A
-    picture Pillow cannot decode comes back as it was, with a note saying so;
-    Pillow never raises out of here."""
+    picture Pillow cannot decode comes back as it was, with a note saying so.
+    One refusal is not passed through: a picture declaring more than
+    `MAX_DECODE_PIXELS` raises `ImageTooManyPixels` (an `ImageTooLarge`)."""
     try:
         out, out_mime, note = _normalise(data, mime, pixel_limit)
+    except ImageTooManyPixels:
+        raise
     except Exception as exc:
         out, out_mime = data, mime
         note = f"could not be normalised ({type(exc).__name__}: {exc}); sent as it was"
