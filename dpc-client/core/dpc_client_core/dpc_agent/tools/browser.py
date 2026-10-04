@@ -13,6 +13,8 @@ to keep dependencies minimal. These tools use simple HTTP requests.
 from __future__ import annotations
 
 import asyncio
+import itertools
+import functools
 import hashlib
 import html as html_module
 import json
@@ -859,6 +861,10 @@ async def sweep_closed_windows() -> int:
                 session, "window_is_gone",
                 _touch=False, _timeout=WINDOW_PROBE_TIMEOUT_SECONDS,
             )
+        except SessionBusyError as e:
+            # An earlier call holds the channel; that says nothing about the window.
+            log.debug("window probe skipped for %s: %s", agent_id, e)
+            continue
         except Exception as e:
             # Includes the timeout. A session that does not answer is not a
             # closed window — it is a busy or wedged one, and closing it
@@ -1666,6 +1672,8 @@ class _PinnedThread:
 
     def __init__(self, name: str):
         self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        # The `_CallRecord` running now; set and cleared by `_run_in_session`.
+        self.current: Optional["_CallRecord"] = None
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
@@ -2277,6 +2285,8 @@ class AuthBrowser:
         # element this walk no longer reaches cannot answer a current ref.
         self._snapshot_serial: int = 0
         self._executor: Optional["_PinnedThread"] = None
+        self._late_results: list[dict] = []
+        self._late_lock = threading.Lock()
         self._last_activity: float = time.monotonic()
         # When the window itself last did something. Kept apart from
         # `_last_activity`, which means "the agent called us" and is what
@@ -2316,6 +2326,41 @@ class AuthBrowser:
         if self._executor is None:
             self._executor = _PinnedThread(f"camoufox-{self._agent_id}")
         return self._executor
+
+    def _keep_late_result(self, rec: "_CallRecord", result: Any) -> None:
+        """Called on the session thread when an abandoned call finishes."""
+        with self._late_lock:
+            self._late_results.append({
+                "id": rec.id, "name": rec.name, "started": rec.started,
+                "finished": time.time(), "result": result,
+            })
+            del self._late_results[:-_LATE_RESULTS_KEPT]
+
+    def _take_late_notice(self) -> str:
+        """Report, once, calls that finished after their waiter had gone.
+        A collect's list is rendered as its first window so the work is not
+        lost; any other result is summarised."""
+        with self._late_lock:
+            kept, self._late_results = self._late_results, []
+        parts = []
+        for k in kept:
+            line = (
+                f"the previous {k['name']} (call {k['id']}, started "
+                f"{time.strftime('%H:%M', time.localtime(k['started']))}) "
+                f"finished late at {_hms(k['finished'])} with "
+                f"{_summarise_late(k['result'])}; result available"
+            )
+            res = k["result"]
+            if isinstance(res, dict) and res.get("items"):
+                items = res["items"]
+                lines, nxt = _collect_window(items, 0, COLLECT_LIMIT_DEFAULT, 6000)
+                line += (
+                    f" (first {nxt} of {len(items)} items below; the full list "
+                    "is not stored, repeat browser_collect for the rest)\n"
+                    + "\n".join(lines)
+                )
+            parts.append("⚠️ " + line)
+        return "\n".join(parts)
 
     def _shutdown_executor(self) -> None:
         if self._executor is not None:
@@ -4071,6 +4116,12 @@ class AuthBrowser:
         except Exception:
             return []
 
+    def _call_abandoned(self) -> bool:
+        """True when the call running on this session's thread has been given
+        up on by its waiter. Long loops read it between iterations."""
+        rec = getattr(self._executor, "current", None)
+        return bool(rec is not None and rec.abandoned)
+
     def collect(
         self,
         container: str,
@@ -4079,15 +4130,24 @@ class AuthBrowser:
         max_scrolls: int = 30,
         scroll_pause_ms: int = 5000,
         dedup_by: str = "text",
+        time_budget_s: Optional[float] = None,
     ) -> dict:
         """Scroll a container and collect all matching items.
 
         Scrolls the container, extracts items matching item_selector,
         deduplicates by dedup_by key, repeats until no new items appear
         or max_scrolls is reached. Returns {items: [...], total, scrolls_done}.
+
+        Also stops, keeping what it has, when `time_budget_s` (default
+        `_COLLECT_TIME_BUDGET`, below `_SESSION_CALL_TIMEOUT`) has passed or
+        the caller has given up on the call (`_call_abandoned`). Checked
+        between iterations; one blocking `scroll()` is not interrupted.
         """
         self._require_open()
         import time as _time
+        if time_budget_s is None:
+            time_budget_s = _COLLECT_TIME_BUDGET
+        _deadline = _time.monotonic() + time_budget_s
 
         _COLLECT_ITEMS_JS = """
         ({containerSel, itemSelector, extractAttrs}) => {
@@ -4168,6 +4228,13 @@ class AuthBrowser:
             if _pass == max_scrolls:
                 break
 
+            if getattr(self, "_call_abandoned", lambda: False)():
+                stop_reason = "abandoned"
+                break
+            if _time.monotonic() >= _deadline:
+                stop_reason = "time_budget"
+                break
+
             try:
                 self.scroll("down", 800)
             except Exception as e:
@@ -4175,7 +4242,9 @@ class AuthBrowser:
                 break
 
             scrolls_done += 1
-            _time.sleep(scroll_pause_ms / 1000.0)
+            _time.sleep(max(0.0, min(
+                scroll_pause_ms / 1000.0, _deadline - _time.monotonic(),
+            )))
 
         self._audit_action(
             "collect", url, "ok",
@@ -4188,6 +4257,7 @@ class AuthBrowser:
             "scrolls_done": scrolls_done,
             "max_scrolls": max_scrolls,
             "stop_reason": stop_reason,
+            "time_budget_s": time_budget_s,
             # How many scrolls in a row added nothing when the loop ended.
             # «The budget ran out» and «the budget ran out while the last four
             # scrolls added nothing» are different claims: the first invites
@@ -4522,6 +4592,74 @@ WINDOW_PROBE_TIMEOUT_SECONDS = 10
 
 _SESSION_CALL_TIMEOUT = 120  # seconds — prevents hung executor from blocking the event loop forever
 
+# The time a collect may spend scrolling before it hands back what it has.
+# Shorter than _SESSION_CALL_TIMEOUT (120 s) and than browser_collect's own
+# harness timeout (120 s), so the loop ends itself and its answer still
+# arrives. The shorter tools (60 s harness timeout for scroll etc.) are given
+# up on by the harness first, the inner 120 s wait_for is the backstop.
+_COLLECT_TIME_BUDGET = 90.0
+
+_call_ids = itertools.count(1)
+_LATE_RESULTS_KEPT = 3
+
+
+class SessionBusyError(TimeoutError):
+    """The session thread is occupied by an earlier call, so this call was
+    not executed (or did not get to run in time). A TimeoutError subclass so
+    callers that catch the timeout keep working."""
+
+
+class SessionCallAbandoned(TimeoutError):
+    """This call outlived its waiter. It keeps running on the session thread
+    and its result will be kept."""
+
+
+def _tool_label(method_name: str) -> str:
+    return "browser_snapshot" if method_name == "a11y_snapshot" else f"browser_{method_name}"
+
+
+class _CallRecord:
+    """One call on the pinned thread: who, when, and whether anyone still waits."""
+
+    def __init__(self, name: str) -> None:
+        self.id = next(_call_ids)
+        self.name = _tool_label(name)
+        self.created = time.time()
+        self.started: Optional[float] = None  # wall clock; None = still queued
+        self.abandoned = False
+        self.done = False
+        self.lock = threading.Lock()
+
+
+def _hms(ts: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(ts))
+
+
+def _busy_message(cur: "_CallRecord") -> str:
+    since = cur.started or cur.created
+    return (
+        f"browser session busy: {cur.name} started {_hms(since)} "
+        f"({int(time.time() - since)}s ago) is still running; "
+        "this call was not executed"
+    )
+
+
+def _summarise_late(result: Any) -> str:
+    if isinstance(result, dict) and "total" in result:
+        return (
+            f"{result.get('total', 0)} items after "
+            f"{result.get('scrolls_done', 0)} scrolls"
+        )
+    text = repr(result)
+    return text if len(text) <= 120 else text[:117] + "..."
+
+
+def _set_current(executor: Any, rec: Optional["_CallRecord"]) -> None:
+    try:
+        executor.current = rec
+    except AttributeError:
+        pass  # a stand-in executor without the slot: nothing to track
+
 
 async def _run_in_session(
     session: "AuthBrowser", method_name: str, *args: Any,
@@ -4536,17 +4674,81 @@ async def _run_in_session(
     `_touch=False` for calls the housekeeping makes on its own behalf:
     the window probe runs every half minute, and counting it as use would
     keep the idle timer permanently reset — a session nobody had touched
-    for hours would look busy because we kept asking whether it was."""
+    for hours would look busy because we kept asking whether it was.
+
+    A running call cannot be cancelled, so a waiter that gives up leaves the
+    thread occupied. Three consequences are handled here: the abandoned call
+    is flagged (`_CallRecord.abandoned`, which long loops read between
+    iterations); a later call finding the thread held by an abandoned call
+    fails at once with `SessionBusyError` naming it, instead of queueing for
+    two minutes; and an abandoned call's result is kept in
+    `session._late_results` for the next browser tool answer."""
     if _touch:
         session._last_activity = time.monotonic()
     loop = asyncio.get_running_loop()
     method = getattr(session, method_name)
-    return await asyncio.wait_for(
-        loop.run_in_executor(
-            session._get_executor(), lambda: method(*args, **kwargs),
-        ),
-        timeout=_timeout,
-    )
+    executor = session._get_executor()
+    cur = getattr(executor, "current", None)
+    if cur is not None and cur.abandoned and not cur.done:
+        raise SessionBusyError(_busy_message(cur))
+
+    rec = _CallRecord(method_name)
+
+    def _call() -> Any:
+        rec.started = time.time()
+        _set_current(executor, rec)
+        try:
+            result = method(*args, **kwargs)
+        except BaseException:
+            with rec.lock:
+                rec.done = True
+            raise
+        else:
+            with rec.lock:
+                rec.done = True
+                late = rec.abandoned
+            if late and hasattr(session, "_keep_late_result"):
+                session._keep_late_result(rec, result)
+            return result
+        finally:
+            _set_current(executor, None)
+
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(executor, _call), timeout=_timeout,
+        )
+    except asyncio.TimeoutError:
+        with rec.lock:
+            running = rec.started is not None and not rec.done
+            if running:
+                rec.abandoned = True
+        if running:
+            raise SessionCallAbandoned(
+                f"{rec.name} (call {rec.id}) did not finish within {_timeout:g}s; "
+                "it is still running in the window and its result will be "
+                "reported by the next browser call"
+            ) from None
+        cur = getattr(executor, "current", None)
+        if cur is not None and cur is not rec and not cur.done:
+            raise SessionBusyError(_busy_message(cur)) from None
+        raise
+
+
+def _reports_late_results(handler):
+    """Decorator for the `browser_*` tool handlers: if a call that outlived
+    its waiter has since finished, say so ahead of this tool's own answer."""
+    @functools.wraps(handler)
+    async def wrapper(ctx, *args, **kwargs):
+        answer = await handler(ctx, *args, **kwargs)
+        try:
+            session = _active_browser_sessions.get(ctx.agent_root.name)
+            notice = session._take_late_notice() if session is not None else ""
+        except Exception:
+            notice = ""
+        if notice and isinstance(answer, str):
+            return f"{notice}\n\n{answer}"
+        return answer
+    return wrapper
 
 
 _session_create_locks: dict[str, asyncio.Lock] = {}
@@ -5339,6 +5541,7 @@ def _format_scrollable_hints(containers: list[dict]) -> str:
     return "\n".join(lines)
 
 
+@_reports_late_results
 async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
     """Return the current page's accessibility-tree snapshot tagged
     with @eN ref ids. Routes oversized snapshots through the per-agent
@@ -5371,6 +5574,7 @@ async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
     return summarized + css_hints
 
 
+@_reports_late_results
 async def browser_navigate(ctx: ToolContext, url: str) -> str:
     """Navigate the active browser session to URL within the auth
     domains. Returns the post-navigation accessibility snapshot,
@@ -5454,6 +5658,7 @@ def _format_scroll_result(info: Any, direction: str, amount: int) -> str:
     return text
 
 
+@_reports_late_results
 async def browser_scroll(
     ctx: ToolContext, direction: str = "down", amount: int = 500,
 ) -> str:
@@ -5477,6 +5682,7 @@ async def browser_scroll(
     return _format_scroll_result(info, direction, amount)
 
 
+@_reports_late_results
 async def browser_click(
     ctx: ToolContext, ref_or_selector: str, timeout: int = 30000,
 ) -> str:
@@ -5530,6 +5736,7 @@ async def browser_click(
     return f"Clicked {ref_or_selector}"
 
 
+@_reports_late_results
 async def browser_fill(
     ctx: ToolContext, ref_or_selector: str, text: str,
 ) -> str:
@@ -5649,6 +5856,7 @@ def _select_answer(ref: str, result: dict) -> str:
     return f"Selected {named} in {ref}. {_select_url_sentence(result)}"
 
 
+@_reports_late_results
 async def browser_select(
     ctx: ToolContext,
     ref_or_selector: str,
@@ -5690,6 +5898,7 @@ async def browser_select(
     return _select_answer(ref_or_selector, result)
 
 
+@_reports_late_results
 async def browser_wait_for(
     ctx: ToolContext, ref_or_selector: str, timeout: int = 30000,
 ) -> str:
@@ -5715,6 +5924,7 @@ async def browser_wait_for(
     return f"Element {ref_or_selector} is visible"
 
 
+@_reports_late_results
 async def browser_extract(ctx: ToolContext, save_to: Optional[str] = None) -> str:
     """Return the current page's full HTML (fallback inspection
     surface when the accessibility tree is insufficient)."""
@@ -5763,6 +5973,7 @@ def _extract_header(
     return " | ".join(parts) + "]"
 
 
+@_reports_late_results
 async def browser_screenshot(
     ctx: ToolContext, full_page: bool = False,
 ) -> str:
@@ -6009,6 +6220,7 @@ def _download_answer(
     return "\n".join(lines)
 
 
+@_reports_late_results
 async def browser_download(
     ctx: ToolContext,
     ref_or_selector: str,
@@ -6049,6 +6261,7 @@ async def browser_download(
     return _download_answer(ctx, target_dir, result, note)
 
 
+@_reports_late_results
 async def browser_switch_tab(ctx: ToolContext, index: int) -> str:
     """Switch the active page to tab at `index` in the browser
     context (0-based)."""
@@ -6158,6 +6371,7 @@ def _collect_window_line(
     return line
 
 
+@_reports_late_results
 async def browser_collect(
     ctx: ToolContext,
     container: str,
@@ -6215,6 +6429,15 @@ async def browser_collect(
                 f" — INCOMPLETE: stopped at the max_scrolls={result.get('max_scrolls', scrolls)}"
                 " budget while the list was still growing; raise max_scrolls to collect more"
             )
+    elif reason in ("time_budget", "abandoned"):
+        why = (
+            f"the {result.get('time_budget_s', _COLLECT_TIME_BUDGET):g}s time budget"
+            if reason == "time_budget" else "the call being abandoned"
+        )
+        header = (
+            f"INCOMPLETE: stopped after {scrolls} scrolls on {why}; "
+            f"partial: {total} items"
+        )
     elif reason:
         header += f" — INCOMPLETE: scrolling stopped early ({reason})"
     if result.get("warning"):
@@ -6236,6 +6459,7 @@ async def browser_collect(
     return f"{header}\n{window}\n\n{body}" if body else f"{header}\n{window}"
 
 
+@_reports_late_results
 async def browser_close(ctx: ToolContext) -> str:
     """Close the active browser session and free Camoufox resources."""
     agent_id = ctx.agent_root.name
