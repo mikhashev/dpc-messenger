@@ -1950,6 +1950,19 @@ _WINDOW_NOT_PAINTED = (
     "off-screen. Restore it on screen; clicks are then delivered normally."
 )
 
+# A scroll step slower than this logs the frame rate seen at that moment:
+# on 2026-10-04 a collect's steps grew 3, 4, 8 ... 521 s (one 11 625 s) and
+# the unpainted window is only the INFERRED cause. The next incident's journal
+# shows `raf=` beside the step's duration and confirms or refutes it.
+_SLOW_SCROLL_STEP_S = 5.0
+
+
+def _scroll_not_repainting_note(raf) -> str:
+    return (
+        f"window not repainting (rAF {raf}/s): scrolled with scrollBy only"
+    )
+
+
 _UNCLAIMED_DIR_NAME = "unclaimed"
 _UNCLAIMED_NOTE = "unclaimed: no tool call was waiting for this download"
 
@@ -3292,6 +3305,14 @@ class AuthBrowser:
         self._require_open()
         url = self._page.url
         delta = -amount if direction == "up" else amount
+        started = time.monotonic()
+        # The wheel step waits on frames like the click's actionability poll
+        # does; read the frame rate with the click's own probe first.
+        facts = self._click_target_facts(self._page.locator("html"))
+        if not isinstance(facts, dict):
+            facts = {}
+        starved = _window_is_starved(facts)
+        raf = facts.get("raf") if facts else None
         try:
             result = self._page.evaluate(_SCROLL_VIEWPORT_JS, delta)
         except Exception as exc:
@@ -3306,17 +3327,40 @@ class AuthBrowser:
         center_x = (result or {}).get("centerX")
         center_y = (result or {}).get("centerY")
         wheel_ok = False
-        if center_x is not None and center_y is not None:
+        if starved:
+            log.warning(
+                "%s (agent=%s, url=%s)",
+                _scroll_not_repainting_note(raf), self._agent_id, url,
+            )
+        elif center_x is not None and center_y is not None:
             try:
                 self._page.mouse.move(center_x, center_y)
                 self._page.mouse.wheel(0, delta)
                 wheel_ok = True
             except Exception as exc:
                 log.debug("mouse wheel dispatch failed: %s", exc)
+        audit_extra: dict = {}
+        if starved:
+            audit_extra.update(raf=raf, starved=True)
+        elapsed = time.monotonic() - started
+        if elapsed >= _SLOW_SCROLL_STEP_S:
+            # Read the frame rate now, at the moment of the stall.
+            now_facts = self._click_target_facts(self._page.locator("html"))
+            now_raf = now_facts.get("raf") if isinstance(now_facts, dict) else None
+            log.warning(
+                "slow scroll step: %.1fs (agent=%s, direction=%s, amount=%s, "
+                "raf_before=%s, raf_now=%s in %dms, url=%s)",
+                elapsed, self._agent_id, direction, amount, raf, now_raf,
+                _RAF_SAMPLE_MS, url,
+            )
+            audit_extra.update(
+                slow_step_s=round(elapsed, 1), raf_before=raf, raf_now=now_raf,
+            )
         self._audit_action(
             "scroll", url, "ok",
             direction=direction, amount=amount,
             scrolled=scrolled, target=target, wheel_ok=wheel_ok,
+            **audit_extra,
         )
         measured = isinstance(result, dict) and "after" in result
         return {
@@ -3326,6 +3370,7 @@ class AuthBrowser:
             "after": result.get("after") if measured else None,
             "height": result.get("height") if measured else None,
             "client": result.get("client") if measured else None,
+            "starved": starved, "raf": raf,
         }
 
     def click(
@@ -4192,6 +4237,8 @@ class AuthBrowser:
         # the item count made "collected everything" and "stopped early"
         # print identically, and an agent could not tell which it had.
         stop_reason = "scroll_budget_exhausted"
+        unpainted_scrolls = 0
+        raf_min = None
         for _pass in range(max_scrolls + 1):
             result = self._page.evaluate(_COLLECT_ITEMS_JS, {
                 "containerSel": container,
@@ -4236,12 +4283,20 @@ class AuthBrowser:
                 break
 
             try:
-                self.scroll("down", 800)
+                step = self.scroll("down", 800)
             except Exception as e:
                 stop_reason = f"scroll_failed: {type(e).__name__}"
                 break
 
             scrolls_done += 1
+            # scroll() reads the frame rate itself and falls back to
+            # scrollBy when the window is not repainting, so the loop only
+            # keeps count of it for the answer.
+            if isinstance(step, dict) and step.get("starved") is True:
+                unpainted_scrolls += 1
+                r = step.get("raf")
+                if isinstance(r, (int, float)):
+                    raf_min = r if raf_min is None else min(raf_min, r)
             _time.sleep(max(0.0, min(
                 scroll_pause_ms / 1000.0, _deadline - _time.monotonic(),
             )))
@@ -4250,6 +4305,8 @@ class AuthBrowser:
             "collect", url, "ok",
             container=container, item_selector=item_selector,
             total=len(all_items), scrolls=scrolls_done,
+            **({"unpainted_scrolls": unpainted_scrolls, "raf_min": raf_min}
+               if unpainted_scrolls else {}),
         )
         result_dict: dict = {
             "items": all_items,
@@ -4267,6 +4324,9 @@ class AuthBrowser:
             # nothing.
             "consecutive_empty": consecutive_empty,
         }
+        if unpainted_scrolls:
+            result_dict["unpainted_scrolls"] = unpainted_scrolls
+            result_dict["raf_min"] = raf_min
         if dupes_skipped > 0:
             result_dict["warning"] = f"{dupes_skipped} duplicates skipped, consider specifying unique attribute for dedup_by"
         return result_dict
@@ -5611,6 +5671,13 @@ async def browser_navigate(ctx: ToolContext, url: str) -> str:
 
 
 def _format_scroll_result(info: Any, direction: str, amount: int) -> str:
+    text = _format_scroll_measurement(info, direction, amount)
+    if isinstance(info, dict) and info.get("starved") is True:
+        text += f"\n{_scroll_not_repainting_note(info.get('raf'))}. Restore the window on screen for the wheel step."
+    return text
+
+
+def _format_scroll_measurement(info: Any, direction: str, amount: int) -> str:
     """The agent's answer to a scroll: what moved, on which element, and
     whether the edge was reached. The requested amount is never reported
     as the movement (Ark was told «Scrolled down by 1200px» eight times
@@ -6442,6 +6509,12 @@ async def browser_collect(
         header += f" — INCOMPLETE: scrolling stopped early ({reason})"
     if result.get("warning"):
         header += f"\n⚠️ {result['warning']}"
+    if result.get("unpainted_scrolls"):
+        header += (
+            f"\nwindow not repainting (rAF {result.get('raf_min')}/s at the "
+            f"lowest): {result['unpainted_scrolls']} of {scrolls} scrolls used "
+            "scrollBy only"
+        )
 
     items = result.get("items") or []
     offset = max(0, int(offset or 0))
