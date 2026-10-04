@@ -1314,6 +1314,10 @@ _SCROLL_VIEWPORT_JS = """
   const rect = scroller.getBoundingClientRect();
   return {
     scrolled: after - before,
+    before: before,
+    after: after,
+    height: scroller.scrollHeight,
+    client: scroller.clientHeight,
     target: tag + idPart + clsPart,
     centerX: Math.round(rect.left + rect.width / 2),
     centerY: Math.round(rect.top + rect.height / 2),
@@ -3227,7 +3231,7 @@ class AuthBrowser:
     # ADR-029 Task 002 interactive methods (Playwright wrappers)
     # ─────────────────────────────────────────────────────────
 
-    def scroll(self, direction: str = "down", amount: int = 500) -> None:
+    def scroll(self, direction: str = "down", amount: int = 500) -> dict:
         """Scroll vertically by `amount` pixels. Finds the nearest
         scrollable container under the viewport center (modal/popup
         aware), moves the cursor to its center, dispatches a real
@@ -3235,7 +3239,11 @@ class AuthBrowser:
         infinite-scroll triggers fire just like a human action), then
         also calls scrollBy as a guaranteed-position fallback. Falls
         back to the document scrolling element when nothing scrollable
-        is hit."""
+        is hit.
+
+        Returns what the measurement saw (`scrolled`, `before`, `after`,
+        `height`, `client`, `target`, `wheel_ok`) so the tool can tell the
+        agent the real movement, not the requested one."""
         self._require_open()
         url = self._page.url
         delta = -amount if direction == "up" else amount
@@ -3265,6 +3273,15 @@ class AuthBrowser:
             direction=direction, amount=amount,
             scrolled=scrolled, target=target, wheel_ok=wheel_ok,
         )
+        measured = isinstance(result, dict) and "after" in result
+        return {
+            "direction": direction, "amount": amount,
+            "scrolled": scrolled, "target": target, "wheel_ok": wheel_ok,
+            "before": result.get("before") if measured else None,
+            "after": result.get("after") if measured else None,
+            "height": result.get("height") if measured else None,
+            "client": result.get("client") if measured else None,
+        }
 
     def click(
         self,
@@ -5389,6 +5406,54 @@ async def browser_navigate(ctx: ToolContext, url: str) -> str:
     return f"Navigated to {url}"
 
 
+def _format_scroll_result(info: Any, direction: str, amount: int) -> str:
+    """The agent's answer to a scroll: what moved, on which element, and
+    whether the edge was reached. The requested amount is never reported
+    as the movement (Ark was told «Scrolled down by 1200px» eight times
+    while the page sat at its end, 2026-10-04)."""
+    try:
+        before = info["before"]
+        after = info["after"]
+        height = info["height"]
+        client = info["client"]
+        target = info.get("target") or "the page"
+        if None in (before, after, height, client):
+            raise KeyError("incomplete")
+        moved = abs(after - before)
+        max_top = max(height - client, 0)
+    except (TypeError, KeyError, AttributeError):
+        return (
+            f"Scrolled {direction} (requested {amount}px), but the position "
+            f"could not be measured, so how far the page moved is unknown."
+        )
+    if direction == "up":
+        at_edge, edge = after <= 1, "top"
+    else:
+        at_edge, edge = after >= max_top - 1, "bottom"
+    pos = f"scrollTop {after:g} of {max_top:g}"
+    if moved < 1:
+        if at_edge:
+            return (
+                f"Did not move: already at the {edge} of {target} ({pos}). "
+                f"Further scrolling {direction} will not move this element."
+            )
+        return (
+            f"Did not move: {target} did not scroll {direction} although it "
+            f"is not at its {edge} ({pos}). Something else may be capturing "
+            f"the scroll; try another position or element."
+        )
+    text = (
+        f"Scrolled {direction} {moved:g} of {amount} px (target: {target}; "
+        f"scrollTop {before:g} -> {after:g} of {max_top:g})"
+    )
+    if at_edge:
+        text += (
+            f"; reached the {edge} - further scrolling {direction} will not "
+            f"move this element"
+        )
+    return text
+
+
 async def browser_scroll(
     ctx: ToolContext, direction: str = "down", amount: int = 500,
 ) -> str:
@@ -5400,14 +5465,16 @@ async def browser_scroll(
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            await _run_in_session(session, "scroll", direction, amount)
+            info = await _run_in_session(
+                session, "scroll", direction, amount,
+            )
         except Exception as e:
             log.warning(
                 "scroll failed (agent=%s): %s: %s",
                 agent_id, type(e).__name__, str(e).split(chr(10))[0],
             )
             return f"⚠️ Scroll failed: {type(e).__name__}: {e}"
-    return f"Scrolled {direction} by {amount}px"
+    return _format_scroll_result(info, direction, amount)
 
 
 async def browser_click(
