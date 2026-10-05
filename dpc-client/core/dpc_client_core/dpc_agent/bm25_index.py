@@ -318,7 +318,12 @@ class BM25Index:
         # `_full_texts` reads as "unknown" rather than misaligned. Length alone could not
         # tell — a replace keeps the count. The chunk list is serialised once and that one
         # string feeds both the digest and the file, so the two cannot disagree. Skipped
-        # when this instance never read the texts, because then it did not change them.
+        # when this instance never read the texts, because then it did not change them —
+        # true only while every mutation goes through `_rebuild`, which reassigns both
+        # lists; a path that assigned `_chunk_metas` alone would write chunks without
+        # their texts, and every row would read as unknown until the startup repair.
+        # No `indent=` here: without it `json.dumps` emits no raw newline, so text-mode
+        # translation on Windows cannot move the bytes the digest was taken over.
         chunks_json = json.dumps(self._chunk_metas, ensure_ascii=False)
         if self._texts is not None:
             atomic_write_text(self.index_dir / TEXTS_FILE,
