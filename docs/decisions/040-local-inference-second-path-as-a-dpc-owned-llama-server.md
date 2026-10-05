@@ -290,6 +290,18 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   passes `reasoning_echo=False`, and the agent adapter keeps `thinking` as a top-level key the
   converter never reads), and on this model's template `undefined` and `true` take the same branch
   (`Observed`).
+  *(**Amendment, 2026-10-06 — (iii) now holds only while the alias leaves `preserve_reasoning`
+  off.** Commit `2407f64f` gives the loop a way to send what (iii) says it never sends: a
+  tool-call turn keeps the round's reasoning under `thinking`, the adapter forwards it on
+  tool-call turns, and `anthropic_to_openai_messages` writes it as `reasoning_content` when the
+  alias sets `preserve_reasoning: true` in `providers.json` (default `false`,
+  `llamacpp_server_provider.py:223`; `reasoning_echo` stays `False`). With the flag off the check
+  above still describes the code. With it on, the server-side default `e750b887` set is no longer
+  inert — it is what decides whether the replayed reasoning renders as a prior-turn `<think>`
+  block; that is read from the template and the PR, not yet seen on a live request
+  (`Not verified` until the A/B run on card
+  `THE-MODEL-STARTS-EVERY-ROUND-WITHOUT-THE-REASONING-THAT-CHOSE-THE-TOOL`). Mike's call,
+  2026-10-06.)*
 
   **One sentence of the amendment above no longer describes the pin.** PR 27342 merged upstream on
   **2026-08-27**, and `src/llama-arch.h` at `b10809` declares **7** `LLM_TENSOR_DFLASH_*` entries
