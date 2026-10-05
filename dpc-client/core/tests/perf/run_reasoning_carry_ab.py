@@ -19,12 +19,25 @@ Per run it prints, for one task:
                             same ~80 normalised characters as an earlier round —
                             the re-derivation this change exists to remove
     note_tokens             reasoning tokens over the whole run
+    peak_prompt_tokens      the largest single-round prompt
+    compaction_round        first round at which ADR-033 compaction ran, or None
+    compactions             how many rounds it ran in
     wall_s                  wall clock, first call to last
+
+The last three are the cost side. Carried notes make every later prompt longer,
+so the `on` run can reach the agent's compaction threshold where the `off` run
+never does, and a compacted run has lost verbatim history the other kept.
+Compaction is read from the loop's own "ADR-033 compaction: round=N" debug
+record — the one place that names the round it ran in — not inferred from a
+prompt that shrank, which a short tool result can also cause. This harness hands
+the loop a manager without `query`, so a compaction pass here cannot reach the
+agent's summariser: it fails and falls to deterministic truncation, counted as
+`compaction_failures`. Production would summarise instead.
 
 Run it against the child the service already has, so no second copy of the model
 is loaded. Read the port from the client log's own start line:
 
-    grep "llama-server\[" ~/.dpc/logs/dpc-client.log | tail -1
+    grep "llama-server\\[" ~/.dpc/logs/dpc-client.log | tail -1
     # llama-server[qwen3.8 27b] starting on :NNNNN (binary=..., n_ctx=...)
 
 then, from `dpc-client/core`:
@@ -55,6 +68,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import re
 import sys
 import time
@@ -100,6 +114,35 @@ class _LiveChild:
 
     async def stop(self) -> None:
         return None
+
+
+class _Compactions(logging.Handler):
+    """Collects the loop's compaction records: the round each pass ran in, and failures."""
+
+    LOGGER = "dpc_client_core.dpc_agent.context"
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.rounds: List[int] = []
+        self.failures = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.msg.startswith("ADR-033 compaction: round=") and record.args:
+            self.rounds.append(int(record.args[0]))
+        elif record.msg.startswith("Compaction failed ("):
+            self.failures += 1
+
+    def __enter__(self) -> "_Compactions":
+        logger = logging.getLogger(self.LOGGER)
+        self._saved_level = logger.level
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(self)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        logger = logging.getLogger(self.LOGGER)
+        logger.removeHandler(self)
+        logger.setLevel(self._saved_level)
 
 
 def _normalise(text: str) -> str:
@@ -162,6 +205,9 @@ class _Rounds:
             "rounds_with_notes": with_notes,
             "repeat_opening_share": round(repeats / with_notes, 3) if with_notes else None,
             "note_tokens": note_tokens,
+            "peak_prompt_tokens": max(
+                (r["prompt_tokens"] or 0 for r in self.rows), default=0,
+            ),
             "wall_s": round(wall_s, 1),
             "per_round": self.rows,
         }
@@ -194,8 +240,21 @@ def _adapter(provider: LlamaServerProvider, alias: str, window: int) -> DpcLlmAd
     return DpcLlmAdapter(manager, provider_alias=alias, caller="ab-reasoning-carry")
 
 
+def _agent_alias(agent_root: Path) -> Optional[str]:
+    """The provider alias the agent's config.json names, if it names one."""
+    try:
+        cfg = json.loads((agent_root / "config.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    alias = cfg.get("provider_alias")
+    return alias if isinstance(alias, str) and alias else None
+
+
 async def _one_run(args: argparse.Namespace, task: str, preserve: bool) -> Dict[str, Any]:
-    alias = "ab_local_qwen"
+    # The agent's own alias, not a harness name: the loop resolves the compaction
+    # window through `providers[provider_alias]`, and under any other name it falls
+    # back to CompactionState's generic 204800 — a different trigger than production.
+    alias = _agent_alias(Path(args.agent_root).expanduser()) or "ab_local_qwen"
     provider = _provider(alias, args, preserve)
     window = args.context_window or 215040
     llm = _adapter(provider, alias, window)
@@ -220,21 +279,26 @@ async def _one_run(args: argparse.Namespace, task: str, preserve: bool) -> Dict[
     ))
 
     wall_started = time.perf_counter()
-    answer, usage, _trace = await run_llm_loop(
-        messages=[{"role": "user", "content": task}],
-        tools=tools,
-        llm=llm,
-        agent_root=agent_root,
-        emit_progress=lambda *a, **k: None,
-        task_id="ab-reasoning-carry",
-        max_rounds=args.max_rounds,
-        reasoning_effort=args.effort,
-        context_window=window,
-    )
+    with _Compactions() as compactions:
+        answer, usage, _trace = await run_llm_loop(
+            messages=[{"role": "user", "content": task}],
+            tools=tools,
+            llm=llm,
+            agent_root=agent_root,
+            emit_progress=lambda *a, **k: None,
+            task_id="ab-reasoning-carry",
+            max_rounds=args.max_rounds,
+            reasoning_effort=args.effort,
+            context_window=window,
+        )
     wall_s = time.perf_counter() - wall_started
     await provider.close()
 
     report = rounds.report(args.reasoning_budget, wall_s)
+    report["compaction_round"] = compactions.rounds[0] if compactions.rounds else None
+    report["compactions"] = len(compactions.rounds)
+    report["compaction_rounds"] = compactions.rounds
+    report["compaction_failures"] = compactions.failures
     report["preserve_reasoning"] = preserve
     report["answer"] = answer
     report["loop_usage"] = usage
@@ -243,7 +307,8 @@ async def _one_run(args: argparse.Namespace, task: str, preserve: bool) -> Dict[
 
 HEADER = (
     f"{'flag':>6}  {'rounds':>6}  {'budget_hits':>11}  {'silent':>6}  "
-    f"{'repeat_open':>11}  {'note_tokens':>11}  {'wall_s':>8}"
+    f"{'repeat_open':>11}  {'note_tokens':>11}  {'peak_prompt':>11}  "
+    f"{'compact_at':>10}  {'compacts':>8}  {'wall_s':>8}"
 )
 
 
@@ -254,7 +319,9 @@ def _line(report: Dict[str, Any]) -> str:
         f"{report['rounds']:>6}  {report['budget_hits']:>11}  "
         f"{report['silent_rounds']:>6}  "
         f"{'-' if share is None else f'{share:.3f}':>11}  "
-        f"{report['note_tokens']:>11}  {report['wall_s']:>8.1f}"
+        f"{report['note_tokens']:>11}  {report['peak_prompt_tokens']:>11}  "
+        f"{'-' if report['compaction_round'] is None else report['compaction_round']:>10}  "
+        f"{report['compactions']:>8}  {report['wall_s']:>8.1f}"
     )
 
 
@@ -298,6 +365,18 @@ def main() -> int:
         "compares rounds-to-completion and success, which no counter here can judge "
         "— read the answers."
     )
+    print(
+        "A run is not judged better on budget_hits or repeat_open alone when it "
+        "compacted earlier than the other: both sides of each pair, side by side —"
+    )
+    for i in range(0, len(reports) - 1, 2):
+        off, on = reports[i], reports[i + 1]
+        for name, key in (("budget_hits", "budget_hits"),
+                          ("repeat_open", "repeat_opening_share"),
+                          ("compact_at", "compaction_round"),
+                          ("compacts", "compactions"),
+                          ("peak_prompt", "peak_prompt_tokens")):
+            print(f"  pair {i // 2 + 1}  {name:>11}  off={off[key]}  on={on[key]}")
     return 0
 
 
