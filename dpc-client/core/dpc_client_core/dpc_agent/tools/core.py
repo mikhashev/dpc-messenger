@@ -355,15 +355,10 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
 
         # Update _meta.json + regenerate smart _index.md for knowledge writes
         if not os.path.isabs(path) and path.startswith("knowledge/") and not path.endswith("_index.md"):
-            from ..memory import read_file_meta, write_file_meta, record_write
+            from ..memory import record_write
             knowledge_dir = ctx.agent_root / "knowledge"
             filename = Path(path).name
-            meta = read_file_meta(knowledge_dir, filename)
-            if not meta.summary:
-                meta.summary = content[:1000].strip()
-                meta.tags = [t for t in Path(path).stem.replace("_", "-").split("-") if len(t) > 2]
-                write_file_meta(knowledge_dir, filename, meta)
-            record_write(knowledge_dir, filename)
+            record_write(knowledge_dir, filename, content)
             # Incremental reindex for Active Recall (MEM-3.7)
             try:
                 agent = getattr(ctx, '_agent', None)

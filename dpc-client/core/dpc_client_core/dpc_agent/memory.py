@@ -215,17 +215,27 @@ def update_access(knowledge_dir: pathlib.Path, filename: str) -> None:
     # consolidation (ADR-010 Tier 1).
 
 
-def record_write(knowledge_dir: pathlib.Path, filename: str) -> None:
+def record_write(knowledge_dir: pathlib.Path, filename: str,
+                 content: Optional[str] = None) -> None:
     """Record that this document was written.
 
     Separate from update_access because the two answer different questions.
     Consolidation asks "has anyone wanted this lately", and a write is the author
     saying so while a read is a reader saying so — but only the write used to be
     counted, under the reader's name.
+
+    Given the new content, the summary follows it on every write. It used to be
+    set on the first write only, so the index kept describing the first draft.
     """
     meta = read_file_meta(knowledge_dir, filename)
     meta.last_written = utc_now_iso()
     meta.write_count += 1
+    if content is not None:
+        meta.summary = content[:1000].strip()
+        # Tags come from the file name, which a rewrite does not change.
+        if not meta.tags:
+            meta.tags = [t for t in pathlib.Path(filename).stem.replace("_", "-").split("-")
+                         if len(t) > 2]
     write_file_meta(knowledge_dir, filename, meta)
     try:
         generate_smart_index(knowledge_dir)
@@ -304,6 +314,44 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
     index_path = knowledge_dir / "_index.md"
     index_path.write_text(content, encoding="utf-8")
     return content
+
+
+def refresh_summaries(knowledge_dir: pathlib.Path, apply: bool = True) -> Dict[str, int]:
+    """Bring every stored summary back in line with its file, then rebuild the index.
+
+    For stores written while record_write still froze the summary at the first
+    write. Entries whose file is gone are left as they are, and files without an
+    entry are not added: both are someone else's question. Only `summary` moves.
+    """
+    counts = {"changed": 0, "unchanged": 0, "missing_file": 0}
+    # Read raw rather than through read_all_meta: that one may persist a legacy
+    # migration or a backfill, and a dry run must write nothing.
+    meta_path = knowledge_dir / "_meta.json"
+    try:
+        all_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        log.warning("refresh_summaries: unreadable %s, skipped", meta_path)
+        return counts
+    if not isinstance(all_meta, dict):
+        return counts
+    for fname, entry in all_meta.items():
+        path = knowledge_dir / fname
+        if not isinstance(entry, dict) or not path.is_file():
+            counts["missing_file"] += 1
+            continue
+        fresh = path.read_text(encoding="utf-8", errors="replace")[:1000].strip()
+        if entry.get("summary", "") == fresh:
+            counts["unchanged"] += 1
+            continue
+        entry["summary"] = fresh
+        counts["changed"] += 1
+    if apply and counts["changed"]:
+        # Temp file and rename, so a crash mid-write cannot leave half a registry.
+        tmp = meta_path.with_name(meta_path.name + ".tmp")
+        tmp.write_text(json.dumps(all_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, meta_path)
+        generate_smart_index(knowledge_dir)
+    return counts
 
 
 # ---------------------------------------------------------------------------
