@@ -13,6 +13,7 @@ it for real against a store degraded to the old shape.
 import asyncio
 import hashlib
 import json
+import logging
 import threading
 from types import SimpleNamespace
 
@@ -60,6 +61,12 @@ class FakeProvider:
 def _long_doc(title):
     # The unique word sits past the 500-character preview.
     return f"# {title}\n" + ("filler words about nothing " * 30) + f"\nonly here: {UNIQUE}\n"
+
+
+def _long_doc_named(name):
+    # The same, plus a word only this file has — also past the preview, so finding it
+    # proves which document the row was built from.
+    return _long_doc(name) + f"and only in this one: {UNIQUE}{name[0]}\n"
 
 
 @pytest.fixture
@@ -298,3 +305,69 @@ def test_deleting_a_directory_drops_the_rows_of_the_files_under_it(agent, monkey
     vec, txt = _rows(agent)
     assert _keys(vec) == ["knowledge/keep.md"]
     assert _keys(txt) == ["knowledge/keep.md"]
+
+
+# 6 ---------------------------------------------------------------------------
+
+def _store_of(d, names):
+    """A saved keyword store, one long document per name."""
+    bodies = {n: _long_doc_named(n) for n in names}
+    bm = BM25Index(d)
+    bm.build([bodies[n] for n in names],
+             [{"source_file": n, "text": bodies[n][:500]} for n in names])
+    bm.save()
+    return bodies
+
+
+def test_a_texts_file_from_a_later_generation_is_not_read_as_this_one(agent, caplog):
+    """The cut inside `save`: the texts landed, the chunk list did not.
+
+    The mutation is a replace — remove_by_source then add — which moves the key's row
+    to the end of both lists, so the two generations have the same row count and only
+    their order differs. A length check passes and every row from the moved one on is
+    another document's text; the digest is what tells them apart.
+    """
+    d = _index_dir(agent)
+    names = ["a.md", "b.md", "c.md"]
+    bodies = _store_of(d, names)
+    chunks_before = (d / "bm25_chunks.json").read_bytes()
+
+    bm = BM25Index(d)
+    assert bm.load()
+    bm.remove_by_source("a.md")
+    bm.add([bodies["a.md"]], [{"source_file": "a.md", "text": bodies["a.md"][:500]}])
+    bm.save()
+    stored = json.loads((d / TEXTS_FILE).read_text(encoding="utf-8"))
+    assert stored["texts"][-1].startswith("# a.md")       # the replace moved it to the end
+    (d / "bm25_chunks.json").write_bytes(chunks_before)   # the cut
+
+    bm = BM25Index(d)
+    assert bm.load()
+    assert _keys(bm._chunk_metas) == names                # same count, earlier order
+    caplog.set_level(logging.WARNING)
+    bm.add(["# D\nbody of d"], [{"source_file": "d.md", "text": "# D\nbody of d"}])
+    bm.save()
+
+    stored = json.loads((d / TEXTS_FILE).read_text(encoding="utf-8"))
+    assert stored["texts"] == [None, None, None, "# D\nbody of d"]
+    # Each file's own word is past its preview, so no row answers for it at all —
+    # rather than a row answering under another document's name.
+    for name in names:
+        assert _keyword_hits(agent, UNIQUE + name[0]) == []
+    assert "every row's full text treated as unknown" in caplog.text
+
+
+def test_a_save_and_load_round_trip_keeps_every_rows_full_text(agent):
+    d = _index_dir(agent)
+    names = ["a.md", "b.md"]
+    _store_of(d, names)
+
+    bm = BM25Index(d)
+    assert bm.load()
+    bm.add(["# D\nbody of d"], [{"source_file": "d.md", "text": "# D\nbody of d"}])
+    bm.save()
+
+    stored = json.loads((d / TEXTS_FILE).read_text(encoding="utf-8"))
+    assert None not in stored["texts"] and len(stored["texts"]) == 3
+    for name in names:
+        assert _keyword_hits(agent, UNIQUE + name[0]) == [name]

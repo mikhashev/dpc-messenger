@@ -7,6 +7,7 @@ Stop words via stopwordsiso (57 languages, Rule 14 Solution Check).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import pathlib
@@ -75,8 +76,19 @@ TEXTS_FILE = "bm25_texts.json"
 CORPUS_VERSION = 2
 
 
-def _texts_document(texts) -> str:
-    return json.dumps({"corpus_version": CORPUS_VERSION, "texts": texts}, ensure_ascii=False)
+def _chunks_digest(chunks_json: str) -> str:
+    return hashlib.sha256(chunks_json.encode("utf-8")).hexdigest()
+
+
+def _texts_document(texts, chunks_json: str) -> str:
+    """The texts, naming the one chunk list they are row-for-row aligned with.
+
+    The digest is what makes the pair verifiable: the two files are written one after
+    the other, and a length check cannot see a cut between them (see `save`).
+    """
+    return json.dumps({"corpus_version": CORPUS_VERSION,
+                       "chunks_sha256": _chunks_digest(chunks_json),
+                       "texts": texts}, ensure_ascii=False)
 
 
 class BM25Index:
@@ -87,8 +99,9 @@ class BM25Index:
     `meta["text"]` is the preview recall prints and is never a rebuild source: a row
     rebuilt from it is searchable on its first 500 characters only. The texts are read
     only when a mutation needs them, because recall loads this index on every turn.
-    A row whose full text is unknown (an index older than the file) is held as None
-    and falls back to its preview until the startup sync supplies the text.
+    A row whose full text is unknown — an index older than the file, or a texts file
+    whose digest does not name the chunk list on disk — is held as None and falls back
+    to its preview until the startup sync supplies the text.
     """
 
     CORPUS_MAX_DF = 0.8
@@ -99,6 +112,9 @@ class BM25Index:
         self._chunk_metas: List[dict] = []
         # None as a whole: not read from disk yet. None as an element: unknown.
         self._texts: Optional[List[Optional[str]]] = []
+        # Digest of the chunk file this instance loaded; what the texts file is checked
+        # against. None until `load` reads one.
+        self._loaded_chunks_digest: Optional[str] = None
         self._corpus_stop_words: frozenset = frozenset()
         self._batching = False
         self._pending_texts: List[str] = []
@@ -108,19 +124,33 @@ class BM25Index:
         """The stored full texts, read on first need, always as long as the metas."""
         if self._texts is None:
             texts: list = []
+            disagreement = ""
             path = self.index_dir / TEXTS_FILE if self.index_dir is not None else None
             if path is not None and path.exists():
                 try:
                     loaded = json.loads(path.read_text(encoding="utf-8"))
                     if isinstance(loaded, dict) and loaded.get("corpus_version") == CORPUS_VERSION:
                         texts = loaded.get("texts") or []
+                        # The digest, not the length, is what decides. `save` writes the
+                        # two files one after the other, and a cut between them on a
+                        # replace — remove_by_source then add, which moves the row to the
+                        # end — leaves newer texts beside an older chunk list of the *same*
+                        # length and a different order: a length check sees nothing while
+                        # every row from the moved one on is another document's text.
+                        # An absent digest (a store from before this check) counts as
+                        # unknown too, which is safe: the startup sync re-reads the
+                        # document and supplies the text.
+                        if (not self._loaded_chunks_digest
+                                or loaded.get("chunks_sha256") != self._loaded_chunks_digest):
+                            disagreement = "they name another generation of the chunk list"
+                            texts = []
                 except Exception as e:
                     log.warning("BM25 full texts unreadable, rows fall back to previews: %s", e)
             if len(texts) != len(self._chunk_metas):
-                if texts:
-                    log.warning("BM25 full texts disagree with the chunk list (%d vs %d) — "
+                if texts or disagreement:
+                    log.warning("BM25 full texts disagree with the chunk list (%s) — "
                                 "every row's full text treated as unknown",
-                                len(texts), len(self._chunk_metas))
+                                disagreement or f"{len(texts)} vs {len(self._chunk_metas)}")
                 texts = [None] * len(self._chunk_metas)
             self._texts = texts
         return self._texts
@@ -265,7 +295,7 @@ class BM25Index:
             # Emptied by removals: the last saved corpus must not come back on load.
             if not self._chunk_metas and (self.index_dir / "bm25_chunks.json").exists():
                 shutil.rmtree(self.index_dir / "bm25", ignore_errors=True)
-                atomic_write_text(self.index_dir / TEXTS_FILE, _texts_document([]))
+                atomic_write_text(self.index_dir / TEXTS_FILE, _texts_document([], "[]"))
                 atomic_write_text(self.index_dir / "bm25_chunks.json", "[]")
             return
         self.index_dir.mkdir(parents=True, exist_ok=True)
@@ -283,13 +313,17 @@ class BM25Index:
         replace_when_the_readers_let_go(staged, live)
         shutil.rmtree(previous, ignore_errors=True)
 
-        # Texts before the chunk list: a cut between the two leaves them disagreeing in
-        # length, which `_full_texts` reads as "unknown" rather than misaligned. Skipped
-        # when this instance never read them, because then it did not change them.
+        # Texts before the chunk list, carrying its digest: a cut between the two writes
+        # leaves a texts file that names a generation the chunk list on disk is not, which
+        # `_full_texts` reads as "unknown" rather than misaligned. Length alone could not
+        # tell — a replace keeps the count. The chunk list is serialised once and that one
+        # string feeds both the digest and the file, so the two cannot disagree. Skipped
+        # when this instance never read the texts, because then it did not change them.
+        chunks_json = json.dumps(self._chunk_metas, ensure_ascii=False)
         if self._texts is not None:
-            atomic_write_text(self.index_dir / TEXTS_FILE, _texts_document(self._texts))
-        atomic_write_text(self.index_dir / "bm25_chunks.json",
-                          json.dumps(self._chunk_metas, ensure_ascii=False))
+            atomic_write_text(self.index_dir / TEXTS_FILE,
+                              _texts_document(self._texts, chunks_json))
+        atomic_write_text(self.index_dir / "bm25_chunks.json", chunks_json)
         # Written even when empty: skipping it left the previous corpus's stop words on
         # disk, and the next load would tokenise this corpus through them.
         atomic_write_text(self.index_dir / "bm25_corpus_stops.json",
@@ -306,7 +340,11 @@ class BM25Index:
         try:
             import bm25s
             self._retriever = bm25s.BM25.load(str(bm25_dir))
-            self._chunk_metas = json.loads(chunks_path.read_text(encoding="utf-8"))
+            raw_chunks = chunks_path.read_text(encoding="utf-8")
+            self._chunk_metas = json.loads(raw_chunks)
+            # Kept from the bytes actually read, so `_full_texts` can tell whether the
+            # texts file beside it belongs to this very generation.
+            self._loaded_chunks_digest = _chunks_digest(raw_chunks)
             self._texts = None  # read on the first mutation, see _full_texts
             # The same refusal the vector channel makes, for the same reason: `search`
             # maps a retrieved row number into `_chunk_metas`, so a list that disagrees
