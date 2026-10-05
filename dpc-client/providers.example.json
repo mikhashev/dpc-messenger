@@ -369,6 +369,11 @@
       "thinking": "Object with 'enabled' (bool, default true); false switches to the -noreason model where one exists",
       "reasoning_effort": "Optional: 'low' | 'medium' | 'high' | 'max', sent only to models that take it (gpt-oss-*, qwen3.8-27b)"
     },
+    "llamacpp_server_fields": {
+      "_comment": "Not the whole key set: the supervisor flags (gguf_path, n_ctx, cache_type_k/v, mmproj, spec_type, ...) are listed in docs/decisions/040-local-inference-second-path-as-a-dpc-owned-llama-server.md D3 and read in providers/llamacpp_server_provider.py",
+      "reasoning_budget_tokens": "Optional: cap on reasoning tokens per request; the request value wins over the child's --reasoning-budget",
+      "preserve_reasoning": "Optional, default false: replay each tool-call turn's own reasoning to the server as reasoning_content, which this model's template renders as a prior-turn <think> block. Off means the model sees a bare tool call and its result from round two and re-derives its plan; on costs those tokens on every later round and invalidates the prompt cache for one turn when it is switched. Local path only - no cloud provider is sent this field"
+    },
     "gemini_fields": {
       "api_key_env": "Environment variable containing Google AI Studio API key (default: GEMINI_API_KEY)"
     },

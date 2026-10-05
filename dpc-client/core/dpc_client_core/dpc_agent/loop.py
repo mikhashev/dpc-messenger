@@ -1307,7 +1307,19 @@ async def run_llm_loop(
 
             # Process tool calls — strip hallucinated post-tool-call content before storing
             thinking = _extract_thinking_prefix(content)
-            messages.append({"role": "assistant", "content": thinking, "tool_calls": tool_calls})
+            assistant_turn: Dict[str, Any] = {
+                "role": "assistant", "content": thinking, "tool_calls": tool_calls,
+            }
+            # The round's reasoning channel, kept beside the sanitized visible text
+            # and never inside it: `content` is where the model writes its answer.
+            # Stored on every provider, put on the wire by whichever one asks for it
+            # (today: llama-server behind `preserve_reasoning`) — other converters
+            # rebuild the assistant turn and drop the key. Blank is never stored: it
+            # renders as an empty `<think></think>` and shifts the cached prefix.
+            _round_notes = (msg.get("thinking") or "").strip()
+            if _round_notes:
+                assistant_turn["thinking"] = _round_notes
+            messages.append(assistant_turn)
 
             # SGR compliance logging — detect reasoning quality before tool calls
             tool_names = [tc["function"]["name"] for tc in tool_calls]

@@ -215,6 +215,12 @@ class LlamaServerProvider(DeepSeekProvider):
                 alias, "/".join(self._template_efforts), template_default or "unset",
             )
         self._reasoning_budget = config.get("reasoning_budget_tokens")
+        # Whether a replayed tool-call turn carries the notes that chose it
+        # (`reasoning_content`, which this model's template renders as a prior-turn
+        # `<think>` block). Off by default: it is a per-alias answer to an open
+        # question — the model may hold the thread better, or anchor on its own
+        # early reasoning and stop revising when a tool result contradicts it.
+        self.preserve_reasoning = bool(config.get("preserve_reasoning", False))
         self._mmproj = config.get("mmproj")
         # What the alias asked the child to cap one image at, or None when the
         # flag is not sent. It is the configured value, not a read-back of what
@@ -976,11 +982,15 @@ class LlamaServerProvider(DeepSeekProvider):
         """Native tool calling, Anthropic-shape in and out, on the local server."""
         self._last_thinking = None
         self._last_usage = None
-        openai_messages = self._anthropic_to_openai_messages(system, messages, provider=self)
+        openai_messages = self._anthropic_to_openai_messages(
+            system, messages, provider=self,
+            preserve_reasoning=self.preserve_reasoning,
+        )
         openai_tools = self._anthropic_to_openai_tools(tools)
         # No reasoning_content padding on replay: the HTTP-400-if-absent rule is
         # DeepSeek's, not the template's — qwen3.8's template accepts an
-        # assistant tool-call message with no reasoning attached.
+        # assistant tool-call message with no reasoning attached. What does go out,
+        # when the alias asks for it, is the round's real notes.
 
         async def _call():
             client = await self._ensure()

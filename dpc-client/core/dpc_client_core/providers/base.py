@@ -492,6 +492,7 @@ def anthropic_to_openai_messages(
     reasoning_echo: bool = False,
     *,
     provider: Any = None,
+    preserve_reasoning: bool = False,
 ) -> List[Dict[str, Any]]:
     """The Anthropic Messages conversation as OpenAI chat messages: the one
     converter behind DeepSeek, Z.AI and llama-server, and, reshaped onto its
@@ -504,7 +505,12 @@ def anthropic_to_openai_messages(
     tool calls — and the rest of the turn follows as one `role: user` message.
 
     `reasoning_echo` pads `reasoning_content` onto replayed tool-call turns
-    (DeepSeek thinking mode). `provider`, when given, is asked
+    (DeepSeek thinking mode). `preserve_reasoning` sends the real thing instead:
+    the `thinking` the agent loop kept on that turn, when it kept one, so the
+    server's template can render the round's own notes back to the model. The two
+    are separate because padding satisfies an API rule and preserving changes what
+    the model is shown; only a provider whose template renders prior-turn reasoning
+    asks for it. `provider`, when given, is asked
     `supports_vision()` at the first image, and a no refuses rather than
     sending the turn with the picture gone. Without it nobody is asked:
     `flatten_messages` renders text and sends no picture anywhere.
@@ -583,6 +589,12 @@ def anthropic_to_openai_messages(
                     # thinking blocks on replay, so thinking_text is normally
                     # empty -> pad with a single space (V4 Pro rejects "").
                     msg["reasoning_content"] = thinking_text or " "
+                if preserve_reasoning:
+                    # Real notes beat a pad: a blank one would render as an empty
+                    # <think></think> and move the cached prefix for nothing.
+                    kept = str(m.get("thinking") or "").strip()
+                    if kept:
+                        msg["reasoning_content"] = kept
             out.append(msg)
             continue
 

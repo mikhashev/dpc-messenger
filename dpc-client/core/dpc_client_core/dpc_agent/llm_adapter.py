@@ -883,7 +883,13 @@ class DpcLlmAdapter:
                 prompt_tokens = self._token_counter.count_tokens(str(anthropic_messages), model_name)
                 completion_tokens = self._token_counter.count_tokens(raw.get("content", ""), model_name)
             else:
-                prompt_tokens = sum(len(str(m.get("content", ""))) for m in messages) // 4
+                # `thinking` counts too where a provider replays it: this number is
+                # what compaction and the context guard trigger on, and a history
+                # whose carried notes are invisible to it compacts late.
+                prompt_tokens = sum(
+                    len(str(m.get("content", ""))) + len(str(m.get("thinking") or ""))
+                    for m in messages
+                ) // 4
                 completion_tokens = len(raw.get("content", "")) // 4
             usage = {
                 "prompt_tokens": prompt_tokens,
@@ -949,7 +955,15 @@ class DpcLlmAdapter:
                 # Anthropic requires at least one block
                 if not blocks:
                     blocks = [{"type": "text", "text": ""}]
-                anthropic_messages.append({"role": "assistant", "content": blocks})
+                turn: Dict[str, Any] = {"role": "assistant", "content": blocks}
+                # The round's reasoning channel rides as a sibling of `content`, not
+                # as a `thinking` block: a block would be picked up by DeepSeek's
+                # `reasoning_echo` padding, and this value is for the local
+                # llama-server alone. Only a tool-call turn carries it — the final
+                # answering turn is not replayed.
+                if msg.get("thinking") and msg.get("tool_calls"):
+                    turn["thinking"] = msg["thinking"]
+                anthropic_messages.append(turn)
                 i += 1
                 continue
 

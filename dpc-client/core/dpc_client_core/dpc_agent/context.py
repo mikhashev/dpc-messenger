@@ -1180,7 +1180,12 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
             content = msg.get("content") or ""
             if len(content) > 200:
                 content = content[:200] + "..."
-            result.append({**msg, "content": content})
+            compacted = {**msg, "content": content}
+            # A round whose result has been cut to 200 characters keeps no notes:
+            # the reasoning is the largest thing on the turn, and reasoning about
+            # evidence that is no longer there is worse than none.
+            compacted.pop("thinking", None)
+            result.append(compacted)
             continue
 
         result.append(msg)
@@ -1238,6 +1243,13 @@ async def compact_tool_history_llm(
     result: List[Dict[str, Any]] = []
 
     for i, msg in enumerate(messages):
+        if i in rounds_to_compact and msg.get("role") == "assistant" and msg.get("thinking"):
+            # Same rule as the deterministic compactor: once this round's results
+            # are summaries, its notes go with them. The notes stay on the recent
+            # tail, which is where they are read.
+            result.append({k: v for k, v in msg.items() if k != "thinking"})
+            continue
+
         if msg.get("role") == "tool" and not msg.get("_compacted"):
             parent_round = None
             for rs in reversed(tool_round_starts):
