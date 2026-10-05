@@ -119,10 +119,20 @@ The question is the board card
 `THE-MODEL-STARTS-EVERY-ROUND-WITHOUT-THE-REASONING-THAT-CHOSE-THE-TOOL`: does
 sending a tool round's own notes back to llama-server (`preserve_reasoning`,
 commit `2407f64f`, per alias, default off) change how a long run ends? Dry run,
-then the run, from `dpc-client/core`, the DPC service stopped:
+then the step-0 preflight, then — only if the preflight says yes — the run, from
+`dpc-client/core`, the DPC service stopped:
 
     uv run python ../../eval/loop/run_loop_eval.py --dry-run --tier long --preserve-reasoning both
+    uv run python ../../eval/loop/run_loop_eval.py --step0-only --auto-approve
     uv run python ../../eval/loop/run_loop_eval.py --tier long --preserve-reasoning both --auto-approve
+
+- **The preflight first.** `--step0-only` is the long tier's off arm on the first
+  two tasks (`--tasks N` for another count), under the same run conditions as
+  the full run, printing only the step-0 verdict. Estimated 20–50 min against
+  3–7 hours for the A/B: if the off arm never reaches the incident's regime here,
+  the full run would measure nothing about the flag, and the owner decides before
+  spending the card for an evening. It is the full run's code path with one arm
+  and fewer tasks, not a separate harness.
 
 - **The arm flag.** `--preserve-reasoning off|on|both` (any tier) sets the key on
   the *copied* provider entry; the operator's file is hashed before and after and
@@ -151,8 +161,13 @@ then the run, from `dpc-client/core`, the DPC service stopped:
   26 rounds, prompt 67 177 → 93 603, seven rounds at the ~10 k note budget,
   eleven of twelve rounds from 14 on with no visible text. A long run prints
   `incident symptom reproduced in the off arm: yes/no (budget hits N, peak
-  prompt P)` — yes when an off-arm task had ≥ 2 budget hits on a prompt ≥ 60 000.
-  On no, the A/B measured nothing, and the report says so. **Not verified**:
+  prompt P, budget-hit share past 60000: h/r = S)` — yes when one off-arm task
+  had ≥ 2 budget hits, a prompt ≥ 60 000, **and** ≥ 0.25 of its rounds past
+  60 000 at the budget. The share keeps two capped thoughts lost in a long run
+  from passing; 0.25 accepts the incident whether its deep rounds were the 12
+  from round 14 on (7/12 = 0.58) or all 26 (7/26 = 0.27) — the derivation is at
+  `SYMPTOM_MIN_BUDGET_SHARE` in `loop/round_metrics.py`. On no, the A/B measured
+  nothing, and the report says so. **Not verified**:
   that a throwaway root gets there — its system prompt is ~10.3 k tokens (GAIA
   `20260924-0348-t0-low`, 1-round tasks), so ~13 full 15 000-character reads have
   to stay in the history, and the model may search instead of reading.
@@ -164,7 +179,9 @@ then the run, from `dpc-client/core`, the DPC service stopped:
 - **Visible output is its own axis.** The verdict prints both arms side by side on
   every axis and ranks nothing; it warns when the on arm went silent in a larger
   share of rounds or compacted earlier, and then refuses to read fewer budget
-  hits as a result. A sample relayed with the brief for this instrument had the on
+  hits as a result. Totals are printed twice — over every paired task, and over
+  the subset whose off arm reproduced the incident, named task by task — because
+  only that subset is in the regime the flag is meant to change. A sample relayed with the brief for this instrument had the on
   arm silent in 33 of 41 rounds against 0 of 41 (not re-read here).
 - **Cost: plan it, do not slot it between other work.** It needs the card free —
   the service stopped or its model unloaded, 26 000 MiB — for the whole run.
@@ -172,6 +189,23 @@ then the run, from `dpc-client/core`, the DPC service stopped:
   round: 10–25 min per task per arm, so roughly 3–7 hours for 8 tasks × 2 arms,
   more if compaction fires (each summary is a local call with its own notes).
   `--tasks N` runs the first N for a smoke pass.
+- **`--rounds N`** is the agent's round limit (`AgentConfig.max_rounds`) on every
+  tier. Default: 60 for long (the incident took 26), `AgentConfig`'s own default
+  for easy and hard — what they ran under before the flag was wired; until
+  2026-10-06 `--rounds` was parsed and never read. `--max-rounds` is kept as an
+  alias.
+- **Known limits.**
+  - *The per-task timeout is 45 min*, 2× the incident's 22.5 min, and is kept.
+    A task that reads more per round than the incident did can be cut before
+    its deep rounds. A cut task is printed `TIME`, carries `timed_out: true`, has
+    its own verdict axis and a warning, and step 0 names it — it is a run the
+    harness stopped, not a failure of either arm. `--task-timeout-minutes`
+    raises it.
+  - *The window comes from the alias.* Without `context_window` on the copied
+    alias the manager falls back to 4096 tokens for a model it does not know
+    (`LLMManager.get_context_window`), and the compaction trigger and session
+    limit would follow it in silence. The dry run refuses such an alias on every
+    tier, and a long-tier run refuses it before loading anything.
 - The predecessor `dpc-client/core/tests/perf/run_reasoning_carry_ab.py` stays
   until this has run; its metric code lives on in `loop/round_metrics.py`.
 

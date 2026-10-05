@@ -30,8 +30,10 @@ Run from `dpc-client/core`:
 
     uv run python ../../eval/loop/run_loop_eval.py
 
-`--tasks N` for a smoke pass, `--tier hard` for the harder set, `--dry-run`
-to validate the alias/binary/gguf/VRAM/output-dir without loading a model.
+`--tasks N` for a smoke pass, `--tier hard` for the harder set, `--rounds N` for
+the agent's round limit on any tier, `--dry-run` to validate the
+alias/binary/gguf/VRAM/output-dir without loading a model, `--step0-only` for
+the long tier's preflight (off arm, two tasks, step-0 verdict).
 
 **Firewall (2026-10-06).** Every tier runs under
 `_harness/benchmark_tools.benchmark_firewall`, a rules file owned by the run in
@@ -56,7 +58,8 @@ to reach the 2026-10-05 incident's prompt sizes. Its runs use the production
 compaction trigger of the incident's agent (threshold 0.5, the window the loop
 resolves for the alias) with the local alias as summariser, the agent's effort
 word (`medium`), and print **step 0** first: whether the off arm reproduced the
-incident at all. If it did not, the verdict says the A/B measured nothing.
+incident at all. If it did not, the verdict says the A/B measured nothing, and
+its totals are printed over all tasks and again over the reproducing subset.
 """
 
 from __future__ import annotations
@@ -87,7 +90,6 @@ from _harness.results_root import results_root  # noqa: E402
 import round_metrics  # noqa: E402
 
 OLLAMA_PROVIDERS = HERE / "providers.eval.json"
-DEFAULT_ROUNDS = 8
 DEFAULT_ALIAS = "qwen3.8 27b"
 RESULTS_DIR = results_root("loop")
 LOOP_PROFILE = "loop_benchmark"
@@ -104,8 +106,14 @@ LONG_COMPACTION_THRESHOLD = 0.5
 # The incident took 26 rounds; 60 leaves room to see a run that does not stop.
 LONG_MAX_ROUNDS = 60
 # The incident's 26 rounds took 22.5 min. A task past 45 min is recorded as a
-# timeout, the same figure `gaia/` uses per task.
+# timeout, the same figure `gaia/` uses per task. Known limit: 2x the incident is
+# not 2x a slower run — a task that reads more per round can be cut before its
+# deep rounds. Such a row carries `timed_out: true` and is reported as cut off,
+# not as a failure of either arm.
 LONG_TASK_TIMEOUT_MIN = 45.0
+# `--step0-only` runs the off arm on this many long tasks, the cheap preflight
+# before the full A/B.
+STEP0_ONLY_TASKS = 2
 
 # Same figure and the same reasoning as `eval/kv/ab_key_quant.py:_free_vram_mib`
 # callers: a 27B GGUF, one card, one child — not derived from this GGUF's exact
@@ -161,6 +169,43 @@ def _check_vram_or_refuse(entry: Dict[str, Any]) -> Optional[int]:
             "two 27B children on one card is an incident, not an experiment"
         )
     return free
+
+
+def resolve_max_rounds(tier: str, rounds: Optional[int]) -> int:
+    """The agent's round limit for this run: `--rounds`, else the tier's own.
+
+    Long: LONG_MAX_ROUNDS. Easy and hard: `AgentConfig`'s default, which is what
+    they ran under before `--rounds` was wired (`AgentConfig()` with no
+    argument) — read from the class, not copied here, so it cannot drift.
+    """
+    if rounds is not None:
+        if rounds < 1:
+            raise SystemExit(f"--rounds must be at least 1, got {rounds}")
+        return rounds
+    if tier == "long":
+        return LONG_MAX_ROUNDS
+    from dpc_client_core.dpc_agent.agent import AgentConfig
+    return AgentConfig().max_rounds
+
+
+def require_context_window(entry: Dict[str, Any]) -> int:
+    """Refuse an alias without `context_window`.
+
+    Without it the manager falls back to 4096 for a model it does not know
+    (`LLMManager.get_context_window`), and the long tier would run its
+    compaction trigger and session limit on that number in silence.
+    """
+    raw = entry.get("context_window")
+    try:
+        window = int(raw)
+    except (TypeError, ValueError):
+        window = 0
+    if window <= 0:
+        raise SystemExit(
+            f"alias {entry.get('alias')!r} carries no usable context_window ({raw!r}); "
+            "the manager would fall back to 4096 tokens — set it on the alias first"
+        )
+    return window
 
 
 def _resolve_binary_or_none(entry: Dict[str, Any]) -> Optional[Path]:
@@ -402,7 +447,7 @@ def check(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
     return {"passed": ok, "why": reasons}
 
 
-async def run_one(agent, task: Dict[str, Any], rounds: int, *,
+async def run_one(agent, task: Dict[str, Any], *,
                   recorder: Optional[round_metrics.RoundRecorder] = None,
                   timeout_s: Optional[float] = None,
                   reasoning_effort: Optional[str] = None,
@@ -411,6 +456,7 @@ async def run_one(agent, task: Dict[str, Any], rounds: int, *,
                   queries: Optional[round_metrics.QueryCounter] = None) -> Dict[str, Any]:
     started = time.time()
     error = None
+    timed_out = False
     answer = ""
     if recorder is not None:
         recorder.rows = []
@@ -424,6 +470,7 @@ async def run_one(agent, task: Dict[str, Any], rounds: int, *,
             )
             answer = await (asyncio.wait_for(call, timeout_s) if timeout_s else call)
         except asyncio.TimeoutError:
+            timed_out = True
             error = f"timeout after {timeout_s:.0f}s"
         except Exception as exc:  # a crash is a failure, recorded as one
             error = f"{type(exc).__name__}: {exc}"
@@ -433,6 +480,9 @@ async def run_one(agent, task: Dict[str, Any], rounds: int, *,
     out = {
         "id": task["id"],
         "passed": passed,
+        # Cut off by the harness, not failed by the agent: kept apart so the
+        # verdict never reads a timeout as the flag's failure.
+        "timed_out": timed_out,
         "why": verdict["why"] + ([error] if error else []),
         "seconds": round(elapsed, 1),
         "answer": (answer or "")[:400],
@@ -475,6 +525,9 @@ def _allowed_tools(tier: str):
 def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
              effort: Optional[str]) -> int:
     print(f"  alias: {entry.get('alias')!r} (type={entry.get('type')})")
+    # Every copied arm entry is checked, though they share the field with `entry`.
+    for e in entries.values():
+        require_context_window(e)
     if entry.get("type") == "llamacpp_server":
         binary = _resolve_binary_or_none(entry)
         if binary is None:
@@ -498,6 +551,8 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
     print(f"  reasoning effort sent: {effort or '(none — the alias decides)'}; "
           f"note budget: {entry.get('reasoning_budget_tokens')}; "
           f"alias context_window: {entry.get('context_window')}")
+    print(f"  max rounds: {resolve_max_rounds(args.tier, args.rounds)}"
+          f"{'' if args.rounds is not None else ' (tier default)'}")
 
     allowed = _allowed_tools(args.tier)
     with tempfile.TemporaryDirectory(prefix="dpc-loop-dry-") as tmp:
@@ -543,8 +598,7 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
             cfg = long_compaction_config(entry["alias"], args.compaction,
                                          LONG_COMPACTION_THRESHOLD)
             print(f"  compaction config served to each root: {cfg}")
-            print(f"  max rounds {args.max_rounds or LONG_MAX_ROUNDS}, task timeout "
-                  f"{args.task_timeout_minutes} min, arms run per task in "
+            print(f"  task timeout {args.task_timeout_minutes} min, arms run per task in "
                   f"{' then '.join(entries)} / reversed order alternately")
 
     out_dir = RESULTS_DIR
@@ -580,6 +634,11 @@ async def main_async(args) -> int:
         _check_vram_or_refuse(entry)
         return rc
 
+    if long_tier:
+        # The harness reads the window for the long tier (session limit and
+        # compaction trigger); easy and hard never ask for it.
+        require_context_window(entry)
+    max_rounds = resolve_max_rounds(args.tier, args.rounds)
     free_vram = _check_vram_or_refuse(entry)
 
     from dpc_client_core.llm_manager import LLMManager
@@ -620,12 +679,10 @@ async def main_async(args) -> int:
     queries.wrap(llm)
     budget = entry.get("reasoning_budget_tokens")
     session_state = None
-    max_rounds = None
     timeout_s = None
     if long_tier:
         window = llm.get_context_window(provider.model) if provider is not None else None
         session_state = {"tokens_limit": window} if window else None
-        max_rounds = args.max_rounds or LONG_MAX_ROUNDS
         timeout_s = args.task_timeout_minutes * 60
 
     approver = None
@@ -637,7 +694,7 @@ async def main_async(args) -> int:
     def new_agent(root: Path):
         agent = DpcAgent(
             llm_manager=llm,
-            config=AgentConfig(max_rounds=max_rounds) if max_rounds else AgentConfig(),
+            config=AgentConfig(max_rounds=max_rounds),
             agent_root=root,
             firewall=firewall,
             firewall_profile=LOOP_PROFILE,
@@ -689,7 +746,7 @@ async def main_async(args) -> int:
     try:
         for arm, task, agent, recorder in plan:
             set_arm(arm)
-            outcome = await run_one(agent, task, args.rounds, recorder=recorder,
+            outcome = await run_one(agent, task, recorder=recorder,
                                     timeout_s=timeout_s, reasoning_effort=effort,
                                     session_state=session_state, budget=budget,
                                     queries=queries)
@@ -697,7 +754,7 @@ async def main_async(args) -> int:
             outcome["preserve_reasoning"] = entries[arm]["preserve_reasoning"]
             results.append(outcome)
             m = outcome.get("metrics") or {}
-            mark = "pass" if outcome["passed"] else "FAIL"
+            mark = "pass" if outcome["passed"] else ("TIME" if outcome["timed_out"] else "FAIL")
             print(f"  {mark:4} {outcome['id']:34} {arm:>3} {outcome['seconds']:7.1f}s "
                   f"r={m.get('rounds')} hits={m.get('budget_hits')} "
                   f"silent={m.get('silent_rounds')} peak={m.get('peak_prompt_tokens')} "
@@ -718,6 +775,7 @@ async def main_async(args) -> int:
                 **(snapshot_info or {})}
                if long_tier else {"kind": "fixed fixture", "tier": args.tier})
     run_conditions = {
+        "step0_only": bool(args.step0_only),
         "arms": list(arms),
         "preserve_reasoning_by_arm": {a: e["preserve_reasoning"] for a, e in entries.items()},
         "reasoning_effort_sent": effort,
@@ -768,17 +826,23 @@ async def main_async(args) -> int:
     for arm in arms:
         rows = [r for r in results if r["arm"] == arm]
         ok = sum(1 for r in rows if r["passed"])
-        print(f"arm {arm}: {ok}/{len(rows)} on {report['model']}")
+        cut = sum(1 for r in rows if r.get("timed_out"))
+        print(f"arm {arm}: {ok}/{len(rows)} on {report['model']}"
+              + (f" ({cut} timed out — cut off by the harness, not failed)" if cut else ""))
     # Step 0 belongs to the long tier: easy and hard never reach the incident's depth.
     s0 = round_metrics.step0(results) if long_tier else {"reproduced": None, "why": "not a long-tier run"}
     report["step0"] = s0
-    if long_tier and s0["reproduced"] is None:
-        print(f"incident symptom reproduced in the off arm: not measured ({s0['why']})")
-    elif long_tier:
-        print(f"incident symptom reproduced in the off arm: {'yes' if s0['reproduced'] else 'no'} "
-              f"(budget hits {s0['budget_hits']}, peak prompt {s0['peak_prompt']})")
-        if not s0["reproduced"]:
+    if long_tier:
+        print(round_metrics.step0_line(s0))
+        if s0["reproduced"] is False:
             print(f"  {s0['why']}")
+    if args.step0_only:
+        if s0["reproduced"]:
+            print("step-0 preflight: the off arm reached the incident's regime — the full "
+                  "A/B (--preserve-reasoning both) can measure the flag here")
+        else:
+            print("step-0 preflight: the off arm did not reach the incident's regime — the "
+                  "full A/B would measure nothing about the flag on this setup")
     if len(arms) == 2:
         lines = round_metrics.verdict_lines(results)
         report["verdict"] = lines
@@ -789,7 +853,8 @@ async def main_async(args) -> int:
 
     out = Path(args.json) if args.json else (
         RESULTS_DIR / f"{args.tier}-{entry.get('alias', 'unknown').replace(' ', '_')}"
-        f"-{args.preserve_reasoning}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        f"-{'step0' if args.step0_only else args.preserve_reasoning}"
+        f"-{time.strftime('%Y%m%d-%H%M%S')}.json"
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -803,17 +868,12 @@ async def main_async(args) -> int:
     return 0
 
 
-def main() -> int:
-    # Model answers carry arrows and non-Latin text; a cp1252 console would die
-    # on printing a finished run.
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--tier", choices=("easy", "hard", "long"), default="easy",
-                    help="easy is the regression floor; hard asks for more than one hop; "
-                         "long is the deep code-reading set built for the preserve_reasoning A/B")
+    ap.add_argument("--tier", choices=("easy", "hard", "long"), default=None,
+                    help="easy (default) is the regression floor; hard asks for more than one "
+                         "hop; long is the deep code-reading set built for the "
+                         "preserve_reasoning A/B")
     ap.add_argument("--tasks", type=int, default=None, help="run only the first N tasks")
     ap.add_argument("--provider-alias", default=DEFAULT_ALIAS,
                     help=f"alias to copy verbatim from ~/.dpc/providers.json (default: {DEFAULT_ALIAS!r})")
@@ -822,11 +882,19 @@ def main() -> int:
                          "(e.g. eval/loop/providers.eval.json for Ollama) instead of "
                          "--provider-alias")
     ap.add_argument("--model", default=None, help="override the model field on the chosen provider entry")
-    ap.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
+    # `--max-rounds` was the long tier's spelling; it stays as an alias so a
+    # command written on 2026-10-06 still means what it said.
+    ap.add_argument("--rounds", "--max-rounds", type=int, default=None, dest="rounds",
+                    help=f"the agent's round limit (AgentConfig.max_rounds) on every tier; "
+                         f"default: {LONG_MAX_ROUNDS} for long, AgentConfig's own default for "
+                         f"easy and hard")
     ap.add_argument("--preserve-reasoning", choices=tuple(ARMS), default="off",
                     dest="preserve_reasoning",
                     help="set preserve_reasoning on the copied provider entry: off (default, "
                          "the behaviour before the flag), on, or both (every task under each arm)")
+    ap.add_argument("--step0-only", action="store_true", dest="step0_only",
+                    help=f"the preflight before the A/B: the long tier's off arm on the first "
+                         f"{STEP0_ONLY_TASKS} tasks (or --tasks N), then the step-0 verdict")
     ap.add_argument("--reasoning-effort", default=None,
                     help=f"effort word sent per call (default: none for easy/hard, "
                          f"{LONG_EFFORT!r} for long)")
@@ -836,8 +904,6 @@ def main() -> int:
                          "(deterministic truncation after round 8)")
     ap.add_argument("--snapshot-commit", default=None,
                     help="long tier: commit to snapshot (default HEAD at start)")
-    ap.add_argument("--max-rounds", type=int, default=None,
-                    help=f"long tier agent round limit (default {LONG_MAX_ROUNDS})")
     ap.add_argument("--task-timeout-minutes", type=float, default=LONG_TASK_TIMEOUT_MIN,
                     help="long tier: a task past this is recorded as a timeout")
     ap.add_argument("--auto-approve", action="store_true",
@@ -848,8 +914,27 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", dest="dry_run",
                      help="validate alias/binary/gguf/arms/tools/snapshot/golds/output-dir, "
                           "then VRAM, and exit; loads no model")
-    args = ap.parse_args()
-    return asyncio.run(main_async(args))
+    args = ap.parse_args(argv)
+    if args.step0_only:
+        if args.tier not in (None, "long"):
+            ap.error("--step0-only runs the long tier; drop --tier " + args.tier)
+        if args.preserve_reasoning != "off":
+            ap.error("--step0-only runs the off arm only; drop --preserve-reasoning "
+                     + args.preserve_reasoning)
+        args.tier = "long"
+        args.tasks = args.tasks or STEP0_ONLY_TASKS
+    args.tier = args.tier or "easy"
+    return args
+
+
+def main() -> int:
+    # Model answers carry arrows and non-Latin text; a cp1252 console would die
+    # on printing a finished run.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    return asyncio.run(main_async(parse_args()))
 
 
 if __name__ == "__main__":

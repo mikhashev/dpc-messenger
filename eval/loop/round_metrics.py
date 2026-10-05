@@ -27,6 +27,15 @@ OPENING_CHARS = 80
 # complaint is a run that keeps hitting the cap.
 SYMPTOM_MIN_BUDGET_HITS = 2
 SYMPTOM_MIN_PEAK_PROMPT = 60_000
+# ...and those hits must be a share of the deep rounds, not two capped thoughts
+# lost in a long run: budget hits among the rounds whose prompt reached
+# SYMPTOM_MIN_PEAK_PROMPT, over the count of those rounds. From the incident (per
+# the card, not re-read here): 7 hits in 26 rounds. Read as the reviewers did —
+# the 12 rounds from round 14 on were the ones past ~67 k — the share is
+# 7/12 = 0.58; read as the card's range "67 177 -> 93 603" says — every round
+# was already past 60 k — it is 7/26 = 0.27. 0.25 accepts the incident under
+# both readings and rejects two hits in ten or more deep rounds (0.20).
+SYMPTOM_MIN_BUDGET_SHARE = 0.25
 
 # A capped round lands near the budget, not on it: the server stops the trace at
 # a token boundary (the incident's capped rounds read 10 080-10 980 on 10 000).
@@ -174,6 +183,10 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
             repeats += 1
         openings[r["note_opening"]] = openings.get(r["note_opening"], 0) + 1
     prompts = [r["prompt_tokens"] for r in rows if r["prompt_tokens"] is not None]
+    deep = [r["round"] for r in rows
+            if r["prompt_tokens"] is not None and r["prompt_tokens"] >= SYMPTOM_MIN_PEAK_PROMPT]
+    deep_hits = (len([n for n in hit_rounds if n in set(deep)])
+                 if hit_rounds is not None else None)
     return {
         "rounds": len(rows),
         "budget_hits": len(hit_rounds) if hit_rounds is not None else None,
@@ -191,15 +204,27 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
             or str(r.get("thinking_source") or "").startswith("estimat")),
         "first_prompt_tokens": prompts[0] if prompts else None,
         "peak_prompt_tokens": max(prompts) if prompts else None,
+        # Rounds whose prompt reached SYMPTOM_MIN_PEAK_PROMPT, and the budget hits
+        # among them — the denominator and numerator of the step-0 share.
+        "deep_rounds": len(deep),
+        "deep_budget_hits": deep_hits,
     }
+
+
+def _share(hits: Optional[int], rounds: Optional[int]) -> Optional[float]:
+    if hits is None or not rounds:
+        return None
+    return hits / rounds
 
 
 def task_symptom(m: Dict[str, Any]) -> Optional[bool]:
     """Did this task-run show the incident's symptom? None when it was not measurable."""
     if m.get("budget_hits") is None or m.get("peak_prompt_tokens") is None:
         return None
+    share = _share(m.get("deep_budget_hits"), m.get("deep_rounds"))
     return (m["budget_hits"] >= SYMPTOM_MIN_BUDGET_HITS
-            and m["peak_prompt_tokens"] >= SYMPTOM_MIN_PEAK_PROMPT)
+            and m["peak_prompt_tokens"] >= SYMPTOM_MIN_PEAK_PROMPT
+            and share is not None and share >= SYMPTOM_MIN_BUDGET_SHARE)
 
 
 def step0(results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -211,18 +236,46 @@ def step0(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     peaks = [r["metrics"]["peak_prompt_tokens"] for r in off
              if r["metrics"]["peak_prompt_tokens"] is not None]
     flags = [task_symptom(r["metrics"]) for r in off]
+    timed_out = [r["id"] for r in off if r.get("timed_out")]
     if not hits or not peaks:
         return {"reproduced": None, "budget_hits": None, "peak_prompt": None,
+                "timed_out_off": timed_out,
                 "why": "the provider reported no note or prompt counts — not measured"}
     yes = [r["id"] for r, f in zip(off, flags) if f]
+    deep_hits = sum(r["metrics"].get("deep_budget_hits") or 0 for r in off)
+    deep_rounds = sum(r["metrics"].get("deep_rounds") or 0 for r in off)
     out = {"reproduced": bool(yes), "budget_hits": sum(hits), "peak_prompt": max(peaks),
-           "tasks_reproducing": yes, "off_tasks": len(off)}
+           "deep_budget_hits": deep_hits, "deep_rounds": deep_rounds,
+           "deep_budget_share": _share(deep_hits, deep_rounds),
+           "tasks_reproducing": yes, "off_tasks": len(off), "timed_out_off": timed_out}
     if not yes:
         out["why"] = (
             f"no off-arm task reached >= {SYMPTOM_MIN_BUDGET_HITS} budget hits on a prompt "
-            f">= {SYMPTOM_MIN_PEAK_PROMPT} tokens, so the off arm never entered the regime "
-            "the flag is meant to change; the A/B below measured nothing about it")
+            f">= {SYMPTOM_MIN_PEAK_PROMPT} tokens with >= {SYMPTOM_MIN_BUDGET_SHARE:.2f} of its "
+            f"rounds past {SYMPTOM_MIN_PEAK_PROMPT} at the budget, so the off arm never entered "
+            "the regime the flag is meant to change; the A/B below measured nothing about it")
+        if timed_out:
+            out["why"] += (f" ({len(timed_out)} off-arm task(s) hit the harness timeout first: "
+                           f"{', '.join(timed_out)})")
     return out
+
+
+def step0_line(s0: Dict[str, Any]) -> str:
+    """The printed step-0 line: the verdict, then both thresholds' numbers."""
+    head = "incident symptom reproduced in the off arm"
+    if s0.get("reproduced") is None:
+        return f"{head}: not measured ({s0.get('why')})"
+    share = s0.get("deep_budget_share")
+    share_s = f"{share:.2f}" if share is not None else "-"
+    line = (f"{head}: {'yes' if s0['reproduced'] else 'no'} "
+            f"(budget hits {s0['budget_hits']} [need >= {SYMPTOM_MIN_BUDGET_HITS} in one task], "
+            f"peak prompt {s0['peak_prompt']} [need >= {SYMPTOM_MIN_PEAK_PROMPT}], "
+            f"budget-hit share past {SYMPTOM_MIN_PEAK_PROMPT}: "
+            f"{s0.get('deep_budget_hits')}/{s0.get('deep_rounds')} = {share_s} "
+            f"[need >= {SYMPTOM_MIN_BUDGET_SHARE:.2f} in one task])")
+    if s0.get("tasks_reproducing"):
+        line += f"; reproducing: {', '.join(s0['tasks_reproducing'])}"
+    return line
 
 
 def _fmt(v: Any) -> str:
@@ -233,28 +286,32 @@ def _fmt(v: Any) -> str:
     return str(v)
 
 
-# Each axis, and which direction is better when read alone. None: no direction —
-# printed, not compared. Visible output is its own axis, beside the rest.
+# Each axis: the printed label and the key it reads. No direction is attached on
+# purpose — the verdict ranks nothing. Visible output is its own axis, beside
+# the rest; a timeout is its own axis too, so a task the harness cut off is not
+# read as a failure of the flag.
 AXES = (
-    ("success", "passed", +1),
-    ("rounds_to_done", "rounds_to_completion", -1),
-    ("rounds", "rounds", -1),
-    ("budget_hits", "budget_hits", -1),
-    ("silent_rounds", "silent_rounds", -1),
-    ("silent_streak", "longest_silent_streak", -1),
-    ("repeat_open", "repeat_opening_share", -1),
-    ("note_tokens", "note_tokens", -1),
-    ("peak_prompt", "peak_prompt_tokens", -1),
-    ("compact_at", "compaction_round", None),
-    ("compactions", "compactions", None),
-    ("compact_fail", "compaction_failures", -1),
-    ("wall_s", "wall_s", -1),
+    ("success", "passed"),
+    ("timed_out", "timed_out"),
+    ("rounds_to_done", "rounds_to_completion"),
+    ("rounds", "rounds"),
+    ("budget_hits", "budget_hits"),
+    ("silent_rounds", "silent_rounds"),
+    ("silent_streak", "longest_silent_streak"),
+    ("repeat_open", "repeat_opening_share"),
+    ("note_tokens", "note_tokens"),
+    ("peak_prompt", "peak_prompt_tokens"),
+    ("compact_at", "compaction_round"),
+    ("compactions", "compactions"),
+    ("compact_fail", "compaction_failures"),
+    ("wall_s", "wall_s"),
 )
+_COUNTED = ("passed", "timed_out")
 
 
 def _value(r: Dict[str, Any], key: str) -> Any:
-    if key == "passed":
-        return r.get("passed")
+    if key in _COUNTED:
+        return bool(r.get(key))
     if key == "wall_s":
         return r.get("seconds")
     return (r.get("metrics") or {}).get(key)
@@ -268,6 +325,11 @@ def verdict_lines(results: List[Dict[str, Any]]) -> List[str]:
     (per the brief for this instrument; that sample's data was not re-read
     here). So the lines below never declare an arm better on budget hits when it
     went silent more or compacted earlier — they say so instead.
+
+    Totals are printed twice: over every paired task, and over the tasks whose
+    off arm reproduced the incident (`step0`'s `tasks_reproducing`). Only the
+    second set is in the regime the flag is meant to change; a total over all
+    tasks dilutes it with tasks where there was nothing to change.
     """
     by_task: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for r in results:
@@ -279,22 +341,37 @@ def verdict_lines(results: List[Dict[str, Any]]) -> List[str]:
     for t, arms in paired.items():
         off, on = arms["off"], arms["on"]
         lines.append(f"  {t}")
-        for label, key, _ in AXES:
+        for label, key in AXES:
             lines.append(f"    {label:>14}  off={_fmt(_value(off, key)):>9}  on={_fmt(_value(on, key)):>9}")
 
+    lines.append(f"  all {len(paired)} paired task(s)")
+    lines.extend(_total_lines(paired, "all tasks"))
+    reproducing = [t for t in (step0(results).get("tasks_reproducing") or []) if t in paired]
+    if reproducing:
+        subset = {t: paired[t] for t in reproducing}
+        lines.append(f"  reproducing subset, {len(subset)} task(s): {', '.join(reproducing)}")
+        lines.extend(_total_lines(subset, "reproducing subset"))
+    else:
+        lines.append("  reproducing subset: empty — no paired task's off arm reproduced the "
+                     "incident, so no total below is in the regime the flag is meant to change")
+    return lines
+
+
+def _total_lines(paired: Dict[str, Dict[str, Dict[str, Any]]], scope: str) -> List[str]:
+    """The total block and its warnings for one set of paired tasks."""
     def total(arm: str, key: str):
         vals = [_value(a[arm], key) for a in paired.values()]
         vals = [v for v in vals if v is not None]
         if not vals:
             return None
-        if key == "passed":
+        if key in _COUNTED:
             return sum(1 for v in vals if v)
         if key in ("peak_prompt_tokens",):
             return max(vals)
         return sum(vals)
 
-    lines.append(f"  all {len(paired)} paired task(s)")
-    for label, key, _ in AXES:
+    lines = []
+    for label, key in AXES:
         if key in ("compaction_round", "repeat_opening_share", "longest_silent_streak",
                    "rounds_to_completion"):
             continue
@@ -329,9 +406,13 @@ def verdict_lines(results: List[Dict[str, Any]]) -> List[str]:
     if earlier:
         warnings.append(f"the on arm compacted earlier (or only it compacted) in {earlier} task(s): "
                         "its later rounds ran on summaries the off arm still had verbatim")
+    t_off, t_on = total("off", "timed_out"), total("on", "timed_out")
+    if t_off or t_on:
+        warnings.append(f"{t_off} off / {t_on} on task(s) hit the harness timeout — a cut-off "
+                        "run, not a failure of either arm")
     b_off, b_on = total("off", "budget_hits"), total("on", "budget_hits")
     if b_off is not None and b_on is not None and b_on < b_off and warnings:
         warnings.append("fewer budget hits in the on arm are not read as a result while the "
                         "warnings above stand")
-    lines.extend(f"  WARNING: {w}" for w in warnings)
+    lines.extend(f"  WARNING ({scope}): {w}" for w in warnings)
     return lines
