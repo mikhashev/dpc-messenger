@@ -1591,21 +1591,13 @@ Respond in JSON format:
                 continue
             from .dpc_agent.index_keys import l6_key
             from .dpc_agent.index_writer import write_index_async
-            from .dpc_agent.indexing_pipeline import index_single_file
-            from .dpc_agent.retrieval import make_backend_for_agent
-            # Same key shape as the full rebuild, from the same helper, so this
-            # incremental add replaces the rebuilt entry instead of sitting beside it.
+            from .dpc_agent.indexing_pipeline import replace_file_in_index
+            # Same key shape as the startup sync, from the same helper, so the replace
+            # finds the rows that sync wrote.
             _l6_key = l6_key(commit_path, self.dpc_home_dir / "knowledge")
 
             def _add_commit(agent_root=agent_mgr.agent_root, provider=agent._embedding_provider):
-                backend = make_backend_for_agent(agent_root)
-                if not backend.vector.load():
-                    return False
-                backend.text.load()
-                index_single_file(commit_path, provider, backend,
-                                  source_layer="L6", source_file_key=_l6_key)
-                backend.save()
-                return True
+                return replace_file_in_index(agent_root, commit_path, provider, "L6", _l6_key)
 
             if await write_index_async(index_dir, _add_commit):
                 logger.info("MEM-3.7: reindexed L6 commit %s for agent %s",

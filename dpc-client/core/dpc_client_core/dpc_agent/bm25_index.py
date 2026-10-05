@@ -13,7 +13,7 @@ import pathlib
 import re
 import shutil
 import unicodedata
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from .index_meta import atomic_write_text, replace_when_the_readers_let_go
 
@@ -69,8 +69,27 @@ def tokenize(text: str, extra_stops: frozenset = frozenset()) -> List[str]:
     return _tokenize_whitespace(text, extra_stops)
 
 
+TEXTS_FILE = "bm25_texts.json"
+# Written into TEXTS_FILE. A store without it, or with another number, is the old
+# format: its rows were built from previews and every row's full text is unknown.
+CORPUS_VERSION = 2
+
+
+def _texts_document(texts) -> str:
+    return json.dumps({"corpus_version": CORPUS_VERSION, "texts": texts}, ensure_ascii=False)
+
+
 class BM25Index:
-    """BM25 keyword search index with disk persistence."""
+    """BM25 keyword search index with disk persistence.
+
+    Every add and remove rebuilds the whole corpus, so the index keeps the full text
+    of every row in its own file (TEXTS_FILE), aligned with the chunk list.
+    `meta["text"]` is the preview recall prints and is never a rebuild source: a row
+    rebuilt from it is searchable on its first 500 characters only. The texts are read
+    only when a mutation needs them, because recall loads this index on every turn.
+    A row whose full text is unknown (an index older than the file) is held as None
+    and falls back to its preview until the startup sync supplies the text.
+    """
 
     CORPUS_MAX_DF = 0.8
 
@@ -78,10 +97,53 @@ class BM25Index:
         self.index_dir = index_dir
         self._retriever = None
         self._chunk_metas: List[dict] = []
+        # None as a whole: not read from disk yet. None as an element: unknown.
+        self._texts: Optional[List[Optional[str]]] = []
         self._corpus_stop_words: frozenset = frozenset()
         self._batching = False
         self._pending_texts: List[str] = []
         self._pending_metas: List[dict] = []
+
+    def _full_texts(self) -> List[Optional[str]]:
+        """The stored full texts, read on first need, always as long as the metas."""
+        if self._texts is None:
+            texts: list = []
+            path = self.index_dir / TEXTS_FILE if self.index_dir is not None else None
+            if path is not None and path.exists():
+                try:
+                    loaded = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict) and loaded.get("corpus_version") == CORPUS_VERSION:
+                        texts = loaded.get("texts") or []
+                except Exception as e:
+                    log.warning("BM25 full texts unreadable, rows fall back to previews: %s", e)
+            if len(texts) != len(self._chunk_metas):
+                if texts:
+                    log.warning("BM25 full texts disagree with the chunk list (%d vs %d) — "
+                                "every row's full text treated as unknown",
+                                len(texts), len(self._chunk_metas))
+                texts = [None] * len(self._chunk_metas)
+            self._texts = texts
+        return self._texts
+
+    def _rebuild(self, texts: List[Optional[str]], metas: List[dict]) -> None:
+        """Rebuild from full texts; a row without one falls back to its preview."""
+        if not metas:
+            self.clear()
+            return
+        corpus = [t if t is not None else m.get("text", "") for t, m in zip(texts, metas)]
+        self.build(corpus, metas)
+        self._texts = list(texts)
+
+    def clear(self) -> None:
+        self._retriever = None
+        self._chunk_metas = []
+        self._texts = []
+        self._corpus_stop_words = frozenset()
+
+    def sources_missing_full_text(self) -> Set[str]:
+        """Keys whose keyword row was built from the preview, not the document."""
+        texts = self._full_texts()
+        return {m.get("source_file", "") for t, m in zip(texts, self._chunk_metas) if t is None}
 
     def _compute_corpus_stops(self, texts: List[str]) -> frozenset:
         """Layer 2: words appearing in >80% of documents are corpus-specific noise."""
@@ -108,6 +170,7 @@ class BM25Index:
         self._retriever = bm25s.BM25()
         self._retriever.index(corpus_tokens)
         self._chunk_metas = chunk_metas
+        self._texts = list(texts)
 
     def add(self, texts: List[str], chunk_metas: List[dict]) -> None:
         """Append new documents and rebuild the BM25 index.
@@ -118,10 +181,7 @@ class BM25Index:
             self._pending_texts.extend(texts)
             self._pending_metas.extend(chunk_metas)
             return
-        existing_texts = [m.get("text", "") for m in self._chunk_metas]
-        all_texts = existing_texts + texts
-        all_metas = self._chunk_metas + chunk_metas
-        self.build(all_texts, all_metas)
+        self._rebuild(self._full_texts() + list(texts), self._chunk_metas + list(chunk_metas))
 
     def begin_batch(self) -> None:
         """Start accumulating add() calls without rebuilding."""
@@ -133,10 +193,8 @@ class BM25Index:
         """Flush accumulated chunks and rebuild BM25 once."""
         self._batching = False
         if self._pending_texts:
-            existing_texts = [m.get("text", "") for m in self._chunk_metas]
-            all_texts = existing_texts + self._pending_texts
-            all_metas = self._chunk_metas + self._pending_metas
-            self.build(all_texts, all_metas)
+            self._rebuild(self._full_texts() + list(self._pending_texts),
+                          self._chunk_metas + self._pending_metas)
         self._pending_texts = []
         self._pending_metas = []
 
@@ -161,48 +219,33 @@ class BM25Index:
 
     def remove_by_source(self, source_file: str) -> int:
         """Remove all documents from a specific source file and rebuild."""
+        removed = self._remove_where(lambda key: key == source_file)
+        if removed:
+            log.info("Removed %d BM25 docs for %s, %d remaining", removed, source_file, len(self._chunk_metas))
+        return removed
+
+    def _remove_where(self, drop) -> int:
         if not self._chunk_metas:
             return 0
-        keep_texts = []
-        keep_metas = []
-        removed = 0
-        for meta in self._chunk_metas:
-            if meta.get("source_file") == source_file:
-                removed += 1
-            else:
-                keep_texts.append(meta.get("text", ""))
+        keep_texts, keep_metas = [], []
+        for text, meta in zip(self._full_texts(), self._chunk_metas):
+            if not drop(meta.get("source_file")):
+                keep_texts.append(text)
                 keep_metas.append(meta)
-        if removed == 0:
-            return 0
-        if keep_texts:
-            self.build(keep_texts, keep_metas)
-        else:
-            self._retriever = None
-            self._chunk_metas = []
-        log.info("Removed %d BM25 docs for %s, %d remaining", removed, source_file, len(self._chunk_metas))
+        removed = len(self._chunk_metas) - len(keep_metas)
+        if removed:
+            self._rebuild(keep_texts, keep_metas)
         return removed
 
     def remove_by_sources(self, source_files) -> int:
         """One pass over the corpus, one build. See FaissIndex.remove_by_sources."""
         drop = {s for s in source_files if s}
-        if not drop or not self._chunk_metas:
+        if not drop:
             return 0
-        keep_texts, keep_metas, removed = [], [], 0
-        for meta in self._chunk_metas:
-            if meta.get("source_file") in drop:
-                removed += 1
-            else:
-                keep_texts.append(meta.get("text", ""))
-                keep_metas.append(meta)
-        if removed == 0:
-            return 0
-        if keep_texts:
-            self.build(keep_texts, keep_metas)
-        else:
-            self._retriever = None
-            self._chunk_metas = []
-        log.info("Removed %d BM25 docs for %d sources, %d remaining",
-                 removed, len(drop), len(self._chunk_metas))
+        removed = self._remove_where(lambda key: key in drop)
+        if removed:
+            log.info("Removed %d BM25 docs for %d sources, %d remaining",
+                     removed, len(drop), len(self._chunk_metas))
         return removed
 
     def save(self) -> None:
@@ -216,7 +259,14 @@ class BM25Index:
         parse half a file" to "a reader may find no directory for a moment", and the
         second is a case `load()` already handles by name.
         """
-        if self.index_dir is None or self._retriever is None:
+        if self.index_dir is None:
+            return
+        if self._retriever is None:
+            # Emptied by removals: the last saved corpus must not come back on load.
+            if not self._chunk_metas and (self.index_dir / "bm25_chunks.json").exists():
+                shutil.rmtree(self.index_dir / "bm25", ignore_errors=True)
+                atomic_write_text(self.index_dir / TEXTS_FILE, _texts_document([]))
+                atomic_write_text(self.index_dir / "bm25_chunks.json", "[]")
             return
         self.index_dir.mkdir(parents=True, exist_ok=True)
         live = self.index_dir / "bm25"
@@ -233,6 +283,11 @@ class BM25Index:
         replace_when_the_readers_let_go(staged, live)
         shutil.rmtree(previous, ignore_errors=True)
 
+        # Texts before the chunk list: a cut between the two leaves them disagreeing in
+        # length, which `_full_texts` reads as "unknown" rather than misaligned. Skipped
+        # when this instance never read them, because then it did not change them.
+        if self._texts is not None:
+            atomic_write_text(self.index_dir / TEXTS_FILE, _texts_document(self._texts))
         atomic_write_text(self.index_dir / "bm25_chunks.json",
                           json.dumps(self._chunk_metas, ensure_ascii=False))
         # Written even when empty: skipping it left the previous corpus's stop words on
@@ -252,6 +307,7 @@ class BM25Index:
             import bm25s
             self._retriever = bm25s.BM25.load(str(bm25_dir))
             self._chunk_metas = json.loads(chunks_path.read_text(encoding="utf-8"))
+            self._texts = None  # read on the first mutation, see _full_texts
             # The same refusal the vector channel makes, for the same reason: `search`
             # maps a retrieved row number into `_chunk_metas`, so a list that disagrees
             # with the corpus does not fail — it answers, with another document's name.
@@ -265,8 +321,7 @@ class BM25Index:
                     "BM25 index and chunk list disagree (%s rows, %d metas) — refusing to load",
                     rows, len(self._chunk_metas),
                 )
-                self._retriever = None
-                self._chunk_metas = []
+                self.clear()
                 return False
             stops_path = self.index_dir / "bm25_corpus_stops.json"
             if stops_path.exists():

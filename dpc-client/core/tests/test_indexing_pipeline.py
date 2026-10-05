@@ -169,6 +169,7 @@ def test_every_indexing_path_reads_a_document_the_same_way():
         / "dpc_client_core" / "managers" / "agent_manager.py"
     ).read_text(encoding="utf-8")
 
-    assert "document_fields(" in source
+    # document_meta reads through document_fields and adds the stored row around it.
+    assert "document_meta(" in source
     assert "_extract_heading(" not in source, "read the document through document_fields"
     assert "_build_doc_text(" not in source, "read the document through document_fields"

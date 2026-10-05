@@ -149,6 +149,32 @@ def _node_count(db, label: str) -> int:
     return int(val) if val is not None else 0
 
 
+def _source_rows(db, label: str) -> Optional[dict]:
+    """Stored metas grouped by key, for the startup sync's duplicate and ghost checks.
+
+    Duplicates are collapsed by the ABC default (drop the key, re-embed it): a Grafeo
+    node cannot be told apart from its twin without its id, and the case is rare.
+    """
+    try:
+        rows = list(db.execute_cypher(
+            f"MATCH (n:{label}) RETURN n.source_file AS sf, n.source_path AS sp, "
+            f"n.heading AS h, n.char_count AS cc, n.{RAW_TEXT_PROPERTY} AS t"
+        ))
+    except Exception as e:
+        log.debug("source listing failed for label %s: %s", label, e)
+        return None
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r.get("sf") or "", []).append({
+            "source_file": r.get("sf") or "",
+            "source_path": r.get("sp") or "",
+            "heading": r.get("h") or "",
+            "char_count": int(r.get("cc") or 0),
+            "text": r.get("t") or "",
+        })
+    return out
+
+
 class GrafeoVectorIndex(VectorIndex):
     """Vector index backed by Grafeo native HNSW (label ChunkVector)."""
 
@@ -364,6 +390,9 @@ class GrafeoVectorIndex(VectorIndex):
     def total_items(self) -> int:
         return _node_count(self._get_db(), VECTOR_LABEL)
 
+    def source_rows(self):
+        return _source_rows(self._get_db(), VECTOR_LABEL)
+
     def needs_rebuild(self, model_name: str) -> bool:
         # Compare requested model_name against the identifier stored on the
         # singleton _RetrievalSchema node (written on first add()). Empty
@@ -528,6 +557,9 @@ class GrafeoTextIndex(TextIndex):
     @property
     def total_items(self) -> int:
         return _node_count(self._get_db(), TEXT_LABEL)
+
+    def source_rows(self):
+        return _source_rows(self._get_db(), TEXT_LABEL)
 
 
 class GrafeoHybridFuser(NativeHybridFuser):

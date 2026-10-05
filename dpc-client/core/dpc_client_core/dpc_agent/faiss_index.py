@@ -118,6 +118,22 @@ class FaissIndex:
                  removed, len(drop), self._header.chunk_count)
         return removed
 
+    def keep_rows(self, keep: List[int]) -> int:
+        """Keep exactly these row numbers, in order; one index rebuilt. Returns removed."""
+        if self._index is None:
+            return 0
+        removed = len(self._chunks) - len(keep)
+        if removed == 0:
+            return 0
+        import faiss
+        new_index = faiss.IndexFlatIP(self._header.dimensions)
+        if keep:
+            new_index.add(np.vstack([self._index.reconstruct(i).reshape(1, -1) for i in keep]))
+        self._index = new_index
+        self._chunks = [self._chunks[i] for i in keep]
+        self._header.chunk_count = self._index.ntotal
+        return removed
+
     def save(self) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         if self._index is not None:

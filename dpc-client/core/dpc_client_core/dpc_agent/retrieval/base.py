@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -86,6 +86,25 @@ class VectorIndex(ABC):
         """
         return sum(self.remove_by_source(s) for s in dict.fromkeys(source_files))
 
+    def source_rows(self) -> "Optional[Dict[str, List[dict]]]":
+        """The stored metas grouped by meta['source_file'], or None if unlistable.
+
+        The startup sync reads it to find keys held twice and keys whose file is gone;
+        None makes it skip that check rather than guess.
+        """
+        return None
+
+    def keep_one_row_per_source(self, source_files: Iterable[str], is_current) -> Set[str]:
+        """For each key keep its last row whose meta `is_current` accepts, drop the rest.
+
+        Returns the keys for which no row was accepted; all their rows are gone and the
+        caller re-embeds them. This default keeps nothing — always correct, never cheap —
+        and backends that can drop a single row override it.
+        """
+        keys = set(source_files)
+        self.remove_by_sources(keys)
+        return keys
+
     @abstractmethod
     def save(self) -> None:
         """Persist to disk. No-op for self-persistent backends."""
@@ -134,6 +153,18 @@ class TextIndex(ABC):
     def remove_by_sources(self, source_files: Iterable[str]) -> int:
         """Remove several sources with one corpus rebuild. See VectorIndex."""
         return sum(self.remove_by_source(s) for s in dict.fromkeys(source_files))
+
+    def source_rows(self) -> "Optional[Dict[str, List[dict]]]":
+        """Stored metas by key, or None. See VectorIndex.source_rows."""
+        return None
+
+    def sources_missing_full_text(self) -> Set[str]:
+        """Keys whose row is indexed on less than the document. Empty by default.
+
+        Native BM25 indexes written before it kept its own full texts answer with
+        every key; the startup sync re-adds those rows' text, without re-embedding.
+        """
+        return set()
 
     @abstractmethod
     def save(self) -> None:

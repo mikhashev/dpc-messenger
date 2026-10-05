@@ -364,26 +364,20 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                 agent = getattr(ctx, '_agent', None)
                 provider = getattr(agent, '_embedding_provider', None) if agent else None
                 if provider:
-                    from ..indexing_pipeline import index_single_file
+                    from ..indexing_pipeline import replace_file_in_index
                     from ..index_writer import write_index
-                    from ..retrieval import make_backend_for_agent
+                    from ..index_keys import l5_key
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
+                        # Same key shape as the startup sync, from the same helper, so
+                        # the replace below finds the rows that sync wrote.
+                        _l5_key = l5_key(file_path, ctx.agent_root / "knowledge")
+
                         def _add_to_index():
                             # Built inside the writer: a backend made outside it would
                             # have read the index before another mutation wrote it.
-                            backend = make_backend_for_agent(ctx.agent_root)
-                            if not backend.vector.load():
-                                return False
-                            backend.text.load()
-                            # Same key shape as the full rebuild, from the same helper —
-                            # an incremental add under a different name would sit beside
-                            # the rebuilt entry instead of replacing it.
-                            from ..index_keys import l5_key
-                            _l5_key = l5_key(file_path, ctx.agent_root / "knowledge")
-                            index_single_file(file_path, provider, backend, source_layer="L5", source_file_key=_l5_key)
-                            backend.save()
-                            return True
+                            return replace_file_in_index(
+                                ctx.agent_root, file_path, provider, "L5", _l5_key)
 
                         if write_index(index_dir, _add_to_index):
                             log.info("Incremental reindex: added %s to retrieval backend", file_path.name)
@@ -410,6 +404,34 @@ def repo_write(ctx: ToolContext, path: str, content: str) -> str:
     return write_file(ctx, path, content)
 
 
+def _forget_knowledge_files(ctx: ToolContext, files, path: str) -> None:
+    """Drop deleted knowledge files from both index channels and from file_hashes.
+
+    Keyed by l5_key, the name the file was indexed under: a bare-name delete leaves
+    the row behind and Active Recall keeps offering a path that no longer exists.
+    """
+    knowledge_dir = ctx.agent_root / "knowledge"
+    index_dir = ctx.agent_root / "state" / "memory_index"
+    from ..index_keys import l5_key
+    keys = []
+    for f in files:
+        try:
+            f.relative_to(knowledge_dir)
+        except ValueError:
+            continue
+        if f.name != "_index.md":
+            keys.append(l5_key(f, knowledge_dir))
+    if not keys or not index_dir.exists():
+        return
+    try:
+        from ..index_writer import write_index
+        from ..indexing_pipeline import forget_in_index
+        write_index(index_dir, lambda: forget_in_index(ctx.agent_root, keys))
+        log.info("Removed %d file(s) under %s from retrieval backend", len(keys), path)
+    except Exception as e:
+        log.warning("Index cleanup failed for %s: %s", path, e)
+
+
 def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
     """
     Delete a file or directory from the agent sandbox.
@@ -432,38 +454,14 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
             if not recursive:
                 return f"⚠️ '{path}' is a directory. Use recursive=true to delete it and all contents."
             import shutil
-            count = sum(1 for _ in target.rglob("*") if _.is_file())
+            files = [f for f in target.rglob("*") if f.is_file()]
             shutil.rmtree(target)
-            return f"✓ Deleted directory '{path}' ({count} files)"
+            _forget_knowledge_files(ctx, files, path)
+            return f"✓ Deleted directory '{path}' ({len(files)} files)"
         else:
             size = target.stat().st_size
             target.unlink()
-            # Remove from retrieval backend if knowledge file
-            if path.startswith("knowledge/") and not path.endswith("_index.md"):
-                try:
-                    from ..index_writer import write_index
-                    from ..retrieval import make_backend_for_agent
-                    index_dir = ctx.agent_root / "state" / "memory_index"
-                    if index_dir.exists():
-                        from ..index_keys import l5_key
-                        # Delete by the key the file was indexed under, not by its bare
-                        # name: a mismatch here leaves the deleted file in the index and
-                        # Active Recall keeps offering a path that no longer exists.
-                        source_file = l5_key(target, ctx.agent_root / "knowledge")
-
-                        def _remove_from_index():
-                            backend = make_backend_for_agent(ctx.agent_root)
-                            if backend.vector.load():
-                                backend.vector.remove_by_source(source_file)
-                                backend.vector.save()
-                            if backend.text.load():
-                                backend.text.remove_by_source(source_file)
-                                backend.text.save()
-
-                        write_index(index_dir, _remove_from_index)
-                        log.info("Removed %s from retrieval backend", source_file)
-                except Exception as e:
-                    log.warning("Index cleanup failed for %s: %s", path, e)
+            _forget_knowledge_files(ctx, [target], path)
             return f"✓ Deleted '{path}' ({size} bytes)"
 
     except PermissionError as e:

@@ -366,7 +366,7 @@ class DpcAgentManager:
                             )
                             from dpc_client_core.dpc_agent.text_extract import extract_text, is_binary
                             from dpc_client_core.dpc_agent.indexing_pipeline import (
-                                document_fields, _BACKFILL_SKIP, read_file_meta,
+                                document_meta, doc_hash, _BACKFILL_SKIP, read_file_meta,
                             )
                             from dpc_client_core.dpc_agent.index_keys import (
                                 KEY_FORMAT, build_ext_roots, ext_key, l5_key, l6_key,
@@ -413,15 +413,8 @@ class DpcAgentManager:
                                         continue
                                     file_meta = read_file_meta(knowledge_dir, f.name)
                                     key = l5_key(f, knowledge_dir)
-                                    heading, doc_text, excerpt = document_fields(key, text)
-                                    collected.append((
-                                        key, doc_text,
-                                        {"source_file": key, "heading": heading,
-                                         "source_layer": file_meta.source_layer,
-                                         "source_path": str(f),
-                                         "char_count": len(text), "text": excerpt},
-                                        "L5",
-                                    ))
+                                    doc_text, meta = document_meta(key, f, text, file_meta.source_layer)
+                                    collected.append((key, doc_text, meta, "L5"))
                                     _claim(f)
                                     l5_count += 1
 
@@ -437,14 +430,8 @@ class DpcAgentManager:
                                         if not text:
                                             continue
                                         key = l6_key(f, l6_dir)
-                                        heading, doc_text, excerpt = document_fields(key, text)
-                                        collected.append((
-                                            key, doc_text,
-                                            {"source_file": key, "heading": heading,
-                                             "source_layer": "L6", "char_count": len(text),
-                                             "source_path": str(f), "text": excerpt},
-                                            "L6",
-                                        ))
+                                        doc_text, meta = document_meta(key, f, text, "L6")
+                                        collected.append((key, doc_text, meta, "L6"))
                                         _claim(f)
                                         l6_count += 1
 
@@ -474,14 +461,8 @@ class DpcAgentManager:
                                         if not text:
                                             continue
                                         key = ext_key(f, ext_roots)
-                                        heading, doc_text, excerpt = document_fields(key, text)
-                                        collected.append((
-                                            key, doc_text,
-                                            {"source_file": key, "heading": heading,
-                                             "source_layer": "EXT", "char_count": len(text),
-                                             "source_path": str(f), "text": excerpt},
-                                            "EXT",
-                                        ))
+                                        doc_text, meta = document_meta(key, f, text, "EXT")
+                                        collected.append((key, doc_text, meta, "EXT"))
                                         ext_count += 1
                                     if not ext_files and indexed_list:
                                         log.info("Extended paths: %d paths configured but 0 text files found", len(indexed_list))
@@ -541,7 +522,7 @@ class DpcAgentManager:
                             to_embed: list = []   # (source_file, doc_text, meta)
                             unchanged: list = []
                             for source_file, doc_text, meta, _layer in collected:
-                                h = hashlib.sha256(doc_text.encode()).hexdigest()[:16]
+                                h = doc_hash(doc_text)
                                 # Two files under one key is not a duplicate, it is a
                                 # disappearance: the second overwrites the first here and
                                 # deletes both from the index on the next remove_by_source.
@@ -561,27 +542,32 @@ class DpcAgentManager:
 
                             t_start = time.monotonic()
 
+                            from dpc_client_core.dpc_agent.indexing_pipeline import (
+                                IndexRepair, repair_before_embedding,
+                            )
+                            repair = IndexRepair()
+                            text_only_docs: list = []
                             if needs_full_rebuild:
                                 backend.vector.clear()
                                 backend.text.clear()
                             else:
-                                # already loaded above, before the hash comparison
-                                # remove_by_source kills all rows for source_file, must precede add for modified entries
-                                modified_or_removed = [f for f, _, _ in to_embed if f in old_hashes] + removed_files
-                                if modified_or_removed:
-                                    # One call, one rebuild per index. Per source this
-                                    # rebuilt the whole index each time, and a pass that
-                                    # dropped 298 sources spent 505.9 s doing it while
-                                    # embedding 73 documents.
-                                    backend.vector.remove_by_sources(modified_or_removed)
-                                    backend.text.remove_by_sources(modified_or_removed)
+                                # already loaded above, before the hash comparison.
+                                # Removes every row of every key about to be re-added,
+                                # ghosts and duplicates included; see the helper.
+                                repair, text_only_docs = repair_before_embedding(
+                                    backend, index_dir, collected, to_embed,
+                                    old_hashes, removed_files, self.agent_id,
+                                )
 
                             BATCH_SIZE = max(1, int(mem_cfg.batch_size))
                             embedded = 0
-                            if to_embed:
+                            if to_embed or text_only_docs:
                                 if hasattr(backend.text, "begin_batch"):
                                     backend.text.begin_batch()
                                 try:
+                                    # Text rows only, from the document: no embedding.
+                                    backend.text.add([TextAddItem(text=t, meta=m)
+                                                      for t, m in text_only_docs])
                                     for batch_start in range(0, len(to_embed), BATCH_SIZE):
                                         if self._stop_event.is_set():
                                             log.info("Per-file indexing interrupted by shutdown at batch %d/%d", batch_start, len(to_embed))
@@ -624,7 +610,7 @@ class DpcAgentManager:
                                 )
 
                             # meta save last = commit point for crash safety
-                            if to_embed or removed_files or needs_full_rebuild or _needs_backend_stamp:
+                            if to_embed or removed_files or needs_full_rebuild or _needs_backend_stamp or repair.needed:
                                 backend.save()
                                 try:
                                     from ..dpc_agent.index_meta import read_meta, write_meta

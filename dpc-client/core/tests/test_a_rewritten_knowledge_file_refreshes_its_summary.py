@@ -65,6 +65,8 @@ def test_refresh_summaries_fixes_stale_entries_and_nothing_else(agent):
     kdir = agent / "knowledge"
     (kdir / "stale.md").write_text("# Stale\ncurrent text", encoding="utf-8")
     (kdir / "fresh.md").write_text("# Fresh\nsame", encoding="utf-8")
+    # A file with no entry: refresh_summaries must not add one.
+    (kdir / "orphan.md").write_text("# Orphan\nnever registered", encoding="utf-8")
     (kdir / "_meta.json").write_text(json.dumps({
         "stale.md": {"summary": "# Stale\nfirst draft", "access_count": 7, "write_count": 3,
                      "last_accessed": "2026-09-01T00:00:00+00:00",

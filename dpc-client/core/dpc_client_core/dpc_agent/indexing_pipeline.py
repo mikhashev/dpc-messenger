@@ -9,12 +9,14 @@ Full rebuild if model/dimensions change (detected by backend.vector.needs_rebuil
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import pathlib
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -91,6 +93,30 @@ def document_fields(source_key: str, text: str) -> "tuple[str, str, str]":
     return heading, _build_doc_text(source_key, heading, body), body[:500]
 
 
+def doc_hash(doc_text: str) -> str:
+    """The `file_hashes` value for a document: what the startup sync compares."""
+    return hashlib.sha256(doc_text.encode()).hexdigest()[:16]
+
+
+def document_meta(source_file: str, path: pathlib.Path, text: str, source_layer: str) -> "tuple[str, dict]":
+    """The embedded text and the stored row for one document, as every path builds them.
+
+    `text` in the row is a preview for readers (Active Recall prints it). It is not
+    the document and nothing may rebuild an index from it.
+    """
+    heading, doc_text, excerpt = document_fields(source_file, text)
+    return doc_text, {
+        "source_file": source_file,
+        "heading": heading,
+        "source_layer": source_layer,
+        # Where the document actually lives. The key names it; this reaches it.
+        "source_path": str(path),
+        "char_count": len(text),
+        "text": excerpt,
+        "doc_hash": doc_hash(doc_text),
+    }
+
+
 def index_single_file(
     path: pathlib.Path,
     embedding_provider,
@@ -99,6 +125,9 @@ def index_single_file(
     source_file_key: "str | None" = None,
 ) -> int:
     """Extract, embed, and index a single file as one document. Returns 1 if indexed, 0 if skipped.
+
+    This appends. A caller replacing a document goes through `replace_file_in_index`,
+    which removes the key's rows first and records the hash.
 
     source_file_key lets the caller pin the key/display string used as
     `meta["source_file"]` (matters for `remove_by_source` lookups and for
@@ -109,25 +138,240 @@ def index_single_file(
     text = extract_text(path)
     if not text:
         return 0
-
-    _src = source_file_key or path.name
-    heading, doc_text, excerpt = document_fields(_src, text)
-
-    meta = {
-        "source_file": _src,
-        "heading": heading,
-        "source_layer": source_layer,
-        # Where the document actually lives. The key names it; this reaches it.
-        "source_path": str(path),
-        "char_count": len(text),
-        "text": excerpt,
-    }
-
+    doc_text, meta = document_meta(source_file_key or path.name, path, text, source_layer)
     vector = np.array(embedding_provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
     backend.vector.add([VectorAddItem(vector=vector, meta=meta)])
     backend.text.add([TextAddItem(text=doc_text, meta=meta)])
-
     return 1
+
+
+def record_file_hashes(index_dir: pathlib.Path, updates: Dict[str, Optional[str]]) -> None:
+    """Bring `file_hashes` in line with a live change; a None value forgets the key.
+
+    Without this a document added by a tool is absent from the map, so the next start
+    reads it as new and embeds it beside the row already there — a permanent duplicate.
+    A store with no map yet is left without one: a one-entry map would tell the sync
+    that every other document is new.
+    """
+    from .index_meta import read_meta, write_meta
+    meta_path = index_dir / "index_meta.json"
+    doc = read_meta(meta_path)
+    hashes = doc.get("file_hashes")
+    if not isinstance(hashes, dict) or not hashes:
+        return
+    for key, value in updates.items():
+        if value is None:
+            hashes.pop(key, None)
+        else:
+            hashes[key] = value
+    write_meta(meta_path, doc)
+
+
+def replace_file_in_index(
+    agent_root: pathlib.Path,
+    path: pathlib.Path,
+    embedding_provider,
+    source_layer: str,
+    source_file_key: str,
+) -> bool:
+    """Make the index hold exactly one row per channel for this file: the current one.
+
+    Run it on the agent's index writer. False when the index would not load, which
+    leaves the document out until the next start.
+    """
+    from .retrieval import make_backend_for_agent
+    backend = make_backend_for_agent(agent_root)
+    if not backend.vector.load():
+        return False
+    backend.text.load()
+    backend.vector.remove_by_source(source_file_key)
+    backend.text.remove_by_source(source_file_key)
+    text = extract_text(path) if path.exists() else ""
+    new_hash: Optional[str] = None
+    if text:
+        doc_text, meta = document_meta(source_file_key, path, text, source_layer)
+        vector = np.array(embedding_provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
+        backend.vector.add([VectorAddItem(vector=vector, meta=meta)])
+        backend.text.add([TextAddItem(text=doc_text, meta=meta)])
+        new_hash = meta["doc_hash"]
+    backend.save()
+    record_file_hashes(agent_root / "state" / "memory_index", {source_file_key: new_hash})
+    return True
+
+
+def forget_in_index(agent_root: pathlib.Path, source_files: List[str]) -> int:
+    """Drop these keys from both channels and from `file_hashes`. Run on the index writer."""
+    from .retrieval import make_backend_for_agent
+    if not source_files:
+        return 0
+    backend = make_backend_for_agent(agent_root)
+    removed = 0
+    if backend.vector.load():
+        removed = backend.vector.remove_by_sources(source_files)
+        backend.vector.save()
+    if backend.text.load():
+        backend.text.remove_by_sources(source_files)
+        backend.text.save()
+    record_file_hashes(agent_root / "state" / "memory_index", {k: None for k in source_files})
+    return removed
+
+
+def row_is_current(row: dict, current: dict) -> bool:
+    """Was this stored row embedded from the document as it is now?
+
+    Rows written from 2026-10-05 carry the hash. Older ones are judged by what they
+    do carry — preview, length and heading — which a rewrite almost always moves.
+    """
+    if row.get("doc_hash"):
+        return row["doc_hash"] == current.get("doc_hash")
+    return (row.get("text", "") == current.get("text", "")
+            and int(row.get("char_count") or 0) == int(current.get("char_count") or 0)
+            and row.get("heading", "") == current.get("heading", ""))
+
+
+@dataclass
+class IndexRepair:
+    """What the startup sync has to fix beyond the documents whose hash moved."""
+
+    ghosts: List[str] = field(default_factory=list)          # in the index, file gone
+    collapse: List[str] = field(default_factory=list)        # more than one vector row
+    embed_missing: List[str] = field(default_factory=list)   # collected, no vector row
+    text_only: List[str] = field(default_factory=list)       # text row wrong, vector fine
+    preview_rows: int = 0                                    # of text_only: old format
+    strays_kept: int = 0                                     # not collected, file exists
+    reembedded: int = 0                                      # of collapse: no row matched
+
+    @property
+    def needed(self) -> bool:
+        return bool(self.ghosts or self.collapse or self.embed_missing or self.text_only)
+
+
+def plan_index_repair(
+    vector_rows: "Optional[Dict[str, List[dict]]]",
+    text_rows: "Optional[Dict[str, List[dict]]]",
+    preview_keys: "set",
+    current: Dict[str, dict],
+    reembedding: "set",
+    exists=None,
+) -> IndexRepair:
+    """Compare what the index holds with what the sync collected. Reads, never writes.
+
+    `current` maps each collected key to its fresh row; `reembedding` is the keys the
+    pass already re-embeds because their hash moved. A key the sync does not collect
+    is a ghost only when its file is gone: a file written live outside the collected
+    layers (a nested knowledge directory) stays.
+    """
+    exists = exists or os.path.exists
+    plan = IndexRepair()
+    v = vector_rows or {}
+    t = text_rows or {}
+    for key in sorted(set(v) | set(t)):
+        if key in current:
+            continue
+        paths = {r.get("source_path") for r in v.get(key, []) + t.get(key, [])} - {None, ""}
+        if any(exists(p) for p in paths):
+            plan.strays_kept += 1
+        else:
+            plan.ghosts.append(key)
+    for key in sorted(current):
+        if key in reembedding:
+            continue
+        n = len(v.get(key, [])) if vector_rows is not None else 1
+        if n == 0:
+            plan.embed_missing.append(key)
+            continue
+        if n > 1:
+            plan.collapse.append(key)
+        wrong_text = text_rows is not None and len(t.get(key, [])) != 1
+        if key in preview_keys:
+            plan.preview_rows += 1
+        if n > 1 or wrong_text or key in preview_keys:
+            plan.text_only.append(key)
+    return plan
+
+
+def repair_before_embedding(
+    backend: RetrievalBackend,
+    index_dir: pathlib.Path,
+    collected: list,
+    to_embed: list,
+    old_hashes: dict,
+    removed_files: list,
+    agent_id: str = "",
+    dpc_home: "pathlib.Path | None" = None,
+) -> "tuple[IndexRepair, list]":
+    """The startup sync's removal step, with the repair folded in. Idempotent.
+
+    Removes every row of every key the pass is about to add — a key added live and
+    missing from `file_hashes` included, which is how a tool write became a permanent
+    duplicate — plus ghosts. Duplicated keys keep one vector row when one matches the
+    current file and are re-embedded (appended to `to_embed`) only when none does.
+    Keyword rows that are wrong or were built from previews are re-added from the
+    collected text, which costs a BM25 rebuild and no embedding.
+
+    Returns the plan and the (text, meta) pairs the caller adds to the text channel.
+    """
+    current = {key: meta for key, _t, meta, _l in collected}
+    doc_texts = {key: text for key, text, _m, _l in collected}
+    reembedding = {key for key, _t, _m in to_embed}
+    vector_rows = backend.vector.source_rows()
+    text_rows = backend.text.source_rows()
+    plan = plan_index_repair(vector_rows, text_rows, backend.text.sources_missing_full_text(),
+                             current, reembedding)
+    if plan.needed:
+        home = dpc_home or pathlib.Path(os.environ.get("DPC_HOME", pathlib.Path.home() / ".dpc"))
+        try:
+            dest = back_up_index_once(index_dir, home,
+                                      with_grafeo="grafeo" in (backend.backend_id or ""))
+            log.info("[%s] memory index backed up to %s before repair", agent_id, dest)
+        except Exception as e:
+            log.warning("[%s] memory index repair skipped — backup failed: %s", agent_id, e)
+            plan = IndexRepair()
+
+    in_index = set(vector_rows or {}) | set(text_rows or {})
+    vector_drop = [k for k in reembedding if k in old_hashes or k in in_index]
+    vector_drop += list(removed_files) + plan.ghosts
+    if vector_drop:
+        backend.vector.remove_by_sources(vector_drop)
+    reembed = sorted(backend.vector.keep_one_row_per_source(
+        plan.collapse, lambda row: row_is_current(row, current[row.get("source_file", "")]),
+    )) if plan.collapse else []
+    plan.reembedded = len(reembed)
+    for key in reembed + plan.embed_missing:
+        to_embed.append((key, doc_texts[key], current[key]))
+    text_only = [k for k in plan.text_only if k not in set(reembed)]
+    text_drop = vector_drop + reembed + plan.embed_missing + text_only
+    if text_drop:
+        backend.text.remove_by_sources(text_drop)
+    if plan.needed:
+        log.info(
+            "[%s] memory index repair: %d keyword rows rebuilt from full text (%d were previews), "
+            "%d ghost keys dropped, %d duplicate keys collapsed (%d re-embedded), "
+            "%d missing keys re-embedded, %d uncollected keys kept",
+            agent_id, len(text_only), plan.preview_rows, len(plan.ghosts), len(plan.collapse),
+            plan.reembedded, len(plan.embed_missing), plan.strays_kept,
+        )
+    return plan, [(doc_texts[k], current[k]) for k in text_only]
+
+
+def back_up_index_once(index_dir: pathlib.Path, dpc_home: pathlib.Path, today: "str | None" = None,
+                       with_grafeo: bool = False) -> pathlib.Path:
+    """Copy the index aside before a repair rewrites it; once per agent per day.
+
+    The copy lives under `<dpc_home>/backups`, outside every directory an agent
+    indexes. Raises when the copy fails, so the caller skips the repair instead of
+    repairing without a way back. The `grafeo` directory is copied only when that
+    backend is in use: a native agent never writes it (338 MB unused on agent_001).
+    """
+    import datetime
+    import shutil
+    agent = index_dir.parent.parent.name
+    day = today or datetime.date.today().isoformat()
+    dest = dpc_home / "backups" / f"memory-index-{day}" / agent
+    if not dest.exists():
+        skip = ["bm25.new", "bm25.old", "*.tmp"] + ([] if with_grafeo else ["grafeo"])
+        shutil.copytree(index_dir, dest, ignore=shutil.ignore_patterns(*skip))
+    return dest
 
 
 @dataclass(frozen=True)
@@ -259,18 +503,10 @@ def full_rebuild(
         text = extract_text(f)
         if not text:
             continue
-        _src = l5_key(f, knowledge_dir)
-        heading, doc_text, excerpt = document_fields(_src, text)
         file_meta = read_file_meta(knowledge_dir, f.name)
+        doc_text, meta = document_meta(l5_key(f, knowledge_dir), f, text, file_meta.source_layer)
         all_doc_texts.append(doc_text)
-        all_metas.append({
-            "source_file": _src,
-            "heading": heading,
-            "source_layer": file_meta.source_layer,
-            "source_path": str(f),
-            "char_count": len(text),
-            "text": excerpt,
-        })
+        all_metas.append(meta)
 
     if not all_doc_texts:
         return 0

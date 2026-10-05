@@ -32,6 +32,13 @@ from .base import (
 )
 
 
+def _group_by_source(metas) -> dict:
+    rows: dict = {}
+    for meta in metas:
+        rows.setdefault(meta.get("source_file", ""), []).append(meta)
+    return rows
+
+
 class NativeVectorIndex(VectorIndex):
     """ABC wrapper over FaissIndex (IndexFlatIP / HNSW upgrade path)."""
 
@@ -62,6 +69,22 @@ class NativeVectorIndex(VectorIndex):
     def remove_by_sources(self, source_files) -> int:
         return self._inner.remove_by_sources(source_files)
 
+    def source_rows(self):
+        return _group_by_source(self._inner._chunks)
+
+    def keep_one_row_per_source(self, source_files, is_current):
+        keys = set(source_files)
+        last_current = {}
+        for i, meta in enumerate(self._inner._chunks):
+            key = meta.get("source_file", "")
+            if key in keys and is_current(meta):
+                last_current[key] = i
+        keep = [i for i, meta in enumerate(self._inner._chunks)
+                if meta.get("source_file", "") not in keys
+                or last_current.get(meta.get("source_file", "")) == i]
+        self._inner.keep_rows(keep)
+        return keys - set(last_current)
+
     def save(self) -> None:
         self._inner.save()
 
@@ -89,15 +112,20 @@ class NativeTextIndex(TextIndex):
         if not items:
             return
         texts = [item.text for item in items]
-        # BM25Index.remove_by_source and BM25Index.add both rebuild the corpus
-        # from meta["text"] (see bm25_index.py:118 and :170). Inject the text
-        # into meta when caller didn't supply it so the rebuild path doesn't
-        # see an empty corpus and crash inside bm25s.
+        # meta["text"] is a preview for readers, never the rebuild source — BM25Index
+        # keeps the full texts itself. Filled when the caller left it out, at the same
+        # length the indexing pipeline and the Grafeo backend store.
         metas = [
-            {**item.meta, "text": item.meta.get("text") or item.text}
+            {**item.meta, "text": item.meta.get("text") or item.text[:500]}
             for item in items
         ]
         self._inner.add(texts, metas)
+
+    def source_rows(self):
+        return _group_by_source(self._inner._chunk_metas)
+
+    def sources_missing_full_text(self):
+        return self._inner.sources_missing_full_text()
 
     def begin_batch(self) -> None:
         """Forward the deferral the indexing pass asks for.
@@ -130,12 +158,7 @@ class NativeTextIndex(TextIndex):
         return self._inner.load()
 
     def clear(self) -> None:
-        # Intentional coupling to BM25Index internals — that class has no
-        # public clear() method, and clear() is only invoked from tests today.
-        # Will be reconsidered if BM25Index grows a public reset path.
-        self._inner._retriever = None
-        self._inner._chunk_metas = []
-        self._inner._corpus_stop_words = frozenset()
+        self._inner.clear()
 
     @property
     def total_items(self) -> int:
