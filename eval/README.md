@@ -16,7 +16,7 @@ cost is the card and the hours.
 | harness | question | cost | last run |
 |---|---|---|---|
 | `retrieval/` | does the index find a card, and does fusing BM25 with vectors help? | seconds — the embedding encoder production already loads, no model served, no network (189 queries in 1 s) | 2026-08-24 |
-| `loop/` | does the agent loop finish the kind of task we actually give it? | about two minutes — the local `llamacpp_server` alias `qwen3.8 27b`, one entry copied from `~/.dpc/providers.json`, the file untouched; needs 26 000 MiB free | 2026-09-23 |
+| `loop/` | does the agent loop finish the kind of task we actually give it? and, `--tier long --preserve-reasoning both`, does carrying a round's notes change how a deep run ends? | easy/hard about two minutes; long estimated 3–7 hours for both arms (never run) — the local `llamacpp_server` alias `qwen3.8 27b`, one entry copied from `~/.dpc/providers.json`, the file untouched; needs 26 000 MiB free | 2026-09-23 (long: never) |
 | `kv/` | does K quantised to q4_0 diverge from q8_0 as depth grows? | the whole card and ~35 min of answer time for four arms; refuses to start while the DPC service holds VRAM | 2026-08-30 |
 | `gaia/` | how does the loop score on a public split that other agents publish scores on? | a night per campaign (~2 h per run); gated dataset, needs a Hugging Face token | 2026-08-31 |
 
@@ -107,8 +107,73 @@ its own child on exit — normal, exception or Ctrl-C — through
 2026-09-23, so `14` satisfied a gold of `4`; they match whole tokens now, and
 file-content checks stay exact substrings. Results go to
 `~/.dpc/eval-results/loop/` with the same provenance block as `gaia/`.
-Still open: the loop agent runs with no firewall, every tool on — it should
-take `_harness/benchmark_tools.benchmark_firewall` as `gaia/` does.
+~~Still open: the loop agent runs with no firewall, every tool on.~~ Closed
+2026-10-06: every tier runs under `_harness/benchmark_tools.benchmark_firewall`
+(profile `loop_benchmark`, rules file in the run's workdir), and
+`--auto-approve` attaches `Tier1AutoApprover` as `gaia/` does. Not yet run with
+either.
+
+## loop, long tier — the `preserve_reasoning` A/B (2026-10-06, built, not run)
+
+The question is the board card
+`THE-MODEL-STARTS-EVERY-ROUND-WITHOUT-THE-REASONING-THAT-CHOSE-THE-TOOL`: does
+sending a tool round's own notes back to llama-server (`preserve_reasoning`,
+commit `2407f64f`, per alias, default off) change how a long run ends? Dry run,
+then the run, from `dpc-client/core`, the DPC service stopped:
+
+    uv run python ../../eval/loop/run_loop_eval.py --dry-run --tier long --preserve-reasoning both
+    uv run python ../../eval/loop/run_loop_eval.py --tier long --preserve-reasoning both --auto-approve
+
+- **The arm flag.** `--preserve-reasoning off|on|both` (any tier) sets the key on
+  the *copied* provider entry; the operator's file is hashed before and after and
+  the report says whether it changed. `off`, the default, is the behaviour before
+  the flag: the alias carries no such key. `both` runs every task under each arm
+  in its own root, order alternating per task; one child serves both arms and the
+  flag is set on the live provider before each run, so no model reload between.
+- **The tasks** (`loop/tasks_long.py`, 8 of them) read this repository's own
+  source — `git archive` of `dpc_agent/`, `agent_manager.py` and two providers at
+  the commit the run starts at, copied into each task root, because the approver
+  never answers a sandbox-boundary question. Each names 2–5 files of 92–319 k
+  characters and ends in `key=value` lines scored deterministically. Every gold
+  was written by reading the code at `57ba6879` and is re-derived mechanically
+  (AST or an anchored regex) from the run's snapshot before the first task; a gold
+  the snapshot no longer supports stops the run with exit 2. Tools: read, list,
+  search, shell, scratchpad — no web (the repository is public; a model reading
+  it on GitHub would answer from another commit).
+- **Run conditions copied from the incident's agent** (Johnny's config, read
+  2026-10-06): effort `medium`, compaction on at threshold 0.5 with the window
+  the loop resolves for the alias (215 040, so it fires at 107 520). The
+  summariser differs on purpose: Johnny's is a cloud alias; here it is the local
+  alias, the only provider the run holds, so no paid call can happen. `--compaction
+  off` gives the throwaway default instead, deterministic truncation after round 8
+  — which keeps the prompt small and could not reproduce the incident.
+- **Step 0 is printed first.** The incident (2026-10-05, Johnny on `qwen3.8 27b`):
+  26 rounds, prompt 67 177 → 93 603, seven rounds at the ~10 k note budget,
+  eleven of twelve rounds from 14 on with no visible text. A long run prints
+  `incident symptom reproduced in the off arm: yes/no (budget hits N, peak
+  prompt P)` — yes when an off-arm task had ≥ 2 budget hits on a prompt ≥ 60 000.
+  On no, the A/B measured nothing, and the report says so. **Not verified**:
+  that a throwaway root gets there — its system prompt is ~10.3 k tokens (GAIA
+  `20260924-0348-t0-low`, 1-round tasks), so ~13 full 15 000-character reads have
+  to stay in the history, and the model may search instead of reading.
+- **Per task and arm**: rounds, rounds-to-completion (absent on failure), success,
+  budget-hit rounds by number, silent rounds and the longest silent streak, peak
+  prompt, compaction round / count / failures and summariser calls, note tokens
+  (and how many rows were estimated), the share of rounds whose notes open with
+  the same 80 normalised characters as an earlier one, wall time.
+- **Visible output is its own axis.** The verdict prints both arms side by side on
+  every axis and ranks nothing; it warns when the on arm went silent in a larger
+  share of rounds or compacted earlier, and then refuses to read fewer budget
+  hits as a result. A sample relayed with the brief for this instrument had the on
+  arm silent in 33 of 41 rounds against 0 of 41 (not re-read here).
+- **Cost: plan it, do not slot it between other work.** It needs the card free —
+  the service stopped or its model unloaded, 26 000 MiB — for the whole run.
+  Estimated from the incident's 26 rounds in 22.5 min and GAIA's 14–21 s per
+  round: 10–25 min per task per arm, so roughly 3–7 hours for 8 tasks × 2 arms,
+  more if compaction fires (each summary is a local call with its own notes).
+  `--tasks N` runs the first N for a smoke pass.
+- The predecessor `dpc-client/core/tests/perf/run_reasoning_carry_ab.py` stays
+  until this has run; its metric code lives on in `loop/round_metrics.py`.
 
 ## State of the set, 2026-09-23
 
