@@ -372,6 +372,7 @@
     "llamacpp_server_fields": {
       "_comment": "Not the whole key set: the supervisor flags (gguf_path, n_ctx, cache_type_k/v, mmproj, spec_type, ...) are listed in docs/decisions/040-local-inference-second-path-as-a-dpc-owned-llama-server.md D3 and read in providers/llamacpp_server_provider.py",
       "reasoning_budget_tokens": "Optional: cap on reasoning tokens per request; the request value wins over the child's --reasoning-budget",
+      "reasoning_budget_message": "Optional: the note the server writes into the thinking before it forces the end-of-thinking tag at the budget; sent only beside a budget. Absent = a short built-in line, empty string = no note (the server's own default)",
       "preserve_reasoning": "Optional, default false: replay each tool-call turn's own reasoning to the server as reasoning_content, which this model's template renders as a prior-turn <think> block. Off means the model sees a bare tool call and its result from round two and re-derives its plan; on costs those tokens on every later round and invalidates the prompt cache for one turn when it is switched. Local path only - no cloud provider is sent this field"
     },
     "gemini_fields": {

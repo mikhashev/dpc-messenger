@@ -54,6 +54,18 @@ TEMPLATE_EFFORTS = ("low", "medium", "xhigh")
 # review: three levels on the model, five in our header.
 FLEET_TO_TEMPLATE = {"high": "xhigh", "max": "xhigh"}
 
+# What the server writes into the thinking just before it forces the
+# end-of-thinking tag when `reasoning_budget_tokens` runs out. The server's own
+# default is empty (`--reasoning-budget-message`, "default: none"), so a cut
+# reads to the model as thought stopping mid-sentence; this line makes the cut
+# read as its own decision to answer. It does not fix the reasoning-loss loop —
+# the next round still starts without the notes that chose the tool
+# (THE-MODEL-STARTS-EVERY-ROUND-WITHOUT-THE-REASONING-THAT-CHOSE-THE-TOOL).
+# Per alias: `reasoning_budget_message` overrides it; an empty string sends none.
+REASONING_BUDGET_MESSAGE = (
+    "\n\nI have thought about this long enough; time to answer with what I have."
+)
+
 # One live child per alias across provider reloads. `save_config` drops old
 # provider objects without closing them, and a dropped provider holding a
 # 30 GB model would otherwise leak the child until process exit.
@@ -215,6 +227,10 @@ class LlamaServerProvider(DeepSeekProvider):
                 alias, "/".join(self._template_efforts), template_default or "unset",
             )
         self._reasoning_budget = config.get("reasoning_budget_tokens")
+        # Absent means the module default; an empty string means no message.
+        self._reasoning_budget_message = config.get(
+            "reasoning_budget_message", REASONING_BUDGET_MESSAGE
+        )
         # Whether a replayed tool-call turn carries the notes that chose it
         # (`reasoning_content`, which this model's template renders as a prior-turn
         # `<think>` block). Off by default: it is a per-alias answer to an open
@@ -423,6 +439,9 @@ class LlamaServerProvider(DeepSeekProvider):
                 if budget <= 0:
                     budget = 1
             body["reasoning_budget_tokens"] = int(budget)
+            # Only beside a budget: with no cut there is nothing to announce.
+            if self._reasoning_budget_message:
+                body["reasoning_budget_message"] = self._reasoning_budget_message
         return body
 
     def _effort_label(self, requested: Optional[str], extra_body: Dict[str, Any]) -> str:

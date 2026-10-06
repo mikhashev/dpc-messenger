@@ -26,7 +26,9 @@ from dpc_client_core.managers.llama_server_supervisor import (
     LlamaServerSupervisor,
 )
 from dpc_client_core.providers import LlamaServerProvider
-from dpc_client_core.providers.llamacpp_server_provider import _ACTIVE_SUPERVISORS, _flags_of
+from dpc_client_core.providers.llamacpp_server_provider import (
+    REASONING_BUDGET_MESSAGE, _ACTIVE_SUPERVISORS, _flags_of,
+)
 
 GGUF = "D:/models/qwen3.8-27b-Q4_K_M.gguf"
 
@@ -315,6 +317,7 @@ class TestTheBudget:
         assert p._build_extra_body("medium") == {
             "chat_template_kwargs": {"reasoning_effort": "medium"},
             "reasoning_budget_tokens": 8000,
+            "reasoning_budget_message": REASONING_BUDGET_MESSAGE,
         }
 
     def test_a_per_request_budget_beats_the_alias_config(self):
@@ -326,11 +329,50 @@ class TestTheBudget:
         # default (xhigh), and that is the strongest path — it must be the
         # capped one, not the exempt one.
         p = _provider(reasoning_budget_tokens=8000)
-        assert p._build_extra_body() == {"reasoning_budget_tokens": 8000}
+        assert p._build_extra_body() == {
+            "reasoning_budget_tokens": 8000,
+            "reasoning_budget_message": REASONING_BUDGET_MESSAGE,
+        }
 
     def test_off_carries_no_budget(self):
         p = _provider(reasoning_budget_tokens=8000)
         assert p._build_extra_body("off") == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+class TestTheBudgetMessage:
+    """reasoning_budget_message: the note the server writes before it forces
+    the end-of-thinking tag. Its own default is empty, so a cut is silent."""
+
+    def test_a_budget_carries_the_message(self):
+        body = _provider(reasoning_budget_tokens=8000)._build_extra_body("medium")
+        assert body["reasoning_budget_message"] == REASONING_BUDGET_MESSAGE
+        assert REASONING_BUDGET_MESSAGE.strip()
+
+    def test_no_budget_no_message(self):
+        assert "reasoning_budget_message" not in _provider()._build_extra_body("medium")
+        assert "reasoning_budget_message" not in _provider(
+            reasoning_budget_tokens=8000
+        )._build_extra_body("off")
+
+    def test_an_alias_message_wins(self):
+        p = _provider(reasoning_budget_tokens=8000, reasoning_budget_message="\n\nEnough.")
+        assert p._build_extra_body()["reasoning_budget_message"] == "\n\nEnough."
+
+    def test_an_empty_string_turns_it_off(self):
+        body = _provider(reasoning_budget_tokens=8000, reasoning_budget_message="")._build_extra_body()
+        assert body == {"reasoning_budget_tokens": 8000}
+
+    @pytest.mark.asyncio
+    async def test_the_message_reaches_the_wire(self):
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp())
+        async def _ensure():
+            return client
+        p._ensure = _ensure
+
+        await p.generate_response("hello", reasoning_budget_tokens=2048)
+        assert completions.bodies[0]["extra_body"]["reasoning_budget_message"] == REASONING_BUDGET_MESSAGE
 
 
 class TestSamplingAndLabels:
