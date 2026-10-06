@@ -60,6 +60,15 @@ resolves for the alias) with the local alias as summariser, the agent's effort
 word (`medium`), and print **step 0** first: whether the off arm reproduced the
 incident at all. If it did not, the verdict says the A/B measured nothing, and
 its totals are printed over all tasks and again over the reproducing subset.
+
+**Seeding (2026-10-06).** `--seed-history PATH` (long tier only) puts a
+conversation the agent had already loaded in front of every task, rendered by
+production (`seed_history.py`): the first step 0 ran on fresh roots and stayed
+at 16-24 k, while the incident's round 1 carried a 42-turn group history. With a
+seed, both `--dry-run` and the run itself build each task's round-1 request
+through a real `DpcAgent` before any model and refuse below
+`--seed-depth-floor` (default 60 000, the step-0 floor). A seeded report carries
+the seed's path, sha256 and count, and no text the model wrote.
 """
 
 from __future__ import annotations
@@ -453,7 +462,12 @@ async def run_one(agent, task: Dict[str, Any], *,
                   reasoning_effort: Optional[str] = None,
                   session_state: Optional[Dict[str, Any]] = None,
                   budget: Optional[int] = None,
-                  queries: Optional[round_metrics.QueryCounter] = None) -> Dict[str, Any]:
+                  queries: Optional[round_metrics.QueryCounter] = None,
+                  process_kwargs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """One task on one agent. `process_kwargs` carries a seeded history
+    (`seed_history.seeded_process_kwargs`); a seeded row keeps no text the model
+    wrote — see `seed_history.redact_seeded_outcome`."""
+    seeded = bool(process_kwargs)
     started = time.time()
     error = None
     timed_out = False
@@ -467,13 +481,15 @@ async def run_one(agent, task: Dict[str, Any], *,
                 conversation_id=f"eval-{task['id']}",
                 reasoning_effort=reasoning_effort,
                 session_state=session_state,
+                **(process_kwargs or {}),
             )
             answer = await (asyncio.wait_for(call, timeout_s) if timeout_s else call)
         except asyncio.TimeoutError:
             timed_out = True
             error = f"timeout after {timeout_s:.0f}s"
         except Exception as exc:  # a crash is a failure, recorded as one
-            error = f"{type(exc).__name__}: {exc}"
+            # A seeded run keeps the type only: a provider error can echo the prompt.
+            error = type(exc).__name__ if seeded else f"{type(exc).__name__}: {exc}"
     elapsed = time.time() - started
     verdict = check(task, answer or "")
     passed = verdict["passed"] and error is None
@@ -503,6 +519,9 @@ async def run_one(agent, task: Dict[str, Any], *,
         m["symptom"] = round_metrics.task_symptom(m)
         out["metrics"] = m
         out["per_round"] = recorder.rows
+    if seeded:
+        import seed_history
+        seed_history.redact_seeded_outcome(out, task, _field_value, answer)
     return out
 
 
@@ -607,8 +626,88 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
     probe.write_text("ok", encoding="utf-8")
     probe.unlink()
     print(f"  output dir writable: {out_dir}")
-    print("dry run checks passed — nothing was loaded; VRAM last:")
     return 0
+
+
+# The incident's round 1 by two counts: what the production estimator logged
+# ("Context size: estimated 41012", dpc-client.log.1, 2026-10-05 17:54:53 —
+# tool schemas excluded) and what the engine counted (67 177, per the board
+# card; not re-read here). Printed beside every seeded estimate so a figure in
+# estimator units is not read as engine tokens.
+INCIDENT_ROUND1_ESTIMATED = 41_012
+INCIDENT_ROUND1_COUNTED = 67_177
+
+
+def load_seed_or_refuse(args) -> Optional[Dict[str, Any]]:
+    """The seed for this run, or None. Refused before anything is loaded."""
+    if not args.seed_history:
+        return None
+    import seed_history
+    seed = seed_history.load_seed(Path(args.seed_history), args.seed_reader)
+    differ = seed_history.roles_agree_for_group_and_direct(seed)
+    if differ:
+        raise SystemExit(
+            f"--seed-history: records {differ} would render with another role under the "
+            "eval's 1:1 conversation id than in their group; the prompt would not be "
+            "the one production built")
+    return seed
+
+
+async def seed_depth_or_refuse(seed: Dict[str, Any], args, entry: Dict[str, Any],
+                               effort: Optional[str], workdir: Path, firewall,
+                               agent_configs: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Round 1 of every task this run will start, measured before any model.
+
+    Each task's request is built by a real `DpcAgent` on a probe root
+    (`seed_history.probe_round1`); a task whose estimate is below
+    `--seed-depth-floor` stops the run, so a step 0 cannot start shallow again
+    without saying so. Returns what the provenance records — numbers, no text.
+    """
+    import seed_history
+    import tasks_long
+    window = require_context_window(entry)
+    floor = args.seed_depth_floor
+    rec = seed_history.seed_record(seed)
+    print(f"  seed: {rec['path']}")
+    print(f"    sha256 {rec['sha256']}, {rec['messages']} records "
+          f"({rec['history_records']} history + the trigger, whose body the task replaces), "
+          f"reader {rec['reader']!r}")
+    print("    estimator: production chars/4 (dpc_agent.utils.estimate_tokens) over the "
+          "request the agent builds, plus tool schemas; no tokenizer")
+    print(f"    for scale: the incident's round 1 read {INCIDENT_ROUND1_ESTIMATED} on this "
+          f"estimator (tool schemas excluded) and {INCIDENT_ROUND1_COUNTED} on the engine "
+          "(per the board card) — Cyrillic-heavy text reads low here")
+    probe_root = workdir / "depth-probe"
+    n = len(tasks_long.tasks_for(probe_root))
+    rows: List[Dict[str, Any]] = []
+    for i, task in enumerate(tasks_long.tasks_for(probe_root)[: min(n, args.tasks or n)]):
+        root = workdir / f"depth-{i + 1:02d}"
+        agent_configs[root.name] = long_compaction_config(entry["alias"], args.compaction,
+                                                          LONG_COMPACTION_THRESHOLD)
+        m = await seed_history.probe_round1(
+            root, firewall=firewall, profile=LOOP_PROFILE, alias=entry["alias"],
+            task_prompt=task["prompt"], seed=seed, conversation_id=f"eval-{task['id']}",
+            session_state={"tokens_limit": window}, reasoning_effort=effort)
+        m.pop("messages")
+        m["id"] = task["id"]
+        m["below_floor"] = m["round1_tokens_est"] < floor
+        rows.append(m)
+        print(f"    {task['id']:28} history turns {m['history_turns']} "
+              f"({m['assistant_turns']} assistant, ~{m['history_tokens_est']} of them), "
+              f"round-1 est {m['round1_tokens_est']} "
+              f"= request {m['prompt_tokens_est']} + tool schemas {m['tool_schema_tokens_est']} "
+              f"[floor {floor}] {'BELOW' if m['below_floor'] else 'ok'}")
+    out = {**rec, "depth_floor": floor, "depth_estimator": "chars/4 (estimate_tokens)",
+           "depth_by_task": rows}
+    low = [r["id"] for r in rows if r["below_floor"]]
+    if low:
+        worst = min(r["round1_tokens_est"] for r in rows)
+        raise SystemExit(
+            f"SEEDED ROUND 1 BELOW THE STEP-0 FLOOR: {len(low)} of {len(rows)} task(s) estimate "
+            f"under {floor} tokens (lowest {worst}): {', '.join(low)}. The run would start "
+            "shallow and step 0 would again measure nothing. Seed deeper, or pass "
+            "--seed-depth-floor N to start knowingly (recorded in the report)")
+    return out
 
 
 async def main_async(args) -> int:
@@ -626,12 +725,31 @@ async def main_async(args) -> int:
     if args.model:
         entry["model"] = args.model
     entries = arm_entries(entry, arms)
+    seed = load_seed_or_refuse(args)
 
     if args.dry_run:
         rc = _dry_run(entry, args, entries, effort)
+        refusal: Optional[SystemExit] = None
+        if seed is not None:
+            with tempfile.TemporaryDirectory(prefix="dpc-loop-seed-dry-") as tmp:
+                configs: Dict[str, Dict[str, Any]] = {}
+                harness_agent_configs(configs)
+                fw = benchmark_tools.benchmark_firewall(Path(tmp), LOOP_PROFILE,
+                                                        allowed=_allowed_tools("long"))
+                try:
+                    await seed_depth_or_refuse(seed, args, entry, effort, Path(tmp), fw,
+                                               configs)
+                except SystemExit as exc:
+                    refusal = exc
+        if refusal is None:
+            print("dry run checks passed — nothing was loaded; VRAM last:")
+        else:
+            print("dry run REFUSED (the reason is the last line); VRAM, for the record:")
         # Last, so the checks above are reported even while the service holds the
         # card; it still refuses (exit 1) when the card is not free.
         _check_vram_or_refuse(entry)
+        if refusal is not None:
+            raise refusal
         return rc
 
     if long_tier:
@@ -667,6 +785,16 @@ async def main_async(args) -> int:
             shutil.rmtree(workdir, ignore_errors=True)
             return 2
         compaction_cfg = long_compaction_config(alias, args.compaction, LONG_COMPACTION_THRESHOLD)
+
+    seed_info: Optional[Dict[str, Any]] = None
+    if seed is not None:
+        # Before the model: a seed too shallow for step 0 stops here.
+        try:
+            seed_info = await seed_depth_or_refuse(seed, args, entry, effort, workdir,
+                                                   firewall, agent_configs)
+        except SystemExit:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise
 
     live_providers = workdir / "providers.json"
     live_providers.write_text(
@@ -707,6 +835,11 @@ async def main_async(args) -> int:
     def set_arm(arm: str) -> None:
         if provider is not None:
             provider.preserve_reasoning = entries[arm]["preserve_reasoning"]
+
+    import seed_history
+
+    def kwargs_for(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        return seed_history.seeded_process_kwargs(seed, task["prompt"]) if seed else None
 
     # (arm, task, agent, recorder) in run order.
     plan: List[tuple] = []
@@ -749,7 +882,7 @@ async def main_async(args) -> int:
             outcome = await run_one(agent, task, recorder=recorder,
                                     timeout_s=timeout_s, reasoning_effort=effort,
                                     session_state=session_state, budget=budget,
-                                    queries=queries)
+                                    queries=queries, process_kwargs=kwargs_for(task))
             outcome["arm"] = arm
             outcome["preserve_reasoning"] = entries[arm]["preserve_reasoning"]
             results.append(outcome)
@@ -786,7 +919,18 @@ async def main_async(args) -> int:
         "session_tokens_limit": (session_state or {}).get("tokens_limit"),
         "firewall": {"profile": LOOP_PROFILE, "tools": sorted(allowed)},
         "operator_providers_unchanged": digest_before == digest_after,
+        # Path, sha256, record count and the depth estimate — never the records.
+        "seed_history": seed_info,
     }
+    approvals = approver.summary() if approver is not None else None
+    withheld = [0]
+    if seed is not None:
+        # The net under the per-row redaction in run_one: any string the model
+        # typed that still carries 40+ characters of the chat verbatim.
+        windows = seed_history.seed_windows(seed)
+        results = seed_history.withhold_seed_text(results, windows, counter=withheld)
+        approvals = seed_history.withhold_seed_text(approvals, windows, counter=withheld)
+        run_conditions["seed_history"]["withheld_strings"] = withheld[0]
     prov_block = provenance.snapshot(
         repo_root=REPO_ROOT,
         provider_entry=entry,
@@ -794,7 +938,7 @@ async def main_async(args) -> int:
         harness_file=Path(__file__),
         argv=sys.argv,
         extra={"run_conditions": run_conditions,
-               **({"approvals": approver.summary()} if approver is not None else {})},
+               **({"approvals": approvals} if approvals is not None else {})},
     )
 
     passed = sum(1 for r in results if r["passed"])
@@ -815,7 +959,7 @@ async def main_async(args) -> int:
         "passed": passed,
         "accuracy": round(passed / len(results), 3) if results else 0.0,
         "seconds": round(time.time() - started, 1),
-        **({"approvals": approver.summary()} if approver is not None else {}),
+        **({"approvals": approvals} if approvals is not None else {}),
         "results": results,
     }
     if entry.get("type") == "llamacpp_server":
@@ -854,6 +998,7 @@ async def main_async(args) -> int:
     out = Path(args.json) if args.json else (
         RESULTS_DIR / f"{args.tier}-{entry.get('alias', 'unknown').replace(' ', '_')}"
         f"-{'step0' if args.step0_only else args.preserve_reasoning}"
+        f"{'-seeded' if seed is not None else ''}"
         f"-{time.strftime('%Y%m%d-%H%M%S')}.json"
     )
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -909,6 +1054,19 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument("--auto-approve", action="store_true",
                     help="answer ADR-030 Tier 1 prompts with the eval approver (inline code "
                          "inside the task only); Tier 2 stays hard-blocked")
+    ap.add_argument("--seed-history", default=None, dest="seed_history", metavar="PATH",
+                    help="long tier only: a seed file of conversation records rendered in front "
+                         "of every task the way production renders a loaded history; its last "
+                         "record's body is replaced by the task. Kept outside the repository; "
+                         "reports carry its path, sha256 and count, never its text")
+    ap.add_argument("--seed-reader", default="Johnny", dest="seed_reader", metavar="NAME",
+                    help="whose history the seed is: that reader's own records become "
+                         "assistant turns (default: Johnny); its identity must be in the file")
+    ap.add_argument("--seed-depth-floor", type=int, default=round_metrics.SYMPTOM_MIN_PEAK_PROMPT,
+                    dest="seed_depth_floor", metavar="N",
+                    help="with --seed-history: refuse to start when a task's estimated round-1 "
+                         f"prompt is below N tokens (default {round_metrics.SYMPTOM_MIN_PEAK_PROMPT}, "
+                         "the step-0 floor)")
     ap.add_argument("--json", default=None, help="write the report here instead of results_root()/loop/")
     ap.add_argument("--keep", action="store_true", help="keep the throwaway workdir")
     ap.add_argument("--dry-run", action="store_true", dest="dry_run",
@@ -924,6 +1082,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         args.tier = "long"
         args.tasks = args.tasks or STEP0_ONLY_TASKS
     args.tier = args.tier or "easy"
+    if args.seed_history and args.tier != "long":
+        ap.error(f"--seed-history seeds the long tier only; the {args.tier} tier's tasks "
+                 "are scored against a fixture a chat history has nothing to do with")
     return args
 
 

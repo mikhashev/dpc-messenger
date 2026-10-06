@@ -26,6 +26,10 @@ therefore needs about thirteen full-cap reads still in the history. **Not
 verified**: whether the model reads that much rather than searching — the
 search tools would let it answer from a few lines. Step 0 of the runner is what
 finds out; a long tier that stays shallow is reported as such, not as a result.
+It did stay shallow: the first step 0 (2026-10-06) peaked at 16-24 k in 5-6 rounds.
+`--seed-history` (`seed_history.py`) is the answer under
+test — the incident's own loaded history in front of each task, rendered by
+production; the task text then stands where the incident's trigger stood.
 
 **Scoring.** Deterministic, as in the rest of `eval/loop`: each task ends with
 `key=value` lines checked by `expect_fields` (whole-token, numbers compared as
@@ -228,9 +232,22 @@ def _derive_compaction(src: Path) -> Dict[str, Any]:
     deadband = float(_one(r"self\.threshold - ([\d.]+)\)", init).group(1))
     ladder = _one(r"keep = \{1: (\d+), 2: (\d+)\}\.get\(state\.fail_streak, state\.keep_recent\)",
                   apply_src)
-    assert "apply_compaction(" in loop  # the loop is where it runs; asked of the agent too
+    # The question asks for the loop's own `round_idx`, so the gold is the
+    # smallest value passing `round_idx > N` only if the loop hands that very
+    # variable to apply_compaction, before the round's LLM call.
+    run = _segment(loop, "run_llm_loop")
+    start = _one(r"\n    round_idx = (\d+)\n", run)
+    increment = run.index("round_idx += 1")
+    call = run.index("messages = await apply_compaction(")
+    llm_call = run.index("# --- LLM call ---")
+    if not (start.start() < increment < call < llm_call
+            and "round_idx=round_idx," in run[call:llm_call]):
+        raise LookupError("round_idx is not incremented, then handed to apply_compaction, "
+                          "before the round's LLM call")
     return {
-        "first_truncation_round": int(off.group(1)) + 1,
+        # `round_idx = 0`, then `+= 1` before the first call: the first round is 1.
+        "_first_round_idx": int(start.group(1)) + 1,
+        "first_truncation_round_idx": int(off.group(1)) + 1,
         "keep_recent": int(off.group(2)),
         "default_threshold": float(_one(r'cfg\.get\("compaction_threshold", ([\d.]+)\)', init).group(1)),
         "release_at_half": round(0.5 - deadband, 6),
@@ -430,11 +447,17 @@ def tasks_for(root: Path) -> List[Dict[str, Any]]:
 
     # Gold checked by reading context.py at GOLD_COMMIT: apply_compaction with the
     # toggle off does `if round_idx > 8: return compact_tool_history(messages,
-    # keep_recent=6)` (:1329-1330) -> first round 9, keep 6; CompactionState: threshold
+    # keep_recent=6)` (:1329-1330) -> round_idx 9, keep 6. run_llm_loop sets
+    # `round_idx = 0` and increments it at the top of each round, before
+    # apply_compaction and the LLM call (loop.py:1099-1144 at HEAD 67d0ab41), so the
+    # first round is round_idx 1 and round_idx 9 is the ninth call. Until
+    # 2026-10-06 the question asked for "the first round number"; the step-0 run
+    # answered 10, a reading the wording allowed (rounds counted from 0, or "after
+    # round 9"). It now asks for the variable's value. CompactionState: threshold
     # default 0.8, release = threshold - 0.2 (-> 0.3 at 0.5), max_fails 3
     # (:1300-1306); compact_tool_history_llm timeout_s=180.0 (:1220); ladder
     # `{1: 12, 2: 18}` below UNDER_PRESSURE (:1384).
-    keys = ["first_truncation_round", "keep_recent", "default_threshold", "release_at_half",
+    keys = ["first_truncation_round_idx", "keep_recent", "default_threshold", "release_at_half",
             "max_fails", "summary_timeout", "keep_after_first_failure", "keep_after_second_failure"]
     tasks.append({
         "id": "long-compaction-ladder",
@@ -443,15 +466,17 @@ def tasks_for(root: Path) -> List[Dict[str, Any]]:
         "prompt": (
             f"The source of an agent loop is under {s}. Read {a / 'loop.py'} and "
             f"{a / 'context.py'} and answer about tool-history compaction. With compaction "
-            f"disabled: the first round number at which old tool history is truncated, and how "
-            f"many recent tool rounds that truncation keeps. With it enabled: the default "
+            f"disabled: the value of run_llm_loop's own variable round_idx (as the loop sets "
+            f"and increments it, not a count of your own) in the first round whose LLM call "
+            f"is sent with old tool history truncated, and how many recent tool rounds that "
+            f"truncation keeps. With it enabled: the default "
             f"threshold; the usage ratio at which compaction stops again when the threshold is "
             f"0.5; how many consecutive summariser failures stop the summariser being called; "
             f"the summariser call's timeout in seconds; and, below the under-pressure ratio, how "
             f"many rounds are kept verbatim after the first and after the second consecutive "
             f"failure. " + rule + _fields_block(keys)
         ),
-        "gold": {"first_truncation_round": 9, "keep_recent": 6, "default_threshold": 0.8,
+        "gold": {"first_truncation_round_idx": 9, "keep_recent": 6, "default_threshold": 0.8,
                  "release_at_half": 0.3, "max_fails": 3, "summary_timeout": 180,
                  "keep_after_first_failure": 12, "keep_after_second_failure": 18},
     })

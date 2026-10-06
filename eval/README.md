@@ -16,7 +16,7 @@ cost is the card and the hours.
 | harness | question | cost | last run |
 |---|---|---|---|
 | `retrieval/` | does the index find a card, and does fusing BM25 with vectors help? | seconds — the embedding encoder production already loads, no model served, no network (189 queries in 1 s) | 2026-08-24 |
-| `loop/` | does the agent loop finish the kind of task we actually give it? and, `--tier long --preserve-reasoning both`, does carrying a round's notes change how a deep run ends? | easy/hard about two minutes; long estimated 3–7 hours for both arms (never run) — the local `llamacpp_server` alias `qwen3.8 27b`, one entry copied from `~/.dpc/providers.json`, the file untouched; needs 26 000 MiB free | 2026-09-23 (long: never) |
+| `loop/` | does the agent loop finish the kind of task we actually give it? and, `--tier long --preserve-reasoning both`, does carrying a round's notes change how a deep run ends? | easy/hard about two minutes; long estimated 3–7 hours for both arms (never run) — the local `llamacpp_server` alias `qwen3.8 27b`, one entry copied from `~/.dpc/providers.json`, the file untouched; needs 26 000 MiB free | 2026-09-23 (long: step 0 on 2026-10-06, unseeded, not reproduced) |
 | `kv/` | does K quantised to q4_0 diverge from q8_0 as depth grows? | the whole card and ~35 min of answer time for four arms; refuses to start while the DPC service holds VRAM | 2026-08-30 |
 | `gaia/` | how does the loop score on a public split that other agents publish scores on? | a night per campaign (~2 h per run); gated dataset, needs a Hugging Face token | 2026-08-31 |
 
@@ -113,7 +113,7 @@ file-content checks stay exact substrings. Results go to
 `--auto-approve` attaches `Tier1AutoApprover` as `gaia/` does. Not yet run with
 either.
 
-## loop, long tier — the `preserve_reasoning` A/B (2026-10-06, built, not run)
+## loop, long tier — the `preserve_reasoning` A/B (2026-10-06, step 0 run unseeded, not reproduced)
 
 The question is the board card
 `THE-MODEL-STARTS-EVERY-ROUND-WITHOUT-THE-REASONING-THAT-CHOSE-THE-TOOL`: does
@@ -122,9 +122,65 @@ commit `2407f64f`, per alias, default off) change how a long run ends? Dry run,
 then the step-0 preflight, then — only if the preflight says yes — the run, from
 `dpc-client/core`, the DPC service stopped:
 
-    uv run python ../../eval/loop/run_loop_eval.py --dry-run --tier long --preserve-reasoning both
-    uv run python ../../eval/loop/run_loop_eval.py --step0-only --auto-approve
+    uv run python ../../eval/loop/run_loop_eval.py --dry-run --step0-only --seed-history ~/.dpc/eval-results/loop/seeds/incident-2026-10-05-johnny.json
+    uv run python ../../eval/loop/run_loop_eval.py --step0-only --seed-history ~/.dpc/eval-results/loop/seeds/incident-2026-10-05-johnny.json --auto-approve
     uv run python ../../eval/loop/run_loop_eval.py --tier long --preserve-reasoning both --auto-approve
+
+(The A/B line takes the same `--seed-history` once step 0 says yes with it.)
+
+- **Seeding — why the first step 0 measured nothing.** Step 0 ran unseeded on
+  2026-10-06 (`long-qwen3.8_27b-step0-20261006-114852.json`): both off-arm tasks
+  finished in 5–6 rounds, peak prompt 16–24 k, no budget hit — incident not
+  reproduced. The incident's round 1 was already 67 177 tokens (per the board
+  card); the agent had loaded its group's history with the task, 43 records
+  (`dpc-client.log.1`, 2026-10-05 17:54:49: "Loaded 43 messages"), rendered as 42
+  history turns, one of them its own ("History turns for reader Johnny: 42
+  total, 1 assistant"). A fresh root starts near 10 k. `--seed-history PATH`
+  (long tier only; refused on easy and hard) puts such a history in front of
+  every task (`loop/seed_history.py`). **Rendered by production**: the seed
+  reaches `DpcAgent.process` through the arguments `agent_manager` passes — a
+  monitor serving the records, the reader's identity, the trigger's id — so
+  `build_llm_messages` and `derive_history_role` make the turns, the reader's
+  own records as assistant. `--seed-reader NAME` (default `Johnny`) names the
+  reader; its identity has to be in the seed file. **The task replaces the
+  trigger**: the seed's last record keeps its index, time and sender and takes
+  the task as its body, so the prompt has the incident's shape (42 turns, then
+  one user turn) and the model is not handed a question nobody scores.
+- **The seed is private and stays out of git and out of reports.** The
+  incident seed is `~/.dpc/eval-results/loop/seeds/incident-2026-10-05-johnny.json`:
+  records `#1–#43` of the group's live `history.json`, chain hashes recomputed
+  from genesis through `#43`, `#43` the trigger at 10:54:49.831Z. It is group
+  chat — the same reason GAIA results left the tree (see *State of the set*:
+  four files carried previews of our own chat). A seeded report and its
+  provenance carry the seed's path, sha256, record count and depth estimate,
+  never a record. Per row, a seeded run drops the answer text (the scored
+  values stay as `answer_fields`, with `answer_chars`), digests each round's
+  note opening (`sha256:…`; repeat detection compares for equality only), and
+  keeps only an exception's type; then any string still sharing 40+ characters
+  with the seed — a shell command in the approver's summary, a reason — is
+  replaced by `[withheld: …]`, counted in `seed_history.withheld_strings`. A
+  paraphrase passes that net, which is why the answer is dropped, not filtered.
+- **Depth before any model.** With a seed, `--dry-run` and the run itself build
+  every task's round-1 request through a real `DpcAgent` on a probe root (its
+  adapter's `chat` replaced by a recorder that answers at once) and print, per
+  task, `history turns N (A assistant, ~H of them), round-1 est T = request R +
+  tool schemas S [floor 60000] ok|BELOW`. The estimator is production's own
+  chars/4 (`dpc_agent.utils.estimate_tokens`, the figure behind "Context size:
+  estimated N"), plus the same over the tool schemas the engine also reads; no
+  tokenizer is loaded. Below `--seed-depth-floor` (default 60 000, step 0's
+  prompt floor) the run refuses before loading anything; the flag lowers it on
+  purpose, and the report records the value. For scale the dry run prints the
+  incident's own pair: 41 012 on this estimator (round 1, tool schemas
+  excluded) against 67 177 counted by the engine — Cyrillic-heavy text reads low.
+- **What the incident seed gives (dry run, 2026-10-06): ~20 k, not 60 k.** The
+  42 turns are 57 094 characters of content (~14 600 estimated with their
+  prefixes); with a throwaway root's system prompt and 7 tool schemas, round 1
+  estimates 19 984 and 20 023 on the two step-0 tasks, and the dry run refuses. The rest of the incident's 41 012 came
+  from what a throwaway root does not have — Johnny's own system prompt,
+  identity and scratchpad (23 842 + 23 270 + 84 911 characters on disk on
+  2026-10-06, not at the incident), Active Recall's three hints, and 52 tool
+  schemas against 7. Seeding the history alone does not reach the floor; what
+  else to seed is the owner's call.
 
 - **The preflight first.** `--step0-only` is the long tier's off arm on the first
   two tasks (`--tasks N` for another count), under the same run conditions as
@@ -149,7 +205,14 @@ then the step-0 preflight, then — only if the preflight says yes — the run, 
   (AST or an anchored regex) from the run's snapshot before the first task; a gold
   the snapshot no longer supports stops the run with exit 2. Tools: read, list,
   search, shell, scratchpad — no web (the repository is public; a model reading
-  it on GitHub would answer from another commit).
+  it on GitHub would answer from another commit). `long-compaction-ladder` asked
+  for "the first round number" at which truncation starts; the gold 9 came from
+  `round_idx > 8`, and step 0's answer of 10 was a reading that wording allowed.
+  `run_llm_loop` sets `round_idx = 0` and increments it before
+  `apply_compaction` and the call, so the first round is 1 and truncation first
+  applies at `round_idx` 9. The question now asks for the value of the loop's
+  own `round_idx` (key `first_truncation_round_idx`), and the derive checks the
+  loop still hands that variable over before the call.
 - **Run conditions copied from the incident's agent** (Johnny's config, read
   2026-10-06): effort `medium`, compaction on at threshold 0.5 with the window
   the loop resolves for the alias (215 040, so it fires at 107 520). The

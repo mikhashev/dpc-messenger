@@ -92,7 +92,7 @@ def test_a_moved_constant_fails_exactly_the_golds_that_read_it(snapshot, tmp_pat
 
     assert _bad(T.verify_golds(mutated)) == {
         ("long-size-caps", "loop_result_cap"),
-        ("long-compaction-ladder", "first_truncation_round"),
+        ("long-compaction-ladder", "first_truncation_round_idx"),
     }
 
 
