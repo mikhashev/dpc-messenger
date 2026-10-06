@@ -116,6 +116,7 @@ async def test_a_chat_run_hands_the_agent_no_context_with_both_switches_on(
     manager._memory_indexes_initialized = True
     manager._agent_display_name = "Ark"
     manager._interrupt_events = {}
+    manager._kill_events = {}
     manager._daily_tokens_used = 0
     manager._daily_tokens_date = ""
     manager.service = types.SimpleNamespace(
