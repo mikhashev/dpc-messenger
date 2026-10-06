@@ -69,7 +69,7 @@ production (`seed_history.py`): the first step 0 ran on fresh roots and stayed
 at 16-24 k, while the incident's round 1 carried a 42-turn group history. With a
 seed, both `--dry-run` and the run itself build each task's round-1 request
 through a real `DpcAgent` before any model, size it in engine tokens (the
-alias's own tokenizer, `llama-tokenize --vocab-only`; else the incident's ratio,
+alias's own tokenizer, `llama-tokenize`, vocabulary only; else the incident's ratio,
 labelled calibrated) and refuse below `--seed-depth-floor` (default 60 000, the
 step-0 floor). A seeded report carries the seed's path, sha256, counts and, for
 a deep seed, its source ranges — no text the model wrote.
@@ -1152,6 +1152,7 @@ async def main_async(args) -> int:
                 "pass" if outcome["passed"] else ("TIME" if outcome["timed_out"] else "FAIL"))
             print(f"  {mark:4} {outcome['id']:34} {arm:>3} r{repeat} {outcome['seconds']:7.1f}s "
                   f"r={m.get('rounds')} hits={m.get('budget_hits')} "
+                  f"undet={m.get('budget_undetermined')} "
                   f"silent={m.get('silent_rounds')} both={m.get('silent_budget_hits')} "
                   f"peak={m.get('peak_prompt_tokens')} "
                   f"{'; '.join(outcome['why'])[:60]}", flush=True)
@@ -1259,7 +1260,10 @@ async def main_async(args) -> int:
     if args.step0_only and s0.get("burn_control") and s0["reproduced"] is None:
         print(f"step-0 preflight, burn control: {s0['outcome']['text']}")
     elif args.step0_only:
-        if s0["reproduced"]:
+        if s0.get("undetermined"):
+            print("step-0 preflight: undetermined — completions crossed the budget with the "
+                  "reasoning not counted; re-run with the tokenizer before reading it")
+        elif s0["reproduced"]:
             print("step-0 preflight: the off arm reached the incident's regime — the full "
                   "A/B (--preserve-reasoning both) can measure the flag here")
         else:

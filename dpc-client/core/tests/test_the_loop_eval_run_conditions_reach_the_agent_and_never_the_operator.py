@@ -122,7 +122,7 @@ class _FakeAdapter:
         content, notes, prompt = _ROUNDS[self.n % len(_ROUNDS)]
         self.n += 1
         return ({"content": content, "thinking": "the same plan again"},
-                {"reasoning_tokens": notes, "completion_tokens": notes + 10,
+                {"reasoning_tokens": notes, "thinking_source": "engine", "completion_tokens": notes + 10,
                  "prompt_tokens": prompt})
 
 

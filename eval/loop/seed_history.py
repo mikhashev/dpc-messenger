@@ -203,9 +203,10 @@ METHOD_CALIBRATED = "calibrated"
 class Tokenizer:
     """The model's own tokenizer through `llama-tokenize`, vocabulary only.
 
-    llama.cpp's tokenize tool opens the GGUF with `vocab_only` and skips every
-    tensor; CUDA is hidden so the process cannot open a GPU context. Text goes
-    in on stdin, so nothing private is written to disk.
+    llama.cpp's tokenize tool sets `model_params.vocab_only = true` itself
+    (tools/tokenize/tokenize.cpp) and skips every tensor; it has no flag for
+    it, so none is passed. CUDA is hidden so the process cannot open a GPU
+    context. Text goes in on stdin, so nothing private is written to disk.
     """
 
     def __init__(self, binary: Path, gguf: Path, timeout_s: float = 120.0) -> None:
@@ -214,7 +215,7 @@ class Tokenizer:
         self.timeout_s = timeout_s
 
     def describe(self) -> str:
-        return f"{self.binary.name} --vocab-only on {self.gguf.name}"
+        return f"{self.binary.name} (vocabulary only, by the tool's own default) on {self.gguf.name}"
 
     def count(self, text: str) -> int:
         env = dict(os.environ, CUDA_VISIBLE_DEVICES="-1")

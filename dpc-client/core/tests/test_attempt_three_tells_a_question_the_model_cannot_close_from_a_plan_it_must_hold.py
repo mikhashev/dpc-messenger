@@ -154,7 +154,7 @@ def _rows(n, hits, silent=(), first_prompt=67000, peak=93603):
     for i in range(1, n + 1):
         notes = 10500 if i in hits else 1500
         rec.record({"content": "" if i in silent else "text", "thinking": f"plan {i}"},
-                   {"reasoning_tokens": notes, "completion_tokens": notes + 100,
+                   {"reasoning_tokens": notes, "thinking_source": "engine", "completion_tokens": notes + 100,
                     "prompt_tokens": first_prompt + (peak - first_prompt) * i // n}, 1.0)
     return rec.rows
 
@@ -292,7 +292,8 @@ class _Adapter:
     async def chat(self, messages, **kw):
         content, notes, prompt = _ROUNDS[kw.pop("_n")]
         return ({"content": content, "thinking": "the plan"},
-                {"reasoning_tokens": notes, "completion_tokens": notes + 10, "prompt_tokens": prompt})
+                {"reasoning_tokens": notes, "thinking_source": "engine",
+                 "completion_tokens": notes + 10, "prompt_tokens": prompt})
 
 
 class _Agent:

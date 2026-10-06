@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import statistics
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 OPENING_CHARS = 80
@@ -66,7 +67,14 @@ SOURCE_TOKENIZER = "tokenizer"              # the note text, the model's own tok
 SOURCE_MINUS_VISIBLE = "completion_minus_visible"  # completion - (content + tool calls)
 SOURCE_UPPER_BOUND = "completion_upper_bound"      # the whole completion: an upper bound
 COUNTED_SOURCES = (SOURCE_ENGINE, SOURCE_TOKENIZER)
-CORRECTED_SOURCES = COUNTED_SOURCES + (SOURCE_MINUS_VISIBLE, SOURCE_UPPER_BOUND)
+# The sources that can decide a budget hit. The upper bound cannot: the
+# completion always holds the reasoning (llama-server's `completion_tokens` is
+# every sampled token), so a completion under the threshold proves no hit, but
+# one over it may be a long visible answer — undetermined, not a hit.
+DETERMINING_SOURCES = COUNTED_SOURCES + (SOURCE_MINUS_VISIBLE,)
+CORRECTED_SOURCES = DETERMINING_SOURCES + (SOURCE_UPPER_BOUND,)
+
+HIT, NO_HIT, UNDETERMINED = "hit", "no", "undetermined"
 
 
 def reasoning_count(*, reported: Any, reported_source: Any, completion: Any,
@@ -119,6 +127,41 @@ def _budget_count(r: Dict[str, Any]) -> int:
     if r.get("thinking_source") in CORRECTED_SOURCES and r.get("reasoning_tokens") is not None:
         return r["reasoning_tokens"]
     return r.get("completion_tokens") or r.get("reasoning_tokens") or 0
+
+
+def budget_state(r: Dict[str, Any], budget: int) -> str:
+    """`hit`, `no` or `undetermined` for one round against the note budget.
+
+    Under the threshold on any bound (the completion, or a determining count) is
+    `no`. A determining count at or over it is a `hit`. Anything else — only the
+    completion upper bound over the threshold, or a provider estimate with no
+    completion — is `undetermined`."""
+    threshold = budget * BUDGET_HIT_FRACTION
+    completion = r.get("completion_tokens")
+    if isinstance(completion, int) and completion < threshold:
+        return NO_HIT
+    count = r.get("reasoning_tokens")
+    if r.get("thinking_source") in DETERMINING_SOURCES and isinstance(count, int):
+        return HIT if count >= threshold else NO_HIT
+    return UNDETERMINED
+
+
+def _quartiles(values: List[int]) -> Optional[Dict[str, float]]:
+    if not values:
+        return None
+    if len(values) == 1:
+        v = float(values[0])
+        return {"q1": v, "median": v, "q3": v}
+    q1, med, q3 = statistics.quantiles(values, n=4, method="inclusive")
+    return {"q1": q1, "median": med, "q3": q3}
+
+
+def _longest_run(flags: List[bool]) -> int:
+    longest = run = 0
+    for f in flags:
+        run = run + 1 if f else 0
+        longest = max(longest, run)
+    return longest
 
 
 def _visible_text(msg: Dict[str, Any]) -> str:
@@ -272,18 +315,22 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
     """The counters the card asks for, from one task-run's rows.
 
     `budget` is the alias's `reasoning_budget_tokens`; without one, budget hits are
-    None (not measured), never 0.
+    None (not measured), never 0. Each round is a hit, not a hit, or
+    undetermined (`budget_state`); only hits count as hits.
     """
-    if budget:
-        hit_rounds = [r["round"] for r in rows
-                      if _budget_count(r) >= budget * BUDGET_HIT_FRACTION]
+    states = {r["round"]: budget_state(r, budget) for r in rows} if budget else None
+    if states is not None:
+        hit_rounds = [n for n, s in states.items() if s == HIT]
+        undetermined_rounds = [n for n, s in states.items() if s == UNDETERMINED]
     else:
-        hit_rounds = None
+        hit_rounds = undetermined_rounds = None
     silent = [r["round"] for r in rows if not r["content_chars"]]
-    longest, run = 0, 0
-    for r in rows:
-        run = run + 1 if not r["content_chars"] else 0
-        longest = max(longest, run)
+    longest = _longest_run([not r["content_chars"] for r in rows])
+    # The incident's signature: seven capped rounds in a row, every one silent.
+    longest_hit = (_longest_run([not r["content_chars"] and states[r["round"]] == HIT
+                                 for r in rows])
+                   if states is not None else None)
+    counts = [_budget_count(r) for r in rows]
     openings: Dict[str, int] = {}
     repeats = with_notes = 0
     for r in rows:
@@ -303,13 +350,24 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
     # silent ones, and a union or either axis alone would not say so.
     silent_hit_rounds = ([n for n in hit_rounds if n in set(silent)]
                          if hit_rounds is not None else None)
+    deep_undetermined = (len([n for n in undetermined_rounds if n in set(deep)])
+                         if undetermined_rounds is not None else None)
+    determined = [r["reasoning_tokens"] for r in rows
+                  if r.get("thinking_source") in DETERMINING_SOURCES
+                  and isinstance(r.get("reasoning_tokens"), int)]
     return {
         "rounds": len(rows),
         "budget_hits": len(hit_rounds) if hit_rounds is not None else None,
         "budget_hit_rounds": hit_rounds,
+        # Rounds whose completion crossed the threshold but whose reasoning was
+        # not counted: neither a hit nor not a hit.
+        "budget_undetermined": (len(undetermined_rounds)
+                                if undetermined_rounds is not None else None),
+        "budget_undetermined_rounds": undetermined_rounds,
         "silent_rounds": len(silent),
         "silent_round_list": silent,
         "longest_silent_streak": longest,
+        "longest_silent_budget_streak": longest_hit,
         "rounds_with_notes": with_notes,
         "repeat_opening_share": round(repeats / with_notes, 3) if with_notes else None,
         "note_tokens": sum(_budget_count(r) for r in rows),
@@ -326,16 +384,24 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
         # among them — the denominator and numerator of the step-0 share.
         "deep_rounds": len(deep),
         "deep_budget_hits": deep_hits,
+        "deep_budget_undetermined": deep_undetermined,
         "silent_budget_hits": len(silent_hit_rounds) if silent_hit_rounds is not None else None,
         "silent_budget_hit_rounds": silent_hit_rounds,
+        "silent_budget_undetermined": (len([n for n in undetermined_rounds if n in set(silent)])
+                                       if undetermined_rounds is not None else None),
         # Reasoning depth, beside the context depth of the prompt figures: the
         # largest per-round count held against the budget, and the budget itself.
         "note_budget": budget,
-        "max_reasoning_tokens": (max(_budget_count(r) for r in rows)
+        # `max_reasoning_tokens` may be an upper bound (see `thinking_sources`);
+        # `max_reasoning_tokens_counted` is over the determining sources only.
+        "max_reasoning_tokens": (max(counts)
                                  if any(r["reasoning_tokens"] is not None
                                         or r["completion_tokens"] is not None for r in rows)
                                  else None),
-        "reasoning_tokens_by_round": [_budget_count(r) for r in rows],
+        "max_reasoning_tokens_counted": max(determined) if determined else None,
+        "reasoning_tokens_by_round": counts,
+        # The per-round spread, over the same counts (bounds included).
+        "reasoning_tokens_quartiles": _quartiles(counts),
         # Every rung the rounds ran on, as production names it; [] when no round
         # carried a word (unknown, not `off`).
         "served_effort": sorted({str(r["served_effort"]) for r in rows
@@ -349,12 +415,18 @@ def _share(hits: Optional[int], rounds: Optional[int]) -> Optional[float]:
     return hits / rounds
 
 
-def task_symptom(m: Dict[str, Any]) -> Optional[bool]:
-    """Did this task-run show the incident's symptom? None when it was not measurable."""
+def task_symptom(m: Dict[str, Any], upper: bool = False) -> Optional[bool]:
+    """Did this task-run show the incident's symptom? None when it was not
+    measurable. `upper` also counts the undetermined rounds as hits: the most
+    the run could have shown, used to tell "no" from "undetermined"."""
     if m.get("budget_hits") is None or m.get("peak_prompt_tokens") is None:
         return None
-    share = _share(m.get("deep_budget_hits"), m.get("deep_rounds"))
-    return (m["budget_hits"] >= SYMPTOM_MIN_BUDGET_HITS
+    hits = m["budget_hits"] + ((m.get("budget_undetermined") or 0) if upper else 0)
+    deep_hits = m.get("deep_budget_hits")
+    if upper and deep_hits is not None:
+        deep_hits += m.get("deep_budget_undetermined") or 0
+    share = _share(deep_hits, m.get("deep_rounds"))
+    return (hits >= SYMPTOM_MIN_BUDGET_HITS
             and m["peak_prompt_tokens"] >= SYMPTOM_MIN_PEAK_PROMPT
             and share is not None and share >= SYMPTOM_MIN_BUDGET_SHARE)
 
@@ -386,38 +458,80 @@ def step0(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _burn_state(m: Dict[str, Any]) -> str:
+    """One burn-control run: `yes` (a counted hit), `no` (every round under the
+    threshold on some bound), `undetermined`, or `not-measured`."""
+    if not m.get("note_budget") or m.get("budget_hits") is None or m.get("max_reasoning_tokens") is None:
+        return "not-measured"
+    if m["budget_hits"]:
+        return "yes"
+    return "undetermined" if m.get("budget_undetermined") else "no"
+
+
 def burn_control(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Did the burn control produce burning — at least one round at >= 0.98 x the
-    note budget? None when no budget or no count was reported (not measured)."""
+    """Did the burn control produce burning — at least one round counted at
+    >= 0.98 x the note budget? `produced` is True only on a counted hit, False
+    only when every measured run stayed under the threshold, and None when not
+    measured or undetermined (`state` says which)."""
     multi = _multi(rows)
     by_run = []
     for r in rows:
         m = r["metrics"]
-        budget, most = m.get("note_budget"), m.get("max_reasoning_tokens")
+        state = _burn_state(m)
         by_run.append({
             "run": run_label(r, multi), "rounds": m.get("rounds"),
-            "max_reasoning_tokens": most, "budget": budget,
-            "budget_hits": m.get("budget_hits"), "silent_budget_hits": m.get("silent_budget_hits"),
+            "max_reasoning_tokens": m.get("max_reasoning_tokens"),
+            "max_reasoning_tokens_counted": m.get("max_reasoning_tokens_counted"),
+            "budget": m.get("note_budget"),
+            "budget_hits": m.get("budget_hits"),
+            "budget_undetermined": m.get("budget_undetermined"),
+            "silent_budget_hits": m.get("silent_budget_hits"),
             "reasoning_tokens_by_round": m.get("reasoning_tokens_by_round"),
+            "thinking_sources": m.get("thinking_sources"),
             "timed_out": bool(r.get("timed_out")),
-            "burned": (None if not budget or most is None
-                       else most >= budget * BUDGET_HIT_FRACTION),
+            "state": state,
+            "burned": {"yes": True, "no": False}.get(state),
         })
+    states = [b["state"] for b in by_run]
+    if "yes" in states:
+        state = "yes"
+    elif "undetermined" in states:
+        state = "undetermined"
+    elif "no" in states:
+        state = "no"
+    else:
+        state = "not-measured"
     measured = [b for b in by_run if b["burned"] is not None]
-    counts = [b["max_reasoning_tokens"] for b in measured]
+    yes = [b for b in by_run if b["state"] == "yes"]
+    # The figure printed: the counted maximum on a yes, else the largest count
+    # held against the budget (an upper bound on a no or an undetermined run).
+    shown = ([b["max_reasoning_tokens_counted"] for b in yes] if yes
+             else [b["max_reasoning_tokens"] for b in by_run
+                   if b["state"] in ("no", "undetermined")])
+    shown = [c for c in shown if c is not None]
     return {
-        "produced": any(b["burned"] for b in measured) if measured else None,
+        "state": state,
+        "produced": {"yes": True, "no": False}.get(state),
         "runs": len(by_run), "runs_measured": len(measured),
-        "runs_burned": sum(1 for b in measured if b["burned"]),
-        "max_reasoning_tokens": max(counts) if counts else None,
+        "runs_burned": len(yes),
+        "runs_undetermined": states.count("undetermined"),
+        "max_reasoning_tokens": max(shown) if shown else None,
         "budget": next((b["budget"] for b in by_run if b["budget"]), None),
         "threshold_fraction": BUDGET_HIT_FRACTION,
         "by_run": by_run,
     }
 
 
+BURN_UNDETERMINED_LINE = ("burn produced: undetermined: completion over the budget but the "
+                          "reasoning was not counted — re-run with the tokenizer")
+
+
 def burn_line(burn: Dict[str, Any]) -> str:
-    """`burn produced: yes/no (max reasoning tokens N of budget B)`."""
+    """`burn produced: yes/no (max reasoning tokens N of budget B)`, or undetermined."""
+    if burn.get("state") == "undetermined":
+        return (f"{BURN_UNDETERMINED_LINE} (max completion {burn['max_reasoning_tokens']} of "
+                f"budget {burn['budget']}; {burn['runs_undetermined']}/{burn['runs']} run(s) "
+                "undetermined)")
     if burn.get("produced") is None:
         return ("burn produced: not measured (no note budget on the alias, or no "
                 "reasoning count reported)")
@@ -434,6 +548,10 @@ def _step0_incident(off: List[Dict[str, Any]]) -> Dict[str, Any]:
     peaks = [r["metrics"]["peak_prompt_tokens"] for r in off
              if r["metrics"]["peak_prompt_tokens"] is not None]
     flags = [task_symptom(r["metrics"]) for r in off]
+    # What each run could have shown had its undetermined rounds been hits: a
+    # run that reproduces only on that reading is undetermined, not a "no".
+    maybe = [bool(task_symptom(r["metrics"], upper=True)) and not f
+             for r, f in zip(off, flags)]
     timed_out = [r["id"] for r in off if r.get("timed_out")]
     if not hits or not peaks:
         return {"reproduced": None, "budget_hits": None, "peak_prompt": None,
@@ -442,21 +560,30 @@ def _step0_incident(off: List[Dict[str, Any]]) -> Dict[str, Any]:
     multi = _multi(off)
     yes: List[str] = []
     by_task: Dict[str, Dict[str, Any]] = {}
-    for r, f in zip(off, flags):
+    for r, f, m_ in zip(off, flags, maybe):
         if f and r["id"] not in yes:
             yes.append(r["id"])
         t = by_task.setdefault(r["id"], {"kind": r.get("kind"), "runs": 0, "burned": 0,
-                                         "budget_hits": 0, "silent_rounds": 0,
-                                         "silent_budget_hits": 0, "timed_out": 0})
+                                         "undetermined": 0, "budget_hits": 0,
+                                         "budget_undetermined": 0, "silent_rounds": 0,
+                                         "silent_budget_hits": 0,
+                                         "longest_silent_budget_streak": 0, "timed_out": 0})
         t["runs"] += 1
         t["burned"] += 1 if f else 0
+        t["undetermined"] += 1 if m_ else 0
         t["budget_hits"] += r["metrics"].get("budget_hits") or 0
+        t["budget_undetermined"] += r["metrics"].get("budget_undetermined") or 0
+        t["longest_silent_budget_streak"] = max(
+            t["longest_silent_budget_streak"], r["metrics"].get("longest_silent_budget_streak") or 0)
         t["silent_rounds"] += r["metrics"].get("silent_rounds") or 0
         t["silent_budget_hits"] += r["metrics"].get("silent_budget_hits") or 0
         t["timed_out"] += 1 if r.get("timed_out") else 0
     deep_hits = sum(r["metrics"].get("deep_budget_hits") or 0 for r in off)
     deep_rounds = sum(r["metrics"].get("deep_rounds") or 0 for r in off)
     out = {"reproduced": bool(yes), "budget_hits": sum(hits), "peak_prompt": max(peaks),
+           "budget_undetermined": sum(t["budget_undetermined"] for t in by_task.values()),
+           "longest_silent_budget_streak": max(
+               (t["longest_silent_budget_streak"] for t in by_task.values()), default=0),
            "deep_budget_hits": deep_hits, "deep_rounds": deep_rounds,
            "deep_budget_share": _share(deep_hits, deep_rounds),
            "silent_budget_hits": sum(t["silent_budget_hits"] for t in by_task.values()),
@@ -465,7 +592,15 @@ def _step0_incident(off: List[Dict[str, Any]]) -> Dict[str, Any]:
            "by_task": by_task, "off_tasks": len(by_task), "off_runs": len(off),
            "timed_out_off": timed_out}
     out["outcome"] = step0_outcome(by_task)
-    if not yes:
+    if not yes and any(maybe):
+        out["reproduced"] = None
+        out["undetermined"] = True
+        out["runs_undetermined"] = [run_label(r, multi) for r, m_ in zip(off, maybe) if m_]
+        out["why"] = ("undetermined: no run reproduced on counted hits, but "
+                      f"{', '.join(out['runs_undetermined'])} would on rounds whose completion "
+                      "crossed the budget with the reasoning not counted — re-run with the "
+                      "tokenizer")
+    elif not yes:
         out["why"] = (
             f"no off-arm task reached >= {SYMPTOM_MIN_BUDGET_HITS} budget hits on a prompt "
             f">= {SYMPTOM_MIN_PEAK_PROMPT} tokens with >= {SYMPTOM_MIN_BUDGET_SHARE:.2f} of its "
@@ -499,7 +634,12 @@ def step0_outcome(by_task: Dict[str, Dict[str, Any]],
     unresolvable control. Only the pattern across task kinds separates them.
     """
     if burn is not None:
-        if burn.get("produced") is None:
+        if burn.get("state") == "undetermined":
+            out = {"code": "burn-undetermined",
+                   "text": "the burn control's completions crossed the budget but its reasoning "
+                           "was not counted — undetermined, neither a burn nor its absence; "
+                           "re-run with the tokenizer before reading the card"}
+        elif burn.get("produced") is None:
             out = {"code": "burn-not-measured",
                    "text": "the burn control ran but was not measured (no note budget or no "
                            "reasoning count) — no reading"}
@@ -516,6 +656,13 @@ def step0_outcome(by_task: Dict[str, Dict[str, Any]],
     ran = {t.get("kind") or "baseline" for t in by_task.values()}
     unresolvable = KIND_UNRESOLVABLE in burned
     closable = sorted(k for k in burned if k != KIND_UNRESOLVABLE)
+    undetermined = {t.get("kind") or "baseline" for t in by_task.values()
+                    if t.get("undetermined")}
+    if not burned and undetermined:
+        return {"code": "undetermined",
+                "text": "no counted burn, but rounds of "
+                        f"{', '.join(sorted(undetermined))} crossed the budget on the completion "
+                        "with the reasoning not counted — undetermined; re-run with the tokenizer"}
     if not burned:
         return {"code": "not-reproduced",
                 "text": "burns nowhere: not reproduced outside production (residual gap: a "
@@ -549,6 +696,8 @@ def step0_line(s0: Dict[str, Any], seed: Optional[Dict[str, Any]] = None) -> str
     silent-AND-at-budget intersection, and — for a deep seed — how far the seed
     reaches past the history the incident actually loaded."""
     head = "incident symptom reproduced in the off arm"
+    if s0.get("undetermined"):
+        return f"{head}: undetermined ({s0.get('why')})"
     if s0.get("reproduced") is None:
         return f"{head}: not measured ({s0.get('why')})"
     share = s0.get("deep_budget_share")
@@ -560,7 +709,9 @@ def step0_line(s0: Dict[str, Any], seed: Optional[Dict[str, Any]] = None) -> str
             f"{s0.get('deep_budget_hits')}/{s0.get('deep_rounds')} = {share_s} "
             f"[need >= {SYMPTOM_MIN_BUDGET_SHARE:.2f} in one task], "
             f"silent AND at budget: {s0.get('silent_budget_hits')} "
-            f"[the incident: {INCIDENT_SILENT_BUDGET_HITS}])")
+            f"[the incident: {INCIDENT_SILENT_BUDGET_HITS}], longest silent-at-budget run: "
+            f"{s0.get('longest_silent_budget_streak')}, undetermined rounds: "
+            f"{s0.get('budget_undetermined')})")
     if s0.get("tasks_reproducing"):
         line += f"; reproducing: {', '.join(s0['tasks_reproducing'])}"
     beyond = seed_beyond_incident(seed)
@@ -576,6 +727,9 @@ def step0_task_lines(s0: Dict[str, Any]) -> List[str]:
         lines.append(f"  {task} [{t.get('kind') or 'baseline'}]: budget-burn reproduced "
                      f"{t['burned']}/{t['runs']}; budget hits {t['budget_hits']}, silent rounds "
                      f"{t['silent_rounds']}, silent AND at budget {t['silent_budget_hits']}"
+                     + (f", undetermined {t.get('undetermined', 0)}/{t['runs']} run(s) "
+                        f"({t.get('budget_undetermined', 0)} round(s))"
+                        if t.get("budget_undetermined") else "")
                      + (f", {t['timed_out']} timed out" if t["timed_out"] else ""))
     burn = s0.get("burn_control")
     if burn:
@@ -603,9 +757,11 @@ AXES = (
     ("rounds_to_done", "rounds_to_completion"),
     ("rounds", "rounds"),
     ("budget_hits", "budget_hits"),
+    ("budget_undet", "budget_undetermined"),
     ("silent_rounds", "silent_rounds"),
     ("silent_and_hit", "silent_budget_hits"),
     ("silent_streak", "longest_silent_streak"),
+    ("silent_hit_run", "longest_silent_budget_streak"),
     ("repeat_open", "repeat_opening_share"),
     ("note_tokens", "note_tokens"),
     ("peak_prompt", "peak_prompt_tokens"),
@@ -686,7 +842,7 @@ def _total_lines(paired: Dict[str, Dict[str, Dict[str, Any]]], scope: str) -> Li
     lines = []
     for label, key in AXES:
         if key in ("compaction_round", "repeat_opening_share", "longest_silent_streak",
-                   "rounds_to_completion"):
+                   "longest_silent_budget_streak", "rounds_to_completion"):
             continue
         lines.append(f"    {label:>14}  off={_fmt(total('off', key)):>9}  on={_fmt(total('on', key)):>9}")
     # rounds to completion only over tasks both arms finished: a failed task has
