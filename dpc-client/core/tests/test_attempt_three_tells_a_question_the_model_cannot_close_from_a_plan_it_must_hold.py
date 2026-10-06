@@ -164,7 +164,8 @@ INCIDENT_HITS = {14, 18, 19, 20, 22, 24, 25}
 
 def test_the_intersection_counts_only_rounds_both_silent_and_at_the_budget():
     incident = M.summarise_rounds(_rows(26, INCIDENT_HITS, silent=set(range(14, 27)) - {16}), BUDGET)
-    assert incident["silent_budget_hits"] == M.INCIDENT_SILENT_BUDGET_HITS == 7
+    assert incident["silent_budget_hits"] == 7  # engine-counted fixture rows
+    assert incident["silent_completion_at_budget"] == M.INCIDENT_SILENT_COMPLETION_AT_BUDGET == 7
     assert incident["silent_budget_hit_rounds"] == sorted(INCIDENT_HITS)
 
     # Hits only on talking rounds, silence only on uncapped ones: the union is 8,
@@ -188,7 +189,8 @@ FLAT = M.summarise_rounds(_rows(5, set(), first_prompt=70000, peak=80000), BUDGE
 def test_step0_prints_the_intersection_beside_the_separate_axes():
     line = M.step0_line(M.step0([_result("a", BURN)]))
     assert "budget hits 7" in line
-    assert "silent AND at budget: 7 [the incident: 7]" in line
+    assert ("silent AND at budget: 7, silent AND completion at budget: 7 "
+            "[the incident: 7, completion unit]") in line
     verdict = "\n".join(M.verdict_lines([_result("a", BURN), _result("a", FLAT, arm="on")]))
     assert "silent_and_hit  off=        7  on=        0" in verdict
 
@@ -342,7 +344,8 @@ def test_repeats_run_in_fresh_roots_and_step0_reports_k_of_n(home, stubbed, tmp_
     assert report["step0"]["outcome"]["code"] == "both"
     printed = capsys.readouterr().out
     assert "long-control-unresolvable [control-unresolvable]: budget-burn reproduced 2/2" in printed
-    assert "silent AND at budget: 8 [the incident: 7]" in printed
+    assert ("silent AND at budget: 8, silent AND completion at budget: 8 "
+            "[the incident: 7, completion unit]") in printed
 
 
 @needs_git

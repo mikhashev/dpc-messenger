@@ -211,3 +211,115 @@ def test_an_incident_run_with_counted_silent_hits_reports_its_streak():
     assert s0["reproduced"] is True
     assert s0["longest_silent_budget_streak"] == 7
     assert "longest silent-at-budget run: 7" in M.step0_line(s0)
+
+
+# -- round 3: finish_reason, the incident's unit, loud fallbacks, derived hits ----------
+
+def test_finish_reason_and_max_tokens_reach_every_row_and_length_is_counted():
+    rec = M.RoundRecorder()
+    rec.record({"content": "", "thinking": "n"},
+               dict(USAGE, finish_reason="length", max_tokens=16384), 1.0)
+    # A server that caps only the reasoning and then calls a tool says tool_calls.
+    rec.record({"content": "", "thinking": "n"}, dict(USAGE, finish_reason="tool_calls"), 1.0)
+    assert [(r["finish_reason"], r["max_tokens"]) for r in rec.rows] == [
+        ("length", 16384), ("tool_calls", None)]
+    m = M.summarise_rounds(rec.rows, BUDGET)
+    assert (m["length_rounds"], m["length_round_list"]) == (1, [1])
+    burn = M.step0([_burn(rec.rows)])["burn_control"]
+    assert burn["length_rounds"] == 1 and "length-cut rounds: 1" in M.burn_line(burn)
+    # No round carrying a finish_reason (none given, or a row from before the
+    # field) is "not recorded", never 0.
+    assert M.summarise_rounds(_record(), BUDGET)["length_rounds"] is None
+    legacy = [{k: v for k, v in _record()[0].items() if k != "finish_reason"}]
+    assert M.summarise_rounds(legacy, BUDGET)["length_rounds"] is None
+    assert "length-cut rounds: not recorded" in M.burn_line(
+        M.step0([_burn(legacy)])["burn_control"])
+
+
+def _incident_round(rec, count_tokens=None, thinking="0123456789" * 1100):
+    """One synthetic round shaped like the incident's capped ones: silent, two
+    tool calls, the provider's estimate clamped to the completion."""
+    rec.count_tokens = count_tokens
+    rec.record({"content": "", "thinking": thinking,
+                "tool_calls": [{"function": {"name": "t", "arguments": "{}"}}] * 2},
+               {"reasoning_tokens": 10150, "thinking_source": "estimated",
+                "completion_tokens": 10150, "prompt_tokens": 85000,
+                "finish_reason": "tool_calls"}, 1.0)
+
+
+def test_the_incident_constant_is_in_the_completion_unit_and_never_compared_with_hits():
+    assert not hasattr(M, "INCIDENT_SILENT_BUDGET_HITS")
+    rec = M.RoundRecorder()
+    for _ in range(7):
+        _incident_round(rec)
+    m = M.summarise_rounds(rec.rows, BUDGET)
+    assert m["silent_completion_at_budget"] == M.INCIDENT_SILENT_COMPLETION_AT_BUDGET == 7
+    assert m["silent_budget_hits"] == M.INCIDENT_SILENT_BUDGET_HITS_NEW_RULE == 0
+    assert m["silent_budget_undetermined"] == M.INCIDENT_SILENT_BUDGET_UNDETERMINED_NEW_RULE == 7
+    assert m["length_rounds"] == 0  # the caveat: a capped trace still said tool_calls
+    # With the model's tokenizer over the notes the same rows are hits.
+    counted = M.RoundRecorder()
+    for _ in range(7):
+        _incident_round(counted, count_tokens=lambda t: len(t))
+    mc = M.summarise_rounds(counted.rows, BUDGET)
+    assert (mc["silent_budget_hits"], mc["thinking_sources"]) == (7, {M.SOURCE_TOKENIZER: 7})
+    # ...and with a tokenizer but no note text, by the derived source.
+    derived = M.RoundRecorder()
+    for _ in range(7):
+        _incident_round(derived, count_tokens=lambda t: len(t) // 4, thinking="")
+    md = M.summarise_rounds(derived.rows, BUDGET)
+    assert (md["silent_budget_hits"], md["budget_hits_derived"]) == (7, 7)
+    line = M.step0_line(M.step0([_task(rec.rows)]))
+    assert "the incident: 7, completion unit" in line
+    assert "[the incident: 7]" not in line
+
+
+def test_a_failing_tokenizer_is_counted_and_printed_not_swallowed():
+    def broken(_text):
+        raise RuntimeError("no count")
+    rows = _record(count_tokens=broken)
+    assert rows[0]["tokenizer_error"] == "RuntimeError: no count"
+    m = M.summarise_rounds(rows, BUDGET)
+    assert (m["tokenizer_failed_rows"], m["tokenizer_first_error"]) == (1, "RuntimeError: no count")
+    line = M.burn_line(M.step0([_burn(rows)])["burn_control"])
+    assert "TOKENIZER FAILED on 1 round(s), first: RuntimeError: no count" in line
+    assert "sources: completion_upper_bound=1" in line
+
+
+def test_the_burn_line_prints_the_source_histogram():
+    line = M.burn_line(M.step0([_burn(_record(count_tokens=_digit_tokenizer))])["burn_control"])
+    assert "sources: tokenizer=1" in line and "TOKENIZER FAILED" not in line
+
+
+def test_a_verdict_resting_only_on_derived_hits_says_so():
+    rows = _record(count_tokens=lambda t: len(t) // 4, msg={"content": "short"})
+    assert rows[0]["thinking_source"] == M.SOURCE_MINUS_VISIBLE
+    s0 = M.step0([_burn(rows)])
+    burn = s0["burn_control"]
+    assert burn["state"] == "yes" and burn["derived_only"] is True
+    assert M.burn_line(burn).startswith(f"burn produced: yes [{M.DERIVED_NOTE}]")
+    assert s0["outcome"]["derived"] is True and M.DERIVED_NOTE in s0["outcome"]["text"]
+    # One measured hit beside it: no longer derived only.
+    mixed = M.step0([_burn(rows), _burn(_record(count_tokens=_digit_tokenizer), repeat=2)])
+    assert mixed["burn_control"]["derived_only"] is False
+    assert M.DERIVED_NOTE not in M.burn_line(mixed["burn_control"])
+    # The incident tasks the same way.
+    rec = M.RoundRecorder()
+    for _ in range(3):
+        _incident_round(rec, count_tokens=lambda t: len(t) // 4, thinking="")
+    inc = M.step0([_task(rec.rows)])
+    assert inc["reproduced"] is True and inc["derived_only"] is True
+    assert M.DERIVED_NOTE in M.step0_line(inc)
+
+
+def test_the_run_start_line_is_loud_without_a_tokenizer():
+    sys.path.insert(0, str(REPO_ROOT / "eval"))
+    import run_loop_eval as R
+    loud = R.tokenizer_banner(None)
+    assert loud.startswith("!!! NO TOKENIZER") and "'no' or 'undetermined'" in loud
+
+    class _Tok:
+        def describe(self):
+            return "llama-tokenize.exe (vocabulary only) on m.gguf"
+    assert R.tokenizer_banner(_Tok()) == (
+        "reasoning count per round: tokenizer (llama-tokenize.exe (vocabulary only) on m.gguf)")

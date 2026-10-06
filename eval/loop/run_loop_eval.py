@@ -854,6 +854,16 @@ def seed_tokenizer(entry: Dict[str, Any]):
     return seed_history.tokenizer_beside(binary, Path(entry.get("gguf_path") or ""))
 
 
+def tokenizer_banner(tokenizer) -> str:
+    """The run-start line naming how each round's reasoning is counted; loud when
+    there is no tokenizer, since then no round can be a budget hit."""
+    if tokenizer is not None:
+        return f"reasoning count per round: tokenizer ({tokenizer.describe()})"
+    return ("!!! NO TOKENIZER: budget hits in this run can only be 'no' or 'undetermined' "
+            "(unless the provider reports an engine reasoning count) — every round over "
+            "the threshold is known only by its completion upper bound !!!")
+
+
 def load_seed_or_refuse(args) -> Optional[Dict[str, Any]]:
     """The seed for this run, or None. Refused before anything is loaded."""
     if not args.seed_history:
@@ -1066,9 +1076,7 @@ async def main_async(args) -> int:
     # The model's own tokenizer counts each round's note for the budget check;
     # without it a non-engine count is the completion, labelled an upper bound.
     row_tokenizer = seed_tokenizer(entry)
-    print("reasoning count per round: "
-          + (f"tokenizer ({row_tokenizer.describe()})" if row_tokenizer is not None
-             else "engine, else the completion as an upper bound (no tokenizer)"))
+    print(tokenizer_banner(row_tokenizer))
 
     def new_agent(root: Path, agent_firewall=None):
         agent = DpcAgent(
@@ -1152,8 +1160,10 @@ async def main_async(args) -> int:
                 "pass" if outcome["passed"] else ("TIME" if outcome["timed_out"] else "FAIL"))
             print(f"  {mark:4} {outcome['id']:34} {arm:>3} r{repeat} {outcome['seconds']:7.1f}s "
                   f"r={m.get('rounds')} hits={m.get('budget_hits')} "
-                  f"undet={m.get('budget_undetermined')} "
-                  f"silent={m.get('silent_rounds')} both={m.get('silent_budget_hits')} "
+                  f"undet={m.get('budget_undetermined')} len={m.get('length_rounds')} "
+                  + (f"TOKFAIL={m.get('tokenizer_failed_rows')} "
+                     if m.get("tokenizer_failed_rows") else "")
+                  + f"silent={m.get('silent_rounds')} both={m.get('silent_budget_hits')} "
                   f"peak={m.get('peak_prompt_tokens')} "
                   f"{'; '.join(outcome['why'])[:60]}", flush=True)
     finally:
