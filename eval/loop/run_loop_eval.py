@@ -1063,6 +1063,13 @@ async def main_async(args) -> int:
         approver = Tier1AutoApprover().start()
         print("Tier 1 auto-approval ON (Tier 2 still blocked)")
 
+    # The model's own tokenizer counts each round's note for the budget check;
+    # without it a non-engine count is the completion, labelled an upper bound.
+    row_tokenizer = seed_tokenizer(entry)
+    print("reasoning count per round: "
+          + (f"tokenizer ({row_tokenizer.describe()})" if row_tokenizer is not None
+             else "engine, else the completion as an upper bound (no tokenizer)"))
+
     def new_agent(root: Path, agent_firewall=None):
         agent = DpcAgent(
             llm_manager=llm,
@@ -1074,6 +1081,7 @@ async def main_async(args) -> int:
         )
         recorder = round_metrics.RoundRecorder()
         recorder.resolve_effort = lambda reported: served_effort_for(llm, alias, effort, reported)
+        recorder.count_tokens = row_tokenizer.count if row_tokenizer is not None else None
         recorder.wrap(agent.llm)
         return agent, recorder
 

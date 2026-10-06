@@ -185,7 +185,7 @@ def _rows(notes_per_round):
     for i, n in enumerate(notes_per_round, 1):
         last = i == len(notes_per_round)
         rec.record({"content": "answer" if last else "", "thinking": f"step {i}"},
-                   {"reasoning_tokens": n, "completion_tokens": n + 200,
+                   {"reasoning_tokens": n, "thinking_source": "engine", "completion_tokens": n + 200,
                     "prompt_tokens": 11000 + i}, 1.0)
     return rec.rows
 
@@ -325,7 +325,7 @@ class _Agent:
         self.firewall = firewall
 
     async def chat(self, messages, **kw):
-        return {"content": "x_48=1"}, {"reasoning_tokens": kw["notes"],
+        return {"content": "x_48=1"}, {"reasoning_tokens": kw["notes"], "thinking_source": "engine",
                                        "completion_tokens": kw["notes"] + 10,
                                        "prompt_tokens": 11000}
 

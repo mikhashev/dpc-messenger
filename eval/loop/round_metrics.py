@@ -13,9 +13,10 @@ returned for a round (`msg`, `usage`) or from the loop's own log records.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 OPENING_CHARS = 80
 
@@ -55,10 +56,84 @@ KIND_UNRESOLVABLE = "control-unresolvable"
 KIND_BURN = "control-burn"
 
 
+# Where a row's `reasoning_tokens` came from (its `thinking_source`), best first.
+# The provider's own word for a guess is "estimated" (chars / 4 over the note):
+# on the burn control it read ~3 000 for rounds that spent ~11 000 of a 12 050
+# completion on digits, and the budget check believed it. A guess is never the
+# count held against the budget; the provider's number is kept beside it only.
+SOURCE_ENGINE = "engine"                    # counted by the engine (production's word)
+SOURCE_TOKENIZER = "tokenizer"              # the note text, the model's own tokenizer
+SOURCE_MINUS_VISIBLE = "completion_minus_visible"  # completion - (content + tool calls)
+SOURCE_UPPER_BOUND = "completion_upper_bound"      # the whole completion: an upper bound
+COUNTED_SOURCES = (SOURCE_ENGINE, SOURCE_TOKENIZER)
+CORRECTED_SOURCES = COUNTED_SOURCES + (SOURCE_MINUS_VISIBLE, SOURCE_UPPER_BOUND)
+
+
+def reasoning_count(*, reported: Any, reported_source: Any, completion: Any,
+                    thinking: Optional[str] = None, visible: Optional[str] = None,
+                    count_tokens: Optional[Callable[[str], int]] = None
+                    ) -> Tuple[Optional[int], Optional[str]]:
+    """`(count, source)` for one round's reasoning, never from chars / 4.
+
+    An engine count is taken as is. Otherwise the note is counted with the
+    model's tokenizer; with no note text, the completion less the visible output
+    (content and tool calls) counted the same way; with no tokenizer, the whole
+    completion, labelled as the upper bound it is.
+    """
+    if isinstance(reported, int) and reported_source == SOURCE_ENGINE:
+        return reported, SOURCE_ENGINE
+    if count_tokens is not None:
+        try:
+            if thinking:
+                return int(count_tokens(thinking)), SOURCE_TOKENIZER
+            if isinstance(completion, int):
+                seen = int(count_tokens(visible)) if visible else 0
+                return max(completion - seen, 0), SOURCE_MINUS_VISIBLE
+        except Exception:  # a tokenizer that fails falls through to the bound
+            pass
+    if isinstance(completion, int):
+        return completion, SOURCE_UPPER_BOUND
+    return None, None
+
+
+def correct_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Upgrade a row recorded before the correction (no note text kept) in
+    place: the provider's figure moves to `*_reported`, the count becomes the
+    completion upper bound unless the engine counted it. Idempotent."""
+    if "reasoning_tokens_reported" in row:
+        return row
+    row["reasoning_tokens_reported"] = row.get("reasoning_tokens")
+    row["thinking_source_reported"] = row.get("thinking_source")
+    row["reasoning_tokens"], row["thinking_source"] = reasoning_count(
+        reported=row.get("reasoning_tokens_reported"),
+        reported_source=row.get("thinking_source_reported"),
+        completion=row.get("completion_tokens"))
+    return row
+
+
 def _budget_count(r: Dict[str, Any]) -> int:
     """The count a round is held against the note budget with — the rule of
-    `budget_hit_rounds` in `summarise_rounds`, kept in one place."""
-    return r["reasoning_tokens"] or r["completion_tokens"] or 0
+    `budget_hit_rounds` in `summarise_rounds`, kept in one place. A row whose
+    count is not one of `CORRECTED_SOURCES` (an old row, an estimate) is held
+    with its completion instead."""
+    if r.get("thinking_source") in CORRECTED_SOURCES and r.get("reasoning_tokens") is not None:
+        return r["reasoning_tokens"]
+    return r.get("completion_tokens") or r.get("reasoning_tokens") or 0
+
+
+def _visible_text(msg: Dict[str, Any]) -> str:
+    """What the round said aloud: its content and its tool calls' names and
+    arguments — the part of the completion that is not the note."""
+    parts = [str(msg.get("content") or "")]
+    for call in msg.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            parts.append(str(call))
+            continue
+        fn = call.get("function") if isinstance(call.get("function"), dict) else call
+        args = fn.get("arguments", fn.get("input", ""))
+        parts.append(str(fn.get("name") or ""))
+        parts.append(args if isinstance(args, str) else json.dumps(args, ensure_ascii=False))
+    return "\n".join(p for p in parts if p)
 
 
 def _normalise(text: str) -> str:
@@ -73,6 +148,10 @@ class RoundRecorder:
         # Optional: maps the provider's reported effort word to the rung the
         # round ran on (`run_loop_eval.served_effort_for`, production's rule).
         self.resolve_effort = None
+        # Optional: text -> token count with the model's own tokenizer
+        # (`seed_history.Tokenizer.count`); without it a non-engine count falls
+        # back to the completion upper bound (`reasoning_count`).
+        self.count_tokens: Optional[Callable[[str], int]] = None
 
     def record(self, msg: Optional[Dict[str, Any]], usage: Optional[Dict[str, Any]],
                elapsed_s: float) -> None:
@@ -80,16 +159,24 @@ class RoundRecorder:
         usage = usage or {}
         thinking = str(msg.get("thinking") or "")
         reported = usage.get("served_effort")
+        count, source = reasoning_count(
+            reported=usage.get("reasoning_tokens"), reported_source=usage.get("thinking_source"),
+            completion=usage.get("completion_tokens"), thinking=thinking,
+            visible=_visible_text(msg), count_tokens=self.count_tokens)
         self.rows.append({
             "round": len(self.rows) + 1,
             "content_chars": len(str(msg.get("content") or "").strip()),
             "tool_calls": len(msg.get("tool_calls") or []),
             "note_chars": len(thinking),
             "note_opening": _normalise(thinking)[:OPENING_CHARS],
-            "reasoning_tokens": usage.get("reasoning_tokens"),
-            # Counted by the engine or estimated by the provider; on the incident's
-            # silent rows it was the estimate (`split=estimated`).
-            "thinking_source": usage.get("thinking_source"),
+            # The count held against the budget and how it was made
+            # (`CORRECTED_SOURCES`); the provider's figure and word stay beside it,
+            # informational only — on the incident's silent rows and the burn
+            # control they were the chars / 4 estimate.
+            "reasoning_tokens": count,
+            "thinking_source": source,
+            "reasoning_tokens_reported": usage.get("reasoning_tokens"),
+            "thinking_source_reported": usage.get("thinking_source"),
             "completion_tokens": usage.get("completion_tokens"),
             "prompt_tokens": usage.get("prompt_tokens"),
             # The word the provider read off the body it sent (None: it said
@@ -187,9 +274,6 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
     `budget` is the alias's `reasoning_budget_tokens`; without one, budget hits are
     None (not measured), never 0.
     """
-    def notes(r):
-        return r["reasoning_tokens"] if r["reasoning_tokens"] is not None else r["note_chars"] // 4
-
     if budget:
         hit_rounds = [r["round"] for r in rows
                       if _budget_count(r) >= budget * BUDGET_HIT_FRACTION]
@@ -228,12 +312,14 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
         "longest_silent_streak": longest,
         "rounds_with_notes": with_notes,
         "repeat_opening_share": round(repeats / with_notes, 3) if with_notes else None,
-        "note_tokens": sum(notes(r) for r in rows),
-        # Which rows' note count is the engine's and which ours (chars / 4) or the
-        # provider's estimate; a reader can then tell a count from a guess.
+        "note_tokens": sum(_budget_count(r) for r in rows),
+        # Rows whose count was derived from the completion rather than counted
+        # (engine or tokenizer), and every method used; a reader can then tell a
+        # count from a bound.
         "note_tokens_estimated_rows": sum(
-            1 for r in rows if r["reasoning_tokens"] is None
-            or str(r.get("thinking_source") or "").startswith("estimat")),
+            1 for r in rows if r.get("thinking_source") not in COUNTED_SOURCES),
+        "thinking_sources": {s: sum(1 for r in rows if r.get("thinking_source") == s)
+                             for s in sorted({str(r.get("thinking_source")) for r in rows})},
         "first_prompt_tokens": prompts[0] if prompts else None,
         "peak_prompt_tokens": max(prompts) if prompts else None,
         # Rounds whose prompt reached SYMPTOM_MIN_PEAK_PROMPT, and the budget hits
@@ -249,7 +335,7 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
                                  if any(r["reasoning_tokens"] is not None
                                         or r["completion_tokens"] is not None for r in rows)
                                  else None),
-        "reasoning_tokens_by_round": [r["reasoning_tokens"] for r in rows],
+        "reasoning_tokens_by_round": [_budget_count(r) for r in rows],
         # Every rung the rounds ran on, as production names it; [] when no round
         # carried a word (unknown, not `off`).
         "served_effort": sorted({str(r["served_effort"]) for r in rows
