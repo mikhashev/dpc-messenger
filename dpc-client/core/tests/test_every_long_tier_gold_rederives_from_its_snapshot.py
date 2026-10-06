@@ -63,7 +63,8 @@ def test_the_snapshot_copy_lands_inside_each_task_root(snapshot, tmp_path):
     for t in tasks:
         for rel in t["files"]:
             assert (root / "src" / T.PKG / rel).is_file(), f"{t['id']}: {rel} not in the root"
-        assert str(root) in t["prompt"], f"{t['id']}: prompt points outside its root"
+        if t["files"]:  # the burn control names no file at all
+            assert str(root) in t["prompt"], f"{t['id']}: prompt points outside its root"
 
 
 @needs_git
@@ -131,6 +132,8 @@ def _gold_answer(t) -> str:
 
 def test_a_gold_shaped_answer_passes_every_long_task(tasks):
     for t in tasks.values():
+        if not T.is_scored(t):
+            continue  # the burn control has no gold (its own test file)
         v = R.check(t, _gold_answer(t))
         assert v["passed"], f"{t['id']}: {v['why']}"
 

@@ -460,8 +460,12 @@ def redact_seeded_outcome(outcome: Dict[str, Any], task: Dict[str, Any],
     outcome.pop("answer_tail", None)
     lowered = answer.lower()
     outcome["answer_chars"] = len(answer)
-    outcome["answer_fields"] = {k: field_value(k, lowered)
-                                for k in (task.get("expect_fields") or {})}
+    # Every scored key, places and paths included: attempt 3 kept only
+    # `expect_fields`, so a passing `*_where` value could not be re-scored later.
+    keys = [*(task.get("expect_fields") or {}), *(task.get("expect_paths") or {}),
+            *(task.get("expect_where") or {}),
+            *((task.get("expect_places") or {}).get("keys") or [])]
+    outcome["answer_fields"] = {k: field_value(k, lowered) for k in keys}
     for row in outcome.get("per_round") or []:
         if row.get("note_opening"):
             row["note_opening"] = _digest(row["note_opening"])

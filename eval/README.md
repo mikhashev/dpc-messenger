@@ -307,7 +307,92 @@ tests use synthetic records only.
     the same tasks with the seed plus Johnny's real `system_prompt` and
     knowledge in the root. After four "no"s the card is recorded as
     "plausible, 0 of N reproductions" and `preserve_reasoning` stays off (the
-    owner's decision).
+    owner's decision). Two additions (Ark, 2026-10-06): if attempt 4 ever runs,
+    its variable is fixed by an **inert seed control** of the same size without
+    unresolved material, so a "yes" can be put on Johnny's material and not on
+    sheer size; and four "no"s gathered under drifting conditions (unseeded,
+    deep seed, new tasks, Johnny's root) are recorded as **one failure plus
+    three approximations**, not as four independent reproductions failed.
+
+- **After attempt 3 (2026-10-06): golds that rejected right answers, and a
+  positive control for burn.**
+  - **Context depth is not reasoning depth.** Context depth is the prompt
+    (prompt tokens per round); reasoning depth is the thinking (reasoning
+    tokens per round, against the 10 000 note budget). The incident had both;
+    the three step 0s reproduced only the first — 0 budget hits in 84 deep
+    rounds.
+  - **Ark's rule for places.** A `*_where` (or evidence) answer is also
+    accepted when it falls inside the definition of any function the gold's own
+    derivation names. Each derive declares, per key, the functions it relies on
+    (`_relies_on`), and `tasks_long.accepted_spans` adds their definition spans,
+    recomputed from the snapshot like every other span; only that key widens,
+    and `verify_golds` checks the declared names too. Attempt 3's claim 5 was
+    answered `partly` (right) at `indexing_pipeline.py:209`, inside
+    `forget_in_index` — the function whose call the derive tests for — and was
+    rejected. Claim 1's `bm25_index.py:97` still fails: it is a sentence of
+    `BM25Index`'s docstring stating the invariant, and where an invariant is
+    written is not where it runs (`save` / `_rebuild`). Taken literally, the
+    rule also accepts claim 5 inside the three registry functions the derive
+    checks the delete path never reaches (`read_all_meta`, `write_all_meta`,
+    `write_file_meta`); one exception is made on purpose — `run_llm_loop`,
+    which the unresolvable control's derive only searches for two lines, is not
+    declared, since accepting its definition would accept any line of the loop.
+    The unresolvable control's second place now also accepts
+    `get_agent_config_path`, where the path under `~/.dpc/agents` is built.
+  - **The other address and boundary golds, checked against the code:**
+    `first_truncation_round_idx` 9 (`round_idx > 8`; reworded earlier the same
+    day after a 9-vs-10 rejection); `release_at_half` 0.3 and
+    `compaction_releases` 64 512 (`ratio < release`, asked as "stops / below");
+    `compaction_starts` 107 520 (`ratio >= threshold`); `guard_stops` 204 288
+    (`ratio < 0.95` passes, so 0.95 stops); `max_fails` 3 (`fail_streak <
+    max_fails`); `min_docs_for_corpus_stops` 5 (`len(texts) < 5` returns
+    none); `max_df` 0.8 and `bigram_share` 0.15 (strict `>`, asked as
+    "above"); `script_read_limit` 262 144 (`size > limit` refused, so the
+    limit itself is read); `preview_chars` 500 (`body[:500]`, asked "at most").
+    Each wording matches its comparison, so none rejects a defensible answer.
+    The guard order was read off the whole answer, so working notes naming two
+    guards in another order could fail a right list; the last line naming every
+    guard is now the list scored.
+  - **Attempt 3 re-scored offline under the rule** (the report is unchanged):
+    run 1 of `long-audit-claims` changes from fail to pass (claim 5 at :209);
+    run 3 stays a fail (claim 1 at :97); the other passes stay passes, since the
+    rule only widens. Runs 1 and 3 of `long-control-unresolvable` cannot be
+    re-scored: a seeded row kept only `expect_fields` values, not the places
+    (it now keeps places and paths too). Known: 6 of 9 pass, 1 fails, 2
+    undetermined — against 5 of 9 as scored.
+  - **`long-control-burn`** (kind `control-burn`) asks whether this instrument
+    can produce a capped round at all. **No tools** — the runner gives it a
+    firewall of its own allowing none, so the loop offers no schema and a tool
+    call is refused; its first answer ends the run (one round). **No gold, never
+    pass/fail**: its row carries `passed: null`, it is out of the accuracy
+    denominator, and step 0 prints `burn produced: yes/no (max reasoning tokens
+    N of budget B)`, yes when one round reached ≥ 0.98 × the budget. The prompt
+    is a chain of 48 dependent modular squarings (`x_(n+1)` from `x_n` mod
+    10007, the rule chosen by `x_n mod 4`, then a count): no lookup, no closed
+    form, no cycle, every step an 8-digit product and a division, and one slip
+    spoils every later value — at ~200 reasoning tokens per checked step, about
+    the 10 000 budget. With no tools the adapter takes its text path (one
+    flattened prompt, `generate_response[_stream]`), not the native tools path
+    the incident ran on; the note budget and the effort word reach the server on
+    both. **Meant unseeded** (it is about the model's reasoning, not the
+    context); `--seed-history` is allowed and the dry run says so.
+  - **What step 0 then says.** When the burn control ran its reading comes
+    first: burns → "the instrument can produce burning; the open question is
+    which task shape makes the model think instead of read"; does not burn →
+    "the instrument does not produce burning at all on this setup; further
+    attempts measure nothing — record the card as 0 of N, not reproduced, flag
+    stays off" — the agreed reading; the decision on the card is the owner's.
+    The other tasks' reading follows it, and the control is kept out of the
+    incident symptom.
+  - **The burn control's step 0** (dry run first):
+
+        uv run python ../../eval/loop/run_loop_eval.py --step0-only \
+          --task-ids long-control-burn --repeats 3 --auto-approve
+
+    Estimate: each run is the budget plus a ~1 500-token answer, 11 500 tokens
+    at the model's ~50–75 tokens/s decode (per the brief, not re-measured
+    here) = 153–230 s, so **~8–12 min** for three runs if every one burns, less
+    if not; prefill is not counted.
 
 - **The preflight first.** `--step0-only` is the long tier's off arm on the first
   two tasks (`--tasks N` for another count), under the same run conditions as
@@ -323,7 +408,8 @@ tests use synthetic records only.
   the flag: the alias carries no such key. `both` runs every task under each arm
   in its own root, order alternating per task; one child serves both arms and the
   flag is set on the live provider before each run, so no model reload between.
-- **The tasks** (`loop/tasks_long.py`, 8 of them, 11 since attempt 3) read this repository's own
+- **The tasks** (`loop/tasks_long.py`, 8 of them, 11 since attempt 3, plus the
+  tool-less burn control) read this repository's own
   source — `git archive` of `dpc_agent/`, `agent_manager.py` and two providers at
   the commit the run starts at, copied into each task root, because the approver
   never answers a sandbox-boundary question. Each names 2–5 files of 92–319 k

@@ -124,7 +124,7 @@ def test_a_where_value_is_scored_by_file_and_span(tasks):
 
 def test_the_unresolvable_control_passes_cannot_settle_with_both_places(tasks):
     t = tasks["long-control-unresolvable"]
-    (a,), (b, _) = t["gold_places"]["places"]
+    (a,), (b, *_) = t["gold_places"]["places"]
     place_a, place_b = f"{a[0]}:{a[1]}", f"{b[0]}:{b[2]}"
 
     settled_no = f"settleable=no\nvalue=none\nevidence_a={place_a}\nevidence_b={place_b}"

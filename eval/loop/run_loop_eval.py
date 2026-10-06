@@ -430,8 +430,11 @@ def check(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
     text; a key the answer never wrote is reported as missing, not as wrong.
     `expect_paths` compares a module path by suffix; `expect_where` passes a
     `<file>:<line>` inside any accepted span; `expect_places` asks for every
-    place to be named by a distinct key, in any order.
+    place to be named by a distinct key, in any order. A task with
+    `scored: False` (the burn control) is never scored: `passed` is None.
     """
+    if task.get("scored") is False:
+        return {"passed": None, "why": []}
     reasons: List[str] = []
     ok = True
     lowered = (answer or "").lower()
@@ -487,7 +490,13 @@ def check(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
 
     want_order = task.get("expect_ordered")
     if want_order:
-        positions = [_word_boundary_search(name.lower(), lowered) for name in want_order]
+        # The last line naming every item is the list given; working notes above
+        # it may name the same items in another order.
+        names = [n.lower() for n in want_order]
+        listed = [ln for ln in lowered.splitlines()
+                  if all(_word_boundary_search(n, ln) >= 0 for n in names)]
+        scope = listed[-1] if listed else lowered
+        positions = [_word_boundary_search(n, scope) for n in names]
         if any(pos < 0 for pos in positions):
             ok = False
             reasons.append("not all names given")
@@ -555,7 +564,8 @@ async def run_one(agent, task: Dict[str, Any], *,
             error = type(exc).__name__ if seeded else f"{type(exc).__name__}: {exc}"
     elapsed = time.time() - started
     verdict = check(task, answer or "")
-    passed = verdict["passed"] and error is None
+    # None stays None: an unscored task is absent from pass/fail, error or not.
+    passed = None if verdict["passed"] is None else (verdict["passed"] and error is None)
     out = {
         "id": task["id"],
         "passed": passed,
@@ -640,6 +650,42 @@ def run_time_estimate(n_tasks: int, repeats: int, arms: int, seeded: bool,
             "ceiling_min": round(runs * timeout_min, 1)}
 
 
+# The burn control has no tools, so a run is one round (or a few): its time is
+# the note budget plus the answer, decoded. The decode speed is the model's
+# ~50-75 tokens/s as relayed in the brief for the control (not re-measured here);
+# the answer allowance is a guess at a worked-chain answer. Prefill not counted.
+BURN_DECODE_TOKENS_PER_S = (50, 75)
+BURN_ANSWER_TOKENS = 1500
+
+
+def burn_time_estimate(runs: int, budget: Optional[int]) -> Optional[Dict[str, Any]]:
+    """Minutes for `runs` burn-control runs at the decode speeds above; None
+    without a note budget (the run would then not be bounded by it)."""
+    if not runs or not budget:
+        return None
+    tokens = budget + BURN_ANSWER_TOKENS
+    slow, fast = BURN_DECODE_TOKENS_PER_S
+    return {"runs": runs, "tokens_per_run": tokens,
+            "seconds_per_run": [round(tokens / fast), round(tokens / slow)],
+            "expected_min": [round(runs * tokens / fast / 60, 1),
+                             round(runs * tokens / slow / 60, 1)]}
+
+
+def task_firewall(task: Dict[str, Any], workdir: Path, shared, cache: Dict[str, Any]):
+    """The firewall one long task runs under: the run's own, unless the task names
+    another tool set (the burn control: none), which gets a rules file of its own
+    in a subdirectory — the shared one must not be overwritten."""
+    import tasks_long
+    tools = tasks_long.task_tools(task)
+    if tools == tasks_long.LONG_TIER_TOOLS:
+        return shared
+    if task["id"] not in cache:
+        d = workdir / f"firewall-{task['id']}"
+        d.mkdir(parents=True, exist_ok=True)
+        cache[task["id"]] = benchmark_tools.benchmark_firewall(d, LOOP_PROFILE, allowed=tools)
+    return cache[task["id"]]
+
+
 def _operator_providers_digest() -> Optional[str]:
     src = Path.home() / ".dpc" / "providers.json"
     try:
@@ -719,15 +765,27 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
             tasks_long.build_fixture(root, tmp_path / "snapshot")
             todo = tasks_long.tasks_for(root)
             picked = select_long_tasks(todo, args)
+            fw_cache: Dict[str, Any] = {}
             for t in todo:
                 need = set(t["tools_needed"])
                 named = [root / "src" / tasks_long.PKG / f for f in t["files"]]
                 print(f"    {'*' if todo.index(t) in picked else ' '}{t['id']:27} files={len(named)} "
                       f"chars={sum(p.stat().st_size for p in named)} "
                       f"in_root={all(p.is_file() for p in named)} "
-                      f"tools_needed_listed={need <= set(allowed)}")
+                      f"tools_needed_listed={need <= set(allowed)}"
+                      + ("" if tasks_long.is_scored(t) else " scored=never"))
                 if not need <= set(allowed) or not all(p.is_file() for p in named):
                     raise SystemExit(f"task {t['id']} cannot run under this tool set/snapshot")
+                own = tasks_long.task_tools(t)
+                if own != tasks_long.LONG_TIER_TOOLS:
+                    fw = task_firewall(t, tmp_path, firewall, fw_cache)
+                    on_here = sorted(k for k, v in (fw.get_agent_tools_map(LOOP_PROFILE) or {}).items()
+                                     if v)
+                    print(f"      own firewall: {len(on_here)} tools on"
+                          f"{': ' + ', '.join(on_here) if on_here else ' (none offered)'}")
+                    if set(on_here) != set(own):
+                        raise SystemExit(f"task {t['id']}: its firewall disagrees with its tool "
+                                         f"set: on={on_here}")
             if bad:
                 raise SystemExit("golds disagree with the snapshot — re-derive them, or pass "
                                  f"--snapshot-commit {tasks_long.GOLD_COMMIT[:12]}")
@@ -736,16 +794,35 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
             print(f"  compaction config served to each root: {cfg}")
             print(f"  task timeout {args.task_timeout_minutes} min, arms run per task in "
                   f"{' then '.join(entries)} / reversed order alternately")
-            est = run_time_estimate(len(picked), args.repeats, len(entries),
+            burn = [i for i in picked if todo[i].get("kind") == round_metrics.KIND_BURN]
+            reading = [i for i in picked if i not in burn]
+            est = run_time_estimate(len(reading), args.repeats, len(entries),
                                     bool(args.seed_history), args.task_timeout_minutes)
             print(f"  selected (*): {', '.join(todo[i]['id'] for i in picked)}; "
-                  f"x{args.repeats} repeat(s) x {len(entries)} arm(s) = {est['task_runs']} task-runs, "
-                  f"each in a fresh root")
-            print(f"  run-time estimate: {est['task_runs']} x {est['seconds_per_run']} s = "
-                  f"~{est['expected_min']} min if nothing burns (per task-arm, the "
-                  f"{'seeded' if args.seed_history else 'unseeded'} step 0s of 2026-10-06); "
-                  f"ceiling {est['ceiling_min']} min if every run reaches the "
-                  f"{args.task_timeout_minutes:.0f}-min timeout")
+                  f"x{args.repeats} repeat(s) x {len(entries)} arm(s) = "
+                  f"{len(picked) * args.repeats * len(entries)} task-runs, each in a fresh root")
+            if reading:
+                print(f"  run-time estimate: {est['task_runs']} x {est['seconds_per_run']} s = "
+                      f"~{est['expected_min']} min if nothing burns (per task-arm, the "
+                      f"{'seeded' if args.seed_history else 'unseeded'} step 0s of 2026-10-06); "
+                      f"ceiling {est['ceiling_min']} min if every run reaches the "
+                      f"{args.task_timeout_minutes:.0f}-min timeout")
+            if burn:
+                b = burn_time_estimate(len(burn) * args.repeats * len(entries),
+                                       entry.get("reasoning_budget_tokens"))
+                if b is None:
+                    print("  burn control: the alias has no reasoning_budget_tokens — the control "
+                          "has no budget to reach and would measure nothing")
+                else:
+                    print(f"  burn control estimate: {b['runs']} run(s) x (budget "
+                          f"{entry.get('reasoning_budget_tokens')} + ~{BURN_ANSWER_TOKENS} answer) "
+                          f"tokens at {BURN_DECODE_TOKENS_PER_S[1]}-{BURN_DECODE_TOKENS_PER_S[0]} "
+                          f"tokens/s = {b['seconds_per_run'][0]}-{b['seconds_per_run'][1]} s per run, "
+                          f"~{b['expected_min'][0]}-{b['expected_min'][1]} min if it burns (less if "
+                          f"not); no tools, so one round or a few; not scored")
+                if args.seed_history:
+                    print("  NOTE: the burn control is meant unseeded — it is about the model's "
+                          "reasoning, not the context")
 
     out_dir = RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -834,12 +911,14 @@ async def seed_depth_or_refuse(seed: Dict[str, Any], args, entry: Dict[str, Any]
     probe_root = workdir / "depth-probe"
     probe_tasks = tasks_long.tasks_for(probe_root)
     rows: List[Dict[str, Any]] = []
+    fw_cache: Dict[str, Any] = {}
     for i, task in enumerate(probe_tasks[k] for k in select_long_tasks(probe_tasks, args)):
         root = workdir / f"depth-{i + 1:02d}"
         agent_configs[root.name] = long_compaction_config(entry["alias"], args.compaction,
                                                           LONG_COMPACTION_THRESHOLD)
         m = await seed_history.probe_round1(
-            root, firewall=firewall, profile=LOOP_PROFILE, alias=entry["alias"],
+            root, firewall=task_firewall(task, workdir, firewall, fw_cache),
+            profile=LOOP_PROFILE, alias=entry["alias"],
             task_prompt=task["prompt"], seed=seed, conversation_id=f"eval-{task['id']}",
             session_state={"tokens_limit": window}, reasoning_effort=effort,
             tokenizer=tokenizer)
@@ -984,12 +1063,12 @@ async def main_async(args) -> int:
         approver = Tier1AutoApprover().start()
         print("Tier 1 auto-approval ON (Tier 2 still blocked)")
 
-    def new_agent(root: Path):
+    def new_agent(root: Path, agent_firewall=None):
         agent = DpcAgent(
             llm_manager=llm,
             config=AgentConfig(max_rounds=max_rounds),
             agent_root=root,
-            firewall=firewall,
+            firewall=agent_firewall if agent_firewall is not None else firewall,
             firewall_profile=LOOP_PROFILE,
             provider_alias=alias if long_tier else None,
         )
@@ -1011,6 +1090,7 @@ async def main_async(args) -> int:
     plan: List[tuple] = []
     if long_tier:
         picked = select_long_tasks(tasks_long.tasks_for(workdir / "probe"), args)
+        fw_cache: Dict[str, Any] = {}
         pair = 0
         for i in picked:
             for rep in range(args.repeats):
@@ -1020,8 +1100,10 @@ async def main_async(args) -> int:
                     root = workdir / long_root_name(i, rep, arm, args.repeats)
                     tasks_long.build_fixture(root, workdir / "snapshot")
                     agent_configs[root.name] = compaction_cfg
-                    agent, recorder = new_agent(root)
-                    plan.append((arm, tasks_long.tasks_for(root)[i], agent, recorder, rep + 1))
+                    task = tasks_long.tasks_for(root)[i]
+                    agent, recorder = new_agent(root, task_firewall(task, workdir, firewall,
+                                                                    fw_cache))
+                    plan.append((arm, task, agent, recorder, rep + 1))
                 pair += 1
     else:
         if args.tier == "hard":
@@ -1058,7 +1140,8 @@ async def main_async(args) -> int:
             outcome["preserve_reasoning"] = entries[arm]["preserve_reasoning"]
             results.append(outcome)
             m = outcome.get("metrics") or {}
-            mark = "pass" if outcome["passed"] else ("TIME" if outcome["timed_out"] else "FAIL")
+            mark = ("TIME" if outcome["timed_out"] else "ctrl") if outcome["passed"] is None else (
+                "pass" if outcome["passed"] else ("TIME" if outcome["timed_out"] else "FAIL"))
             print(f"  {mark:4} {outcome['id']:34} {arm:>3} r{repeat} {outcome['seconds']:7.1f}s "
                   f"r={m.get('rounds')} hits={m.get('budget_hits')} "
                   f"silent={m.get('silent_rounds')} both={m.get('silent_budget_hits')} "
@@ -1120,6 +1203,8 @@ async def main_async(args) -> int:
     )
 
     passed = sum(1 for r in results if r["passed"])
+    # The burn control is never scored: out of the denominator, counted apart.
+    scored = [r for r in results if r["passed"] is not None]
     report = {
         "tier": args.tier,
         "model": entry.get("model"),
@@ -1133,8 +1218,10 @@ async def main_async(args) -> int:
         "free_vram_mib_before": free_vram,
         **run_conditions,
         "tasks": len(results),
+        "scored_tasks": len(scored),
+        "unscored_tasks": len(results) - len(scored),
         "passed": passed,
-        "accuracy": round(passed / len(results), 3) if results else 0.0,
+        "accuracy": round(passed / len(scored), 3) if scored else None,
         "seconds": round(time.time() - started, 1),
         **({"approvals": approvals} if approvals is not None else {}),
         "results": results,
@@ -1148,8 +1235,10 @@ async def main_async(args) -> int:
         rows = [r for r in results if r["arm"] == arm]
         ok = sum(1 for r in rows if r["passed"])
         cut = sum(1 for r in rows if r.get("timed_out"))
-        print(f"arm {arm}: {ok}/{len(rows)} on {report['model']}"
-              + (f" ({cut} timed out — cut off by the harness, not failed)" if cut else ""))
+        unscored = sum(1 for r in rows if r["passed"] is None)
+        print(f"arm {arm}: {ok}/{len(rows) - unscored} on {report['model']}"
+              + (f" ({cut} timed out — cut off by the harness, not failed)" if cut else "")
+              + (f" (+{unscored} unscored: the burn control)" if unscored else ""))
     # Step 0 belongs to the long tier: easy and hard never reach the incident's depth.
     s0 = round_metrics.step0(results) if long_tier else {"reproduced": None, "why": "not a long-tier run"}
     report["step0"] = s0
@@ -1159,7 +1248,9 @@ async def main_async(args) -> int:
             print(line)
         if s0["reproduced"] is False:
             print(f"  {s0['why']}")
-    if args.step0_only:
+    if args.step0_only and s0.get("burn_control") and s0["reproduced"] is None:
+        print(f"step-0 preflight, burn control: {s0['outcome']['text']}")
+    elif args.step0_only:
         if s0["reproduced"]:
             print("step-0 preflight: the off arm reached the incident's regime — the full "
                   "A/B (--preserve-reasoning both) can measure the flag here")
@@ -1172,7 +1263,11 @@ async def main_async(args) -> int:
         print("both sides of each trade (no arm is ranked here):")
         for line in lines:
             print(line)
-    print(f"{passed}/{len(results)} = {report['accuracy']:.1%} in {report['seconds']}s")
+    if scored:
+        print(f"{passed}/{len(scored)} = {report['accuracy']:.1%} in {report['seconds']}s"
+              + (f" ({report['unscored_tasks']} unscored)" if report["unscored_tasks"] else ""))
+    else:
+        print(f"no scored task ({report['unscored_tasks']} unscored) in {report['seconds']}s")
 
     out = Path(args.json) if args.json else (
         RESULTS_DIR / f"{args.tier}-{entry.get('alias', 'unknown').replace(' ', '_')}"

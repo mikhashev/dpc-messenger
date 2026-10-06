@@ -41,7 +41,10 @@ claims to verdict (`long-audit-claims`, kind `incident`), a question the snapsho
 cannot settle (`long-control-unresolvable`) and a closable chain of dependent
 lookups (`long-control-multistep`). Their `where`/`evidence` values are scored
 by span (`expect_where`, `expect_places`), module paths by suffix
-(`expect_paths`); every span is recomputed by `derive` like any other gold.
+(`expect_paths`); every span is recomputed by `derive` like any other gold,
+and since attempt 3 a span also covers the definition of every function the
+derive names (`accepted_spans`). `long-control-burn` holds no tools and no gold:
+it is measured on the burn axes only, never pass/fail.
 
 **Golds.** Each gold was written by reading the code at `GOLD_COMMIT`, and each
 task carries a `derive(src)` that recomputes the same values mechanically (AST or
@@ -427,6 +430,40 @@ def _span(text: str, func: str, cls: Optional[str] = None) -> List[int]:
     return [fn.lineno, fn.end_lineno]
 
 
+def _definition_span(text: str, qualname: str) -> List[int]:
+    """`func` or `Class.func` -> [first line, last line] of its definition."""
+    cls, _, fn = qualname.rpartition(".")
+    return _span(text, fn, cls or None)
+
+
+# Ark's rule (2026-10-06, after attempt 3): a `*_where` answer is also accepted
+# when it falls inside the definition of a function the gold's own derivation
+# names. Attempt 3's claim 5 pointed inside `forget_in_index` — the very function
+# whose call the derive tests for — and was rejected because only the two
+# delete-path spans were listed. Each derive therefore declares, per key, the
+# functions it relies on (`_relies_on`), and the accepted spans are the explicit
+# ones plus those functions' definition spans, both recomputed from the snapshot.
+# Only that key widens. A function the derive merely searches inside for a call
+# is declared too; the one exception is named where it is made.
+
+def accepted_spans(src: Path, explicit: Dict[str, List[List[Any]]],
+                   relies_on: Dict[str, List[List[str]]]) -> Dict[str, List[List[Any]]]:
+    """Per key: the explicit spans, then the definition span of every function
+    that key's derivation names ([rel, qualname]), duplicates dropped."""
+    texts: Dict[str, str] = {}
+    out: Dict[str, List[List[Any]]] = {}
+    for key in list(explicit) + [k for k in relies_on if k not in explicit]:
+        spans = [list(s) for s in explicit.get(key, [])]
+        for rel, qualname in relies_on.get(key, []):
+            if rel not in texts:
+                texts[rel] = _read(src, rel)
+            span = [rel, *_definition_span(texts[rel], qualname)]
+            if span not in spans:
+                spans.append(span)
+        out[key] = spans
+    return out
+
+
 def _const_line(text: str, name: str) -> int:
     for node in ast.parse(text).body:
         if isinstance(node, ast.Assign) and any(
@@ -499,21 +536,35 @@ def _derive_audit(src: Path) -> Dict[str, Any]:
     claim5 = _verdict(index_kept + meta_kept, 2)
 
     write_span = [C, *_span(core, "write_file")]
+    explicit = {
+        "claim_1_where": [[B, _const_line(bm25, "TEXTS_FILE"), _const_line(bm25, "TEXTS_FILE")],
+                          [B, *_span(bm25, "_full_texts", "BM25Index")],
+                          [B, *_span(bm25, "_rebuild", "BM25Index")],
+                          [B, *_span(bm25, "save", "BM25Index")]],
+        "claim_2_where": [[AM, *_span(am, "sync_firewall_settings", "DpcAgentManager")]],
+        "claim_3_where": [[P, *_span(pipe, "replace_file_in_index")], write_span],
+        "claim_4_where": [write_span, [M, *_span(mem, "record_write")],
+                          [M, *_span(mem, "write_file_meta")]],
+        "claim_5_where": [[C, *_span(core, "repo_delete")],
+                          [C, *_span(core, "_forget_knowledge_files")]],
+    }
+    # Every function each claim's lines above name. Claim 1's docstring is in the
+    # class, not in a named function, so where the invariant is *written* stays
+    # outside: where it runs is `save` / `_rebuild`.
+    relies_on = {
+        "claim_1_where": [[B, "BM25Index.save"], [B, "BM25Index._rebuild"]],
+        "claim_2_where": [[AM, "DpcAgentManager.sync_firewall_settings"]],
+        "claim_3_where": [[C, "write_file"], [P, "replace_file_in_index"]],
+        "claim_4_where": [[C, "write_file"], [M, "record_write"], [M, "write_file_meta"]],
+        "claim_5_where": [[C, "repo_delete"], [C, "_forget_knowledge_files"],
+                          [P, "forget_in_index"], [M, "read_all_meta"],
+                          [M, "write_all_meta"], [M, "write_file_meta"]],
+    }
     return {
         "claim_1": claim1, "claim_2": claim2, "claim_3": claim3, "claim_4": claim4,
         "claim_5": claim5,
-        "_where": {
-            "claim_1_where": [[B, _const_line(bm25, "TEXTS_FILE"), _const_line(bm25, "TEXTS_FILE")],
-                              [B, *_span(bm25, "_full_texts", "BM25Index")],
-                              [B, *_span(bm25, "_rebuild", "BM25Index")],
-                              [B, *_span(bm25, "save", "BM25Index")]],
-            "claim_2_where": [[AM, *_span(am, "sync_firewall_settings", "DpcAgentManager")]],
-            "claim_3_where": [[P, *_span(pipe, "replace_file_in_index")], write_span],
-            "claim_4_where": [write_span, [M, *_span(mem, "record_write")],
-                              [M, *_span(mem, "write_file_meta")]],
-            "claim_5_where": [[C, *_span(core, "repo_delete")],
-                              [C, *_span(core, "_forget_knowledge_files")]],
-        },
+        "_relies_on": relies_on,
+        "_where": accepted_spans(src, explicit, relies_on),
     }
 
 
@@ -535,14 +586,24 @@ def _derive_unresolvable(src: Path) -> Dict[str, Any]:
                      if "_compaction_cfg = load_agent_config(agent_root.name)" in l)
     state_line = next(i for i, l in enumerate(lines, 1)
                       if "_compaction_state = CompactionState(_compaction_cfg)" in l)
+    U = "dpc_agent/utils.py"
+    # Named by this derive and declared (Ark's rule, see `accepted_spans`):
+    # CompactionState.__init__, load_agent_config, get_agent_config_path — the
+    # last is where the path under ~/.dpc/agents is built. Not declared:
+    # run_llm_loop, searched only for the two lines that read the config; its
+    # definition is hundreds of lines, and accepting it would accept any line of
+    # the loop as the place the answer is left open.
+    relies_on = {"evidence_a": [["dpc_agent/context.py", "CompactionState.__init__"]],
+                 "evidence_b": [[U, "load_agent_config"], [U, "get_agent_config_path"]]}
+    spans = accepted_spans(src, {
+        "evidence_a": [["dpc_agent/context.py", *_span(ctx, "__init__", "CompactionState")]],
+        # The try/except around the read starts two lines above it.
+        "evidence_b": [["dpc_agent/loop.py", load_line - 2, state_line]],
+    }, relies_on)
     return {
         "settleable": "no" if defaulted and from_config and from_home else "yes",
-        "_places": [
-            [["dpc_agent/context.py", *_span(ctx, "__init__", "CompactionState")]],
-            # The try/except around the read starts two lines above it.
-            [["dpc_agent/loop.py", load_line - 2, state_line],
-             ["dpc_agent/utils.py", *_span(utils, "load_agent_config")]],
-        ],
+        "_relies_on": relies_on,
+        "_places": [spans["evidence_a"], spans["evidence_b"]],
     }
 
 
@@ -888,8 +949,30 @@ def tasks_for(root: Path) -> List[Dict[str, Any]]:
                               ["dpc_agent/tools/core.py", 330, 399]],
             "claim_4_where": [["dpc_agent/tools/core.py", 330, 399], ["dpc_agent/memory.py", 218, 243],
                               ["dpc_agent/memory.py", 199, 202]],
+            # The last four: Ark's rule — the definitions of forget_in_index (whose
+            # call decides the rows half) and of the three registry functions the
+            # derive checks the delete path never reaches (the _meta.json half).
             "claim_5_where": [["dpc_agent/tools/core.py", 435, 470],
-                              ["dpc_agent/tools/core.py", 407, 432]],
+                              ["dpc_agent/tools/core.py", 407, 432],
+                              ["dpc_agent/indexing_pipeline.py", 202, 216],
+                              ["dpc_agent/memory.py", 170, 185], ["dpc_agent/memory.py", 188, 190],
+                              ["dpc_agent/memory.py", 199, 202]],
+        },
+        "gold_relies_on": {
+            "claim_1_where": [["dpc_agent/bm25_index.py", "BM25Index.save"],
+                              ["dpc_agent/bm25_index.py", "BM25Index._rebuild"]],
+            "claim_2_where": [["managers/agent_manager.py", "DpcAgentManager.sync_firewall_settings"]],
+            "claim_3_where": [["dpc_agent/tools/core.py", "write_file"],
+                              ["dpc_agent/indexing_pipeline.py", "replace_file_in_index"]],
+            "claim_4_where": [["dpc_agent/tools/core.py", "write_file"],
+                              ["dpc_agent/memory.py", "record_write"],
+                              ["dpc_agent/memory.py", "write_file_meta"]],
+            "claim_5_where": [["dpc_agent/tools/core.py", "repo_delete"],
+                              ["dpc_agent/tools/core.py", "_forget_knowledge_files"],
+                              ["dpc_agent/indexing_pipeline.py", "forget_in_index"],
+                              ["dpc_agent/memory.py", "read_all_meta"],
+                              ["dpc_agent/memory.py", "write_all_meta"],
+                              ["dpc_agent/memory.py", "write_file_meta"]],
         },
     })
 
@@ -919,8 +1002,15 @@ def tasks_for(root: Path) -> List[Dict[str, Any]]:
         "gold": {"settleable": "no"},
         "gold_places": {
             "keys": ["evidence_a", "evidence_b"],
+            # utils.py 671-673 is get_agent_config_path (Ark's rule: named by the derive).
             "places": [[["dpc_agent/context.py", 1296, 1308]],
-                       [["dpc_agent/loop.py", 1074, 1097], ["dpc_agent/utils.py", 676, 688]]],
+                       [["dpc_agent/loop.py", 1074, 1097], ["dpc_agent/utils.py", 676, 688],
+                        ["dpc_agent/utils.py", 671, 673]]],
+        },
+        "gold_relies_on": {
+            "evidence_a": [["dpc_agent/context.py", "CompactionState.__init__"]],
+            "evidence_b": [["dpc_agent/utils.py", "load_agent_config"],
+                           ["dpc_agent/utils.py", "get_agent_config_path"]],
         },
     })
 
@@ -965,8 +1055,41 @@ def tasks_for(root: Path) -> List[Dict[str, Any]]:
                        "meta_module": "dpc_agent/index_meta.py"},
     })
 
+    # The burn control: can this instrument produce a capped round at all? No tools
+    # (the runner builds it a firewall allowing none), no gold, never pass/fail —
+    # measured on the burn axes only (`round_metrics.burn_control`). The chain has
+    # 48 dependent steps, each an exact square of a number below 10007 reduced mod
+    # 10007, the rule picked by the value mod 4; no closed form and no cycle, and
+    # one slip spoils every later value, so a careful model checks every step.
+    burn_keys = ["x_12", "x_24", "x_36", "x_48", "s"]
+    tasks.append({
+        "id": "long-control-burn",
+        "kind": "control-burn",
+        "scored": False,
+        "tools": frozenset(),
+        "files": [],
+        "prompt": (
+            "No files, tools or lookups are available for this task; everything you need is "
+            "below. Work it out by careful reasoning and exact arithmetic. Every step depends "
+            "on the one before it, so a single slip changes every later value: check each "
+            "step before moving on.\n"
+            "Let p = 10007 (a prime). Define integers x_0, x_1, ..., x_48 with "
+            "0 <= x_n < p by x_0 = 2026 and, for n = 0, 1, ..., 47, with r = x_n mod 4:\n"
+            "- if r = 0: x_(n+1) = (x_n^2 + n) mod p\n"
+            "- if r = 1: x_(n+1) = (3*x_n^2 + 7*n + 1) mod p\n"
+            "- if r = 2: x_(n+1) = (x_n^2 + x_n + 5) mod p\n"
+            "- if r = 3: x_(n+1) = (x_n * (n+2)^2 + 11) mod p\n"
+            "Let s be how many of x_0, ..., x_48 are greater than 5003.\n"
+            "End your answer with exactly these lines, one per value:\n"
+            + _fields_block(burn_keys)
+        ),
+    })
+
     for t in tasks:
         t.setdefault("kind", "baseline")
+        if "gold" not in t:
+            t["tools_needed"] = []
+            continue
         t["expect_fields"] = dict(t["gold"])
         for gold_key, expect_key in (("gold_where", "expect_where"), ("gold_paths", "expect_paths"),
                                      ("gold_places", "expect_places")):
@@ -978,6 +1101,18 @@ def tasks_for(root: Path) -> List[Dict[str, Any]]:
             t["expect_in_answer"] = list(t["gold_names"])
         t["tools_needed"] = sorted({"read_file"})
     return tasks
+
+
+def task_tools(task: Dict[str, Any]) -> frozenset:
+    """The tools one long task may hold: its own set where it names one (the burn
+    control: none), else the tier's."""
+    tools = task.get("tools")
+    return LONG_TIER_TOOLS if tools is None else frozenset(tools)
+
+
+def is_scored(task: Dict[str, Any]) -> bool:
+    """False for a task measured only on the burn axes, never pass/fail."""
+    return task.get("scored", True) is not False
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -997,6 +1132,8 @@ def verify_golds(snapshot: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     fake_root = snapshot.parent / "_gold_check_root"
     for t in tasks_for(fake_root):
+        if "derive" not in t:
+            continue  # the burn control has no gold to derive
         try:
             derived = t["derive"](snapshot)
         except Exception as exc:
@@ -1017,6 +1154,10 @@ def verify_golds(snapshot: Path) -> List[Dict[str, Any]]:
         for k, g in (t.get("gold_where") or {}).items():
             d = (derived.get("_where") or {}).get(k)
             rows.append({"task": t["id"], "key": k, "gold": g, "derived": d, "ok": g == d})
+        for k, g in (t.get("gold_relies_on") or {}).items():
+            d = (derived.get("_relies_on") or {}).get(k)
+            rows.append({"task": t["id"], "key": f"relies_on:{k}", "gold": g, "derived": d,
+                         "ok": g == d})
         for k, g in (t.get("gold_paths") or {}).items():
             rows.append({"task": t["id"], "key": k, "gold": g, "derived": derived.get(k),
                          "ok": g == derived.get(k)})

@@ -50,6 +50,15 @@ INCIDENT_SILENT_BUDGET_HITS = 7
 # Task kinds of the long tier (`tasks_long.py`), read by `step0_outcome`. A task
 # that carries none is a baseline: closable, not built for the attempt-3 split.
 KIND_UNRESOLVABLE = "control-unresolvable"
+# The positive control for budget burn: no tools, no gold, never pass/fail. It
+# is kept out of the incident symptom and read on the burn axes alone.
+KIND_BURN = "control-burn"
+
+
+def _budget_count(r: Dict[str, Any]) -> int:
+    """The count a round is held against the note budget with — the rule of
+    `budget_hit_rounds` in `summarise_rounds`, kept in one place."""
+    return r["reasoning_tokens"] or r["completion_tokens"] or 0
 
 
 def _normalise(text: str) -> str:
@@ -183,8 +192,7 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
 
     if budget:
         hit_rounds = [r["round"] for r in rows
-                      if (r["reasoning_tokens"] or r["completion_tokens"] or 0)
-                      >= budget * BUDGET_HIT_FRACTION]
+                      if _budget_count(r) >= budget * BUDGET_HIT_FRACTION]
     else:
         hit_rounds = None
     silent = [r["round"] for r in rows if not r["content_chars"]]
@@ -234,6 +242,14 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
         "deep_budget_hits": deep_hits,
         "silent_budget_hits": len(silent_hit_rounds) if silent_hit_rounds is not None else None,
         "silent_budget_hit_rounds": silent_hit_rounds,
+        # Reasoning depth, beside the context depth of the prompt figures: the
+        # largest per-round count held against the budget, and the budget itself.
+        "note_budget": budget,
+        "max_reasoning_tokens": (max(_budget_count(r) for r in rows)
+                                 if any(r["reasoning_tokens"] is not None
+                                        or r["completion_tokens"] is not None for r in rows)
+                                 else None),
+        "reasoning_tokens_by_round": [r["reasoning_tokens"] for r in rows],
         # Every rung the rounds ran on, as production names it; [] when no round
         # carried a word (unknown, not `off`).
         "served_effort": sorted({str(r["served_effort"]) for r in rows
@@ -269,8 +285,63 @@ def _multi(results: List[Dict[str, Any]]) -> bool:
 
 def step0(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """The top line: did the off arm reproduce the incident — and, per task, in
-    how many of its repeats (k of N)?"""
-    off = [r for r in results if r.get("arm") == "off" and r.get("metrics")]
+    how many of its repeats (k of N)? The burn control is read apart
+    (`burn_control`): its prompt is shallow by design and it says nothing about
+    the incident's regime, only whether a capped round can happen here at all."""
+    ran = [r for r in results if r.get("arm") == "off" and r.get("metrics")]
+    burn_rows = [r for r in ran if r.get("kind") == KIND_BURN]
+    burn = burn_control(burn_rows) if burn_rows else None
+    out = _step0_incident([r for r in ran if r.get("kind") != KIND_BURN])
+    if burn is not None:
+        out["burn_control"] = burn
+        out["outcome"] = step0_outcome(out.get("by_task") or {}, burn)
+        if not out.get("by_task") and out["reproduced"] is None:
+            out["why"] = "only the burn control ran — the incident symptom was not asked"
+    return out
+
+
+def burn_control(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Did the burn control produce burning — at least one round at >= 0.98 x the
+    note budget? None when no budget or no count was reported (not measured)."""
+    multi = _multi(rows)
+    by_run = []
+    for r in rows:
+        m = r["metrics"]
+        budget, most = m.get("note_budget"), m.get("max_reasoning_tokens")
+        by_run.append({
+            "run": run_label(r, multi), "rounds": m.get("rounds"),
+            "max_reasoning_tokens": most, "budget": budget,
+            "budget_hits": m.get("budget_hits"), "silent_budget_hits": m.get("silent_budget_hits"),
+            "reasoning_tokens_by_round": m.get("reasoning_tokens_by_round"),
+            "timed_out": bool(r.get("timed_out")),
+            "burned": (None if not budget or most is None
+                       else most >= budget * BUDGET_HIT_FRACTION),
+        })
+    measured = [b for b in by_run if b["burned"] is not None]
+    counts = [b["max_reasoning_tokens"] for b in measured]
+    return {
+        "produced": any(b["burned"] for b in measured) if measured else None,
+        "runs": len(by_run), "runs_measured": len(measured),
+        "runs_burned": sum(1 for b in measured if b["burned"]),
+        "max_reasoning_tokens": max(counts) if counts else None,
+        "budget": next((b["budget"] for b in by_run if b["budget"]), None),
+        "threshold_fraction": BUDGET_HIT_FRACTION,
+        "by_run": by_run,
+    }
+
+
+def burn_line(burn: Dict[str, Any]) -> str:
+    """`burn produced: yes/no (max reasoning tokens N of budget B)`."""
+    if burn.get("produced") is None:
+        return ("burn produced: not measured (no note budget on the alias, or no "
+                "reasoning count reported)")
+    return (f"burn produced: {'yes' if burn['produced'] else 'no'} (max reasoning tokens "
+            f"{burn['max_reasoning_tokens']} of budget {burn['budget']}; "
+            f"{burn['runs_burned']}/{burn['runs_measured']} run(s) at >= "
+            f"{BUDGET_HIT_FRACTION:.2f} x budget)")
+
+
+def _step0_incident(off: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not off:
         return {"reproduced": None, "why": "no off-arm run in this report — not measured"}
     hits = [r["metrics"]["budget_hits"] for r in off if r["metrics"]["budget_hits"] is not None]
@@ -320,8 +391,20 @@ def step0(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
-def step0_outcome(by_task: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
-    """Which hypothesis the off arm's burning points at (attempt 3).
+BURN_PRODUCED = ("the instrument can produce burning; the open question is which task "
+                 "shape makes the model think instead of read")
+# The agreed reading of a burn control that does not burn; the decision on the
+# card stays the owner's.
+BURN_ABSENT = ("the instrument does not produce burning at all on this setup; further "
+               "attempts measure nothing — record the card as 0 of N, not reproduced, flag "
+               "stays off (the agreed reading; the decision on the card is the owner's)")
+
+
+def step0_outcome(by_task: Dict[str, Dict[str, Any]],
+                  burn: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Which hypothesis the off arm's burning points at (attempt 3) — or, when the
+    burn control ran, whether this instrument can produce burning at all, which
+    comes first: without it no other reading means anything.
 
     The card's mechanism — the model re-plans every round because it lost the
     reasoning that chose the tool — predicts burning on a closable task that
@@ -329,6 +412,20 @@ def step0_outcome(by_task: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
     model does with a question it cannot close — predicts burning on the
     unresolvable control. Only the pattern across task kinds separates them.
     """
+    if burn is not None:
+        if burn.get("produced") is None:
+            out = {"code": "burn-not-measured",
+                   "text": "the burn control ran but was not measured (no note budget or no "
+                           "reasoning count) — no reading"}
+        elif burn["produced"]:
+            out = {"code": "burn-produced", "text": BURN_PRODUCED}
+        else:
+            out = {"code": "burn-absent", "text": BURN_ABSENT}
+        if by_task:
+            rest = step0_outcome(by_task)
+            out["tasks_code"] = rest["code"]
+            out["text"] += f"; the other tasks: {rest['text']}"
+        return out
     burned = {t.get("kind") or "baseline" for t in by_task.values() if t["burned"]}
     ran = {t.get("kind") or "baseline" for t in by_task.values()}
     unresolvable = KIND_UNRESOLVABLE in burned
@@ -394,6 +491,9 @@ def step0_task_lines(s0: Dict[str, Any]) -> List[str]:
                      f"{t['burned']}/{t['runs']}; budget hits {t['budget_hits']}, silent rounds "
                      f"{t['silent_rounds']}, silent AND at budget {t['silent_budget_hits']}"
                      + (f", {t['timed_out']} timed out" if t["timed_out"] else ""))
+    burn = s0.get("burn_control")
+    if burn:
+        lines.append(f"  long-control-burn [{KIND_BURN}]: {burn_line(burn)}")
     if s0.get("outcome"):
         lines.append(f"  outcome: {s0['outcome']['text']}")
     return lines
@@ -432,6 +532,8 @@ _COUNTED = ("passed", "timed_out")
 
 
 def _value(r: Dict[str, Any], key: str) -> Any:
+    if key == "passed" and r.get("passed") is None:
+        return None  # not scored (the burn control): absent, not failed
     if key in _COUNTED:
         return bool(r.get(key))
     if key == "wall_s":
