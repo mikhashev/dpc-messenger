@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-LLAMA_CPP_TAG = "b11146"
+LLAMA_CPP_TAG = "b11429"
 LLAMA_CPP_RELEASE_BASE = "https://github.com/ggml-org/llama.cpp/releases/download"
 
 # The CUDA family for the Windows asset key, the two Windows asset names and
@@ -57,14 +57,14 @@ DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 # pin: read `nightly-tag.txt` from the newest `vX.Y.Z`, then take that tag's
 # `digest` and `size` from the release API.
 #
-# b11146 is what v0.5.0 named (2026-09-23). Do not follow `releases/latest`: it
+# b11429 is what v0.6.0 named (2026-10-05). Do not follow `releases/latest`: it
 # now returns the versioned release, whose only asset is that text file.
 PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
     WIN_CUDA_FAMILY: [
         {
             "name": f"llama-{LLAMA_CPP_TAG}-bin-{WIN_CUDA_FAMILY}.zip",
-            "sha256": "b1866c0ce76bc7bfb0c24b33e9a37e9669f1be18539b12c74ce361f81c41f047",
-            "size": 149_758_833,
+            "sha256": "76ddc6eff2389570789ed608881efc6977751a722015d8e8c94f302224ff1a3a",
+            "size": 153_089_864,
         },
         {
             "name": f"cudart-llama-bin-{WIN_CUDA_FAMILY}.zip",
@@ -74,16 +74,16 @@ PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
     ],
     "macos-arm64": [
         {
-            "name": "llama-b11146-bin-macos-arm64.tar.gz",
-            "sha256": "1ad3f9eff80edb9dbef4259ad564d1720612ef7eea48fa4afed0e54f5f3d5711",
-            "size": 11_189_714,
+            "name": f"llama-{LLAMA_CPP_TAG}-bin-macos-arm64.tar.gz",
+            "sha256": "740288ec6887be94280a5dfa25b5e23a78285cab104519e6c7e218904ee82459",
+            "size": 11_971_406,
         },
     ],
     "ubuntu-x64": [
         {
-            "name": "llama-b11146-bin-ubuntu-x64.tar.gz",
-            "sha256": "c150306eb16b5ab696f76a8bdf810c35fd98a24e82158742e6fa28f420ff8410",
-            "size": 16_998_357,
+            "name": f"llama-{LLAMA_CPP_TAG}-bin-ubuntu-x64.tar.gz",
+            "sha256": "f6d25dde8f51133143d1453da4fd5f73b145127177612a283bf7995957af3392",
+            "size": 17_693_462,
         },
     ],
 }
