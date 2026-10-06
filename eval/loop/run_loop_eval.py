@@ -66,9 +66,11 @@ conversation the agent had already loaded in front of every task, rendered by
 production (`seed_history.py`): the first step 0 ran on fresh roots and stayed
 at 16-24 k, while the incident's round 1 carried a 42-turn group history. With a
 seed, both `--dry-run` and the run itself build each task's round-1 request
-through a real `DpcAgent` before any model and refuse below
-`--seed-depth-floor` (default 60 000, the step-0 floor). A seeded report carries
-the seed's path, sha256 and count, and no text the model wrote.
+through a real `DpcAgent` before any model, size it in engine tokens (the
+alias's own tokenizer, `llama-tokenize --vocab-only`; else the incident's ratio,
+labelled calibrated) and refuse below `--seed-depth-floor` (default 60 000, the
+step-0 floor). A seeded report carries the seed's path, sha256, counts and, for
+a deep seed, its source ranges — no text the model wrote.
 """
 
 from __future__ import annotations
@@ -629,13 +631,25 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
     return 0
 
 
-# The incident's round 1 by two counts: what the production estimator logged
-# ("Context size: estimated 41012", dpc-client.log.1, 2026-10-05 17:54:53 —
-# tool schemas excluded) and what the engine counted (67 177, per the board
-# card; not re-read here). Printed beside every seeded estimate so a figure in
-# estimator units is not read as engine tokens.
-INCIDENT_ROUND1_ESTIMATED = 41_012
-INCIDENT_ROUND1_COUNTED = 67_177
+# The incident's pair lives with the probe (`seed_history`); printed beside every
+# seeded estimate so a chars/4 figure is not read as engine tokens.
+from seed_history import INCIDENT_ROUND1_COUNTED, INCIDENT_ROUND1_ESTIMATED  # noqa: E402
+
+
+def seed_tokenizer(entry: Dict[str, Any]):
+    """The alias's own tokenizer for the depth probe, or None (then calibrated).
+
+    `llama-tokenize` from the pinned build's directory over the alias's GGUF,
+    vocabulary only; a missing binary or file is not an error here.
+    """
+    import seed_history
+    if entry.get("type") != "llamacpp_server" or not Path(entry.get("gguf_path") or "").is_file():
+        return None
+    try:
+        binary = _resolve_binary_or_none(entry)
+    except SystemExit:
+        return None
+    return seed_history.tokenizer_beside(binary, Path(entry.get("gguf_path") or ""))
 
 
 def load_seed_or_refuse(args) -> Optional[Dict[str, Any]]:
@@ -659,24 +673,39 @@ async def seed_depth_or_refuse(seed: Dict[str, Any], args, entry: Dict[str, Any]
     """Round 1 of every task this run will start, measured before any model.
 
     Each task's request is built by a real `DpcAgent` on a probe root
-    (`seed_history.probe_round1`); a task whose estimate is below
-    `--seed-depth-floor` stops the run, so a step 0 cannot start shallow again
-    without saying so. Returns what the provenance records — numbers, no text.
+    (`seed_history.probe_round1`) and sized in engine tokens — counted by the
+    alias's tokenizer, or calibrated from the incident where that is missing.
+    A task whose engine-scale figure is below `--seed-depth-floor` (itself in
+    engine tokens) stops the run. Returns what the provenance records — numbers,
+    no text.
     """
     import seed_history
     import tasks_long
     window = require_context_window(entry)
     floor = args.seed_depth_floor
     rec = seed_history.seed_record(seed)
+    tokenizer = seed_tokenizer(entry)
     print(f"  seed: {rec['path']}")
     print(f"    sha256 {rec['sha256']}, {rec['messages']} records "
           f"({rec['history_records']} history + the trigger, whose body the task replaces), "
           f"reader {rec['reader']!r}")
-    print("    estimator: production chars/4 (dpc_agent.utils.estimate_tokens) over the "
-          "request the agent builds, plus tool schemas; no tokenizer")
-    print(f"    for scale: the incident's round 1 read {INCIDENT_ROUND1_ESTIMATED} on this "
-          f"estimator (tool schemas excluded) and {INCIDENT_ROUND1_COUNTED} on the engine "
-          "(per the board card) — Cyrillic-heavy text reads low here")
+    deep = rec.get("deepening")
+    if deep:
+        print(f"    DEEP SEED: {deep.get('outside_incident_history')} records from outside the "
+              f"incident's loaded history (production would not have loaded them), from "
+              + "; ".join(f"{s['file']} #{s['msg_index_from']}-#{s['msg_index_to']} "
+                          f"({s['records']})" for s in deep.get("sources") or [])
+              + f"; base {deep.get('base_seed', {}).get('sha256', '?')[:16]}")
+    if tokenizer is not None:
+        print(f"    engine scale: COUNTED with the model's tokenizer ({tokenizer.describe()}, "
+              "no weights, CUDA hidden) over the request in ChatML framing plus tool schemas")
+    else:
+        print(f"    engine scale: CALIBRATED, not measured — no llama-tokenize/GGUF for this "
+              f"alias; the chars/4 request estimate x {INCIDENT_ROUND1_COUNTED}/"
+              f"{INCIDENT_ROUND1_ESTIMATED} = x{seed_history.CALIBRATION:.3f}")
+    print(f"    the incident's round 1: {INCIDENT_ROUND1_ESTIMATED} on chars/4 (tool schemas "
+          f"excluded), {INCIDENT_ROUND1_COUNTED} counted by the engine (dpc-client.log.1, "
+          "2026-10-05 17:54:53 / 17:56:41)")
     probe_root = workdir / "depth-probe"
     n = len(tasks_long.tasks_for(probe_root))
     rows: List[Dict[str, Any]] = []
@@ -687,26 +716,32 @@ async def seed_depth_or_refuse(seed: Dict[str, Any], args, entry: Dict[str, Any]
         m = await seed_history.probe_round1(
             root, firewall=firewall, profile=LOOP_PROFILE, alias=entry["alias"],
             task_prompt=task["prompt"], seed=seed, conversation_id=f"eval-{task['id']}",
-            session_state={"tokens_limit": window}, reasoning_effort=effort)
+            session_state={"tokens_limit": window}, reasoning_effort=effort,
+            tokenizer=tokenizer)
         m.pop("messages")
         m["id"] = task["id"]
-        m["below_floor"] = m["round1_tokens_est"] < floor
+        m["below_floor"] = m["engine_tokens"] < floor
         rows.append(m)
+        cross = (f", calibrated would say {round(m['prompt_tokens_est'] * seed_history.CALIBRATION)}"
+                 if m["engine_method"] == seed_history.METHOD_TOKENIZER else "")
         print(f"    {task['id']:28} history turns {m['history_turns']} "
-              f"({m['assistant_turns']} assistant, ~{m['history_tokens_est']} of them), "
-              f"round-1 est {m['round1_tokens_est']} "
+              f"({m['assistant_turns']} assistant), round 1 ENGINE {m['engine_tokens']} "
+              f"({m['engine_method']}{cross}); chars/4 {m['round1_tokens_est']} "
               f"= request {m['prompt_tokens_est']} + tool schemas {m['tool_schema_tokens_est']} "
-              f"[floor {floor}] {'BELOW' if m['below_floor'] else 'ok'}")
-    out = {**rec, "depth_floor": floor, "depth_estimator": "chars/4 (estimate_tokens)",
+              f"[floor {floor} engine tokens] {'BELOW' if m['below_floor'] else 'ok'}")
+    out = {**rec, "depth_floor": floor, "depth_floor_unit": "engine prompt tokens",
+           "depth_method": rows[0]["engine_method"] if rows else None,
+           "depth_counter": rows[0]["engine_counter"] if rows else None,
            "depth_by_task": rows}
     low = [r["id"] for r in rows if r["below_floor"]]
     if low:
-        worst = min(r["round1_tokens_est"] for r in rows)
+        worst = min(r["engine_tokens"] for r in rows)
         raise SystemExit(
-            f"SEEDED ROUND 1 BELOW THE STEP-0 FLOOR: {len(low)} of {len(rows)} task(s) estimate "
-            f"under {floor} tokens (lowest {worst}): {', '.join(low)}. The run would start "
-            "shallow and step 0 would again measure nothing. Seed deeper, or pass "
-            "--seed-depth-floor N to start knowingly (recorded in the report)")
+            f"SEEDED ROUND 1 BELOW THE STEP-0 FLOOR: {len(low)} of {len(rows)} task(s) at "
+            f"under {floor} engine tokens (lowest {worst}, {rows[0]['engine_method']}): "
+            f"{', '.join(low)}. The run would start shallow and step 0 would again measure "
+            "nothing. Seed deeper, or pass --seed-depth-floor N to start knowingly "
+            "(recorded in the report)")
     return out
 
 
@@ -1064,8 +1099,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "assistant turns (default: Johnny); its identity must be in the file")
     ap.add_argument("--seed-depth-floor", type=int, default=round_metrics.SYMPTOM_MIN_PEAK_PROMPT,
                     dest="seed_depth_floor", metavar="N",
-                    help="with --seed-history: refuse to start when a task's estimated round-1 "
-                         f"prompt is below N tokens (default {round_metrics.SYMPTOM_MIN_PEAK_PROMPT}, "
+                    help="with --seed-history: refuse to start when a task's round-1 prompt is "
+                         f"below N engine tokens (default {round_metrics.SYMPTOM_MIN_PEAK_PROMPT}, "
                          "the step-0 floor)")
     ap.add_argument("--json", default=None, help="write the report here instead of results_root()/loop/")
     ap.add_argument("--keep", action="store_true", help="keep the throwaway workdir")

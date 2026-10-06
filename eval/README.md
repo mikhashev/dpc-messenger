@@ -122,11 +122,17 @@ commit `2407f64f`, per alias, default off) change how a long run ends? Dry run,
 then the step-0 preflight, then — only if the preflight says yes — the run, from
 `dpc-client/core`, the DPC service stopped:
 
-    uv run python ../../eval/loop/run_loop_eval.py --dry-run --step0-only --seed-history ~/.dpc/eval-results/loop/seeds/incident-2026-10-05-johnny.json
-    uv run python ../../eval/loop/run_loop_eval.py --step0-only --seed-history ~/.dpc/eval-results/loop/seeds/incident-2026-10-05-johnny.json --auto-approve
+    uv run python ../../eval/loop/run_loop_eval.py --dry-run --step0-only --seed-history ~/.dpc/eval-results/loop/seeds/incident-2026-10-05-johnny-deep.json --auto-approve
+    uv run python ../../eval/loop/run_loop_eval.py --step0-only --seed-history ~/.dpc/eval-results/loop/seeds/incident-2026-10-05-johnny-deep.json --auto-approve
     uv run python ../../eval/loop/run_loop_eval.py --tier long --preserve-reasoning both --auto-approve
 
-(The A/B line takes the same `--seed-history` once step 0 says yes with it.)
+(The A/B line takes the same `--seed-history` once step 0 says yes with it. The
+incident seed, `incident-2026-10-05-johnny.json`, stays beside the deep one,
+untouched; it is what Johnny loaded, and it is too shallow for the floor.)
+
+**Seed files never enter the repository** — not the seed, not a copy, not a
+fixture cut from it. They live under `~/.dpc/eval-results/loop/seeds/`; the
+tests use synthetic records only.
 
 - **Seeding — why the first step 0 measured nothing.** Step 0 ran unseeded on
   2026-10-06 (`long-qwen3.8_27b-step0-20261006-114852.json`): both off-arm tasks
@@ -152,35 +158,72 @@ then the step-0 preflight, then — only if the preflight says yes — the run, 
   from genesis through `#43`, `#43` the trigger at 10:54:49.831Z. It is group
   chat — the same reason GAIA results left the tree (see *State of the set*:
   four files carried previews of our own chat). A seeded report and its
-  provenance carry the seed's path, sha256, record count and depth estimate,
-  never a record. Per row, a seeded run drops the answer text (the scored
+  provenance carry the seed's path, sha256, record count, depth figures and,
+  for a deep seed, its source files, index ranges and hashes — never a record. Per row, a seeded run drops the answer text (the scored
   values stay as `answer_fields`, with `answer_chars`), digests each round's
   note opening (`sha256:…`; repeat detection compares for equality only), and
   keeps only an exception's type; then any string still sharing 40+ characters
   with the seed — a shell command in the approver's summary, a reason — is
   replaced by `[withheld: …]`, counted in `seed_history.withheld_strings`. A
   paraphrase passes that net, which is why the answer is dropped, not filtered.
-- **Depth before any model.** With a seed, `--dry-run` and the run itself build
-  every task's round-1 request through a real `DpcAgent` on a probe root (its
-  adapter's `chat` replaced by a recorder that answers at once) and print, per
-  task, `history turns N (A assistant, ~H of them), round-1 est T = request R +
-  tool schemas S [floor 60000] ok|BELOW`. The estimator is production's own
-  chars/4 (`dpc_agent.utils.estimate_tokens`, the figure behind "Context size:
-  estimated N"), plus the same over the tool schemas the engine also reads; no
-  tokenizer is loaded. Below `--seed-depth-floor` (default 60 000, step 0's
-  prompt floor) the run refuses before loading anything; the flag lowers it on
-  purpose, and the report records the value. For scale the dry run prints the
-  incident's own pair: 41 012 on this estimator (round 1, tool schemas
-  excluded) against 67 177 counted by the engine — Cyrillic-heavy text reads low.
-- **What the incident seed gives (dry run, 2026-10-06): ~20 k, not 60 k.** The
-  42 turns are 57 094 characters of content (~14 600 estimated with their
-  prefixes); with a throwaway root's system prompt and 7 tool schemas, round 1
-  estimates 19 984 and 20 023 on the two step-0 tasks, and the dry run refuses. The rest of the incident's 41 012 came
-  from what a throwaway root does not have — Johnny's own system prompt,
-  identity and scratchpad (23 842 + 23 270 + 84 911 characters on disk on
-  2026-10-06, not at the incident), Active Recall's three hints, and 52 tool
-  schemas against 7. Seeding the history alone does not reach the floor; what
-  else to seed is the owner's call.
+- **Depth before any model, in engine tokens.** With a seed, `--dry-run` and the
+  run itself build every task's round-1 request through a real `DpcAgent` on a
+  probe root (its adapter's `chat` replaced by a recorder that answers at once)
+  and print, per task, `round 1 ENGINE E (tokenizer|calibrated); chars/4 T =
+  request R + tool schemas S [floor 60000 engine tokens] ok|BELOW`. The floor is
+  step 0's prompt floor, which is in what llama-server reports as
+  `prompt_tokens`, so it is compared with the engine-scale figure E, never with
+  chars/4: production's estimator reads this conversation low — the incident's
+  round 1 logged "Context size: estimated 41012" (tool schemas excluded) while
+  the engine counted 67 177 with 52 schemas (`dpc-client.log.1`, 2026-10-05
+  17:54:53 and 17:56:41, both read 2026-10-06). **E is counted with the model's
+  own tokenizer**: `llama-tokenize` from the pinned build's directory (beside
+  `llama-server`) over the alias's GGUF. That tool opens the file with
+  `vocab_only` ("vocab only - skipping tensors", 0.5 s on the 27B file, no
+  weights) and runs with `CUDA_VISIBLE_DEVICES=-1`, so no GPU is touched; the
+  text goes in on stdin. What it counts is the request in ChatML framing plus the
+  tool schemas as JSON lines — the chat template's own fixed wording around the
+  tools is not reproduced. Where the binary or the GGUF is missing (another
+  provider type, a missing pin), E falls back to the incident's ratio, 67 177 /
+  41 012 = 1.638 applied to the request's chars/4 figure without tool schemas,
+  and is printed and recorded as `calibrated`, not counted. That ratio has the
+  incident's 52 schemas folded in, so with 7 it reads high: on the incident seed
+  it says 31 068 where the tokenizer counts 26 342. Below `--seed-depth-floor`
+  the run refuses before loading anything; the flag lowers it on purpose, and
+  the report records the value, its unit and the method.
+- **The incident seed is ~26 k engine tokens, not 60 k** (dry run, 2026-10-06:
+  26 342 and 26 364 counted on the two step-0 tasks; 19 984 and 20 023 on
+  chars/4). The 42 turns are 57 094 characters of content. The rest of the
+  incident's 67 177 came from what a throwaway root does not have — Johnny's own
+  system prompt, identity and scratchpad (23 842 + 23 270 + 84 911 characters
+  on disk on 2026-10-06, not at the incident), Active Recall's three hints, and
+  52 tool schemas against 7.
+- **The deep seed — more conversation, not what Johnny saw.** Mike's order of
+  2026-10-06: deepen the seed from the conversation history.
+  `~/.dpc/eval-results/loop/seeds/incident-2026-10-05-johnny-deep.json` is the
+  incident seed's 43 records unchanged (same order, the trigger still replaced
+  by the task) with 73 records put in front: `#96–#168`, the newest end of the
+  group's previous session (`archive/2026/10/2026-10-05T08-29-59_reset_session.json`),
+  taken whole, newest first, until the tokenizer count reached the target of
+  67 000 (the incident's level) and stopped at the record that crossed it. **A
+  reset sits between those 73 and the incident's 43: production would not have
+  loaded them**, and the file's `deepening` block, the dry run's `DEEP SEED`
+  line and every report's `seed_history.deepening` say so. The block lists the
+  source file with its sha256, the index range and count taken, how many came
+  from outside the incident's loaded history (73), how many the renderer skips
+  anyway (0 — every one has content and a `sender_type`; 26 carry `tool_calls`
+  metadata, which the renderer does not read), and the base seed's sha256.
+  Prepended records keep their own index as `source_msg_index` and carry
+  `msg_index: null`: the earlier session counted from 1 again, and
+  `select_prior_history` drops every integer index at or above the trigger's,
+  so they render as `[HH:MM:SS | sender]` without `#N`. Role derivation holds
+  for all of them (5 are Johnny's, all assistant turns; the group/1:1 check finds
+  no record that would change role). The dry run counts round 1 at 67 868 and
+  67 889 engine tokens (a few tokens move between runs: the turn context carries
+  the clock) — within 67 000 ± 10 % and below Johnny's compaction
+  trigger (0.5 × 215 040 = 107 520), so the off arm starts where the incident
+  started, not past it. `deepen` in `loop/seed_history.py` does the taking; the
+  run that wrote the file was a script outside the repository.
 
 - **The preflight first.** `--step0-only` is the long tier's off arm on the first
   two tasks (`--tasks N` for another count), under the same run conditions as

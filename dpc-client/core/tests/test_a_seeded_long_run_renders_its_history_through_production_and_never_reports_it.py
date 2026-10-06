@@ -94,6 +94,29 @@ def _small_records():
     ]
 
 
+def _earlier_sessions():
+    """Two synthetic earlier sessions, oldest first; indices restart at 1 in each."""
+    a = [_record(i, "Mike", "human", f"session a message {i}") for i in range(1, 4)]
+    b = [_record(1, "Mike", "human", "session b opens"),
+         _record(2, "Johnny", "agent", f"my answer in b {MARKER} quoted at length", owner=NODE),
+         _record(3, "Ark", "agent", f"a colleague in b {MARKER} quoted at length", owner=NODE),
+         _record(4, "Mike", "human", f"session b closes {MARKER} quoted at length")]
+    return [("session-a.json", a), ("session-b.json", b)]
+
+
+def _write_deep_seed(path: Path, base, sessions, need, cost=lambda rec: 1) -> Path:
+    reader = {"agent_id": "agent_johnny_test", "display_name": "Johnny", "node_id": NODE}
+    records, info = S.deepen(base, sessions, reader, need, cost)
+    path.write_text(json.dumps({
+        "reader": reader,
+        "deepening": {"base_seed": {"path": "base.json", "sha256": "0" * 64,
+                                    "records": len(base)}, **info,
+                      "production_would_not_have_loaded_these": "synthetic"},
+        "messages": records,
+    }, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def _probe_world(tmp_path):
     from _harness import benchmark_tools
     (tmp_path / "rules").mkdir(exist_ok=True)
@@ -203,10 +226,14 @@ def test_the_dry_run_depth_estimate_refuses_below_the_floor_and_passes_above_it(
     info = asyncio.run(R.seed_depth_or_refuse(deep, _depth_args(), _entry(), "medium",
                                               tmp_path / "w2", fw, configs))
     row = info["depth_by_task"][0]
-    assert row["round1_tokens_est"] >= 60_000 and row["below_floor"] is False
+    # No tokenizer for this entry (no GGUF): the engine figure is the labelled calibration.
+    assert row["engine_method"] == S.METHOD_CALIBRATED and info["depth_method"] == "calibrated"
+    assert row["engine_tokens"] == round(row["prompt_tokens_est"] * S.CALIBRATION)
+    assert row["engine_tokens"] >= 60_000 and row["below_floor"] is False
     assert row["history_turns"] == 40
     assert row["round1_tokens_est"] == row["prompt_tokens_est"] + row["tool_schema_tokens_est"]
     assert (info["sha256"], info["messages"], info["depth_floor"]) == (deep["sha256"], 41, 60_000)
+    assert info["depth_floor_unit"] == "engine prompt tokens"
 
     # The same shallow seed passes when the floor is lowered on purpose.
     low = asyncio.run(R.seed_depth_or_refuse(shallow, _depth_args(floor=100), _entry(), "medium",
@@ -262,15 +289,18 @@ class _EchoAgent:
 
 
 @needs_git
+@pytest.mark.parametrize("depth", ["incident", "deep"])
 def test_a_seeded_report_carries_path_sha256_and_count_and_no_seed_text(home, tmp_path,
-                                                                        monkeypatch):
+                                                                        monkeypatch, depth):
     import dpc_client_core.dpc_agent.agent as AG
     import dpc_client_core.llm_manager as LM
 
     async def probe(root, **kw):
         return {"history_turns": 4, "assistant_turns": 1, "history_tokens_est": 50,
                 "prompt_tokens_est": 70_000, "tool_schema_tokens_est": 1_000,
-                "round1_tokens_est": 71_000, "messages": [{"content": MARKER}]}
+                "round1_tokens_est": 71_000, "engine_tokens": 71_000,
+                "engine_method": S.METHOD_TOKENIZER, "engine_counter": "stand-in",
+                "messages": [{"content": MARKER}]}
 
     _EchoAgent.seen = []
     monkeypatch.setattr(LM, "LLMManager", _FakeLLM)
@@ -278,7 +308,14 @@ def test_a_seeded_report_carries_path_sha256_and_count_and_no_seed_text(home, tm
     monkeypatch.setattr(R, "_check_vram_or_refuse", lambda entry: None)
     monkeypatch.setattr(S, "probe_round1", probe)
 
-    seed_path = _write_seed(tmp_path / "seed.json", _small_records())
+    if depth == "deep":
+        # The marker sits only in an earlier session's records, the ones a deep seed adds.
+        base = [_record(i, "Mike", "human", f"incident record {i}") for i in range(1, 4)]
+        seed_path = _write_deep_seed(tmp_path / "seed.json", base, _earlier_sessions(), need=3)
+        n_messages = 6
+    else:
+        seed_path = _write_seed(tmp_path / "seed.json", _small_records())
+        n_messages = 5
     out = tmp_path / "out" / "report.json"
     args = R.parse_args(["--step0-only", "--tasks", "1", "--seed-history", str(seed_path),
                          "--json", str(out)])
@@ -291,10 +328,14 @@ def test_a_seeded_report_carries_path_sha256_and_count_and_no_seed_text(home, tm
     report = json.loads(out.read_text(encoding="utf-8"))
     prov = json.loads(out.with_suffix(".provenance.json").read_text(encoding="utf-8"))
     want = {"path": str(seed_path), "sha256": hashlib.sha256(seed_path.read_bytes()).hexdigest(),
-            "messages": 5}
+            "messages": n_messages}
     for block in (report["seed_history"], prov["run_conditions"]["seed_history"]):
         assert {k: block[k] for k in want} == want
-        assert block["depth_by_task"][0]["round1_tokens_est"] == 71_000
+        assert block["depth_by_task"][0]["engine_tokens"] == 71_000
+        assert block["depth_method"] == S.METHOD_TOKENIZER
+        if depth == "deep":
+            assert block["deepening"]["outside_incident_history"] == 3
+            assert block["deepening"]["sources"][0]["file"] == "session-b.json"
 
     row = report["results"][0]
     assert "answer" not in row and "answer_tail" not in row
@@ -357,3 +398,179 @@ def test_the_reworded_compaction_ladder_gold_still_rederives_from_the_snapshot(s
                     encoding="utf-8")
     bad = [r for r in T.verify_golds(mutated) if not r["ok"]]
     assert {(r["task"], r["key"]) for r in bad} == {("long-compaction-ladder", "*")}
+
+
+# -- engine scale -----------------------------------------------------------------
+
+class _CharTokenizer:
+    """A stand-in for `llama-tokenize`: one token per character of what it is handed."""
+
+    def __init__(self):
+        self.texts = []
+
+    def describe(self):
+        return "one token per character (test stand-in)"
+
+    def count(self, text):
+        self.texts.append(text)
+        return len(text)
+
+
+def test_engine_scale_counts_with_the_tokenizer_and_otherwise_says_calibrated():
+    msgs = [{"role": "system", "content": [{"type": "text", "text": "sys"}]},
+            {"role": "user", "content": "hello"}]
+    tools = [{"name": "read_file"}]
+    tok = _CharTokenizer()
+    counted = S.engine_scale(1_000, msgs, tools, tok)
+    rendered = S.render_for_count(msgs, tools)
+    assert counted == {"engine_tokens": len(rendered), "engine_method": S.METHOD_TOKENIZER,
+                       "engine_counter": tok.describe()}
+    assert tok.texts == [rendered]
+    assert '{"name": "read_file"}' in rendered and "<|im_start|>user\nhello<|im_end|>" in rendered
+
+    calibrated = S.engine_scale(1_000, msgs, tools, None)
+    assert calibrated["engine_method"] == S.METHOD_CALIBRATED
+    assert calibrated["engine_tokens"] == round(1_000 * 67_177 / 41_012) == 1638
+    assert "not measured" in calibrated["engine_counter"]
+
+
+def test_the_tokenizer_runs_vocab_only_with_cuda_hidden_and_the_text_on_stdin(monkeypatch, tmp_path):
+    server = tmp_path / "bin" / "llama-server.exe"
+    server.parent.mkdir()
+    server.write_bytes(b"")
+    gguf = tmp_path / "model.gguf"
+    assert S.tokenizer_beside(server, gguf) is None, "no GGUF, no tokenizer"
+    gguf.write_bytes(b"")
+    assert S.tokenizer_beside(server, gguf) is None, "no llama-tokenize beside the server"
+    (server.parent / "llama-tokenize.exe").write_bytes(b"")
+    tok = S.tokenizer_beside(server, gguf)
+    assert tok is not None and tok.binary.name == "llama-tokenize.exe"
+
+    calls = []
+
+    def fake_run(argv, input, capture_output, env, timeout):
+        calls.append((argv, input, env))
+        return subprocess.CompletedProcess(argv, 0, stdout=b"[1, 2, 3]\nTotal number of tokens: 3\n",
+                                           stderr=b"")
+
+    monkeypatch.setattr(S.subprocess, "run", fake_run)
+    assert tok.count(f"private {MARKER}") == 3
+    argv, given, env = calls[0]
+    assert env["CUDA_VISIBLE_DEVICES"] == "-1"
+    assert "--stdin" in argv and "-m" in argv and str(gguf) in argv
+    assert MARKER not in " ".join(argv) and given == f"private {MARKER}".encode("utf-8")
+
+
+def test_the_floor_is_compared_with_the_engine_scale_figure_not_chars_over_four(
+        home, tmp_path, monkeypatch):
+    configs = {}
+    R.harness_agent_configs(configs)
+    fw = _probe_world(tmp_path)
+    # ~6 000 characters of history: ~1 500 on chars/4, far under the floor, but
+    # the stand-in tokenizer counts every character, so the engine figure clears it.
+    records = [_record(i, "Mike", "human", "w" * 3000) for i in (1, 2)] + [
+        _record(3, "Mike", "human", "@Johnny go")]
+    seed = S.load_seed(_write_seed(tmp_path / "s.json", records), "Johnny")
+    monkeypatch.setattr(R, "seed_tokenizer", lambda entry: _CharTokenizer())
+    info = asyncio.run(R.seed_depth_or_refuse(seed, _depth_args(floor=8_000), _entry(), "medium",
+                                              tmp_path / "w1", fw, configs))
+    row = info["depth_by_task"][0]
+    assert row["round1_tokens_est"] < 8_000 <= row["engine_tokens"]
+    assert row["below_floor"] is False and info["depth_method"] == S.METHOD_TOKENIZER
+
+    # And the other way: chars/4 over the floor, the engine figure under it — refused.
+    class _Eighth(_CharTokenizer):
+        def count(self, text):
+            return len(text) // 8
+
+    monkeypatch.setattr(R, "seed_tokenizer", lambda entry: _Eighth())
+    floor = row["round1_tokens_est"] - 100
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(R.seed_depth_or_refuse(seed, _depth_args(floor=floor), _entry(), "medium",
+                                           tmp_path / "w2", fw, configs))
+    assert "BELOW THE STEP-0 FLOOR" in str(exc.value) and "tokenizer" in str(exc.value)
+
+
+# -- deep seeds -------------------------------------------------------------------
+
+READER = {"agent_id": "agent_johnny_test", "display_name": "Johnny", "node_id": NODE}
+
+
+def test_a_deep_seed_takes_whole_records_newest_first_to_the_target_and_stops_at_a_boundary():
+    base = [_record(i, "Mike", "human", f"incident {i}") for i in range(1, 4)]
+    a = [_record(i, "Mike", "human", "a" * 10) for i in range(1, 4)]
+    b = [_record(1, "Mike", "human", "b" * 10),
+         {**_record(2, "System", "system", "joined"), "role": "system"},
+         _record(3, "Johnny", "agent", "b" * 10, owner=NODE),
+         _record(4, "Mike", "human", "b" * 10)]
+    sessions = [("a.json", a), ("b.json", b)]
+    costs = []
+
+    def cost(rec):
+        costs.append(rec["source_msg_index"])
+        assert rec["msg_index"] is None
+        return 10
+
+    # 35 needed at 10 per rendered record: b#4, b#3, (b#2 skipped, 0), b#1, then a#3
+    # crosses the target and is the last one taken — whole, never cut.
+    records, info = S.deepen(base, sessions, READER, 35, cost)
+    assert costs == [4, 3, 1, 3]
+    n = info["prepended_records"]
+    assert n == 5 and info["skipped_by_renderer"] == 1 and info["prepended_cost_tokens"] == 40
+    assert [r["source_msg_index"] for r in records[:n]] == [3, 1, 2, 3, 4], "chronological"
+    assert all(r["msg_index"] is None for r in records[:n])
+    assert records[n:] == base, "the incident's records stay exactly as they were"
+    assert info["sources"] == [
+        {"file": "a.json", "records": 1, "msg_index_from": 3, "msg_index_to": 3},
+        {"file": "b.json", "records": 4, "msg_index_from": 1, "msg_index_to": 4}]
+    assert records[n - 1]["content"] == b[3]["content"] and records[0]["content"] == a[2]["content"]
+
+    # Already deep enough: nothing is added.
+    same, none = S.deepen(base, sessions, READER, 0, cost)
+    assert same == base and none["prepended_records"] == 0
+
+
+def test_a_deep_seeds_provenance_lists_sources_ranges_and_hashes_and_no_text(tmp_path):
+    base = [_record(i, "Mike", "human", f"incident record {i}") for i in range(1, 4)]
+    path = _write_deep_seed(tmp_path / "deep.json", base, _earlier_sessions(), need=3)
+    seed = S.load_seed(path, "Johnny")
+    rec = S.seed_record(seed)
+    assert rec["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    deep = rec["deepening"]
+    assert deep["base_seed"]["sha256"] == "0" * 64 and deep["outside_incident_history"] == 3
+    assert deep["sources"] == [{"file": "session-b.json", "records": 3,
+                                "msg_index_from": 2, "msg_index_to": 4}]
+    assert "production_would_not_have_loaded_these" in deep
+    dumped = json.dumps(rec, ensure_ascii=False)
+    assert MARKER not in dumped and "session b" not in dumped and "incident record" not in dumped
+
+    # A prepended record that kept its own index would collide with the trigger's.
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["messages"][0]["msg_index"] = 2
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        S.load_seed(path, "Johnny")
+    assert "keeps a msg_index" in str(exc.value)
+
+
+def test_a_deep_seeds_earlier_records_reach_the_prompt_through_production_before_the_incident(
+        home, tmp_path):
+    from dpc_client_core.dpc_agent import context as context_module
+    base = [_record(1, "Mike", "human", "incident record 1"),
+            _record(2, "Johnny", "agent", "incident answer", owner=NODE),
+            _record(3, "Mike", "human", "@Johnny the trigger")]
+    seed = S.load_seed(_write_deep_seed(tmp_path / "deep.json", base, _earlier_sessions(),
+                                        need=3), "Johnny")
+    R.harness_agent_configs({})
+    m = asyncio.run(S.probe_round1(
+        tmp_path / "depth-01", firewall=_probe_world(tmp_path), profile=R.LOOP_PROFILE,
+        alias=ALIAS, task_prompt="the task", seed=seed, conversation_id="eval-t",
+        session_state={"tokens_limit": 215040}, reasoning_effort="medium"))
+    history = m["messages"][1:-1]
+    # Earlier session b #2..#4 (Johnny, Ark, Mike), then the incident's #1, #2.
+    assert [h["role"] for h in history] == ["assistant", "user", "user", "user", "assistant"]
+    for rec, h in zip(seed["messages"][:5], history):
+        assert h["content"] == context_module.history_prefix(rec) + rec["content"]
+    assert history[0]["content"].startswith("[10:02:00 | Johnny] "), "no index on an earlier record"
+    assert history[3]["content"].startswith("[#1 | ")
+    assert m["engine_method"] == S.METHOD_CALIBRATED
