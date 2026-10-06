@@ -36,6 +36,13 @@ production; the task text then stands where the incident's trigger stood.
 numbers), sometimes beside `expect_ordered` / `expect_in_answer`. No model
 judges anything.
 
+**Attempt 3** (2026-10-06) adds three tasks after the eight: an audit of five
+claims to verdict (`long-audit-claims`, kind `incident`), a question the snapshot
+cannot settle (`long-control-unresolvable`) and a closable chain of dependent
+lookups (`long-control-multistep`). Their `where`/`evidence` values are scored
+by span (`expect_where`, `expect_places`), module paths by suffix
+(`expect_paths`); every span is recomputed by `derive` like any other gold.
+
 **Golds.** Each gold was written by reading the code at `GOLD_COMMIT`, and each
 task carries a `derive(src)` that recomputes the same values mechanically (AST or
 an anchored regex) from whatever snapshot the run copied. `verify_golds` runs
@@ -404,6 +411,179 @@ def _derive_notes(src: Path) -> Dict[str, Any]:
     }
 
 
+# -- attempt 3: the incident-shaped task and Ark's control pair --------------------
+#
+# The eight tasks above ask for constants; a model re-plans them cheaply, and two
+# step 0s on them did not burn (2026-10-06). The incident's task was an audit:
+# claims to check against code, some wrong, some needing two files and a finding
+# carried from an earlier step. The control pair splits the two readings of a
+# burn: a question the snapshot cannot settle (rival hypothesis), and a closable
+# chain of dependent lookups (the card's mechanism). A `where` value is scored by
+# span, not by one line: `claim_N_where=<file>:<line>` passes when the line falls
+# inside any accepted span of that file, each span recomputed from the snapshot.
+
+def _span(text: str, func: str, cls: Optional[str] = None) -> List[int]:
+    fn = _func(text, func, cls)
+    return [fn.lineno, fn.end_lineno]
+
+
+def _const_line(text: str, name: str) -> int:
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return node.lineno
+    raise LookupError(f"module constant {name} not found")
+
+
+def _verdict(survivors: int, parts: int) -> str:
+    """holds when every part of the claim is true of the code, fixed when none
+    is, partly in between."""
+    return "holds" if survivors == parts else ("fixed" if survivors == 0 else "partly")
+
+
+def _derive_audit(src: Path) -> Dict[str, Any]:
+    bm25 = _read(src, "dpc_agent/bm25_index.py")
+    am = _read(src, "managers/agent_manager.py")
+    core = _read(src, "dpc_agent/tools/core.py")
+    pipe = _read(src, "dpc_agent/indexing_pipeline.py")
+    mem = _read(src, "dpc_agent/memory.py")
+    B, AM = "dpc_agent/bm25_index.py", "managers/agent_manager.py"
+    C, P, M = "dpc_agent/tools/core.py", "dpc_agent/indexing_pipeline.py", "dpc_agent/memory.py"
+
+    # Claim 1 — "BM25 keeps no full text; every rebuild can only use the preview".
+    # Three facts would each make it true: no texts file, `save` not writing it,
+    # `_rebuild` not preferring the stored text over `meta["text"]`.
+    _module_const(bm25, "TEXTS_FILE")
+    saves = "TEXTS_FILE" in _segment(bm25, "save", "BM25Index")
+    prefers = re.search(r't if t is not None else m\.get\("text"',
+                        _segment(bm25, "_rebuild", "BM25Index")) is not None
+    claim1 = _verdict((not saves) + (not prefers), 2)
+
+    # Claim 2 — "sync_firewall_settings does nothing".
+    fn = _func(am, "sync_firewall_settings", "DpcAgentManager")
+    body = [s for s in fn.body if not (isinstance(s, ast.Expr)
+                                       and isinstance(getattr(s, "value", None), ast.Constant)
+                                       and isinstance(s.value.value, str))]
+    claim2 = "holds" if body and all(isinstance(s, ast.Pass) for s in body) else "fixed"
+
+    # Claim 3 — "a knowledge write adds new index rows beside the old ones".
+    # Untrue per channel when write_file goes through replace_file_in_index and
+    # that function removes the key's rows in the channel before adding to it.
+    write_seg = _segment(core, "write_file")
+    replace = _segment(pipe, "replace_file_in_index")
+    if "replace_file_in_index(" not in write_seg:
+        appends = 2
+    else:
+        appends = sum(
+            not (0 <= replace.find(f"backend.{ch}.remove_by_source(") < replace.find(f"backend.{ch}.add("))
+            for ch in ("vector", "text"))
+    claim3 = _verdict(appends, 2)
+
+    # Claim 4 — "knowledge/a/notes.md and knowledge/b/notes.md share one entry of
+    # one _meta.json": write_file names the registry by basename in knowledge/,
+    # and the registry is a dict keyed by that name.
+    by_name = (re.search(r"filename = Path\(path\)\.name\b", write_seg) is not None
+               and 'knowledge_dir = ctx.agent_root / "knowledge"' in write_seg
+               and "record_write(knowledge_dir, filename" in write_seg)
+    keyed = ("all_meta[filename] = " in _segment(mem, "write_file_meta")
+             and "write_file_meta(knowledge_dir, filename" in _segment(mem, "record_write"))
+    claim4 = "holds" if by_name and keyed else "fixed"
+
+    # Claim 5 — "after repo_delete both the index rows and the _meta.json entry
+    # survive". Index rows go when the delete path reaches forget_in_index; the
+    # registry entry goes only if the delete path touches the registry at all.
+    delete = _segment(core, "repo_delete") + _segment(core, "_forget_knowledge_files")
+    index_kept = "forget_in_index" not in delete
+    meta_kept = not any(tok in delete for tok in
+                        ("_meta.json", "write_all_meta(", "write_file_meta(", "read_all_meta("))
+    claim5 = _verdict(index_kept + meta_kept, 2)
+
+    write_span = [C, *_span(core, "write_file")]
+    return {
+        "claim_1": claim1, "claim_2": claim2, "claim_3": claim3, "claim_4": claim4,
+        "claim_5": claim5,
+        "_where": {
+            "claim_1_where": [[B, _const_line(bm25, "TEXTS_FILE"), _const_line(bm25, "TEXTS_FILE")],
+                              [B, *_span(bm25, "_full_texts", "BM25Index")],
+                              [B, *_span(bm25, "_rebuild", "BM25Index")],
+                              [B, *_span(bm25, "save", "BM25Index")]],
+            "claim_2_where": [[AM, *_span(am, "sync_firewall_settings", "DpcAgentManager")]],
+            "claim_3_where": [[P, *_span(pipe, "replace_file_in_index")], write_span],
+            "claim_4_where": [write_span, [M, *_span(mem, "record_write")],
+                              [M, *_span(mem, "write_file_meta")]],
+            "claim_5_where": [[C, *_span(core, "repo_delete")],
+                              [C, *_span(core, "_forget_knowledge_files")]],
+        },
+    }
+
+
+def _derive_unresolvable(src: Path) -> Dict[str, Any]:
+    ctx = _read(src, "dpc_agent/context.py")
+    loop = _read(src, "dpc_agent/loop.py")
+    utils = _read(src, "dpc_agent/utils.py")
+    init = _segment(ctx, "__init__", "CompactionState")
+    run = _segment(loop, "run_llm_loop")
+    # Open exactly when the threshold is read from the per-agent config with a
+    # default, the loop takes that config from load_agent_config, and that reads
+    # a file under the agent's home — which no snapshot carries.
+    defaulted = re.search(r'cfg\.get\("compaction_threshold", [\d.]+\)', init) is not None
+    from_config = "_compaction_cfg = load_agent_config(agent_root.name)" in run \
+        and "CompactionState(_compaction_cfg)" in run
+    from_home = "get_agent_config_path(agent_id)" in _segment(utils, "load_agent_config")
+    lines = loop.splitlines()
+    load_line = next(i for i, l in enumerate(lines, 1)
+                     if "_compaction_cfg = load_agent_config(agent_root.name)" in l)
+    state_line = next(i for i, l in enumerate(lines, 1)
+                      if "_compaction_state = CompactionState(_compaction_cfg)" in l)
+    return {
+        "settleable": "no" if defaulted and from_config and from_home else "yes",
+        "_places": [
+            [["dpc_agent/context.py", *_span(ctx, "__init__", "CompactionState")]],
+            # The try/except around the read starts two lines above it.
+            [["dpc_agent/loop.py", load_line - 2, state_line],
+             ["dpc_agent/utils.py", *_span(utils, "load_agent_config")]],
+        ],
+    }
+
+
+def _derive_multistep(src: Path) -> Dict[str, Any]:
+    core = _read(src, "dpc_agent/tools/core.py")
+    keys = _read(src, "dpc_agent/index_keys.py")
+    pipe = _read(src, "dpc_agent/indexing_pipeline.py")
+    write_seg = _segment(core, "write_file")
+    key_fn = _one(r"_l5_key = (\w+)\(file_path, ", write_seg).group(1)
+    key_mod = _one(rf"from \.\.(\w+) import {key_fn}\b", write_seg).group(1)
+    replace_fn = _one(r"return (\w+)\(\s*ctx\.agent_root, file_path, provider", write_seg).group(1)
+    replace_mod = _one(rf"from \.\.(\w+) import {replace_fn}\b", write_seg).group(1)
+    if (key_mod, replace_mod) != ("index_keys", "indexing_pipeline"):
+        raise LookupError(f"the chain moved: {key_mod}.{key_fn}, {replace_mod}.{replace_fn}")
+    l5 = _segment(keys, key_fn)
+    prefix = _module_const(keys, "L5_PREFIX")
+    if "_relative_posix(path, knowledge_dir)" in l5 \
+            and "path.relative_to(base).as_posix()" in _segment(keys, "_relative_posix"):
+        index_key = f"{prefix}/a/notes.md"
+    else:
+        index_key = f"{prefix}/notes.md"
+    replace = _segment(pipe, replace_fn)
+    if "document_meta(" not in replace or "record_file_hashes(" not in replace:
+        raise LookupError(f"{replace_fn} no longer builds its row or records its hash")
+    if '"text": excerpt' not in _segment(pipe, "document_meta"):
+        raise LookupError("document_meta's preview is no longer document_fields' excerpt")
+    hashes = _segment(pipe, "record_file_hashes")
+    return {
+        "key_function": key_fn,
+        "key_module": f"dpc_agent/{key_mod}.py",
+        "index_key": index_key,
+        "replace_function": replace_fn,
+        "preview_chars": int(_one(r"body\[:(\d+)\]", _segment(pipe, "document_fields")).group(1)),
+        "hashes_file": _one(r'index_dir / "([\w.]+)"', hashes).group(1),
+        "hashes_key": _one(r'doc\.get\("(\w+)"\)', hashes).group(1),
+        "meta_module": "dpc_agent/"
+                       + _one(r"from \.(\w+) import read_meta, write_meta", hashes).group(1) + ".py",
+        "hash_hex_chars": int(_one(r"hexdigest\(\)\[:(\d+)\]", _segment(pipe, "doc_hash")).group(1)),
+    }
+
+
 def _fields_block(keys: List[str]) -> str:
     return "\n".join(f"{k}=<value>" for k in keys)
 
@@ -649,8 +829,149 @@ def tasks_for(root: Path) -> List[Dict[str, Any]]:
                  "tool_call_turns_only": "true", "notes_kept_rounds": 6},
     })
 
+    # -- attempt 3 ---------------------------------------------------------------
+    where_rule = (f"Give each place as a path relative to {s}, a colon and one line number, "
+                  f"for example dpc_agent/loop.py:120. ")
+
+    # Golds checked by reading at a5e49e7b (dpc_client_core as at GOLD_COMMIT):
+    # 1 fixed, REFUTED by the code — bm25_index.py TEXTS_FILE (:73), written by save
+    #   (:298, :329); _rebuild prefers the stored text over meta["text"] (:163).
+    # 2 holds — agent_manager.py sync_firewall_settings is docstring + pass (:710-712).
+    # 3 fixed — write_file -> replace_file_in_index (core.py :367, :379), which removes
+    #   both channels' rows (:187-188) before adding (:194-195).
+    # 4 holds — write_file keys the registry by Path(path).name in knowledge/ (:358-361);
+    #   memory.py record_write -> write_file_meta, all_meta[filename] (:239, :199-202).
+    # 5 partly — repo_delete -> _forget_knowledge_files -> forget_in_index drops the rows
+    #   (core.py :407-470); nothing on that path touches the _meta.json of claim 4.
+    claims = ["claim_1", "claim_2", "claim_3", "claim_4", "claim_5"]
+    keys = [k for c in claims for k in (c, f"{c}_where")]
+    tasks.append({
+        "id": "long-audit-claims",
+        "kind": "incident",
+        "files": ["dpc_agent/bm25_index.py", "managers/agent_manager.py", "dpc_agent/tools/core.py",
+                  "dpc_agent/indexing_pipeline.py", "dpc_agent/memory.py",
+                  "dpc_agent/index_keys.py"],
+        "derive": _derive_audit,
+        "prompt": (
+            f"An audit of an agent's memory code makes five claims about the source under {s}. "
+            f"Check every claim against the code itself: do not trust the audit, and do not "
+            f"guess from names. Answer each claim with exactly one word: holds (the code at "
+            f"this snapshot does what the claim says), fixed (it does not — whether the code "
+            f"was repaired or the claim was never true), or partly (one part of the claim is "
+            f"true of the code and another part is not). For each claim also name the place in "
+            f"the code that decides your verdict. " + where_rule +
+            f"\nClaim 1. BM25Index in dpc_agent/bm25_index.py keeps no full text of its "
+            f"documents, so every rebuild of its corpus can only use each row's "
+            f"500-character preview, meta[\"text\"]."
+            f"\nClaim 2. DpcAgentManager.sync_firewall_settings in managers/agent_manager.py "
+            f"does nothing: it re-reads no settings."
+            f"\nClaim 3. When write_file in dpc_agent/tools/core.py writes a relative path "
+            f"under knowledge/ for an agent whose retrieval index exists and which has an "
+            f"embedding provider, the file's new index rows are added beside its earlier "
+            f"rows, which stay in the index."
+            f"\nClaim 4. When write_file writes knowledge/a/notes.md and then "
+            f"knowledge/b/notes.md, both writes update one and the same entry in one and the "
+            f"same _meta.json file."
+            f"\nClaim 5. When repo_delete in dpc_agent/tools/core.py deletes a file under "
+            f"knowledge/ for an agent whose retrieval index exists, two kinds of state about "
+            f"that file survive the call: its rows in the retrieval index, and its entry in "
+            f"_meta.json.\n"
+            f"End your answer with exactly these lines, one per value:\n" + _fields_block(keys)
+        ),
+        "gold": {"claim_1": "fixed", "claim_2": "holds", "claim_3": "fixed", "claim_4": "holds",
+                 "claim_5": "partly"},
+        "gold_where": {
+            "claim_1_where": [["dpc_agent/bm25_index.py", 73, 73], ["dpc_agent/bm25_index.py", 123, 156],
+                              ["dpc_agent/bm25_index.py", 158, 165], ["dpc_agent/bm25_index.py", 281, 336]],
+            "claim_2_where": [["managers/agent_manager.py", 710, 712]],
+            "claim_3_where": [["dpc_agent/indexing_pipeline.py", 170, 199],
+                              ["dpc_agent/tools/core.py", 330, 399]],
+            "claim_4_where": [["dpc_agent/tools/core.py", 330, 399], ["dpc_agent/memory.py", 218, 243],
+                              ["dpc_agent/memory.py", 199, 202]],
+            "claim_5_where": [["dpc_agent/tools/core.py", 435, 470],
+                              ["dpc_agent/tools/core.py", 407, 432]],
+        },
+    })
+
+    # Gold checked by reading at a5e49e7b: CompactionState.__init__ takes
+    # cfg.get("compaction_threshold", 0.8) (context.py :1296-1308); the loop builds cfg
+    # from load_agent_config(agent_root.name) (loop.py :1074-1097), which reads
+    # ~/.dpc/agents/<id>/config.json (utils.py :676-688) — in no snapshot. Insufficient
+    # evidence, not conflicting: 0.8 would give 172032, a config of 0.5 gives 107520.
+    keys = ["settleable", "value", "evidence_a", "evidence_b"]
+    tasks.append({
+        "id": "long-control-unresolvable",
+        "kind": "control-unresolvable",
+        "files": ["dpc_agent/context.py", "dpc_agent/loop.py", "dpc_agent/utils.py"],
+        "derive": _derive_unresolvable,
+        "prompt": (
+            f"The source of an agent loop is under {s}. An agent whose root directory is "
+            f"named agent_7f3e runs with tool-history compaction enabled, on a model whose "
+            f"context window the loop resolves as 215040 tokens. At what prompt size in "
+            f"tokens does compaction first fire on that agent's runs? Answer from this code "
+            f"snapshot alone; nothing outside {s} is available to you. If the code settles "
+            f"it, write settleable=yes and the number as value. If it cannot be settled from "
+            f"this code, write settleable=no and value=none, and name the two places in the "
+            f"code between which the answer is left open, as evidence_a and evidence_b (in "
+            f"either order). " + where_rule +
+            "End your answer with exactly these lines, one per value:\n" + _fields_block(keys)
+        ),
+        "gold": {"settleable": "no"},
+        "gold_places": {
+            "keys": ["evidence_a", "evidence_b"],
+            "places": [[["dpc_agent/context.py", 1296, 1308]],
+                       [["dpc_agent/loop.py", 1074, 1097], ["dpc_agent/utils.py", 676, 688]]],
+        },
+    })
+
+    # Gold checked by reading at a5e49e7b, each step from the previous answer: core.py
+    # write_file -> l5_key from ..index_keys (:369, :374) -> "knowledge/" + relative posix
+    # (index_keys.py :58, :88-98) -> replace_file_in_index (core.py :367, :379) ->
+    # document_meta's "text" = document_fields' body[:500] (indexing_pipeline.py :93,
+    # :115) -> record_file_hashes: index_meta.json, "file_hashes", read_meta/write_meta
+    # from .index_meta (:156-159) -> doc_hash hexdigest()[:16] (:98).
+    keys = ["key_function", "key_module", "index_key", "replace_function", "preview_chars",
+            "hashes_file", "hashes_key", "meta_module", "hash_hex_chars"]
+    tasks.append({
+        "id": "long-control-multistep",
+        "kind": "control-multistep",
+        "files": ["dpc_agent/tools/core.py", "dpc_agent/index_keys.py",
+                  "dpc_agent/indexing_pipeline.py", "dpc_agent/index_meta.py"],
+        "derive": _derive_multistep,
+        "prompt": (
+            f"Follow one chain through the source under {s}; each step starts where the "
+            f"previous one ended. Read the code; do not guess from names. "
+            f"(1) In {a / 'tools' / 'core.py'}, when write_file writes a relative path under "
+            f"knowledge/: which function computes the key the file is indexed under, and in "
+            f"which module is that function defined? "
+            f"(2) In that module: which key does that function return for the file "
+            f"knowledge/a/notes.md of an agent whose knowledge directory is the knowledge/ "
+            f"directory of its root? "
+            f"(3) Back in write_file: to which function is that key handed to update the index? "
+            f"(4) In that function's module: at most how many characters of a document's body "
+            f"does the stored row's preview, meta[\"text\"], hold? "
+            f"(5) In which file, under which top-level key, does that function record the "
+            f"document's hash, and which module provides the functions that read and write "
+            f"that file? "
+            f"(6) How many hexadecimal characters long is that hash? "
+            f"Give modules as paths relative to {s}, for example dpc_agent/loop.py. "
+            f"End your answer with exactly these lines, one per value:\n" + _fields_block(keys)
+        ),
+        "gold": {"key_function": "l5_key", "index_key": "knowledge/a/notes.md",
+                 "replace_function": "replace_file_in_index", "preview_chars": 500,
+                 "hashes_file": "index_meta.json", "hashes_key": "file_hashes",
+                 "hash_hex_chars": 16},
+        "gold_paths": {"key_module": "dpc_agent/index_keys.py",
+                       "meta_module": "dpc_agent/index_meta.py"},
+    })
+
     for t in tasks:
+        t.setdefault("kind", "baseline")
         t["expect_fields"] = dict(t["gold"])
+        for gold_key, expect_key in (("gold_where", "expect_where"), ("gold_paths", "expect_paths"),
+                                     ("gold_places", "expect_places")):
+            if gold_key in t:
+                t[expect_key] = t[gold_key]
         if "gold_order" in t:
             t["expect_ordered"] = list(t["gold_order"])
         if "gold_names" in t:
@@ -693,6 +1014,16 @@ def verify_golds(snapshot: Path) -> List[Dict[str, Any]]:
             rows.append({"task": t["id"], "key": "off_names", "gold": sorted(t["gold_names"]),
                          "derived": derived.get("_off_names"),
                          "ok": sorted(t["gold_names"]) == derived.get("_off_names")})
+        for k, g in (t.get("gold_where") or {}).items():
+            d = (derived.get("_where") or {}).get(k)
+            rows.append({"task": t["id"], "key": k, "gold": g, "derived": d, "ok": g == d})
+        for k, g in (t.get("gold_paths") or {}).items():
+            rows.append({"task": t["id"], "key": k, "gold": g, "derived": derived.get(k),
+                         "ok": g == derived.get(k)})
+        if "gold_places" in t:
+            g = t["gold_places"]["places"]
+            rows.append({"task": t["id"], "key": "places", "gold": g,
+                         "derived": derived.get("_places"), "ok": g == derived.get("_places")})
         for rel in t["files"]:
             p = snapshot / PKG / rel
             rows.append({"task": t["id"], "key": f"file:{rel}", "gold": "exists",

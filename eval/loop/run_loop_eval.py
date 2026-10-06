@@ -33,7 +33,9 @@ Run from `dpc-client/core`:
 `--tasks N` for a smoke pass, `--tier hard` for the harder set, `--rounds N` for
 the agent's round limit on any tier, `--dry-run` to validate the
 alias/binary/gguf/VRAM/output-dir without loading a model, `--step0-only` for
-the long tier's preflight (off arm, two tasks, step-0 verdict).
+the long tier's preflight (off arm, two tasks, step-0 verdict), `--task-ids`
+and `--repeats N` to pick long tasks by id and run each N times in fresh roots
+(attempt 3, see `eval/README.md`).
 
 **Firewall (2026-10-06).** Every tier runs under
 `_harness/benchmark_tools.benchmark_firewall`, a rules file owned by the run in
@@ -392,6 +394,31 @@ def _same_value(got: str, want: Any) -> bool:
         return got == want_s
 
 
+def _norm_path(value: str) -> str:
+    """A path or dotted module as the answer wrote it, in one comparable form."""
+    v = value.strip().replace("\\", "/").lower()
+    if "/" not in v and not v.endswith(".py") and "." in v:
+        v = v.replace(".", "/") + ".py"
+    return v
+
+
+def _path_is(got: str, rel: str) -> bool:
+    got, rel = _norm_path(got), rel.lower()
+    return got == rel or got.endswith("/" + rel)
+
+
+def _place(value: str):
+    """`<path>.py:<line>` -> (path, line), the first number after the colon."""
+    m = re.match(r"^(.+?\.py):(\d+)", value or "")
+    return (m.group(1), int(m.group(2))) if m else None
+
+
+def _in_spans(value: Optional[str], spans) -> bool:
+    place = _place(value or "")
+    return place is not None and any(
+        _path_is(place[0], rel) and lo <= place[1] <= hi for rel, lo, hi in spans)
+
+
 def check(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
     """Deterministic scoring. No model decides anything here.
 
@@ -401,6 +428,9 @@ def check(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
     token parsed out of prose. `expect_fields` (the long tier) reads
     `key=value` lines and compares numbers as numbers, the rest as lowercase
     text; a key the answer never wrote is reported as missing, not as wrong.
+    `expect_paths` compares a module path by suffix; `expect_where` passes a
+    `<file>:<line>` inside any accepted span; `expect_places` asks for every
+    place to be named by a distinct key, in any order.
     """
     reasons: List[str] = []
     ok = True
@@ -414,6 +444,37 @@ def check(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
         elif not _same_value(got, want):
             ok = False
             reasons.append(f"{key}={got} (want {str(want).lower()})")
+
+    for key, rel in (task.get("expect_paths") or {}).items():
+        got = _field_value(key, lowered)
+        if got is None:
+            ok = False
+            reasons.append(f"no {key}=")
+        elif not _path_is(got, rel):
+            ok = False
+            reasons.append(f"{key}={got} (want {rel})")
+
+    for key, spans in (task.get("expect_where") or {}).items():
+        got = _field_value(key, lowered)
+        if got is None:
+            ok = False
+            reasons.append(f"no {key}=")
+        elif not _in_spans(got, spans):
+            ok = False
+            reasons.append(f"{key}={got} (outside every accepted span)")
+
+    places = task.get("expect_places")
+    if places:
+        given = [_field_value(k, lowered) for k in places["keys"]]
+        unmatched = list(places["places"])
+        for value in given:
+            hit = next((p for p in unmatched if _in_spans(value, p)), None)
+            if hit is not None:
+                unmatched.remove(hit)
+        if unmatched:
+            ok = False
+            reasons.append(f"{len(unmatched)} of {len(places['places'])} places not named "
+                           f"({', '.join(places['keys'])})")
 
     for needle in task.get("expect_in_answer", []):
         if _word_boundary_search(needle.lower(), lowered) < 0:
@@ -527,6 +588,58 @@ async def run_one(agent, task: Dict[str, Any], *,
     return out
 
 
+def served_effort_for(llm, alias: str, requested: Optional[str],
+                      reported: Optional[str]) -> Optional[str]:
+    """The rung a round ran on, by the rule that writes `served_effort` on a usage
+    row: `Gateway._served_effort`, called unbound with a stand-in door so the rule
+    stays the gateway's. `result` is shaped as `LLMManager` shapes it."""
+    from types import SimpleNamespace
+    from dpc_client_core.gateway import Gateway
+    from dpc_client_core.providers.base import normalize_reasoning_effort
+    door = SimpleNamespace(_core=SimpleNamespace(llm_manager=llm))
+    return Gateway._served_effort(door, alias, {
+        "provider_served_effort": reported,
+        "served_effort": normalize_reasoning_effort(requested),
+    })
+
+
+def select_long_tasks(tasks: List[Dict[str, Any]], args) -> List[int]:
+    """Indices of the long tasks this run starts: `--task-ids` (in the order given)
+    or all, then cut to `--tasks N`."""
+    ids = [t["id"] for t in tasks]
+    if getattr(args, "task_ids", None):
+        want = [s.strip() for s in args.task_ids.split(",") if s.strip()]
+        unknown = [w for w in want if w not in ids]
+        if unknown:
+            raise SystemExit(f"--task-ids: no long task {unknown}; known: {', '.join(ids)}")
+        picked = [ids.index(w) for w in want]
+    else:
+        picked = list(range(len(ids)))
+    return picked[: args.tasks] if args.tasks else picked
+
+
+def long_root_name(index: int, repeat: int, arm: str, repeats: int) -> str:
+    """One fresh root per task, repeat and arm; a single-repeat run keeps the old names."""
+    return (f"long-{index + 1:02d}-{arm}" if repeats == 1
+            else f"long-{index + 1:02d}-r{repeat + 1}-{arm}")
+
+
+# Per task-arm wall time of the step 0s of 2026-10-06, read from their reports:
+# 120.2 / 120.5 s seeded with the deep seed (`...-step0-seeded-20261006-124416`),
+# 48.6 / 39.8 s unseeded (`...-step0-20261006-114852`). None burned; a run that
+# burns takes longer, up to the task timeout.
+SECONDS_PER_TASK_ARM_SEEDED = 120
+SECONDS_PER_TASK_ARM_UNSEEDED = 45
+
+
+def run_time_estimate(n_tasks: int, repeats: int, arms: int, seeded: bool,
+                      timeout_min: float) -> Dict[str, Any]:
+    runs = n_tasks * repeats * arms
+    per = SECONDS_PER_TASK_ARM_SEEDED if seeded else SECONDS_PER_TASK_ARM_UNSEEDED
+    return {"task_runs": runs, "seconds_per_run": per, "expected_min": round(runs * per / 60, 1),
+            "ceiling_min": round(runs * timeout_min, 1)}
+
+
 def _operator_providers_digest() -> Optional[str]:
     src = Path.home() / ".dpc" / "providers.json"
     try:
@@ -569,7 +682,8 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
     if entry.get("type") != "llamacpp_server" and "on" in entries:
         print("  NOTE: only llamacpp_server reads preserve_reasoning; on this provider "
               "the two arms are the same run")
-    print(f"  reasoning effort sent: {effort or '(none — the alias decides)'}; "
+    print(f"  reasoning effort requested: {effort or '(none — the alias decides)'}; "
+          f"alias default (its own reasoning_effort): {entry.get('reasoning_effort')}; "
           f"note budget: {entry.get('reasoning_budget_tokens')}; "
           f"alias context_window: {entry.get('context_window')}")
     print(f"  max rounds: {resolve_max_rounds(args.tier, args.rounds)}"
@@ -604,10 +718,11 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
             root = tmp_path / "long-00-off"
             tasks_long.build_fixture(root, tmp_path / "snapshot")
             todo = tasks_long.tasks_for(root)
+            picked = select_long_tasks(todo, args)
             for t in todo:
                 need = set(t["tools_needed"])
                 named = [root / "src" / tasks_long.PKG / f for f in t["files"]]
-                print(f"    {t['id']:28} files={len(named)} "
+                print(f"    {'*' if todo.index(t) in picked else ' '}{t['id']:27} files={len(named)} "
                       f"chars={sum(p.stat().st_size for p in named)} "
                       f"in_root={all(p.is_file() for p in named)} "
                       f"tools_needed_listed={need <= set(allowed)}")
@@ -621,6 +736,16 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
             print(f"  compaction config served to each root: {cfg}")
             print(f"  task timeout {args.task_timeout_minutes} min, arms run per task in "
                   f"{' then '.join(entries)} / reversed order alternately")
+            est = run_time_estimate(len(picked), args.repeats, len(entries),
+                                    bool(args.seed_history), args.task_timeout_minutes)
+            print(f"  selected (*): {', '.join(todo[i]['id'] for i in picked)}; "
+                  f"x{args.repeats} repeat(s) x {len(entries)} arm(s) = {est['task_runs']} task-runs, "
+                  f"each in a fresh root")
+            print(f"  run-time estimate: {est['task_runs']} x {est['seconds_per_run']} s = "
+                  f"~{est['expected_min']} min if nothing burns (per task-arm, the "
+                  f"{'seeded' if args.seed_history else 'unseeded'} step 0s of 2026-10-06); "
+                  f"ceiling {est['ceiling_min']} min if every run reaches the "
+                  f"{args.task_timeout_minutes:.0f}-min timeout")
 
     out_dir = RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -707,9 +832,9 @@ async def seed_depth_or_refuse(seed: Dict[str, Any], args, entry: Dict[str, Any]
           f"excluded), {INCIDENT_ROUND1_COUNTED} counted by the engine (dpc-client.log.1, "
           "2026-10-05 17:54:53 / 17:56:41)")
     probe_root = workdir / "depth-probe"
-    n = len(tasks_long.tasks_for(probe_root))
+    probe_tasks = tasks_long.tasks_for(probe_root)
     rows: List[Dict[str, Any]] = []
-    for i, task in enumerate(tasks_long.tasks_for(probe_root)[: min(n, args.tasks or n)]):
+    for i, task in enumerate(probe_tasks[k] for k in select_long_tasks(probe_tasks, args)):
         root = workdir / f"depth-{i + 1:02d}"
         agent_configs[root.name] = long_compaction_config(entry["alias"], args.compaction,
                                                           LONG_COMPACTION_THRESHOLD)
@@ -729,7 +854,12 @@ async def seed_depth_or_refuse(seed: Dict[str, Any], args, entry: Dict[str, Any]
               f"({m['engine_method']}{cross}); chars/4 {m['round1_tokens_est']} "
               f"= request {m['prompt_tokens_est']} + tool schemas {m['tool_schema_tokens_est']} "
               f"[floor {floor} engine tokens] {'BELOW' if m['below_floor'] else 'ok'}")
+    beyond = round_metrics.seed_beyond_incident(rec)
+    print(f"    approximation: {beyond} records beyond the incident's history"
+          + (" (production would not have loaded them)" if beyond else " (none: the incident's own)"))
     out = {**rec, "depth_floor": floor, "depth_floor_unit": "engine prompt tokens",
+           "approximation": {"records_beyond_incident_history": beyond,
+                             "exceeds_incident_history": beyond > 0},
            "depth_method": rows[0]["engine_method"] if rows else None,
            "depth_counter": rows[0]["engine_counter"] if rows else None,
            "depth_by_task": rows}
@@ -864,6 +994,7 @@ async def main_async(args) -> int:
             provider_alias=alias if long_tier else None,
         )
         recorder = round_metrics.RoundRecorder()
+        recorder.resolve_effort = lambda reported: served_effort_for(llm, alias, effort, reported)
         recorder.wrap(agent.llm)
         return agent, recorder
 
@@ -876,19 +1007,22 @@ async def main_async(args) -> int:
     def kwargs_for(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return seed_history.seeded_process_kwargs(seed, task["prompt"]) if seed else None
 
-    # (arm, task, agent, recorder) in run order.
+    # (arm, task, agent, recorder, repeat) in run order.
     plan: List[tuple] = []
     if long_tier:
-        n = len(tasks_long.tasks_for(workdir / "probe"))
-        for i in range(min(n, args.tasks or n)):
-            # ABBA: alternate which arm goes first, so neither always meets a
-            # child that just served the other.
-            for arm in (arms if i % 2 == 0 else tuple(reversed(arms))):
-                root = workdir / f"long-{i + 1:02d}-{arm}"
-                tasks_long.build_fixture(root, workdir / "snapshot")
-                agent_configs[root.name] = compaction_cfg
-                agent, recorder = new_agent(root)
-                plan.append((arm, tasks_long.tasks_for(root)[i], agent, recorder))
+        picked = select_long_tasks(tasks_long.tasks_for(workdir / "probe"), args)
+        pair = 0
+        for i in picked:
+            for rep in range(args.repeats):
+                # ABBA: alternate which arm goes first, so neither always meets a
+                # child that just served the other.
+                for arm in (arms if pair % 2 == 0 else tuple(reversed(arms))):
+                    root = workdir / long_root_name(i, rep, arm, args.repeats)
+                    tasks_long.build_fixture(root, workdir / "snapshot")
+                    agent_configs[root.name] = compaction_cfg
+                    agent, recorder = new_agent(root)
+                    plan.append((arm, tasks_long.tasks_for(root)[i], agent, recorder, rep + 1))
+                pair += 1
     else:
         if args.tier == "hard":
             from tasks_hard import build_fixture as build, tasks_for as make_tasks
@@ -907,25 +1041,28 @@ async def main_async(args) -> int:
             todo = make_tasks(fixture)
             if args.tasks:
                 todo = todo[: args.tasks]
-            plan.extend((arm, task, agent, recorder) for task in todo)
+            plan.extend((arm, task, agent, recorder, 1) for task in todo)
 
     results = []
     started = time.time()
     try:
-        for arm, task, agent, recorder in plan:
+        for arm, task, agent, recorder, repeat in plan:
             set_arm(arm)
             outcome = await run_one(agent, task, recorder=recorder,
                                     timeout_s=timeout_s, reasoning_effort=effort,
                                     session_state=session_state, budget=budget,
                                     queries=queries, process_kwargs=kwargs_for(task))
             outcome["arm"] = arm
+            outcome["repeat"] = repeat
+            outcome["kind"] = task.get("kind")
             outcome["preserve_reasoning"] = entries[arm]["preserve_reasoning"]
             results.append(outcome)
             m = outcome.get("metrics") or {}
             mark = "pass" if outcome["passed"] else ("TIME" if outcome["timed_out"] else "FAIL")
-            print(f"  {mark:4} {outcome['id']:34} {arm:>3} {outcome['seconds']:7.1f}s "
+            print(f"  {mark:4} {outcome['id']:34} {arm:>3} r{repeat} {outcome['seconds']:7.1f}s "
                   f"r={m.get('rounds')} hits={m.get('budget_hits')} "
-                  f"silent={m.get('silent_rounds')} peak={m.get('peak_prompt_tokens')} "
+                  f"silent={m.get('silent_rounds')} both={m.get('silent_budget_hits')} "
+                  f"peak={m.get('peak_prompt_tokens')} "
                   f"{'; '.join(outcome['why'])[:60]}", flush=True)
     finally:
         if approver is not None:
@@ -946,7 +1083,13 @@ async def main_async(args) -> int:
         "step0_only": bool(args.step0_only),
         "arms": list(arms),
         "preserve_reasoning_by_arm": {a: e["preserve_reasoning"] for a, e in entries.items()},
-        "reasoning_effort_sent": effort,
+        # The word asked for; `served_effort` is the rung the rounds ran on.
+        "reasoning_effort_requested": effort,
+        "served_effort": sorted({w for r in results
+                                 for w in (r.get("metrics") or {}).get("served_effort") or []}),
+        "served_effort_rule": "dpc_client_core.gateway.Gateway._served_effort per round",
+        "alias_reasoning_effort_default": entry.get("reasoning_effort"),
+        "repeats": args.repeats,
         "note_budget": budget,
         "compaction": compaction_cfg,
         "max_rounds": max_rounds,
@@ -984,7 +1127,6 @@ async def main_async(args) -> int:
         "provider_type": entry.get("type"),
         "gguf_path": entry.get("gguf_path"),
         "llama_cpp_tag": None,
-        "reasoning_effort": entry.get("reasoning_effort"),
         "temperature": entry.get("temperature"),
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": prov_block.get("code", {}).get("repo", {}).get("sha"),
@@ -1012,7 +1154,9 @@ async def main_async(args) -> int:
     s0 = round_metrics.step0(results) if long_tier else {"reproduced": None, "why": "not a long-tier run"}
     report["step0"] = s0
     if long_tier:
-        print(round_metrics.step0_line(s0))
+        print(round_metrics.step0_line(s0, seed_info))
+        for line in round_metrics.step0_task_lines(s0):
+            print(line)
         if s0["reproduced"] is False:
             print(f"  {s0['why']}")
     if args.step0_only:
@@ -1074,7 +1218,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "the behaviour before the flag), on, or both (every task under each arm)")
     ap.add_argument("--step0-only", action="store_true", dest="step0_only",
                     help=f"the preflight before the A/B: the long tier's off arm on the first "
-                         f"{STEP0_ONLY_TASKS} tasks (or --tasks N), then the step-0 verdict")
+                         f"{STEP0_ONLY_TASKS} tasks (or --tasks N, or --task-ids), then the "
+                         f"step-0 verdict")
     ap.add_argument("--reasoning-effort", default=None,
                     help=f"effort word sent per call (default: none for easy/hard, "
                          f"{LONG_EFFORT!r} for long)")
@@ -1102,6 +1247,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                     help="with --seed-history: refuse to start when a task's round-1 prompt is "
                          f"below N engine tokens (default {round_metrics.SYMPTOM_MIN_PEAK_PROMPT}, "
                          "the step-0 floor)")
+    ap.add_argument("--task-ids", default=None, dest="task_ids", metavar="ID,ID",
+                    help="long tier: run these tasks (comma-separated ids, in this order) "
+                         "instead of the first N")
+    ap.add_argument("--repeats", type=int, default=1, metavar="N",
+                    help="long tier: run each selected task N times per arm, each in a fresh "
+                         "root; step 0 reports the burn as k of N per task (default 1)")
     ap.add_argument("--json", default=None, help="write the report here instead of results_root()/loop/")
     ap.add_argument("--keep", action="store_true", help="keep the throwaway workdir")
     ap.add_argument("--dry-run", action="store_true", dest="dry_run",
@@ -1115,8 +1266,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             ap.error("--step0-only runs the off arm only; drop --preserve-reasoning "
                      + args.preserve_reasoning)
         args.tier = "long"
-        args.tasks = args.tasks or STEP0_ONLY_TASKS
+        if not args.task_ids:
+            args.tasks = args.tasks or STEP0_ONLY_TASKS
     args.tier = args.tier or "easy"
+    if args.repeats < 1:
+        ap.error(f"--repeats must be at least 1, got {args.repeats}")
+    if (args.task_ids or args.repeats > 1) and args.tier != "long":
+        ap.error("--task-ids and --repeats select long-tier task-runs; the easy and hard "
+                 "tiers share one root per arm")
     if args.seed_history and args.tier != "long":
         ap.error(f"--seed-history seeds the long tier only; the {args.tier} tier's tasks "
                  "are scored against a fixture a chat history has nothing to do with")

@@ -103,8 +103,10 @@ def test_a_derivation_that_cannot_find_its_anchor_is_reported_not_crashed(snapsh
     (mutated / T.PKG / "dpc_agent" / "index_keys.py").write_text("# gone\n", encoding="utf-8")
 
     rows = [r for r in T.verify_golds(mutated) if not r["ok"]]
-    assert {(r["task"], r["key"]) for r in rows} == {("long-retrieval-constants", "*")}
-    assert "LookupError" in rows[0]["error"]
+    # Both tasks that read index_keys.py: the retrieval constants and the chain.
+    assert {(r["task"], r["key"]) for r in rows} == {("long-retrieval-constants", "*"),
+                                                     ("long-control-multistep", "*")}
+    assert all("LookupError" in r["error"] for r in rows)
 
 
 # -- the key=value scorer --------------------------------------------------------
@@ -117,6 +119,12 @@ def tasks(tmp_path):
 
 def _gold_answer(t) -> str:
     lines = [f"{k}={str(v).lower()}" for k, v in t["gold"].items()]
+    lines += [f"{k}={v}" for k, v in t.get("gold_paths", {}).items()]
+    # A place inside the first accepted span of each `where` / evidence key.
+    lines += [f"{k}={spans[0][0]}:{spans[0][1]}" for k, spans in t.get("gold_where", {}).items()]
+    places = t.get("gold_places")
+    if places:
+        lines += [f"{k}={p[0][0]}:{p[0][1]}" for k, p in zip(places["keys"], places["places"])]
     extra = ", ".join(t.get("gold_order", [])) + "\n" + " ".join(t.get("gold_names", []))
     return "working notes first\n" + extra + "\n" + "\n".join(lines)
 

@@ -225,6 +225,90 @@ tests use synthetic records only.
   started, not past it. `deepen` in `loop/seed_history.py` does the taking; the
   run that wrote the file was a script outside the repository.
 
+- **Attempt 3 (built 2026-10-06, not yet run).** Two step 0s said no: unseeded
+  (5–6 rounds, peak 24 k) and seeded with the deep seed (round 1 ≈ 67.8 k engine
+  tokens, as the incident's 67 177; 14 and 6 rounds, 0 budget hits, 13/14 and
+  5/6 silent rounds, 120.2 s and 120.5 s per task —
+  `long-qwen3.8_27b-step0-seeded-20261006-124416.json`). The reviewers' reading
+  (Ark, Zcode): depth is necessary but not sufficient — "find these constants"
+  is cheap to re-plan. Ark's rival hypothesis: the burning belongs to a question
+  the model cannot close, not to forgotten reasoning; only an off arm that
+  actually burns can tell the two apart. Attempt 3 adds three tasks to the
+  eight (the eight are unchanged) and four instruments:
+  - *`long-audit-claims`* (kind `incident`) — five audit-style claims about the
+    memory-index and agent-loop code touched by 339028b2 / 5fc168fa / 2407f64f,
+    each answered `claim_N=holds|fixed|partly` plus `claim_N_where=<file>:<line>`.
+    `holds` means the code at the snapshot does what the claim says, `fixed` that
+    it does not (repaired or never true), `partly` that one part is true and
+    another is not. Golds: 1 `fixed` — BM25 keeps full texts in
+    `bm25_texts.json` and rebuilds from them, so the claim is **refuted by the
+    code** and an "the audit is right" answer fails; 2 `holds` —
+    `sync_firewall_settings` is still `pass`; 3 `fixed` — a knowledge write
+    replaces the file's rows (`write_file` → `replace_file_in_index`, two files);
+    4 `holds` — `_meta.json` is keyed by basename in `knowledge/`, so
+    `knowledge/a/notes.md` and `knowledge/b/notes.md` share one entry (two
+    files); 5 `partly` — `repo_delete` drops the index rows but never touches the
+    `_meta.json` entry claim 4 located (returns to earlier findings). A place is
+    scored by span: it passes when the line falls inside any accepted function
+    span of the right file, and every span is recomputed by `derive` from the
+    snapshot like the verdicts.
+  - *`long-control-unresolvable`* — at what prompt size compaction fires for an
+    agent whose config is not in the snapshot. The default (0.8,
+    `CompactionState.__init__`) applies only when the per-agent config names no
+    threshold, and the config is read from `~/.dpc/agents/<id>/config.json`
+    (`loop.py` → `load_agent_config`), which no snapshot holds: insufficient
+    evidence, not conflicting. Scored `settleable=no` plus `evidence_a` /
+    `evidence_b` naming both places in either order; a confident number fails.
+  - *`long-control-multistep`* — answerable, a chain of six dependent lookups
+    (`write_file` → `l5_key` in `index_keys.py` → the key for
+    `knowledge/a/notes.md` → `replace_file_in_index` → preview length →
+    `index_meta.json` / `file_hashes` / `index_meta.py` → hash length), each
+    step's file named by the answer before it.
+  - **What step 0 then says** (`step0_outcome` in `loop/round_metrics.py`),
+    per task whether the off arm burned: only on the unresolvable control →
+    the rival hypothesis; on the audit or multistep task (and not on the
+    control) → the card's mechanism is plausible; on both → not separated;
+    nowhere → "not reproduced outside production", with the residual gap
+    named: a throwaway root has no Johnny system prompt, identity, memory or
+    Active Recall.
+  - **The intersection axis.** Per round, *silent AND at the budget*
+    (`silent_budget_hits`); the incident had 7 — every capped round was a
+    silent one (per the card, not re-read here). It is printed per task, in
+    total, on the step-0 verdict line (`silent AND at budget: N [the incident:
+    7]`) and as `silent_and_hit` in the verdict, beside the two separate axes.
+    It is reported, not added to the symptom rule.
+  - **Repeats.** `--repeats N` (long tier, default 1) runs each selected task N
+    times per arm, each in a fresh root (`long-NN-rK-arm`); step 0 prints
+    `budget-burn reproduced k/N` per task. `--task-ids a,b,c` picks tasks by id.
+    The dry run prints the run-time estimate: task-runs × 120 s (seeded; 45 s
+    unseeded), both from the step 0s of 2026-10-06, with the ceiling at the
+    45-min task timeout — a run that burns takes far longer than one that did
+    not.
+  - **Effort provenance.** `reasoning_effort_requested` (renamed from
+    `reasoning_effort_sent`; no reader of the old key exists in the
+    repository) is the word asked for. `served_effort` is the rung each round
+    ran on, named by production's own rule — `Gateway._served_effort`, called
+    unbound: the provider's word read off the body it sent, else the requested
+    word on the alias's ladder, else the alias's default — per round, per task
+    and as a run total. `alias_reasoning_effort_default` is the alias's own
+    `reasoning_effort` field.
+  - **The seed is named.** A seeded report's `seed_history` carries the path,
+    sha256 and `approximation: {records_beyond_incident_history,
+    exceeds_incident_history}`, and the step-0 verdict line ends
+    `approximation: 73 records beyond the incident's history` for the deep seed.
+  - **The attempt-3 step 0** (estimated ~18 min if nothing burns, ceiling 6.75 h):
+
+        uv run python ../../eval/loop/run_loop_eval.py --step0-only \
+          --task-ids long-audit-claims,long-control-unresolvable,long-control-multistep \
+          --repeats 3 --auto-approve \
+          --seed-history ~/.dpc/eval-results/loop/seeds/incident-2026-10-05-johnny-deep.json
+
+  - **If attempt 3 also says no — the agreed plan, not done:** attempt 4 runs
+    the same tasks with the seed plus Johnny's real `system_prompt` and
+    knowledge in the root. After four "no"s the card is recorded as
+    "plausible, 0 of N reproductions" and `preserve_reasoning` stays off (the
+    owner's decision).
+
 - **The preflight first.** `--step0-only` is the long tier's off arm on the first
   two tasks (`--tasks N` for another count), under the same run conditions as
   the full run, printing only the step-0 verdict. Estimated 20–50 min against
@@ -239,7 +323,7 @@ tests use synthetic records only.
   the flag: the alias carries no such key. `both` runs every task under each arm
   in its own root, order alternating per task; one child serves both arms and the
   flag is set on the live provider before each run, so no model reload between.
-- **The tasks** (`loop/tasks_long.py`, 8 of them) read this repository's own
+- **The tasks** (`loop/tasks_long.py`, 8 of them, 11 since attempt 3) read this repository's own
   source — `git archive` of `dpc_agent/`, `agent_manager.py` and two providers at
   the commit the run starts at, copied into each task root, because the approver
   never answers a sandbox-boundary question. Each names 2–5 files of 92–319 k

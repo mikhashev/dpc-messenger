@@ -41,6 +41,16 @@ SYMPTOM_MIN_BUDGET_SHARE = 0.25
 # a token boundary (the incident's capped rounds read 10 080-10 980 on 10 000).
 BUDGET_HIT_FRACTION = 0.98
 
+# Rounds that were both silent (no visible text) and at the note budget. Per the
+# card's 2026-10-06 entry (relayed in the attempt-3 brief, not re-read here) the
+# incident had 7: every one of its seven capped rounds was also a silent one.
+# Reported beside the two separate axes, never folded into the symptom rule.
+INCIDENT_SILENT_BUDGET_HITS = 7
+
+# Task kinds of the long tier (`tasks_long.py`), read by `step0_outcome`. A task
+# that carries none is a baseline: closable, not built for the attempt-3 split.
+KIND_UNRESOLVABLE = "control-unresolvable"
+
 
 def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
@@ -51,12 +61,16 @@ class RoundRecorder:
 
     def __init__(self) -> None:
         self.rows: List[Dict[str, Any]] = []
+        # Optional: maps the provider's reported effort word to the rung the
+        # round ran on (`run_loop_eval.served_effort_for`, production's rule).
+        self.resolve_effort = None
 
     def record(self, msg: Optional[Dict[str, Any]], usage: Optional[Dict[str, Any]],
                elapsed_s: float) -> None:
         msg = msg or {}
         usage = usage or {}
         thinking = str(msg.get("thinking") or "")
+        reported = usage.get("served_effort")
         self.rows.append({
             "round": len(self.rows) + 1,
             "content_chars": len(str(msg.get("content") or "").strip()),
@@ -69,6 +83,11 @@ class RoundRecorder:
             "thinking_source": usage.get("thinking_source"),
             "completion_tokens": usage.get("completion_tokens"),
             "prompt_tokens": usage.get("prompt_tokens"),
+            # The word the provider read off the body it sent (None: it said
+            # nothing), and the rung production would name for the round.
+            "served_effort_reported": reported,
+            "served_effort": (self.resolve_effort(reported)
+                              if self.resolve_effort is not None else reported),
             "elapsed_s": round(elapsed_s, 2),
         })
 
@@ -187,6 +206,11 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
             if r["prompt_tokens"] is not None and r["prompt_tokens"] >= SYMPTOM_MIN_PEAK_PROMPT]
     deep_hits = (len([n for n in hit_rounds if n in set(deep)])
                  if hit_rounds is not None else None)
+    # The intersection: a round that is silent AND at the budget. Its own axis,
+    # beside the two it is made of — the incident's seven capped rounds were all
+    # silent ones, and a union or either axis alone would not say so.
+    silent_hit_rounds = ([n for n in hit_rounds if n in set(silent)]
+                         if hit_rounds is not None else None)
     return {
         "rounds": len(rows),
         "budget_hits": len(hit_rounds) if hit_rounds is not None else None,
@@ -208,6 +232,12 @@ def summarise_rounds(rows: List[Dict[str, Any]], budget: Optional[int]) -> Dict[
         # among them — the denominator and numerator of the step-0 share.
         "deep_rounds": len(deep),
         "deep_budget_hits": deep_hits,
+        "silent_budget_hits": len(silent_hit_rounds) if silent_hit_rounds is not None else None,
+        "silent_budget_hit_rounds": silent_hit_rounds,
+        # Every rung the rounds ran on, as production names it; [] when no round
+        # carried a word (unknown, not `off`).
+        "served_effort": sorted({str(r["served_effort"]) for r in rows
+                                 if r.get("served_effort")}),
     }
 
 
@@ -227,8 +257,19 @@ def task_symptom(m: Dict[str, Any]) -> Optional[bool]:
             and share is not None and share >= SYMPTOM_MIN_BUDGET_SHARE)
 
 
+def run_label(r: Dict[str, Any], multi: bool) -> str:
+    """What one task-run is called in step 0 and the verdict: the task id, plus
+    its repeat when the run made more than one per task (`--repeats`)."""
+    return f"{r['id']} r{r.get('repeat') or 1}" if multi else r["id"]
+
+
+def _multi(results: List[Dict[str, Any]]) -> bool:
+    return any((r.get("repeat") or 1) > 1 for r in results)
+
+
 def step0(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """The top line: did the off arm reproduce the incident?"""
+    """The top line: did the off arm reproduce the incident — and, per task, in
+    how many of its repeats (k of N)?"""
     off = [r for r in results if r.get("arm") == "off" and r.get("metrics")]
     if not off:
         return {"reproduced": None, "why": "no off-arm run in this report — not measured"}
@@ -241,13 +282,32 @@ def step0(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {"reproduced": None, "budget_hits": None, "peak_prompt": None,
                 "timed_out_off": timed_out,
                 "why": "the provider reported no note or prompt counts — not measured"}
-    yes = [r["id"] for r, f in zip(off, flags) if f]
+    multi = _multi(off)
+    yes: List[str] = []
+    by_task: Dict[str, Dict[str, Any]] = {}
+    for r, f in zip(off, flags):
+        if f and r["id"] not in yes:
+            yes.append(r["id"])
+        t = by_task.setdefault(r["id"], {"kind": r.get("kind"), "runs": 0, "burned": 0,
+                                         "budget_hits": 0, "silent_rounds": 0,
+                                         "silent_budget_hits": 0, "timed_out": 0})
+        t["runs"] += 1
+        t["burned"] += 1 if f else 0
+        t["budget_hits"] += r["metrics"].get("budget_hits") or 0
+        t["silent_rounds"] += r["metrics"].get("silent_rounds") or 0
+        t["silent_budget_hits"] += r["metrics"].get("silent_budget_hits") or 0
+        t["timed_out"] += 1 if r.get("timed_out") else 0
     deep_hits = sum(r["metrics"].get("deep_budget_hits") or 0 for r in off)
     deep_rounds = sum(r["metrics"].get("deep_rounds") or 0 for r in off)
     out = {"reproduced": bool(yes), "budget_hits": sum(hits), "peak_prompt": max(peaks),
            "deep_budget_hits": deep_hits, "deep_rounds": deep_rounds,
            "deep_budget_share": _share(deep_hits, deep_rounds),
-           "tasks_reproducing": yes, "off_tasks": len(off), "timed_out_off": timed_out}
+           "silent_budget_hits": sum(t["silent_budget_hits"] for t in by_task.values()),
+           "tasks_reproducing": yes,
+           "runs_reproducing": [run_label(r, multi) for r, f in zip(off, flags) if f],
+           "by_task": by_task, "off_tasks": len(by_task), "off_runs": len(off),
+           "timed_out_off": timed_out}
+    out["outcome"] = step0_outcome(by_task)
     if not yes:
         out["why"] = (
             f"no off-arm task reached >= {SYMPTOM_MIN_BUDGET_HITS} budget hits on a prompt "
@@ -260,8 +320,51 @@ def step0(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
-def step0_line(s0: Dict[str, Any]) -> str:
-    """The printed step-0 line: the verdict, then both thresholds' numbers."""
+def step0_outcome(by_task: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    """Which hypothesis the off arm's burning points at (attempt 3).
+
+    The card's mechanism — the model re-plans every round because it lost the
+    reasoning that chose the tool — predicts burning on a closable task that
+    needs a plan held in mind. The rival (Ark, 2026-10-06) — burning is what a
+    model does with a question it cannot close — predicts burning on the
+    unresolvable control. Only the pattern across task kinds separates them.
+    """
+    burned = {t.get("kind") or "baseline" for t in by_task.values() if t["burned"]}
+    ran = {t.get("kind") or "baseline" for t in by_task.values()}
+    unresolvable = KIND_UNRESOLVABLE in burned
+    closable = sorted(k for k in burned if k != KIND_UNRESOLVABLE)
+    if not burned:
+        return {"code": "not-reproduced",
+                "text": "burns nowhere: not reproduced outside production (residual gap: a "
+                        "throwaway root has no Johnny system prompt, identity, memory or "
+                        "Active Recall)"}
+    if unresolvable and not closable:
+        return {"code": "rival",
+                "text": "burns only on the unresolvable control: favours the rival hypothesis "
+                        "(the burning belongs to a question the model cannot close, not to "
+                        "lost reasoning)"}
+    if closable and not unresolvable:
+        text = (f"burns on a closable task ({', '.join(closable)}): the card's mechanism is "
+                "plausible")
+        if KIND_UNRESOLVABLE not in ran:
+            text += " (the unresolvable control did not run, so the rival is untested)"
+        return {"code": "mechanism", "text": text}
+    return {"code": "both",
+            "text": f"burns on the unresolvable control and on {', '.join(closable)}: the two "
+                    "hypotheses are not separated"}
+
+
+def seed_beyond_incident(seed: Optional[Dict[str, Any]]) -> int:
+    """Records a seed carries that the incident's prompt did not (a deep seed's
+    `outside_incident_history`); 0 for the incident seed itself or no seed."""
+    deep = (seed or {}).get("deepening") or {}
+    return int(deep.get("outside_incident_history") or 0)
+
+
+def step0_line(s0: Dict[str, Any], seed: Optional[Dict[str, Any]] = None) -> str:
+    """The printed step-0 line: the verdict, both thresholds' numbers, the
+    silent-AND-at-budget intersection, and — for a deep seed — how far the seed
+    reaches past the history the incident actually loaded."""
     head = "incident symptom reproduced in the off arm"
     if s0.get("reproduced") is None:
         return f"{head}: not measured ({s0.get('why')})"
@@ -272,10 +375,28 @@ def step0_line(s0: Dict[str, Any]) -> str:
             f"peak prompt {s0['peak_prompt']} [need >= {SYMPTOM_MIN_PEAK_PROMPT}], "
             f"budget-hit share past {SYMPTOM_MIN_PEAK_PROMPT}: "
             f"{s0.get('deep_budget_hits')}/{s0.get('deep_rounds')} = {share_s} "
-            f"[need >= {SYMPTOM_MIN_BUDGET_SHARE:.2f} in one task])")
+            f"[need >= {SYMPTOM_MIN_BUDGET_SHARE:.2f} in one task], "
+            f"silent AND at budget: {s0.get('silent_budget_hits')} "
+            f"[the incident: {INCIDENT_SILENT_BUDGET_HITS}])")
     if s0.get("tasks_reproducing"):
         line += f"; reproducing: {', '.join(s0['tasks_reproducing'])}"
+    beyond = seed_beyond_incident(seed)
+    if beyond:
+        line += f"; approximation: {beyond} records beyond the incident's history"
     return line
+
+
+def step0_task_lines(s0: Dict[str, Any]) -> List[str]:
+    """Per task: whether the off arm burned, in k of N repeats, and the axes."""
+    lines = []
+    for task, t in (s0.get("by_task") or {}).items():
+        lines.append(f"  {task} [{t.get('kind') or 'baseline'}]: budget-burn reproduced "
+                     f"{t['burned']}/{t['runs']}; budget hits {t['budget_hits']}, silent rounds "
+                     f"{t['silent_rounds']}, silent AND at budget {t['silent_budget_hits']}"
+                     + (f", {t['timed_out']} timed out" if t["timed_out"] else ""))
+    if s0.get("outcome"):
+        lines.append(f"  outcome: {s0['outcome']['text']}")
+    return lines
 
 
 def _fmt(v: Any) -> str:
@@ -297,6 +418,7 @@ AXES = (
     ("rounds", "rounds"),
     ("budget_hits", "budget_hits"),
     ("silent_rounds", "silent_rounds"),
+    ("silent_and_hit", "silent_budget_hits"),
     ("silent_streak", "longest_silent_streak"),
     ("repeat_open", "repeat_opening_share"),
     ("note_tokens", "note_tokens"),
@@ -331,9 +453,12 @@ def verdict_lines(results: List[Dict[str, Any]]) -> List[str]:
     second set is in the regime the flag is meant to change; a total over all
     tasks dilutes it with tasks where there was nothing to change.
     """
+    # One pair per task-run: with `--repeats` the same task runs N times per arm,
+    # and repeat k of the off arm is set beside repeat k of the on arm.
+    multi = _multi(results)
     by_task: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for r in results:
-        by_task.setdefault(r["id"], {})[r.get("arm", "?")] = r
+        by_task.setdefault(run_label(r, multi), {})[r.get("arm", "?")] = r
     paired = {t: arms for t, arms in by_task.items() if "off" in arms and "on" in arms}
     if not paired:
         return ["no task ran under both arms — nothing to set side by side"]
@@ -346,7 +471,7 @@ def verdict_lines(results: List[Dict[str, Any]]) -> List[str]:
 
     lines.append(f"  all {len(paired)} paired task(s)")
     lines.extend(_total_lines(paired, "all tasks"))
-    reproducing = [t for t in (step0(results).get("tasks_reproducing") or []) if t in paired]
+    reproducing = [t for t in (step0(results).get("runs_reproducing") or []) if t in paired]
     if reproducing:
         subset = {t: paired[t] for t in reproducing}
         lines.append(f"  reproducing subset, {len(subset)} task(s): {', '.join(reproducing)}")
