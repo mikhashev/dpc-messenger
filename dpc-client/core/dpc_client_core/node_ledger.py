@@ -173,8 +173,18 @@ def usage_row(
     served_by: Optional[str] = None,
     peer_proved: Optional[bool] = None,
     peer_connection_type: Optional[str] = None,
+    content_chars: Any = None,
+    tool_calls: Any = None,
 ) -> Dict[str, Any]:
     """One row in D3's column order.
+
+    `content_chars` and `tool_calls` say what the model left visible: the
+    length of its stripped assistant text and the number of tool calls in the
+    response, the words `eval/loop/round_metrics.py` already uses for them.
+    A round the server cut inside its reasoning budget then reads 0 and 0 (or
+    0 and 1) beside its thinking count, which a long answer never does. They
+    come from `response_counts`, and None is «the writer did not see that half
+    of the response», never 0, which is «measured, and empty».
 
     A value outside the vocabulary is refused here rather than written: a row
     saying `caller_kind=stranger` would be read by nothing. `gateway` is
@@ -271,6 +281,9 @@ def usage_row(
         raise ValueError(f"peer_proved={peer_proved!r} is not True, False or None")
     if peer_connection_type is not None and not isinstance(peer_connection_type, str):
         raise ValueError(f"peer_connection_type={peer_connection_type!r} is not a connection's word for itself")
+    for name, value in (("content_chars", content_chars), ("tool_calls", tool_calls)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(f"{name}={value!r} is not a non-negative int or None")
     cost = _cost_columns(cost_amount, cost_currency, cost_basis, cost_unpriced_reason)
     row: Dict[str, Any] = {
         "request_id": str(request_id),
@@ -285,6 +298,8 @@ def usage_row(
         "counts_source": counts_source,
         "output_includes_thinking": output_includes_thinking,
         "thinking_source": thinking_source,
+        "content_chars": content_chars,
+        "tool_calls": tool_calls,
         "served_effort": served_effort,
         "peer_proved": peer_proved,
         "peer_connection_type": peer_connection_type,
@@ -303,6 +318,19 @@ def usage_row(
     if conversation_id:
         row["conversation_id"] = conversation_id
     return row
+
+
+def response_counts(text: Any, tool_calls: Any) -> Dict[str, Optional[int]]:
+    """`content_chars` and `tool_calls` for `usage_row`, from what the writer saw.
+
+    `text` is the visible assistant text and `tool_calls` the list of calls in
+    the response; either one None is a half the writer did not see, and its
+    column is then None rather than a 0 nobody measured.
+    """
+    return {
+        "content_chars": None if text is None else len(str(text).strip()),
+        "tool_calls": None if tool_calls is None else len(tool_calls),
+    }
 
 
 def _cost_columns(amount: Any, currency: Any, basis: Any, reason: Any) -> Dict[str, Any]:
@@ -602,6 +630,9 @@ class NodeLedger:
                                 # did not record which host served it».
                                 row.setdefault("served_by", None)
                             row.setdefault("thinking_source", None)
+                            # A row written before the two columns did not see the response.
+                            row.setdefault("content_chars", None)
+                            row.setdefault("tool_calls", None)
                             row.setdefault("served_effort", None)
                             row.setdefault("peer_proved", None)
                             row.setdefault("peer_connection_type", None)

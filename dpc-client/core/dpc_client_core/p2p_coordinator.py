@@ -21,7 +21,7 @@ from .firewall import (
     ServingLists,
     onward_sharing_refusal,
 )
-from .node_ledger import NodeLedger, default_ledger, tariff_amount_for, usage_row
+from .node_ledger import NodeLedger, default_ledger, response_counts, tariff_amount_for, usage_row
 from .guest_vendor_quota import guest_vendor_quota_refusal
 
 logger = logging.getLogger(__name__)
@@ -667,6 +667,9 @@ class P2PCoordinator:
                 tariff_currency=tariff.currency if tariff else None,
                 tariff_at=tariff.at if tariff else None,
                 tariff_amount=tariff_amount,
+                # The `llm_manager` dict: `query` has no `tool_calls` key (null),
+                # `query_messages` always has the list it parsed.
+                **response_counts(result.get("response"), result.get("tool_calls")),
             )
         except Exception:
             logger.error(

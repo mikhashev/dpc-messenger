@@ -26,6 +26,7 @@ from ..node_ledger import (
     TARIFF_FIELDS,
     NodeLedger,
     default_ledger,
+    response_counts,
     stated_output_includes_thinking,
     stated_thinking_source,
     usage_row,
@@ -336,7 +337,7 @@ class DpcLlmAdapter:
             conversation_id=conversation_id,
         )
         self._write_usage_row(
-            usage, started_at=started_at, duration_s=time.monotonic() - clock,
+            usage, response_msg, started_at=started_at, duration_s=time.monotonic() - clock,
             task_id=task_id, conversation_id=conversation_id,
         )
         return response_msg, usage
@@ -382,6 +383,7 @@ class DpcLlmAdapter:
     def _write_usage_row(
         self,
         usage: Dict[str, Any],
+        response_msg: Any,
         *,
         started_at: datetime,
         duration_s: float,
@@ -389,6 +391,14 @@ class DpcLlmAdapter:
         conversation_id: Optional[str],
     ) -> None:
         facts = self._last_call or {}
+        # The message the loop is handed, read as `round_metrics` reads it. Every
+        # route here sets `tool_calls` only when it found some, so its absence is
+        # a measured zero; a message without `content` was not seen and is None.
+        if isinstance(response_msg, dict):
+            visible = response_counts(response_msg.get("content") if "content" in response_msg else None,
+                                      response_msg.get("tool_calls") or [])
+        else:
+            visible = response_counts(None, None)
         try:
             alias = facts.get("alias") or self._provider_alias
             self._last_serving_alias = alias
@@ -436,6 +446,7 @@ class DpcLlmAdapter:
                 **{name: facts.get(name) for name in TARIFF_FIELDS},
                 task_id=task_id,
                 conversation_id=conversation_id,
+                **visible,
             )
         except Exception:
             log.error("Usage row for caller %s was not built", self._caller, exc_info=True)

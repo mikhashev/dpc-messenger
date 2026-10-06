@@ -121,7 +121,8 @@ def test_every_column_of_d3_is_present_in_its_order():
     assert list(row) == [
         "request_id", "caller", "caller_kind", "alias", "model", "route",
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
-        "output_includes_thinking", "thinking_source", "served_effort", "peer_proved",
+        "output_includes_thinking", "thinking_source", "content_chars", "tool_calls",
+        "served_effort", "peer_proved",
         "peer_connection_type",
         "started_at", "duration_s", "billing", "cost_amount", "cost_currency", "cost_basis", "cost_unpriced_reason",
         "task_id", "conversation_id",
@@ -228,7 +229,8 @@ def test_the_tariff_columns_travel_as_one_group_or_not_at_all(tmp_path):
     assert list(priced) == [
         "request_id", "caller", "caller_kind", "alias", "model", "route",
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
-        "output_includes_thinking", "thinking_source", "served_effort", "peer_proved",
+        "output_includes_thinking", "thinking_source", "content_chars", "tool_calls",
+        "served_effort", "peer_proved",
         "peer_connection_type",
         "started_at", "duration_s", "billing", "cost_amount", "cost_currency", "cost_basis", "cost_unpriced_reason",
         "tariff_in", "tariff_out", "tariff_currency", "tariff_at", "tariff_amount", "task_id",

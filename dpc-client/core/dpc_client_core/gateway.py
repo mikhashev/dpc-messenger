@@ -132,6 +132,7 @@ from .node_ledger import (
     TARIFF_FIELDS,
     NodeLedger,
     default_ledger,
+    response_counts,
     stated_output_includes_thinking,
     stated_thinking_source,
     usage_row,
@@ -1236,6 +1237,9 @@ class Gateway:
                 duration_s=duration_s,
                 billing=billing,
                 **price,
+                # `query` returns no `tool_calls` key and leaves that column
+                # null; `query_messages` always returns the list it parsed.
+                **response_counts(result.get("response"), result.get("tool_calls")),
             )
         except Exception:
             # The answer exists and is returned; the missing row is findable by id.
@@ -1520,6 +1524,9 @@ class Gateway:
                 duration_s=duration_s,
                 billing=billing,
                 **tariff,
+                # What reached this node; a host older than DPTP v1.7 sends no
+                # `tool_calls`, and that column stays null.
+                **response_counts(result.get("response"), result.get("tool_calls")),
             )
         except Exception:
             logger.error("Usage row for gateway request %r via peer %s was not built", request_id, peer_id, exc_info=True)
