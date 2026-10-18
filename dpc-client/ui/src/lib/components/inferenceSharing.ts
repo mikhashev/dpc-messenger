@@ -79,7 +79,7 @@ export interface VendorTokenQuota {
  *  holds `local_whisper`; the board (2026-09-10) and the tab before this one
  *  keep Whisper out of inference sharing — it is reached through Transcription
  *  Sharing, which has a gate of its own — so it is classified apart. */
-export const LOCAL_SERVING_TYPES: ReadonlySet<string> = new Set(['ollama', 'llamacpp_server']);
+export const LOCAL_SERVING_TYPES: ReadonlySet<string> = new Set(['ollama', 'llamacpp_server', 'strata']);
 /** A vendor type spends money and needs a ceiling (VENDOR_PROVIDER_TYPES). */
 export const VENDOR_SERVING_TYPES: ReadonlySet<string> = new Set([
   'openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'gemini', 'github_models',

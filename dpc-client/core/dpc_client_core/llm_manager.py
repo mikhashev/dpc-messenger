@@ -14,7 +14,7 @@ from .providers import (
     OllamaProvider, OLLAMA_VISION_MODELS, OLLAMA_THINKING_MODELS,
     OpenAICompatibleProvider, AnthropicProvider, ZaiProvider,
     DeepSeekProvider, NeuralDeepProvider,
-    LlamaServerProvider,
+    LlamaServerProvider, StrataProvider,
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
@@ -57,6 +57,7 @@ PROVIDER_MAP = {
     "deepseek": DeepSeekProvider,  # DeepSeek pay-per-token (OpenAI-compatible, V4 thinking)
     "neuraldeep": NeuralDeepProvider,  # NeuralDeep gateway (OpenAI-compatible, RUB-priced)
     "llamacpp_server": LlamaServerProvider,  # DPC-owned llama-server child (ADR-040 route b2)
+    "strata": StrataProvider,  # DPC-owned Strata launcher child (ADR-044)
     "local_whisper": LocalWhisperProvider,  # v0.13.1+: Local Whisper transcription
     "dpc_agent": DpcAgentProvider,  # Embedded autonomous AI agent
     "remote_peer": RemotePeerProvider,  # v0.18.0+: Remote peer inference

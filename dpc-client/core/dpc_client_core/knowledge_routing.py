@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Providers that answer from this machine. `openai_compatible` is deliberately
 # absent: its base_url may name LM Studio next door or a service on the other
 # side of the world, and this list decides what may see a whole conversation.
-LOCAL_PROVIDER_TYPES = frozenset({"ollama", "llamacpp_server"})
+LOCAL_PROVIDER_TYPES = frozenset({"ollama", "llamacpp_server", "strata"})
 
 # The role's key in providers.json, beside default_provider / vision_provider /
 # voice_provider / agent_provider.

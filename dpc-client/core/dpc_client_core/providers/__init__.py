@@ -8,6 +8,7 @@ from .zai_provider import ZaiProvider
 from .deepseek_provider import DeepSeekProvider
 from .neuraldeep_provider import NeuralDeepProvider
 from .llamacpp_server_provider import LlamaServerProvider
+from .strata_provider import StrataProvider
 from .whisper_provider import LocalWhisperProvider
 from .remote_peer_provider import RemotePeerProvider
 from .dpc_agent_provider import DpcAgentProvider
@@ -30,6 +31,7 @@ __all__ = [
     "DeepSeekProvider",
     "NeuralDeepProvider",
     "LlamaServerProvider",
+    "StrataProvider",
     "LocalWhisperProvider",
     "RemotePeerProvider",
     "DpcAgentProvider",

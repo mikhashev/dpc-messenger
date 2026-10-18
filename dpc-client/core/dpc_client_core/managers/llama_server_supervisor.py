@@ -615,9 +615,18 @@ class LlamaServerSupervisor:
     deadline, capture /props, read /slots through, drain, stop.
     """
 
+    # The defaults this class fills under an alias's config. A subclass that
+    # starts a different child (ADR-044's Strata launcher) names its own.
+    DEFAULTS: Dict[str, Any] = DEFAULTS
+
+    @classmethod
+    def merge_config(cls, config: Dict[str, Any]) -> Dict[str, Any]:
+        """The alias config over this class's defaults; a None value is an absence."""
+        return {**cls.DEFAULTS, **{k: v for k, v in config.items() if v is not None}}
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         self.alias = alias
-        self.config = {**DEFAULTS, **{k: v for k, v in config.items() if v is not None}}
+        self.config = self.merge_config(config)
         self.port: Optional[int] = None
         self.props: Optional[Dict[str, Any]] = None
         self._proc: Optional[asyncio.subprocess.Process] = None

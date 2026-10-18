@@ -129,26 +129,45 @@ class LlamaServerProvider(DeepSeekProvider):
 
     RETRY_LABEL = "llama-server"
 
-    def __init__(self, alias: str, config: Dict[str, Any]):
-        # AIProvider directly, not DeepSeekProvider.__init__: there is no API
-        # key to require, and DeepSeek's effort normalisation must not run on
-        # the configured word (see the module docstring for the xhigh fold).
-        AIProvider.__init__(self, alias, config)
+    # The child this provider owns. ADR-044's Strata type names its own
+    # supervisor, flag set and config check through these four hooks and keeps
+    # everything else here: adoption, retirement, the registry, the dialect.
+    SUPERVISOR_CLASS = LlamaServerSupervisor
+    DEFAULT_REASONING_BUDGET_MESSAGE = REASONING_BUDGET_MESSAGE
 
+    @classmethod
+    def _check_config(cls, alias: str, config: Dict[str, Any]) -> None:
         if not config.get("gguf_path"):
             raise ValueError(
                 f"llamacpp_server provider '{alias}' needs a gguf_path pointing "
                 "at the model file to serve"
             )
 
+    @classmethod
+    def _flag_signature(cls, config: Dict[str, Any]) -> tuple:
+        return _flags_of(config)
+
+    def _read_effort_dictionary(self, config: Dict[str, Any]):
+        return gguf_effort_dictionary(config.get("gguf_path") or "")
+
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        # AIProvider directly, not DeepSeekProvider.__init__: there is no API
+        # key to require, and DeepSeek's effort normalisation must not run on
+        # the configured word (see the module docstring for the xhigh fold).
+        AIProvider.__init__(self, alias, config)
+
+        self._check_config(alias, config)
+
         # Adopt a live child left by a previous load of the same alias when its
         # flags are unchanged (a reload must not re-load a 30 GB model), and
-        # retire it loudly when they are not.
+        # retire it loudly when they are not. A child of another class is never
+        # adopted: an alias whose type changed keeps its name and nothing else.
         previous = _ACTIVE_SUPERVISORS.get(alias)
         if (
             previous is not None
             and previous.props is not None
-            and _flags_of(previous.config) == _flags_of(config)
+            and type(previous) is self.SUPERVISOR_CLASS
+            and self._flag_signature(previous.config) == self._flag_signature(config)
         ):
             self.supervisor = previous
             # Adoption keeps the running child, and used to keep the whole old
@@ -160,10 +179,7 @@ class LlamaServerProvider(DeepSeekProvider):
             # equal by the branch condition above, so re-merging here cannot
             # change what the live child was started with; it only lets the
             # non-flag values move without paying for a model re-load.
-            previous.config = {
-                **SUPERVISOR_DEFAULTS,
-                **{k: v for k, v in config.items() if v is not None},
-            }
+            previous.config = previous.merge_config(config)
             logger.info(
                 "llamacpp_server '%s': adopting the already-running llama-server "
                 "(flags unchanged by the config reload)",
@@ -176,7 +192,7 @@ class LlamaServerProvider(DeepSeekProvider):
                     "old child will be stopped and the model re-loaded",
                     alias,
                 )
-            self.supervisor = LlamaServerSupervisor(alias, config)
+            self.supervisor = self.SUPERVISOR_CLASS(alias, config)
             if previous is not None:
                 # The successor must not spend VRAM until the predecessor has
                 # finished its in-flight work and released the card — this card
@@ -217,7 +233,7 @@ class LlamaServerProvider(DeepSeekProvider):
         # Whether the words above came from this model or from the table. The UI
         # may only quote them as the model's when they were read from it.
         self._template_efforts_source = "fallback"
-        dictionary = gguf_effort_dictionary(config.get("gguf_path") or "")
+        dictionary = self._read_effort_dictionary(config)
         if dictionary:
             self._template_efforts, template_default = dictionary
             self._template_default = template_default
@@ -229,7 +245,7 @@ class LlamaServerProvider(DeepSeekProvider):
         self._reasoning_budget = config.get("reasoning_budget_tokens")
         # Absent means the module default; an empty string means no message.
         self._reasoning_budget_message = config.get(
-            "reasoning_budget_message", REASONING_BUDGET_MESSAGE
+            "reasoning_budget_message", self.DEFAULT_REASONING_BUDGET_MESSAGE
         )
         # Whether a replayed tool-call turn carries the notes that chose it
         # (`reasoning_content`, which this model's template renders as a prior-turn

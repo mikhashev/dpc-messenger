@@ -95,7 +95,7 @@ SERVING_ALIAS_KEY = 'serving_alias'
 # Which provider types may stand in which list, by the resource they spend:
 # a local type's is the card, a vendor type's is money and needs a ceiling.
 # The last two are somebody else's model and belong in neither (D7 part 1).
-LOCAL_PROVIDER_TYPES = frozenset({'ollama', 'llamacpp_server', 'local_whisper'})
+LOCAL_PROVIDER_TYPES = frozenset({'ollama', 'llamacpp_server', 'strata', 'local_whisper'})
 VENDOR_PROVIDER_TYPES = frozenset({
     'openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'gemini', 'github_models',
     'gigachat',

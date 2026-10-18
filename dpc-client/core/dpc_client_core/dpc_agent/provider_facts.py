@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 # The same classes firewall.py uses for the serving lists.
-LOCAL_TYPES = frozenset({"ollama", "llamacpp_server", "local_whisper"})
+LOCAL_TYPES = frozenset({"ollama", "llamacpp_server", "strata", "local_whisper"})
 VENDOR_TYPES = frozenset({
     "openai_compatible", "anthropic", "zai", "deepseek", "neuraldeep", "gemini", "github_models",
     "gigachat",
