@@ -118,7 +118,7 @@ card.** Every point is Mike's call, 2026-10-18.
    `--config` file (point 6). DPC stores a *tested version* with its date in the provider
    config. At start the supervisor reads the real engine's version from `/metrics`
    `engine.version`, **warns** on a mismatch with the tested version (does not refuse) and
-   runs a smoke — `/health`, `/props`, one tool-call request — which counts only after the
+   runs a smoke — `/health`, `/props`, two tool-call requests — which counts only after the
    version check, because the mock engine would pass the rest. The smoke runs once per
    start and forces one trivial tool by name twice, both with `strata_checkpoint: false`
    so neither parks anything: first with thinking off, then with thinking on at the effort
@@ -129,17 +129,24 @@ card.** Every point is Mike's call, 2026-10-18.
    call's opening itself — so a short xhigh thinking phase cannot spend the window and
    read as no call; an alias whose effort is off skips it. A start whose launcher names
    no version, or whose smoke gets `/health` other than 200, `/props` other than an
-   object, an HTTP error or no tool call at all from either call, is failed closed like an
+   object, an HTTP error, or no tool call from either call (one exception below), is failed closed like an
    engine death (point 3: stopped, not started again until a person resets it). **No tool
    call is fatal, not a degradation** (Zcode's review): every round of the agent loop
    sends tools (`dpc_agent/loop.py` passes its tool schemas on every call), so an engine
    that cannot return a call cannot serve one agent round; and Strata's `forced_call`
    (`serve/frontend.py`) writes the call's opening into the reply itself, so a live engine
    cannot answer a forced call with prose — when it does, the build is a mock or broken.
-   Two outcomes only warn and serve: a tool call that comes back with other arguments,
-   and a call with **no answer within `smoke_timeout_s`** (120 s; Ark's and Zcode's
-   review) — `/health` answers before the model is loaded, so the first call is the
-   request that pulls the shards in, and a slow load is not a broken engine. Falsifier (Ark's review):
+   Three outcomes only warn and serve: a tool call that comes back with other arguments;
+   a call with **no answer within `smoke_timeout_s`** (120 s; Ark's and Zcode's review) —
+   `/health` answers before the model is loaded, so the first call is the request that
+   pulls the shards in, and a slow load is not a broken engine; and a **thinking-on** call
+   with no tool call whose `finish_reason` is `length` (Ark's and Zcode's review,
+   reconciled) — the thinking spent the window before the call's opening was written, a
+   budget question rather than an engine that cannot call. No tool call with any other
+   `finish_reason` (`stop` among them) fails closed, and the thinking-off call keeps its
+   rule whatever the reason: 64 tokens with nothing to think. Every verdict on a missing
+   call, warning or refusal, names the `finish_reason` and the completion tokens (and the
+   reasoning tokens when the reply carries the split). Falsifier (Ark's review):
    if two Strata updates in a row break our launch, revisit — DPC pins a tag (checkout,
    then `START-HERE.bat --update`) and installs it as it does llama.cpp, or Strata goes
    back to user-started.

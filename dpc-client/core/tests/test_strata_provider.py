@@ -341,3 +341,55 @@ class TestTheEffortIsAlwaysOnTheWire:
         with caplog.at_level(logging.WARNING, logger="dpc_client_core.providers.strata_provider"):
             q._build_extra_body()
         assert len([r for r in caplog.records if "no effort word to send" in r.getMessage()]) == 2
+
+
+class TestAnOwnersWordTheTemplateRefuses:
+    """Ark's and Zcode's review: a word the chat template does not accept was
+    replaced by its default in silence. The call warns, once per provider; the
+    save refuses the word; an alias saved before that still loads, and warns."""
+
+    def test_the_call_warns_once_naming_the_word_the_template_words_and_the_substitute(
+        self, tmp_path, caplog,
+    ):
+        import logging
+
+        p = StrataProvider("flash", _config(_install(tmp_path), reasoning_effort="bogus"))
+        with caplog.at_level(logging.WARNING, logger="dpc_client_core.providers.strata_provider"):
+            bodies = [p._build_extra_body() for _ in range(3)]
+        assert all(b["chat_template_kwargs"] == {"reasoning_effort": "xhigh"} for b in bodies)
+        warned = [r.getMessage() for r in caplog.records if "is not a word the chat template" in r.getMessage()]
+        assert len(warned) == 1, warned
+        assert "'bogus'" in warned[0] and "xhigh/medium/low" in warned[0] and "sending xhigh" in warned[0]
+
+    def test_a_per_call_word_the_template_refuses_warns_too(self, tmp_path, caplog):
+        import logging
+
+        p = StrataProvider("flash", _config(_install(tmp_path)))
+        with caplog.at_level(logging.WARNING, logger="dpc_client_core.providers.strata_provider"):
+            assert p._build_extra_body("weird")["chat_template_kwargs"] == {"reasoning_effort": "xhigh"}
+            p._build_extra_body()
+        assert len([r for r in caplog.records if "effort 'weird'" in r.getMessage()]) == 1
+
+    def test_the_save_refuses_the_word_and_takes_the_template_words(self, tmp_path):
+        from dpc_client_core.service import CoreService
+
+        root = _install(tmp_path)
+        bad = CoreService._validate_providers_config(
+            SimpleNamespace(), {"default_provider": "flash",
+                                "providers": [_config(root, reasoning_effort="bogus")]})
+        assert len(bad) == 1 and "reasoning_effort: 'bogus'" in bad[0] and "xhigh/medium/low" in bad[0]
+        for word in ("low", "high", "off", None):
+            assert CoreService._validate_providers_config(
+                SimpleNamespace(), {"default_provider": "flash",
+                                    "providers": [_config(root, reasoning_effort=word)]}) == [], word
+
+    def test_an_alias_saved_before_the_check_still_loads_and_warns(self, tmp_path, caplog):
+        import logging
+
+        from dpc_client_core.managers.strata_supervisor import strata_config_errors
+
+        config = _config(_install(tmp_path), reasoning_effort="bogus")
+        assert strata_config_errors(config) == [], "the load's check reads no disk"
+        with caplog.at_level(logging.WARNING, logger="dpc_client_core.providers.strata_provider"):
+            StrataProvider("flash", config)
+        assert any("reasoning_effort: 'bogus'" in r.getMessage() for r in caplog.records)

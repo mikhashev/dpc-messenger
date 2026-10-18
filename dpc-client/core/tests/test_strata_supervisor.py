@@ -753,3 +753,59 @@ class TestTheSmokeRunsTheAgentsPath:
                 assert p.supervisor.smoke_effort() == want
         finally:
             _ACTIVE_SUPERVISORS.clear()
+
+
+def _no_call_reply(finish_reason, completion_tokens, reasoning_tokens=None):
+    """A completion with no tool call, its finish_reason and usage as the launcher reports them."""
+    usage = {"prompt_tokens": 40, "completion_tokens": completion_tokens}
+    if reasoning_tokens is not None:
+        usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+    return {"choices": [{"message": {"role": "assistant", "content": ""},
+                         "finish_reason": finish_reason}], "usage": usage}
+
+
+class TestNoCallIsReadByItsFinishReason:
+    """Ark's and Zcode's review: a thinking call that spent its window before
+    the call was written is a budget question and warns; no call for any other
+    reason fails closed. Every verdict names the finish_reason and the tokens."""
+
+    @pytest.mark.asyncio
+    async def test_a_thinking_call_cut_at_length_warns_and_serves(self, tmp_path, home, monkeypatch, caplog):
+        sup = _sup(_install(tmp_path))
+        sup.smoke_effort = lambda: {"reasoning_effort": "xhigh"}
+        spawned = _started_through_the_real_launch(
+            sup, monkeypatch, metrics=_VERSIONED,
+            smoke=[_tool_call_reply(), _no_call_reply("length", 1024, 1010)])
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            await sup.ensure_running()
+        assert sup.failure is None and sup._proc is spawned[0]
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("finish_reason length" in m and "1024 completion tokens (1010 reasoning)" in m
+                   and "serving anyway" in m for m in warned), warned
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_thinking_call_that_stopped_without_a_call_fails_closed(self, tmp_path, home, monkeypatch):
+        sup = _sup(_install(tmp_path))
+        sup.smoke_effort = lambda: {"reasoning_effort": "low"}
+        _started_through_the_real_launch(
+            sup, monkeypatch, metrics=_VERSIONED,
+            smoke=[_tool_call_reply(), _no_call_reply("stop", 37)])
+        with pytest.raises(LlamaServerError, match="will not start it again"):
+            await sup.ensure_running()
+        reason = sup.failure["reason"]
+        assert "thinking on (low) call came back with no tool call" in reason
+        assert "finish_reason stop" in reason and "37 completion tokens" in reason
+
+    @pytest.mark.asyncio
+    async def test_the_thinking_off_call_cut_at_length_still_fails_closed(self, tmp_path, home, monkeypatch):
+        sup = _sup(_install(tmp_path))
+        sup.smoke_effort = lambda: {"reasoning_effort": "low"}
+        _started_through_the_real_launch(
+            sup, monkeypatch, metrics=_VERSIONED, smoke=_no_call_reply("length", 64))
+        with pytest.raises(LlamaServerError, match="will not start it again"):
+            await sup.ensure_running()
+        reason = sup.failure["reason"]
+        assert "thinking-off call came back with no tool call" in reason
+        assert "finish_reason length" in reason and "64 completion tokens" in reason
+        assert len(sup.smoke_posts) == 1

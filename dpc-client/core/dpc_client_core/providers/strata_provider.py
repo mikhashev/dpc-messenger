@@ -12,11 +12,13 @@ import asyncio
 import json
 import logging
 import time
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..managers.llama_server_supervisor import effort_dictionary_of
-from ..managers.strata_supervisor import StrataSupervisor, peer_being_served, strata_config_errors
+from ..managers.strata_supervisor import (
+    StrataSupervisor, peer_being_served, reasoning_effort_error, strata_chat_template,
+    strata_config_errors,
+)
 from .llamacpp_server_provider import _ACTIVE_SUPERVISORS, LlamaServerProvider, card_holder
 
 logger = logging.getLogger(__name__)
@@ -54,7 +56,14 @@ class StrataProvider(LlamaServerProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         # Whether the call that went out with no effort word has been reported.
         self._no_effort_word_warned = False
+        # Whether an owner's word the template refuses has been reported.
+        self._dropped_word_warned = False
         super().__init__(alias, config)
+        # The save refuses such a word (`strata_config_errors`); an alias saved
+        # before that check still loads, and says so here.
+        word_error = reasoning_effort_error(config)
+        if word_error:
+            logger.warning("strata '%s': %s", alias, word_error)
         # The start smoke's thinking call runs what a tools call of this alias
         # sends (ADR-044 point 5). An adopted supervisor takes the newest alias's.
         self.supervisor.smoke_effort = self._tools_call_template_kwargs
@@ -84,15 +93,7 @@ class StrataProvider(LlamaServerProvider):
 
         A failure leaves the fallback table, as for a GGUF without a template."""
         try:
-            install = Path(str(config.get("strata_install_dir") or ""))
-            base = Path(str(config.get("strata_base_config") or ""))
-            if not base.is_absolute():
-                base = install / base
-            cfg = json.loads(base.read_text(encoding="utf-8-sig"))
-            tokenizer = Path(str(cfg.get("tokenizer") or ""))
-            if not tokenizer.is_absolute():
-                tokenizer = Path(str(cfg.get("cwd") or install)) / tokenizer
-            template = (tokenizer / "chat_template.jinja").read_text(encoding="utf-8")
+            template = strata_chat_template(config)
         except (OSError, ValueError, TypeError, AttributeError) as e:
             logger.info(
                 "strata '%s': chat template unreadable from the base config (%s) — "
@@ -120,6 +121,18 @@ class StrataProvider(LlamaServerProvider):
             word = self._template_default
             if word not in self._template_efforts:
                 word = "xhigh" if "xhigh" in self._template_efforts else None
+            owner = self._reasoning_effort_raw if reasoning_effort is None else reasoning_effort
+            owner = str(owner or "").strip().lower()
+            if owner and not self._dropped_word_warned:
+                # The owner named a word and the template refused it; what goes
+                # out instead is a word nobody chose (Ark's and Zcode's review).
+                self._dropped_word_warned = True
+                logger.warning(
+                    "strata '%s': effort '%s' is not a word the chat template accepts "
+                    "(%s, from the %s) — sending %s in its place",
+                    self.alias, owner, "/".join(self._template_efforts),
+                    self._template_efforts_source, word or "no word",
+                )
             if word:
                 body["chat_template_kwargs"] = {"reasoning_effort": word}
             elif not self._no_effort_word_warned:

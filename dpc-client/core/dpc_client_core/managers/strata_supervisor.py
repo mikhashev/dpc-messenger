@@ -31,7 +31,8 @@ What differs, by ADR-044 point:
   Then, once per start, the smoke: `/health`, `/props` and two forced tool
   calls, thinking off and then on at the alias's effort. An HTTP error or no
   tool call at all fails closed like the missing version; a call that timed
-  out or came back with other arguments only warns.
+  out or came back with other arguments only warns, and so does a thinking
+  call with no tool call whose finish_reason is `length` (the window spent).
 - 2. `stop` waits for the card's free VRAM to come back to what it was before
   the start; if it does not, an engine outlived the launcher (`contain()` can
   fail harmlessly) and the card is not claimed free.
@@ -276,7 +277,11 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
 
     The required keys, the cache budget's type and the model parameters always;
     with `check_paths`, also that every path the alias sets exists (a relative
-    base config is read against the install dir, as the supervisor reads it)."""
+    base config is read against the install dir, as the supervisor reads it),
+    and that `reasoning_effort` is a word the chat template accepts. Both read
+    the disk, so both are the save's checks only: the load calls this without
+    `check_paths`, and an alias saved before the word check is not dropped
+    from the loaded set — its provider warns instead (`StrataProvider`)."""
     errors: List[str] = []
     missing = [k for k in ("strata_install_dir", "strata_base_config") if not config.get(k)]
     if missing:
@@ -316,7 +321,59 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
                 path = install / path
             if not path.exists():
                 errors.append(f"{key}: {path} does not exist")
+        word_error = reasoning_effort_error(config)
+        if word_error:
+            errors.append(word_error)
     return errors
+
+
+def strata_chat_template(config: Dict[str, Any]) -> str:
+    """The text of `<tokenizer>/chat_template.jinja` the alias's base config names.
+
+    A relative base config is read against the install dir, a relative
+    tokenizer against the base config's `cwd` (else the install dir), as
+    Strata reads them. Raises OSError, ValueError, TypeError or AttributeError."""
+    install = Path(str(config.get("strata_install_dir") or ""))
+    base = Path(str(config.get("strata_base_config") or ""))
+    if not base.is_absolute():
+        base = install / base
+    cfg = json.loads(base.read_text(encoding="utf-8-sig"))
+    tokenizer = Path(str(cfg.get("tokenizer") or ""))
+    if not tokenizer.is_absolute():
+        tokenizer = Path(str(cfg.get("cwd") or install)) / tokenizer
+    return (tokenizer / "chat_template.jinja").read_text(encoding="utf-8")
+
+
+def reasoning_effort_error(config: Dict[str, Any]) -> Optional[str]:
+    """Why the alias's `reasoning_effort` is a word its chat template refuses, or None.
+
+    The provider's own rule (`_template_effort`): `off`, a template word, or a
+    fleet word folding onto one passes. Anything else the provider drops and
+    sends the template's default in its place (`StrataProvider._build_extra_body`),
+    so the owner's word never reaches the engine. None too when the template is
+    unreadable or unguarded: there is nothing to check the word against, and
+    the provider falls back to its table."""
+    from ..providers.base import REASONING_OFF
+    from ..providers.llamacpp_server_provider import FLEET_TO_TEMPLATE
+
+    word = str(config.get("reasoning_effort") or "").strip().lower()
+    if not word or word == REASONING_OFF:
+        return None
+    try:
+        found = _base.effort_dictionary_of(strata_chat_template(config))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if not found:
+        return None
+    words, default = found
+    if word in words or FLEET_TO_TEMPLATE.get(word) in words:
+        return None
+    sent = default if default in words else ("xhigh" if "xhigh" in words else None)
+    return (
+        f"reasoning_effort: {word!r} is not a word the model's chat template accepts "
+        f"({'/'.join(words)}); the provider would drop it and send "
+        f"{sent or 'no word'} instead"
+    )
 
 
 def read_base_config(path: Path) -> Dict[str, Any]:
@@ -547,6 +604,19 @@ def _smoke_error(step: str, elapsed: float, e: BaseException) -> str:
     detail = getattr(getattr(e, "response", None), "text", None)
     return (f"{step + ' ' if step else ''}after {elapsed:.1f}s: {type(e).__name__}: {e}"
             + (f" — {detail[:300]}" if detail else ""))
+
+
+def _smoke_tokens(reply: Any) -> str:
+    """What a smoke reply spent, from its `usage`: completion tokens, and the
+    reasoning tokens when the reply carries the split."""
+    usage = (reply or {}).get("usage") if isinstance(reply, dict) else None
+    usage = usage if isinstance(usage, dict) else {}
+    words = f"{usage.get('completion_tokens', 'unreported')} completion tokens"
+    details = usage.get("completion_tokens_details")
+    reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    if reasoning is None:
+        reasoning = usage.get("reasoning_tokens")
+    return words + (f" ({reasoning} reasoning)" if reasoning is not None else "")
 
 
 def exit_code_words(text: str) -> Optional[str]:
@@ -1066,7 +1136,10 @@ class StrataSupervisor(LlamaServerSupervisor):
         answers before the model is loaded, so the first call is the request
         that loads it, and a slow disk is not a broken engine), and a call
         that came back with another name or other arguments (the engine
-        answered with a call, which is what the smoke asks of it)."""
+        answered with a call, which is what the smoke asks of it), and a
+        thinking call with no tool call and finish_reason `length` (the
+        thinking spent the window; Ark's and Zcode's review). Every verdict on
+        a missing call names the finish_reason and the tokens spent."""
         t0 = time.monotonic()
         step = "/health"
         try:
@@ -1088,7 +1161,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             results.append((f"thinking on: {effort}", None))
         else:
             label = f"thinking on ({(effort or {}).get('reasoning_effort') or 'template default'})"
-            results.append((label, await self._smoke_call(smoke_request(model, True, effort))))
+            results.append((label, await self._smoke_call(smoke_request(model, True, effort), thinking=True)))
             if results[1][1][0] == "failed":
                 return f"the {label} call {results[1][1][1]}"
         warn = any(r is not None and r[0] != "ok" for _label, r in results)
@@ -1114,18 +1187,24 @@ class StrataSupervisor(LlamaServerSupervisor):
             return "the alias's effort is off"
         return kwargs
 
-    async def _smoke_call(self, body: Dict[str, Any]) -> tuple:
+    async def _smoke_call(self, body: Dict[str, Any], thinking: bool = False) -> tuple:
         """One forced tool call of the smoke -> (verdict, words).
 
-        `ok`, `surprise` (another name or other arguments) and `timeout` serve;
-        `failed` (an HTTP error, any other exception, no tool call) does not."""
+        `ok`, `surprise` (another name or other arguments), `timeout` and
+        `window` serve; `failed` (an HTTP error, any other exception, no tool
+        call) does not. `window` is the thinking call's only: no tool call
+        with finish_reason `length`, the thinking having spent the window
+        before the call's opening was written — a budget question, not an
+        engine that cannot call. With any other finish_reason, or on the
+        thinking-off call (64 tokens and nothing to think), no call fails."""
         import httpx
 
         t0 = time.monotonic()
         timeout = float(self.config.get("smoke_timeout_s") or 120.0)
         try:
             reply = await self._post("/v1/chat/completions", body, timeout)
-            calls = (((reply or {}).get("choices") or [{}])[0].get("message") or {}).get("tool_calls")
+            choice = ((reply or {}).get("choices") or [{}])[0] or {}
+            calls = (choice.get("message") or {}).get("tool_calls")
         except httpx.TimeoutException as e:
             return "timeout", (
                 f"no answer within {timeout:.0f}s ({type(e).__name__}) — the first request after "
@@ -1135,7 +1214,14 @@ class StrataSupervisor(LlamaServerSupervisor):
             return "failed", _smoke_error("", time.monotonic() - t0, e)
         elapsed = time.monotonic() - t0
         if not calls:
-            return "failed", f"came back with no tool call ({elapsed:.1f}s)"
+            finish = choice.get("finish_reason")
+            spent = f"finish_reason {finish or 'absent'}, {_smoke_tokens(reply)}, {elapsed:.1f}s"
+            if thinking and finish == "length":
+                return "window", (
+                    f"no tool call ({spent}) — the window ran out while thinking, before the "
+                    "call was written; the budget or max_tokens is short, not the engine"
+                )
+            return "failed", f"came back with no tool call ({spent})"
         fn = (calls[0] or {}).get("function") or {}
         try:
             args = json.loads(fn.get("arguments") or "{}")
