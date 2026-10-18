@@ -751,7 +751,7 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
 
         if args.tier == "long":
             import tasks_long
-            commit = tasks_long.resolve_commit(REPO_ROOT, args.snapshot_commit or "HEAD")
+            commit = tasks_long.resolve_commit(REPO_ROOT, args.snapshot_commit or tasks_long.GOLD_COMMIT)
             info = tasks_long.snapshot_source(REPO_ROOT, commit, tmp_path / "snapshot")
             print(f"  snapshot: {commit} ({info['files']} files, {info['bytes']} bytes) "
                   f"gold commit {tasks_long.GOLD_COMMIT[:12]}")
@@ -1027,7 +1027,7 @@ async def main_async(args) -> int:
     compaction_cfg: Optional[Dict[str, Any]] = None
     if long_tier:
         import tasks_long
-        commit = tasks_long.resolve_commit(REPO_ROOT, args.snapshot_commit or "HEAD")
+        commit = tasks_long.resolve_commit(REPO_ROOT, args.snapshot_commit or tasks_long.GOLD_COMMIT)
         snapshot_info = tasks_long.snapshot_source(REPO_ROOT, commit, workdir / "snapshot")
         gold_rows = tasks_long.verify_golds(workdir / "snapshot")
         bad = [r for r in gold_rows if not r["ok"]]
@@ -1345,7 +1345,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          f"{LONG_COMPACTION_THRESHOLD}, local alias as summariser; off = disabled "
                          "(deterministic truncation after round 8)")
     ap.add_argument("--snapshot-commit", default=None,
-                    help="long tier: commit to snapshot (default HEAD at start)")
+                    help="long tier: commit to snapshot (default GOLD_COMMIT: since 2026-10-18 HEAD "
+                         "no longer matches the golds; Mike's call on Ark's proposal)")
     ap.add_argument("--task-timeout-minutes", type=float, default=LONG_TASK_TIMEOUT_MIN,
                     help="long tier: a task past this is recorded as a timeout")
     ap.add_argument("--auto-approve", action="store_true",

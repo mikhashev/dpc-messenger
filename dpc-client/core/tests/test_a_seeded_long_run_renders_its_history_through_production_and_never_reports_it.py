@@ -371,7 +371,7 @@ def snapshot(tmp_path_factory):
     if not _git_works():
         pytest.skip("git archive of this repository unavailable")
     dest = tmp_path_factory.mktemp("seeded-long") / "snapshot"
-    T.snapshot_source(REPO_ROOT, T.resolve_commit(REPO_ROOT, "HEAD"), dest)
+    T.snapshot_source(REPO_ROOT, T.resolve_commit(REPO_ROOT, T.GOLD_COMMIT), dest)
     return dest
 
 
