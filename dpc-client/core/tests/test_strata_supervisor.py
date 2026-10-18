@@ -382,6 +382,86 @@ class TestTheVersionCheck:
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+def _started_through_the_real_launch(sup, monkeypatch, metrics, props=None):
+    """Spawn, /health, /props and /metrics faked at the supervisor's seams, so
+    `ensure_running` and both `_launch`es run for real. Returns the spawned procs."""
+    monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
+    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: 30000)
+    spawned = []
+
+    async def spawn(cmd, env):
+        proc = _FakeProc()
+        spawned.append(proc)
+        return proc
+
+    async def health():
+        return True
+
+    async def get(path):
+        return metrics if path == "/metrics" else (props or {"total_slots": 1})
+
+    sup._spawn, sup._health_ok, sup._get = spawn, health, get
+    sup._start_watch = lambda: None
+    return spawned
+
+
+class TestNoVersionFailsClosed:
+    """ADR-044 point 5: the smoke counts only after the version check, so a
+    launcher that names no engine version is refused like an engine death."""
+
+    @pytest.mark.asyncio
+    async def test_no_version_after_health_stops_the_launcher_and_refuses_until_reset(
+        self, tmp_path, home, monkeypatch,
+    ):
+        sup = _sup(_install(tmp_path), tested_version="0.1.45")
+        spawned = _started_through_the_real_launch(
+            sup, monkeypatch, metrics={"live": {"state": "loaded"}})
+
+        with pytest.raises(LlamaServerError, match="will not start it again") as excinfo:
+            await sup.ensure_running()
+        assert mod.NO_ENGINE_VERSION in str(excinfo.value)
+        assert "no engine version reported" in sup.failure["reason"]
+        assert "mock engine or wrong --engine" in sup.failure["reason"]
+        assert "commit limit" not in sup.failure["reason"], "not a death: no commit-limit story"
+        assert sup.failure["exit_code"] is None
+        assert len(spawned) == 1
+        expected = signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT
+        assert ("signal", expected) in spawned[0].calls, "the launcher was stopped"
+        assert sup._proc is None and sup.props is None
+        assert sup.engine_version is None
+
+        with pytest.raises(LlamaServerError, match="will not start it again"):
+            await sup.ensure_running()
+        assert len(spawned) == 1, "refused like a death: no second start"
+
+        sup.reset_failure()
+        with pytest.raises(LlamaServerError, match="no engine version reported"):
+            await sup.ensure_running()
+        assert len(spawned) == 2, "after a reset a person's call starts it again"
+
+    @pytest.mark.asyncio
+    async def test_a_mismatch_with_the_tested_version_still_serves(self, tmp_path, home, monkeypatch, caplog):
+        sup = _sup(_install(tmp_path), tested_version="0.1.45")
+        spawned = _started_through_the_real_launch(
+            sup, monkeypatch, metrics={"engine": {"version": "0.1.46"}})
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            props = await sup.ensure_running()
+        assert props == {"total_slots": 1}
+        assert sup.failure is None and sup._proc is spawned[0]
+        assert sup.engine_version == "0.1.46"
+        assert any(r.levelno == logging.WARNING and "0.1.45" in r.getMessage() for r in caplog.records)
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_props_build_info_alone_is_a_version_and_serves(self, tmp_path, home, monkeypatch):
+        sup = _sup(_install(tmp_path))
+        _started_through_the_real_launch(
+            sup, monkeypatch, metrics={}, props={"build_info": "Strata 0.1.45"})
+        await sup.ensure_running()
+        assert sup.failure is None and sup.engine_version == "0.1.45"
+        await sup.stop()
+
+
 class TestStopChecksTheCard:
     @pytest.mark.asyncio
     async def test_vram_that_does_not_come_back_is_reported(self, tmp_path, home, monkeypatch, caplog):

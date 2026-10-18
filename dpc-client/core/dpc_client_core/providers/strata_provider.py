@@ -10,14 +10,23 @@ where the effort words come from, and vision, answered from the live launcher.
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..managers.llama_server_supervisor import effort_dictionary_of
-from ..managers.strata_supervisor import StrataSupervisor, strata_config_errors
+from ..managers.strata_supervisor import StrataSupervisor, peer_being_served, strata_config_errors
 from .llamacpp_server_provider import _ACTIVE_SUPERVISORS, LlamaServerProvider, card_holder
 
 logger = logging.getLogger(__name__)
+
+# How long one /metrics read answers the peer policy, so a burst of peer
+# requests reads the launcher once rather than once each.
+PEER_METRICS_TTL_S = 3.0
+# How long after the owner's call ends its conversation counts as live: the
+# engine parks at the end of the turn and the launcher learns it from the
+# engine's log, so a /metrics read just after the answer can miss the park.
+OWNER_PARK_GRACE_S = 3.0
 
 # The keys that change what the launcher would be started with; a reload that
 # leaves them equal adopts the running launcher. An edit inside the base
@@ -91,6 +100,98 @@ class StrataProvider(LlamaServerProvider):
 
     def _model_name(self) -> str:
         return self.model or "strata"
+
+    @classmethod
+    def _is_retryable(cls, error: Exception) -> bool:
+        """A call served to a peer is never retried here: the engine is the
+        owner's, and a peer told 503 comes back on its own (ADR-044 point 9)."""
+        if peer_being_served() is not None:
+            return False
+        return super()._is_retryable(error)
+
+    async def peer_refusal(self) -> Optional[str]:
+        """Why a peer may not be served on this alias now, or None (ADR-044 point 9).
+
+        Starting, stopped, failed or draining: refused, and a peer never starts
+        the launcher. Running: refused while our own conversations may hold the
+        conversation cache. Strata keys the cache by token prefix and reports
+        it only in aggregate (`/metrics` `conversation_cache` parked / bytes,
+        no owner per entry), so ownership is DPC's own count: the owner's calls
+        on this launcher since it started. The rule —
+          - an owner call running now, or ended under OWNER_PARK_GRACE_S ago: refused;
+          - no owner call since the start: served (whatever is parked is a peer's);
+          - otherwise served only when the cache is off, or holds nothing
+            (parked == 0 and bytes == 0); refused when /metrics cannot be read.
+        So a peer is never served while a conversation of ours can be parked,
+        and a peer's park can therefore never evict one (Strata evicts oldest
+        first when its budget or slots run out). It is conservative: once the
+        owner has used the launcher, a peer waits until nothing is parked or
+        the launcher restarts.
+
+        A None answer records the owner's call count it was given on; the
+        peer's slot refuses if that count has moved by the time the call
+        reaches the engine (`StrataSupervisor.peer_slot_refusal`)."""
+        sup = self.supervisor
+        counted = sup.owner_calls
+        refusal = await self._peer_refusal_now()
+        sup.peer_cleared_at_owner_calls = counted if refusal is None else None
+        return refusal
+
+    async def _peer_refusal_now(self) -> Optional[str]:
+        sup = self.supervisor
+        state = _strata_state(sup)
+        if state == "starting":
+            return f"'{self.alias}' is loading (the Strata launcher is starting); try again shortly"
+        if state == "draining":
+            return f"'{self.alias}' is stopping (the Strata launcher is draining)"
+        if state in ("stopped", "failed"):
+            return (
+                f"'{self.alias}' is not running; this node's owner starts it, a peer's request does not"
+            )
+        if sup.owner_in_flight > 0:
+            return f"'{self.alias}' is serving this node's owner now; its conversation cache is not shared meanwhile"
+        if sup.owner_calls == 0:
+            return None
+        now = time.monotonic()
+        if sup.owner_last_end is not None and now - sup.owner_last_end < OWNER_PARK_GRACE_S:
+            return f"'{self.alias}' has just served this node's owner; its conversation cache is not shared meanwhile"
+        cache = await self._peer_cache_view(now)
+        if cache is None:
+            return f"'{self.alias}': the conversation cache cannot be read, so it is not shared"
+        if cache.get("enabled") is False:
+            return None
+        if cache.get("parked") is None and cache.get("bytes") is None:
+            return f"'{self.alias}': the launcher reports no conversation cache state, so it is not shared"
+        parked, held = cache.get("parked") or 0, cache.get("bytes") or 0
+        if parked > 0 or held > 0:
+            budget = cache.get("budget_mib")
+            return (
+                f"'{self.alias}': this node's own conversations hold the conversation cache "
+                f"({parked} parked, {int(held) >> 20} MiB"
+                f"{f' of {budget} MiB' if budget is not None else ''})"
+            )
+        return None
+
+    async def _peer_cache_view(self, now: float) -> Optional[Dict[str, Any]]:
+        """`conversation_cache` of a recent /metrics read, or None when unreadable.
+
+        A read older than the owner's last call is not reused."""
+        sup = self.supervisor
+        cached = sup.peer_metrics_read
+        if cached is not None:
+            at, body = cached
+            fresh = now - at < PEER_METRICS_TTL_S
+            after_owner = sup.owner_last_end is None or at >= sup.owner_last_end
+            if fresh and after_owner:
+                return body
+        try:
+            metrics = await asyncio.wait_for(sup._get("/metrics"), PEER_METRICS_TTL_S)
+            body = metrics_summary(metrics if isinstance(metrics, dict) else {})["conversation_cache"]
+        except Exception as e:
+            logger.info("strata '%s': /metrics unreadable for the peer policy: %s", self.alias, e)
+            body = None
+        sup.peer_metrics_read = (time.monotonic(), body) if body is not None else None
+        return body
 
     def engine_failure(self) -> Optional[Dict[str, Any]]:
         return getattr(self.supervisor, "failure", None)

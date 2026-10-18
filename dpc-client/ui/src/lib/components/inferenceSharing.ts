@@ -31,7 +31,9 @@ export interface ComputeRules {
   /** A filter on what a caller may ask for; **empty accepts every model**
    *  (firewall.py :1928-1938, :2016-2020), the opposite of the serving lists. */
   allowed_models: string[];
-  /** Deprecated single form; folded into `serving_local` (firewall.py :248-256). */
+  /** The local alias a peer request naming none is served from; one of
+   *  `serving_local`, null = the first entry (ADR-044 point 9). Alone, with no
+   *  `serving_local`, it is still read as that list's one entry. */
   serving_alias?: string | null;
   serving_local?: string[] | null;
   serving_vendor?: string[] | null;
@@ -124,12 +126,12 @@ function cleanList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string' && v.length > 0) : [];
 }
 
-/** The block as the tab edits it: every list present, and the deprecated
- *  `serving_alias` folded into `serving_local` the way the load path folds
- *  it (firewall.py :248-256 — only when `serving_local` is absent), then
- *  dropped, which is what the validator's own message asks for when the two
- *  disagree (:370-377: «put the alias first in the list and drop
- *  serving_alias»). Returns a new object; the input is not touched. */
+/** The block as the tab edits it: every list present, and a lone
+ *  `serving_alias` folded into `serving_local` the way the load path folds it
+ *  (only when `serving_local` is absent; one entry needs no default). Beside a
+ *  list it is kept when it names one of its entries — it is then the explicit
+ *  default (ADR-044 point 9) — and dropped when it names none, which the
+ *  validator refuses. Returns a new object; the input is not touched. */
 export function foldServingAlias(compute: ComputeRules): ComputeRules {
   const legacy = typeof compute.serving_alias === 'string' && compute.serving_alias.length > 0
     ? compute.serving_alias : null;
@@ -174,7 +176,7 @@ export function foldServingAlias(compute: ComputeRules): ComputeRules {
     allow_nodes: cleanList(compute.allow_nodes),
     allow_groups: cleanList(compute.allow_groups),
     allowed_models: cleanList(compute.allowed_models),
-    serving_alias: null,
+    serving_alias: hadLocal && legacy !== null && local.includes(legacy) ? legacy : null,
     serving_local: local,
     serving_vendor: cleanList(compute.serving_vendor),
     vendor_quotas: quotas,
@@ -287,12 +289,32 @@ export function addServing(compute: ComputeRules, list: ServingList, alias: stri
 export function removeServing(compute: ComputeRules, list: ServingList, alias: string): ComputeRules {
   const key = servingKey(list);
   const next: ComputeRules = { ...compute, [key]: cleanList(compute[key]).filter((v) => v !== alias) };
+  if (list === 'local' && compute.serving_alias === alias) next.serving_alias = null;
   if (list === 'vendor') {
     const quotas = { ...(compute.vendor_quotas ?? {}) };
     delete quotas[alias];
     next.vendor_quotas = quotas;
   }
   return next;
+}
+
+/** The local alias a peer request naming none is served from, and whether the
+ *  owner chose it (`compute.serving_alias`) or it is the first entry by list
+ *  order — firewall.py `compute_serving_alias`. With two local engines the
+ *  order is no choice, so the tab offers a select (ADR-044 point 9). */
+export function servingDefault(compute: ComputeRules | null | undefined): { alias: string | null; explicit: boolean } {
+  const local = cleanList(compute?.serving_local);
+  const chosen = typeof compute?.serving_alias === 'string' ? compute.serving_alias : '';
+  if (chosen && local.includes(chosen)) return { alias: chosen, explicit: true };
+  return { alias: local[0] ?? null, explicit: false };
+}
+
+/** Names the default; `null` or `''` returns to list order. An alias that is
+ *  not in `serving_local` is not set (the validator would refuse it). */
+export function setServingDefault(compute: ComputeRules, alias: string | null): ComputeRules {
+  if (!alias) return compute.serving_alias ? { ...compute, serving_alias: null } : compute;
+  if (!cleanList(compute.serving_local).includes(alias) || compute.serving_alias === alias) return compute;
+  return { ...compute, serving_alias: alias };
 }
 
 /** `null` removes the ceiling (the save is then refused with the reason). */
@@ -764,6 +786,13 @@ export function computeBlockErrors(compute: ComputeRules): string[] {
     if (vendor.includes(alias)) {
       errors.push(`'${alias}' is in both compute.serving_local and compute.serving_vendor; an alias is bounded by the card or by money, not both`);
     }
+  }
+  const chosen = compute.serving_alias;
+  if (typeof chosen === 'string' && chosen && compute.serving_local != null && !local.includes(chosen)) {
+    errors.push(
+      `compute.serving_alias = '${chosen}' disagrees with compute.serving_local; it names the local alias ` +
+      'a request naming none is served from, so it must be one of the list',
+    );
   }
 
   const currency = compute.currency ?? null;

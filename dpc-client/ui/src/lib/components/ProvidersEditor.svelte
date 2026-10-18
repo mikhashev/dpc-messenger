@@ -1329,7 +1329,7 @@
       </p>
       {#if row.failure}
         <p class="help-text warn">
-          <strong>Stopped after an engine death:</strong> {row.failure.reason}
+          <strong>Stopped, not restarted until reset:</strong> {row.failure.reason}
           {#if row.failure.at}<br />at {new Date(row.failure.at * 1000).toLocaleString()}{/if}
         </p>
         <button type="button" class="btn-fetch" disabled={!!engineActionBusy}

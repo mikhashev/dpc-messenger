@@ -43,7 +43,7 @@ def test_a_served_answer_never_wears_a_code():
     assert payload["status"] == "success" and "code" not in payload
 
 
-def test_the_vocabulary_is_exactly_these_nine_words():
+def test_the_vocabulary_is_exactly_these_ten_words():
     """Written out rather than counted, so that adding a word to the frozenset
     is a change somebody has to make here too — and so that the three
     money-shaped refusals are visibly three words and not one (DPTP §3.4,
@@ -59,10 +59,12 @@ def test_the_vocabulary_is_exactly_these_nine_words():
         "insufficient_quota",
         "unrated",
         "misconfigured",
+        # ADR-044 point 9: a local engine that cannot take a peer now.
+        "provider_unavailable",
     }
 
 
-def test_a_tenth_word_is_not_one_a_host_of_this_version_may_send():
+def test_a_word_off_the_list_is_not_one_a_host_of_this_version_may_send():
     """The frozenset is what a host chooses from; `unpriceable` is the ledger
     badge's word and `quota_exhausted` a plausible invention, and neither is on
     the wire. Outside it is not refused — see below — but it is not the

@@ -83,6 +83,14 @@ REFUSAL_TOOLS_UNSUPPORTED = "tools_unsupported"
 REFUSAL_INSUFFICIENT_QUOTA = "insufficient_quota"
 REFUSAL_UNRATED = "unrated"
 REFUSAL_MISCONFIGURED = "misconfigured"
+# The host's local engine cannot take a peer now (ADR-044 points 4 and 9):
+# the card is held by the other local engine, or (Strata) it is loading, it is
+# not running and a peer does not start it, or the owner's own conversations
+# hold its conversation cache. The word is the gateway's own for
+# a listed alias whose provider is not there (`provider_unavailable`, 503).
+# Retryable: the state ends without the guest changing anything, so the guest
+# may come back later, and nothing on either node retries it by itself.
+REFUSAL_PROVIDER_UNAVAILABLE = "provider_unavailable"
 
 #: The words a host may send today. A receiver reads it to recognise, never to
 #: refuse: a newer host may name a reason this one has no word for, and an
@@ -97,6 +105,7 @@ REFUSAL_CODES = frozenset({
     REFUSAL_INSUFFICIENT_QUOTA,
     REFUSAL_UNRATED,
     REFUSAL_MISCONFIGURED,
+    REFUSAL_PROVIDER_UNAVAILABLE,
 })
 
 

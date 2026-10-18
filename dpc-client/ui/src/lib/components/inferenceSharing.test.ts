@@ -42,9 +42,11 @@ import {
   removeTariffEntry,
   selectedMenuEntry,
   SERVES_NO_LOCAL_ALIAS,
+  servingDefault,
   setAliasCurrency,
   setCurrency,
   setFree,
+  setServingDefault,
   setVendorQuota,
   shortenPeerId,
   soleMenuChoiceLine,
@@ -185,6 +187,43 @@ describe('the deprecated serving_alias is folded into serving_local the way the 
     expect(folded.vendor_quotas).toEqual({ ds: 5 });
     expect(Object.keys(folded.serving_tariff ?? {})).toEqual(['llama']);
     expect(folded._serving_tariff).toBe('explanation');
+  });
+});
+
+describe('the alias a request naming none gets is chosen, not inferred (ADR-044 point 9)', () => {
+  const two = (): ComputeRules => ({ ...emptyBlock(), serving_local: ['llama', 'flash'] });
+
+  it('is the first entry by list order until one is chosen', () => {
+    expect(servingDefault(two())).toEqual({ alias: 'llama', explicit: false });
+    expect(servingDefault({ ...two(), serving_alias: 'flash' })).toEqual({ alias: 'flash', explicit: true });
+    expect(servingDefault(emptyBlock())).toEqual({ alias: null, explicit: false });
+    expect(servingDefault(null)).toEqual({ alias: null, explicit: false });
+  });
+
+  it('can be set only to a local entry, and cleared back to list order', () => {
+    const chosen = setServingDefault(two(), 'flash');
+    expect(chosen.serving_alias).toBe('flash');
+    expect(setServingDefault(two(), 'ghost')).toEqual(two());
+    expect(setServingDefault(chosen, null).serving_alias).toBeNull();
+    expect(setServingDefault(chosen, '').serving_alias).toBeNull();
+  });
+
+  it('survives the fold when it names an entry, and is dropped when it names none', () => {
+    expect(foldServingAlias({ ...two(), serving_alias: 'flash' }).serving_alias).toBe('flash');
+    expect(foldServingAlias({ ...two(), serving_alias: 'ghost' }).serving_alias).toBeNull();
+  });
+
+  it('leaves with its alias when that alias stops being served', () => {
+    const next = removeServing({ ...two(), serving_alias: 'flash' }, 'local', 'flash');
+    expect(next.serving_local).toEqual(['llama']);
+    expect(next.serving_alias).toBeNull();
+    expect(removeServing({ ...two(), serving_alias: 'flash' }, 'local', 'llama').serving_alias).toBe('flash');
+  });
+
+  it('is refused on the client, as on the server, when it names no local entry', () => {
+    expect(computeBlockErrors({ ...two(), serving_alias: 'flash' })).toEqual([]);
+    expect(computeBlockErrors({ ...two(), serving_alias: 'ghost' }).join('\n'))
+      .toContain("compute.serving_alias = 'ghost' disagrees with compute.serving_local");
   });
 });
 

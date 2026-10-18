@@ -79,8 +79,9 @@ def _known_tool_names() -> Optional[Set[str]]:
 
 
 # What this node serves, in two lists (ADR-041 D5). Each key is one constant
-# so a rename is one line. `serving_alias` is the deprecated single form,
-# folded into `serving_local` at load.
+# so a rename is one line. `serving_alias` was the single form; alone it is
+# still folded into `serving_local` at load, and beside the list it names which
+# local entry a request naming no alias is served from (ADR-044 point 9).
 SERVING_LOCAL_KEY = 'serving_local'
 SERVING_VENDOR_KEY = 'serving_vendor'
 VENDOR_QUOTAS_KEY = 'vendor_quotas'
@@ -287,6 +288,10 @@ class ContextFirewall:
                 SERVING_ALIAS_KEY, SERVING_LOCAL_KEY, legacy,
             )
         self.compute_serving_local: List[str] = local
+        # The explicit default (ADR-044 point 9): with two local engines "the
+        # first entry" is no choice, so the owner names it. The checks above
+        # refused a `serving_alias` that is not in the list.
+        self.compute_serving_default: Optional[str] = legacy if legacy in local else None
         self.compute_serving_vendor: List[str] = list(compute.get(SERVING_VENDOR_KEY) or [])
         self.compute_vendor_quotas: Dict[str, float] = {
             alias: float(quota)
@@ -375,7 +380,14 @@ class ContextFirewall:
         provider, and the state line reads it. Since 2026-09-28 the vendor
         list is served over P2P as well, and is never this default: a guest
         that names no alias is not sent to a vendor on the owner's key.
+
+        Since 2026-10-18 (Mike's call, ADR-044 point 9) the owner names it:
+        `compute.serving_alias`, which must be one of `serving_local`. Absent,
+        the first entry is taken as before, and the P2P door says once that
+        the choice was list order.
         """
+        if self.compute_serving_default:
+            return self.compute_serving_default
         return self.compute_serving_local[0] if self.compute_serving_local else None
 
     @staticmethod
@@ -433,12 +445,14 @@ class ContextFirewall:
                 )
 
         legacy = compute.get(SERVING_ALIAS_KEY)
-        if legacy and compute.get(SERVING_LOCAL_KEY) is not None and isinstance(legacy, str):
-            if not local or local[0] != legacy:
+        if legacy is not None and not isinstance(legacy, str):
+            errors.append(f"'compute.{SERVING_ALIAS_KEY}' must be a provider alias (a string) or null")
+        elif legacy and compute.get(SERVING_LOCAL_KEY) is not None:
+            if legacy not in local:
                 errors.append(
                     f"compute.{SERVING_ALIAS_KEY} = {legacy!r} disagrees with compute.{SERVING_LOCAL_KEY} = {local!r}; "
-                    f"the P2P door serves the first local entry, so put the alias first in the list and drop "
-                    f"{SERVING_ALIAS_KEY}"
+                    f"it names the local alias a request naming none is served from, so it must be one of "
+                    f"the list: add it to {SERVING_LOCAL_KEY}, or choose another"
                 )
 
         errors.extend(ContextFirewall._tariff_errors(compute))
@@ -798,10 +812,17 @@ class ContextFirewall:
                 % ", ".join(repr(a) for a in self.compute_serving_vendor)
                 if self.compute_serving_vendor else ""
             )
+            default = (
+                "; a request naming none gets %r (%s)" % (
+                    self.compute_serving_alias,
+                    "compute.serving_alias" if self.compute_serving_default else "first in the list",
+                )
+                if self.compute_serving_alias else ""
+            )
             logger.info(
-                "Compute sharing: enabled, serving peers from %s%s (%d node(s), %d group(s) allowed)",
+                "Compute sharing: enabled, serving peers from %s%s%s (%d node(s), %d group(s) allowed)",
                 ", ".join(repr(a) for a in self.compute_serving_local) or "no local alias",
-                vendor, len(self.compute_allowed_nodes), len(self.compute_allowed_groups),
+                vendor, default, len(self.compute_allowed_nodes), len(self.compute_allowed_groups),
             )
 
     def _parse_transcription_settings(self):
@@ -1628,7 +1649,7 @@ class ContextFirewall:
                     "allow_nodes": [],
                     "_allowed_models": "Empty = every model. Since the host designates serving_alias, this list can only refuse a peer that names a model; it never chooses one. A non-empty list that does not contain the serving alias's own model makes this node advertise nothing and refuse everything.",
                     "allowed_models": [],
-                    "_serving_alias": "Deprecated single form of serving_local, still read. What this node serves is serving_local (aliases on this machine; every one of them is served to peers, the first being what a request naming none gets) and serving_vendor (paid APIs, each needing a daily ceiling in vendor_quotas, in the currency that vendor bills in). Empty = share nothing (the opposite of allowed_models, where empty = all).",
+                    "_serving_alias": "The local alias a peer request naming none is served from; it must be one of serving_local, and null means the first entry. What this node serves is serving_local (aliases on this machine; every one of them is served to peers) and serving_vendor (paid APIs, each needing a daily ceiling in vendor_quotas, in the currency that vendor bills in). Empty = share nothing (the opposite of allowed_models, where empty = all). Alone, without serving_local, it is read as serving_local = [it].",
                     "serving_alias": None,
                     "_currency": "Default ISO 4217 code of the unit the tariff below is priced in, e.g. \"USD\" or \"RUB\": every local alias, and a vendor alias whose provider names no billing currency. A vendor alias defaults to the currency its provider bills in. Null with no other unit = no tariff declared: every call served on that alias is a gift.",
                     "currency": None,

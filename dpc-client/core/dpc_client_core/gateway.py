@@ -1439,6 +1439,10 @@ class Gateway:
                 # auto-retrying client in a loop nobody here can end.
                 "unrated": 503,
                 "misconfigured": 503,
+                # The host's local engine cannot take a peer now - loading, not
+                # running, or its cache held by the owner (ADR-044 point 9).
+                # A 503 the client may retry later; this route never retries it.
+                "provider_unavailable": 503,
             }.get(e.code)
             if status is None:
                 raise GatewayError(502, f"peer {peer_id} refused: {e}", "peer_refused")

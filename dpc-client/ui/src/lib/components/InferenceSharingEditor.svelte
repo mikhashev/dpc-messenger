@@ -54,9 +54,11 @@
     reserveFractionToPercent,
     selectedMenuEntry,
     SERVES_NO_LOCAL_ALIAS,
+    servingDefault,
     setAliasCurrency,
     setCurrency,
     setFree,
+    setServingDefault,
     setVendorOwnerReservePct,
     setVendorQuota,
     setVendorRequestQuota,
@@ -128,6 +130,8 @@
   $: providerByAlias = new Map(($providersList || []).map((p) => [p.alias, p]));
   let pickLocal = '';
   let pickVendor = '';
+  // The alias a peer request naming none is served from (ADR-044 point 9).
+  $: defaultLocal = servingDefault(view);
 
   // A vendor alias's request quota (A-VENDOR-KEYS-QUOTA-WINDOWS-ARE-READ-AND-
   // NEVER-SHOWN): fetched once on mount — /v1/limits-style reads spend no
@@ -564,8 +568,10 @@
           </p>
           <details class="why"><summary>why</summary>
             Two lists, by what an alias spends. A <strong>local</strong> alias (Ollama, llama.cpp) spends this
-            card; every one listed is served to peers over P2P (Mike's call, 2026-09-18), the first being what
-            a request naming no alias gets. A <strong>vendor</strong> alias spends money, so its ceiling is
+            card; every one listed is served to peers over P2P (Mike's call, 2026-09-18), and the one chosen
+            below (else the first) is what a request naming no alias gets. A Strata alias answers a peer
+            503 while it loads, while it is not running (a peer never starts it) and while this node's own
+            conversations hold its conversation cache (ADR-044 point 9). A <strong>vendor</strong> alias spends money, so its ceiling is
             per caller, per day, in the currency its provider bills in; it is served over P2P too
             (Mike's call, 2026-09-28), only to a peer that names it, and never as the default. A remote peer's model and an agent are never offered: what is shared is
             not shared onward (ADR-041 D7). Whisper is shared under Transcription Sharing.
@@ -594,6 +600,28 @@
               <p class="empty-small">No local alias shared &mdash; a peer request naming no alias is refused.</p>
             {/each}
           </div>
+          {#if (view.serving_local ?? []).length > 0}
+            <div class="inline-input-row">
+              <label for="compute-default-local" class="muted">A request naming no alias is served from</label>
+              {#if editMode && editCompute}
+                <select
+                  id="compute-default-local"
+                  name="compute-default-local"
+                  class="inline-input"
+                  value={defaultLocal.explicit ? defaultLocal.alias : ''}
+                  on:change={(e) => editCompute && apply(setServingDefault(editCompute, e.currentTarget.value || null))}
+                >
+                  <option value="">the first in the list ({(view.serving_local ?? [])[0]})</option>
+                  {#each view.serving_local ?? [] as alias (alias)}
+                    <option value={alias}>{alias}</option>
+                  {/each}
+                </select>
+              {:else}
+                <code class="rule-path">{defaultLocal.alias}</code>
+                <span class="muted">{defaultLocal.explicit ? '(chosen)' : '(first in the list)'}</span>
+              {/if}
+            </div>
+          {/if}
           {#if editMode}
             <div class="inline-input-row">
               <select id="compute-pick-local" name="compute-pick-local" class="inline-input" bind:value={pickLocal}>

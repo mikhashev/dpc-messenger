@@ -31,9 +31,15 @@ What differs, by ADR-044 point:
 - 2. `stop` waits for the card's free VRAM to come back to what it was before
   the start; if it does not, an engine outlived the launcher (`contain()` can
   fail harmlessly) and the card is not claimed free.
+- 9. A peer's call is marked (`serving_a_peer`) so the supervisor can tell the
+  owner's calls from a peer's: a peer never starts the launcher, and the
+  owner's calls since the start are what the peer policy in
+  `strata_provider.peer_refusal` weighs against the conversation cache.
 """
 
 import asyncio
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -47,6 +53,37 @@ from . import llama_server_supervisor as _base
 from .llama_server_supervisor import LlamaServerError, LlamaServerSupervisor, _free_port
 
 logger = logging.getLogger(__name__)
+
+# ADR-044 point 9: set while a call is served to a peer, holding its node id.
+# A ContextVar because the mark has to reach `ensure_running` and `call_slot`
+# through LLMManager and the provider without a parameter on every signature;
+# it follows the awaits of the task that set it and nothing else.
+_PEER_CALL: contextvars.ContextVar = contextvars.ContextVar("dpc_strata_peer_call", default=None)
+
+
+@contextlib.contextmanager
+def serving_a_peer(peer_id: str):
+    """Mark the calls made inside as served to `peer_id`."""
+    token = _PEER_CALL.set(peer_id or "peer")
+    try:
+        yield
+    finally:
+        _PEER_CALL.reset(token)
+
+
+def peer_being_served() -> Optional[str]:
+    """The peer the current call is served to, or None for the owner's own call."""
+    return _PEER_CALL.get()
+
+
+class PeerCallRefused(LlamaServerError):
+    """A peer's call refused by the Strata supervisor itself (ADR-044 point 9):
+    the host answers it `provider_unavailable`, and it is never retried."""
+
+
+class PeerStartRefused(PeerCallRefused):
+    """A peer's call met a launcher that is not up; a peer never starts it (ADR-044 point 9)."""
+
 
 STRATA_DEFAULTS: Dict[str, Any] = {
     "strata_install_dir": None,
@@ -333,6 +370,14 @@ def inspect_base_config(path: Any, install_dir: Any = None) -> Dict[str, Any]:
         "missing_files": [v for v in named if v and not Path(str(v)).exists()],
     }
 
+# ADR-044 point 5: a start whose launcher names no engine version is refused.
+NO_ENGINE_VERSION = "no engine version reported — mock engine or wrong --engine"
+_NO_VERSION_NOTE = (
+    "/metrics engine.version and /props build_info are both absent after /health, "
+    "which is what Strata's mock engine looks like; check that the launcher got "
+    "--engine strata and that the engine is a real build"
+)
+
 _COMMIT_LIMIT_NOTE = (
     "possibly the Windows commit limit (RAM + page file): Strata can exit there "
     "with an NTSTATUS code and no message"
@@ -433,6 +478,17 @@ class StrataSupervisor(LlamaServerSupervisor):
         self._watch_task: Optional[asyncio.Task] = None
         # The start config the last launch used; the UI shows it (point 6).
         self.start_config_used: Optional[Path] = None
+        # The owner's calls on this launcher since it started, the ones running
+        # now, and when the last one ended (monotonic). Peer calls are not
+        # counted: the peer policy asks whether anything parked can be ours.
+        self.owner_calls = 0
+        self.owner_in_flight = 0
+        self.owner_last_end: Optional[float] = None
+        # The last /metrics read the peer policy made: (monotonic time, body).
+        self.peer_metrics_read: Optional[tuple] = None
+        # `owner_calls` as it stood when the peer policy last let a peer in;
+        # a peer's slot checks it again (`peer_slot_refusal`).
+        self.peer_cleared_at_owner_calls: Optional[int] = None
 
     # --- paths ----------------------------------------------------------------
 
@@ -700,8 +756,8 @@ class StrataSupervisor(LlamaServerSupervisor):
     def _refusal(self) -> LlamaServerError:
         f = self.failure or {}
         return LlamaServerError(
-            f"strata[{self.alias}] was stopped after an engine death and DPC will not "
-            f"start it again: {f.get('reason', 'reason not recorded')}. Check the machine, "
+            f"strata[{self.alias}] was stopped and DPC will not start it again: "
+            f"{f.get('reason', 'reason not recorded')}. Check the machine and the install, "
             "then reset it explicitly",
             f.get("log_tail"),
         )
@@ -727,6 +783,15 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"the launcher exited on its own with {proc.returncode}", body=None, stop=True,
                 )
                 raise self._refusal()
+            # A peer never starts the owner's engine (ADR-044 point 9): this is
+            # the one place a start begins, so the rule holds whichever door
+            # or retry the call came through.
+            peer = peer_being_served()
+            if peer is not None:
+                raise PeerStartRefused(
+                    f"strata[{self.alias}] is not running, and a call served to peer "
+                    f"{peer} does not start it"
+                )
             await self._await_predecessor()
             self._claim_card()
             try:
@@ -749,17 +814,32 @@ class StrataSupervisor(LlamaServerSupervisor):
         self.write_start_config(self.port)
         self.vram_released = None
         self.engine_version = None
+        # A new launcher starts with an empty conversation cache.
+        self.owner_calls = 0
+        self.owner_last_end = None
+        self.peer_metrics_read = None
+        self.peer_cleared_at_owner_calls = None
         try:
             self._vram_free_before = await asyncio.to_thread(_base._free_vram_mib)
         except Exception:
             self._vram_free_before = None
         props = await super()._launch(binary)
-        await self._check_version()
+        if await self._check_version() is None:
+            # ADR-044 point 5: the smoke counts only after the version check,
+            # because the mock engine answers /health and /props like a real
+            # one. No version is refused like an engine death: stopped, and
+            # not started again until a person resets it.
+            await self._fail_closed(NO_ENGINE_VERSION, note=_NO_VERSION_NOTE)
+            raise self._refusal()
         self._start_watch()
         return props
 
-    async def _check_version(self) -> None:
-        """The real engine's version against the tested one (ADR-044 point 5)."""
+    async def _check_version(self) -> Optional[str]:
+        """The real engine's version against the tested one (ADR-044 point 5).
+
+        Returns the version, or None when the launcher reports none — the
+        caller fails closed on that. A mismatch with the tested version only
+        warns."""
         version: Optional[str] = None
         try:
             metrics = await self._get("/metrics")
@@ -784,7 +864,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                 "--engine strata reached it and that the engine is a real build",
                 self.alias,
             )
-            return
+            return None
         if tested and str(tested).strip() != version:
             logger.warning(
                 "strata[%s]: engine version %s differs from the tested version %s%s — "
@@ -795,6 +875,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             )
         else:
             logger.info("strata[%s]: engine version %s (tested %s)", self.alias, version, tested or "unset")
+        return version
 
     def _start_watch(self) -> None:
         if self._watch_task is not None and not self._watch_task.done():
@@ -842,15 +923,25 @@ class StrataSupervisor(LlamaServerSupervisor):
             return None
         return text
 
-    async def _fail_closed(self, observed: str, body: Optional[str] = None, stop: bool = True) -> None:
-        """Record an engine death with its reason and stop the launcher."""
+    async def _fail_closed(
+        self, observed: str, body: Optional[str] = None, stop: bool = True,
+        note: Optional[str] = None,
+    ) -> None:
+        """Record an engine death with its reason and stop the launcher.
+
+        `note` replaces the exit-code words and the commit-limit explanation,
+        for a refusal that is not a death (no engine version reported)."""
         if self.failure is not None:
             return
         tail = self.tail_log(20) + self._tail_engine_log(20)
-        words = exit_code_words(body or "") or next(
-            (w for w in (exit_code_words(line) for line in reversed(tail)) if w), None
-        )
-        reason = f"{observed}; {words or 'no exit code reported'}; {_COMMIT_LIMIT_NOTE}"
+        if note is not None:
+            words = None
+            reason = f"{observed}; {note}"
+        else:
+            words = exit_code_words(body or "") or next(
+                (w for w in (exit_code_words(line) for line in reversed(tail)) if w), None
+            )
+            reason = f"{observed}; {words or 'no exit code reported'}; {_COMMIT_LIMIT_NOTE}"
         self.failure = {
             "reason": reason,
             "exit_code": words,
@@ -859,9 +950,9 @@ class StrataSupervisor(LlamaServerSupervisor):
             "log_tail": tail[-12:],
         }
         logger.error(
-            "strata[%s]: engine death — %s. Stopping the launcher; DPC will not restart "
+            "strata[%s]: %s — %s. Stopping the launcher; DPC will not restart "
             "it until the failure is reset",
-            self.alias, reason,
+            self.alias, "engine death" if note is None else "start refused", reason,
         )
         if stop:
             await self.stop()
@@ -884,24 +975,55 @@ class StrataSupervisor(LlamaServerSupervisor):
         except OSError:
             return []
 
+    def peer_slot_refusal(self) -> Optional[str]:
+        """The peer policy's synchronous half, asked again at the call boundary.
+
+        The policy (`StrataProvider.peer_refusal`) is asked by the P2P door
+        before the call, and the owner does not queue behind peers, so an owner
+        call can begin between that answer and this slot. Whatever an owner
+        call does, it raises `owner_calls` at its own slot, so a count that
+        moved since the policy let this peer in — or an owner call running —
+        refuses the peer here. No /metrics read: the slot is synchronous.
+        An owner call that begins after this slot is taken runs beside the
+        peer's; the policy cannot stop a call already running."""
+        if self.owner_in_flight > 0:
+            return f"'{self.alias}' began serving this node's owner while the peer's call was being prepared"
+        if self.peer_cleared_at_owner_calls is None:
+            return f"'{self.alias}': no peer policy decision stands for this call"
+        if self.owner_calls != self.peer_cleared_at_owner_calls:
+            return f"'{self.alias}' served this node's owner after the peer policy let the call in"
+        return None
+
     def call_slot(self):
         if self._draining:
             raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
+        owner = peer_being_served() is None
+        if not owner:
+            refusal = self.peer_slot_refusal()
+            if refusal:
+                raise PeerCallRefused(f"strata[{self.alias}]: {refusal}")
         self._in_flight += 1
         self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
-        return self._StrataSlot(self)
+        if owner:
+            self.owner_calls += 1
+            self.owner_in_flight += 1
+        return self._StrataSlot(self, owner)
 
     class _StrataSlot:
         """The base slot, and the one place every request's error passes through."""
 
-        def __init__(self, supervisor: "StrataSupervisor"):
+        def __init__(self, supervisor: "StrataSupervisor", owner: bool = True):
             self._supervisor = supervisor
+            self._owner = owner
 
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, exc_type, exc, tb):
             self._supervisor._in_flight -= 1
+            if self._owner:
+                self._supervisor.owner_in_flight -= 1
+                self._supervisor.owner_last_end = time.monotonic()
             if exc is not None:
                 body = self._supervisor.note_request_error(exc)
                 if body is not None:

@@ -441,6 +441,8 @@ STATUS_FOR = {
     # auto-retrying client to come back to a state that never changes.
     "unrated": 503,
     "misconfigured": 503,
+    # The host's local engine cannot take a peer now (ADR-044 point 9).
+    "provider_unavailable": 503,
 }
 OPENAI_TYPE_FOR = {400: "invalid_request_error", 403: "permission_error",
                    404: "invalid_request_error", 429: "insufficient_quota",

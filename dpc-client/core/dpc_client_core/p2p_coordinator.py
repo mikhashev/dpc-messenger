@@ -41,6 +41,38 @@ class EffortRefused(ValueError):
     """
 
 
+class EngineUnavailable(RuntimeError):
+    """The local engine behind the serving alias cannot take a peer now
+    (ADR-044 point 9): answered `provider_unavailable`, never retried here."""
+
+
+def _engine_unavailable_cause(error: BaseException, strata: bool) -> bool:
+    """Whether a failed peer call failed on the local engine being unavailable.
+
+    For any local engine: the card is held by the other engine
+    (`CardHeldError`, ADR-044 point 4) or the Strata supervisor refused the
+    peer itself (`PeerCallRefused`, which `PeerStartRefused` is). For a Strata
+    alias (`strata` true) also an HTTP 503 from its launcher. Read through the
+    provider's `RuntimeError(...) from e` wrap and the router's above it."""
+    from .managers.llama_server_supervisor import CardHeldError
+    from .managers.strata_supervisor import PeerCallRefused
+
+    seen = error
+    for _ in range(5):
+        if seen is None:
+            return False
+        if isinstance(seen, (CardHeldError, PeerCallRefused)):
+            return True
+        if strata:
+            code = getattr(seen, "status_code", None)
+            if code is None:
+                code = getattr(getattr(seen, "response", None), "status_code", None)
+            if code == 503:
+                return True
+        seen = seen.__cause__
+    return False
+
+
 class P2PCoordinator:
     """Coordinates P2P connection lifecycle, messaging, and request handling."""
 
@@ -65,6 +97,9 @@ class P2PCoordinator:
         # id that keys the host's row and routes its chunks, so only the host
         # can see a reuse. Per peer, because two guests share no namespace.
         self._in_flight_requests: Dict[str, set] = {}
+        # The default alias last said to be inferred from list order, so the
+        # line is written once per value rather than once per request.
+        self._inferred_default_logged: Optional[str] = None
 
     async def connect_via_uri(self, uri: str):
         """
@@ -788,6 +823,8 @@ class P2PCoordinator:
         # it always did, and never to a vendor alias: a guest that chose
         # nothing is not sent to a vendor on this node's key.
         serving_alias = provider or self.service.firewall.compute_serving_alias
+        if not provider and serving_alias:
+            self._note_inferred_default(serving_alias)
         if not serving_alias:
             logger.warning(
                 "Peer inference refused for %s: this node designates no compute.serving_alias", peer_id
@@ -970,7 +1007,15 @@ class P2PCoordinator:
             queue = (
                 contextlib.nullcontext() if owner == "vendor" else self._peer_inference_lock
             )
+            from .managers.strata_supervisor import serving_a_peer
+
             async with queue:
+                # The engine's own state, asked after the wait and right before
+                # the call, so what was true when the peer queued is not what
+                # decides (ADR-044 point 9). Refused before any row.
+                engine_refusal = await self._local_engine_refusal(serving_alias)
+                if engine_refusal:
+                    raise EngineUnavailable(engine_refusal)
                 # Clocked inside the lock: the wait is not part of the call, and
                 # the price depends on the hour the call is made (ADR-041 D3).
                 started_at = datetime.now(timezone.utc)
@@ -978,18 +1023,25 @@ class P2PCoordinator:
                 # The turns, image blocks and all, take `query_messages`; only
                 # the flat `images` field keeps `query`, and beside tools that
                 # field was refused above, so no tool is dropped on this branch.
-                if messages and not images:
-                    result = await self.service.llm_manager.query_messages(
-                        messages, system=system or "", tools=tools or None,
-                        on_chunk=send_chunk if stream else None,
-                        provider_alias=serving_alias, return_metadata=True,
-                        **query_kwargs,
-                    )
-                else:
-                    result = await self.service.llm_manager.query(
-                        prompt, provider_alias=serving_alias, images=images,
-                        return_metadata=True, **query_kwargs,
-                    )
+                # Marked as a peer's call: a Strata launcher that is down is not
+                # started for it and its failure is not retried. The owner does
+                # not queue behind this lock, so an owner call can begin between
+                # the policy above and the engine; the peer's slot asks the
+                # policy's synchronous half again (`peer_slot_refusal`) and
+                # refuses with the same word.
+                with serving_a_peer(peer_id):
+                    if messages and not images:
+                        result = await self.service.llm_manager.query_messages(
+                            messages, system=system or "", tools=tools or None,
+                            on_chunk=send_chunk if stream else None,
+                            provider_alias=serving_alias, return_metadata=True,
+                            **query_kwargs,
+                        )
+                    else:
+                        result = await self.service.llm_manager.query(
+                            prompt, provider_alias=serving_alias, images=images,
+                            return_metadata=True, **query_kwargs,
+                        )
             duration_s = time.monotonic() - clock
             logger.info("Inference completed successfully for %s", peer_id)
 
@@ -1051,7 +1103,21 @@ class P2PCoordinator:
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)
 
+        except EngineUnavailable as e:
+            logger.warning("Peer inference refused for %s: %s", peer_id, e)
+            await self._send_engine_unavailable(peer_id, request_id, str(e))
         except Exception as e:
+            if _engine_unavailable_cause(e, strata=self._serves_from_strata(serving_alias)):
+                # The other engine holds the card (any local alias), or Strata
+                # refused the peer, went down or answered 503 under the call:
+                # the same word as the gate above, and not retried (ADR-044
+                # points 4 and 9). Without it the guest would read a 502.
+                logger.warning("Peer inference for %s met an unavailable engine: %s", peer_id, e)
+                await self._send_engine_unavailable(
+                    peer_id, request_id,
+                    f"This node's engine for '{serving_alias}' is unavailable: {e}",
+                )
+                return
             logger.error("Inference failed for %s: %s", peer_id, e, exc_info=True)
             # No code: whatever failed in here failed on this node's side, and the
             # guest's gateway reads an absent word as 502. The two words that blame
@@ -1069,6 +1135,56 @@ class P2PCoordinator:
             in_flight.discard(request_id)
             if not in_flight:
                 self._in_flight_requests.pop(peer_id, None)
+
+    def _note_inferred_default(self, alias: str) -> None:
+        """Say once that a request naming no alias got the first local entry by
+        list order, because no explicit `compute.serving_alias` names one
+        (ADR-044 point 9: with two local engines the order is not a choice)."""
+        firewall = self.service.firewall
+        if getattr(firewall, "compute_serving_default", None):
+            return
+        local = getattr(firewall, "compute_serving_local", None)
+        if not isinstance(local, list) or len(local) < 2:
+            return
+        if self._inferred_default_logged == alias:
+            return
+        self._inferred_default_logged = alias
+        logger.warning(
+            "A peer request named no alias and was served '%s', the first of compute.serving_local "
+            "%s by list order: no compute.serving_alias names the default. Choose it in Inference "
+            "Sharing (or set compute.serving_alias in privacy_rules.json).",
+            alias, local,
+        )
+
+    def _serves_from_strata(self, alias: str) -> bool:
+        from .providers.strata_provider import StrataProvider
+
+        return isinstance(self._provider_for_alias(alias), StrataProvider)
+
+    async def _local_engine_refusal(self, alias: str) -> Optional[str]:
+        """Why the local engine behind `alias` cannot take a peer now, or None.
+
+        Only a Strata alias has a policy (ADR-044 point 9); a `llama-server`
+        alias, an Ollama one and a vendor one are untouched by it."""
+        if not self._serves_from_strata(alias):
+            return None
+        provider = self._provider_for_alias(alias)
+        try:
+            return await provider.peer_refusal()
+        except Exception as e:
+            logger.error("Strata peer policy failed for '%s': %s", alias, e, exc_info=True)
+            return f"'{alias}': this node cannot tell whether its engine is free ({type(e).__name__})"
+
+    async def _send_engine_unavailable(self, peer_id: str, request_id: str, text: str) -> None:
+        from dpc_protocol.protocol import REFUSAL_PROVIDER_UNAVAILABLE, create_remote_inference_response
+
+        error_response = create_remote_inference_response(
+            request_id=request_id, error=text, code=REFUSAL_PROVIDER_UNAVAILABLE,
+        )
+        try:
+            await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+        except Exception as send_err:
+            logger.error("Error sending inference error response to %s: %s", peer_id, send_err, exc_info=True)
 
     async def handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
         """Handle incoming remote transcription request from a peer."""
