@@ -1469,6 +1469,9 @@ def _model_identity(entry: Dict[str, Any], record: Dict[str, Any]) -> str:
     if isinstance(gguf, dict) and gguf.get("path"):
         sha = gguf.get("sha256") or "sha256 unread"
         return f"{Path(gguf['path']).name} sha256:{sha[:16]}"
+    native = (record.get("model_files") or {}).get("native_gguf") if isinstance(record, dict) else None
+    if isinstance(native, dict) and native.get("path"):
+        return f"{Path(native['path']).name} (Strata start config; not hashed)"
     return f"{entry.get('model')} (label only; no model file recorded)"
 
 

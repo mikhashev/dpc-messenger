@@ -15,7 +15,9 @@ Captured, in the order it matters:
   own template supplied it;
 - **the model by its files** — for a local llama-server alias, the GGUF and
   mmproj with their SHA-256, and the llama-server binary, its pinned tag and
-  the version it reports, because the entry's `model` label can be stale;
+  the version it reports, because the entry's `model` label can be stale; for
+  a Strata alias, the launcher, the base config and the start config's model
+  files by path and size;
 - **the code** — git sha, branch, and whether the tree was dirty, with the
   dirty files named. `dirty: true` with no list is how a number becomes
   unreproducible three weeks later;
@@ -152,17 +154,30 @@ def effort_record(entry: Dict[str, Any]) -> Dict[str, Any]:
     Unpinned, nothing is sent and the template answers with its own default —
     read here from the GGUF's embedded template, the same reader the provider
     uses. Where there is no GGUF to read, the value is recorded as unknown.
+
+    A Strata alias reads its template from the tokenizer its base config names,
+    and its provider puts that default on the wire itself (Strata would fill an
+    effort-less call from settings DPC does not own), so the source says so.
     """
     effort = entry.get("reasoning_effort")
     if effort:
         return {"value": effort, "source": "pinned by the run"}
     default = None
+    strata = entry.get("type") == "strata"
     try:
-        from dpc_client_core.managers.llama_server_supervisor import gguf_effort_dictionary
-        found = gguf_effort_dictionary(entry.get("gguf_path") or "")
+        if strata:
+            from _harness.local_engine import strata_effort_words
+            found = strata_effort_words(entry)
+        else:
+            from dpc_client_core.managers.llama_server_supervisor import gguf_effort_dictionary
+            found = gguf_effort_dictionary(entry.get("gguf_path") or "")
         default = found[1] if found else None
     except Exception:
         pass
+    if default and strata:
+        return {"value": default,
+                "source": "the model's chat template default, read from the tokenizer the "
+                          "Strata base config names — the provider sends it"}
     if default:
         return {"value": default,
                 "source": "the model's chat template default, read from the GGUF — nothing was sent"}
@@ -258,6 +273,8 @@ def llama_server_binary(entry: Dict[str, Any]) -> Dict[str, Any]:
 def model_files(entry: Dict[str, Any], cache_dir: Path | None = None) -> Dict[str, Any]:
     """The model identified by its files, not by the entry's free-text `model` label."""
     try:
+        if entry.get("type") == "strata":
+            return strata_files(entry)
         if entry.get("type") != "llamacpp_server":
             return {"note": f"provider type {entry.get('type')!r}: no local model files to record"}
         record: Dict[str, Any] = {
@@ -272,6 +289,23 @@ def model_files(entry: Dict[str, Any], cache_dir: Path | None = None) -> Dict[st
         return record
     except Exception as exc:  # never cost a run
         return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def strata_files(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """A Strata alias's model by its start config: launcher, base config, and the
+    files the start would load, by path and size. Not hashed: the model is a set
+    of shards, packs and folders, and one file's digest would not identify it.
+    The engine's own version is read only by a running launcher (`/metrics`);
+    the alias's tested version is recorded beside it."""
+    from _harness.local_engine import path_record, strata_start_facts
+    facts = strata_start_facts(entry)
+    return {
+        "model_label": entry.get("model"),
+        "note": "the `model` field is a free label and can be stale; the model is the "
+                "start config's files below (paths and sizes, not hashed)",
+        "strata": {k: v for k, v in facts.items() if k != "model_files"},
+        "model_files": {k: path_record(v) for k, v in facts.get("model_files", {}).items()},
+    }
 
 
 def snapshot(

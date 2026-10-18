@@ -14,17 +14,21 @@ Runs against the local `llamacpp_server` provider by default — the alias
 `--provider-alias` names (default `qwen3.8 27b`) is copied verbatim out of
 the operator's `~/.dpc/providers.json`, the same pattern
 `eval/gaia/run_gaia_eval.py`'s `providers_file_for` uses. Nothing is written
-back to the operator's file. Ollama stays available as an explicit opt-in via
-`--providers eval/loop/providers.eval.json`.
+back to the operator's file. A `strata` alias (ADR-044) runs the same way, so
+Strata and the 27B are compared on one harness; each is checked by its own
+engine's facts (`_harness/local_engine.py`). Ollama stays available as an
+explicit opt-in via `--providers eval/loop/providers.eval.json`.
 
 The agent gets a throwaway root under a temp dir: no real agent's memory is
 read or written. Results are written under `results_root("loop")` unless
 `--json` gives an explicit path.
 
 The DPC service normally holds the same model in VRAM; two children do not
-fit on one card. Before a `llamacpp_server` run, free VRAM is checked against
-the threshold `eval/kv/ab_key_quant.py` uses for a 27B model on one card —
-refusing loudly beats an OOM mid-run.
+fit on one card. Before a run on a supervised engine (`llamacpp_server` or
+`strata`), the card is asked who holds it — the other engine there is a refusal
+naming it (ADR-044 point 4) — and free VRAM is checked against the threshold
+`eval/kv/ab_key_quant.py` uses for a 27B model on one card — refusing loudly
+beats an OOM mid-run.
 
 Run from `dpc-client/core`:
 
@@ -98,7 +102,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))  # for _harness
 sys.path.insert(0, str(CORE_DIR))  # so this also runs standalone, not only from core/
 
-from _harness import benchmark_tools, provenance  # noqa: E402
+from _harness import benchmark_tools, local_engine, provenance  # noqa: E402
 from _harness.results_root import results_root  # noqa: E402
 import round_metrics  # noqa: E402
 
@@ -166,10 +170,22 @@ def _free_vram_mib() -> Optional[int]:
 
 
 def _check_vram_or_refuse(entry: Dict[str, Any]) -> Optional[int]:
-    """Applies only to `llamacpp_server`: other provider types do not hold this
-    card's VRAM the way the DPC service's own child does."""
-    if entry.get("type") != "llamacpp_server":
+    """Applies only to the supervised engines (`local_engine.supervised_types`):
+    other provider types do not hold this card's VRAM the way the DPC service's
+    own child does.
+
+    The card-holder guard first: the other engine on the card is a refusal that
+    names it, the way `CardHeldError` does in the client — that guard lives in
+    one process and cannot see the service's child from here. Then VRAM; for
+    Strata the 27B's figure is applied as a floor, no Strata figure being
+    measured here (ADR-044 keeps those on the gate card)."""
+    ptype = entry.get("type")
+    if ptype not in local_engine.supervised_types():
         return None
+    holders = local_engine.engines_on_the_card()
+    conflicts = local_engine.card_conflicts(ptype, holders)
+    if conflicts:
+        raise SystemExit(local_engine.card_held_message(ptype, entry.get("alias"), conflicts))
     free = _free_vram_mib()
     if free is None:
         print("  VRAM: nvidia-smi unreadable — proceeding without a check "
@@ -702,6 +718,32 @@ def _allowed_tools(tier: str):
     return benchmark_tools.BENCHMARK_TOOLS
 
 
+def _strata_dry_run(entry: Dict[str, Any]) -> None:
+    """What a `strata` alias would start, without starting it: the alias's own
+    errors with its paths checked, the launcher, the base config, and the files
+    of the start config DPC would write. The engine's version is read only by a
+    running launcher, so the tested version is printed, not compared."""
+    facts = local_engine.strata_start_facts(entry)
+    for key in ("install", "python", "server_script", "base_config"):
+        if key in facts:
+            exists = facts.get(f"{key}_exists")
+            print(f"  {key}: {facts[key]}" + ("" if exists is None else f" (exists={exists})"))
+    print(f"  tested version: {facts.get('tested_version')!r} ({facts.get('tested_version_date')})")
+    missing = []
+    for key, value in facts.get("model_files", {}).items():
+        rec = local_engine.path_record(value)
+        print(f"  {key}: {rec['path']} ({rec.get('kind') or rec.get('error')})")
+        if rec.get("error"):
+            missing.append(f"{key}: {rec['path']} {rec['error']}")
+    problems = list(facts["config_errors"]) + missing
+    problems += [f"{facts[k]} does not exist" for k in ("python", "server_script")
+                 if k in facts and not facts.get(f"{k}_exists")]
+    if facts.get("start_error"):
+        problems.append(facts["start_error"])
+    if problems:
+        raise SystemExit("strata alias cannot start: " + "; ".join(problems))
+
+
 def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
              effort: Optional[str]) -> int:
     print(f"  alias: {entry.get('alias')!r} (type={entry.get('type')})")
@@ -721,13 +763,15 @@ def _dry_run(entry: Dict[str, Any], args, entries: Dict[str, Dict[str, Any]],
         print(f"  gguf: {gguf} (exists={gguf.is_file()})")
         if not gguf.is_file():
             raise SystemExit(f"gguf_path does not exist: {gguf}")
+    elif entry.get("type") == "strata":
+        _strata_dry_run(entry)
     print(f"  operator alias preserve_reasoning: "
           f"{entry.get('preserve_reasoning', '(absent -> provider default false)')}")
     for arm, e in entries.items():
         print(f"  arm {arm}: copy carries preserve_reasoning={e['preserve_reasoning']}")
-    if entry.get("type") != "llamacpp_server" and "on" in entries:
-        print("  NOTE: only llamacpp_server reads preserve_reasoning; on this provider "
-              "the two arms are the same run")
+    if entry.get("type") not in local_engine.supervised_types() and "on" in entries:
+        print(f"  NOTE: only {', '.join(sorted(local_engine.supervised_types()))} read "
+              "preserve_reasoning; on this provider the two arms are the same run")
     print(f"  reasoning effort requested: {effort or '(none — the alias decides)'}; "
           f"alias default (its own reasoning_effort): {entry.get('reasoning_effort')}; "
           f"note budget: {entry.get('reasoning_budget_tokens')}; "
@@ -842,7 +886,9 @@ def seed_tokenizer(entry: Dict[str, Any]):
     """The alias's own tokenizer for the depth probe, or None (then calibrated).
 
     `llama-tokenize` from the pinned build's directory over the alias's GGUF,
-    vocabulary only; a missing binary or file is not an error here.
+    vocabulary only; a missing binary or file is not an error here. A `strata`
+    alias has neither — its tokenizer is a folder the base config names, not a
+    GGUF `llama-tokenize` reads — so it gets None and the calibrated count.
     """
     import seed_history
     if entry.get("type") != "llamacpp_server" or not Path(entry.get("gguf_path") or "").is_file():

@@ -4,7 +4,8 @@ A night that dies in its first minute on a renamed alias, a stale token or a
 missing binary is a night lost, and the campaign used to find each of those out
 one run at a time. These checks download nothing and load no model: the token
 is tested with an access check, the binary is asked for `--version`, and the
-GGUF is read for its chat template and hashed (once; the digest is cached).
+GGUF is read for its chat template and hashed (once; the digest is cached). A
+`strata` alias is read through its base config instead (`engine_checks`).
 
 Each check is (status, name, detail), status one of OK / WARN / FAIL / SKIP. Only
 FAIL stops a campaign. The card being full is a WARN, because the campaign waits
@@ -26,7 +27,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
-from _harness import benchmark_tools, provenance  # noqa: E402
+from _harness import benchmark_tools, local_engine, provenance  # noqa: E402
 
 Check = Tuple[str, str, str]
 
@@ -45,9 +46,14 @@ def _effort_words(entry) -> Tuple[tuple, str]:
     from dpc_client_core.managers.llama_server_supervisor import gguf_effort_dictionary
     from dpc_client_core.providers.llamacpp_server_provider import (
         FLEET_TO_TEMPLATE, TEMPLATE_EFFORTS)
-    found = gguf_effort_dictionary(entry.get("gguf_path") or "")
+    if entry.get("type") == "strata":
+        found = local_engine.strata_effort_words(entry)
+        where = "the tokenizer template the Strata base config names"
+    else:
+        found = gguf_effort_dictionary(entry.get("gguf_path") or "")
+        where = "the GGUF template"
     words, default = (found if found else (TEMPLATE_EFFORTS, None))
-    source = "read from the GGUF template" if found else "the provider's fallback table"
+    source = f"read from {where}" if found else "the provider's fallback table"
     return words, f"{source}; default {default or 'unset'}; folds {FLEET_TO_TEMPLATE}"
 
 
@@ -82,34 +88,39 @@ def memory_check(no_memory: bool) -> Check:
             f"it on purpose — the run then records that choice instead of hiding it")
 
 
-def run_checks(alias: str, efforts: List[str], results_dir: Path,
-               gpu_needed_mib: int, no_memory: bool = False) -> List[Check]:
-    import run_gaia_eval as gaia
-    from campaign import gpu_free_mib, gpu_holder_candidates
+def engine_checks(alias: str, entry, known: List[str], src: Path, efforts: List[str],
+                  results_dir: Path) -> List[Check]:
+    """The alias and the engine it would start: checks 1-4 of `run_checks`, on
+    their own so a test can run them without the token and the card.
 
+    The campaign runs on a supervised local engine — `llamacpp_server` or
+    `strata` (`local_engine.supervised_types`, read from the client's own type
+    sets). Each check reads the facts of the engine the alias names: the pinned
+    binary and the GGUF for llama-server; for Strata, the install, the base
+    config and the files of the start config DPC would write.
+    """
     checks: List[Check] = []
 
     def add(status, name, detail):
         checks.append((status, name, detail))
 
     # 1. the alias, before anything else — every other model check reads it
-    try:
-        entry, known, src = _alias_entry(alias)
-    except Exception as exc:
-        entry, known, src = None, [], Path.home() / ".dpc" / "providers.json"
-        add("FAIL", "alias", f"cannot read {src}: {type(exc).__name__}: {exc}")
+    supervised = sorted(local_engine.supervised_types())
+    ptype = entry.get("type") if entry is not None else None
     if entry is None:
         if known:
             add("FAIL", "alias", f"no provider aliased {alias!r} in {src}; "
                                  f"available: {', '.join(known)}")
-    elif entry.get("type") != "llamacpp_server":
-        add("FAIL", "alias", f"{alias!r} is type {entry.get('type')!r}; the campaign is "
-                             f"built for a local llamacpp_server alias")
-    else:
-        add("OK", "alias", f"{alias!r} type=llamacpp_server; `model` label "
-                           f"{entry.get('model')!r} is free text, the model is the GGUF below")
+        return checks
+    if ptype not in supervised:
+        add("FAIL", "alias", f"{alias!r} is type {ptype!r}; the campaign is built for a "
+                             f"supervised local engine: {', '.join(supervised)}")
+        return checks
+    what = "the GGUF below" if ptype == "llamacpp_server" else "the start config's files below"
+    add("OK", "alias", f"{alias!r} type={ptype} (engine {local_engine.engine_of(ptype)}); "
+                       f"`model` label {entry.get('model')!r} is free text, the model is {what}")
 
-    if entry is not None and entry.get("type") == "llamacpp_server":
+    if ptype == "llamacpp_server":
         # 2. the binary the provider would start
         info = provenance.llama_server_binary(entry)
         if info.get("binary"):
@@ -136,23 +147,102 @@ def run_checks(alias: str, efforts: List[str], results_dir: Path,
                 cached = "cached digest" if rec.get("sha256_from_cache") else "hashed now, cached"
                 add("OK", label, f"{rec['path']} {rec['size'] / 1e9:.2f} GB "
                                  f"sha256 {rec['sha256'][:16]}… ({cached})")
-        # 4. the queue's effort words against the template that will receive them
-        try:
-            words, how = _effort_words(entry)
-            from dpc_client_core.providers.llamacpp_server_provider import FLEET_TO_TEMPLATE
-            bad = [e for e in efforts
-                   if e not in words and FLEET_TO_TEMPLATE.get(e) not in words]
-            add("FAIL" if bad else "OK", "effort",
-                (f"refused by the template: {bad}; " if bad else "")
-                + f"queue {sorted(set(efforts))} vs template {list(words)} ({how})")
-        except Exception as exc:
-            add("FAIL", "effort", f"cannot read the template: {type(exc).__name__}: {exc}")
-        add("OK", "sampling pins",
-            "each run copies the alias and overwrites `temperature` and "
-            "`reasoning_effort`; the provider reads both from that entry and the agent "
-            f"sends no per-call override. Alias as stored: temperature="
-            f"{entry.get('temperature')} effort={entry.get('reasoning_effort')} "
-            f"reasoning_budget_tokens={entry.get('reasoning_budget_tokens')}")
+    else:
+        # 2. the launcher the supervisor would start; nothing is started
+        facts = local_engine.strata_start_facts(entry)
+        problems = list(facts["config_errors"])
+        for key in ("python", "server_script"):
+            if key in facts and not facts.get(f"{key}_exists"):
+                problems.append(f"{facts[key]} does not exist")
+        if facts.get("start_error"):
+            problems.append(facts["start_error"])
+        if problems:
+            add("FAIL", "strata", "; ".join(problems))
+        else:
+            add("OK", "strata",
+                f"launcher {facts['server_script']} under {facts['python']}; base config "
+                f"{facts['base_config']}; tested version {facts.get('tested_version')!r} "
+                f"({facts.get('tested_version_date')}) — the engine's own version is read "
+                f"only at start, where a mismatch warns")
+        # 3. the model files of the start config. Not hashed: a Strata model is
+        # shards, packs and folders, and one file's digest would not name it.
+        for key, value in facts.get("model_files", {}).items():
+            rec = local_engine.path_record(value)
+            if rec.get("error"):
+                add("FAIL", key, f"{rec['path']}: {rec['error']}")
+            else:
+                size = f" {rec['size'] / 1e9:.2f} GB" if "size" in rec else ""
+                add("OK", key, f"{rec['path']} ({rec['kind']}{size}, not hashed)")
+    # 4. the queue's effort words against the template that will receive them
+    try:
+        words, how = _effort_words(entry)
+        from dpc_client_core.providers.llamacpp_server_provider import FLEET_TO_TEMPLATE
+        bad = [e for e in efforts
+               if e not in words and FLEET_TO_TEMPLATE.get(e) not in words]
+        add("FAIL" if bad else "OK", "effort",
+            (f"refused by the template: {bad}; " if bad else "")
+            + f"queue {sorted(set(efforts))} vs template {list(words)} ({how})")
+    except Exception as exc:
+        add("FAIL", "effort", f"cannot read the template: {type(exc).__name__}: {exc}")
+    add("OK", "sampling pins",
+        "each run copies the alias and overwrites `temperature` and "
+        "`reasoning_effort`; the provider reads both from that entry and the agent "
+        f"sends no per-call override. Alias as stored: temperature="
+        f"{entry.get('temperature')} effort={entry.get('reasoning_effort')} "
+        f"reasoning_budget_tokens={entry.get('reasoning_budget_tokens')}")
+    return checks
+
+
+def card_checks(entry, gpu_needed_mib: int, free, holder_candidates,
+                engines_on_the_card) -> List[Check]:
+    """The card: VRAM short is a wait (WARN), the other engine holding it is a FAIL.
+
+    ADR-044 point 4: the two engines cannot hold the card together and DPC does
+    not swap them, so a campaign started beside the other engine would wait out
+    its budget for a person, or — with room to spare — start beside it and page
+    through WDDM. The in-process guard (`CardHeldError`) cannot see the DPC
+    service's child from here, so the card is asked by process name."""
+    checks: List[Check] = []
+    ptype = entry.get("type") if entry is not None else None
+    engines = engines_on_the_card() if local_engine.engine_of(ptype) else None
+    conflicts = local_engine.card_conflicts(ptype, engines)
+    if conflicts:
+        checks.append(("FAIL", "card holder",
+                       local_engine.card_held_message(ptype, entry.get("alias"), conflicts)))
+    if free is None:
+        checks.append(("OK", "vram", "no nvidia-smi: the VRAM gate does not apply"))
+        return checks
+    figure = ("" if ptype != "strata" else
+              " (the 27B's figure: no Strata figure is measured here — ADR-044 keeps "
+              "those on the gate card)")
+    if free >= gpu_needed_mib:
+        checks.append(("OK", "vram", f"{free} MiB free, {gpu_needed_mib} needed{figure}"))
+    else:
+        holders = ", ".join(holder_candidates()) or "no compute process named it"
+        checks.append(("WARN", "vram",
+                       f"{free} MiB free, {gpu_needed_mib} needed{figure} (held by: {holders}). "
+                       f"Stop the DPC service before the campaign: it holds the model "
+                       f"through its own local engine child (llama-server or Strata). The "
+                       f"campaign waits, bounded by --wait-budget-minutes, then exits 4"))
+    return checks
+
+
+def run_checks(alias: str, efforts: List[str], results_dir: Path,
+               gpu_needed_mib: int, no_memory: bool = False) -> List[Check]:
+    import run_gaia_eval as gaia
+    from campaign import gpu_free_mib, gpu_holder_candidates
+
+    checks: List[Check] = []
+
+    def add(status, name, detail):
+        checks.append((status, name, detail))
+
+    try:
+        entry, known, src = _alias_entry(alias)
+    except Exception as exc:
+        entry, known, src = None, [], Path.home() / ".dpc" / "providers.json"
+        add("FAIL", "alias", f"cannot read {src}: {type(exc).__name__}: {exc}")
+    checks.extend(engine_checks(alias, entry, known, src, efforts, results_dir))
 
     # 5. the token, checked against the gated repo without downloading it
     token, source = gaia.resolve_hf_token()
@@ -196,18 +286,9 @@ def run_checks(alias: str, efforts: List[str], results_dir: Path,
     except Exception as exc:
         add("FAIL", "reachable gold", f"{type(exc).__name__}: {exc}")
 
-    # 8. the card — a wait, not a refusal
-    free = gpu_free_mib()
-    if free is None:
-        add("OK", "vram", "no nvidia-smi: the VRAM gate does not apply")
-    elif free >= gpu_needed_mib:
-        add("OK", "vram", f"{free} MiB free, {gpu_needed_mib} needed")
-    else:
-        holders = ", ".join(gpu_holder_candidates()) or "no compute process named it"
-        add("WARN", "vram", f"{free} MiB free, {gpu_needed_mib} needed (held by: {holders}). "
-                            f"Stop the DPC service before the campaign: it holds the model "
-                            f"through its own llama-server child. The campaign waits, "
-                            f"bounded by --wait-budget-minutes, then exits 4")
+    # 8. the card — a wait, not a refusal, unless the other engine holds it
+    checks.extend(card_checks(entry, gpu_needed_mib, gpu_free_mib(),
+                              gpu_holder_candidates, local_engine.engines_on_the_card))
 
     # 9. somewhere to write
     try:

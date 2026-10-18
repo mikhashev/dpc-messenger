@@ -126,7 +126,7 @@ DEFAULT_WAIT_BUDGET_MIN = 30
 # Names worth naming when the card is held. Windows does not attribute VRAM per
 # process under WDDM — `nvidia-smi --query-compute-apps` returns `[N/A]` for
 # every used_memory here — so these are candidates, never proof.
-_COMPUTE_NAMES = ("llama-server", "python", "ollama", "camoufox")
+_COMPUTE_NAMES = ("llama-server", "strata", "python", "ollama", "camoufox")
 
 
 def gpu_free_mib():
@@ -376,7 +376,7 @@ def main() -> int:
     ap.add_argument("--wait-budget-minutes", type=float, default=DEFAULT_WAIT_BUDGET_MIN,
                     help="stop waiting for the card after this long and say so")
     ap.add_argument("--alias", default=DEFAULT_ALIAS,
-                    help="provider alias in ~/.dpc/providers.json (a llamacpp_server entry)")
+                    help="provider alias in ~/.dpc/providers.json (a llamacpp_server or strata entry)")
     ap.add_argument("--limit", type=int, default=None,
                     help="tasks per run, for a short smoke campaign (default: all 53)")
     ap.add_argument("--run-timeout-minutes", type=float, default=DEFAULT_RUN_TIMEOUT_MIN,
