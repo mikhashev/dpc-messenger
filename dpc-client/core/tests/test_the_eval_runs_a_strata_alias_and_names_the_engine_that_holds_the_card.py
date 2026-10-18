@@ -149,8 +149,8 @@ def test_the_loop_eval_checks_the_card_for_a_strata_run(monkeypatch):
     monkeypatch.setattr(R, "_free_vram_mib", lambda: 30000)
     assert R._check_vram_or_refuse({"type": "strata", "alias": "flash"}) == 30000
     monkeypatch.setattr(R, "_free_vram_mib", lambda: 9000)
-    with pytest.raises(SystemExit):
-        R._check_vram_or_refuse({"type": "strata", "alias": "flash"})
+    with pytest.raises(SystemExit, match="two 27B children"):
+        R._check_vram_or_refuse({"type": "llamacpp_server", "alias": "q"})
 
 
 def test_the_loop_dry_run_reads_the_strata_start_and_refuses_a_missing_file(tmp_path, capsys):
@@ -197,3 +197,95 @@ def test_a_strata_run_records_its_start_files_and_its_template_default(tmp_path)
     assert record["strata"]["tested_version"] == "0.9.1"
     effort = provenance.effort_record(entry)
     assert effort["value"] == "xhigh" and "Strata base config" in effort["source"]
+
+
+# --- second review round: no VRAM floor for Strata, an unread card, exact names ---
+
+
+def test_the_27b_floor_lives_in_one_place_and_both_gates_import_it():
+    import campaign
+
+    assert campaign.GPU_NEEDED_MIB == local_engine.LLAMA_SERVER_VRAM_FLOOR_MIB
+    assert R.VRAM_FREE_THRESHOLD_MIB == local_engine.LLAMA_SERVER_VRAM_FLOOR_MIB
+    for module in (campaign, R):
+        text = Path(module.__file__).read_text(encoding="utf-8")
+        assert "26000" not in text and "26_000" not in text, module.__file__
+    assert local_engine.vram_floor_mib("llamacpp_server") == 26_000
+    assert local_engine.vram_floor_mib("strata") is None
+
+
+@pytest.mark.parametrize("free", [30000, 9000])
+def test_a_strata_vram_reading_is_a_warning_with_context_never_a_refusal(free):
+    checks = preflight.card_checks({"type": "strata", "alias": "flash"}, 26000, free,
+                                   lambda: [], lambda: [])
+    assert _statuses(checks) == {"vram": "WARN"}
+    detail = checks[0][2]
+    assert f"{free} MiB free" in detail and "no minimum is measured" in detail
+    assert "30,743 of 32,623 MiB" in detail and "2026-10-18" in detail
+    assert "needed" not in detail
+
+
+def test_the_27b_vram_reading_is_unchanged():
+    ok = preflight.card_checks({"type": "llamacpp_server", "alias": "q"}, 26000, 30000,
+                               lambda: [], lambda: [])
+    assert ok == [("OK", "vram", "30000 MiB free, 26000 needed")]
+
+
+def test_the_loop_eval_runs_strata_on_a_short_card_and_says_why(monkeypatch, capsys):
+    monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: [])
+    monkeypatch.setattr(R, "_free_vram_mib", lambda: 3000)
+    assert R._check_vram_or_refuse({"type": "strata", "alias": "flash"}) == 3000
+    out = capsys.readouterr().out
+    assert "WARN VRAM: 3000 MiB free" in out and "no minimum is measured" in out
+    assert "27B" not in out
+
+
+def test_the_campaign_does_not_wait_on_vram_for_strata(monkeypatch, capsys):
+    from datetime import datetime, timedelta
+
+    import campaign
+
+    monkeypatch.setattr(campaign, "gpu_free_mib", lambda: 3000)
+
+    def no_sleep(seconds):
+        raise AssertionError("the campaign waited on a Strata alias")
+
+    monkeypatch.setattr(campaign.time, "sleep", no_sleep)
+    assert campaign.wait_for_gpu(datetime.now() + timedelta(hours=8), 5, needed_mib=None) is True
+    assert "no minimum is measured" in capsys.readouterr().out
+
+
+def test_an_nvidia_smi_that_does_not_answer_is_unavailable_not_an_empty_card(capsys, monkeypatch):
+    def broken(*a, **k):
+        raise OSError("device busy")
+
+    found = local_engine.engines_on_the_card(run=broken)
+    assert isinstance(found, local_engine.CardUnavailable) and found != []
+    assert found.error == "OSError: device busy"
+    assert local_engine.card_conflicts("strata", found) == []
+
+    checks = preflight.card_checks({"type": "strata", "alias": "flash"}, 26000, 30000,
+                                   lambda: [], lambda: found)
+    held = [(s, d) for s, n, d in checks if n == "card holder"]
+    assert held == [("WARN", held[0][1])]
+    assert held[0][1].startswith("card holder check unavailable: OSError: device busy")
+
+    monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: found)
+    monkeypatch.setattr(R, "_free_vram_mib", lambda: 30000)
+    R._check_vram_or_refuse({"type": "llamacpp_server", "alias": "q"})
+    assert "card holder check unavailable: OSError: device busy" in capsys.readouterr().out
+
+
+def test_engines_are_matched_on_the_exact_executable_name():
+    out = types.SimpleNamespace(stdout=(
+        "1, D:\\tools\\strata_helper.exe\n"
+        "2, C:\\Games\\strategy.exe\n"
+        "3, /usr/bin/stratagem\n"
+        "4, C:\\x\\llama-server-old.exe\n"
+        "5, D:\\Strata\\engine\\STRATA.EXE\n"
+        "6, /opt/llama/llama-server\n"
+        "7, D:\\Strata\\engine\\Strata-Vision.exe\n"))
+    found = local_engine.engines_on_the_card(run=lambda *a, **k: out)
+    assert found == [("strata", "STRATA.EXE (pid 5)"),
+                     ("llama-server", "llama-server (pid 6)"),
+                     ("strata", "Strata-Vision.exe (pid 7)")]

@@ -26,9 +26,10 @@ read or written. Results are written under `results_root("loop")` unless
 The DPC service normally holds the same model in VRAM; two children do not
 fit on one card. Before a run on a supervised engine (`llamacpp_server` or
 `strata`), the card is asked who holds it — the other engine there is a refusal
-naming it (ADR-044 point 4) — and free VRAM is checked against the threshold
-`eval/kv/ab_key_quant.py` uses for a 27B model on one card — refusing loudly
-beats an OOM mid-run.
+naming it (ADR-044 point 4) — and, for the 27B, free VRAM is checked against
+the threshold `eval/kv/ab_key_quant.py` uses for a 27B model on one card —
+refusing loudly beats an OOM mid-run. Strata sizes its expert cache to what is
+free, so for a `strata` alias the reading is reported, not refused on.
 
 Run from `dpc-client/core`:
 
@@ -132,10 +133,9 @@ LONG_TASK_TIMEOUT_MIN = 45.0
 # before the full A/B.
 STEP0_ONLY_TASKS = 2
 
-# Same figure and the same reasoning as `eval/kv/ab_key_quant.py:_free_vram_mib`
-# callers: a 27B GGUF, one card, one child — not derived from this GGUF's exact
-# byte size, because neither is that one.
-VRAM_FREE_THRESHOLD_MIB = 26_000
+# The 27B's figure, shared with the GAIA campaign (`local_engine`); the same
+# one `eval/kv/ab_key_quant.py` refuses on. Strata has none (`vram_floor_mib`).
+VRAM_FREE_THRESHOLD_MIB = local_engine.LLAMA_SERVER_VRAM_FLOOR_MIB
 
 
 def _provider_entry_for_alias(alias: str) -> Dict[str, Any]:
@@ -176,13 +176,16 @@ def _check_vram_or_refuse(entry: Dict[str, Any]) -> Optional[int]:
 
     The card-holder guard first: the other engine on the card is a refusal that
     names it, the way `CardHeldError` does in the client — that guard lives in
-    one process and cannot see the service's child from here. Then VRAM; for
-    Strata the 27B's figure is applied as a floor, no Strata figure being
-    measured here (ADR-044 keeps those on the gate card)."""
+    one process and cannot see the service's child from here; a card that did
+    not answer is said so, not taken as free. Then VRAM: the 27B's floor
+    refuses; a Strata alias has no floor, its reading is printed with context."""
     ptype = entry.get("type")
     if ptype not in local_engine.supervised_types():
         return None
     holders = local_engine.engines_on_the_card()
+    if isinstance(holders, local_engine.CardUnavailable):
+        print(f"  WARN card holder check unavailable: {holders.error} — the card is not "
+              "known to be free of the other engine")
     conflicts = local_engine.card_conflicts(ptype, holders)
     if conflicts:
         raise SystemExit(local_engine.card_held_message(ptype, entry.get("alias"), conflicts))
@@ -191,6 +194,9 @@ def _check_vram_or_refuse(entry: Dict[str, Any]) -> Optional[int]:
         print("  VRAM: nvidia-smi unreadable — proceeding without a check "
               "(reading failed, not \"zero free\")")
         return None
+    if local_engine.vram_floor_mib(ptype) is None:
+        print(f"  WARN VRAM: {free} MiB free; {local_engine.STRATA_VRAM_NOTE}")
+        return free
     print(f"  VRAM: {free} MiB free (need >= {VRAM_FREE_THRESHOLD_MIB} MiB)")
     if free < VRAM_FREE_THRESHOLD_MIB:
         raise SystemExit(

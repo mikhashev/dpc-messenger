@@ -201,10 +201,17 @@ def card_checks(entry, gpu_needed_mib: int, free, holder_candidates,
     not swap them, so a campaign started beside the other engine would wait out
     its budget for a person, or — with room to spare — start beside it and page
     through WDDM. The in-process guard (`CardHeldError`) cannot see the DPC
-    service's child from here, so the card is asked by process name."""
+    service's child from here, so the card is asked by process name; a card
+    that did not answer is a WARN, not a free card. A Strata alias has no VRAM
+    floor (`local_engine.vram_floor_mib`): its reading is a WARN with context,
+    and the campaign does not wait on it."""
     checks: List[Check] = []
     ptype = entry.get("type") if entry is not None else None
     engines = engines_on_the_card() if local_engine.engine_of(ptype) else None
+    if isinstance(engines, local_engine.CardUnavailable):
+        checks.append(("WARN", "card holder",
+                       f"card holder check unavailable: {engines.error} — the card is not "
+                       f"known to be free of the other engine"))
     conflicts = local_engine.card_conflicts(ptype, engines)
     if conflicts:
         checks.append(("FAIL", "card holder",
@@ -212,15 +219,15 @@ def card_checks(entry, gpu_needed_mib: int, free, holder_candidates,
     if free is None:
         checks.append(("OK", "vram", "no nvidia-smi: the VRAM gate does not apply"))
         return checks
-    figure = ("" if ptype != "strata" else
-              " (the 27B's figure: no Strata figure is measured here — ADR-044 keeps "
-              "those on the gate card)")
+    if local_engine.vram_floor_mib(ptype) is None:
+        checks.append(("WARN", "vram", f"{free} MiB free; {local_engine.STRATA_VRAM_NOTE}"))
+        return checks
     if free >= gpu_needed_mib:
-        checks.append(("OK", "vram", f"{free} MiB free, {gpu_needed_mib} needed{figure}"))
+        checks.append(("OK", "vram", f"{free} MiB free, {gpu_needed_mib} needed"))
     else:
         holders = ", ".join(holder_candidates()) or "no compute process named it"
         checks.append(("WARN", "vram",
-                       f"{free} MiB free, {gpu_needed_mib} needed{figure} (held by: {holders}). "
+                       f"{free} MiB free, {gpu_needed_mib} needed (held by: {holders}). "
                        f"Stop the DPC service before the campaign: it holds the model "
                        f"through its own local engine child (llama-server or Strata). The "
                        f"campaign waits, bounded by --wait-budget-minutes, then exits 4"))

@@ -21,6 +21,43 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# What one llama-server run of the 27B occupies (model plus KV cache, one
+# card, one child); the one figure both eval gates import.
+LLAMA_SERVER_VRAM_FLOOR_MIB = 26_000
+
+# Strata sizes its expert cache to the VRAM it finds free (`--expert-cache
+# auto`, less `--vram-reserve-mib`), so it has no measured floor; the reading is
+# reported, never refused on. The occupancy is context, not need.
+STRATA_OBSERVED_OCCUPANCY = "30,743 of 32,623 MiB used with Strata running (2026-10-18, live /metrics)"
+STRATA_VRAM_NOTE = (
+    "Strata adapts its expert cache to the VRAM it finds free (--expert-cache auto, "
+    "--vram-reserve-mib), so no minimum is measured and this reading is not a gate; "
+    f"for scale, {STRATA_OBSERVED_OCCUPANCY} — occupancy, not need"
+)
+
+
+class CardUnavailable:
+    """`engines_on_the_card`'s answer when nvidia-smi is there but did not answer:
+    falsy like an empty list, but not one — an unread card is not a free card."""
+
+    def __init__(self, error: str):
+        self.error = error
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return f"CardUnavailable({self.error!r})"
+
+
+def vram_floor_mib(provider_type: Optional[str]) -> Optional[int]:
+    """Free VRAM an alias of this type needs before a run, or None when its
+    engine has no floor to refuse on (Strata, see STRATA_VRAM_NOTE)."""
+    if engine_of(provider_type) == "strata":
+        return None
+    return LLAMA_SERVER_VRAM_FLOOR_MIB
+
+
 def supervised_types() -> frozenset:
     """Provider types whose alias starts a supervised engine on the card."""
     from dpc_client_core.firewall import LOCAL_PROVIDER_TYPES
@@ -45,26 +82,37 @@ def engine_of(provider_type: Optional[str]) -> Optional[str]:
     return cls.ENGINE if cls is not None else None
 
 
-def engines_on_the_card(run=subprocess.run) -> Optional[List[Tuple[str, str]]]:
-    """(engine, "name (pid N)") for each compute process on the card that is one
-    of the supervised engines, matched on its file name (`llama-server.exe`,
-    `strata.exe`, `strata-vision.exe`). None where there is no nvidia-smi to ask.
-
-    By name, never by MiB: Windows does not attribute VRAM per process under
-    WDDM (`used_memory` reads `[N/A]`). An unreadable answer is an empty list —
-    a held card then shows as short VRAM, which the VRAM gate still catches.
-    """
+def engine_executables() -> Dict[str, str]:
+    """Executable stem -> engine: each supervised engine's own name, and
+    Strata's vision encoder (`strata-vision`), which is Strata on the card."""
     from dpc_client_core.llm_manager import PROVIDER_MAP
-    engines = sorted({PROVIDER_MAP[t].SUPERVISOR_CLASS.ENGINE for t in supervised_types()},
-                     key=len, reverse=True)
+    stems = {PROVIDER_MAP[t].SUPERVISOR_CLASS.ENGINE: PROVIDER_MAP[t].SUPERVISOR_CLASS.ENGINE
+             for t in supervised_types()}
+    if "strata" in stems:
+        stems["strata-vision"] = "strata"
+    return stems
+
+
+def engines_on_the_card(run=subprocess.run):
+    """(engine, "name (pid N)") for each compute process on the card that is one
+    of the supervised engines, matched on its executable stem exactly, case
+    aside and with or without `.exe` (`llama-server`, `strata`, `strata-vision`):
+    a prefix would take `strata_helper.exe` or `strategy.exe` for Strata.
+
+    None where there is no nvidia-smi to ask; `CardUnavailable` when there is
+    one and it did not answer — never an empty list, which reads as a free
+    card. By name, never by MiB: Windows does not attribute VRAM per process
+    under WDDM (`used_memory` reads `[N/A]`).
+    """
+    stems = engine_executables()
     try:
         out = run(["nvidia-smi", "--query-compute-apps=pid,process_name",
                    "--format=csv,noheader,nounits"],
                   capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
         return None
-    except Exception:
-        return []
+    except Exception as exc:
+        return CardUnavailable(f"{type(exc).__name__}: {exc}")
     found: List[Tuple[str, str]] = []
     for line in (getattr(out, "stdout", "") or "").strip().splitlines():
         parts = [p.strip() for p in line.split(",", 1)]
@@ -72,7 +120,8 @@ def engines_on_the_card(run=subprocess.run) -> Optional[List[Tuple[str, str]]]:
             continue
         pid, name = parts
         base = name.replace("\\", "/").rsplit("/", 1)[-1]
-        engine = next((e for e in engines if base.lower().startswith(e)), None)
+        stem = base[:-4] if base.lower().endswith(".exe") else base
+        engine = stems.get(stem.lower())
         if engine is not None:
             found.append((engine, f"{base} (pid {pid})"))
     return found
@@ -86,7 +135,7 @@ def card_conflicts(provider_type: Optional[str],
     llama-server children may share; whether they fit is the VRAM gate's question.
     """
     mine = supervisor_class(provider_type)
-    if mine is None or not holders:
+    if mine is None or not holders or isinstance(holders, CardUnavailable):
         return []
     from dpc_client_core.llm_manager import PROVIDER_MAP
     from dpc_client_core.managers.llama_server_supervisor import LlamaServerSupervisor

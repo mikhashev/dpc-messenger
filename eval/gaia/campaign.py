@@ -65,6 +65,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+from _harness import local_engine  # noqa: E402
 from _harness.results_root import results_root  # noqa: E402
 
 RESULTS = results_root("gaia")
@@ -118,8 +119,9 @@ QUEUE = [
 # What one run actually occupies: the 16 GB model plus its KV cache. The gate
 # used to ask whether the card was *idle* (`used < 6000`), which is a different
 # question and one the resident server can never answer yes to — so a run could
-# deadlock the queue behind itself even when it leaked nothing.
-GPU_NEEDED_MIB = 26000
+# deadlock the queue behind itself even when it leaked nothing. A Strata alias
+# has no such floor (`local_engine.vram_floor_mib`).
+GPU_NEEDED_MIB = local_engine.LLAMA_SERVER_VRAM_FLOOR_MIB
 POLL_SECONDS = 60
 REPORT_EVERY = 5            # polls; one line a minute for eight hours is not a report
 DEFAULT_WAIT_BUDGET_MIN = 30
@@ -175,8 +177,10 @@ def gpu_holder_candidates() -> list:
     return holders
 
 
-def wait_for_gpu(deadline: datetime, budget_minutes: float = DEFAULT_WAIT_BUDGET_MIN) -> bool:
-    """True when the card has room for a run.
+def wait_for_gpu(deadline: datetime, budget_minutes: float = DEFAULT_WAIT_BUDGET_MIN,
+                 needed_mib=GPU_NEEDED_MIB) -> bool:
+    """True when the card has room for a run. `needed_mib` None (a Strata alias,
+    which sizes its cache to what is free) reports the reading and does not wait.
 
     Two things the previous version did not do. It says **what** is holding the
     card rather than repeating the same number — the 2026-08-25 log carries 598
@@ -197,13 +201,16 @@ def wait_for_gpu(deadline: datetime, budget_minutes: float = DEFAULT_WAIT_BUDGET
             print("  no nvidia-smi on this machine: the VRAM gate does not apply",
                   flush=True)
             return True
-        if free >= GPU_NEEDED_MIB:
+        if needed_mib is None:
+            print(f"  VRAM: {free} MiB free; {local_engine.STRATA_VRAM_NOTE}", flush=True)
+            return True
+        if free >= needed_mib:
             return True
         if polls % REPORT_EVERY == 0:
             waited = (datetime.now() - started).total_seconds() / 60
             holders = gpu_holder_candidates()
             who = ", ".join(holders) if holders else "no compute process named it"
-            print(f"  waiting for the GPU: {free} MiB free, {GPU_NEEDED_MIB} needed, "
+            print(f"  waiting for the GPU: {free} MiB free, {needed_mib} needed, "
                   f"{waited:.0f} min so far — held by: {who}. Stop the DPC service "
                   f"(or unload its model): it holds the card through its own "
                   f"llama-server child", flush=True)
@@ -212,7 +219,7 @@ def wait_for_gpu(deadline: datetime, budget_minutes: float = DEFAULT_WAIT_BUDGET
     waited = (datetime.now() - started).total_seconds() / 60
     if datetime.now() >= give_up_at:
         print(f"  giving up on the GPU after {waited:.0f} min "
-              f"({gpu_free_mib()} MiB free, {GPU_NEEDED_MIB} needed)", flush=True)
+              f"({gpu_free_mib()} MiB free, {needed_mib} needed)", flush=True)
 
     return False
 
@@ -403,6 +410,11 @@ def main() -> int:
               flush=True)
         return PREFLIGHT_EXIT
 
+    try:
+        entry = preflight._alias_entry(args.alias)[0]
+    except Exception:
+        entry = None
+    needed_mib = local_engine.vram_floor_mib((entry or {}).get("type"))
     settings = {"alias": args.alias, "limit": args.limit,
                 "run_timeout_minutes": args.run_timeout_minutes,
                 "no_memory": args.no_memory}
@@ -420,7 +432,7 @@ def main() -> int:
             print(f"skipping {cfg['name']}: {left:.0f} min left, "
                   f"a run needs about {args.minutes_per_run:.0f}", flush=True)
             continue
-        if not wait_for_gpu(deadline, args.wait_budget_minutes):
+        if not wait_for_gpu(deadline, args.wait_budget_minutes, needed_mib):
             card_never_free = True
             print("not starting the rest of the queue: the card never came free",
                   flush=True)
