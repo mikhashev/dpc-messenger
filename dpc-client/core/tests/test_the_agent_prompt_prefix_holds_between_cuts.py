@@ -161,6 +161,33 @@ class TestTheCutIsBatched:
         assert _fps(again) == _fps(messages[:-2])
 
 
+@pytest.mark.parametrize("threshold", [0.3, 0.5])
+def test_off_ignores_the_summarisers_threshold(threshold):
+    """Johnny (0.5) and Warren (0.3) run with compaction off; their threshold is
+    the summariser's and must not cut the deterministic path. Off cuts at the
+    pressure line or the round bound, nothing else."""
+    state = CompactionState({"compaction_enabled": False, "compaction_threshold": threshold,
+                             "context_window": 100000})
+    rewrites, messages = _drive(state, None, [threshold + 0.1] * 20)
+    assert rewrites == [] and uncut_rounds(messages) == 20
+    assert state.compacting is False
+    # At the pressure line it cuts, down to the emergency tail.
+    out = asyncio.run(apply_compaction(
+        messages, state=state, last_prompt_tokens=int(UNDER_PRESSURE * state.window),
+        llm_manager=None, round_idx=21,
+    ))
+    assert uncut_rounds(out) == EMERGENCY_KEEP
+
+
+def test_on_still_cuts_at_its_threshold():
+    state = CompactionState({"compaction_enabled": True, "compaction_threshold": 0.5,
+                             "context_window": 100000})
+    manager = _Summariser()
+    rewrites, _ = _drive(state, manager, [0.6] * 20)
+    assert rewrites, "the summariser never ran above its own threshold"
+    assert manager.calls > 0 and state.compacting is True
+
+
 def test_the_deterministic_cut_is_idempotent():
     msgs = [m for r in range(12) for m in _round(r)]
     once = compact_tool_history(msgs, keep_recent=6)

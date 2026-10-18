@@ -1317,7 +1317,7 @@ class CompactionState:
 
 # A cut rewrites the prompt from its boundary on, and a local engine re-reads
 # everything after the first changed message. So a cut fires rarely and deep:
-# below the pressure line only once at least CUT_MIN_BATCH rounds can go at once,
+# below the pressure line (compaction on only) once at least CUT_MIN_BATCH rounds can go at once,
 # at or above it down to EMERGENCY_KEEP rounds, and with compaction off also when
 # OFF_ROUND_BOUND rounds have piled up uncut. Between cuts the prefix is stable.
 CUT_MIN_BATCH = 6
@@ -1371,20 +1371,29 @@ async def apply_compaction(
 ) -> List[Dict[str, Any]]:
     """Decide whether/how to compact this round and return the (maybe) compacted list.
 
-    Both settings share one trigger (window share with hysteresis) and one cut
-    rule (`plan_cut`): between cuts the list comes back unchanged. Toggle off (or
-    no llm_manager) → deterministic truncation. Toggle on → the summariser; on
+    Both settings share one cut rule (`plan_cut`): between cuts the list comes
+    back unchanged. The trigger differs: on, the agent's `compaction_threshold`
+    with hysteresis; off, only the pressure line, because `compaction_threshold`
+    is the summariser's setting and a deterministic cut at 50% of the window
+    throws away rounds there is still room for. Toggle off (or no llm_manager) →
+    deterministic truncation. Toggle on → the summariser; on
     its failure, degrade the *strategy* (keep more verbatim: 12 → 18) and
     ``notify`` the user, with a circuit breaker after ``max_fails`` consecutive
     failures. The model is never swapped. Mutates ``state``.
     """
     summariser = state.enabled and llm_manager is not None
     ratio = (last_prompt_tokens / state.window) if state.window else 0.0
+    # Off has no deadband: it is under pressure or it is not, and below the line
+    # only the round bound cuts.
+    enter, release = (
+        (state.threshold, state.release) if summariser
+        else (UNDER_PRESSURE, UNDER_PRESSURE)
+    )
     entered = False
-    if not state.compacting and ratio >= state.threshold:
+    if not state.compacting and ratio >= enter:
         state.compacting = True
         entered = True
-    elif state.compacting and ratio < state.release:
+    elif state.compacting and ratio < release:
         state.compacting = False
 
     keep_after = plan_cut(messages, state, ratio, entered=entered, summariser=summariser)
