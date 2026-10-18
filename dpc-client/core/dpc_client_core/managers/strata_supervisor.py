@@ -97,6 +97,11 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # The server's window (`--max-context`), not the agent's: that one is
     # `context_window`, a config field nothing derives.
     "max_context": None,
+    # `--resident-budget-gib` (GiB of host RAM the engine may pin for the experts
+    # the GPU cache does not hold) and `--vram-reserve-mib` (VRAM left free for
+    # the desktop and other programs). None keeps the base config's value.
+    "resident_budget_gib": None,
+    "vram_reserve_mib": None,
     # None keeps whatever the base config says; True / False decide.
     "vision": None,
     "control_vector": None,
@@ -160,6 +165,29 @@ STRATA_MODEL_PARAMS: Dict[str, Any] = {
     "api_monitor": "bool",
     "vram_reserve_mib": ("arg", "--vram-reserve-mib"),
 }
+
+# Typed alias key -> (engine flag, whole number, lowest value). Strata reads the
+# budget as a float and clamps it to the commit capacity itself, so no upper
+# bound here; a reserve of 0 is Strata's own "leave nothing", as model_params allows.
+BUDGET_FLAGS: Dict[str, tuple] = {
+    "resident_budget_gib": ("--resident-budget-gib", False, 0.0),
+    "vram_reserve_mib": ("--vram-reserve-mib", True, 0),
+}
+
+
+def budget_error(key: str, value: Any) -> Optional[str]:
+    """Why `value` cannot be the alias's `key` in BUDGET_FLAGS, or None (None is an absence)."""
+    if value is None:
+        return None
+    _flag, whole, lo = BUDGET_FLAGS[key]
+    ok = (not isinstance(value, bool) and isinstance(value, (int, float))
+          and not (whole and value != int(value))
+          and (value > lo if not whole else value >= lo))
+    if ok:
+        return None
+    rule = "a whole number, at least 0" if whole else "a number more than 0"
+    return f"{key}: expected {rule}, not {value!r}"
+
 
 # Alias key -> the engine flag whose value it replaces (ADR-044 point 7).
 MODEL_FILE_FLAGS: Dict[str, str] = {
@@ -260,6 +288,7 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
                 _base._positive_int(key, config[key])
             except LlamaServerError as e:
                 errors.append(str(e))
+    errors.extend(e for e in (budget_error(k, config.get(k)) for k in BUDGET_FLAGS) if e)
     params = config.get("model_params")
     if params is not None and not isinstance(params, dict):
         errors.append(f"model_params must be an object, got {params!r}")
@@ -304,6 +333,17 @@ def reads_images(cfg: Dict[str, Any]) -> bool:
     return "--vision" in [str(a) for a in args] and isinstance(cfg.get("vision"), dict)
 
 
+def _number_or_raw(raw: Optional[str]) -> Any:
+    """A flag value as a number when it is one (24, 24.5), else as written."""
+    if raw is None:
+        return None
+    try:
+        n = float(raw)
+    except ValueError:
+        return raw
+    return int(n) if n.is_integer() else n
+
+
 def _flag_value(args: List[str], flag: str) -> Optional[str]:
     """The value after `flag` in `args`, or None when the flag is absent or bare."""
     args = [str(a) for a in args]
@@ -346,6 +386,8 @@ def inspect_base_config(path: Any, install_dir: Any = None) -> Dict[str, Any]:
                       ("conversation_cache_slots", "--conversation-cache-slots")):
         raw = _flag_value(args, flag)
         values[key] = int(raw) if raw is not None and raw.isdigit() else raw
+    for key, (flag, _whole, _lo) in BUDGET_FLAGS.items():
+        values[key] = _number_or_raw(_flag_value(args, flag))
     block = cfg.get("vision") if isinstance(cfg.get("vision"), dict) else None
     values["vision"] = reads_images(cfg)
     values["mmproj"] = (block or {}).get("mmproj")
@@ -649,6 +691,17 @@ class StrataSupervisor(LlamaServerSupervisor):
                 cfg.pop(key, None)
             else:
                 cfg[key] = value
+        # The typed fields win over model_params.vram_reserve_mib, which older
+        # aliases may carry: set, they replace the base's value; unset, the
+        # base's (or model_params') value stays.
+        for key, (flag, _whole, _lo) in BUDGET_FLAGS.items():
+            value = c.get(key)
+            if value is None:
+                continue
+            refusal = budget_error(key, value)
+            if refusal:
+                raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
+            args = _set_flag(args, flag, value)
         if cfg.get("lazy_load") is True and cfg.get("vision"):
             raise LlamaServerError(
                 f"strata[{self.alias}]: lazy_load is text-only and this start reads images "

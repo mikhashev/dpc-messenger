@@ -178,6 +178,7 @@ class TestInspectCommand:
         assert v["vision"] is True and v["mmproj"] == "D:/mmproj.gguf"
         assert v["control_vector"] is True and v["control_vector_file"] == "D:/cv/refusal.gguf"
         assert out["control_vector_scale"] == "1.0"
+        assert v["resident_budget_gib"] == 24 and v["vram_reserve_mib"] == 1536
         assert out["model_params"] == {"sampling.temperature": 0.6, "sampling.top_k": 20,
                                        "idle_unload_s": 0, "vram_reserve_mib": 1536}
         assert out["suggested_ple_gguf"] == "D:/models/flash-next-00002-of-00002.gguf"
@@ -349,6 +350,16 @@ class TestSaveValidation:
         for bad in (0, "4g", True):
             assert any("positive whole number" in e
                        for e in self._errors({**ok, "conversation_cache_mib": bad})), bad
+
+    def test_the_budget_and_reserve_are_checked(self, tmp_path):
+        ok = self._ok(tmp_path)
+        assert self._errors({**ok, "resident_budget_gib": 24.5, "vram_reserve_mib": 0}) == []
+        for bad in (0, -1, "24", True):
+            errors = self._errors({**ok, "resident_budget_gib": bad})
+            assert len(errors) == 1 and "resident_budget_gib: expected a number more than 0" in errors[0], bad
+        for bad in (-1, 1.5, "700", False):
+            errors = self._errors({**ok, "vram_reserve_mib": bad})
+            assert len(errors) == 1 and "vram_reserve_mib: expected a whole number, at least 0" in errors[0], bad
 
     def test_a_set_path_must_exist(self, tmp_path):
         ok = self._ok(tmp_path)

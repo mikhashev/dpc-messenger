@@ -53,7 +53,7 @@ export const STRATA_MODEL_PARAMS: StrataParamSpec[] = [
   { key: 'api_monitor', kind: 'bool',
     help: "Keep the last 100 requests' prompts and answers in memory for /api-monitor" },
   { key: 'vram_reserve_mib', kind: 'int', min: 0, step: 100,
-    help: 'VRAM in MiB the engine leaves free for other programs (engine default 700)' },
+    help: 'VRAM in MiB the engine leaves free for other programs (engine default 700); the VRAM reserve field above wins when set' },
 ];
 
 const SHARD_RE = /^(.*)-(\d{5})-of-(\d{5})(\.gguf)$/i;

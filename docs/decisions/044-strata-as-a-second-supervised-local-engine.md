@@ -142,7 +142,9 @@ card.** Every point is Mike's call, 2026-10-18.
    `/metrics`: engine version against tested version, effective context, conversation
    cache, images, free VRAM. The `--resident-budget-gib` / `--vram-reserve-mib` values in
    today's configs were set for an older card layout; they are re-derived at the first
-   supervised start and recorded beside the card state they were derived on.
+   supervised start and recorded beside the card state they were derived on. Both are
+   typed alias fields (`resident_budget_gib`, `vram_reserve_mib`) over the base config's
+   values; the typed reserve wins over a `model_params.vram_reserve_mib`.
 8. **Vision by the fact of the start.** The subclass **overrides** `supports_vision`: the
    base class answers yes whenever the alias names an mmproj, even with no live child.
    For Strata it answers from the live start — `/props` `modalities.vision` of the running

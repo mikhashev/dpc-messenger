@@ -199,6 +199,41 @@ class TestTheStartConfig:
         assert cfg["args"].count("--vram-reserve-mib") == 1
         assert cfg["idle_unload_s"] == 0
 
+    def test_unset_budget_and_reserve_keep_the_base_values(self, tmp_path, home):
+        args = _sup(_install(tmp_path)).build_start_config(5000)["args"]
+        assert _value(args, "--resident-budget-gib") == "24"
+        assert _value(args, "--vram-reserve-mib") == "1536"
+
+    def test_typed_budget_and_reserve_replace_the_base_values(self, tmp_path, home):
+        args = _sup(_install(tmp_path), resident_budget_gib=30.5,
+                    vram_reserve_mib=2048).build_start_config(5000)["args"]
+        assert _value(args, "--resident-budget-gib") == "30.5"
+        assert _value(args, "--vram-reserve-mib") == "2048"
+        assert args.count("--resident-budget-gib") == 1 and args.count("--vram-reserve-mib") == 1
+        # The cvec flags around the budget keep their values.
+        assert _value(args, "--control-vector-layer-range", 2) == ["4", "44"]
+
+    def test_typed_budget_and_reserve_are_added_when_the_base_has_none(self, tmp_path, home):
+        args = [a for a in BASE_ARGS if a not in ("--resident-budget-gib", "24", "--vram-reserve-mib", "1536")]
+        out = _sup(_install(tmp_path, args=args), resident_budget_gib=20,
+                   vram_reserve_mib=0).build_start_config(5000)["args"]
+        assert _value(out, "--resident-budget-gib") == "20"
+        assert _value(out, "--vram-reserve-mib") == "0"
+
+    def test_the_typed_reserve_wins_over_model_params(self, tmp_path, home):
+        args = _sup(_install(tmp_path), vram_reserve_mib=3000,
+                    model_params={"vram_reserve_mib": 900}).build_start_config(5000)["args"]
+        assert _value(args, "--vram-reserve-mib") == "3000"
+        assert args.count("--vram-reserve-mib") == 1
+        args = _sup(_install(tmp_path / "b"), model_params={"vram_reserve_mib": 900}).build_start_config(5000)["args"]
+        assert _value(args, "--vram-reserve-mib") == "900"
+
+    def test_a_bad_budget_or_reserve_is_refused_before_the_start(self, tmp_path, home):
+        with pytest.raises(LlamaServerError, match="resident_budget_gib"):
+            _sup(_install(tmp_path), resident_budget_gib=0).build_start_config(5000)
+        with pytest.raises(LlamaServerError, match="vram_reserve_mib"):
+            _sup(_install(tmp_path / "b"), vram_reserve_mib=1.5).build_start_config(5000)
+
     def test_model_params_cannot_reach_the_structural_keys(self, tmp_path, home):
         with pytest.raises(LlamaServerError, match="'exe'"):
             _sup(_install(tmp_path), model_params={"exe": "evil.exe"}).build_start_config(1)

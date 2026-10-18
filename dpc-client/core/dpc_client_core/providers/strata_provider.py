@@ -34,7 +34,8 @@ OWNER_PARK_GRACE_S = 3.0
 # config file itself is not seen here and takes a restart by hand.
 _STRATA_FLAG_KEYS = (
     "strata_install_dir", "strata_base_config", "conversation_cache_mib",
-    "conversation_cache_slots", "max_context", "vision", "control_vector",
+    "conversation_cache_slots", "max_context", "resident_budget_gib", "vram_reserve_mib",
+    "vision", "control_vector",
     "model_params", "extra_args",
     # Model-file overrides (ADR-044 point 7): each replaces a base config value.
     "native_gguf", "ple_gguf", "pack_dir", "mtp_dir", "expert_profile", "mmproj",

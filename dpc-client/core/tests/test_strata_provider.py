@@ -179,6 +179,14 @@ class TestAdoption:
         second = StrataProvider("flash", _config(root, conversation_cache_mib=8192))
         assert second.supervisor is not first.supervisor
 
+    @pytest.mark.parametrize("key,value", [("resident_budget_gib", 30), ("vram_reserve_mib", 2048)])
+    def test_a_changed_resident_budget_or_reserve_does_not_adopt(self, tmp_path, key, value):
+        root = _install(tmp_path)
+        first = StrataProvider("flash", _config(root))
+        first.supervisor.props = {"x": 1}
+        second = StrataProvider("flash", _config(root, **{key: value}))
+        assert second.supervisor is not first.supervisor
+
     def test_a_child_of_the_other_engine_is_never_adopted_under_the_same_alias(self, tmp_path):
         llama = LlamaServerSupervisor("flash", {"gguf_path": "D:/m.gguf"})
         llama.props = {"x": 1}

@@ -92,6 +92,8 @@
     conversation_cache_mib?: number;   // no default: a dated measurement
     conversation_cache_slots?: number;
     max_context?: number;        // the SERVER window, not context_window
+    resident_budget_gib?: number; // --resident-budget-gib, host RAM pinned for experts
+    vram_reserve_mib?: number;   // --vram-reserve-mib, VRAM left for other programs
     vision?: boolean;            // unset = the base config decides
     control_vector?: boolean;    // unset = the base config decides
     model_params?: Record<string, unknown>; // Strata /config keys (runconfig.py EDITABLE)
@@ -2564,6 +2566,35 @@
                         Re-measure after changing the page file, the model or the server window.
                       </p>
 
+                      <div class="form-group strata-pair">
+                        <div>
+                          <label for="strata-resident-gib-{i}">Resident budget, GiB (--resident-budget-gib)</label>
+                          <input
+                            id="strata-resident-gib-{i}"
+                            type="number"
+                            min="0.5"
+                            step="1"
+                            value={sp.resident_budget_gib ?? ''}
+                            on:input={(e) => setNum(i, 'resident_budget_gib', e.currentTarget.value, true)}
+                            placeholder={basePlaceholder(strataBase(strataInspect, i, 'resident_budget_gib'), 'not in the base config')}
+                          />
+                          <p class="help-text">Host RAM the engine may pin for the experts the card does not hold.</p>
+                        </div>
+                        <div>
+                          <label for="strata-vram-reserve-{i}">VRAM reserve, MiB (--vram-reserve-mib)</label>
+                          <input
+                            id="strata-vram-reserve-{i}"
+                            type="number"
+                            min="0"
+                            step="256"
+                            value={sp.vram_reserve_mib ?? ''}
+                            on:input={(e) => setNum(i, 'vram_reserve_mib', e.currentTarget.value)}
+                            placeholder={basePlaceholder(strataBase(strataInspect, i, 'vram_reserve_mib'), 'engine default')}
+                          />
+                          <p class="help-text">VRAM left free for the desktop and other programs.</p>
+                        </div>
+                      </div>
+
                       <div class="form-group">
                         <label for="strata-maxctx-{i}">Server window, tokens (--max-context)</label>
                         <input
@@ -2635,7 +2666,7 @@
                             rows="4"
                             value={(sp.extra_args ?? []).join('\n')}
                             on:input={(e) => setExtraArgs(i, e.currentTarget.value)}
-                            placeholder={'--resident-budget-gib\n24'}
+                            placeholder={'--spec\n4'}
                           ></textarea>
                           <p class="help-text warn">
                             Appended to the start config's engine "args" last, verbatim and unchecked; every flag
