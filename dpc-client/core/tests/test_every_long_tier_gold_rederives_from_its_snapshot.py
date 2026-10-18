@@ -5,9 +5,12 @@ against, a moved constant fails exactly the golds that read it, and the
 The long tier (`eval/loop/tasks_long.py`) grades a model on this repository's
 own source, copied out with `git archive`. A gold is two derivations agreeing —
 a reading at `GOLD_COMMIT` and a mechanical parse of the snapshot — and the run
-refuses when they part. These tests snapshot HEAD, as a run does by default: if
-a gold drifts from the code, this file goes red for the same reason the run
-would refuse. No model, no network; the git tests skip without git.
+refuses when they part. These tests snapshot `GOLD_COMMIT`, the commit the golds
+were read at: since 2026-10-18 HEAD no longer carries the compaction-off
+truncation the long-compaction-ladder gold describes, so the tier is run pinned
+(`--snapshot-commit GOLD_COMMIT`) until the corpus is re-read at a new commit
+as one batch. A run on unpinned HEAD refuses with exit 2, which is the gate
+working. No model, no network; the git tests skip without git.
 """
 
 import shutil
@@ -44,7 +47,7 @@ def snapshot(tmp_path_factory):
     if not _git_works():
         pytest.skip("git archive of this repository unavailable")
     dest = tmp_path_factory.mktemp("long-tier") / "snapshot"
-    info = T.snapshot_source(REPO_ROOT, T.resolve_commit(REPO_ROOT, "HEAD"), dest)
+    info = T.snapshot_source(REPO_ROOT, T.resolve_commit(REPO_ROOT, T.GOLD_COMMIT), dest)
     assert info["files"] > 0
     return dest
 

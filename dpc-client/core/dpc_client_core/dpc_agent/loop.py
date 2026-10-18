@@ -31,6 +31,7 @@ from .utils import (
     load_agent_config,
 )
 from .context import CompactionState, apply_compaction
+from . import prompt_divergence
 from .tool_ledger import record_attempt, sweep_unfinished
 from .llm_adapter import DpcLlmAdapter
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
@@ -905,6 +906,19 @@ async def _chat_unless_killed(coro, kill_event: Optional[asyncio.Event]):
     raise CallKilled()
 
 
+def _answers_with_tool_calls(msg: Dict[str, Any], llm: Any) -> bool:
+    """A reply that is a tool call, native or written into the text."""
+    if msg.get("tool_calls"):
+        return True
+    content = msg.get("content") or ""
+    if "tool_call" in content.lower() and hasattr(llm, "_parse_tool_calls"):
+        try:
+            return bool(llm._parse_tool_calls(content))
+        except Exception:
+            return False
+    return False
+
+
 async def _finalize_after_guard_stop(
     hooks: HookRegistry,
     messages: List[Dict[str, Any]],
@@ -916,14 +930,21 @@ async def _finalize_after_guard_stop(
     fallback_reason: str,
     task_id: str = "",
     stop_event: Optional[asyncio.Event] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    reasoning_effort: Optional[str] = None,
+    observe_request: Optional[Callable[..., None]] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Shared "guard fired → graceful termination" sequence.
 
     When any guard returns ``HookAction.STOP_LOOP``, the loop asks the
     triggering middleware for a user-facing reason string, injects it as
-    a system message, and does one more LLM call without tools so the
-    model can produce a clean final answer. If that call fails the
-    fallback_reason (or the stop message) is returned instead.
+    a system message, and does one more LLM call so the model can produce a
+    clean final answer. That call carries the loop's own `tools` and
+    `reasoning_effort`: a template that renders them at the head of the
+    prompt would otherwise re-read the whole conversation. If the model
+    answers it with tool calls anyway, one more call without tools asks
+    again. If the calls fail the fallback_reason (or the stop message) is
+    returned instead.
 
     Two exceptions: after ContextLimitGuard the call is skipped, and a
     user stop during the call cancels it.
@@ -949,12 +970,17 @@ async def _finalize_after_guard_stop(
     if stop_event is not None and stop_event.is_set():
         llm_trace["stopped_by_user"] = True
         return user_stopped, accumulated_usage, llm_trace
-    try:
+
+    async def _final_call(tools_sent):
+        """One finalising call; None when the user stopped it."""
+        if observe_request is not None:
+            observe_request(messages, tools_sent, reasoning_effort)
         chat_task = asyncio.ensure_future(llm.chat(
             messages,
-            tools=None,
+            tools=tools_sent,
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
+            reasoning_effort=reasoning_effort,
             task_id=task_id or None,
         ))
         if stop_event is not None:
@@ -965,12 +991,21 @@ async def _finalize_after_guard_stop(
                 stop_task.cancel()
             if not chat_task.done():
                 chat_task.cancel()
-                log.info("Agent stopped by user during the finalising call after a guard stop")
-                llm_trace["stopped_by_user"] = True
-                return user_stopped, accumulated_usage, llm_trace
+                return None
         final_msg, final_usage = await chat_task
         accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
-        if final_msg and final_msg.get("content"):
+        return final_msg or {}
+
+    try:
+        final_msg = await _final_call(tools or None)
+        if final_msg is not None and tools and _answers_with_tool_calls(final_msg, llm):
+            log.info("Finalising call answered with tool calls; asking again without tools")
+            final_msg = await _final_call(None)
+        if final_msg is None:
+            log.info("Agent stopped by user during the finalising call after a guard stop")
+            llm_trace["stopped_by_user"] = True
+            return user_stopped, accumulated_usage, llm_trace
+        if final_msg.get("content"):
             return final_msg["content"], accumulated_usage, llm_trace
     except Exception:
         log.warning("Failed to get final response after guard stop", exc_info=True)
@@ -1096,6 +1131,25 @@ async def run_llm_loop(
             pass
     _compaction_state = CompactionState(_compaction_cfg)
 
+    # Ark's measure of cache reuse: how often a request rewrote the prefix the
+    # previous request of this turn sent, rather than only appending to it.
+    _divergence_key = conversation_id or f"task:{task_id}"
+    _divergence = {"requests": 0, "prefix_rewrites": 0, "rewrite_rounds": []}
+    llm_trace["prompt_divergence"] = _divergence
+
+    def _observe_request(msgs, tools_sent, effort_sent) -> None:
+        try:
+            seen = prompt_divergence.TRACKER.observe(
+                _divergence_key, msgs, tools_sent, effort_sent, round_idx,
+            )
+        except Exception:
+            log.debug("prompt divergence: not measured", exc_info=True)
+            return
+        if _divergence["requests"] and seen["prefix_rewritten"]:
+            _divergence["prefix_rewrites"] += 1
+            _divergence["rewrite_rounds"].append(round_idx)
+        _divergence["requests"] += 1
+
     round_idx = 0
     empty_retry_count = 0
     MAX_EMPTY_RETRIES = 3
@@ -1127,6 +1181,9 @@ async def run_llm_loop(
                     fallback_reason=f"⚠️ Task exceeded MAX_ROUNDS ({max_rounds}).",
                     task_id=task_id,
                     stop_event=stop_event,
+                    tools=tool_schemas,
+                    reasoning_effort=reasoning_effort,
+                    observe_request=_observe_request,
                 )
 
             # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
@@ -1142,6 +1199,7 @@ async def run_llm_loop(
             )
 
             # --- LLM call ---
+            _observe_request(messages, tool_schemas, reasoning_effort)
             try:
                 msg, usage = await _chat_unless_killed(
                     llm.chat(
@@ -1240,6 +1298,9 @@ async def run_llm_loop(
                     fallback_reason="⚠️ Agent loop stopped by guard.",
                     task_id=task_id,
                     stop_event=stop_event,
+                    tools=tool_schemas,
+                    reasoning_effort=reasoning_effort,
+                    observe_request=_observe_request,
                 )
 
             # No tool calls — final response or empty-response retry

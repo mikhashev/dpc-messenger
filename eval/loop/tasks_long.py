@@ -686,6 +686,11 @@ def tasks_for(root: Path) -> List[Dict[str, Any]]:
                        "BudgetLimitGuard", "ContextLimitGuard"],
     })
 
+    # 2026-10-18: this gold describes GOLD_COMMIT only. The fix for card
+    # WITH-COMPACTION-OFF-THE-AGENT-REWRITES-AN-OLD-TOOL-ROUND-EVERY-ROUND-AND-THE-LOCAL-ENGINE-LOSES-ITS-PREFIX
+    # replaced the per-round cut with a batched one, so 9 is not what the code
+    # does after it; run the tier with --snapshot-commit GOLD_COMMIT until the
+    # corpus is re-read at a new commit (Mike's call on Ark's proposal, 2026-10-18).
     # Gold checked by reading context.py at GOLD_COMMIT: apply_compaction with the
     # toggle off does `if round_idx > 8: return compact_tool_history(messages,
     # keep_recent=6)` (:1329-1330) -> round_idx 9, keep 6. run_llm_loop sets

@@ -96,16 +96,26 @@ def test_state_config_and_defaults():
     assert abs(st2.release - 0.5) < 1e-9
 
 
-def test_toggle_off_uses_round_count_truncation():
+def test_toggle_off_truncates_deterministically_on_the_round_bound_or_the_window():
+    from dpc_client_core.dpc_agent.context import OFF_ROUND_BOUND
+
     async def run():
-        st = CompactionState({"compaction_enabled": False})
         lm = _FakeLLM()
-        msgs = _messages(12)
-        out = await apply_compaction(msgs, state=st, last_prompt_tokens=999999, llm_manager=lm, round_idx=5)
+        # Room in the window and fewer uncut rounds than the bound: untouched.
+        st = CompactionState({"compaction_enabled": False, "context_window": 1000})
+        msgs = _messages(OFF_ROUND_BOUND - 1)
+        out = await apply_compaction(msgs, state=st, last_prompt_tokens=100, llm_manager=lm, round_idx=30)
         assert out is msgs and lm.calls == 0
-        out = await apply_compaction(msgs, state=st, last_prompt_tokens=999999, llm_manager=lm, round_idx=9)
-        assert lm.calls == 0
+        # The bound reached: cut, never through the summariser.
+        msgs = _messages(OFF_ROUND_BOUND)
+        out = await apply_compaction(msgs, state=st, last_prompt_tokens=100, llm_manager=lm, round_idx=31)
+        assert lm.calls == 0 and out is not msgs
         assert any(len(str(m.get("content", ""))) <= 205 for m in out if m.get("role") == "tool")
+        # Window pressure cuts a short history too.
+        st = CompactionState({"compaction_enabled": False, "context_window": 1000})
+        out = await apply_compaction(_messages(12), state=st, last_prompt_tokens=999, llm_manager=lm, round_idx=5)
+        assert lm.calls == 0
+        assert any(m.get("_compacted") for m in out)
     asyncio.run(run())
 
 

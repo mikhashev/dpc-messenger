@@ -25,7 +25,7 @@ CALL_USAGE = {
 class _Llm:
     """Reports the same usage on every call, and keeps asking for a tool so the
     loop takes rounds until a guard stops it. The call the guard stop makes is
-    the one that arrives with `tools=None`."""
+    the one after the guard's stop message; it carries the loop's tools too."""
 
     def __init__(self):
         self.usages = []
@@ -33,7 +33,7 @@ class _Llm:
     async def chat(self, messages, **kwargs):
         usage = dict(CALL_USAGE)
         self.usages.append(usage)
-        if kwargs.get("tools") is None:
+        if messages and messages[-1].get("role") == "system":
             return {"content": "final answer", "tool_calls": []}, usage
         return {
             "content": "",

@@ -1162,6 +1162,10 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
             result.append(msg)
             continue
 
+        if msg.get("_compacted"):  # cut once, never again: re-applying changes nothing
+            result.append(msg)
+            continue
+
         if msg.get("role") == "tool" and i > 0:
             parent_round = None
             for rs in reversed(tool_round_starts):
@@ -1172,7 +1176,7 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
                 content = str(msg.get("content") or "")
                 # Compact tool result
                 summary = content[:200] if len(content) > 200 else content
-                result.append({**msg, "content": summary})
+                result.append({**msg, "content": summary, "_compacted": True})
                 continue
 
         if i in rounds_to_compact and msg.get("role") == "assistant":
@@ -1180,7 +1184,7 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
             content = msg.get("content") or ""
             if len(content) > 200:
                 content = content[:200] + "..."
-            compacted = {**msg, "content": content}
+            compacted = {**msg, "content": content, "_compacted": True}
             # A round whose result has been cut to 200 characters keeps no notes:
             # the reasoning is the largest thing on the turn, and reasoning about
             # evidence that is no longer there is worse than none.
@@ -1243,11 +1247,14 @@ async def compact_tool_history_llm(
     result: List[Dict[str, Any]] = []
 
     for i, msg in enumerate(messages):
-        if i in rounds_to_compact and msg.get("role") == "assistant" and msg.get("thinking"):
+        if i in rounds_to_compact and msg.get("role") == "assistant" and not msg.get("_compacted"):
             # Same rule as the deterministic compactor: once this round's results
             # are summaries, its notes go with them. The notes stay on the recent
-            # tail, which is where they are read.
-            result.append({k: v for k, v in msg.items() if k != "thinking"})
+            # tail, which is where they are read. The mark is what `uncut_rounds`
+            # counts, so a round is cut once and the boundary stays put after it.
+            aged = {k: v for k, v in msg.items() if k != "thinking"}
+            aged["_compacted"] = True
+            result.append(aged)
             continue
 
         if msg.get("role") == "tool" and not msg.get("_compacted"):
@@ -1308,6 +1315,51 @@ class CompactionState:
         self.fail_streak = 0
 
 
+# A cut rewrites the prompt from its boundary on, and a local engine re-reads
+# everything after the first changed message. So a cut fires rarely and deep:
+# below the pressure line only once at least CUT_MIN_BATCH rounds can go at once,
+# at or above it down to EMERGENCY_KEEP rounds, and with compaction off also when
+# OFF_ROUND_BOUND rounds have piled up uncut. Between cuts the prefix is stable.
+CUT_MIN_BATCH = 6
+EMERGENCY_KEEP = 2
+OFF_ROUND_BOUND = 24
+
+
+def uncut_rounds(messages: List[Dict[str, Any]]) -> int:
+    """Tool rounds no compactor has cut yet — what the cut rule counts."""
+    return sum(
+        1 for m in messages
+        if m.get("role") == "assistant" and m.get("tool_calls") and not m.get("_compacted")
+    )
+
+
+def plan_cut(
+    messages: List[Dict[str, Any]],
+    state: CompactionState,
+    ratio: float,
+    *,
+    entered: bool,
+    summariser: bool,
+) -> Optional[int]:
+    """How many recent rounds to keep if a cut fires this round, else None.
+
+    `entered` is the round the hysteresis switched on; `summariser` says the
+    on path (an LLM compactor) runs, which has no round bound of its own.
+    """
+    uncut = uncut_rounds(messages)
+    if state.compacting and ratio >= UNDER_PRESSURE:
+        # The tail alone may hold the window above release, so keeping the usual
+        # six would cut one round every round; cut deeper and wait for a batch.
+        return EMERGENCY_KEEP if uncut > state.keep_recent else None
+    if uncut <= state.keep_recent:
+        return None
+    if state.compacting and (entered or uncut - state.keep_recent >= CUT_MIN_BATCH):
+        return state.keep_recent
+    if not summariser and uncut >= OFF_ROUND_BOUND:
+        return state.keep_recent
+    return None
+
+
 async def apply_compaction(
     messages: List[Dict[str, Any]],
     *,
@@ -1319,38 +1371,44 @@ async def apply_compaction(
 ) -> List[Dict[str, Any]]:
     """Decide whether/how to compact this round and return the (maybe) compacted list.
 
-    Toggle off (or no llm_manager) → the pre-existing round-count prefix truncation,
-    unchanged. Toggle on → window-adaptive trigger with hysteresis; on LLM failure,
-    degrade the *strategy* (keep more verbatim: 12 → 18) and ``notify`` the user,
-    with a circuit breaker after ``max_fails`` consecutive failures. The model is
-    never swapped. Mutates ``state`` (compacting / fail_streak).
+    Both settings share one trigger (window share with hysteresis) and one cut
+    rule (`plan_cut`): between cuts the list comes back unchanged. Toggle off (or
+    no llm_manager) → deterministic truncation. Toggle on → the summariser; on
+    its failure, degrade the *strategy* (keep more verbatim: 12 → 18) and
+    ``notify`` the user, with a circuit breaker after ``max_fails`` consecutive
+    failures. The model is never swapped. Mutates ``state``.
     """
-    if not state.enabled or llm_manager is None:
-        if round_idx > 8:
-            return compact_tool_history(messages, keep_recent=6)
-        return messages
-
+    summariser = state.enabled and llm_manager is not None
     ratio = (last_prompt_tokens / state.window) if state.window else 0.0
+    entered = False
     if not state.compacting and ratio >= state.threshold:
         state.compacting = True
+        entered = True
     elif state.compacting and ratio < state.release:
         state.compacting = False
 
-    if not state.compacting:
+    keep_after = plan_cut(messages, state, ratio, entered=entered, summariser=summariser)
+    if keep_after is None:
         return messages
+    log.info(
+        "context cut: round=%d usage=%.1f%% uncut_rounds=%d keep=%d summariser=%s",
+        round_idx, ratio * 100, uncut_rounds(messages), keep_after, summariser,
+    )
+    if not summariser:
+        return compact_tool_history(messages, keep_recent=keep_after)
 
     # ADR-033 observability: one line each time compaction runs, so a live agent's
     # compaction behaviour is visible in the log (grep "ADR-033 compaction").
     log.debug(
         "ADR-033 compaction: round=%d usage=%.1f%% (>= %.0f%%), window=%d, provider=%s, keep_recent=%d",
         round_idx, ratio * 100, state.threshold * 100, state.window,
-        state.provider or "default", state.keep_recent,
+        state.provider or "default", keep_after,
     )
 
     if state.fail_streak < state.max_fails:
         try:
             out = await compact_tool_history_llm(
-                messages, llm_manager, state.provider, keep_recent=state.keep_recent,
+                messages, llm_manager, state.provider, keep_recent=keep_after,
             )
             state.fail_streak = 0
             log.debug("ADR-033 compaction: done (round=%d, usage was %.1f%%)", round_idx, ratio * 100)
@@ -1385,4 +1443,4 @@ async def apply_compaction(
             return compact_tool_history(messages, keep_recent=keep)
 
     # Circuit broken: stop calling the model; keep context bounded deterministically.
-    return compact_tool_history(messages, keep_recent=state.keep_recent)
+    return compact_tool_history(messages, keep_recent=keep_after)
