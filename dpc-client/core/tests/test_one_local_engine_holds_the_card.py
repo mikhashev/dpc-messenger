@@ -62,9 +62,15 @@ def _fake_child(sup, health_delay=0.0):
             return {"engine": {"version": "0.1.46"}, "live": {"state": "loaded"}}
         return {"total_slots": 1}
 
+    async def post(path, body, timeout):
+        # The Strata start smoke's one tool call (ADR-044 point 5).
+        call = {"function": {"name": "report_ready", "arguments": '{"status": "ok"}'}}
+        return {"choices": [{"message": {"tool_calls": [call]}}]}
+
     sup._spawn = spawn
     sup._health_ok = health
     sup._get = get
+    sup._post = post
     # The engine watcher is not under test, and a sleeping one outlives the loop.
     sup._start_watch = lambda: None
     return spawned

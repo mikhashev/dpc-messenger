@@ -119,7 +119,12 @@ card.** Every point is Mike's call, 2026-10-18.
    config. At start the supervisor reads the real engine's version from `/metrics`
    `engine.version`, **warns** on a mismatch with the tested version (does not refuse) and
    runs a smoke — `/health`, `/props`, one tool-call request — which counts only after the
-   version check, because the mock engine would pass the rest. Falsifier (Ark's review):
+   version check, because the mock engine would pass the rest. The smoke runs once per
+   start; its tool call is forced by name, with thinking off and `strata_checkpoint: false`
+   so it parks nothing. A start whose launcher names no version, or whose smoke gets no
+   answer, an HTTP error or no tool call at all, is failed closed like an engine death
+   (point 3: stopped, not started again until a person resets it); a tool call that comes
+   back with other arguments only warns. Falsifier (Ark's review):
    if two Strata updates in a row break our launch, revisit — DPC pins a tag (checkout,
    then `START-HERE.bat --update`) and installs it as it does llama.cpp, or Strata goes
    back to user-started.

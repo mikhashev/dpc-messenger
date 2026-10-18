@@ -417,12 +417,21 @@ class TestTheVersionCheck:
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
-def _started_through_the_real_launch(sup, monkeypatch, metrics, props=None):
-    """Spawn, /health, /props and /metrics faked at the supervisor's seams, so
-    `ensure_running` and both `_launch`es run for real. Returns the spawned procs."""
+def _tool_call_reply(name=mod.SMOKE_TOOL, arguments='{"status": "ok"}'):
+    """An OpenAI chat completion carrying one tool call, as the launcher answers it."""
+    call = {"id": "call_1", "type": "function", "function": {"name": name, "arguments": arguments}}
+    return {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}}]}
+
+
+def _started_through_the_real_launch(sup, monkeypatch, metrics, props=None, smoke=None):
+    """Spawn, /health, /props, /metrics and the smoke's POST faked at the
+    supervisor's seams, so `ensure_running` and both `_launch`es run for real.
+    `smoke` is the tool call's reply, or an exception it raises. Returns the
+    spawned procs; the smoke's requests land in `sup.smoke_posts`."""
     monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
     monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: 30000)
     spawned = []
+    sup.smoke_posts = []
 
     async def spawn(cmd, env):
         proc = _FakeProc()
@@ -435,7 +444,14 @@ def _started_through_the_real_launch(sup, monkeypatch, metrics, props=None):
     async def get(path):
         return metrics if path == "/metrics" else (props or {"total_slots": 1})
 
-    sup._spawn, sup._health_ok, sup._get = spawn, health, get
+    async def post(path, body, timeout):
+        sup.smoke_posts.append((path, body))
+        reply = _tool_call_reply() if smoke is None else smoke
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    sup._spawn, sup._health_ok, sup._get, sup._post = spawn, health, get, post
     sup._start_watch = lambda: None
     return spawned
 
@@ -516,3 +532,81 @@ class TestStopChecksTheCard:
         monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: 29500)
         await sup.stop()
         assert sup.vram_released is True
+
+
+class TestTheStartSmoke:
+    """ADR-044 point 5: after the version check, /health, /props and one tool
+    call. No call at all fails closed; a call with other arguments warns."""
+
+    @pytest.mark.asyncio
+    async def test_the_smoke_sends_one_forced_call_without_thinking_or_checkpoint(
+        self, tmp_path, home, monkeypatch, caplog,
+    ):
+        sup = _sup(_install(tmp_path), model="qwen3.8-flash-next")
+        _started_through_the_real_launch(sup, monkeypatch, metrics={"engine": {"version": "0.1.46"}})
+        with caplog.at_level(logging.INFO, logger=mod.__name__):
+            await sup.ensure_running()
+            await sup.ensure_running()
+        assert len(sup.smoke_posts) == 1, "one smoke per start, not per call"
+        path, body = sup.smoke_posts[0]
+        assert path == "/v1/chat/completions"
+        assert body["strata_checkpoint"] is False
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        assert body["tool_choice"] == {"type": "function", "function": {"name": mod.SMOKE_TOOL}}
+        assert [t["function"]["name"] for t in body["tools"]] == [mod.SMOKE_TOOL]
+        assert body["max_tokens"] <= 64 and body["stream"] is False
+        assert body["model"] == "qwen3.8-flash-next"
+        assert any("start smoke passed in" in r.getMessage() for r in caplog.records)
+        assert sup.failure is None
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_version_runs_no_smoke(self, tmp_path, home, monkeypatch):
+        sup = _sup(_install(tmp_path))
+        _started_through_the_real_launch(sup, monkeypatch, metrics={})
+        with pytest.raises(LlamaServerError, match="no engine version reported"):
+            await sup.ensure_running()
+        assert sup.smoke_posts == [], "the smoke counts only after the version check"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("smoke", [
+        {"choices": [{"message": {"role": "assistant", "content": "ok", "tool_calls": None}}]},
+        {"choices": []},
+        OSError("connection refused"),
+    ], ids=["no-tool-call", "no-choices", "http-error"])
+    async def test_no_tool_call_back_fails_closed_until_reset(self, tmp_path, home, monkeypatch, smoke):
+        sup = _sup(_install(tmp_path))
+        spawned = _started_through_the_real_launch(
+            sup, monkeypatch, metrics={"engine": {"version": "0.1.46"}}, smoke=smoke)
+        with pytest.raises(LlamaServerError, match="will not start it again") as excinfo:
+            await sup.ensure_running()
+        assert mod.SMOKE_FAILED in str(excinfo.value)
+        assert sup.failure["reason"].startswith(mod.SMOKE_FAILED)
+        assert "commit limit" not in sup.failure["reason"]
+        assert sup._proc is None and len(spawned) == 1
+        with pytest.raises(LlamaServerError, match="will not start it again"):
+            await sup.ensure_running()
+        assert len(spawned) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_503_naming_the_exit_code_keeps_the_death_story(self, tmp_path, home, monkeypatch):
+        sup = _sup(_install(tmp_path))
+        _started_through_the_real_launch(
+            sup, monkeypatch, metrics={"engine": {"version": "0.1.46"}},
+            smoke=OSError("503 the engine stopped unexpectedly (exit code 3221226505)"))
+        with pytest.raises(LlamaServerError):
+            await sup.ensure_running()
+        assert sup.failure["exit_code"].startswith("exit code 3221226505 (0xC0000409)")
+        assert "commit limit" in sup.failure["reason"]
+
+    @pytest.mark.asyncio
+    async def test_a_call_with_other_arguments_warns_and_serves(self, tmp_path, home, monkeypatch, caplog):
+        sup = _sup(_install(tmp_path))
+        spawned = _started_through_the_real_launch(
+            sup, monkeypatch, metrics={"engine": {"version": "0.1.46"}},
+            smoke=_tool_call_reply(arguments='{"status": "fine"}'))
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            await sup.ensure_running()
+        assert sup.failure is None and sup._proc is spawned[0]
+        assert any(r.levelno == logging.WARNING and "surprise" in r.getMessage() for r in caplog.records)
+        await sup.stop()
