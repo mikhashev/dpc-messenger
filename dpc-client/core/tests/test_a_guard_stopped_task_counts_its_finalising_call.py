@@ -33,7 +33,8 @@ class _Llm:
     async def chat(self, messages, **kwargs):
         usage = dict(CALL_USAGE)
         self.usages.append(usage)
-        if messages and messages[-1].get("role") == "system":
+        # The guard's stop message rides after the history as user text.
+        if messages and str(messages[-1].get("content", "")).startswith("[ROUND_LIMIT]"):
             return {"content": "final answer", "tool_calls": []}, usage
         return {
             "content": "",

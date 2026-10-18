@@ -101,6 +101,30 @@ def messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+def _as_blocks(content: Any) -> List[Dict[str, Any]]:
+    """A user turn's content as a block list (a copy), for joining two turns."""
+    if isinstance(content, list):
+        return list(content)
+    return [{"type": "text", "text": str(content or "")}] if content else []
+
+
+def _holds_tool_results(turn: Dict[str, Any]) -> bool:
+    content = turn.get("content")
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    )
+
+
+def _text_of_content(content: Any) -> str:
+    """The text of a message's content, whether a string or text blocks."""
+    if isinstance(content, list):
+        return "\n\n".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+        )
+    return str(content or "")
+
+
 class DpcLlmAdapter:
     """
     Adapts DPC's LLMManager to the interface expected by the Ouroboros agent loop.
@@ -926,9 +950,28 @@ class DpcLlmAdapter:
         Ouroboros uses role:"tool" for tool results; Anthropic expects them as
         role:"user" with tool_result content blocks. Consecutive tool results are
         batched into a single user message as required by the Anthropic API.
+
+        Only the first system message is the system part. A later one (a guard's
+        stop notice, say) becomes user-side text at its place in the history:
+        taken as `system` it replaced the agent's whole system prompt — identity,
+        scratchpad, everything a local engine had cached at the head. Text that
+        follows a batch of tool results joins that batch's user turn, so the roles
+        still alternate; the OpenAI-shape converter renders the joined turn exactly
+        as it rendered the two (tool messages, then the text). Two text turns stay
+        apart: joining them would change how they render.
         """
-        system = ""
+        system: Any = ""
+        seen_system = False
         anthropic_messages: List[Dict[str, Any]] = []
+
+        def add_user(content: Any) -> None:
+            previous = anthropic_messages[-1] if anthropic_messages else None
+            if previous is not None and previous.get("role") == "user" and _holds_tool_results(previous):
+                # New lists, never an append: the blocks are shared with the loop's
+                # own messages, which are sent again next round.
+                previous["content"] = _as_blocks(previous.get("content")) + _as_blocks(content)
+                return
+            anthropic_messages.append({"role": "user", "content": content})
 
         i = 0
         while i < len(messages):
@@ -936,14 +979,19 @@ class DpcLlmAdapter:
             role = msg.get("role", "")
 
             if role == "system":
-                system = msg.get("content", "")
+                if not seen_system:
+                    system = msg.get("content", "")
+                    seen_system = True
+                else:
+                    text = _text_of_content(msg.get("content", ""))
+                    if text:
+                        add_user(text)
                 i += 1
                 continue
 
             if role == "user":
-                content = msg.get("content", "")
                 # If content is already a list (e.g. vision), pass through
-                anthropic_messages.append({"role": "user", "content": content})
+                add_user(msg.get("content", ""))
                 i += 1
                 continue
 

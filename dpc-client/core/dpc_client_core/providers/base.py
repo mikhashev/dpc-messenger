@@ -551,6 +551,12 @@ def anthropic_to_openai_messages(
     for position, m in enumerate(messages):
         role = m.get("role")
         content = m.get("content")
+        if role == "system":
+            # The system part is `system` above. One that arrives inside the
+            # turns is a note at its place in the history, sent as user text:
+            # passed through, a template that wants the system first refuses it
+            # or renders a second head; as a block list it was dropped.
+            role = "user"
 
         if isinstance(content, str):
             out.append({"role": role, "content": content})

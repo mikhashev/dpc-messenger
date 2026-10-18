@@ -937,9 +937,11 @@ async def _finalize_after_guard_stop(
     """Shared "guard fired → graceful termination" sequence.
 
     When any guard returns ``HookAction.STOP_LOOP``, the loop asks the
-    triggering middleware for a user-facing reason string, injects it as
-    a system message, and does one more LLM call so the model can produce a
-    clean final answer. That call carries the loop's own `tools` and
+    triggering middleware for a user-facing reason string, appends it after
+    the history as user-side text, and does one more LLM call so the model can
+    produce a clean final answer. Not as a system message: the converter took
+    the last system message for the system prompt, so the agent's own was
+    dropped from the call and the engine's cached head with it. That call carries the loop's own `tools` and
     `reasoning_effort`: a template that renders them at the head of the
     prompt would otherwise re-read the whole conversation. If the model
     answers it with tool calls anyway, one more call without tools asks
@@ -953,7 +955,7 @@ async def _finalize_after_guard_stop(
     stop_msg = mw.stop_message() if mw is not None else None
     if stop_msg:
         log.warning("Guard %s stopped loop: %s", mw.__class__.__name__, stop_msg)
-        messages.append({"role": "system", "content": stop_msg})
+        messages.append({"role": "user", "content": stop_msg})
     if isinstance(mw, ContextLimitGuard):
         # The prompt already sits at the window's edge; a local model spends
         # minutes prefilling it again for an answer the stop message already gives.
