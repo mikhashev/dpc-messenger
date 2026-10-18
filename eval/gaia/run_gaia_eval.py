@@ -53,7 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # The shared harness bits live one directory up.
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from _harness import answer_key_policy, benchmark_tools, provenance  # noqa: E402
+from _harness import answer_key_policy, benchmark_tools, local_engine, provenance  # noqa: E402
 from _harness.results_root import results_root  # noqa: E402
 
 _DATASET_STATE = {}
@@ -1094,6 +1094,9 @@ async def main_async(args) -> int:
         temperature=args.temperature, reasoning_effort=args.reasoning_effort,
     )
     model_record = provenance.model_files(entry, RESULTS_DIR)
+    # Before anything is loaded: the card as the run found it (None unless the
+    # alias starts a supervised engine).
+    card_at_start = local_engine.card_stamp(entry)
     max_rounds = getattr(args, "max_rounds", None)
     task_timeout = getattr(args, "task_timeout", None) or DEFAULT_TASK_TIMEOUT_SECONDS
 
@@ -1284,6 +1287,7 @@ async def main_async(args) -> int:
                     "not_reported_by": len(vals) - len(present)}
         exposure = answer_key_exposure(logs_root, results, full_answers, task_of=task_of)
         policy_summary = answer_key.summary()
+        local_engine.stamp_reported_version(card_at_start, entry.get("alias"))
         policy_summary["tools_wrapped_per_task"] = sorted(
             {len(v) for v in wrapped_per_task.values()})
         report = {
@@ -1375,6 +1379,7 @@ async def main_async(args) -> int:
                                 "prompt_suffix_sha256": hashlib.sha256(
                                     PROMPT_SUFFIX.encode("utf-8")).hexdigest()},
                     "model_files": model_record,
+                    "card_at_start": card_at_start,
                     "max_rounds": getattr(agent_config, "max_rounds", None),
                     "task_timeout_seconds": task_timeout,
                     "hf_token_source": _DATASET_STATE.get("token_source"),

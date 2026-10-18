@@ -236,6 +236,27 @@ def test_the_report_names_the_model_by_file_not_by_label(isolated, monkeypatch):
     assert "model" not in report, "a bare label is what was stale"
 
 
+def test_the_card_at_the_start_lands_in_the_provenance(isolated, monkeypatch):
+    """Ark's and Johnny's review: an unread card is recorded in the result, not
+    only printed."""
+    from _harness import local_engine
+
+    monkeypatch.setattr(gaia, "run_one", _outcome_with("FINAL ANSWER: 7"))
+    taken = []
+    unread = local_engine.CardUnavailable("OSError: device busy")
+    real = local_engine.card_stamp
+    monkeypatch.setattr(gaia.local_engine, "card_stamp", lambda entry: taken.append(1) or
+                        real({"type": "strata"}, free_mib=None, holders=unread))
+    monkeypatch.setattr(gaia.provenance, "snapshot", lambda **k: {"extra": k.get("extra")})
+
+    asyncio.run(gaia.main_async(_args(json=str(isolated.out))))
+    card = json.loads(isolated.out.read_text(encoding="utf-8"))["provenance"]["extra"]["card_at_start"]
+
+    assert taken == [1]
+    assert card["card_holders"] == "unknown" and card["free_vram_mib"] is None
+    assert card["card_holders_unread"] == "card holder check unavailable: OSError: device busy"
+
+
 # --- the credential ---------------------------------------------------------------
 
 

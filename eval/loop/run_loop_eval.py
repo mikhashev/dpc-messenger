@@ -169,7 +169,7 @@ def _free_vram_mib() -> Optional[int]:
         return None
 
 
-def _check_vram_or_refuse(entry: Dict[str, Any]) -> Optional[int]:
+def _check_vram_or_refuse(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Applies only to the supervised engines (`local_engine.supervised_types`):
     other provider types do not hold this card's VRAM the way the DPC service's
     own child does.
@@ -178,7 +178,8 @@ def _check_vram_or_refuse(entry: Dict[str, Any]) -> Optional[int]:
     names it, the way `CardHeldError` does in the client — that guard lives in
     one process and cannot see the service's child from here; a card that did
     not answer is said so, not taken as free. Then VRAM: the 27B's floor
-    refuses; a Strata alias has no floor, its reading is printed with context."""
+    refuses; a Strata alias has no floor, its reading is printed with context.
+    Returns the card as read (`local_engine.card_stamp`), for the provenance."""
     ptype = entry.get("type")
     if ptype not in local_engine.supervised_types():
         return None
@@ -190,20 +191,21 @@ def _check_vram_or_refuse(entry: Dict[str, Any]) -> Optional[int]:
     if conflicts:
         raise SystemExit(local_engine.card_held_message(ptype, entry.get("alias"), conflicts))
     free = _free_vram_mib()
+    stamp = local_engine.card_stamp(entry, free_mib=free, holders=holders)
     if free is None:
         print("  VRAM: nvidia-smi unreadable — proceeding without a check "
               "(reading failed, not \"zero free\")")
-        return None
+        return stamp
     if local_engine.vram_floor_mib(ptype) is None:
         print(f"  WARN VRAM: {free} MiB free; {local_engine.STRATA_VRAM_NOTE}")
-        return free
+        return stamp
     print(f"  VRAM: {free} MiB free (need >= {VRAM_FREE_THRESHOLD_MIB} MiB)")
     if free < VRAM_FREE_THRESHOLD_MIB:
         raise SystemExit(
             f"only {free} MiB free on the card — stop the DPC service first; "
             "two 27B children on one card is an incident, not an experiment"
         )
-    return free
+    return stamp
 
 
 def resolve_max_rounds(tier: str, rounds: Optional[int]) -> int:
@@ -1063,7 +1065,8 @@ async def main_async(args) -> int:
         # compaction trigger); easy and hard never ask for it.
         require_context_window(entry)
     max_rounds = resolve_max_rounds(args.tier, args.rounds)
-    free_vram = _check_vram_or_refuse(entry)
+    card_at_start = _check_vram_or_refuse(entry)
+    free_vram = (card_at_start or {}).get("free_vram_mib")
 
     from dpc_client_core.llm_manager import LLMManager
     from dpc_client_core.dpc_agent.agent import DpcAgent, AgentConfig
@@ -1224,6 +1227,7 @@ async def main_async(args) -> int:
         # LLMManager.shutdown() sweeps stop_all_supervisors() unconditionally
         # (llm_manager.py:1155-1156), so the child this run started is stopped
         # even on a task exception or Ctrl-C.
+        local_engine.stamp_reported_version(card_at_start, alias)
         try:
             await llm.shutdown()
         except Exception as exc:
@@ -1270,6 +1274,7 @@ async def main_async(args) -> int:
         harness_file=Path(__file__),
         argv=sys.argv,
         extra={"run_conditions": run_conditions,
+               "card_at_start": card_at_start,
                **({"approvals": approvals} if approvals is not None else {})},
     )
 
@@ -1287,6 +1292,7 @@ async def main_async(args) -> int:
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": prov_block.get("code", {}).get("repo", {}).get("sha"),
         "free_vram_mib_before": free_vram,
+        "card_at_start": card_at_start,
         **run_conditions,
         "tasks": len(results),
         "scored_tasks": len(scored),

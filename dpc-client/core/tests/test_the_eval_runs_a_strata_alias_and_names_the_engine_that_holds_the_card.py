@@ -147,7 +147,7 @@ def test_the_loop_eval_refuses_a_strata_run_beside_the_llama_server_child(monkey
 def test_the_loop_eval_checks_the_card_for_a_strata_run(monkeypatch):
     monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: [])
     monkeypatch.setattr(R, "_free_vram_mib", lambda: 30000)
-    assert R._check_vram_or_refuse({"type": "strata", "alias": "flash"}) == 30000
+    assert R._check_vram_or_refuse({"type": "strata", "alias": "flash"})["free_vram_mib"] == 30000
     monkeypatch.setattr(R, "_free_vram_mib", lambda: 9000)
     with pytest.raises(SystemExit, match="two 27B children"):
         R._check_vram_or_refuse({"type": "llamacpp_server", "alias": "q"})
@@ -234,7 +234,7 @@ def test_the_27b_vram_reading_is_unchanged():
 def test_the_loop_eval_runs_strata_on_a_short_card_and_says_why(monkeypatch, capsys):
     monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: [])
     monkeypatch.setattr(R, "_free_vram_mib", lambda: 3000)
-    assert R._check_vram_or_refuse({"type": "strata", "alias": "flash"}) == 3000
+    assert R._check_vram_or_refuse({"type": "strata", "alias": "flash"})["free_vram_mib"] == 3000
     out = capsys.readouterr().out
     assert "WARN VRAM: 3000 MiB free" in out and "no minimum is measured" in out
     assert "27B" not in out
@@ -289,3 +289,69 @@ def test_engines_are_matched_on_the_exact_executable_name():
     assert found == [("strata", "STRATA.EXE (pid 5)"),
                      ("llama-server", "llama-server (pid 6)"),
                      ("strata", "Strata-Vision.exe (pid 7)")]
+
+
+# --- the card at the start, as the result records it (Ark, Johnny) -------------
+
+
+def _broken_nvidia_smi(*a, **k):
+    raise OSError("device busy")
+
+
+def test_the_strata_warning_names_the_tell_and_the_lever():
+    note = local_engine.STRATA_VRAM_NOTE
+    assert "MiB of VRAM free with everything loaded" in note
+    assert "only as speed" in note
+    assert "--vram-reserve-mib" in note and "vram_reserve_mib" in note
+
+
+def test_an_unread_card_is_stamped_unknown_never_an_empty_list(monkeypatch):
+    found = local_engine.engines_on_the_card(run=_broken_nvidia_smi)
+    monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: found)
+    monkeypatch.setattr(R, "_free_vram_mib", lambda: 30000)
+    stamp = R._check_vram_or_refuse({"type": "llamacpp_server", "alias": "q"})
+    assert stamp["card_holders"] == "unknown"
+    assert stamp["card_holders_unread"] == "card holder check unavailable: OSError: device busy"
+    assert stamp["free_vram_mib"] == 30000
+    assert stamp["engine"]["name"] == "llama-server" and stamp["engine"]["pinned_tag"]
+    assert stamp["read_at"].endswith("+00:00")
+
+
+def test_no_nvidia_smi_is_unknown_too_and_free_vram_is_null():
+    stamp = local_engine.card_stamp({"type": "strata", "alias": "flash",
+                                     "tested_version": "0.9.1"}, free_mib=None, holders=None)
+    assert stamp["card_holders"] == "unknown"
+    assert stamp["card_holders_unread"] == "no nvidia-smi on this machine"
+    assert stamp["free_vram_mib"] is None
+    assert stamp["engine"] == {"name": "strata", "tested_version": "0.9.1",
+                               "tested_version_date": None, "version_reported": None}
+
+
+def test_a_read_card_is_stamped_as_a_list_of_holders():
+    empty = local_engine.card_stamp({"type": "strata"}, free_mib=31000, holders=[])
+    assert empty["card_holders"] == [] and "card_holders_unread" not in empty
+    held = local_engine.card_stamp({"type": "llamacpp_server"}, free_mib=9000, holders=LLAMA_ON_CARD)
+    assert held["card_holders"] == ["llama-server.exe (pid 32848)"]
+
+
+def test_an_alias_that_starts_no_engine_is_not_stamped():
+    assert local_engine.card_stamp({"type": "openai_compatible"}, free_mib=1, holders=[]) is None
+    assert R._check_vram_or_refuse({"type": "openai_compatible", "alias": "x"}) is None
+
+
+def test_the_running_engine_version_is_read_from_its_supervisor_without_a_call(monkeypatch):
+    from dpc_client_core.providers import llamacpp_server_provider as lsp
+
+    stamp = local_engine.card_stamp({"type": "strata"}, free_mib=1, holders=[])
+    monkeypatch.setitem(lsp._ACTIVE_SUPERVISORS, "flash",
+                        types.SimpleNamespace(engine_version="0.1.46", props=None))
+    local_engine.stamp_reported_version(stamp, "flash")
+    assert stamp["engine"]["version_reported"] == "0.1.46"
+
+    stamp = local_engine.card_stamp({"type": "llamacpp_server"}, free_mib=1, holders=[])
+    monkeypatch.setitem(lsp._ACTIVE_SUPERVISORS, "q",
+                        types.SimpleNamespace(props={"build_info": "b11669-abc"}))
+    local_engine.stamp_reported_version(stamp, "q")
+    assert stamp["engine"]["version_reported"] == "b11669-abc"
+    local_engine.stamp_reported_version(stamp, "gone")
+    assert stamp["engine"]["version_reported"] == "b11669-abc"

@@ -16,6 +16,7 @@ name — and applies the supervisor's own exclusion rule to what it finds.
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,7 +33,11 @@ STRATA_OBSERVED_OCCUPANCY = "30,743 of 32,623 MiB used with Strata running (2026
 STRATA_VRAM_NOTE = (
     "Strata adapts its expert cache to the VRAM it finds free (--expert-cache auto, "
     "--vram-reserve-mib), so no minimum is measured and this reading is not a gate; "
-    f"for scale, {STRATA_OBSERVED_OCCUPANCY} — occupancy, not need"
+    f"for scale, {STRATA_OBSERVED_OCCUPANCY} — occupancy, not need. "
+    "A cache too big for the card pages to system memory instead of failing and shows "
+    "only as speed: the tell is a small N in the engine's start line \"N MiB of VRAM "
+    "free with everything loaded\", the lever --vram-reserve-mib (the alias's "
+    "vram_reserve_mib in the providers editor)"
 )
 
 
@@ -155,6 +160,77 @@ def card_held_message(provider_type: Optional[str], alias: Optional[str],
             f"does not swap them (ADR-044 point 4). Stop that engine — the DPC service's "
             f"local engine, from the providers settings, or the service itself — then "
             f"run again")
+
+
+# --- The card at the start of a run, as its result records it ------------------
+
+_READ = object()
+
+
+def card_stamp(entry: Dict[str, Any], *, free_mib: Any = _READ,
+               holders: Any = _READ) -> Optional[Dict[str, Any]]:
+    """The card when the run started, for its provenance; None for an alias
+    that starts no supervised engine. A reading the caller did not pass is taken.
+
+    `free_vram_mib` None means unread, never 0. `card_holders` is a list (empty:
+    read and free) or "unknown" with `card_holders_unread` saying why — an unread
+    card is not a free one. No expert-cache size: only the engine's log prints
+    it, and the eval makes no engine call."""
+    ptype = entry.get("type")
+    engine = engine_of(ptype)
+    if engine is None:
+        return None
+    if free_mib is _READ:
+        from dpc_client_core.managers.llama_server_supervisor import _free_vram_mib
+        free_mib = _free_vram_mib()
+    if holders is _READ:
+        holders = engines_on_the_card()
+    stamp: Dict[str, Any] = {
+        "read_at": datetime.now(timezone.utc).isoformat(),
+        "free_vram_mib": free_mib,
+    }
+    if isinstance(holders, CardUnavailable):
+        stamp["card_holders"] = "unknown"
+        stamp["card_holders_unread"] = f"card holder check unavailable: {holders.error}"
+    elif holders is None:
+        stamp["card_holders"] = "unknown"
+        stamp["card_holders_unread"] = "no nvidia-smi on this machine"
+    else:
+        stamp["card_holders"] = [who for _engine, who in holders]
+    facts: Dict[str, Any] = {"name": engine}
+    if engine == "strata":
+        facts["tested_version"] = entry.get("tested_version")
+        facts["tested_version_date"] = entry.get("tested_version_date")
+    else:
+        try:
+            from dpc_client_core.managers.llama_server_fetcher import LLAMA_CPP_TAG
+            facts["pinned_tag"] = LLAMA_CPP_TAG
+        except Exception as exc:
+            facts["pinned_tag"] = f"[unavailable: {type(exc).__name__}]"
+        facts["binary_path_configured"] = entry.get("binary_path")
+    facts["version_reported"] = None
+    stamp["engine"] = facts
+    return stamp
+
+
+def stamp_reported_version(stamp: Optional[Dict[str, Any]], alias: Optional[str]) -> None:
+    """Fill `engine.version_reported` from the alias's live supervisor (Strata's
+    `engine_version`, else `/props` build_info), with no engine call. Call it
+    before the run's shutdown, which drops the supervisor."""
+    if not stamp or not alias:
+        return
+    try:
+        from dpc_client_core.providers.llamacpp_server_provider import _ACTIVE_SUPERVISORS
+        sup = _ACTIVE_SUPERVISORS.get(alias)
+        if sup is None:
+            return
+        version = getattr(sup, "engine_version", None)
+        if not version:
+            build = (getattr(sup, "props", None) or {}).get("build_info")
+            version = build if isinstance(build, str) and build.strip() else None
+        stamp["engine"]["version_reported"] = version
+    except Exception:
+        pass  # a stamp must not cost a run
 
 
 # --- Strata: what a start would use, read without starting it ------------------
