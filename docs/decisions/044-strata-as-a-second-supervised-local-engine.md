@@ -120,11 +120,26 @@ card.** Every point is Mike's call, 2026-10-18.
    `engine.version`, **warns** on a mismatch with the tested version (does not refuse) and
    runs a smoke — `/health`, `/props`, one tool-call request — which counts only after the
    version check, because the mock engine would pass the rest. The smoke runs once per
-   start; its tool call is forced by name, with thinking off and `strata_checkpoint: false`
-   so it parks nothing. A start whose launcher names no version, or whose smoke gets no
-   answer, an HTTP error or no tool call at all, is failed closed like an engine death
-   (point 3: stopped, not started again until a person resets it); a tool call that comes
-   back with other arguments only warns. Falsifier (Ark's review):
+   start and forces one trivial tool by name twice, both with `strata_checkpoint: false`
+   so neither parks anything: first with thinking off, then with thinking on at the effort
+   the provider sends on a tools call of the alias (`_build_extra_body`, not a second copy
+   of it), because agents run with thinking on and the first call does not touch that path
+   (Johnny's review). The second call has its own window — `max_tokens` 1024 with a
+   `reasoning_budget_tokens` of 512, at which Strata closes the thinking and writes the
+   call's opening itself — so a short xhigh thinking phase cannot spend the window and
+   read as no call; an alias whose effort is off skips it. A start whose launcher names
+   no version, or whose smoke gets `/health` other than 200, `/props` other than an
+   object, an HTTP error or no tool call at all from either call, is failed closed like an
+   engine death (point 3: stopped, not started again until a person resets it). **No tool
+   call is fatal, not a degradation** (Zcode's review): every round of the agent loop
+   sends tools (`dpc_agent/loop.py` passes its tool schemas on every call), so an engine
+   that cannot return a call cannot serve one agent round; and Strata's `forced_call`
+   (`serve/frontend.py`) writes the call's opening into the reply itself, so a live engine
+   cannot answer a forced call with prose — when it does, the build is a mock or broken.
+   Two outcomes only warn and serve: a tool call that comes back with other arguments,
+   and a call with **no answer within `smoke_timeout_s`** (120 s; Ark's and Zcode's
+   review) — `/health` answers before the model is loaded, so the first call is the
+   request that pulls the shards in, and a slow load is not a broken engine. Falsifier (Ark's review):
    if two Strata updates in a row break our launch, revisit — DPC pins a tag (checkout,
    then `START-HERE.bat --update`) and installs it as it does llama.cpp, or Strata goes
    back to user-started.

@@ -51,6 +51,18 @@ class StrataProvider(LlamaServerProvider):
     # Strata reads no `reasoning_budget_message`, so none is sent unless an alias asks.
     DEFAULT_REASONING_BUDGET_MESSAGE = ""
 
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        # Whether the call that went out with no effort word has been reported.
+        self._no_effort_word_warned = False
+        super().__init__(alias, config)
+        # The start smoke's thinking call runs what a tools call of this alias
+        # sends (ADR-044 point 5). An adopted supervisor takes the newest alias's.
+        self.supervisor.smoke_effort = self._tools_call_template_kwargs
+
+    def _tools_call_template_kwargs(self) -> Optional[Dict[str, Any]]:
+        """`chat_template_kwargs` of an agent-round tools call with no per-call word."""
+        return self._build_extra_body(effective_max_tokens=self.max_tokens).get("chat_template_kwargs")
+
     @classmethod
     def _check_config(cls, alias: str, config: Dict[str, Any]) -> None:
         """The alias's own keys, without the disk: a path checked here would drop
@@ -110,6 +122,17 @@ class StrataProvider(LlamaServerProvider):
                 word = "xhigh" if "xhigh" in self._template_efforts else None
             if word:
                 body["chat_template_kwargs"] = {"reasoning_effort": word}
+            elif not self._no_effort_word_warned:
+                # The hole this method closes stays open here: no template
+                # default among the words, and no `xhigh` to fall back on.
+                self._no_effort_word_warned = True
+                logger.warning(
+                    "strata '%s': no effort word to send — the template's default (%s) is not "
+                    "among its words (%s, from the %s) and neither is xhigh; Strata fills "
+                    "these calls from its own shared settings, and the usage row cannot name the rung",
+                    self.alias, self._template_default or "unset",
+                    "/".join(self._template_efforts), self._template_efforts_source,
+                )
         return body
 
     def supports_vision(self) -> bool:

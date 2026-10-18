@@ -12,6 +12,7 @@ import signal
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 from dpc_client_core.managers import llama_server_supervisor as base_mod
@@ -426,8 +427,9 @@ def _tool_call_reply(name=mod.SMOKE_TOOL, arguments='{"status": "ok"}'):
 def _started_through_the_real_launch(sup, monkeypatch, metrics, props=None, smoke=None):
     """Spawn, /health, /props, /metrics and the smoke's POST faked at the
     supervisor's seams, so `ensure_running` and both `_launch`es run for real.
-    `smoke` is the tool call's reply, or an exception it raises. Returns the
-    spawned procs; the smoke's requests land in `sup.smoke_posts`."""
+    `smoke` is the tool calls' reply, or an exception they raise; a list gives
+    one per call in order. Returns the spawned procs; the smoke's requests land
+    in `sup.smoke_posts`."""
     monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
     monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: 30000)
     spawned = []
@@ -447,6 +449,8 @@ def _started_through_the_real_launch(sup, monkeypatch, metrics, props=None, smok
     async def post(path, body, timeout):
         sup.smoke_posts.append((path, body))
         reply = _tool_call_reply() if smoke is None else smoke
+        if isinstance(smoke, list):
+            reply = smoke[len(sup.smoke_posts) - 1]
         if isinstance(reply, BaseException):
             raise reply
         return reply
@@ -573,7 +577,11 @@ class TestTheStartSmoke:
         {"choices": [{"message": {"role": "assistant", "content": "ok", "tool_calls": None}}]},
         {"choices": []},
         OSError("connection refused"),
-    ], ids=["no-tool-call", "no-choices", "http-error"])
+        httpx.HTTPStatusError(
+            "500", request=httpx.Request("POST", "http://127.0.0.1/v1/chat/completions"),
+            response=httpx.Response(500, text="template error"),
+        ),
+    ], ids=["no-tool-call", "no-choices", "oserror", "http-500"])
     async def test_no_tool_call_back_fails_closed_until_reset(self, tmp_path, home, monkeypatch, smoke):
         sup = _sup(_install(tmp_path))
         spawned = _started_through_the_real_launch(
@@ -610,3 +618,138 @@ class TestTheStartSmoke:
         assert sup.failure is None and sup._proc is spawned[0]
         assert any(r.levelno == logging.WARNING and "surprise" in r.getMessage() for r in caplog.records)
         await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_the_reason_names_the_smoke_once(self, tmp_path, home, monkeypatch):
+        sup = _sup(_install(tmp_path))
+        _started_through_the_real_launch(
+            sup, monkeypatch, metrics={"engine": {"version": "0.1.46"}},
+            smoke={"choices": [{"message": {"content": "ok"}}]})
+        with pytest.raises(LlamaServerError):
+            await sup.ensure_running()
+        assert sup.failure["reason"].count("smoke") == 1, sup.failure["reason"]
+
+
+_VERSIONED = {"engine": {"version": "0.1.46"}}
+
+
+class TestATimeoutIsNotACapabilityFailure:
+    """/health answers before the model is loaded, so the smoke's first call is
+    the request that loads it: running past smoke_timeout_s warns and serves."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", [
+        httpx.ReadTimeout("timed out"), httpx.ConnectTimeout("timed out"), httpx.PoolTimeout("timed out"),
+    ], ids=["read", "connect", "pool"])
+    async def test_a_timeout_warns_and_serves(self, tmp_path, home, monkeypatch, caplog, error):
+        sup = _sup(_install(tmp_path))
+        spawned = _started_through_the_real_launch(sup, monkeypatch, metrics=_VERSIONED, smoke=error)
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            await sup.ensure_running()
+        assert sup.failure is None and sup._proc is spawned[0]
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("no answer within 120s" in m and "serving anyway" in m for m in warned), warned
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_on_the_thinking_call_warns_too(self, tmp_path, home, monkeypatch, caplog):
+        sup = _sup(_install(tmp_path))
+        sup.smoke_effort = lambda: {"reasoning_effort": "low"}
+        _started_through_the_real_launch(
+            sup, monkeypatch, metrics=_VERSIONED, smoke=[_tool_call_reply(), httpx.ReadTimeout("t")])
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            await sup.ensure_running()
+        assert sup.failure is None and len(sup.smoke_posts) == 2
+        await sup.stop()
+
+
+class TestTheSmokeRunsTheAgentsPath:
+    """Agents run with thinking on at the alias's effort; the smoke's second
+    call does too, with the provider's own words for a tools call."""
+
+    @pytest.mark.asyncio
+    async def test_the_second_call_carries_the_alias_effort_with_thinking_on(
+        self, tmp_path, home, monkeypatch, caplog,
+    ):
+        sup = _sup(_install(tmp_path), model="qwen3.8-flash-next")
+        sup.smoke_effort = lambda: {"reasoning_effort": "low"}
+        _started_through_the_real_launch(sup, monkeypatch, metrics=_VERSIONED)
+        with caplog.at_level(logging.INFO, logger=mod.__name__):
+            await sup.ensure_running()
+            await sup.ensure_running()
+        assert len(sup.smoke_posts) == 2, "two calls, once per start"
+        off, on = (body for _path, body in sup.smoke_posts)
+        assert off["chat_template_kwargs"] == {"enable_thinking": False}
+        assert on["chat_template_kwargs"] == {"reasoning_effort": "low"}
+        assert on["max_tokens"] == mod.SMOKE_THINKING_MAX_TOKENS
+        assert on["reasoning_budget_tokens"] == mod.SMOKE_THINKING_BUDGET < on["max_tokens"]
+        assert on["strata_checkpoint"] is False and on["model"] == "qwen3.8-flash-next"
+        assert on["tool_choice"] == {"type": "function", "function": {"name": mod.SMOKE_TOOL}}
+        lines = [r.getMessage() for r in caplog.records if "start smoke passed" in r.getMessage()]
+        assert len(lines) == 1 and "thinking off: report_ready in" in lines[0] \
+            and "thinking on (low): report_ready in" in lines[0], lines
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_word_runs_the_template_default_with_thinking_on(self, tmp_path, home, monkeypatch):
+        sup = _sup(_install(tmp_path))
+        sup.smoke_effort = lambda: None
+        _started_through_the_real_launch(sup, monkeypatch, metrics=_VERSIONED)
+        await sup.ensure_running()
+        assert len(sup.smoke_posts) == 2
+        assert "chat_template_kwargs" not in sup.smoke_posts[1][1]
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_an_alias_with_thinking_off_skips_the_second_call(self, tmp_path, home, monkeypatch):
+        sup = _sup(_install(tmp_path))
+        sup.smoke_effort = lambda: {"enable_thinking": False}
+        _started_through_the_real_launch(sup, monkeypatch, metrics=_VERSIONED)
+        await sup.ensure_running()
+        assert len(sup.smoke_posts) == 1 and sup.failure is None
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_tool_call_with_thinking_on_fails_closed(self, tmp_path, home, monkeypatch):
+        sup = _sup(_install(tmp_path))
+        sup.smoke_effort = lambda: {"reasoning_effort": "xhigh"}
+        spawned = _started_through_the_real_launch(
+            sup, monkeypatch, metrics=_VERSIONED,
+            smoke=[_tool_call_reply(), {"choices": [{"message": {"content": "thinking..."}}]}])
+        with pytest.raises(LlamaServerError, match="will not start it again"):
+            await sup.ensure_running()
+        assert "thinking on (xhigh) call came back with no tool call" in sup.failure["reason"]
+        assert sup._proc is None and len(spawned) == 1
+
+    @pytest.mark.asyncio
+    async def test_other_arguments_with_thinking_on_warn_and_serve(self, tmp_path, home, monkeypatch, caplog):
+        sup = _sup(_install(tmp_path))
+        sup.smoke_effort = lambda: {"reasoning_effort": "low"}
+        _started_through_the_real_launch(
+            sup, monkeypatch, metrics=_VERSIONED,
+            smoke=[_tool_call_reply(), _tool_call_reply(arguments='{"status": "fine"}')])
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            await sup.ensure_running()
+        assert sup.failure is None
+        assert any(r.levelno == logging.WARNING and "not report_ready" in r.getMessage() for r in caplog.records)
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_the_provider_wires_its_tools_call_words(self, tmp_path, home):
+        from dpc_client_core.providers import StrataProvider
+        from dpc_client_core.providers.llamacpp_server_provider import _ACTIVE_SUPERVISORS
+
+        root = _install(tmp_path)
+        try:
+            for effort, want in (("low", {"reasoning_effort": "low"}), (None, {"reasoning_effort": "xhigh"}),
+                                 ("off", {"enable_thinking": False})):
+                _ACTIVE_SUPERVISORS.clear()
+                config = {"type": "strata", "model": "m", "strata_install_dir": str(root),
+                          "strata_base_config": "strata-base.json", "conversation_cache_mib": 4096,
+                          "reasoning_budget_tokens": 4096}
+                if effort:
+                    config["reasoning_effort"] = effort
+                p = StrataProvider("flash", config)
+                assert p.supervisor.smoke_effort() == want
+        finally:
+            _ACTIVE_SUPERVISORS.clear()

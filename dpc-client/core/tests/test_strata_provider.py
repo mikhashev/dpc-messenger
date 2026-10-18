@@ -323,3 +323,21 @@ class TestTheEffortIsAlwaysOnTheWire:
         assert await p.generate_response_stream("hi") == "ok"
         assert bodies[0]["stream"] is True
         assert bodies[0]["extra_body"]["chat_template_kwargs"] == {"reasoning_effort": "xhigh"}
+
+    def test_no_word_to_send_warns_once_per_provider(self, tmp_path, caplog):
+        # The hole the override closes stays open when neither the template's
+        # default nor xhigh is among the words: say so, once, not per call.
+        import logging
+
+        p = StrataProvider("flash", _config(_install(tmp_path)))
+        p._template_efforts, p._template_default = ("low", "medium"), None
+        with caplog.at_level(logging.WARNING, logger="dpc_client_core.providers.strata_provider"):
+            bodies = [p._build_extra_body() for _ in range(3)]
+        assert all("chat_template_kwargs" not in b for b in bodies)
+        warned = [r for r in caplog.records if "no effort word to send" in r.getMessage()]
+        assert len(warned) == 1 and warned[0].levelno == logging.WARNING
+        q = StrataProvider("flash2", _config(_install(tmp_path / "q")))
+        q._template_efforts, q._template_default = ("low", "medium"), None
+        with caplog.at_level(logging.WARNING, logger="dpc_client_core.providers.strata_provider"):
+            q._build_extra_body()
+        assert len([r for r in caplog.records if "no effort word to send" in r.getMessage()]) == 2

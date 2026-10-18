@@ -28,9 +28,10 @@ What differs, by ADR-044 point:
   `engine.version` (fallback `/props` `build_info`) and compared with the
   alias's tested version: a mismatch warns, an absent version is an ERROR,
   because the mock engine reports none and would pass every other check.
-  Then, once per start, the smoke: `/health`, `/props` and one forced tool
-  call. No answer, an HTTP error or no tool call at all fails closed like the
-  missing version; a call that came back with other arguments only warns.
+  Then, once per start, the smoke: `/health`, `/props` and two forced tool
+  calls, thinking off and then on at the alias's effort. An HTTP error or no
+  tool call at all fails closed like the missing version; a call that timed
+  out or came back with other arguments only warns.
 - 2. `stop` waits for the card's free VRAM to come back to what it was before
   the start; if it does not, an engine outlived the launcher (`contain()` can
   fail harmlessly) and the card is not claimed free.
@@ -50,7 +51,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import llama_server_supervisor as _base
 from .llama_server_supervisor import LlamaServerError, LlamaServerSupervisor, _free_port
@@ -131,8 +132,9 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # by its own words, longer on a cold disk.
     "start_timeout_s": 600.0,
     "engine_watch_interval_s": 5.0,
-    # The start smoke's one tool call (ADR-044 point 5): a few dozen tokens
-    # with thinking off, but the first request after a load can be slow.
+    # Each start-smoke tool call (ADR-044 point 5). /health answers before
+    # the model is loaded, so the first call is the one that pulls the shards
+    # in; running past this only warns.
     "smoke_timeout_s": 120.0,
     "vram_release_timeout_s": 30.0,
     # How far below its pre-start level free VRAM may sit after a stop and
@@ -434,21 +436,36 @@ _NO_VERSION_NOTE = (
 )
 
 # ADR-044 point 5: the start smoke after the version check. One trivial tool,
-# forced by name, thinking off; `strata_checkpoint: false` is Strata's own key
-# for a one-shot call (serve/server.py, #830), so the probe takes no
-# conversation checkpoint and parks nothing.
+# forced by name, called twice: thinking off, then thinking on at the alias's
+# own effort, the path every agent round takes. `strata_checkpoint: false` is
+# Strata's own key for a one-shot call (serve/server.py, #830), so the probe
+# takes no conversation checkpoint and parks nothing.
 SMOKE_FAILED = "the start smoke failed"
 SMOKE_TOOL = "report_ready"
+SMOKE_MAX_TOKENS = 64
+# The thinking call: Strata closes the thinking at the budget with its wrap-up
+# and writes the forced call's opening itself, so the call needs only the room
+# left after it. 512 of 1024 leaves 512 for a call of about twenty tokens; with
+# max_tokens 512 and no budget, an xhigh thinking phase could spend the whole
+# window and come back with no call — a false fail-closed. (Strata's own
+# answer_room starts only at max_tokens 1024 and a config can turn it off.)
+SMOKE_THINKING_MAX_TOKENS = 1024
+SMOKE_THINKING_BUDGET = 512
 _SMOKE_NOTE = (
-    "the launcher answered /health and named an engine version, but the smoke "
-    "(/health, /props, one forced tool call) did not complete; read the launcher "
+    "the launcher answered /health and named an engine version; read the launcher "
     "and engine logs"
 )
 
 
-def smoke_request(model: str) -> Dict[str, Any]:
-    """The smoke's one OpenAI-shape tool-call request."""
-    return {
+def smoke_request(
+    model: str, thinking: bool = False, template_kwargs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """One OpenAI-shape tool-call request of the smoke.
+
+    Thinking off by default; with `thinking`, `template_kwargs` is what the
+    provider would send on a tools call of this alias (None: no word, the
+    template's default runs), beside the smoke's own window and budget."""
+    body = {
         "model": model,
         "messages": [{"role": "user", "content": f'Call {SMOKE_TOOL} with status "ok".'}],
         "tools": [{
@@ -464,12 +481,19 @@ def smoke_request(model: str) -> Dict[str, Any]:
             },
         }],
         "tool_choice": {"type": "function", "function": {"name": SMOKE_TOOL}},
-        "max_tokens": 64,
+        "max_tokens": SMOKE_MAX_TOKENS,
         "temperature": 0,
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False},
         "strata_checkpoint": False,
     }
+    if thinking:
+        body.pop("chat_template_kwargs")
+        if template_kwargs:
+            body["chat_template_kwargs"] = dict(template_kwargs)
+        body["max_tokens"] = SMOKE_THINKING_MAX_TOKENS
+        body["reasoning_budget_tokens"] = SMOKE_THINKING_BUDGET
+    return body
 
 
 _COMMIT_LIMIT_NOTE = (
@@ -516,6 +540,13 @@ def _set_flag(args: List[str], flag: str, value: Any) -> List[str]:
 
 def _is_control_vector_flag(flag: str) -> bool:
     return flag.startswith("--control-vector") or flag.startswith("--cvec-")
+
+
+def _smoke_error(step: str, elapsed: float, e: BaseException) -> str:
+    """A smoke step's exception as the failure names it, the launcher's body included."""
+    detail = getattr(getattr(e, "response", None), "text", None)
+    return (f"{step + ' ' if step else ''}after {elapsed:.1f}s: {type(e).__name__}: {e}"
+            + (f" — {detail[:300]}" if detail else ""))
 
 
 def exit_code_words(text: str) -> Optional[str]:
@@ -586,6 +617,10 @@ class StrataSupervisor(LlamaServerSupervisor):
         # (key, answer) of the last `start_reads_images`; the key holds the
         # base config's mtime and size, so an edit there is seen.
         self._start_vision_cache: Optional[tuple] = None
+        # The `chat_template_kwargs` the provider sends on a tools call of
+        # this alias, or None: set by StrataProvider, so the smoke's thinking
+        # call runs the agents' effort without a second copy of its logic.
+        self.smoke_effort: Optional[Callable[[], Optional[Dict[str, Any]]]] = None
 
     # --- paths ----------------------------------------------------------------
 
@@ -1020,11 +1055,18 @@ class StrataSupervisor(LlamaServerSupervisor):
         """The start smoke of ADR-044 point 5, run by `_launch` once per start
         and only after the version check.
 
-        `/health`, `/props`, then one tool call forced by name with thinking
-        off and no conversation checkpoint. Returns why it failed — no answer,
-        an HTTP error, a malformed reply or no tool call at all — or None. A
-        call that came back with another name or other arguments only warns:
-        the engine answered with a call, which is what the smoke asks of it."""
+        `/health`, `/props`, then two tool calls forced by name with no
+        conversation checkpoint: thinking off, then thinking on at the effort
+        the provider sends on a tools call of this alias (skipped when that
+        effort is off, or no provider has wired it). Returns why it failed —
+        /health not 200, /props not an object, an HTTP error, a malformed
+        reply or no tool call at all — or None.
+
+        Only warns, and serves: a call that ran past `smoke_timeout_s` (/health
+        answers before the model is loaded, so the first call is the request
+        that loads it, and a slow disk is not a broken engine), and a call
+        that came back with another name or other arguments (the engine
+        answered with a call, which is what the smoke asks of it)."""
         t0 = time.monotonic()
         step = "/health"
         try:
@@ -1035,37 +1077,76 @@ class StrataSupervisor(LlamaServerSupervisor):
             if not isinstance(props, dict):
                 return f"/props answered {type(props).__name__}, not an object"
             self.props = props
-            step = "the tool call"
-            reply = await self._post(
-                "/v1/chat/completions",
-                smoke_request(str(self.config.get("model") or "strata")),
-                float(self.config.get("smoke_timeout_s") or 120.0),
-            )
-            calls = (((reply or {}).get("choices") or [{}])[0].get("message") or {}).get("tool_calls")
         except Exception as e:
-            detail = getattr(getattr(e, "response", None), "text", None)
-            return (f"{step} after {time.monotonic() - t0:.1f}s: {type(e).__name__}: {e}"
-                    + (f" — {detail[:300]}" if detail else ""))
+            return _smoke_error(step, time.monotonic() - t0, e)
+        model = str(self.config.get("model") or "strata")
+        results = [("thinking off", await self._smoke_call(smoke_request(model)))]
+        if results[0][1][0] == "failed":
+            return f"the thinking-off call {results[0][1][1]}"
+        effort = self._smoke_effort_kwargs()
+        if isinstance(effort, str):
+            results.append((f"thinking on: {effort}", None))
+        else:
+            label = f"thinking on ({(effort or {}).get('reasoning_effort') or 'template default'})"
+            results.append((label, await self._smoke_call(smoke_request(model, True, effort))))
+            if results[1][1][0] == "failed":
+                return f"the {label} call {results[1][1][1]}"
+        warn = any(r is not None and r[0] != "ok" for _label, r in results)
+        (logger.warning if warn else logger.info)(
+            "strata[%s]: start smoke passed in %.1fs (/health, /props); %s%s",
+            self.alias, time.monotonic() - t0,
+            "; ".join(f"{label}: {r[1] if r else 'not run'}" for label, r in results),
+            " — serving anyway" if warn else "",
+        )
+        return None
+
+    def _smoke_effort_kwargs(self) -> Any:
+        """The thinking call's `chat_template_kwargs` (None: the template's
+        default), or a str saying why that call is not run."""
+        if self.smoke_effort is None:
+            return "no provider wired its effort"
+        try:
+            kwargs = self.smoke_effort()
+        except Exception as e:
+            logger.warning("strata[%s]: the smoke could not read the alias's effort: %s", self.alias, e)
+            return f"the alias's effort unreadable ({type(e).__name__})"
+        if (kwargs or {}).get("enable_thinking") is False:
+            return "the alias's effort is off"
+        return kwargs
+
+    async def _smoke_call(self, body: Dict[str, Any]) -> tuple:
+        """One forced tool call of the smoke -> (verdict, words).
+
+        `ok`, `surprise` (another name or other arguments) and `timeout` serve;
+        `failed` (an HTTP error, any other exception, no tool call) does not."""
+        import httpx
+
+        t0 = time.monotonic()
+        timeout = float(self.config.get("smoke_timeout_s") or 120.0)
+        try:
+            reply = await self._post("/v1/chat/completions", body, timeout)
+            calls = (((reply or {}).get("choices") or [{}])[0].get("message") or {}).get("tool_calls")
+        except httpx.TimeoutException as e:
+            return "timeout", (
+                f"no answer within {timeout:.0f}s ({type(e).__name__}) — the first request after "
+                "/health loads the model, so this may be a slow load, not a broken engine"
+            )
+        except Exception as e:
+            return "failed", _smoke_error("", time.monotonic() - t0, e)
         elapsed = time.monotonic() - t0
         if not calls:
-            return f"the tool call came back with no tool call ({elapsed:.1f}s)"
+            return "failed", f"came back with no tool call ({elapsed:.1f}s)"
         fn = (calls[0] or {}).get("function") or {}
         try:
             args = json.loads(fn.get("arguments") or "{}")
         except (TypeError, ValueError):
             args = fn.get("arguments")
         if fn.get("name") != SMOKE_TOOL or args != {"status": "ok"}:
-            logger.warning(
-                "strata[%s]: start smoke passed with a surprise in %.1fs — the forced call came "
-                "back as %s(%s), not %s(status=\"ok\"); serving anyway",
-                self.alias, elapsed, fn.get("name"), json.dumps(args, default=str)[:200], SMOKE_TOOL,
+            return "surprise", (
+                f"a surprise in {elapsed:.1f}s, the call came back as {fn.get('name')}"
+                f"({json.dumps(args, default=str)[:200]}), not {SMOKE_TOOL}(status=\"ok\")"
             )
-        else:
-            logger.info(
-                "strata[%s]: start smoke passed in %.1fs (/health, /props, one tool call)",
-                self.alias, elapsed,
-            )
-        return None
+        return "ok", f"{SMOKE_TOOL} in {elapsed:.1f}s"
 
     async def _post(self, path: str, body: Dict[str, Any], timeout: float) -> Any:
         import httpx
