@@ -89,6 +89,29 @@ class StrataProvider(LlamaServerProvider):
             return None
         return effort_dictionary_of(template)
 
+    def _build_extra_body(
+        self,
+        reasoning_effort: Optional[str] = None,
+        reasoning_budget_tokens: Optional[int] = None,
+        effective_max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """The base dialect with an effort word always on the wire.
+
+        Strata fills an effort-less request from its own shared Chat settings
+        or config (`Service.with_shared`), which DPC does not own; so a call
+        that would send no word sends the template's default, the rung
+        `_served_effort` records for it."""
+        body = super()._build_extra_body(
+            reasoning_effort, reasoning_budget_tokens, effective_max_tokens=effective_max_tokens,
+        )
+        if "chat_template_kwargs" not in body:
+            word = self._template_default
+            if word not in self._template_efforts:
+                word = "xhigh" if "xhigh" in self._template_efforts else None
+            if word:
+                body["chat_template_kwargs"] = {"reasoning_effort": word}
+        return body
+
     def supports_vision(self) -> bool:
         """`/props` `modalities.vision` of a running launcher; otherwise what the
         start config would say (ADR-044 point 8).

@@ -247,3 +247,79 @@ class TestLocalByPurpose:
         from dpc_client_core.gateway import serves_chat
 
         assert serves_chat("strata") is True
+
+
+class TestTheEffortIsAlwaysOnTheWire:
+    """Every DPC call reaches Strata through /v1/chat/completions, and Strata
+    fills an effort-less request from settings DPC does not own, so each call
+    kind names its effort (or turns thinking off) itself."""
+
+    @staticmethod
+    def _wired(tmp_path, **overrides):
+        from tests.test_llamacpp_server_provider import _FakeSupervisor, _chat_resp, _fake_client
+
+        p = StrataProvider("flash", _config(_install(tmp_path), **overrides))
+        p.supervisor = _FakeSupervisor()
+        tc = SimpleNamespace(id="c1", function=SimpleNamespace(name="t", arguments="{}"))
+        client, completions = _fake_client(_chat_resp(tool_calls=[tc]))
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+        return p, completions
+
+    @staticmethod
+    async def _every_kind(p):
+        await p.generate_response("hi")
+        await p.generate_with_tools(
+            [{"role": "user", "content": [{"type": "text", "text": "x"}]}],
+            [{"name": "t", "description": "", "input_schema": {"type": "object"}}],
+        )
+        await p.generate_with_vision("what is this?", [{"mime_type": "image/png", "base64": "iVBORw0KGgo="}])
+
+    @pytest.mark.asyncio
+    async def test_no_effort_anywhere_sends_the_template_default(self, tmp_path):
+        p, completions = self._wired(tmp_path)
+        await self._every_kind(p)
+        kwargs = [b["extra_body"].get("chat_template_kwargs") for b in completions.bodies]
+        # plain and tools name the template's default; vision with nothing asked is off.
+        assert kwargs == [{"reasoning_effort": "xhigh"}, {"reasoning_effort": "xhigh"},
+                          {"enable_thinking": False}]
+        assert p.get_last_usage() is not None
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_alias_word_still_sends_one(self, tmp_path):
+        p, completions = self._wired(tmp_path, reasoning_effort="bogus")
+        await self._every_kind(p)
+        assert [b["extra_body"]["chat_template_kwargs"] for b in completions.bodies] == \
+            [{"reasoning_effort": "xhigh"}] * 3
+
+    @pytest.mark.asyncio
+    async def test_off_and_a_named_word_pass_through(self, tmp_path):
+        p, completions = self._wired(tmp_path, reasoning_effort="off")
+        await self._every_kind(p)
+        assert [b["extra_body"]["chat_template_kwargs"] for b in completions.bodies] == \
+            [{"enable_thinking": False}] * 3
+        p, completions = self._wired(tmp_path / "low", reasoning_effort="low")
+        await self._every_kind(p)
+        assert [b["extra_body"]["chat_template_kwargs"] for b in completions.bodies] == \
+            [{"reasoning_effort": "low"}] * 3
+
+    @pytest.mark.asyncio
+    async def test_the_stream_names_it_too(self, tmp_path):
+        p, completions = self._wired(tmp_path)
+        bodies = []
+
+        async def chunks():
+            delta = SimpleNamespace(content="ok", reasoning_content=None)
+            yield SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason="stop")], usage=None)
+
+        async def create(**params):
+            bodies.append(params)
+            return chunks()
+
+        completions.create = create
+        assert await p.generate_response_stream("hi") == "ok"
+        assert bodies[0]["stream"] is True
+        assert bodies[0]["extra_body"]["chat_template_kwargs"] == {"reasoning_effort": "xhigh"}
