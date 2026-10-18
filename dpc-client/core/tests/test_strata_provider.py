@@ -70,8 +70,54 @@ def test_no_budget_message_is_sent_by_default(tmp_path):
 
 
 class TestVisionFromTheLiveStart:
-    def test_false_when_nothing_runs(self, tmp_path):
+    def test_stopped_answers_from_the_start_config_when_the_base_reads_images(self, tmp_path):
+        # The base carries --vision and a "vision" block: an image routed to a
+        # stopped alias has to reach generate_with_vision, which starts it.
         p = StrataProvider("flash", _config(_install(tmp_path)))
+        assert p.supervisor._proc is None
+        assert p.supports_vision() is True
+
+    def test_stopped_says_no_when_the_start_would_not_read_images(self, tmp_path):
+        assert StrataProvider("flash", _config(_install(tmp_path), vision=False)).supports_vision() is False
+        root = _install(tmp_path / "novision", vision=None)
+        assert StrataProvider("flash", _config(root)).supports_vision() is False
+
+    def test_an_mmproj_override_alone_does_not_turn_vision_on(self, tmp_path):
+        # build_start_config adds --vision only for vision=True; the answer is its own.
+        args = [a for a in json.loads((_install(tmp_path) / "strata-base.json").read_text())["args"]
+                if a != "--vision"]
+        root = _install(tmp_path / "noflag", args=args)
+        assert StrataProvider("flash", _config(root, mmproj="D:/other-mmproj.gguf")).supports_vision() is False
+        assert StrataProvider("flash", _config(root, vision=True)).supports_vision() is True
+
+    def test_the_stopped_answer_follows_an_edit_of_the_base_config(self, tmp_path):
+        root = _install(tmp_path)
+        p = StrataProvider("flash", _config(root))
+        assert p.supports_vision() is True
+        base = root / "strata-base.json"
+        cfg = json.loads(base.read_text(encoding="utf-8"))
+        cfg["args"] = [a for a in cfg["args"] if a != "--vision"]
+        base.write_text(json.dumps(cfg), encoding="utf-8")
+        assert p.supports_vision() is False
+
+    def test_the_stopped_answer_is_cached_while_the_base_is_unchanged(self, tmp_path, monkeypatch):
+        p = StrataProvider("flash", _config(_install(tmp_path)))
+        builds = []
+        real = p.supervisor.build_start_config
+        monkeypatch.setattr(p.supervisor, "build_start_config", lambda port: builds.append(port) or real(port))
+        assert p.supports_vision() is True
+        assert p.supports_vision() is True
+        assert len(builds) == 1
+
+    def test_a_stopped_alias_with_no_start_config_says_no(self, tmp_path):
+        root = _install(tmp_path)
+        p = StrataProvider("flash", _config(root, vision=True))
+        cfg = json.loads((root / "strata-base.json").read_text(encoding="utf-8"))
+        cfg.pop("vision")
+        (root / "strata-base.json").write_text(json.dumps(cfg), encoding="utf-8")
+        # vision=True with no "vision" block: the start would refuse, so no.
+        assert p.supports_vision() is False
+        (root / "strata-base.json").unlink()
         assert p.supports_vision() is False
 
     def test_the_running_launchers_props_decide(self, tmp_path):
@@ -82,11 +128,39 @@ class TestVisionFromTheLiveStart:
         p.supervisor.props = {"modalities": {"vision": False}}
         assert p.supports_vision() is False
 
-    def test_a_dead_launcher_with_stale_props_says_no(self, tmp_path):
+    def test_the_running_launchers_no_wins_over_the_start_config(self, tmp_path):
         p = StrataProvider("flash", _config(_install(tmp_path)))
+        assert p.supervisor.start_reads_images() is True
+        p.supervisor._proc = _FakeProc()
+        p.supervisor.props = {"modalities": {}}
+        assert p.supports_vision() is False
+
+    def test_a_dead_launchers_stale_props_are_not_read(self, tmp_path):
+        p = StrataProvider("flash", _config(_install(tmp_path), vision=False))
         p.supervisor._proc = _FakeProc(returncode=1)
         p.supervisor.props = {"modalities": {"vision": True}}
         assert p.supports_vision() is False
+
+    @pytest.mark.asyncio
+    async def test_an_image_to_a_stopped_alias_starts_the_launcher(self, tmp_path, monkeypatch):
+        from dpc_client_core.llm_manager import LLMManager
+
+        p = StrataProvider("flash", _config(_install(tmp_path)))
+        started = []
+
+        async def fake_ensure_running():
+            started.append(True)
+            raise RuntimeError("start attempted")
+
+        monkeypatch.setattr(p.supervisor, "ensure_running", fake_ensure_running)
+        monkeypatch.setattr(p, "_is_retryable", lambda e: False)
+        manager = LLMManager.__new__(LLMManager)
+        manager.providers = {"flash": p}
+        monkeypatch.setattr(manager, "_alias_for_query", lambda alias, images: "flash", raising=False)
+        image = {"mime_type": "image/png", "base64": "iVBORw0KGgo="}
+        with pytest.raises(Exception, match="start attempted"):
+            await manager.query("what is this?", provider_alias="flash", images=[image])
+        assert started == [True]
 
 
 class TestAdoption:

@@ -297,6 +297,13 @@ def read_base_config(path: Path) -> Dict[str, Any]:
     return cfg
 
 
+def reads_images(cfg: Dict[str, Any]) -> bool:
+    """Whether a Strata run or start config starts the vision encoder: `--vision`
+    among its args and a "vision" block to start it with."""
+    args = cfg.get("args") if isinstance(cfg.get("args"), list) else []
+    return "--vision" in [str(a) for a in args] and isinstance(cfg.get("vision"), dict)
+
+
 def _flag_value(args: List[str], flag: str) -> Optional[str]:
     """The value after `flag` in `args`, or None when the flag is absent or bare."""
     args = [str(a) for a in args]
@@ -340,7 +347,7 @@ def inspect_base_config(path: Any, install_dir: Any = None) -> Dict[str, Any]:
         raw = _flag_value(args, flag)
         values[key] = int(raw) if raw is not None and raw.isdigit() else raw
     block = cfg.get("vision") if isinstance(cfg.get("vision"), dict) else None
-    values["vision"] = "--vision" in args and block is not None
+    values["vision"] = reads_images(cfg)
     values["mmproj"] = (block or {}).get("mmproj")
     cvec = _flag_value(args, "--control-vector-scaled")
     cv_file, cv_scale = split_control_vector(cvec) if cvec else (None, None)
@@ -489,6 +496,9 @@ class StrataSupervisor(LlamaServerSupervisor):
         # `owner_calls` as it stood when the peer policy last let a peer in;
         # a peer's slot checks it again (`peer_slot_refusal`).
         self.peer_cleared_at_owner_calls: Optional[int] = None
+        # (key, answer) of the last `start_reads_images`; the key holds the
+        # base config's mtime and size, so an edit there is seen.
+        self._start_vision_cache: Optional[tuple] = None
 
     # --- paths ----------------------------------------------------------------
 
@@ -661,6 +671,30 @@ class StrataSupervisor(LlamaServerSupervisor):
             "tested_version_date": c.get("tested_version_date"),
         }
         return cfg
+
+    def start_reads_images(self) -> bool:
+        """Whether a start now would read images — `build_start_config`'s own
+        result, so this answer and the next start cannot disagree.
+
+        False when no start config can be built (the start would fail too).
+        Cached on the base config file's mtime and size and the alias config."""
+        try:
+            base = self.base_config_path()
+            st = base.stat()
+        except (LlamaServerError, OSError):
+            return False
+        key = (str(base), st.st_mtime_ns, st.st_size,
+               json.dumps(self.config, sort_keys=True, default=str))
+        cached = self._start_vision_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        try:
+            answer = reads_images(self.build_start_config(0))
+        except LlamaServerError as e:
+            logger.info("strata[%s]: no start config to read vision from: %s", self.alias, e)
+            answer = False
+        self._start_vision_cache = (key, answer)
+        return answer
 
     def write_start_config(self, port: int) -> Path:
         """Write DPC's start config whole (temp file, then replace) and return its path."""

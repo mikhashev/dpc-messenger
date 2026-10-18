@@ -4,7 +4,8 @@ StrataProvider — provider type `strata` (ADR-044): a DPC-owned Strata launcher
 
 Strata accepts the dialect `LlamaServerProvider` already sends, so this class
 changes only what is Strata's own: the child, the keys that decide a restart,
-where the effort words come from, and vision, answered from the live launcher.
+where the effort words come from, and vision, answered from the live launcher
+or, while none runs, from the start it would make.
 """
 
 import asyncio
@@ -88,15 +89,20 @@ class StrataProvider(LlamaServerProvider):
         return effort_dictionary_of(template)
 
     def supports_vision(self) -> bool:
-        """`/props` `modalities.vision` of a running launcher; False when none runs.
+        """`/props` `modalities.vision` of a running launcher; otherwise what the
+        start config would say (ADR-044 point 8).
 
-        No fallback to a configured projector, unlike the base (ADR-044 point 8)."""
+        A stopped launcher answers from the start it would make, so an image
+        routed here starts it on demand, as the base's mmproj answer does; the
+        decision is `build_start_config`'s own (`start_reads_images`)."""
         sup = self.supervisor
-        proc = getattr(sup, "_proc", None)
-        if sup is None or proc is None or proc.returncode is not None or not sup.props:
+        if sup is None:
             return False
-        modal = sup.props.get("modalities") or {}
-        return bool(isinstance(modal, dict) and modal.get("vision"))
+        proc = getattr(sup, "_proc", None)
+        if proc is not None and proc.returncode is None and sup.props:
+            modal = sup.props.get("modalities") or {}
+            return bool(isinstance(modal, dict) and modal.get("vision"))
+        return sup.start_reads_images()
 
     def _model_name(self) -> str:
         return self.model or "strata"

@@ -146,7 +146,9 @@ card.** Every point is Mike's call, 2026-10-18.
 8. **Vision by the fact of the start.** The subclass **overrides** `supports_vision`: the
    base class answers yes whenever the alias names an mmproj, even with no live child.
    For Strata it answers from the live start — `/props` `modalities.vision` of the running
-   launcher. The global default vision provider stays where it is: an agent on Strata
+   launcher — and, while none runs, from the start config DPC would write (`--vision` and a
+   `"vision"` block, `StrataSupervisor.start_reads_images`), so an image routed to a stopped
+   alias starts it on demand instead of being refused before the start. The global default vision provider stays where it is: an agent on Strata
    already sends images to its own provider through `_resolve_vision_alias`, and a global
    default on Strata would break `llama-server` agents whenever Strata is off
    (`VISION-ROUTING-NAMES-A-27B-THAT-IS-DOWN-WHILE-STRATA-HOLDS-THE-CARD`). An image request
