@@ -24,9 +24,9 @@ session: "DPC Project group chat, 2026-10-18 — epic AN-AGENT-TURN-LOSES-TOOL-O
 Inside one agent task the loop keeps the window by cutting old tool results. With
 compaction off — the default — a cut replaces each old result with its first 200
 characters and nothing else (`dpc_agent/context.py`, `compact_tool_history`). The full
-output is in fact persisted (`history.json`, `tool_calls[].output`) and the call's
-arguments in `tools.jsonl`, but the cut does not say so, so the model cannot get the data
-back and does not know what it lost. ADR-033 kept this truncation unchanged for the off
+output is in fact persisted (`history.json`, `tool_calls[].output`), but only once the
+turn ends, and the cut does not say so, so the model cannot get the data back and does not
+know what it lost. ADR-033 kept this truncation unchanged for the off
 setting.
 
 Four further properties make the cut both lossy and expensive:
@@ -42,8 +42,9 @@ Four further properties make the cut both lossy and expensive:
 - **A local engine resumes from a checkpoint.** On a hybrid model it cannot truncate its
   state to an arbitrary point. On 2026-10-18 Strata resumed from its first checkpoint after
   every divergence — at turn starts with and without a memory write, and after a cut — so
-  each of them re-read most of the prompt. Which checkpoints survive is being measured
-  (epic child 1).
+  each of them re-read most of the prompt. The cause, read in Strata's code: six
+  checkpoints by default, the oldest pinned and the rest evicted by least recent use, so a
+  turn of more than a few rounds loses the checkpoint at its own start (epic child 1).
 
 Eleven open harnesses were read for this (Codex, opencode, pi, Gemini CLI, coddy, qwen-code,
 cline, aider, goose, crush, openhands; Ark, Johnny and Zcode, 2026-10-18). They agree on
@@ -78,16 +79,28 @@ the invariants adopted below. None aligns a cut to an engine's cache boundaries.
    placed ahead of the conversation. Agent memory is not moved into the replayed turn tail,
    because past tails replay byte-for-byte and every turn would add a copy. Memory enters
    as a header plus its recent entries, with the body by address.
-8. **A cut lands where the local engine can resume.** Once the engine's checkpoint
-   retention is measured, the cut position and the turn layout are chosen so the surviving
-   prefix ends on a retained checkpoint. The rule is written after the measurement, as an
-   amendment here.
+8. **The checkpoint at a turn's start survives the turn, and one-off calls take no
+   checkpoint.** A local engine resumes only from a checkpoint at or before the divergence,
+   and the next turn diverges where the previous turn's tool rounds began, so that is the
+   checkpoint to keep. A call nobody continues does not occupy a checkpoint slot. How it is
+   met today, recorded separately from the rule:
+   - Strata keeps the turn-start checkpoint with `--prompt-cache-spread` (set on the
+     alias 2026-10-19). Observed: before the flag 7 of 7 turn boundaries resumed from the
+     first grid checkpoint; after it 1 of 1 boundary above the root resumed from the
+     turn-start checkpoint. One observation; the card records further ones.
+   - One-off calls marking themselves with `strata_checkpoint: false` is decided, not
+     built: no DPC call sends it yet.
+   - llama-server keeps two checkpoints and pins none; it has no equivalent setting, so
+     there the lever is decision 2 (fewer and cheaper cuts), not the engine.
+   Aligning cuts to the engine's checkpoint grid was considered and dropped: under
+   least-recent-use eviction only the oldest grid point survives a long turn, so there is
+   no grid to align to.
 
 ### Rationale
 
 - Completeness is not a property of a threshold. Any window compresses; what matters is
-  whether the compression is reversible. An address makes it reversible at almost no cost,
-  because the full output is already stored.
+  whether the compression is reversible. An address makes it reversible at the cost of
+  writing each result once, at the call, which the loop already does after the turn.
 - Counting in tokens is what makes a budget mean something; a round is an accident of what
   a tool returned.
 - A pure projection removes the class of drift that "cut once, never again" was patching,
@@ -121,11 +134,14 @@ the invariants adopted below. None aligns a cut to an engine's cache boundaries.
 
 ## Open Items
 
-- **Engine checkpoint retention** (Strata and llama-server): which checkpoints survive a
-  divergence, and what configuration keeps one near the end of the previous request.
-  Decision 8 waits on it.
-- **Where full outputs live long term.** `history.json` holds them today; whether a
-  separate per-task store is needed (size, retention, peers) is not decided.
+- **Strata pins the oldest checkpoint, not the system-prompt root.** With a system prompt
+  longer than the 16384-token grid the pinned point is the first grid checkpoint and the
+  root rotates out. To be raised upstream; not decided here.
+- **Where full outputs live during a task.** `history.json` holds them, but it is written
+  at the message boundary, after the turn, while a cut happens inside the task. Decision 2
+  therefore needs a store written at the call, before any placeholder points at it; its
+  form (per-call file or a larger preview in `tools.jsonl`), size and retention are left to
+  the implementation card.
 - **The pin.** Whether the model may mark a result "keep until the task ends" (coddy's
   `keep`) is left to the implementation card for decision 2.
 
