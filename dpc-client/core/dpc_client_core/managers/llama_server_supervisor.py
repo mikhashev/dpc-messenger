@@ -134,6 +134,53 @@ class LlamaServerError(RuntimeError):
         self.log_lines = log_lines or []
 
 
+class CardHeldError(LlamaServerError):
+    """Another local engine holds the card (ADR-044 point 4); never retried."""
+
+    def __init__(self, message: str, holder_alias: str, holder_engine: str):
+        super().__init__(message)
+        self.holder_alias = holder_alias
+        self.holder_engine = holder_engine
+
+
+# Supervisors holding the card, from the decision to start a child until its stop
+# has finished: "claimed" or "stopping". Keyed by supervisor, not alias, because a
+# retired child still draining has left `_ACTIVE_SUPERVISORS` and holds the card.
+# One card: no local child here is given a GPU index, so every child on a GPU is
+# on it; one started with `--device none` is not. Check and claim run with no
+# await between them, so two concurrent starts cannot both pass.
+_CARD_CLAIMS: Dict["LlamaServerSupervisor", str] = {}
+
+
+def _live_claims() -> List[Tuple["LlamaServerSupervisor", str]]:
+    """(supervisor, state) for each claim; a child that exited on its own holds
+    nothing any more and is dropped here."""
+    out: List[Tuple["LlamaServerSupervisor", str]] = []
+    for sup, mark in list(_CARD_CLAIMS.items()):
+        proc = sup._proc
+        if proc is not None and proc.returncode is not None:
+            _CARD_CLAIMS.pop(sup, None)
+            continue
+        if mark == "stopping":
+            state = "stopping"
+        elif sup._draining:
+            state = "draining"
+        elif proc is not None and sup.props:
+            state = "running"
+        else:
+            state = "starting"
+        out.append((sup, state))
+    return out
+
+
+def card_holders() -> List[Dict[str, Any]]:
+    """Each supervisor holding the card: alias, engine, state, port."""
+    return [
+        {"alias": sup.alias, "engine": sup.ENGINE, "state": state, "port": sup.port}
+        for sup, state in _live_claims()
+    ]
+
+
 def _positive_int(name: str, value: Any) -> int:
     """A count the child would otherwise reject after a 30 GB load attempt.
 
@@ -619,6 +666,13 @@ class LlamaServerSupervisor:
     # starts a different child (ADR-044's Strata launcher) names its own.
     DEFAULTS: Dict[str, Any] = DEFAULTS
 
+    # The engine's name in what the card-holder check says (ADR-044 point 4).
+    ENGINE = "llama-server"
+    # Whether a child of this engine refuses the card to every other alias,
+    # its own engine's included. Two llama-server aliases are left to the
+    # admission arithmetic, as before the check existed.
+    EXCLUSIVE_ON_THE_CARD = False
+
     @classmethod
     def merge_config(cls, config: Dict[str, Any]) -> Dict[str, Any]:
         """The alias config over this class's defaults; a None value is an absence."""
@@ -727,6 +781,53 @@ class LlamaServerSupervisor:
             env["GGML_BACKEND_PATH"] = str(backend)
         return env
 
+    # --- the card (ADR-044 point 4) -------------------------------------------
+
+    def on_the_card(self) -> bool:
+        """False only when `extra_args` keep the child off the GPU (`--device none`)."""
+        args = [str(a).strip().lower() for a in (self.config.get("extra_args") or [])]
+        for i, a in enumerate(args):
+            if a in ("--device=none", "-dev=none"):
+                return False
+            if a in ("--device", "-dev") and i + 1 < len(args) and args[i + 1] == "none":
+                return False
+        return True
+
+    def _excludes(self, other: "LlamaServerSupervisor") -> bool:
+        return (
+            other.ENGINE != self.ENGINE
+            or self.EXCLUSIVE_ON_THE_CARD
+            or other.EXCLUSIVE_ON_THE_CARD
+        )
+
+    def _claim_card(self) -> None:
+        """Refuse when another alias's child of an excluding engine holds the card;
+        otherwise hold it. Synchronous on purpose: see `_CARD_CLAIMS`."""
+        if not self.on_the_card():
+            return
+        for other, state in _live_claims():
+            if other is self or other.alias == self.alias or not self._excludes(other):
+                continue
+            raise CardHeldError(
+                f"{self.ENGINE}[{self.alias}] cannot load: the card is held by "
+                f"{other.ENGINE} alias '{other.alias}' ({state}). "
+                f"{self.ENGINE} and {other.ENGINE} cannot hold the card together and "
+                f"DPC does not swap them. Stop '{other.alias}' from the providers "
+                f"settings to free the card, or switch this agent to '{other.alias}'",
+                other.alias, other.ENGINE,
+            )
+        _CARD_CLAIMS[self] = "claimed"
+
+    def _release_card_unless_live(self) -> None:
+        """A start that failed before leaving a live child holds nothing."""
+        if self._proc is None or self._proc.returncode is not None:
+            _CARD_CLAIMS.pop(self, None)
+
+    def reopen(self) -> None:
+        """Accept calls again after a manual stop: the alias is still configured,
+        unlike a retired one, and its next call may start the child again."""
+        self._draining = False
+
     # --- lifecycle -----------------------------------------------------------
 
     async def ensure_running(self) -> Dict[str, Any]:
@@ -741,12 +842,19 @@ class LlamaServerSupervisor:
             if self._proc and self._proc.returncode is None and self.props:
                 return self.props
             await self._await_predecessor()
-            binary = ensure_binary(self.config)
-            self.port = self.port or _free_port()
-            if self.config.get("cache_type_k") is not None or self.config.get("cache_type_v") is not None:
-                self._warn_if_explicit_type_exceeds_budget()
-                return await self._launch(binary)
-            return await self._launch_auto_kv(binary)
+            # Before the ladder: its free-VRAM refusal would otherwise name the
+            # model's size instead of the engine that holds the card.
+            self._claim_card()
+            try:
+                binary = ensure_binary(self.config)
+                self.port = self.port or _free_port()
+                if self.config.get("cache_type_k") is not None or self.config.get("cache_type_v") is not None:
+                    self._warn_if_explicit_type_exceeds_budget()
+                    return await self._launch(binary)
+                return await self._launch_auto_kv(binary)
+            except BaseException:
+                self._release_card_unless_live()
+                raise
 
     # --- the KV ladder --------------------------------------------------------
 
@@ -968,6 +1076,9 @@ class LlamaServerSupervisor:
             )
 
     async def _launch(self, binary: Path, cache_type: Optional[str] = None) -> Dict[str, Any]:
+        # Again per rung: a failed rung's stop released the card, and another
+        # engine may have taken it since.
+        self._claim_card()
         cmd = self.build_command(binary, self.port, cache_type=cache_type)
         env = self.build_env(binary)
         # What the child was actually given, in one line. The prompt cache is the
@@ -1262,6 +1373,15 @@ class LlamaServerSupervisor:
                 )
 
     async def stop(self) -> None:
+        """Stop the child, and only then let go of the card."""
+        if self in _CARD_CLAIMS:
+            _CARD_CLAIMS[self] = "stopping"
+        try:
+            await self._stop_child()
+        finally:
+            _CARD_CLAIMS.pop(self, None)
+
+    async def _stop_child(self) -> None:
         """Ask the child to stop with a signal that lets it flush, then wait.
 
         terminate() is banned in this file: on Windows it discards the

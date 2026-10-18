@@ -47,6 +47,18 @@ def _node_ledger_in_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(node_ledger, "ledger_dir", lambda: tmp_path / "ledger")
 
 
+@pytest.fixture(autouse=True)
+def _no_card_claims_cross_tests():
+    """The card-holder registry is module state (ADR-044 point 4). A test whose
+    fake launch returns without a child leaves its claim behind, and the next
+    test's start would be refused by an alias that only existed in the last one."""
+    from dpc_client_core.managers import llama_server_supervisor
+
+    llama_server_supervisor._CARD_CLAIMS.clear()
+    yield
+    llama_server_supervisor._CARD_CLAIMS.clear()
+
+
 class ConnectedUi:
     """A UI client at the other end of `local_api`, recording what it is sent.
 

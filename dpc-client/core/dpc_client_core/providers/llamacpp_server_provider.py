@@ -38,7 +38,7 @@ from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_ba
 from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
-from ..managers.llama_server_supervisor import LlamaServerSupervisor
+from ..managers.llama_server_supervisor import CardHeldError, LlamaServerSupervisor, card_holders
 from ..managers.llama_server_supervisor import gguf_effort_dictionary, gguf_integer_keys
 
 logger = logging.getLogger(__name__)
@@ -572,7 +572,10 @@ class LlamaServerProvider(DeepSeekProvider):
         """500 stays out of the retryable set: the template's refusal of an
         unknown effort word arrives as HTTP 500 with a deterministic jinja
         exception, and retrying it just burns the backoff budget to hear the
-        same refusal again."""
+        same refusal again. A card held by the other engine is the same: it
+        stays held until a person acts (ADR-044 point 4)."""
+        if isinstance(error, CardHeldError):
+            return False
         code = cls._error_status_code(error)
         if code == 500:
             return False
@@ -1296,3 +1299,34 @@ async def stop_all_supervisors() -> List[str]:
                 alias, exc,
             )
     return stopped
+
+
+def card_holder() -> Optional[Dict[str, Any]]:
+    """The local engine holding the card — alias, engine, state, port — or None.
+
+    Read-only, for the providers UI. Several are listed by `card_holders` only
+    when llama-server aliases share the card; across engines there is one."""
+    holders = card_holders()
+    return holders[0] if holders else None
+
+
+async def stop_local_engine(alias: str, timeout: Optional[float] = None) -> bool:
+    """Stop an alias's child by hand to free the card for the other engine.
+
+    The existing drain-then-stop path, behind the alias's start lock so a start
+    in progress finishes first rather than spawning after the stop. `timeout=None`
+    lets a running generation finish, as a settings save does. The alias stays
+    configured: its next call starts the child again, so a switch reassigns the
+    agent before stopping. False when the alias has no supervisor."""
+    supervisor = _ACTIVE_SUPERVISORS.get(alias)
+    retired = supervisor is None
+    if retired:
+        supervisor = (_RETIRING.get(alias) or (None, None))[0]
+    if supervisor is None:
+        return False
+    async with supervisor._start_lock:
+        await supervisor.drain(timeout=timeout)
+        if not retired and _ACTIVE_SUPERVISORS.get(alias) is supervisor:
+            supervisor.reopen()
+    logger.info("local engine '%s' (%s) stopped by hand", alias, supervisor.ENGINE)
+    return True

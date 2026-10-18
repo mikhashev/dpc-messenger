@@ -165,6 +165,12 @@ class StrataSupervisor(LlamaServerSupervisor):
     """Owns the Strata launcher process for one alias."""
 
     DEFAULTS = STRATA_DEFAULTS
+    ENGINE = "strata"
+    # Strata takes most of the card, so no other alias shares it (ADR-044 point 4).
+    EXCLUSIVE_ON_THE_CARD = True
+
+    def on_the_card(self) -> bool:
+        return True
 
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
@@ -446,18 +452,24 @@ class StrataSupervisor(LlamaServerSupervisor):
                 )
                 raise self._refusal()
             await self._await_predecessor()
-            python = self.python_path()
-            script = self.server_script()
-            for needed in (python, script):
-                if not needed.exists():
-                    raise LlamaServerError(
-                        f"strata[{self.alias}]: {needed} does not exist — is "
-                        f"{self.install_dir()} a Strata install with its venv set up?"
-                    )
-            self.port = self.port or _free_port()
-            return await self._launch(python)
+            self._claim_card()
+            try:
+                python = self.python_path()
+                script = self.server_script()
+                for needed in (python, script):
+                    if not needed.exists():
+                        raise LlamaServerError(
+                            f"strata[{self.alias}]: {needed} does not exist — is "
+                            f"{self.install_dir()} a Strata install with its venv set up?"
+                        )
+                self.port = self.port or _free_port()
+                return await self._launch(python)
+            except BaseException:
+                self._release_card_unless_live()
+                raise
 
     async def _launch(self, binary: Path, cache_type: Optional[str] = None) -> Dict[str, Any]:
+        self._claim_card()
         self.write_start_config(self.port)
         self.vram_released = None
         self.engine_version = None
@@ -622,13 +634,15 @@ class StrataSupervisor(LlamaServerSupervisor):
                     )
             return False
 
-    async def stop(self) -> None:
-        """Stop the launcher as the base does, then check that the card let go."""
+    async def _stop_child(self) -> None:
+        """Stop the launcher as the base does, then check that the card let go.
+
+        Inside the base `stop`, so the card stays claimed until the check ends."""
         task, self._watch_task = self._watch_task, None
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
         had_child = self._proc is not None and self._proc.returncode is None
-        await super().stop()
+        await super()._stop_child()
         if had_child or self._vram_free_before is not None:
             await self._verify_vram_released()
 
