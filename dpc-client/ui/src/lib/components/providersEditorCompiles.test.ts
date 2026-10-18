@@ -51,6 +51,34 @@ describe('ProvidersEditor compiled output', () => {
     });
   }
 
+  // The strata status row: in legacy mode a template call is wrapped in
+  // $.untrack and depends only on its arguments, so a row read through the
+  // closure stayed at its first (empty) read — "Not loaded yet" beside a card
+  // holder that named the same running alias.
+  function rowDerived(source: string): string {
+    const js = compile(source, { dev: false, filename: 'ProvidersEditor.svelte' }).js.code;
+    const m = js.match(/const row = \$\.derived_safe_equal\(\(\) => \(([\s\S]*?)\)\);/);
+    expect(m, 'the strata row derived is in the output').not.toBeNull();
+    return m![1];
+  }
+  const tracksStatus = (body: string) =>
+    /\$\.get\(engineStatus\)/.test(body.replace(/\$\.untrack\([\s\S]*$/, ''));
+
+  it('the strata status row re-reads when the engine status arrives', () => {
+    expect(tracksStatus(rowDerived(src))).toBe(true);
+  });
+
+  it('the row guard sees the defect it is meant to catch', () => {
+    const bad = src
+      .replace('{@const row = strataRow(engineStatus, alias)}', '{@const row = strataRow(alias)}')
+      .replace(
+        'function strataRow(status: typeof engineStatus, alias: string): any | null {\n    return status?.strata',
+        'function strataRow(alias: string): any | null {\n    return engineStatus?.strata',
+      );
+    expect(bad).not.toBe(src);
+    expect(tracksStatus(rowDerived(bad))).toBe(false);
+  });
+
   it('the guard sees the defect it is meant to catch', () => {
     const bad = src.replace(
       "value={editedConfig.providers[i].type} on:change={(e) => setProviderField(i, 'type', e.currentTarget.value)}",

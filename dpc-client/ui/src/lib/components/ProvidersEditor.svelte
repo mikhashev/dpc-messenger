@@ -428,8 +428,12 @@
   }
   $: if (!open) engineStatusLoadedForOpen = false;
 
-  function strataRow(alias: string): any | null {
-    return engineStatus?.strata?.find((r) => r.alias === alias) ?? null;
+  // The status is an argument, not read from the closure: this component is in
+  // legacy mode, where a template call is untracked and re-runs only when its
+  // arguments change — the row stayed at its first, empty read while the card
+  // holder beside it updated.
+  function strataRow(status: typeof engineStatus, alias: string): any | null {
+    return status?.strata?.find((r) => r.alias === alias) ?? null;
   }
 
   async function engineAction(command: 'stop_local_engine' | 'strata_reset_failure', alias: string) {
@@ -1309,7 +1313,7 @@
 
 <!-- The read-only state of one strata alias (local_engine_status). -->
 {#snippet strataStatus(alias: string)}
-  {@const row = strataRow(alias)}
+  {@const row = strataRow(engineStatus, alias)}
   {@const holder = engineStatus?.card_holder}
   <div class="strata-status">
     <div class="strata-status-head">
