@@ -86,6 +86,11 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "query_remote_providers",
     "get_provider_balance",
     "get_provider_balances",
+    # Local engines (ADR-044): Strata base config, card holder, manual stop and reset
+    "strata_inspect_base_config",
+    "local_engine_status",
+    "stop_local_engine",
+    "strata_reset_failure",
     # Personal context & instructions
     "get_personal_context",
     "save_personal_context",

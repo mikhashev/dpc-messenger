@@ -13,12 +13,16 @@
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
   import { envNameOrUndefined, looksLikeKey } from '$lib/utils/apiKeyEnv';
   import { isProviderDraftFilled, validateProviderDraftForAdd, suggestProviderAlias } from '$lib/utils/providerDraft';
+  import {
+    STRATA_MODEL_PARAMS, parseModelParam, modelParamText, basePlaceholder, pleAfterNativeChange,
+    versionDiffers, cacheSummaryLine, type StrataParamSpec,
+  } from '$lib/utils/strataFields';
 
   export let open: boolean = false;
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'neuraldeep' | 'llamacpp_server' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'neuraldeep' | 'llamacpp_server' | 'strata' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
 
   type Provider = {
     alias: string;
@@ -75,6 +79,24 @@
     jinja?: boolean;            // unset = true
     start_timeout_s?: number;   // unset = 300
     extra_args?: string[];      // raw flags appended last, one token per entry
+    // strata specific (ADR-044 point 7): DPC starts Strata's launcher from a
+    // base run config and these fields override it; unset keeps the base value.
+    strata_install_dir?: string;
+    strata_base_config?: string;
+    native_gguf?: string;        // --native, the first shard
+    ple_gguf?: string;           // --ple-gguf, suggested from the first shard
+    pack_dir?: string;           // --pack
+    mtp_dir?: string;            // --mtp
+    expert_profile?: string;     // --expert-profile
+    control_vector_file?: string; // file of --control-vector-scaled <file>:<scale>
+    conversation_cache_mib?: number;   // no default: a dated measurement
+    conversation_cache_slots?: number;
+    max_context?: number;        // the SERVER window, not context_window
+    vision?: boolean;            // unset = the base config decides
+    control_vector?: boolean;    // unset = the base config decides
+    model_params?: Record<string, unknown>; // Strata /config keys (runconfig.py EDITABLE)
+    tested_version?: string;
+    tested_version_date?: string;
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -229,6 +251,200 @@
     }
   }
 
+  // --- strata (ADR-044 point 7) ---------------------------------------------
+
+  type StrataPathKey = 'strata_install_dir' | 'strata_base_config' | 'native_gguf' | 'ple_gguf'
+    | 'pack_dir' | 'mtp_dir' | 'expert_profile' | 'mmproj' | 'control_vector_file';
+
+  const STRATA_PICK: Record<StrataPathKey, { title: string; directory?: boolean; ext?: string[] }> = {
+    strata_install_dir: { title: 'Select the Strata folder (serve/server.py, .venv)', directory: true },
+    strata_base_config: { title: 'Select a Strata run config (strata-<model>.json)', ext: ['json'] },
+    native_gguf: { title: 'Select the first model shard (…-00001-of-0000N.gguf)', ext: ['gguf'] },
+    ple_gguf: { title: 'Select the PLE shard (--ple-gguf)', ext: ['gguf'] },
+    pack_dir: { title: 'Select the expert pack folder (--pack)', directory: true },
+    mtp_dir: { title: 'Select the MTP folder (--mtp)', directory: true },
+    expert_profile: { title: 'Select the expert profile (--expert-profile)', ext: ['bin'] },
+    mmproj: { title: 'Select the vision projector (mmproj)', ext: ['gguf'] },
+    control_vector_file: { title: 'Select the control vector (.gguf)', ext: ['gguf'] },
+  };
+
+  // The model files, each overriding the base config's value (empty = keep it).
+  const STRATA_FILE_FIELDS: { key: StrataPathKey; label: string; hint: string }[] = [
+    { key: 'native_gguf', label: 'Model, first shard (--native)',
+      hint: 'The first shard of the model, …-00001-of-0000N.gguf. Picking it fills the PLE shard below with the matching …-00002-of-0000N.gguf beside it; that suggestion stays editable.' },
+    { key: 'ple_gguf', label: 'PLE shard (--ple-gguf)',
+      hint: 'The shard holding the per-layer embeddings, usually the second one beside the first. Empty keeps the base config\'s.' },
+    { key: 'pack_dir', label: 'Expert pack folder (--pack)',
+      hint: 'The packed experts the engine streams from disk, with the tokenizer inside. Empty keeps the base config\'s.' },
+    { key: 'mtp_dir', label: 'MTP folder (--mtp)',
+      hint: 'The multi-token-prediction head for speculative decoding. Empty keeps the base config\'s.' },
+    { key: 'expert_profile', label: 'Expert profile (--expert-profile)',
+      hint: 'Which experts the engine keeps resident, from a profiling run. Empty keeps the base config\'s.' },
+  ];
+
+  /** Set a strata path field; the first shard also refreshes the suggested PLE shard. */
+  function setStrataPath(i: number, key: StrataPathKey, raw: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    const value = raw.trim();
+    if (key === 'native_gguf') {
+      const ple = pleAfterNativeChange(p.ple_gguf, p.native_gguf, value);
+      if (ple) p.ple_gguf = ple; else delete p.ple_gguf;
+    }
+    if (value === '') delete p[key]; else p[key] = value;
+    editedConfig = editedConfig;
+    if (key === 'strata_install_dir' || key === 'strata_base_config') inspectStrataBase(i);
+  }
+
+  async function pickStrataPath(i: number, key: StrataPathKey) {
+    if (!editedConfig || !canBrowse) return;
+    const p = editedConfig.providers[i] as any;
+    const spec = STRATA_PICK[key];
+    const current: string = p[key] || strataInspect[i]?.values?.[key] || p.strata_install_dir || '';
+    const startIn = current ? (spec.directory ? current : current.replace(/[\\/][^\\/]*$/, '')) : undefined;
+    try {
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const picked = await openDialog({
+        multiple: false,
+        directory: !!spec.directory,
+        defaultPath: startIn,
+        title: spec.title,
+        filters: spec.directory ? undefined : [
+          { name: spec.ext?.join(', ') ?? 'File', extensions: spec.ext ?? ['*'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (typeof picked !== 'string' || !picked) return;
+      setStrataPath(i, key, picked);
+    } catch (err) {
+      console.error('[ProvidersEditor] strata dialog failed:', err);
+    }
+  }
+
+  // What each edited strata alias's base config would start with, by form index.
+  type StrataInspect = {
+    loading: boolean; error: string; path?: string; model_name?: string;
+    values?: Record<string, any>; model_params?: Record<string, unknown>;
+    control_vector_scale?: string | null; suggested_ple_gguf?: string | null; missing_files?: string[];
+  };
+  let strataInspect: Record<number, StrataInspect> = {};
+  const autoInspected = new Set<number>();
+
+  async function inspectStrataBase(i: number) {
+    const p = editedConfig?.providers[i];
+    if (!p || p.type !== 'strata') return;
+    if (!p.strata_base_config) {
+      strataInspect[i] = { loading: false, error: '' };
+      return;
+    }
+    strataInspect[i] = { ...(strataInspect[i] ?? {}), loading: true, error: '' };
+    try {
+      const r = await sendCommand('strata_inspect_base_config', {
+        path: p.strata_base_config, install_dir: p.strata_install_dir || '',
+      });
+      if (r?.status === 'success') {
+        strataInspect[i] = { loading: false, error: '', ...r };
+        // The served model name defaults to the base config's, so a new alias saves.
+        if (editedConfig && !editedConfig.providers[i].model && r.model_name) {
+          editedConfig.providers[i].model = r.model_name;
+          editedConfig = editedConfig;
+        }
+      } else {
+        strataInspect[i] = { loading: false, error: r?.message || 'Could not read the base config' };
+      }
+    } catch (error) {
+      strataInspect[i] = { loading: false, error: `Error: ${error}` };
+    }
+  }
+
+  $: if (open && editMode && editedConfig) {
+    editedConfig.providers.forEach((p, i) => {
+      if (p.type === 'strata' && !autoInspected.has(i)) {
+        autoInspected.add(i);
+        inspectStrataBase(i);
+      }
+    });
+  }
+  $: if (!editMode) autoInspected.clear();
+
+  function strataBase(i: number, key: string): unknown {
+    return strataInspect[i]?.values?.[key];
+  }
+
+  /** Tri-state for vision / control_vector: '' leaves the base config's choice. */
+  function strataTriValue(v: boolean | undefined): string {
+    return v === undefined ? '' : v ? 'true' : 'false';
+  }
+
+  let strataParamErrors: Record<string, string> = {};
+
+  function setStrataParam(i: number, spec: StrataParamSpec, raw: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i];
+    const parsed = parseModelParam(spec, raw);
+    const errKey = `${i}:${spec.key}`;
+    if ('error' in parsed) {
+      strataParamErrors[errKey] = parsed.error;
+      return;
+    }
+    delete strataParamErrors[errKey];
+    strataParamErrors = strataParamErrors;
+    const params = { ...(p.model_params ?? {}) };
+    if (parsed.value === undefined) delete params[spec.key];
+    else params[spec.key] = parsed.value;
+    if (Object.keys(params).length) p.model_params = params; else delete p.model_params;
+    editedConfig = editedConfig;
+  }
+
+  // The local engines' state (local_engine_status): the card holder and each
+  // strata alias's supervisor. Read only; loading it never starts an engine.
+  let engineStatus: { card_holder: any; strata: any[] } | null = null;
+  let engineStatusError = '';
+  let engineStatusLoading = false;
+  let engineActionBusy = '';
+
+  async function loadEngineStatus() {
+    engineStatusLoading = true;
+    try {
+      const r = await sendCommand('local_engine_status', {});
+      if (r?.status === 'success') {
+        engineStatus = { card_holder: r.card_holder ?? null, strata: r.strata ?? [] };
+        engineStatusError = '';
+      } else {
+        engineStatusError = r?.message || 'Could not read the local engines';
+      }
+    } catch (error) {
+      engineStatusError = `Error: ${error}`;
+    } finally {
+      engineStatusLoading = false;
+    }
+  }
+
+  $: hasStrata = !!config?.providers?.some((p) => p.type === 'strata');
+  let engineStatusLoadedForOpen = false;
+  $: if (open && hasStrata && !engineStatusLoadedForOpen) {
+    engineStatusLoadedForOpen = true;
+    loadEngineStatus();
+  }
+  $: if (!open) engineStatusLoadedForOpen = false;
+
+  function strataRow(alias: string): any | null {
+    return engineStatus?.strata?.find((r) => r.alias === alias) ?? null;
+  }
+
+  async function engineAction(command: 'stop_local_engine' | 'strata_reset_failure', alias: string) {
+    engineActionBusy = `${command}:${alias}`;
+    try {
+      const r = await sendCommand(command, { alias });
+      if (r?.status !== 'success') engineStatusError = r?.message || `${command} failed`;
+    } catch (error) {
+      engineStatusError = `Error: ${error}`;
+    } finally {
+      engineActionBusy = '';
+      await loadEngineStatus();
+    }
+  }
+
   // Save-time draft confirmation (Mike, 2026-09-28: Save used to drop a
   // filled-but-not-added new-provider draft silently)
   let showDraftConfirm: boolean = false;
@@ -360,7 +576,7 @@
   // coding endpoint had.
   function temperatureDefaultLabel(type: ProviderType): string {
     if (type === 'ollama' || type === 'neuraldeep') return 'Model default (not sent)';
-    if (type === 'deepseek' || type === 'zai' || type === 'llamacpp_server') return 'Provider default (1.0)';
+    if (type === 'deepseek' || type === 'zai' || type === 'llamacpp_server' || type === 'strata') return 'Provider default (1.0)';
     return 'Default (0.7)';
   }
 
@@ -912,6 +1128,11 @@
       provider.temperature = 1.0;
       provider.top_p = 0.95;
       provider.top_k = 20;
+    } else if (newProvider.type === 'strata') {
+      // Nothing to default: the model files come from the base config chosen
+      // in Edit, and the cache budget is a measurement, never a default
+      // (ADR-044 point 7). Save refuses the alias until install dir, base
+      // config and conversation_cache_mib are set.
     } else if (newProvider.type === 'local_whisper') {
       provider.device = 'auto';
       provider.compile_model = true;
@@ -1075,6 +1296,80 @@
 
 <svelte:window on:keydown={handleKeydown} />
 
+<!-- The read-only state of one strata alias (local_engine_status). -->
+{#snippet strataStatus(alias: string)}
+  {@const row = strataRow(alias)}
+  {@const holder = engineStatus?.card_holder}
+  <div class="strata-status">
+    <div class="strata-status-head">
+      <strong>Engine status</strong>
+      <button type="button" class="btn-fetch" on:click={loadEngineStatus} disabled={engineStatusLoading}
+        title="Read the launcher's state again; never starts it">{engineStatusLoading ? '⏳' : 'Refresh'}</button>
+    </div>
+    {#if engineStatusError}
+      <p class="help-text warn">{engineStatusError}</p>
+    {/if}
+    {#if !row}
+      <p class="help-text">Not loaded yet — save the alias, then Refresh.</p>
+    {:else}
+      <p>
+        <strong>State:</strong>
+        <span class="strata-state strata-state-{row.state}">{row.state}</span>
+        {#if row.port}<span class="help-text"> on :{row.port}</span>{/if}
+      </p>
+      <p>
+        <strong>Engine version:</strong> {row.engine_version ?? 'not read yet'}
+        {#if versionDiffers(row.engine_version, row.tested_version)}
+          <span class="strata-badge-warn" title="Starting anyway; re-test and update the tested version">
+            differs from tested {row.tested_version}{row.tested_version_date ? ` (${row.tested_version_date})` : ''}
+          </span>
+        {:else if row.tested_version}
+          <span class="help-text">tested {row.tested_version}{row.tested_version_date ? ` on ${row.tested_version_date}` : ''}</span>
+        {/if}
+      </p>
+      {#if row.failure}
+        <p class="help-text warn">
+          <strong>Stopped after an engine death:</strong> {row.failure.reason}
+          {#if row.failure.at}<br />at {new Date(row.failure.at * 1000).toLocaleString()}{/if}
+        </p>
+        <button type="button" class="btn-fetch" disabled={!!engineActionBusy}
+          on:click={() => engineAction('strata_reset_failure', alias)}
+          title="DPC never restarts Strata after an engine death; this lets the next call start it">Reset</button>
+      {/if}
+      {#if row.vram_released === false}
+        <p class="help-text warn">
+          The last stop did not give the card back: free VRAM {row.last_stop_vram?.after_mib ?? '?'} MiB against
+          {row.last_stop_vram?.before_mib ?? '?'} MiB before the start — a strata.exe may have outlived the launcher.
+        </p>
+      {/if}
+      {#if row.metrics}
+        <p><strong>Server window:</strong> {row.metrics.max_context?.toLocaleString?.() ?? '—'} tokens ·
+          <strong>Images:</strong> {row.metrics.images ? 'on' : 'off'} ·
+          <strong>Free VRAM:</strong> {row.metrics.vram_free_mib != null ? `${row.metrics.vram_free_mib.toLocaleString()} MiB` : '—'}</p>
+        <p><strong>Conversation cache:</strong> {cacheSummaryLine(row.metrics.conversation_cache)}</p>
+      {:else if row.metrics_error}
+        <p class="help-text warn">/metrics unreadable: {row.metrics_error}</p>
+      {/if}
+      {#if row.start_config}
+        <p class="help-text">Start config used: <code>{row.start_config}</code></p>
+      {/if}
+    {/if}
+    <p>
+      <strong>Card holder:</strong>
+      {#if holder}
+        {holder.alias} ({holder.engine}, {holder.state})
+        <button type="button" class="btn-fetch" disabled={!!engineActionBusy}
+          on:click={() => engineAction('stop_local_engine', holder.alias)}
+          title="Drain and stop this engine's child to free the card; its next call starts it again">
+          {engineActionBusy === `stop_local_engine:${holder.alias}` ? 'Stopping…' : 'Stop engine'}
+        </button>
+      {:else}
+        none — the card is free
+      {/if}
+    </p>
+  </div>
+{/snippet}
+
 {#if open && displayConfig}
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div class="modal-overlay" role="presentation">
@@ -1213,6 +1508,7 @@
                         <option value="deepseek">DeepSeek</option>
                         <option value="neuraldeep">NeuralDeep</option>
                         <option value="llamacpp_server">llama-server (local, DPC pin)</option>
+                        <option value="strata">Strata (local, DPC-supervised)</option>
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
                         <option value="gemini">Google Gemini</option>
@@ -2066,6 +2362,289 @@
                       </details>
                     {/if}
 
+                    {#if editedConfig.providers[i].type === 'strata'}
+                      {@const sp = editedConfig.providers[i]}
+                      {@const insp = strataInspect[i]}
+                      {#if originalAliases.get(i)}
+                        {@render strataStatus(originalAliases.get(i) ?? '')}
+                      {/if}
+
+                      <div class="form-group">
+                        <label for="strata-install-{i}">Strata folder</label>
+                        <div class="path-row">
+                          <input
+                            id="strata-install-{i}"
+                            type="text"
+                            value={sp.strata_install_dir ?? ''}
+                            on:change={(e) => setStrataPath(i, 'strata_install_dir', e.currentTarget.value)}
+                            placeholder="Absolute path to the Strata clone (serve/server.py, .venv)"
+                          />
+                          {#if canBrowse}
+                            <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, 'strata_install_dir')}
+                              title="Pick the Strata folder">Browse…</button>
+                          {/if}
+                        </div>
+                        <p class="help-text">
+                          Strata installs and updates through its own START-HERE.bat / UPDATE.bat. DPC runs
+                          the venv's python with <code>serve/server.py --engine strata</code> from here and
+                          writes its own start config under <code>~/.dpc/strata/</code>, never into this folder.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="strata-base-{i}">Base config</label>
+                        <div class="path-row">
+                          <input
+                            id="strata-base-{i}"
+                            type="text"
+                            value={sp.strata_base_config ?? ''}
+                            on:change={(e) => setStrataPath(i, 'strata_base_config', e.currentTarget.value)}
+                            placeholder="strata-<model>.json (relative to the Strata folder, or absolute)"
+                          />
+                          {#if canBrowse}
+                            <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, 'strata_base_config')}
+                              title="Pick a Strata run config">Browse…</button>
+                          {/if}
+                        </div>
+                        {#if insp?.loading}
+                          <p class="help-text">Reading the base config…</p>
+                        {:else if insp?.error}
+                          <p class="help-text warn">{insp.error}</p>
+                        {:else if insp?.path}
+                          <p class="help-text success">
+                            Read {insp.path}{insp.model_name ? ` — model ${insp.model_name}` : ''}. Its values show
+                            as placeholders below; a field left empty keeps them.
+                          </p>
+                          {#if insp.missing_files?.length}
+                            <p class="help-text warn">The base config names files that are not on disk: {insp.missing_files.join(', ')}</p>
+                          {/if}
+                        {/if}
+                        <p class="help-text">
+                          An existing Strata run config, the template of every start: the engine, tokenizer and
+                          flags come from it, and the fields below override it. Strata's own page edits that file
+                          for its own starts; DPC only reads it.
+                        </p>
+                      </div>
+
+                      <h4 class="strata-subhead">Model files (paths chosen directly)</h4>
+                      {#each STRATA_FILE_FIELDS as f}
+                        <div class="form-group">
+                          <label for="strata-{f.key}-{i}">{f.label}</label>
+                          <div class="path-row">
+                            <input
+                              id="strata-{f.key}-{i}"
+                              type="text"
+                              value={(sp as any)[f.key] ?? ''}
+                              on:change={(e) => setStrataPath(i, f.key, e.currentTarget.value)}
+                              placeholder={basePlaceholder(strataBase(i, f.key), 'not in the base config')}
+                            />
+                            {#if canBrowse}
+                              <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, f.key)}
+                                title="Pick from disk">Browse…</button>
+                            {/if}
+                          </div>
+                          <p class="help-text">{f.hint}</p>
+                        </div>
+                      {/each}
+
+                      <div class="form-group">
+                        <label for="strata-vision-{i}">Vision</label>
+                        <select id="strata-vision-{i}" value={strataTriValue(sp.vision)}
+                          on:change={(e) => setBool(i, 'vision', e.currentTarget.value)}>
+                          <option value="">Base config ({strataBase(i, 'vision') === undefined ? '?' : strataBase(i, 'vision') ? 'on' : 'off'})</option>
+                          <option value="true">On</option>
+                          <option value="false">Off</option>
+                        </select>
+                        <div class="path-row">
+                          <input
+                            id="strata-mmproj-{i}"
+                            type="text"
+                            value={sp.mmproj ?? ''}
+                            on:change={(e) => setStrataPath(i, 'mmproj', e.currentTarget.value)}
+                            placeholder={basePlaceholder(strataBase(i, 'mmproj'), 'mmproj .gguf (vision projector)')}
+                            aria-label="mmproj (vision projector)"
+                          />
+                          {#if canBrowse}
+                            <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, 'mmproj')}
+                              title="Pick the projector file">Browse…</button>
+                          {/if}
+                        </div>
+                        <p class="help-text">
+                          The projector goes into the base config's "vision" block, which also names
+                          strata-vision.exe; without that block vision cannot be turned on here. Whether this
+                          alias takes images is read from the running launcher, not from this field.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="strata-cvec-{i}">Control vector</label>
+                        <select id="strata-cvec-{i}" value={strataTriValue(sp.control_vector)}
+                          on:change={(e) => setBool(i, 'control_vector', e.currentTarget.value)}>
+                          <option value="">Base config ({strataBase(i, 'control_vector') === undefined ? '?' : strataBase(i, 'control_vector') ? 'on' : 'off'})</option>
+                          <option value="true">On</option>
+                          <option value="false">Off (drops every --control-vector / --cvec flag)</option>
+                        </select>
+                        <div class="path-row">
+                          <input
+                            id="strata-cvec-file-{i}"
+                            type="text"
+                            value={sp.control_vector_file ?? ''}
+                            on:change={(e) => setStrataPath(i, 'control_vector_file', e.currentTarget.value)}
+                            placeholder={basePlaceholder(strataBase(i, 'control_vector_file'), 'control vector .gguf')}
+                            aria-label="Control vector file"
+                          />
+                          {#if canBrowse}
+                            <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, 'control_vector_file')}
+                              title="Pick the control vector">Browse…</button>
+                          {/if}
+                        </div>
+                        <p class="help-text">
+                          Replaces only the file of <code>--control-vector-scaled &lt;file&gt;:&lt;scale&gt;</code>;
+                          the scale{insp?.control_vector_scale ? ` (${insp.control_vector_scale})` : ''}, layer range and
+                          mode stay the base config's. Strata applies it in project mode (removes the direction),
+                          llama.cpp only adds — the same vector gives different output on the two engines.
+                        </p>
+                      </div>
+
+                      <h4 class="strata-subhead">Conversation cache and windows</h4>
+                      <div class="form-group strata-pair">
+                        <div>
+                          <label for="strata-cc-mib-{i}">Cache budget, MiB (--conversation-cache-mib)</label>
+                          <input
+                            id="strata-cc-mib-{i}"
+                            type="number"
+                            min="1"
+                            step="1024"
+                            value={sp.conversation_cache_mib ?? ''}
+                            on:input={(e) => setNum(i, 'conversation_cache_mib', e.currentTarget.value)}
+                            placeholder={strataBase(i, 'conversation_cache_mib') != null
+                              ? `required — the base config's ${strataBase(i, 'conversation_cache_mib')} is not used` : 'required, no default'}
+                          />
+                        </div>
+                        <div>
+                          <label for="strata-cc-slots-{i}">Conversations (--conversation-cache-slots)</label>
+                          <input
+                            id="strata-cc-slots-{i}"
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={sp.conversation_cache_slots ?? ''}
+                            on:input={(e) => setNum(i, 'conversation_cache_slots', e.currentTarget.value)}
+                            placeholder={basePlaceholder(strataBase(i, 'conversation_cache_slots'), 'engine default')}
+                          />
+                        </div>
+                      </div>
+                      {#if sp.conversation_cache_mib == null}
+                        <p class="help-text warn">Required: the provider refuses to start without a budget.</p>
+                      {/if}
+                      <p class="help-text">
+                        Host RAM the launcher parks whole conversations in, so a returning one is restored instead
+                        of re-read. The budget is bounded by the <strong>Windows commit limit (RAM + page
+                        file)</strong>, not by RAM alone: Strata takes most of it right after load and can exit with
+                        an NTSTATUS code and no message when a park pushes past it. More conversations need a
+                        larger page file. The pair here is <strong>a measurement on this machine</strong>, not a
+                        default — there is none{sp.tested_version_date ? `; this alias was tested ${sp.tested_version_date}` : ''}.
+                        Re-measure after changing the page file, the model or the server window.
+                      </p>
+
+                      <div class="form-group">
+                        <label for="strata-maxctx-{i}">Server window, tokens (--max-context)</label>
+                        <input
+                          id="strata-maxctx-{i}"
+                          type="number"
+                          min="4096"
+                          step="4096"
+                          value={sp.max_context ?? ''}
+                          on:input={(e) => setNum(i, 'max_context', e.currentTarget.value)}
+                          placeholder={basePlaceholder(strataBase(i, 'max_context'), 'engine default')}
+                        />
+                        <p class="help-text">
+                          The most the <strong>server</strong> holds for one conversation. The agent's window is
+                          «Context Window» below, a separate field nothing derives from this one.
+                        </p>
+                      </div>
+
+                      <details class="supervisor-flags">
+                        <summary>Model parameters (Strata's own settings page)</summary>
+                        <p class="help-text">
+                          The keys Strata's page edits, written into DPC's start config and used from the next start.
+                          Empty leaves the base config's value, or Strata's default when it has none. DPC's own
+                          requests always carry a temperature (Temperature below, 1.0 when unset), so
+                          <code>sampling.temperature</code> only reaches requests that send none, such as those from
+                          Strata's own page.
+                        </p>
+                        {#each STRATA_MODEL_PARAMS as spec}
+                          {@const current = sp.model_params?.[spec.key]}
+                          {@const fromBase = insp?.model_params?.[spec.key]}
+                          <div class="form-group">
+                            <label for="strata-param-{spec.key}-{i}"><code>{spec.key}</code></label>
+                            {#if spec.kind === 'bool' || spec.kind === 'enum'}
+                              <select
+                                id="strata-param-{spec.key}-{i}"
+                                value={modelParamText(current)}
+                                on:change={(e) => setStrataParam(i, spec, e.currentTarget.value)}
+                              >
+                                <option value="">{basePlaceholder(fromBase, 'Strata default')}</option>
+                                {#each (spec.kind === 'bool' ? ['true', 'false'] : spec.choices ?? []) as choice}
+                                  <option value={choice}>{choice}</option>
+                                {/each}
+                              </select>
+                            {:else}
+                              <input
+                                id="strata-param-{spec.key}-{i}"
+                                type={spec.kind === 'names' ? 'text' : 'number'}
+                                min={spec.min}
+                                max={spec.max}
+                                step={spec.step}
+                                value={modelParamText(current)}
+                                on:input={(e) => setStrataParam(i, spec, e.currentTarget.value)}
+                                placeholder={basePlaceholder(fromBase, 'Strata default')}
+                              />
+                            {/if}
+                            {#if strataParamErrors[`${i}:${spec.key}`]}
+                              <p class="help-text warn">{strataParamErrors[`${i}:${spec.key}`]}</p>
+                            {/if}
+                            <p class="help-text">{spec.help}</p>
+                          </div>
+                        {/each}
+                      </details>
+
+                      <details class="supervisor-flags">
+                        <summary>Extra flags and tested version</summary>
+                        <div class="form-group">
+                          <label for="strata-extra-{i}">Extra engine flags (one token per line)</label>
+                          <textarea
+                            id="strata-extra-{i}"
+                            rows="4"
+                            value={(sp.extra_args ?? []).join('\n')}
+                            on:input={(e) => setExtraArgs(i, e.currentTarget.value)}
+                            placeholder={'--resident-budget-gib\n24'}
+                          ></textarea>
+                          <p class="help-text warn">
+                            Appended to the start config's engine "args" last, verbatim and unchecked; every flag
+                            without a field here goes this way. One token per line.
+                          </p>
+                        </div>
+                        <div class="form-group strata-pair">
+                          <div>
+                            <label for="strata-tested-{i}">Tested version</label>
+                            <input id="strata-tested-{i}" type="text" value={sp.tested_version ?? ''}
+                              on:input={(e) => setStr(i, 'tested_version', e.currentTarget.value.trim())}
+                              placeholder="engine.version, e.g. 0.1.46" />
+                          </div>
+                          <div>
+                            <label for="strata-tested-date-{i}">Tested on</label>
+                            <input id="strata-tested-date-{i}" type="date" value={sp.tested_version_date ?? ''}
+                              on:input={(e) => setStr(i, 'tested_version_date', e.currentTarget.value)} />
+                          </div>
+                        </div>
+                        <p class="help-text">
+                          The engine version this alias was last verified with, read back from the launcher's
+                          /metrics at each start. A different version warns and starts anyway.
+                        </p>
+                      </details>
+                    {/if}
+
                     {#if editedConfig.providers[i].type === 'openai_compatible'}
                       <div class="form-group">
                         <label for="base-url-{i}">Base URL</label>
@@ -2458,6 +3037,13 @@
                         placeholder="Or enter exact value (tokens)"
                         class="custom-context-input"
                       />
+                      {#if editedConfig.providers[i].type === 'strata'}
+                        <p class="help-text">
+                          The agent's window, not the server's (that is --max-context above). For a Strata alias
+                          set it to the conversation size parking was measured at, so a conversation that fits
+                          here also fits the cache budget.
+                        </p>
+                      {/if}
                     </div>
 
                     <!-- Temperature Setting -->
@@ -2641,6 +3227,21 @@
                       <p><strong>Lazy Loading:</strong> {provider.lazy_loading !== false ? 'Enabled' : 'Disabled'}</p>
                     {/if}
 
+                    {#if provider.type === 'strata'}
+                      <p><strong>Strata folder:</strong> {provider.strata_install_dir || '—'}</p>
+                      <p><strong>Base config:</strong> {provider.strata_base_config || '—'}</p>
+                      <p><strong>Conversation cache:</strong>
+                        {provider.conversation_cache_mib != null ? `${provider.conversation_cache_mib.toLocaleString()} MiB` : 'not set (required)'}
+                        {provider.conversation_cache_slots != null ? ` / ${provider.conversation_cache_slots} conversations` : ''}</p>
+                      {#if provider.max_context}
+                        <p><strong>Server window:</strong> {provider.max_context.toLocaleString()} tokens</p>
+                      {/if}
+                      {#if provider.tested_version}
+                        <p><strong>Tested version:</strong> {provider.tested_version}{provider.tested_version_date ? ` (${provider.tested_version_date})` : ''}</p>
+                      {/if}
+                      {@render strataStatus(provider.alias)}
+                    {/if}
+
                     {#if provider.type === 'dpc_agent' && provider.peer_id}
                       <p><strong>Remote Peer ID:</strong> {provider.peer_id}</p>
                       {#if provider.remote_model}
@@ -2710,6 +3311,7 @@
                 <option value="deepseek">DeepSeek</option>
                 <option value="neuraldeep">NeuralDeep</option>
                 <option value="llamacpp_server">llama-server (local, DPC pin)</option>
+                <option value="strata">Strata (local, DPC-supervised)</option>
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
                 <option value="gemini">Google Gemini</option>
@@ -2728,6 +3330,7 @@
                   placeholder={
                     newProvider.type === 'ollama' ? 'llama3.1:8b' :
                     newProvider.type === 'llamacpp_server' ? 'Absolute path to the .gguf model file' :
+                    newProvider.type === 'strata' ? 'qwen3.8-flash-next-iq3_xxs' :
                     newProvider.type === 'openai_compatible' ? 'gpt-4o' :
                     newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
                     newProvider.type === 'zai' ? 'glm-4.7' :
@@ -2779,6 +3382,14 @@
                   <p class="help-text">
                     Absolute path to the model file — DPC starts its own llama-server on it
                     (no host, no key). The Ollama blob can be named here directly.
+                  </p>
+                {/if}
+                {#if newProvider.type === 'strata'}
+                  <p class="help-text">
+                    The model name requests are sent under, e.g. the base config's model_name. After
+                    adding, fill the Strata folder, the base config and the conversation-cache budget in
+                    the provider's form: Save refuses a strata alias without them, and there is no default
+                    budget (ADR-044).
                   </p>
                 {/if}
               </div>
@@ -3484,6 +4095,56 @@
   /* A path field and its Browse button on one line. The input keeps the
      .form-group styling above; only the layout changes, and min-width: 0 stops
      a long absolute path from pushing the button off the card. */
+  .strata-status {
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    font-size: 0.9em;
+  }
+  .strata-status p {
+    margin: 4px 0;
+  }
+  .strata-status-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .strata-state {
+    font-weight: 600;
+  }
+  .strata-state-running {
+    color: #4caf50;
+  }
+  .strata-state-failed {
+    color: #f44336;
+  }
+  .strata-state-starting,
+  .strata-state-draining {
+    color: #ff9800;
+  }
+  .strata-badge-warn {
+    background: #5a3d00;
+    color: #ffcc80;
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-left: 6px;
+    font-size: 0.85em;
+  }
+  .strata-subhead {
+    margin: 16px 0 8px;
+    font-size: 0.95em;
+  }
+  .strata-pair {
+    display: flex;
+    gap: 12px;
+  }
+  .strata-pair > div {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+
   .path-row {
     display: flex;
     gap: 6px;

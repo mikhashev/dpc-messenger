@@ -118,3 +118,15 @@ describe('suggestProviderAlias', () => {
     ])).toBe('qwen3.8-27b NeuralDeep 3');
   });
 });
+
+describe('a strata draft (ADR-044)', () => {
+  it('names the alias after the served model, not a file path', () => {
+    expect(suggestProviderAlias('qwen3.8-flash-next-iq3_xxs', 'strata', []))
+      .toBe('qwen3.8-flash-next-iq3_xxs Strata');
+  });
+
+  it('needs a model name before it can be added, like any other non-agent type', () => {
+    expect(validateProviderDraftForAdd({ alias: 'flash', type: 'strata', model: '' }, []).valid).toBe(false);
+    expect(validateProviderDraftForAdd({ alias: 'flash', type: 'strata', model: 'flash' }, []).valid).toBe(true);
+  });
+});

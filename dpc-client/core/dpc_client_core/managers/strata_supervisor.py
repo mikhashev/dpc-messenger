@@ -67,6 +67,17 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # serve/runconfig.py stores them: `sampling.<k>` in the "sampling" block,
     # `vram_reserve_mib` as its engine flag, everything else top level.
     "model_params": {},
+    # Model files, each overriding what the base config names; None keeps the
+    # base config's value. See MODEL_FILE_FLAGS for the engine flag of each.
+    "native_gguf": None,
+    "ple_gguf": None,
+    "pack_dir": None,
+    "mtp_dir": None,
+    "expert_profile": None,
+    # The vision block's projector, and the file part of
+    # `--control-vector-scaled <file>:<scale>` (the scale stays the base's).
+    "mmproj": None,
+    "control_vector_file": None,
     # Engine flags, appended to the start config's "args" last.
     "extra_args": [],
     "tested_version": None,
@@ -91,6 +102,236 @@ _STRUCTURAL_KEYS = frozenset({
 # Strata `/config` keys that live in "args" as an engine flag
 # (serve/runconfig.py EDITABLE, kind ("arg", flag)).
 _ARG_PARAMS = {"vram_reserve_mib": "--vram-reserve-mib"}
+
+# The keys Strata's own page edits, with their kinds — serve/runconfig.py
+# EDITABLE as of Strata 477ac13c (read 2026-10-18). `open_browser` is left out:
+# DPC's start config always writes it false. Mirrored for the UI in
+# dpc-client/ui/src/lib/utils/strataFields.ts (a test keeps the two equal).
+STRATA_MODEL_PARAMS: Dict[str, Any] = {
+    "sampling.temperature": ("sampling", "num>=0"),
+    "sampling.top_p": ("sampling", "0<x<=1"),
+    "sampling.top_k": ("sampling", "1..64"),
+    "sampling.min_p": ("sampling", "0<=x<=1"),
+    "reasoning_budget_tokens": "int>=0",
+    "fit_max_tokens": "bool",
+    "anthropic_thinking": ("enum", ("model", "on_request")),
+    "effort_position": ("enum", ("start", "end")),
+    "aliases": "names",
+    "idle_unload_s": "num>=0",
+    "lazy_load": "bool",
+    "engine_silence_s": "num>=0",
+    "api_monitor": "bool",
+    "vram_reserve_mib": ("arg", "--vram-reserve-mib"),
+}
+
+# Alias key -> the engine flag whose value it replaces (ADR-044 point 7).
+MODEL_FILE_FLAGS: Dict[str, str] = {
+    "native_gguf": "--native",
+    "ple_gguf": "--ple-gguf",
+    "pack_dir": "--pack",
+    "mtp_dir": "--mtp",
+    "expert_profile": "--expert-profile",
+}
+
+# Every alias key that names a file or folder, for the existence check on save.
+STRATA_PATH_KEYS = (
+    "strata_install_dir", "strata_base_config", *MODEL_FILE_FLAGS, "mmproj", "control_vector_file",
+)
+
+_SHARD_RE = re.compile(r"^(?P<stem>.*)-(?P<i>\d{5})-of-(?P<n>\d{5})(?P<ext>\.gguf)$", re.IGNORECASE)
+
+
+def suggest_ple_gguf(native_gguf: Any) -> Optional[str]:
+    """The second shard beside a first shard `...-00001-of-0000N.gguf`, or None.
+
+    A suggestion only: the UI pre-fills it when the first shard is picked, and
+    nothing applies it to an alias that leaves `ple_gguf` unset."""
+    m = _SHARD_RE.match(str(native_gguf or "").strip())
+    if not m or int(m["i"]) != 1 or int(m["n"]) < 2:
+        return None
+    return f"{m['stem']}-00002-of-{m['n']}{m['ext']}"
+
+
+def model_param_error(key: str, value: Any) -> Optional[str]:
+    """Why `value` cannot be stored for Strata `/config` key `key`, or None.
+
+    Strata's own rules (serve/runconfig.py `check`); None removes the key."""
+    if key not in STRATA_MODEL_PARAMS:
+        if key == "open_browser":
+            return "open_browser is always false in DPC's start config"
+        return f"{key!r} is not a key Strata's page edits ({', '.join(STRATA_MODEL_PARAMS)})"
+    if value is None:
+        return None
+    kind = STRATA_MODEL_PARAMS[key]
+    k = kind[0] if isinstance(kind, tuple) else kind
+
+    def number(whole=False, lo=0.0, hi=None, lo_open=False) -> Optional[str]:
+        ok = (not isinstance(value, bool) and isinstance(value, (int, float))
+              and not (whole and value != int(value))
+              and not (value <= lo if lo_open else value < lo)
+              and not (hi is not None and value > hi))
+        if ok:
+            return None
+        rng = f"{'more than' if lo_open else 'at least'} {lo:g}" + (f" and at most {hi:g}" if hi is not None else "")
+        return f"{key}: expected a {'whole ' if whole else ''}number, {rng}, not {value!r}"
+
+    if k == "bool":
+        return None if isinstance(value, bool) else f"{key}: expected true or false, not {value!r}"
+    if k == "enum":
+        return None if value in kind[1] else f"{key}: expected one of {', '.join(kind[1])}, not {value!r}"
+    if k == "names":
+        names = [x.strip() for x in value.split(",")] if isinstance(value, str) else value
+        if isinstance(names, list) and all(isinstance(x, str) and x.strip() and len(x) <= 128 for x in names):
+            return None
+        return f"{key}: expected a list of model names, not {value!r}"
+    if k == "int>=0" or k == "arg":
+        return number(whole=True)
+    if k == "num>=0":
+        return number()
+    rule = kind[1]
+    if rule == "num>=0":
+        return number()
+    if rule == "0<x<=1":
+        return number(hi=1, lo_open=True)
+    if rule == "0<=x<=1":
+        return number(hi=1)
+    return number(whole=True, lo=1, hi=64)
+
+
+def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> List[str]:
+    """What keeps a `strata` alias from being saved; empty when nothing does.
+
+    The required keys, the cache budget's type and the model parameters always;
+    with `check_paths`, also that every path the alias sets exists (a relative
+    base config is read against the install dir, as the supervisor reads it)."""
+    errors: List[str] = []
+    missing = [k for k in ("strata_install_dir", "strata_base_config") if not config.get(k)]
+    if missing:
+        errors.append(
+            f"needs {' and '.join(missing)}: the Strata root (serve/server.py, .venv) "
+            "and an existing Strata run config to start from"
+        )
+    if config.get("conversation_cache_mib") is None:
+        errors.append(
+            "needs conversation_cache_mib: there is no default — the parking budget is "
+            "bounded by the Windows commit limit (RAM + page file) and is a value measured "
+            "on this machine"
+        )
+    for key in ("conversation_cache_mib", "conversation_cache_slots", "max_context"):
+        if config.get(key) is not None:
+            try:
+                _base._positive_int(key, config[key])
+            except LlamaServerError as e:
+                errors.append(str(e))
+    params = config.get("model_params")
+    if params is not None and not isinstance(params, dict):
+        errors.append(f"model_params must be an object, got {params!r}")
+    elif params:
+        errors.extend(e for e in (model_param_error(k, v) for k, v in params.items()) if e)
+    extra = config.get("extra_args")
+    if extra is not None and not isinstance(extra, list):
+        errors.append(f"extra_args must be a list of tokens, got {extra!r}")
+    if check_paths:
+        install = Path(str(config["strata_install_dir"])) if config.get("strata_install_dir") else None
+        for key in STRATA_PATH_KEYS:
+            value = config.get(key)
+            if not value:
+                continue
+            path = Path(str(value))
+            if key == "strata_base_config" and not path.is_absolute() and install is not None:
+                path = install / path
+            if not path.exists():
+                errors.append(f"{key}: {path} does not exist")
+    return errors
+
+
+def read_base_config(path: Path) -> Dict[str, Any]:
+    """A Strata run config as a dict; ValueError naming what is wrong with it."""
+    try:
+        cfg = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except OSError as e:
+        raise ValueError(f"cannot read the base config {path}: {e}") from None
+    except ValueError as e:
+        raise ValueError(f"the base config {path} is not JSON: {e}") from None
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("args"), list) or not cfg.get("exe"):
+        raise ValueError(
+            f"the base config {path} has no \"exe\" and \"args\" — is it a Strata run config?"
+        )
+    return cfg
+
+
+def _flag_value(args: List[str], flag: str) -> Optional[str]:
+    """The value after `flag` in `args`, or None when the flag is absent or bare."""
+    args = [str(a) for a in args]
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 < len(args) and not args[i + 1].startswith("--"):
+            return args[i + 1]
+    return None
+
+
+def split_control_vector(value: str) -> tuple:
+    """(file, scale) of a `--control-vector-scaled` value; the scale is None when absent.
+
+    Split at the last colon only when what follows is a number, so `C:\\x.gguf`
+    keeps its drive letter."""
+    head, sep, tail = str(value).rpartition(":")
+    if sep:
+        try:
+            float(tail)
+            return head, tail
+        except ValueError:
+            pass
+    return str(value), None
+
+
+def inspect_base_config(path: Any, install_dir: Any = None) -> Dict[str, Any]:
+    """What a base config would start with, keyed like the alias fields, for the UI's placeholders.
+
+    ValueError when the file is not a readable Strata run config."""
+    p = Path(str(path or ""))
+    if not str(path or "").strip():
+        raise ValueError("no base config path given")
+    if not p.is_absolute() and install_dir:
+        p = Path(str(install_dir)) / p
+    cfg = read_base_config(p)
+    args = [str(a) for a in cfg["args"]]
+    values: Dict[str, Any] = {key: _flag_value(args, flag) for key, flag in MODEL_FILE_FLAGS.items()}
+    for key, flag in (("max_context", "--max-context"),
+                      ("conversation_cache_mib", "--conversation-cache-mib"),
+                      ("conversation_cache_slots", "--conversation-cache-slots")):
+        raw = _flag_value(args, flag)
+        values[key] = int(raw) if raw is not None and raw.isdigit() else raw
+    block = cfg.get("vision") if isinstance(cfg.get("vision"), dict) else None
+    values["vision"] = "--vision" in args and block is not None
+    values["mmproj"] = (block or {}).get("mmproj")
+    cvec = _flag_value(args, "--control-vector-scaled")
+    cv_file, cv_scale = split_control_vector(cvec) if cvec else (None, None)
+    values["control_vector"] = any(_is_control_vector_flag(a) for a in args)
+    values["control_vector_file"] = cv_file
+    params: Dict[str, Any] = {}
+    for key, kind in STRATA_MODEL_PARAMS.items():
+        if isinstance(kind, tuple) and kind[0] == "sampling":
+            s = cfg.get("sampling")
+            v = s.get(key.split(".", 1)[1]) if isinstance(s, dict) else None
+        elif isinstance(kind, tuple) and kind[0] == "arg":
+            raw = _flag_value(args, kind[1])
+            v = int(raw) if raw is not None and raw.isdigit() else raw
+        else:
+            v = cfg.get(key)
+        if v is not None:
+            params[key] = v
+    named = [v for k, v in values.items() if k in MODEL_FILE_FLAGS or k in ("mmproj", "control_vector_file")]
+    return {
+        "path": str(p),
+        "model_name": cfg.get("model_name"),
+        "values": values,
+        "control_vector_scale": cv_scale,
+        "vision_model": (block or {}).get("model"),
+        "model_params": params,
+        "suggested_ple_gguf": suggest_ple_gguf(values.get("native_gguf")),
+        "missing_files": [v for v in named if v and not Path(str(v)).exists()],
+    }
 
 _COMMIT_LIMIT_NOTE = (
     "possibly the Windows commit limit (RAM + page file): Strata can exit there "
@@ -242,17 +483,31 @@ class StrataSupervisor(LlamaServerSupervisor):
             )
         base_path = self.base_config_path()
         try:
-            cfg = json.loads(base_path.read_text(encoding="utf-8-sig"))
-        except OSError as e:
-            raise LlamaServerError(f"strata[{self.alias}]: cannot read the base config {base_path}: {e}") from None
+            cfg = read_base_config(base_path)
         except ValueError as e:
-            raise LlamaServerError(f"strata[{self.alias}]: the base config {base_path} is not JSON: {e}") from None
-        if not isinstance(cfg, dict) or not isinstance(cfg.get("args"), list) or not cfg.get("exe"):
-            raise LlamaServerError(
-                f"strata[{self.alias}]: the base config {base_path} has no \"exe\" and "
-                "\"args\" — is it a Strata run config?"
-            )
+            raise LlamaServerError(f"strata[{self.alias}]: {e}") from None
         args = [str(a) for a in cfg["args"]]
+
+        # Model files: each set key replaces the base's flag value; unset keeps it.
+        base_native = _flag_value(args, "--native")
+        for key, flag in MODEL_FILE_FLAGS.items():
+            if c.get(key):
+                args = _set_flag(args, flag, c[key])
+        block = cfg.get("vision") if isinstance(cfg.get("vision"), dict) else None
+        if block is not None and (c.get("native_gguf") or c.get("mmproj")):
+            block = dict(block)
+            # The encoder reads the same weights the engine does; it follows
+            # the first shard only where the base had it naming that shard.
+            if c.get("native_gguf") and base_native and block.get("model") == base_native:
+                block["model"] = str(c["native_gguf"])
+            if c.get("mmproj"):
+                block["mmproj"] = str(c["mmproj"])
+            cfg["vision"] = block
+        elif c.get("mmproj") and c.get("vision") is not False:
+            raise LlamaServerError(
+                f"strata[{self.alias}]: mmproj is set but the base config {base_path} has "
+                "no \"vision\" block (encoder exe) to put it in"
+            )
 
         args = _set_flag(args, "--conversation-cache-mib",
                          _positive("conversation_cache_mib", c["conversation_cache_mib"]))
@@ -278,6 +533,17 @@ class StrataSupervisor(LlamaServerSupervisor):
         control_vector = c.get("control_vector")
         if control_vector is False:
             args = _drop_flag(args, _is_control_vector_flag)
+        elif c.get("control_vector_file"):
+            current = _flag_value(args, "--control-vector-scaled")
+            if current is None:
+                raise LlamaServerError(
+                    f"strata[{self.alias}]: control_vector_file is set but the base config "
+                    f"{base_path} has no --control-vector-scaled to take the scale, layer "
+                    "range and mode from; add the flags through extra_args instead"
+                )
+            _file, scale = split_control_vector(current)
+            new = str(c["control_vector_file"])
+            args = _set_flag(args, "--control-vector-scaled", f"{new}:{scale}" if scale else new)
         elif control_vector is True and not any(_is_control_vector_flag(a) for a in args):
             logger.warning(
                 "strata[%s]: control_vector is on but the base config %s carries no "
@@ -294,6 +560,11 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"strata[{self.alias}]: model_params may not set {key!r} — the start "
                     "config takes it from the base config and the alias's typed fields"
                 )
+            refusal = model_param_error(key, value)
+            if refusal:
+                raise LlamaServerError(f"strata[{self.alias}]: model_params: {refusal}")
+            if key == "aliases" and isinstance(value, str):
+                value = [x.strip() for x in value.split(",") if x.strip()] or None
             if key.startswith("sampling."):
                 sampling = dict(cfg.get("sampling") or {}) if isinstance(cfg.get("sampling"), dict) else {}
                 sub = key.split(".", 1)[1]
@@ -312,6 +583,11 @@ class StrataSupervisor(LlamaServerSupervisor):
                 cfg.pop(key, None)
             else:
                 cfg[key] = value
+        if cfg.get("lazy_load") is True and cfg.get("vision"):
+            raise LlamaServerError(
+                f"strata[{self.alias}]: lazy_load is text-only and this start reads images "
+                "(\"vision\"); turn one of them off"
+            )
 
         args += [str(a) for a in (c.get("extra_args") or [])]
         cfg["args"] = args

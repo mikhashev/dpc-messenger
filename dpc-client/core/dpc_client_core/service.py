@@ -3115,6 +3115,11 @@ class CoreService:
                 errors.append(f"{prefix}: OpenAI provider missing 'base_url'")
             if provider_type == "remote_peer" and "peer_id" not in provider:
                 errors.append(f"{prefix}: Remote peer provider missing 'peer_id'")
+            if provider_type == "strata":
+                from .managers.strata_supervisor import strata_config_errors
+                errors.extend(
+                    f"{prefix}: strata {e}" for e in strata_config_errors(provider, check_paths=True)
+                )
 
             # Optional context_window validation
             if "context_window" in provider:
@@ -9815,6 +9820,51 @@ class CoreService:
         # Not found is the ordinary race with a call that just recovered, so the
         # interface is told plainly rather than shown an error.
         return {"status": "cancelled" if cancelled else "not_waiting"}
+
+    # --- Local engines: Strata and the llama-server child (ADR-044) ---
+
+    async def strata_inspect_base_config(self, path: str = "", install_dir: str = "") -> Dict[str, Any]:
+        """What a Strata base config would start with, for the editor's placeholders."""
+        from dpc_client_core.managers.strata_supervisor import inspect_base_config
+        try:
+            return {"status": "success", **inspect_base_config(path, install_dir or None)}
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+
+    async def local_engine_status(self) -> Dict[str, Any]:
+        """The card holder and each Strata alias's state; never starts an engine."""
+        from dpc_client_core.providers.strata_provider import local_engine_status
+        try:
+            return {"status": "success", **(await local_engine_status())}
+        except Exception as e:
+            logger.error("local_engine_status failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e) or type(e).__name__}
+
+    @slow_command
+    async def stop_local_engine(self, alias: str = "") -> Dict[str, Any]:
+        """Stop a local engine's child by hand to free the card (ADR-044 point 4).
+
+        Slow: the drain lets a running generation finish first."""
+        from dpc_client_core.providers.llamacpp_server_provider import stop_local_engine
+        if not alias:
+            return {"status": "error", "message": "alias required"}
+        stopped = await stop_local_engine(alias)
+        logger.info("stop_local_engine: alias=%s stopped=%s", alias, stopped)
+        if not stopped:
+            return {"status": "error", "message": f"no local engine child for alias '{alias}'"}
+        return {"status": "success", "alias": alias}
+
+    async def strata_reset_failure(self, alias: str = "") -> Dict[str, Any]:
+        """Clear a Strata alias's recorded engine death so its next call may start it."""
+        from dpc_client_core.providers.strata_provider import strata_supervisor_of
+        if not alias:
+            return {"status": "error", "message": "alias required"}
+        sup = strata_supervisor_of(alias)
+        if sup is None:
+            return {"status": "error", "message": f"no strata alias '{alias}'"}
+        previous = sup.reset_failure()
+        return {"status": "success", "alias": alias, "was_failed": previous is not None,
+                "previous": {k: v for k, v in (previous or {}).items() if k != "log_tail"} or None}
 
     # --- Sleep Consolidation (ADR-014) ---
 

@@ -7,14 +7,15 @@ changes only what is Strata's own: the child, the keys that decide a restart,
 where the effort words come from, and vision, answered from the live launcher.
 """
 
+import asyncio
 import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..managers.llama_server_supervisor import effort_dictionary_of
-from ..managers.strata_supervisor import StrataSupervisor
-from .llamacpp_server_provider import LlamaServerProvider
+from ..managers.strata_supervisor import StrataSupervisor, strata_config_errors
+from .llamacpp_server_provider import _ACTIVE_SUPERVISORS, LlamaServerProvider, card_holder
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ _STRATA_FLAG_KEYS = (
     "strata_install_dir", "strata_base_config", "conversation_cache_mib",
     "conversation_cache_slots", "max_context", "vision", "control_vector",
     "model_params", "extra_args",
+    # Model-file overrides (ADR-044 point 7): each replaces a base config value.
+    "native_gguf", "ple_gguf", "pack_dir", "mtp_dir", "expert_profile", "mmproj",
+    "control_vector_file",
 )
 
 
@@ -38,13 +42,12 @@ class StrataProvider(LlamaServerProvider):
 
     @classmethod
     def _check_config(cls, alias: str, config: Dict[str, Any]) -> None:
-        missing = [k for k in ("strata_install_dir", "strata_base_config") if not config.get(k)]
-        if missing:
-            raise ValueError(
-                f"strata provider '{alias}' needs {' and '.join(missing)}: the Strata "
-                "root (serve/server.py, .venv) and an existing Strata run config to "
-                "start from"
-            )
+        """The alias's own keys, without the disk: a path checked here would drop
+        the alias from the loaded set whenever a drive is not mounted. The save
+        checks the paths too (`strata_config_errors(check_paths=True)`)."""
+        errors = strata_config_errors(config)
+        if errors:
+            raise ValueError(f"strata provider '{alias}' " + "; ".join(errors))
 
     @classmethod
     def _flag_signature(cls, config: Dict[str, Any]) -> tuple:
@@ -107,3 +110,84 @@ class StrataProvider(LlamaServerProvider):
             "vram_released": sup.vram_released,
             "last_stop_vram": dict(sup.last_stop_vram),
         }
+
+
+def _strata_state(sup: StrataSupervisor) -> str:
+    proc = sup._proc
+    if sup.failure is not None:
+        return "failed"
+    if proc is not None and proc.returncode is None:
+        if sup._draining:
+            return "draining"
+        return "running" if sup.props else "starting"
+    return "stopped"
+
+
+def metrics_summary(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """The part of the launcher's `/metrics` the providers UI shows (ADR-044 point 7)."""
+    engine = metrics.get("engine") if isinstance(metrics.get("engine"), dict) else {}
+    cache = metrics.get("conversation_cache") if isinstance(metrics.get("conversation_cache"), dict) else {}
+    hw = metrics.get("hardware") if isinstance(metrics.get("hardware"), dict) else {}
+    live = metrics.get("live") if isinstance(metrics.get("live"), dict) else {}
+    total, used = hw.get("gpu_mem_total"), hw.get("gpu_mem_used")
+    free_mib = None
+    if isinstance(total, (int, float)) and isinstance(used, (int, float)) and total >= used:
+        free_mib = int(total - used) >> 20
+    return {
+        "live_state": live.get("state"),
+        "max_context": engine.get("max_context"),
+        "images": engine.get("images"),
+        "vram_free_mib": free_mib,
+        "conversation_cache": {
+            k: cache.get(k) for k in (
+                "enabled", "budget_mib", "slots", "parked", "bytes", "parks", "restores", "evictions",
+            )
+        },
+    }
+
+
+async def strata_status(sup: StrataSupervisor, metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
+    """One Strata alias as the UI shows it. Reads `/metrics` of a running
+    launcher only; never starts one."""
+    state = _strata_state(sup)
+    tested = sup.config.get("tested_version")
+    version = sup.engine_version
+    failure = dict(sup.failure) if sup.failure else None
+    out: Dict[str, Any] = {
+        "alias": sup.alias,
+        "engine": sup.ENGINE,
+        "state": state,
+        "port": sup.port if state in ("running", "draining", "starting") else None,
+        "engine_version": version,
+        "tested_version": tested,
+        "tested_version_date": sup.config.get("tested_version_date"),
+        "version_matches": None if not (version and tested) else str(tested).strip() == version,
+        "failure": failure,
+        "vram_released": sup.vram_released,
+        "last_stop_vram": dict(sup.last_stop_vram),
+        "start_config": str(sup.start_config_used) if sup.start_config_used else None,
+        "metrics": None,
+        "metrics_error": None,
+    }
+    if state in ("running", "draining"):
+        try:
+            metrics = await asyncio.wait_for(sup._get("/metrics"), metrics_timeout_s)
+            out["metrics"] = metrics_summary(metrics if isinstance(metrics, dict) else {})
+        except Exception as e:  # a status read must not fail the panel
+            out["metrics_error"] = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+    return out
+
+
+async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
+    """Who holds the card, and every Strata alias's supervisor state. Read-only."""
+    strata = [
+        await strata_status(sup, metrics_timeout_s)
+        for sup in list(_ACTIVE_SUPERVISORS.values())
+        if isinstance(sup, StrataSupervisor)
+    ]
+    return {"card_holder": card_holder(), "strata": strata}
+
+
+def strata_supervisor_of(alias: str) -> Optional[StrataSupervisor]:
+    sup = _ACTIVE_SUPERVISORS.get(alias)
+    return sup if isinstance(sup, StrataSupervisor) else None
