@@ -941,12 +941,15 @@ async def _finalize_after_guard_stop(
     the history as user-side text, and does one more LLM call so the model can
     produce a clean final answer. Not as a system message: the converter took
     the last system message for the system prompt, so the agent's own was
-    dropped from the call and the engine's cached head with it. That call carries the loop's own `tools` and
-    `reasoning_effort`: a template that renders them at the head of the
-    prompt would otherwise re-read the whole conversation. If the model
-    answers it with tool calls anyway, one more call without tools asks
-    again. If the calls fail the fallback_reason (or the stop message) is
-    returned instead.
+    dropped from the call and the engine's cached head with it.
+
+    That call carries the loop's own `tools` and `reasoning_effort`: a
+    template that renders them at the head of the prompt would otherwise
+    re-read the whole conversation. If the model answers it with tool calls
+    anyway, one more call asks again with `tool_choice="none"` — the same
+    messages and tools, so the prefix holds where the provider takes the
+    word, and no tools where it does not. If the calls fail the
+    fallback_reason (or the stop message) is returned instead.
 
     Two exceptions: after ContextLimitGuard the call is skipped, and a
     user stop during the call cancels it.
@@ -973,10 +976,11 @@ async def _finalize_after_guard_stop(
         llm_trace["stopped_by_user"] = True
         return user_stopped, accumulated_usage, llm_trace
 
-    async def _final_call(tools_sent):
+    async def _final_call(tools_sent, tool_choice=None):
         """One finalising call; None when the user stopped it."""
         if observe_request is not None:
             observe_request(messages, tools_sent, reasoning_effort)
+        extra = {"tool_choice": tool_choice} if tool_choice else {}
         chat_task = asyncio.ensure_future(llm.chat(
             messages,
             tools=tools_sent,
@@ -984,6 +988,7 @@ async def _finalize_after_guard_stop(
             conversation_id=conversation_id,
             reasoning_effort=reasoning_effort,
             task_id=task_id or None,
+            **extra,
         ))
         if stop_event is not None:
             stop_task = asyncio.ensure_future(stop_event.wait())
@@ -1001,8 +1006,11 @@ async def _finalize_after_guard_stop(
     try:
         final_msg = await _final_call(tools or None)
         if final_msg is not None and tools and _answers_with_tool_calls(final_msg, llm):
-            log.info("Finalising call answered with tool calls; asking again without tools")
-            final_msg = await _final_call(None)
+            # Not tools=None: on the adapter that is the flattened text path, one
+            # user message the engine shares no prefix with (live: 101,547 tokens
+            # re-read). "none" keeps the native shape where the provider takes it.
+            log.info("Finalising call answered with tool calls; asking again with tool_choice=none")
+            final_msg = await _final_call(tools, tool_choice="none")
         if final_msg is None:
             log.info("Agent stopped by user during the finalising call after a guard stop")
             llm_trace["stopped_by_user"] = True

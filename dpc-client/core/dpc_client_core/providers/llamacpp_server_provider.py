@@ -1016,8 +1016,15 @@ class LlamaServerProvider(DeepSeekProvider):
         conversation_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         reasoning_budget_tokens: Optional[int] = None,
+        tool_choice: str = "auto",
     ) -> Dict[str, Any]:
-        """Native tool calling, Anthropic-shape in and out, on the local server."""
+        """Native tool calling, Anthropic-shape in and out, on the local server.
+
+        `tool_choice="none"` asks for an answer and no tool call while the
+        request still carries the tools: the chat template renders them into
+        the system head, so dropping them would move the prefix the server has
+        cached. The agent loop's post-guard retry is the caller that sends it.
+        """
         self._last_thinking = None
         self._last_usage = None
         openai_messages = self._anthropic_to_openai_messages(
@@ -1043,7 +1050,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 "max_tokens": self.max_tokens,
                 "messages": openai_messages,
                 "tools": openai_tools,
-                "tool_choice": "auto",
+                "tool_choice": tool_choice,
                 "extra_body": extra_body,
                 **self._sampling_on_the_wire(extra_body, self._sampling_params(reasoning_effort=reasoning_effort)),
             }

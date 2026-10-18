@@ -14,6 +14,7 @@ Key differences from Ouroboros's LLMClient:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
@@ -106,6 +107,22 @@ def _as_blocks(content: Any) -> List[Dict[str, Any]]:
     if isinstance(content, list):
         return list(content)
     return [{"type": "text", "text": str(content or "")}] if content else []
+
+
+def takes_tool_choice(provider: Any) -> bool:
+    """Whether a provider's `generate_with_tools` names `tool_choice`.
+
+    By name, not through `**kwargs`: a provider that swallows the word without
+    sending it (Ollama's chat API has no tool_choice) would let the model call
+    a tool on the one request that asked it not to.
+    """
+    method = getattr(provider, "generate_with_tools", None)
+    if method is None:
+        return False
+    try:
+        return "tool_choice" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def _holds_tool_results(turn: Dict[str, Any]) -> bool:
@@ -331,6 +348,7 @@ class DpcLlmAdapter:
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        tool_choice: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Send chat request through DPC's LLMManager.
@@ -345,6 +363,11 @@ class DpcLlmAdapter:
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks
             task_id: The task this call belongs to, carried into its usage row (node_ledger)
+            tool_choice: "none" asks for an answer without tool calls while the
+                request keeps `tools`, so a template that renders them at the head
+                renders the same head. Honoured only where the provider's
+                `generate_with_tools` names the parameter; anywhere else the call
+                is made without tools, as it was before the parameter existed.
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -358,7 +381,7 @@ class DpcLlmAdapter:
         response_msg, usage = await self._chat(
             messages, model=model, tools=tools, reasoning_effort=reasoning_effort,
             max_tokens=max_tokens, on_stream_chunk=on_stream_chunk,
-            conversation_id=conversation_id,
+            conversation_id=conversation_id, tool_choice=tool_choice,
         )
         self._write_usage_row(
             usage, response_msg, started_at=started_at, duration_s=time.monotonic() - clock,
@@ -486,8 +509,13 @@ class DpcLlmAdapter:
         max_tokens: int = 4096,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
+        tool_choice: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """`chat` without the usage row: picks the route and makes the call."""
+        # `tool_choice="none"` is honoured on the native tools path alone; every
+        # other route below gets no tools, which is what "none" meant there before.
+        withhold_tools = tool_choice == "none"
+        routed_tools = None if withhold_tools else tools
         # Check for remote peer routing — per-agent compute_host takes priority over global peer_id.
         # Resolved before the image branch, which has to know whether the image is
         # leaving this node at all: handling it locally re-resolves the alias in
@@ -542,7 +570,7 @@ class DpcLlmAdapter:
                     self._note_call(route="local", alias=alias)
                     # Use native vision support (passes images directly to provider)
                     return await self._chat_with_native_vision(
-                        provider, messages, user_images, tools, on_stream_chunk, conversation_id
+                        provider, messages, user_images, routed_tools, on_stream_chunk, conversation_id
                     )
                 else:
                     log.info("Agent provider does not support vision - pre-analyzing image")
@@ -580,7 +608,7 @@ class DpcLlmAdapter:
                 )
                 log.debug(f"Routing to per-agent remote peer: {effective_peer_id} (provider={self._provider_alias})")
                 return await self._chat_via_remote_peer(
-                    remote_ctx, messages, tools, on_stream_chunk, conversation_id,
+                    remote_ctx, messages, routed_tools, on_stream_chunk, conversation_id,
                     images=peer_images,
                     reasoning_effort=reasoning_effort,
                 )
@@ -588,7 +616,7 @@ class DpcLlmAdapter:
                 # Global peer_id routing (legacy KISS approach)
                 log.debug(f"Routing to remote peer: {effective_peer_id}")
                 return await self._chat_via_remote_peer(
-                    dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id,
+                    dpc_agent_provider, messages, routed_tools, on_stream_chunk, conversation_id,
                     images=peer_images,
                     reasoning_effort=reasoning_effort,
                 )
@@ -602,16 +630,23 @@ class DpcLlmAdapter:
         # Native tool calling path — use when provider supports it and tools are requested.
         # This eliminates the text-based tool injection pattern that causes GLM-4.7 to
         # hallucinate [TOOL RESULT]/[USER] sections (tool bypass behavior, ArXiv 2412.04141).
-        if tools and hasattr(provider, "generate_with_tools"):
+        # With `tool_choice="none"` it is used only where the provider takes the
+        # word: the request then keeps the loop's messages and tools as they were,
+        # and the engine's cached prefix with them. Elsewhere the tools go.
+        if tools and hasattr(provider, "generate_with_tools") and (
+            not withhold_tools or takes_tool_choice(provider)
+        ):
             log.debug("Using native tool calling path for provider '%s'", alias)
             try:
                 return await self._chat_native_tools(
-                    provider, messages, tools, on_stream_chunk, conversation_id, reasoning_effort
+                    provider, messages, tools, on_stream_chunk, conversation_id, reasoning_effort,
+                    tool_choice=tool_choice,
                 )
             except Exception as e:
                 log.warning(
                     "Native tool calling failed (%s), falling back to text injection path", e
                 )
+        tools = routed_tools
 
         # Local inference - text-only path (or pre-analyzed image description)
         # Convert message list to prompt string for DPC providers
@@ -850,6 +885,7 @@ class DpcLlmAdapter:
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        tool_choice: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Native Anthropic SDK tool calling path.
@@ -875,6 +911,8 @@ class DpcLlmAdapter:
         gw_kwargs: Dict[str, Any] = {}
         if reasoning_effort is not None:
             gw_kwargs["reasoning_effort"] = reasoning_effort
+        if tool_choice is not None:
+            gw_kwargs["tool_choice"] = tool_choice
         raw = await provider.generate_with_tools(
             messages=anthropic_messages,
             tools=anthropic_tools,

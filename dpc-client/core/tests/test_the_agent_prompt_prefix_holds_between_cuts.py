@@ -345,7 +345,10 @@ class _Scripted:
         self.calls = []
 
     async def chat(self, messages, tools=None, reasoning_effort=None, **kwargs):
-        self.calls.append({"tools": tools, "effort": reasoning_effort})
+        call = {"tools": tools, "effort": reasoning_effort}
+        if "tool_choice" in kwargs:
+            call["tool_choice"] = kwargs["tool_choice"]
+        self.calls.append(call)
         return self.answers.pop(0), {"prompt_tokens": 1, "completion_tokens": 1}
 
 
@@ -363,14 +366,15 @@ def test_the_final_call_carries_the_loop_tools_and_effort():
     assert llm.calls == [{"tools": SCHEMAS, "effort": "high"}]
 
 
-def test_a_tool_call_answer_falls_back_to_a_call_without_tools():
+def test_a_tool_call_answer_asks_again_with_tool_choice_none():
     llm = _Scripted(
         {"role": "assistant", "content": "", "tool_calls": [{"id": "x", "function": {"name": "probe"}}]},
         {"role": "assistant", "content": "plain answer"},
     )
     text, usage, _ = _finalize(llm, tools=SCHEMAS, reasoning_effort="high")
     assert text == "plain answer"
-    assert [c["tools"] for c in llm.calls] == [SCHEMAS, None]
+    assert [c["tools"] for c in llm.calls] == [SCHEMAS, SCHEMAS]
+    assert [c.get("tool_choice") for c in llm.calls] == [None, "none"]
     assert all(c["effort"] == "high" for c in llm.calls)
 
 
