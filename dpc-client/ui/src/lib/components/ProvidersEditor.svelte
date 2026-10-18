@@ -946,6 +946,17 @@
     }
   }
 
+  // No <select bind:value> inside the providers {#each}: Svelte 5.56 legacy mode
+  // (not 5.43) adds every name the loop references, the row index i among them,
+  // to the invalidation of each editedConfig mutation in this script, where i
+  // does not exist (ReferenceError on "Set as Vision Default"). Selects there use
+  // value= + on:change through this helper; providersEditorCompiles.test.ts guards it.
+  function setProviderField(i: number, key: string, value: string) {
+    if (!editedConfig) return;
+    (editedConfig.providers[i] as any)[key] = value;
+    editedConfig = editedConfig; // Trigger reactivity
+  }
+
   // Set default provider
   function setDefault(alias: string) {
     if (!editedConfig) return;
@@ -1500,7 +1511,7 @@
 
                     <div class="form-group">
                       <label for="type-{i}">Type</label>
-                      <select id="type-{i}" bind:value={editedConfig.providers[i].type}>
+                      <select id="type-{i}" value={editedConfig.providers[i].type} on:change={(e) => setProviderField(i, 'type', e.currentTarget.value)}>
                         <option value="ollama">Ollama</option>
                         <option value="openai_compatible">OpenAI Compatible</option>
                         <option value="anthropic">Anthropic</option>
@@ -1604,7 +1615,8 @@
                           {#if getRemotePeerModels(editedConfig.providers[i].peer_id).length > 0}
                             <select
                               id="remote-model-{i}"
-                              bind:value={editedConfig.providers[i].remote_model}
+                              value={editedConfig.providers[i].remote_model ?? ''}
+                              on:change={(e) => setProviderField(i, 'remote_model', e.currentTarget.value)}
                             >
                               <option value="">Any available model</option>
                               {#each getRemotePeerModels(editedConfig.providers[i].peer_id) as model}
@@ -1629,7 +1641,8 @@
                           {#if getRemotePeerProviders(editedConfig.providers[i].peer_id).length > 0}
                             <select
                               id="remote-provider-{i}"
-                              bind:value={editedConfig.providers[i].remote_provider}
+                              value={editedConfig.providers[i].remote_provider ?? ''}
+                              on:change={(e) => setProviderField(i, 'remote_provider', e.currentTarget.value)}
                             >
                               <option value="">Any available provider</option>
                               {#each getRemotePeerProviders(editedConfig.providers[i].peer_id) as prov}
@@ -2883,7 +2896,7 @@
                     {#if editedConfig.providers[i].type === 'local_whisper'}
                       <div class="form-group">
                         <label for="device-{i}">Device</label>
-                        <select id="device-{i}" bind:value={editedConfig.providers[i].device}>
+                        <select id="device-{i}" value={editedConfig.providers[i].device ?? 'auto'} on:change={(e) => setProviderField(i, 'device', e.currentTarget.value)}>
                           <option value="auto">Auto (detect best available)</option>
                           <option value="mlx">MLX (Apple Silicon - M1/M2/M3/M4)</option>
                           <option value="cuda">CUDA (NVIDIA GPU)</option>
@@ -2956,7 +2969,7 @@
 
                       <div class="form-group">
                         <label for="task-{i}">Task</label>
-                        <select id="task-{i}" bind:value={editedConfig.providers[i].task}>
+                        <select id="task-{i}" value={editedConfig.providers[i].task ?? 'transcribe'} on:change={(e) => setProviderField(i, 'task', e.currentTarget.value)}>
                           <option value="transcribe">Transcribe (same language)</option>
                           <option value="translate">Translate (to English)</option>
                         </select>
@@ -2978,7 +2991,7 @@
                     {#if editedConfig.providers[i].type === 'gigachat'}
                       <div class="form-group">
                         <label for="gigachat-scope-{i}">Scope</label>
-                        <select id="gigachat-scope-{i}" bind:value={editedConfig.providers[i].scope}>
+                        <select id="gigachat-scope-{i}" value={editedConfig.providers[i].scope ?? 'GIGACHAT_API_PERS'} on:change={(e) => setProviderField(i, 'scope', e.currentTarget.value)}>
                           <option value="GIGACHAT_API_PERS">Personal / Free (GIGACHAT_API_PERS)</option>
                           <option value="GIGACHAT_API_B2B">Business (GIGACHAT_API_B2B)</option>
                           <option value="GIGACHAT_API_CORP">Corporate (GIGACHAT_API_CORP)</option>
