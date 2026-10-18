@@ -110,7 +110,9 @@ def test_toggle_off_truncates_deterministically_on_the_round_bound_or_the_window
         msgs = _messages(OFF_ROUND_BOUND)
         out = await apply_compaction(msgs, state=st, last_prompt_tokens=100, llm_manager=lm, round_idx=31)
         assert lm.calls == 0 and out is not msgs
-        assert any(len(str(m.get("content", ""))) <= 205 for m in out if m.get("role") == "tool")
+        # ADR-045: a cut result is a placeholder, not its first 200 characters alone.
+        assert any(str(m.get("content", "")).startswith("[Cut from context:")
+                   for m in out if m.get("role") == "tool")
         # Window pressure cuts a short history too.
         st = CompactionState({"compaction_enabled": False, "context_window": 1000})
         out = await apply_compaction(_messages(12), state=st, last_prompt_tokens=999, llm_manager=lm, round_idx=5)

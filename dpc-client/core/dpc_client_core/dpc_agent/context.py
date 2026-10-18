@@ -1139,12 +1139,78 @@ If you want user confirmation — ask and STOP. Do not answer your own question 
 # Tool History Compaction (for long conversations)
 # ---------------------------------------------------------------------------
 
+# Tools whose call only reads, so repeating it returns the data again (the
+# current state of it, which may differ from what the cut result held). A cut
+# result of any other tool is reachable by its address alone (ADR-045 dec. 2).
+REPEATABLE_TOOLS = frozenset({
+    "read_file", "read_document", "list_dir", "search_files", "search_in_file",
+    "git_status", "git_diff", "git_log",
+})
+
+_ARG_VALUE_CHARS = 80
+_ARGS_CHARS = 240
+
+
+def _call_of(messages: list, round_start: int, tool_call_id: Any) -> Tuple[str, Any]:
+    """(name, arguments) of the call a tool result answers, read from the call itself."""
+    for tc in messages[round_start].get("tool_calls") or []:
+        if tc.get("id") == tool_call_id:
+            fn = tc.get("function") or {}
+            return str(fn.get("name") or "tool"), fn.get("arguments")
+    return "tool", None
+
+
+def _compact_args(arguments: Any) -> str:
+    """The call's arguments in one bounded line: key=value, values JSON, long ones shortened."""
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if not isinstance(arguments, dict):
+        text = "" if arguments is None else json.dumps(arguments, ensure_ascii=False, default=str)
+        return text if len(text) <= _ARGS_CHARS else text[:_ARGS_CHARS] + "…"
+    parts = []
+    for key, value in arguments.items():
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        if len(text) > _ARG_VALUE_CHARS:
+            text = text[:_ARG_VALUE_CHARS] + f"…({len(text)} chars)"
+        parts.append(f"{key}={text}")
+    line = ", ".join(parts)
+    return line if len(line) <= _ARGS_CHARS else line[:_ARGS_CHARS] + "…"
+
+
+def cut_placeholder(tool: str, arguments: Any, chars: int, address: Optional[str],
+                    head: str = "") -> str:
+    """What stands in the context for an evicted tool result.
+
+    A pure function of its inputs, so a cut renders the same bytes every time
+    and the prompt prefix after it stays stable. `address` is relative to the
+    agent's root, the path read_file resolves; without one (a failed write)
+    the first characters of the result are all that is left, and it says so.
+    """
+    call = f"{tool}({_compact_args(arguments)})"
+    if not address:
+        return (f"[Cut from context: {call} returned {chars:,} chars; no stored copy. "
+                f"First {len(head)} chars follow.]\n{head}")
+    again = (
+        "Re-running the same call also returns the data (as it is now)."
+        if tool in REPEATABLE_TOOLS else
+        "Read the address to get it back; do not re-run the call for it."
+    )
+    return (f"[Cut from context: {call} returned {chars:,} chars. "
+            f"Full output: {address} (read_file reads it). {again}]")
+
+
 def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
     """
     Compress old tool call/result message pairs into compact summaries.
 
-    Keeps the last `keep_recent` tool-call rounds intact.
-    Older rounds get their tool results truncated to short summaries.
+    Keeps the last `keep_recent` tool-call rounds intact. In older rounds a tool
+    result longer than _KEEP_ASIS_CHARS becomes a `cut_placeholder` naming the
+    call, its size and the address of the full output the loop stored at the
+    call; a shorter one is kept verbatim, since the placeholder would save
+    little and cost a re-read. Either way it is marked and never cut again.
     """
     tool_round_starts = []
     for i, msg in enumerate(messages):
@@ -1174,16 +1240,20 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
                     break
             if parent_round is not None and parent_round in rounds_to_compact:
                 content = str(msg.get("content") or "")
-                # Compact tool result
-                summary = content[:200] if len(content) > 200 else content
-                result.append({**msg, "content": summary, "_compacted": True})
+                if len(content) > _KEEP_ASIS_CHARS:
+                    tool, arguments = _call_of(messages, parent_round, msg.get("tool_call_id"))
+                    content = cut_placeholder(
+                        tool, arguments, int(msg.get("_output_chars") or len(content)),
+                        msg.get("_output_at"), head=content[:200],
+                    )
+                result.append({**msg, "content": content, "_compacted": True})
                 continue
 
         if i in rounds_to_compact and msg.get("role") == "assistant":
             # Compact assistant message
             content = msg.get("content") or ""
             if len(content) > 200:
-                content = content[:200] + "..."
+                content = content[:200] + f"… [shortened by a context cut from {len(content):,} chars]"
             compacted = {**msg, "content": content, "_compacted": True}
             # A round whose result has been cut to 200 characters keeps no notes:
             # the reasoning is the largest thing on the turn, and reasoning about
@@ -1274,6 +1344,8 @@ async def compact_tool_history_llm(
                     summary = (summary or "").strip()
                     if not summary:
                         raise RuntimeError("compaction model returned an empty summary")
+                    if msg.get("_output_at"):  # ADR-045: a summary is a cut too
+                        summary += f"\n[Full output: {msg['_output_at']} (read_file reads it).]"
                     result.append({**msg, "content": summary, "_compacted": True})
                     continue
                 # Small result: keep verbatim, but mark so we don't re-check it.
@@ -1331,6 +1403,36 @@ def uncut_rounds(messages: List[Dict[str, Any]]) -> int:
         1 for m in messages
         if m.get("role") == "assistant" and m.get("tool_calls") and not m.get("_compacted")
     )
+
+
+_EVICTED_LOGGED = 10
+
+
+def evicted_calls(messages: List[Dict[str, Any]], keep_recent: int) -> str:
+    """The results a cut keeping `keep_recent` rounds replaces, for the log line:
+    `tool:chars@address`, at most _EVICTED_LOGGED of them, then a count."""
+    starts = [i for i, m in enumerate(messages)
+              if m.get("role") == "assistant" and m.get("tool_calls")]
+    if len(starts) <= keep_recent:
+        return "none"
+    cut = set(starts[:-keep_recent])
+    entries = []
+    parent = None
+    for i, msg in enumerate(messages):
+        if i in starts:
+            parent = i
+            continue
+        if (msg.get("role") != "tool" or parent not in cut or msg.get("_compacted")
+                or len(str(msg.get("content") or "")) <= _KEEP_ASIS_CHARS):
+            continue
+        tool, _ = _call_of(messages, parent, msg.get("tool_call_id"))
+        chars = int(msg.get("_output_chars") or len(str(msg.get("content") or "")))
+        entries.append(f"{tool}:{chars}@{msg.get('_output_at') or 'unstored'}")
+    if not entries:
+        return "none"
+    shown = " ".join(entries[:_EVICTED_LOGGED])
+    more = len(entries) - _EVICTED_LOGGED
+    return shown + (f" +{more} more" if more > 0 else "")
 
 
 def plan_cut(
@@ -1400,8 +1502,9 @@ async def apply_compaction(
     if keep_after is None:
         return messages
     log.info(
-        "context cut: round=%d usage=%.1f%% uncut_rounds=%d keep=%d summariser=%s",
+        "context cut: round=%d usage=%.1f%% uncut_rounds=%d keep=%d summariser=%s evicted=%s",
         round_idx, ratio * 100, uncut_rounds(messages), keep_after, summariser,
+        evicted_calls(messages, keep_after),
     )
     if not summariser:
         return compact_tool_history(messages, keep_recent=keep_after)

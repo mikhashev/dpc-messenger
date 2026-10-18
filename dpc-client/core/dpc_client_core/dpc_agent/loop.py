@@ -378,6 +378,58 @@ def _truncate_tool_result(result: Any) -> str:
     )
 
 
+# ADR-045 decision 2: a cut result keeps an address, so the full output is
+# written at the call, before any placeholder can point at it. history.json
+# holds it too, but only after the turn, while the cut happens inside it.
+# Relative to agent_root, because that is what read_file resolves without the
+# extended-path gate. Retention is by age: a turn directory untouched for
+# TOOL_OUTPUT_KEEP_DAYS is removed when the next turn starts.
+TOOL_OUTPUT_DIR = "state/tool_results"
+TOOL_OUTPUT_KEEP_DAYS = 7
+
+
+def _new_turn_id() -> str:
+    """UTC time first so directories sort by age; no colon, so Windows takes it."""
+    import uuid
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
+
+
+def _prune_tool_outputs(agent_root: pathlib.Path, keep_days: int = TOOL_OUTPUT_KEEP_DAYS) -> None:
+    store = agent_root / TOOL_OUTPUT_DIR
+    if not store.is_dir():
+        return
+    import shutil
+    cutoff = time.time() - keep_days * 86400
+    for turn_dir in store.iterdir():
+        try:
+            if turn_dir.is_dir() and turn_dir.stat().st_mtime < cutoff:
+                shutil.rmtree(turn_dir, ignore_errors=True)
+        except OSError:
+            log.debug("tool output store: could not prune %s", turn_dir, exc_info=True)
+
+
+def _store_tool_output(
+    agent_root: pathlib.Path, turn_id: str, round_idx: int, position: int, output: str,
+) -> Optional[str]:
+    """Write one call's full output; return its address relative to agent_root, or None.
+
+    The whole string the tool returned, before the TOOL_RESULT_CHAR_CAP cut, so
+    the address gives back at least what the model saw. A failed write leaves
+    the call without an address; it never fails the round.
+    """
+    rel = f"{TOOL_OUTPUT_DIR}/{turn_id}/r{round_idx}-{position}.txt"
+    target = agent_root / rel
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_bytes(output.encode("utf-8", errors="replace"))
+        tmp.replace(target)
+    except OSError:
+        log.warning("tool output store: could not write %s", target, exc_info=True)
+        return None
+    return rel
+
+
 # Patterns that could confuse LLM role boundaries or inject instructions
 _INJECTION_PATTERNS = [
     "<|im_start|>",
@@ -1070,6 +1122,8 @@ async def run_llm_loop(
     logs_dir = agent_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     sweep_unfinished(logs_dir)
+    _prune_tool_outputs(agent_root)
+    turn_id = _new_turn_id()
 
     # Snapshot the context at loop entry — prevents race when another process()
     # or another process() call swaps ToolRegistry._ctx mid-loop.
@@ -1424,7 +1478,7 @@ async def run_llm_loop(
                 llm_trace["assistant_notes"].append(thinking.strip()[:320])
 
             # Execute tool calls
-            for tc in tool_calls:
+            for position, tc in enumerate(tool_calls):
                 if stop_event and stop_event.is_set():
                     log.info("Agent stopped by user mid-round %d (between tool calls)", round_idx)
                     llm_trace["stopped_by_user"] = True
@@ -1464,11 +1518,19 @@ async def run_llm_loop(
                 else:
                     tool_content = safe_result
 
-                messages.append({
+                full_output = str(exec_result["result"])
+                tool_msg: Dict[str, Any] = {
                     "role": "tool",
                     "tool_call_id": exec_result["tool_call_id"],
                     "content": tool_content,
-                })
+                    # Read by the cut (context.compact_tool_history); providers
+                    # rebuild messages from known keys and never send these.
+                    "_output_chars": len(full_output),
+                }
+                address = _store_tool_output(agent_root, turn_id, round_idx, position, full_output)
+                if address:
+                    tool_msg["_output_at"] = address
+                messages.append(tool_msg)
 
                 llm_trace["tool_calls"].append({
                     "tool": exec_result["fn_name"],
