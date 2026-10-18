@@ -8,6 +8,7 @@ config shaped like the real `strata-iq3_xxs-lowmem-park.json`; the process,
 import asyncio
 import json
 import logging
+import re
 import signal
 import sys
 from pathlib import Path
@@ -660,6 +661,24 @@ class TestATimeoutIsNotACapabilityFailure:
         with caplog.at_level(logging.WARNING, logger=mod.__name__):
             await sup.ensure_running()
         assert sup.failure is None and len(sup.smoke_posts) == 2
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_the_passed_line_names_each_call_with_its_seconds(self, tmp_path, home, monkeypatch, caplog):
+        """Ark's review: the thinking call is the only thinking-on call DPC makes
+        to Strata, so its time is the price of thinking — a timeout included,
+        whose limit alone does not say how long it took."""
+        sup = _sup(_install(tmp_path))
+        sup.smoke_effort = lambda: {"reasoning_effort": "low"}
+        _started_through_the_real_launch(
+            sup, monkeypatch, metrics=_VERSIONED, smoke=[_tool_call_reply(), httpx.ReadTimeout("t")])
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            await sup.ensure_running()
+        lines = [r.getMessage() for r in caplog.records if "start smoke passed" in r.getMessage()]
+        assert len(lines) == 1, lines
+        assert re.search(r"thinking off: report_ready in \d+\.\ds", lines[0]), lines[0]
+        assert re.search(r"thinking on \(low\): no answer within 120s \(ReadTimeout after \d+\.\ds\)",
+                         lines[0]), lines[0]
         await sup.stop()
 
 

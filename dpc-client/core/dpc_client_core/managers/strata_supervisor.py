@@ -1139,7 +1139,11 @@ class StrataSupervisor(LlamaServerSupervisor):
         answered with a call, which is what the smoke asks of it), and a
         thinking call with no tool call and finish_reason `length` (the
         thinking spent the window; Ark's and Zcode's review). Every verdict on
-        a missing call names the finish_reason and the tokens spent."""
+        a missing call names the finish_reason and the tokens spent, every
+        verdict names its call (thinking off, thinking on and its effort), and
+        every call that ran carries its seconds: the thinking call is the only
+        thinking-on call DPC makes to Strata, so its time is the price of
+        thinking (Ark)."""
         t0 = time.monotonic()
         step = "/health"
         try:
@@ -1206,8 +1210,12 @@ class StrataSupervisor(LlamaServerSupervisor):
             choice = ((reply or {}).get("choices") or [{}])[0] or {}
             calls = (choice.get("message") or {}).get("tool_calls")
         except httpx.TimeoutException as e:
+            # The time it took, not only the limit: a connect timeout comes
+            # back long before the limit, and the passed line carries each
+            # call's latency (Ark: the thinking call's is the price of thinking).
             return "timeout", (
-                f"no answer within {timeout:.0f}s ({type(e).__name__}) — the first request after "
+                f"no answer within {timeout:.0f}s ({type(e).__name__} after "
+                f"{time.monotonic() - t0:.1f}s) — the first request after "
                 "/health loads the model, so this may be a slow load, not a broken engine"
             )
         except Exception as e:
