@@ -79,6 +79,56 @@ describe('ProvidersEditor compiled output', () => {
     expect(tracksStatus(rowDerived(bad))).toBe(false);
   });
 
+  // The same defect for every template-called helper that reads component
+  // state: the state must be an argument, so the compiled call site reads it in
+  // the tuple before $.untrack. Each entry names the state its helper reads.
+  const STATE_HELPERS: Record<string, RegExp> = {
+    strataBase: /\$\.get\(strataInspect\)/,
+    effortOptions: /\$\.get\(effortWords\)/,
+    getRemotePeerProviders: /\$peerProviders\(\)/,
+    getRemotePeerModels: /\$peerProviders\(\)/,
+    isRemotePeerLoading: /\$\.get\(remotePeerLoading\)/,
+    tempSelectValue: /\$\.get\(editedConfig\)/,
+    thinkSelectValue: /\$\.get\(editedConfig\)/,
+    getSamplingParam: /\$\.get\(editedConfig\)/,
+    rowBlockedModelLine: /\$\.get\(displayConfig\)/,
+  };
+
+  // For each template call of `helper`: does the dependency tuple that opens
+  // before its $.untrack read `state`? (An empty list means no call was found.)
+  function callsTrackState(source: string, helper: string, state: RegExp): boolean[] {
+    const js = compile(source, { dev: false, filename: 'ProvidersEditor.svelte' }).js.code;
+    const out: boolean[] = [];
+    const needle = `$.untrack(() => ${helper}(`;
+    for (let at = js.indexOf(needle); at >= 0; at = js.indexOf(needle, at + 1)) {
+      const open = js.lastIndexOf('() => (', at);
+      out.push(open >= 0 && state.test(js.slice(open, at)));
+    }
+    return out;
+  }
+
+  for (const [helper, state] of Object.entries(STATE_HELPERS)) {
+    it(`${helper} re-reads when the state it depends on changes`, () => {
+      const calls = callsTrackState(src, helper, state);
+      expect(calls.length, `${helper} is called from the template`).toBeGreaterThan(0);
+      expect(calls.every(Boolean)).toBe(true);
+    });
+  }
+
+  it('the helper guard sees a helper that reads its state from the closure', () => {
+    const bad = src
+      .replace(
+        'effortOptions(effortWords, editedConfig.providers[i].alias',
+        'effortOptions(editedConfig.providers[i].alias',
+      )
+      .replace(
+        'function effortOptions(allWords: typeof effortWords, alias: string, current?: string) {\n    const known = allWords[alias]',
+        'function effortOptions(alias: string, current?: string) {\n    const allWords = effortWords;\n    const known = allWords[alias]',
+      );
+    expect(bad).not.toBe(src);
+    expect(callsTrackState(bad, 'effortOptions', STATE_HELPERS.effortOptions).some(Boolean)).toBe(false);
+  });
+
   it('the guard sees the defect it is meant to catch', () => {
     const bad = src.replace(
       "value={editedConfig.providers[i].type} on:change={(e) => setProviderField(i, 'type', e.currentTarget.value)}",

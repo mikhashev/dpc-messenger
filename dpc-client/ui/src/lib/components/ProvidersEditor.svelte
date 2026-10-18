@@ -367,8 +367,8 @@
   }
   $: if (!editMode) autoInspected.clear();
 
-  function strataBase(i: number, key: string): unknown {
-    return strataInspect[i]?.values?.[key];
+  function strataBase(inspect: typeof strataInspect, i: number, key: string): unknown {
+    return inspect[i]?.values?.[key];
   }
 
   /** Tri-state for vision / control_vector: '' leaves the base config's choice. */
@@ -593,8 +593,8 @@
     return p.type === 'deepseek' && p.thinking?.enabled !== false;
   }
 
-  function tempSelectValue(i: number): string | number {
-    const t = editedConfig?.providers[i]?.temperature;
+  function tempSelectValue(cfg: typeof editedConfig, i: number): string | number {
+    const t = cfg?.providers[i]?.temperature;
     if (t != null && !TEMPERATURE_PRESETS.some(p => p.value === t)) return 'custom';
     return t ?? '';
   }
@@ -604,13 +604,13 @@
   // Saying no explicitly is what a checkbox cannot express, and it is the
   // case that matters — a model that spends its whole budget reasoning
   // answers with nothing at all.
-  function thinkSelectValue(i: number): string {
-    const t = editedConfig?.providers[i]?.think;
+  function thinkSelectValue(cfg: typeof editedConfig, i: number): string {
+    const t = cfg?.providers[i]?.think;
     return t === undefined ? '' : t ? 'on' : 'off';
   }
 
-  function getSamplingParam(i: number, key: string): number | '' {
-    const v = (editedConfig?.providers[i] as any)?.[key];
+  function getSamplingParam(cfg: typeof editedConfig, i: number, key: string): number | '' {
+    const v = (cfg?.providers[i] as any)?.[key];
     return v ?? '';
   }
 
@@ -658,8 +658,8 @@
   /** The words this alias may be given: the model's own when they were read
    *  from it, the fleet scale otherwise. A stored value the model does not
    *  know stays on the list so opening the form cannot silently clear it. */
-  function effortOptions(alias: string, current?: string) {
-    const known = effortWords[alias]?.words;
+  function effortOptions(allWords: typeof effortWords, alias: string, current?: string) {
+    const known = allWords[alias]?.words;
     const base = known ?? FLEET_EFFORTS;
     const words = current && current !== 'off' && !base.includes(current)
       ? [...base, current]
@@ -668,7 +668,7 @@
       value: w,
       label:
         w.charAt(0).toUpperCase() + w.slice(1) +
-        (known && w === effortWords[alias]?.default ? ' — default for this model' : '') +
+        (known && w === allWords[alias]?.default ? ' — default for this model' : '') +
         (known && !known.includes(w) ? ' — not in this model' : ''),
     }));
   }
@@ -863,8 +863,8 @@
     }
   }
 
-  function aliasModel(alias: string): string | undefined {
-    return (displayConfig?.providers ?? []).find((p) => p.alias === alias)?.model;
+  function aliasModel(cfg: typeof displayConfig, alias: string): string | undefined {
+    return (cfg?.providers ?? []).find((p) => p.alias === alias)?.model;
   }
 
   // Rows to render: the accounts store when it has something (populated by
@@ -886,13 +886,13 @@
   function rowQuotaWarn(row: AccountRow): boolean {
     return row.result?.status === 'success' ? quotaHasWarning(row.result.balance) : false;
   }
-  function rowBlockedModelLine(row: AccountRow): string {
+  function rowBlockedModelLine(row: AccountRow, cfg: typeof displayConfig): string {
     if (row.result?.status !== 'success') return '';
     // A multi-alias account (e.g. one NeuralDeep key serving several
     // aliases) is checked against each alias's own configured model in turn;
     // the first that matches is shown.
     for (const alias of row.aliases) {
-      const line = blockedModelLine(row.result.balance?.quota, aliasModel(alias));
+      const line = blockedModelLine(row.result.balance?.quota, aliasModel(cfg, alias));
       if (line) return line;
     }
     return '';
@@ -1285,14 +1285,14 @@
   }
 
   // Get providers for a remote peer (uses shared store)
-  function getRemotePeerProviders(peerId: string | undefined): any[] {
+  function getRemotePeerProviders(byPeer: Map<string, any[]>, peerId: string | undefined): any[] {
     if (!peerId) return [];
-    return $peerProviders.get(peerId) || [];
+    return byPeer.get(peerId) || [];
   }
 
   // Get unique models from remote peer providers
-  function getRemotePeerModels(peerId: string | undefined): string[] {
-    const providers = getRemotePeerProviders(peerId);
+  function getRemotePeerModels(byPeer: Map<string, any[]>, peerId: string | undefined): string[] {
+    const providers = getRemotePeerProviders(byPeer, peerId);
     const models = new Set<string>();
     providers.forEach((p: any) => {
       if (p.model) {
@@ -1303,9 +1303,9 @@
   }
 
   // Check if peer providers are loading
-  function isRemotePeerLoading(peerId: string | undefined): boolean {
+  function isRemotePeerLoading(loading: string, peerId: string | undefined): boolean {
     if (!peerId) return false;
-    return remotePeerLoading === peerId;
+    return loading === peerId;
   }
 </script>
 
@@ -1463,8 +1463,8 @@
                       title={rowQuotaLineTitle(row)}
                     >{rowQuotaLine(row)}</div>
                   {/if}
-                  {#if rowBlockedModelLine(row)}
-                    <div class="balance-value balance-flag">{rowBlockedModelLine(row)}</div>
+                  {#if rowBlockedModelLine(row, displayConfig)}
+                    <div class="balance-value balance-flag">{rowBlockedModelLine(row, displayConfig)}</div>
                   {/if}
                 </div>
               {/each}
@@ -1597,18 +1597,18 @@
                           <button
                             class="btn-fetch"
                             on:click={() => fetchRemotePeerProviders(editedConfig!.providers[i].peer_id || '')}
-                            disabled={!editedConfig.providers[i].peer_id || isRemotePeerLoading(editedConfig.providers[i].peer_id)}
+                            disabled={!editedConfig.providers[i].peer_id || isRemotePeerLoading(remotePeerLoading, editedConfig.providers[i].peer_id)}
                             title="Fetch available providers from this peer"
                           >
-                            {isRemotePeerLoading(editedConfig.providers[i].peer_id) ? '⏳' : '🔍'}
+                            {isRemotePeerLoading(remotePeerLoading, editedConfig.providers[i].peer_id) ? '⏳' : '🔍'}
                           </button>
                         </div>
                         <p class="help-text">If set, agent uses this peer's models instead of local</p>
                         {#if remotePeerError && remotePeerLoading === editedConfig.providers[i].peer_id}
                           <p class="help-text warn">{remotePeerError}</p>
                         {/if}
-                        {#if editedConfig.providers[i].peer_id && getRemotePeerProviders(editedConfig.providers[i].peer_id).length > 0}
-                          <p class="help-text success">✓ Found {getRemotePeerProviders(editedConfig.providers[i].peer_id).length} providers</p>
+                        {#if editedConfig.providers[i].peer_id && getRemotePeerProviders($peerProviders, editedConfig.providers[i].peer_id).length > 0}
+                          <p class="help-text success">✓ Found {getRemotePeerProviders($peerProviders, editedConfig.providers[i].peer_id).length} providers</p>
                         {/if}
                       </div>
 
@@ -1616,14 +1616,14 @@
                         <!-- Remote Model Selection -->
                         <div class="form-group">
                           <label for="remote-model-{i}">Remote Model</label>
-                          {#if getRemotePeerModels(editedConfig.providers[i].peer_id).length > 0}
+                          {#if getRemotePeerModels($peerProviders, editedConfig.providers[i].peer_id).length > 0}
                             <select
                               id="remote-model-{i}"
                               value={editedConfig.providers[i].remote_model ?? ''}
                               on:change={(e) => setProviderField(i, 'remote_model', e.currentTarget.value)}
                             >
                               <option value="">Any available model</option>
-                              {#each getRemotePeerModels(editedConfig.providers[i].peer_id) as model}
+                              {#each getRemotePeerModels($peerProviders, editedConfig.providers[i].peer_id) as model}
                                 <option value={model}>{model}</option>
                               {/each}
                             </select>
@@ -1642,14 +1642,14 @@
                         <!-- Remote Provider Selection -->
                         <div class="form-group">
                           <label for="remote-provider-{i}">Remote Provider</label>
-                          {#if getRemotePeerProviders(editedConfig.providers[i].peer_id).length > 0}
+                          {#if getRemotePeerProviders($peerProviders, editedConfig.providers[i].peer_id).length > 0}
                             <select
                               id="remote-provider-{i}"
                               value={editedConfig.providers[i].remote_provider ?? ''}
                               on:change={(e) => setProviderField(i, 'remote_provider', e.currentTarget.value)}
                             >
                               <option value="">Any available provider</option>
-                              {#each getRemotePeerProviders(editedConfig.providers[i].peer_id) as prov}
+                              {#each getRemotePeerProviders($peerProviders, editedConfig.providers[i].peer_id) as prov}
                                 <option value={prov.alias}>{prov.alias} ({prov.type})</option>
                               {/each}
                             </select>
@@ -1993,7 +1993,7 @@
                         >
                           <option value="">Not set — the model decides</option>
                           <option value="off">Off</option>
-                          {#each effortOptions(editedConfig.providers[i].alias, editedConfig.providers[i].reasoning_effort) as w}
+                          {#each effortOptions(effortWords, editedConfig.providers[i].alias, editedConfig.providers[i].reasoning_effort) as w}
                             <option value={w.value}>{w.label}</option>
                           {/each}
                         </select>
@@ -2453,7 +2453,7 @@
                               type="text"
                               value={(sp as any)[f.key] ?? ''}
                               on:change={(e) => setStrataPath(i, f.key, e.currentTarget.value)}
-                              placeholder={basePlaceholder(strataBase(i, f.key), 'not in the base config')}
+                              placeholder={basePlaceholder(strataBase(strataInspect, i, f.key), 'not in the base config')}
                             />
                             {#if canBrowse}
                               <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, f.key)}
@@ -2468,7 +2468,7 @@
                         <label for="strata-vision-{i}">Vision</label>
                         <select id="strata-vision-{i}" value={strataTriValue(sp.vision)}
                           on:change={(e) => setBool(i, 'vision', e.currentTarget.value)}>
-                          <option value="">Base config ({strataBase(i, 'vision') === undefined ? '?' : strataBase(i, 'vision') ? 'on' : 'off'})</option>
+                          <option value="">Base config ({strataBase(strataInspect, i, 'vision') === undefined ? '?' : strataBase(strataInspect, i, 'vision') ? 'on' : 'off'})</option>
                           <option value="true">On</option>
                           <option value="false">Off</option>
                         </select>
@@ -2478,7 +2478,7 @@
                             type="text"
                             value={sp.mmproj ?? ''}
                             on:change={(e) => setStrataPath(i, 'mmproj', e.currentTarget.value)}
-                            placeholder={basePlaceholder(strataBase(i, 'mmproj'), 'mmproj .gguf (vision projector)')}
+                            placeholder={basePlaceholder(strataBase(strataInspect, i, 'mmproj'), 'mmproj .gguf (vision projector)')}
                             aria-label="mmproj (vision projector)"
                           />
                           {#if canBrowse}
@@ -2497,7 +2497,7 @@
                         <label for="strata-cvec-{i}">Control vector</label>
                         <select id="strata-cvec-{i}" value={strataTriValue(sp.control_vector)}
                           on:change={(e) => setBool(i, 'control_vector', e.currentTarget.value)}>
-                          <option value="">Base config ({strataBase(i, 'control_vector') === undefined ? '?' : strataBase(i, 'control_vector') ? 'on' : 'off'})</option>
+                          <option value="">Base config ({strataBase(strataInspect, i, 'control_vector') === undefined ? '?' : strataBase(strataInspect, i, 'control_vector') ? 'on' : 'off'})</option>
                           <option value="true">On</option>
                           <option value="false">Off (drops every --control-vector / --cvec flag)</option>
                         </select>
@@ -2507,7 +2507,7 @@
                             type="text"
                             value={sp.control_vector_file ?? ''}
                             on:change={(e) => setStrataPath(i, 'control_vector_file', e.currentTarget.value)}
-                            placeholder={basePlaceholder(strataBase(i, 'control_vector_file'), 'control vector .gguf')}
+                            placeholder={basePlaceholder(strataBase(strataInspect, i, 'control_vector_file'), 'control vector .gguf')}
                             aria-label="Control vector file"
                           />
                           {#if canBrowse}
@@ -2534,8 +2534,8 @@
                             step="1024"
                             value={sp.conversation_cache_mib ?? ''}
                             on:input={(e) => setNum(i, 'conversation_cache_mib', e.currentTarget.value)}
-                            placeholder={strataBase(i, 'conversation_cache_mib') != null
-                              ? `required — the base config's ${strataBase(i, 'conversation_cache_mib')} is not used` : 'required, no default'}
+                            placeholder={strataBase(strataInspect, i, 'conversation_cache_mib') != null
+                              ? `required — the base config's ${strataBase(strataInspect, i, 'conversation_cache_mib')} is not used` : 'required, no default'}
                           />
                         </div>
                         <div>
@@ -2547,7 +2547,7 @@
                             step="1"
                             value={sp.conversation_cache_slots ?? ''}
                             on:input={(e) => setNum(i, 'conversation_cache_slots', e.currentTarget.value)}
-                            placeholder={basePlaceholder(strataBase(i, 'conversation_cache_slots'), 'engine default')}
+                            placeholder={basePlaceholder(strataBase(strataInspect, i, 'conversation_cache_slots'), 'engine default')}
                           />
                         </div>
                       </div>
@@ -2573,7 +2573,7 @@
                           step="4096"
                           value={sp.max_context ?? ''}
                           on:input={(e) => setNum(i, 'max_context', e.currentTarget.value)}
-                          placeholder={basePlaceholder(strataBase(i, 'max_context'), 'engine default')}
+                          placeholder={basePlaceholder(strataBase(strataInspect, i, 'max_context'), 'engine default')}
                         />
                         <p class="help-text">
                           The most the <strong>server</strong> holds for one conversation. The agent's window is
@@ -3068,7 +3068,7 @@
                       <label for="temperature-{i}">Temperature (optional)</label>
                       <select
                         id="temperature-select-{i}"
-                        value={tempSelectValue(i)}
+                        value={tempSelectValue(editedConfig, i)}
                         on:change={(e) => {
                           if (!editedConfig) return;
                           const val = (e.target as HTMLSelectElement).value;
@@ -3111,7 +3111,7 @@
                         <label for="think-{i}">Thinking</label>
                         <select
                           id="think-{i}"
-                          value={thinkSelectValue(i)}
+                          value={thinkSelectValue(editedConfig, i)}
                           on:change={(e) => {
                             if (!editedConfig) return;
                             const val = (e.target as HTMLSelectElement).value;
@@ -3151,7 +3151,7 @@
                                 step={param.step}
                                 min={param.min}
                                 max={param.max}
-                                value={getSamplingParam(i, param.key)}
+                                value={getSamplingParam(editedConfig, i, param.key)}
                                 placeholder={param.hint}
                                 on:input={(e) => setSamplingParam(i, param.key, (e.target as HTMLInputElement).value, param.isInt)}
                               />
