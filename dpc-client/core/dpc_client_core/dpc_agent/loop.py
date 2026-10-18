@@ -1133,7 +1133,9 @@ async def run_llm_loop(
 
     # Ark's measure of cache reuse: how often a request rewrote the prefix the
     # previous request of this turn sent, rather than only appending to it.
+    # Per agent too: in a group chat every agent shares the conversation id.
     _divergence_key = conversation_id or f"task:{task_id}"
+    _divergence_agent = agent_root.name
     _divergence = {"requests": 0, "prefix_rewrites": 0, "rewrite_rounds": []}
     llm_trace["prompt_divergence"] = _divergence
 
@@ -1141,6 +1143,7 @@ async def run_llm_loop(
         try:
             seen = prompt_divergence.TRACKER.observe(
                 _divergence_key, msgs, tools_sent, effort_sent, round_idx,
+                agent_id=_divergence_agent,
             )
         except Exception:
             log.debug("prompt divergence: not measured", exc_info=True)

@@ -81,6 +81,30 @@ class TestTheDivergenceIndex:
             tr.observe(conv, [{"role": "user", "content": conv}], None, None)
         assert tr.observe("a", [{"role": "user", "content": "a"}], None, None)["first_request"]
 
+    def test_agents_in_one_group_are_kept_apart(self):
+        """Three agents answer in one group conversation: each one's first round
+        is a first observation, and each one's next round is compared with its
+        own last request, not with the agent that spoke before it."""
+        tr = PromptDivergenceTracker()
+        prompts = {a: [{"role": "system", "content": f"I am {a}"}, {"role": "user", "content": "q"}]
+                   for a in ("ark", "johnny", "warren")}
+        for agent, msgs in prompts.items():
+            seen = tr.observe("group-1", msgs, SCHEMAS, None, 1, agent_id=agent)
+            assert seen["first_request"] and seen["first_diff_msg"] is None
+        for agent, msgs in prompts.items():
+            grown = msgs + [{"role": "assistant", "content": "a"}]
+            seen = tr.observe("group-1", grown, SCHEMAS, None, 2, agent_id=agent)
+            assert seen["first_diff_msg"] == len(msgs) and not seen["prefix_rewritten"]
+
+    def test_a_first_observation_is_logged_as_first(self, caplog):
+        tr = PromptDivergenceTracker()
+        with caplog.at_level("INFO", logger="dpc_client_core.dpc_agent.prompt_divergence"):
+            tr.observe("c", [{"role": "user", "content": "q"}], None, None, 1, agent_id="ark")
+            tr.observe("c", [{"role": "user", "content": "q"}] * 2, None, None, 2, agent_id="ark")
+        lines = [r.getMessage() for r in caplog.records if "prompt divergence" in r.getMessage()]
+        assert "conv=c round=1 first_diff_msg=first/1 " in lines[0]
+        assert "conv=c round=2 first_diff_msg=1/2 " in lines[1]
+
 
 # --- apply_compaction alone ----------------------------------------------------
 

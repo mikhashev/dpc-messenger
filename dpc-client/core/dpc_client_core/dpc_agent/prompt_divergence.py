@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -46,11 +46,11 @@ def first_divergence(previous: List[str], current: List[str]) -> Optional[int]:
 
 
 class PromptDivergenceTracker:
-    """The last request seen per conversation, kept in memory (bounded)."""
+    """The last request seen per conversation and agent, kept in memory (bounded)."""
 
     def __init__(self, max_conversations: int = _MAX_CONVERSATIONS) -> None:
         self._max = max_conversations
-        self._last: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._last: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
 
     def observe(
         self,
@@ -59,12 +59,20 @@ class PromptDivergenceTracker:
         tools: Optional[List[Dict[str, Any]]],
         reasoning_effort: Optional[str],
         round_idx: int = 0,
+        agent_id: str = "",
     ) -> Dict[str, Any]:
+        """Compare with the last request this agent sent in this conversation.
+
+        Keyed by both: in a group chat several agents share one conversation,
+        and each one's prompt is a different prefix in the engine's cache.
+        """
         fingerprints = [message_fingerprint(m) for m in messages]
         tools_digest = _digest(tools) if tools else None
-        previous = self._last.get(conversation_id)
+        key = (conversation_id, agent_id)
+        previous = self._last.get(key)
         if previous is None:
-            first_diff = 0 if fingerprints else None
+            # Nothing to compare with — not a rewrite at message 0.
+            first_diff = None
             tools_changed = effort_changed = False
             rewritten = False
         else:
@@ -75,16 +83,21 @@ class PromptDivergenceTracker:
                 (first_diff is not None and first_diff < len(previous["fingerprints"]))
                 or tools_changed or effort_changed
             )
-        self._last[conversation_id] = {
+        self._last[key] = {
             "fingerprints": fingerprints, "tools": tools_digest, "effort": reasoning_effort,
         }
-        self._last.move_to_end(conversation_id)
+        self._last.move_to_end(key)
         while len(self._last) > self._max:
             self._last.popitem(last=False)
+        if previous is None:
+            shown = "first"
+        else:
+            shown = "none" if first_diff is None else str(first_diff)
         log.info(
-            "prompt divergence: conv=%s round=%s first_diff_msg=%s/%d tools_changed=%s effort_changed=%s",
-            conversation_id, round_idx, "none" if first_diff is None else first_diff,
-            len(fingerprints), tools_changed, effort_changed,
+            "prompt divergence: conv=%s round=%s first_diff_msg=%s/%d tools_changed=%s "
+            "effort_changed=%s agent=%s",
+            conversation_id, round_idx, shown, len(fingerprints), tools_changed,
+            effort_changed, agent_id or "-",
         )
         return {
             "first_diff_msg": first_diff,
