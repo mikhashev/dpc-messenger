@@ -24,7 +24,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # Full history: the long-tier eval golds are pinned to GOLD_COMMIT and their
+      # tests `git archive` that commit, which a depth-1 clone does not hold
+      # ("fatal: not a tree object"). Red on every dev push from 2026-10-18 until this.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
