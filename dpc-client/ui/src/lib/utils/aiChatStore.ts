@@ -108,11 +108,48 @@ export function importUnits(store: LegacyChatStore): ImportUnit[] {
 }
 
 /**
- * The answers after which a chat leaves the old store. "deferred" (its history
- * would not be kept) and "failed" are not final, and neither is no answer at
- * all — the call never came back, or the chat was too large to send.
+ * The answers after which a chat leaves the old store. "discarded" is the
+ * backend's answer on a fresh install (~/.dpc did not exist at its start): the
+ * chat is not imported and goes. "deferred" (its history would not be kept) and
+ * "failed" are not final, and neither is no answer at all — the call never came
+ * back, or the chat was too large to send.
  */
-export const FINAL_IMPORT_STATUSES = new Set(['imported', 'kept', 'skipped', 'refused']);
+export const FINAL_IMPORT_STATUSES = new Set(['imported', 'kept', 'skipped', 'refused', 'discarded']);
+
+/**
+ * Whether an `import_ai_chats` answer says ~/.dpc is a fresh install. The
+ * top-level flag is there on every answer, including one to a call that sent no
+ * chat; a "discarded" row says the same for a backend that answers per chat.
+ */
+export function answersFreshInstall(result: any): boolean {
+    return result?.fresh_install === true
+        || (Array.isArray(result?.results) && result.results.some((r: any) => r?.status === 'discarded'));
+}
+
+/**
+ * Erase all three keys, readable or not: a fresh install is a clean slate, and
+ * nothing of the old UI may stay outside ~/.dpc. Returns the keys that held
+ * something. Like `writeImportRemainder`, one of the only places that writes
+ * these keys.
+ */
+export function eraseLegacyChatStore(storage: Pick<Storage, 'getItem' | 'removeItem'>): string[] {
+    const erased: string[] = [];
+    for (const key of LEGACY_CHAT_KEYS) {
+        let present = false;
+        try {
+            present = storage.getItem(key) !== null;
+        } catch {
+            present = false;
+        }
+        try {
+            storage.removeItem(key);
+            if (present) erased.push(key);
+        } catch {
+            // the store refuses; the next start asks again
+        }
+    }
+    return erased;
+}
 
 export type ImportOutcome = { unit: ImportUnit; status: string | undefined };
 

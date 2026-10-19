@@ -257,7 +257,7 @@ from pathlib import Path
 from dpc_client_core.service import CoreService
 from dpc_client_core.dpc_agent.loop import shutdown_shared_executor
 from dpc_client_core.__version__ import __version__
-from dpc_client_core import single_instance
+from dpc_client_core import ai_chats, single_instance
 
 logger = logging.getLogger(__name__)
 
@@ -828,6 +828,9 @@ def _install_shutdown_diagnostics():
 
 
 if __name__ == "__main__":
+    # Before the lock below: writing its pid file is the first thing that creates
+    # ~/.dpc, and after that nothing can tell a deleted directory from an old one.
+    ai_chats.note_fresh_install()
     try:
         single_instance.acquire()  # exits if another backend is already running
         _install_shutdown_diagnostics()

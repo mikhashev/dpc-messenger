@@ -10,6 +10,8 @@
     importUnits,
     importPayloads,
     writeImportRemainder,
+    answersFreshInstall,
+    eraseLegacyChatStore,
     sidebarEntry,
     legacyImportPending,
     FINAL_IMPORT_STATUSES,
@@ -43,7 +45,17 @@
     if (!store) return;
     const units = importUnits(store);
     const outcomes: ImportOutcome[] = [];
-    for (const unit of units) {
+    let fresh = false;
+    if (units.length === 0) {
+      // Only keys that cannot be read: nothing to send, but the backend still
+      // knows whether ~/.dpc is a fresh install, and then they are to go too.
+      try {
+        fresh = answersFreshInstall(await (sendCommand('import_ai_chats', { chats: {}, histories: {} }) as Promise<any>));
+      } catch (error) {
+        console.error('[AI Chats] Could not ask whether ~/.dpc is fresh:', error);
+      }
+    }
+    for (const unit of fresh ? [] : units) {
       const payloads = importPayloads(unit);
       if (!payloads) {
         // Sent whole it would close the socket, and the reconnect would send it
@@ -57,6 +69,7 @@
         try {
           const result = await (sendCommand('import_ai_chats', payload) as Promise<any>);
           status = result?.results?.[0]?.status;
+          if (answersFreshInstall(result)) fresh = true;
           if (status === 'refused' || (status && !FINAL_IMPORT_STATUSES.has(status))) {
             console.warn(`[AI Chats] Import of ${unit.conversation_id}: ${status} (${result.results[0].reason})`);
           }
@@ -67,6 +80,19 @@
         if (status !== 'imported' && status !== 'kept') break;  // a later part cannot fix an earlier one
       }
       outcomes.push({ unit, status });
+      if (fresh) break;  // nothing will be imported: the rest need not be sent
+    }
+    if (fresh) {
+      // A fresh install is a clean slate: every key goes, including one that
+      // could not be read and a chat too large to send.
+      let erased: string[] = [];
+      try {
+        erased = eraseLegacyChatStore(localStorage);
+      } catch (error) {
+        console.error('[AI Chats] Could not erase the old UI store; it is asked again next start:', error);
+      }
+      console.log(`[AI Chats] Old UI store erased (${erased.join(', ') || 'no key'}): ~/.dpc is fresh, nothing is imported`);
+      return;
     }
     let removed: string[] = [];
     try {

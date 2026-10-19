@@ -9,6 +9,9 @@ import {
     importPayloads,
     sidebarEntry,
     isAIChatId,
+    answersFreshInstall,
+    eraseLegacyChatStore,
+    FINAL_IMPORT_STATUSES,
 } from './aiChatStore';
 
 function storage(items: Record<string, string>) {
@@ -148,5 +151,57 @@ describe('isAIChatId', () => {
         expect(isAIChatId('local_ai')).toBe(true);
         expect(isAIChatId('ai_chat_1a2b3c4d')).toBe(true);
         expect(isAIChatId('agent_001')).toBe(false);
+    });
+});
+
+describe('a fresh install (~/.dpc did not exist at the backend start)', () => {
+    const unit = (kind: 'ai' | 'telegram', id: string) => ({ kind, conversation_id: id, record: {} });
+
+    it('counts a discarded chat as settled, and removes all three keys when everything was discarded', () => {
+        expect(FINAL_IMPORT_STATUSES.has('discarded')).toBe(true);
+        const store = {
+            chats: { ai_chat_1: { name: 'A' } },
+            histories: { ai_chat_1: [{ id: 'm1' }] },
+            telegram: { 'telegram-42': { name: 'T' } },
+            unreadable: [],
+        };
+        const storage = memoryStorage({});
+        const removed = writeImportRemainder(storage, store, [
+            { unit: unit('ai', 'ai_chat_1'), status: 'discarded' },
+            { unit: unit('telegram', 'telegram-42'), status: 'discarded' },
+        ]);
+        expect(removed.sort()).toEqual([LEGACY_AI_CHATS_KEY, LEGACY_AI_CHAT_HISTORIES_KEY, LEGACY_TELEGRAM_CHATS_KEY].sort());
+        expect(storage.items).toEqual({});
+    });
+
+    it('reads the flag on any answer, including one to a call that sent no chat, and a discarded row', () => {
+        expect(answersFreshInstall({ status: 'success', results: [], fresh_install: true })).toBe(true);
+        expect(answersFreshInstall({ status: 'success', results: [{ status: 'discarded' }] })).toBe(true);
+        expect(answersFreshInstall({ status: 'success', results: [{ status: 'imported' }], fresh_install: false })).toBe(false);
+        expect(answersFreshInstall({ status: 'error', message: 'x' })).toBe(false);
+        expect(answersFreshInstall(undefined)).toBe(false);
+    });
+
+    it('erases the three keys even when one cannot be read, and names the ones that held something', () => {
+        const items: Record<string, string> = {
+            [LEGACY_AI_CHATS_KEY]: JSON.stringify({ ai_chat_1: { name: 'A' } }),
+            [LEGACY_TELEGRAM_CHATS_KEY]: '{not json',
+            unrelated: 'stays',
+        };
+        const storage = {
+            getItem: (k: string) => (k in items ? items[k] : null),
+            removeItem: (k: string) => { delete items[k]; },
+        };
+        expect(eraseLegacyChatStore(storage)).toEqual([LEGACY_AI_CHATS_KEY, LEGACY_TELEGRAM_CHATS_KEY]);
+        expect(items).toEqual({ unrelated: 'stays' });
+        expect(readLegacyChatStore(storage)).toBeNull();
+    });
+
+    it('survives a store that refuses to answer', () => {
+        const refusing = {
+            getItem: () => { throw new Error('denied'); },
+            removeItem: () => { throw new Error('denied'); },
+        };
+        expect(eraseLegacyChatStore(refusing)).toEqual([]);
     });
 });

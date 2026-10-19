@@ -48,10 +48,14 @@ RECORD_FIELDS = (
 _MAX_FIELD_LENGTH = 256
 
 # Set on a record written while the chat's history could not be (persistence
-# off for the chat): the history is still in the UI's old store, and an import
-# with persistence on brings it over and removes this mark. Not a RECORD_FIELD:
+# off for the chat) — the chat the import answered "deferred": the history is
+# still in the UI's old store, and an import with persistence on brings it over
+# and removes this mark. Not a RECORD_FIELD:
 # the UI never reads it, it only keeps the chat listed meanwhile.
-HISTORY_IMPORT_PENDING = "history_import_pending"
+HISTORY_DEFERRED = "history_deferred"
+# The mark's first name, on disk from 2026-10-19 to 2026-10-20; the import
+# removes it with the new one so no record keeps a mark nothing reads.
+_HISTORY_DEFERRED_FIRST_NAME = "history_import_pending"
 
 # The ids the UI mints (`ai_chat_` + 8 hex) and Telegram's numeric chat ids,
 # which are negative for groups. Narrower than `is_safe_conversation_id` on
@@ -265,6 +269,51 @@ def _ledger_path(base: Optional[Path]) -> Path:
     return (base or conversations_dir()).parent / IMPORT_LEDGER
 
 
+# Present from the first start that found no ~/.dpc: a person who deletes or
+# renames ~/.dpc is asking for a clean install, and whatever the old UI still
+# holds in the WebView is not to be carried into it. A file of its own, not a
+# field of the ledger: the ledger can be moved aside as corrupt, and the fact
+# that this home was born empty must outlive that. It is read by presence, so
+# it needs no parsing and a restart before the UI connects still answers "fresh".
+FRESH_INSTALL_MARKER = "ui_chat_import_fresh_install"
+
+
+def _fresh_marker_path(base: Optional[Path]) -> Path:
+    return (base or conversations_dir()).parent / FRESH_INSTALL_MARKER
+
+
+def is_fresh_install(base: Optional[Path] = None) -> bool:
+    """True when this ~/.dpc did not exist when the backend first started in it."""
+    return _fresh_marker_path(base).exists()
+
+
+def note_fresh_install(home: Optional[Path] = None) -> bool:
+    """Called once per start, before anything creates ~/.dpc; True if it is fresh.
+
+    If `home` does not exist it is created here and the marker written, so that
+    every later start — the directory exists by then — still answers the same.
+    `run_service.py` calls it ahead of the single-instance lock, which is the
+    first thing that creates the directory. Never raises: a start must not fail
+    on this, and a marker that could not be written means the import runs as it
+    always has.
+    """
+    home = home or conversations_dir().parent
+    try:
+        if home.exists():
+            return is_fresh_install(home / "conversations")
+        home.mkdir(parents=True)
+        (home / FRESH_INSTALL_MARKER).write_text(
+            datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+        # Logging is not configured yet when run_service calls this, so say it twice.
+        note = f"{home} did not exist: a fresh install; the old UI store will not be imported"
+        print("[startup] " + note)
+        logger.info(note)
+        return True
+    except OSError as e:
+        logger.warning("Could not record that %s is a fresh install: %s", home, e)
+        return False
+
+
 def _read_ledger(base: Optional[Path]) -> Dict[str, Any]:
     """The chats the import has brought over; an unreadable ledger is empty.
 
@@ -317,9 +366,11 @@ def import_chat(
 ) -> Dict[str, Any]:
     """Bring one chat the old UI stored into ~/.dpc; never overwrite.
 
-    The answer is per chat. "imported", "kept", "skipped" and "refused" are
-    final and the UI drops the chat from its store; "deferred" and "failed"
-    keep it there to be asked again. Everything is validated before anything
+    The answer is per chat. "imported", "kept", "skipped", "refused" and
+    "discarded" are final and the UI drops the chat from its store; "deferred"
+    and "failed" keep it there to be asked again. "discarded" is the answer on
+    a fresh install (`note_fresh_install`): nothing is imported, nothing is
+    written, and the chat is told to go. Everything is validated before anything
     is written, so a refused chat leaves no folder behind.
 
     A chat is imported once. The ledger is written on the last part of it
@@ -328,6 +379,8 @@ def import_chat(
     reset or a delete since then stands.
     """
     result: Dict[str, Any] = {"conversation_id": conversation_id}
+    if is_fresh_install(base):
+        return {**result, "status": "discarded", "reason": "fresh install", "messages_added": 0}
     if not isinstance(conversation_id, str) or not conversation_paths.is_safe_conversation_id(conversation_id):
         return {**result, "status": "refused", "reason": "not a conversation id"}
     if conversation_id.startswith("agent_"):
@@ -364,7 +417,7 @@ def import_chat(
                     # until the chat persists again. The record is written, so
                     # the chat is listed meanwhile instead of vanishing from a
                     # sidebar that no longer reads the old store.
-                    write_record(conversation_id, {**fields, HISTORY_IMPORT_PENDING: True},
+                    write_record(conversation_id, {**fields, HISTORY_DEFERRED: True},
                                  base, keep_existing=True)
                     return {**result, "status": "deferred",
                             "reason": "history persistence is off for this chat"}
@@ -394,7 +447,7 @@ def import_chat(
                     if not monitor.save_history():
                         return {**result, "status": "failed", "reason": "could not write history.json"}
             written = write_record(conversation_id, fields, base, keep_existing=True,
-                                   drop=(HISTORY_IMPORT_PENDING,) if messages else ())
+                                   drop=(HISTORY_DEFERRED, _HISTORY_DEFERRED_FIRST_NAME) if messages else ())
         if not partial:
             _mark_imported(conversation_id, base)
     except Exception as e:  # noqa: BLE001 — reported per chat, retried next start

@@ -6113,6 +6113,11 @@ class CoreService:
         drops each chat with a final answer from its store. `partial` marks a
         part of a history too large for one socket message; the last part goes
         without it.
+
+        On a fresh install (`ai_chats.note_fresh_install`, run at start before
+        ~/.dpc exists) nothing is imported: each chat is answered "discarded"
+        and `fresh_install` is true, which also reaches a caller that sent no
+        chat at all so that it can erase what the old UI left behind.
         """
         chats = {} if chats is None else chats
         histories = {} if histories is None else histories
@@ -6132,7 +6137,7 @@ class CoreService:
                 conversation_id, result.get("status"), result.get("messages_added", 0),
             )
             results.append(result)
-        return {"status": "success", "results": results}
+        return {"status": "success", "results": results, "fresh_install": ai_chats.is_fresh_install()}
 
     # =========================================================================
     # Group Chat Commands (v0.19.0)

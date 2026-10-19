@@ -431,7 +431,7 @@ async def test_a_deferred_chat_is_still_listed_and_imports_later(home):
     assert deferred["results"][0]["status"] == "deferred"
     assert not _history_file(home).exists()
     assert [(c["conversation_id"], c["name"]) for c in ai_chats.list_ai_chats()] == [(CID, "qwen (q3)")]
-    assert ai_chats.read_record(CID)[ai_chats.HISTORY_IMPORT_PENDING] is True
+    assert ai_chats.read_record(CID)[ai_chats.HISTORY_DEFERRED] is True
     shown = await _service().get_conversation_history(CID)  # what the UI asks for when the chat is opened
     assert shown["status"] == "success" and shown["messages"] == []
 
@@ -440,4 +440,86 @@ async def test_a_deferred_chat_is_still_listed_and_imports_later(home):
 
     assert later["results"][0]["status"] == "imported" and later["results"][0]["messages_added"] == 2
     assert [m["id"] for m in _stored(home)] == ["u1", "a1"]
-    assert ai_chats.HISTORY_IMPORT_PENDING not in ai_chats.read_record(CID)
+    assert ai_chats.HISTORY_DEFERRED not in ai_chats.read_record(CID)
+
+
+# --- a fresh install imports nothing, 2026-10-20 -----------------------------
+# Mike's call: deleting or renaming ~/.dpc asks for a clean install, so the old
+# WebView store is not carried into it and the UI erases it.
+
+
+def _store_everything_old_ui_left():
+    return dict(
+        chats={CID: UI_RECORD, "telegram-42": {"name": "T"}, "agent_001": {"name": "Ark"}},
+        histories={CID: UI_HISTORY},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_install_discards_the_old_ui_store_and_writes_nothing(home):
+    assert not (home / ".dpc").exists()
+    assert ai_chats.note_fresh_install() is True
+
+    result = await _service().import_ai_chats(**_store_everything_old_ui_left())
+
+    assert result["fresh_install"] is True
+    assert {r["conversation_id"]: r["status"] for r in result["results"]} == {
+        CID: "discarded", "telegram-42": "discarded", "agent_001": "discarded",
+    }
+    assert all(r["reason"] == "fresh install" and r["messages_added"] == 0 for r in result["results"])
+    assert not (home / ".dpc" / "conversations").exists()
+    assert not (home / ".dpc" / ai_chats.IMPORT_LEDGER).exists()
+    assert (await _service().list_ai_chats())["chats"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_install_answers_an_empty_call_so_the_ui_can_erase_unreadable_keys(home):
+    ai_chats.note_fresh_install()
+
+    result = await _service().import_ai_chats()
+
+    assert result == {"status": "success", "results": [], "fresh_install": True}
+
+
+@pytest.mark.asyncio
+async def test_a_restart_before_the_ui_connects_is_still_a_fresh_install(home):
+    assert ai_chats.note_fresh_install() is True
+    # ~/.dpc exists now; the next start finds it and must answer the same.
+    assert (home / ".dpc").is_dir()
+    assert ai_chats.note_fresh_install() is True
+
+    result = await _service().import_ai_chats(**_store_everything_old_ui_left())
+
+    assert {r["status"] for r in result["results"]} == {"discarded"}
+    assert not (home / ".dpc" / "conversations").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_home_that_existed_at_start_imports_as_before(home):
+    (home / ".dpc").mkdir()
+    assert ai_chats.note_fresh_install() is False
+    assert not (home / ".dpc" / ai_chats.FRESH_INSTALL_MARKER).exists()
+
+    result = await _service().import_ai_chats(chats={CID: UI_RECORD}, histories={CID: UI_HISTORY})
+
+    assert result["fresh_install"] is False
+    assert result["results"][0]["status"] == "imported"
+    assert [m["id"] for m in _stored(home)] == ["u1", "a1"]
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_chat_loses_the_first_name_of_its_mark_too(home):
+    (home / ".dpc").mkdir()
+    ai_chats.write_record(CID, {"name": "qwen (q3)", "history_import_pending": True})
+
+    result = await _service().import_ai_chats(chats={CID: UI_RECORD}, histories={CID: UI_HISTORY})
+
+    assert result["results"][0]["status"] == "imported"
+    assert "history_import_pending" not in ai_chats.read_record(CID)
+
+
+def test_the_start_notes_a_fresh_install_before_the_lock_creates_the_directory():
+    """The single-instance lock writes its pid file into ~/.dpc, which creates it."""
+    source = (pathlib.Path(__file__).resolve().parent.parent / "run_service.py").read_text(encoding="utf-8")
+    main_block = source[source.index('if __name__ == "__main__":'):]
+    assert main_block.index("ai_chats.note_fresh_install()") < main_block.index("single_instance.acquire()")
