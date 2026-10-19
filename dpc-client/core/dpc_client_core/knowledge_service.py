@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
+from . import conversation_paths
 from dpc_protocol.pcm_core import PCMCore
 
 logger = logging.getLogger(__name__)
@@ -462,7 +463,7 @@ class KnowledgeService:
             p2p_manager=self.p2p_manager,
         )
 
-        # Load persisted history from disk — only for group chats
+        # Load persisted history from disk — group chats and AI chats
         if conversation_id.startswith("group-"):
             if self.conversation_monitors[conversation_id].load_history():
                 self.conversation_monitors[conversation_id].rebuild_extraction_buffers_from_history()
@@ -502,6 +503,10 @@ class KnowledgeService:
                 if max_ctx > 0:
                     self.conversation_monitors[conversation_id].set_token_limit(max_ctx)
                     logger.info("Group %s token_limit set to %d (max agent context)", conversation_id, max_ctx)
+        elif self.conversation_monitors[conversation_id].persist_history and conversation_id.startswith("ai_"):
+            # An AI chat keeps its history in its folder (2026-10-19). A monitor
+            # born empty would overwrite that file with the first new message.
+            self.conversation_monitors[conversation_id].load_history()
 
         logger.info(
             "Created conversation monitor for %s with %d participant(s) "
@@ -2095,14 +2100,21 @@ Respond in JSON format:
                 if not success:
                     return {"status": "error", "message": "Group not found or could not be deleted"}
             else:
+                # The id comes from the UI: refused here unless it names a folder
+                # under ~/.dpc/conversations (no '..', separator or drive).
+                if not conversation_paths.is_safe_conversation_id(conversation_id):
+                    return {"status": "error", "message": f"Not a conversation id: {conversation_id!r}"}
                 if conversation_id in self.conversation_monitors:
                     monitor = self.conversation_monitors[conversation_id]
-                    monitor.delete_conversation_folder()
+                    if not monitor.delete_conversation_folder():
+                        return {"status": "error",
+                                "message": f"Could not delete the folder of {conversation_id}"}
                     del self.conversation_monitors[conversation_id]
                 else:
                     import shutil
-                    conv_dir = Path.home() / ".dpc" / "conversations" / conversation_id
-                    if conv_dir.exists():
+                    base = Path.home() / ".dpc" / "conversations"
+                    # Every folder that holds this conversation, a slugged one included.
+                    for conv_dir in conversation_paths.existing_store_dirs(base, conversation_id):
                         shutil.rmtree(conv_dir)
 
             logger.info("Deleted conversation: %s", conversation_id)

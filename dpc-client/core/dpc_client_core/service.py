@@ -68,6 +68,7 @@ from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .conversation_monitor import history_status_for as conversation_monitor_history_status_for
 from . import conversation_paths
+from . import ai_chats
 from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
@@ -5684,6 +5685,12 @@ class CoreService:
                 else:
                     logger.debug("No history file found for %s", conversation_id)
 
+            # AI chats: the monitor loads its history.json when it is created
+            # (2026-10-19), so after a restart the history comes from disk
+            # rather than from an empty in-memory monitor.
+            if monitor is None and ai_chats.is_ai_chat_id(conversation_id):
+                monitor = self._get_or_create_conversation_monitor(conversation_id)
+
             # Group conversations: always read from disk (same SSoT pattern as agent_)
             if conversation_id.startswith("group-"):
                 conv_dir = None
@@ -5747,6 +5754,10 @@ class CoreService:
                     message_dict["sender_node_id"] = msg["sender_node_id"]
                 if "sender_name" in msg:
                     message_dict["sender_name"] = msg["sender_name"]
+                # The UI used to keep these in its own copy; it restores from here now.
+                for kept in ("thinking", "streaming_raw"):
+                    if msg.get(kept):
+                        message_dict[kept] = msg[kept]
                 if "attachments" in msg:
                     # Deep copy attachments to avoid mutating original
                     attachments = []
@@ -6028,6 +6039,100 @@ class CoreService:
     async def delete_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """Delegated to KnowledgeService."""
         return await self.knowledge_service.delete_conversation(conversation_id)
+
+    # =========================================================================
+    # AI chats and Telegram chats in ~/.dpc (2026-10-19, Variant A)
+    # =========================================================================
+
+    def _telegram_conversation_links(self) -> Dict[str, str]:
+        """telegram_chat_id -> conversation_id, from the bridge or, before it
+        starts, from the config it loads them from."""
+        bridge = getattr(getattr(self, "telegram_service", None), "telegram_bridge", None)
+        if bridge is not None:
+            return dict(bridge.conversation_map)
+        try:
+            raw = self.settings.get("telegram", "conversation_links", fallback="{}")
+            links = json.loads(raw or "{}")
+        except Exception:  # noqa: BLE001 — no links is the safe answer
+            return {}
+        return links if isinstance(links, dict) else {}
+
+    async def list_ai_chats(self) -> Dict[str, Any]:
+        """The AI chats and Telegram chats this node holds, for the sidebar.
+
+        The UI builds its chat list from this at start instead of from its own
+        localStorage. A Telegram chat is listed because the bridge has a link
+        for it — the state a reset of ~/.dpc clears — and its record adds only
+        the name.
+        """
+        try:
+            chats = ai_chats.list_ai_chats()
+            for telegram_chat_id, conversation_id in self._telegram_conversation_links().items():
+                if not ai_chats.is_telegram_chat_id(conversation_id):
+                    continue  # `agent-…` links belong to an agent's own chat
+                record = ai_chats.read_record(conversation_id) or {}
+                chats.append({
+                    "conversation_id": conversation_id,
+                    "provider": "telegram",
+                    "name": record.get("name"),
+                    "telegram_chat_id": str(telegram_chat_id),
+                })
+            return {"status": "success", "chats": chats}
+        except Exception as e:
+            logger.error("Error listing AI chats: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e), "chats": []}
+
+    async def save_ai_chat(self, conversation_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Create or update an AI chat's record (name, provider, instruction set).
+
+        Called when the person creates a chat or changes its instruction set,
+        and with a Telegram chat's name when the UI first shows it.
+        """
+        if not (ai_chats.is_ai_chat_id(conversation_id) or ai_chats.is_telegram_chat_id(conversation_id)):
+            return {"status": "error", "message": f"Not an AI or Telegram chat id: {conversation_id!r}"}
+        fields = ai_chats.clean_record(record)
+        if fields is None:
+            return {"status": "error", "message": "record must be an object"}
+        try:
+            written = ai_chats.write_record(conversation_id, fields)
+            return {"status": "success", "conversation_id": conversation_id, "record": written}
+        except Exception as e:
+            logger.error("Error saving AI chat %s: %s", conversation_id, e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def import_ai_chats(
+        self, chats: Dict[str, Any] = None, histories: Dict[str, Any] = None, partial: bool = False
+    ) -> Dict[str, Any]:
+        """One-time import of the chats the old UI kept in localStorage.
+
+        `chats` is `dpc-ai-chats` or `dpc-telegram-chats` as stored, `histories`
+        is `dpc-ai-chat-histories`; the UI sends one chat per call. Nothing on
+        disk is overwritten: a record keeps its values and a history keeps its
+        messages, and a chat is imported once (`ai_chats.IMPORT_LEDGER`), so a
+        reset or delete since is not undone. The answer is per chat; the UI
+        drops each chat with a final answer from its store. `partial` marks a
+        part of a history too large for one socket message; the last part goes
+        without it.
+        """
+        chats = {} if chats is None else chats
+        histories = {} if histories is None else histories
+        if not isinstance(chats, dict) or not isinstance(histories, dict):
+            return {"status": "error", "message": "chats and histories must be objects", "results": []}
+        results = []
+        for conversation_id in list(dict.fromkeys([*chats.keys(), *histories.keys()])):
+            result = ai_chats.import_chat(
+                conversation_id,
+                chats.get(conversation_id),
+                histories.get(conversation_id),
+                self._get_or_create_conversation_monitor,
+                partial=bool(partial),
+            )
+            logger.info(
+                "Import of %s from the UI store: %s (%s message(s) added)",
+                conversation_id, result.get("status"), result.get("messages_added", 0),
+            )
+            results.append(result)
+        return {"status": "success", "results": results}
 
     # =========================================================================
     # Group Chat Commands (v0.19.0)
@@ -7827,12 +7932,22 @@ class CoreService:
                     "base64": data  # Pass base64 data directly (already encoded)
                 }]
 
+                # Taken before the call, so a delete while it runs is seen below.
+                image_monitor = self._get_or_create_conversation_monitor(conversation_id)
+
                 # Run vision query (Phase 2.3: Support remote vision via compute_host)
                 response_metadata = await self.inference_orchestrator.execute_inference(
                     prompt=query,
                     images=images,
                     provider=provider_alias,  # Pass UI selection (or None for auto-selection)
                     compute_host=compute_host  # Pass compute_host for remote vision
+                )
+
+                # Into the chat's history, image included: until 2026-10-19 the
+                # only copy of this exchange was the UI's localStorage.
+                self._record_ai_chat_image_exchange(
+                    image_monitor, tmp_path, filename, mime_type, size_bytes, dimensions,
+                    query, response_metadata,
                 )
 
                 # Broadcast AI response to UI
@@ -7902,6 +8017,45 @@ class CoreService:
             # Cleanup temp file (if not moved to peer storage)
             if tmp_path.exists():
                 tmp_path.unlink()
+
+    def _record_ai_chat_image_exchange(
+        self, monitor, tmp_path, filename, mime_type, size_bytes, dimensions,
+        query, response_metadata,
+    ) -> None:
+        """Keep an AI chat's image question and its answer like any other turn.
+
+        The image moves into the chat's `files/` so the restored message can
+        show it; a chat that does not persist history keeps the turn in memory
+        only and the temp file is cleaned up by the caller as before.
+        """
+        import shutil
+        if monitor.deleted:
+            return  # deleted while the model was answering: nothing to write back
+        try:
+            attachment = {
+                "type": "image", "filename": filename, "mime_type": mime_type,
+                "size_bytes": size_bytes, "dimensions": dimensions,
+            }
+            if monitor.persist_history:
+                files_dir = monitor._get_conversation_dir() / "files"
+                files_dir.mkdir(parents=True, exist_ok=True)
+                target = files_dir / Path(filename).name
+                counter = 1
+                while target.exists():
+                    target = files_dir / f"{Path(filename).stem}_{counter}{Path(filename).suffix}"
+                    counter += 1
+                shutil.move(str(tmp_path), str(target))
+                attachment["filename"] = target.name
+                attachment["file_path"] = str(target)
+            monitor.add_message("user", query, attachments=[attachment])
+            model = response_metadata.get("model")
+            monitor.add_message(
+                "assistant", response_metadata.get("response", ""),
+                sender_name=f"AI ({model})" if model else None,
+            )
+            monitor.save_history()
+        except Exception as e:  # noqa: BLE001 — the answer still reaches the UI
+            logger.error("Could not keep the image turn of %s: %s", monitor.conversation_id, e, exc_info=True)
 
     async def accept_file_transfer(self, transfer_id: str):
         """Delegated to P2PCoordinator."""
@@ -8899,6 +9053,9 @@ class CoreService:
             )
 
         monitor = self._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
+        # The one this turn is written to. `monitor` is fetched again below, and
+        # after a delete during the call that fetch makes a fresh one.
+        history_monitor = monitor
 
         # Phase 7: Check if context window is full (hard limit enforcement)
         if monitor.token_limit > 0:
@@ -9118,8 +9275,14 @@ class CoreService:
                 "thinking_tokens": result.get("thinking_tokens"),
             }
 
-            # Phase 7: Add AI response to conversation history
-            monitor.add_message('assistant', result["response"])
+            # Phase 7: Add AI response to conversation history. The thinking and
+            # the model's name ride along because history.json is now the copy
+            # an AI chat is restored from (2026-10-19), not the UI's.
+            monitor.add_message(
+                'assistant', result["response"],
+                thinking=result.get("thinking"),
+                sender_name=f"AI ({result['model']})" if result.get("model") else None,
+            )
             logger.debug("AI response added to conversation history (total messages: %d)", len(message_history) + 1)
 
             # Update conversation monitor with inference settings used (for knowledge extraction)
@@ -9192,6 +9355,11 @@ class CoreService:
             logger.error("Error during inference: %s", e, exc_info=True)
             status = "ERROR"
             response_payload = {"message": str(e)}
+
+        # An AI chat persists like an agent's: the prompt is kept on a failed
+        # call too. A no-op for a conversation that does not persist history,
+        # and for one deleted while the answer was on its way.
+        history_monitor.save_history()
 
         # Send response back to UI
         await self.local_api.send_response_to_all(

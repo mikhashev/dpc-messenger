@@ -50,8 +50,11 @@ class _Monitor:
         self.history = []
         self.cached = {}
 
-    def add_message(self, role, content):
+    def add_message(self, role, content, **fields):
         self.history.append({"role": role, "content": content})
+
+    def save_history(self):
+        return True
 
     def get_message_history(self):
         return list(self.history)

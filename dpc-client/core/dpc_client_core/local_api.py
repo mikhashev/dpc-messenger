@@ -125,6 +125,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Conversation history
     "get_conversation_history",
     "delete_conversation",
+    # AI chats kept in ~/.dpc rather than in the WebView (2026-10-19)
+    "list_ai_chats",
+    "save_ai_chat",
+    "import_ai_chats",
     "end_conversation_session",
     "get_conversation_settings",
     "set_conversation_persist_history",

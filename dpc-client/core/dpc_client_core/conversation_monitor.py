@@ -22,6 +22,42 @@ from . import conversation_paths
 from .p2p_manager import peer_proof
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Replace a file in one step, so a crash leaves the old file or the new one.
+
+    A temp file in the same folder and `os.replace`. Windows refuses the replace
+    while a reader holds the target, so it is retried briefly before giving up.
+    """
+    import os
+    import tempfile
+    import time
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        for attempt in range(20):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+# Conversations whose history is kept in their folder unless the person turns
+# it off. `ai_` joined on 2026-10-19: until then an AI chat's only copy was the
+# WebView's localStorage, outside ~/.dpc (Mike's call: the backend owns chat
+# histories). `local_ai` stays out — it was never stored anywhere, and making
+# the built-in scratch chat permanent is a separate decision.
+PERSISTED_BY_DEFAULT_PREFIXES = ("group-", "agent_", "discord-", "ai_")
+
+
 def chain_hash_for(message: Dict[str, Any], prev_hash: str) -> str:
     """The local chain hash of a message, given its predecessor's.
 
@@ -588,6 +624,10 @@ class ConversationMonitor:
         self._history_dirty: bool = False  # Track unsaved changes
         self._signer = None  # Lazy-loaded CommitSigner for message signing
         self._chain_rebuilt = False  # One-time local repair of a pre-local chain
+        # Set by delete_conversation_folder: an answer still in flight holds this
+        # monitor and must not write the deleted folder back into existence.
+        self.deleted = False
+        self._history_unreadable = False  # set when a torn history.json could not be moved aside
         # Ids of «Received file» notes this node wrote for a peer's transfer,
         # to be dropped when the peer's own record of that file arrives.
         self._local_file_notes: set = set()
@@ -3183,10 +3223,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """Check if this conversation should persist history by default.
 
         Returns:
-            True for groups, agents, and Discord per-user conversations
+            True for groups, agents, Discord per-user conversations and AI chats
         """
         cid = self.conversation_id
-        return cid.startswith("group-") or cid.startswith("agent_") or cid.startswith("discord-")
+        if cid.startswith("ai_"):
+            # Only an id the UI could have minted: one with a hyphen would share
+            # a folder with the chat whose id is its prefix.
+            from .ai_chats import is_ai_chat_id
+            return is_ai_chat_id(cid)
+        return cid.startswith(PERSISTED_BY_DEFAULT_PREFIXES)
 
     def _load_conversation_settings(self) -> Dict[str, Any]:
         """Load per-conversation settings from disk.
@@ -3197,7 +3242,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         settings_path = self._get_settings_path()
         defaults = {
             "conversation_id": self.conversation_id,
-            "conversation_type": "group" if self._is_group_conversation() else "p2p",
+            "conversation_type": (
+                "ai" if self.conversation_id.startswith("ai_")
+                else "group" if self._is_group_conversation() else "p2p"
+            ),
             "persist_history": self._is_group_conversation(),  # Groups persist by default, P2P don't
             "created_at": datetime.now(timezone.utc).isoformat(),
             "peer_display_name": None
@@ -3366,6 +3414,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         Returns:
             True if saved successfully (or skipped due to settings), False on error
         """
+        if self._history_unreadable:
+            logger.error("Not saving %s over a history file that could not be read",
+                         self.conversation_id)
+            return False
+        if self.deleted:
+            logger.info("Not saving %s: the conversation was deleted while this was in flight",
+                        self.conversation_id)
+            return True
+
         # Check if history should be persisted for this conversation
         if not self.persist_history:
             logger.debug(f"Skipping history save for {self.conversation_id} (persist_history=False)")
@@ -3391,8 +3448,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "messages": self.message_history
             }
 
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            # Replaced in one step: a crash mid-write used to leave a torn file
+            # that the next load could not parse, and the save after that wrote
+            # an empty history over it.
+            atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
 
             self._history_dirty = False
             logger.info(f"Saved {len(self.message_history)} messages to {path}")
@@ -3401,8 +3460,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             last_hash = self.message_history[-1].get("chain_hash", "") if self.message_history else ""
             meta_path = path.parent / ".chain_meta.json"
             try:
-                json.dump({"msg_count": len(self.message_history), "last_chain_hash": last_hash},
-                          open(meta_path, "w", encoding="utf-8"))
+                atomic_write_text(meta_path, json.dumps(
+                    {"msg_count": len(self.message_history), "last_chain_hash": last_hash}))
             except Exception:
                 pass  # non-critical
 
@@ -3450,7 +3509,29 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict) or not isinstance(data.get("messages", []), list):
+                raise ValueError("not a history document")
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+            # Unparseable is not empty. Left in place, the next save would write
+            # this monitor's empty history over it; moved aside, it can still be
+            # repaired by hand.
+            aside = path.with_name(
+                f"{path.name}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+            )
+            try:
+                path.rename(aside)
+                logger.warning("Unreadable history for %s (%s) moved aside to %s; starting empty",
+                               self.conversation_id, e, aside)
+            except OSError as move_error:
+                logger.error("Unreadable history for %s (%s) and could not move it aside: %s; "
+                             "not saving over it", self.conversation_id, e, move_error)
+                self._history_unreadable = True
+            return False
+        except OSError as e:
+            logger.error(f"Failed to read history from {path}: {e}")
+            return False
 
+        try:
             messages = data.get("messages", [])
 
             # Backfill msg_index + verify chain_hash (MSG-CHAIN, S105)
@@ -4019,6 +4100,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         import shutil
 
+        self.deleted = True
         conv_dir = self._get_conversation_dir()
         if not conv_dir.exists():
             logger.debug(f"Conversation folder doesn't exist: {conv_dir}")
