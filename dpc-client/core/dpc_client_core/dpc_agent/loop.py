@@ -1196,10 +1196,16 @@ async def run_llm_loop(
     _compaction_state = CompactionState(_compaction_cfg)
 
     # Ark's measure of cache reuse: how often a request rewrote the prefix the
-    # previous request of this turn sent, rather than only appending to it.
-    # Per agent too: in a group chat every agent shares the conversation id.
+    # previous request sent, rather than only appending to it. The first request
+    # of a turn is compared with the last one of the turn before, so a rewrite
+    # between turns counts; with nothing remembered (first ever, after a restart)
+    # the tracker says "not rewritten". Per agent too: in a group chat every
+    # agent shares the conversation id.
     _divergence_key = conversation_id or f"task:{task_id}"
     _divergence_agent = agent_root.name
+    # Scheduled runs share one id per task type ("task-<type>", "review_task"), so
+    # their first request follows an unrelated prompt: not a rewrite between turns.
+    _shared_run_id = (conversation_id or "").startswith("task-") or conversation_id == "review_task"
     _divergence = {"requests": 0, "prefix_rewrites": 0, "rewrite_rounds": []}
     llm_trace["prompt_divergence"] = _divergence
 
@@ -1212,7 +1218,7 @@ async def run_llm_loop(
         except Exception:
             log.debug("prompt divergence: not measured", exc_info=True)
             return
-        if _divergence["requests"] and seen["prefix_rewritten"]:
+        if seen["prefix_rewritten"] and not (_shared_run_id and not _divergence["requests"]):
             _divergence["prefix_rewrites"] += 1
             _divergence["rewrite_rounds"].append(round_idx)
         _divergence["requests"] += 1

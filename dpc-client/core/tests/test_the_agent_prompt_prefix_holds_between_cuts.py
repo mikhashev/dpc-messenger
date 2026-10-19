@@ -329,6 +329,45 @@ def test_the_guard_stop_final_call_sends_what_the_loop_sent(tmp_path, monkeypatc
     assert trace["prompt_divergence"]["prefix_rewrites"] == 0
 
 
+def _one_turn(tmp_path, monkeypatch, conversation_id, user_text, system="sys"):
+    """One whole turn (a single request, answered at once) on the shared tracker."""
+    monkeypatch.setattr(loop_mod, "load_agent_config", lambda _name: {
+        "compaction_enabled": False, "context_window": 10_000_000,
+    })
+    provider = _Provider(0, None)
+    _text, _usage, trace = asyncio.run(run_llm_loop(
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user_text}],
+        tools=_Tools(), llm=provider, agent_root=tmp_path, emit_progress=lambda *a, **k: None,
+        reasoning_effort="high", conversation_id=conversation_id, max_rounds=5,
+    ))
+    return trace["prompt_divergence"]
+
+
+def test_a_rewrite_between_turns_is_counted_on_the_first_request(tmp_path, monkeypatch):
+    conv = "conv-cross-turn-rewrite"
+    first = _one_turn(tmp_path, monkeypatch, conv, "go")
+    assert first["requests"] == 1 and first["prefix_rewrites"] == 0
+    # Same early message again: the next turn only appends, nothing to count.
+    again = _one_turn(tmp_path, monkeypatch, conv, "go")
+    assert again["requests"] == 1 and again["prefix_rewrites"] == 0
+    # An early message changed between the turns: the engine re-reads from there.
+    rewritten = _one_turn(tmp_path, monkeypatch, conv, "go", system="sys, edited")
+    assert rewritten["requests"] == 1
+    assert rewritten["prefix_rewrites"] == 1 and rewritten["rewrite_rounds"] == [1]
+
+
+def test_a_fresh_conversations_first_request_is_not_a_rewrite(tmp_path, monkeypatch):
+    seen = _one_turn(tmp_path, monkeypatch, "conv-never-seen-before", "go")
+    assert seen == {"requests": 1, "prefix_rewrites": 0, "rewrite_rounds": []}
+
+
+def test_a_scheduled_task_id_is_shared_so_its_first_request_is_not_a_rewrite(tmp_path, monkeypatch):
+    for conv in ("task-the-probe-type", "review_task"):
+        _one_turn(tmp_path, monkeypatch, conv, "first run")
+        seen = _one_turn(tmp_path, monkeypatch, conv, "a different run")
+        assert seen == {"requests": 1, "prefix_rewrites": 0, "rewrite_rounds": []}, conv
+
+
 # --- the finalising call, alone ------------------------------------------------
 
 def _stopped_by_research():
