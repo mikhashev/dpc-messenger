@@ -51,6 +51,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -656,11 +657,44 @@ def exit_code_words(text: str) -> Optional[str]:
     return out + (f": {words.strip()}" if words.strip() else "")
 
 
-# The engine's two ways of giving a conversation up (copied from its log):
-#   conversation cache: evicted 1 parked conversation to admit this snapshot (...)
-#   skip parking (snapshot ... exceeds available budget)
-_CACHE_LOSS_RE = re.compile(r"evicted \d+ parked conversation|skip parking")
+# Every line the engine writes when its conversation cache gave a conversation up or
+# could not use one (src/program/generate.cpp, the park and restore paths of --serve;
+# the formats are copied below). First match wins,
+# so the specific "skip parking" reasons stand before the generic one. A line is not a
+# loss when it says parked / restored / borrowed / dropped N superseded copies.
+#   skip parking (%zu tokens, below the %lld minimum; parked=%zu)
+#   skip parking (stage CUDA%d: %s)  /  skip parking (%s)        the size of the snapshot
+#   skip parking (snapshot %zu MiB exceeds available budget)
+#   skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)
+#   skip parking (RAM floor after capture: %lld MiB needed, %s)
+#   allocation failed; skip parking
+#   evicted %zu parked conversation%s to admit this snapshot (%zu MiB plus %lld MiB floor)
+#   %s %zu tokens in %.1f ms; parked=... with %s = "skipped" (the cache refused the stored image)
+#   discard snapshot (stage count)  /  discard invalid [stage ]snapshot (%s)     at restore
+#   cannot borrow from a parked conversation (%s)  /  no room beside the parked conversation ...
+#   the state at %lld tokens has this prompt's tokens but picture %zu ... cannot be reused
+_CACHE_LOSS_KINDS = (
+    ("below min tokens", re.compile(r"skip parking \(\d+ tokens, below the")),
+    ("over budget", re.compile(r"skip parking \(snapshot \d+ MiB exceeds available budget")),
+    ("RAM admission", re.compile(r"skip parking \(physical RAM admission")),
+    ("RAM floor", re.compile(r"skip parking \(RAM floor after capture")),
+    ("allocation failed", re.compile(r"allocation failed; skip parking")),
+    ("evicted", re.compile(r"evicted \d+ parked conversations? to admit this snapshot")),
+    ("not stored", re.compile(r"conversation cache: skipped \d+ tokens")),
+    ("discarded at restore", re.compile(r"conversation cache: discard (?:invalid )?(?:stage )?snapshot")),
+    ("borrow refused", re.compile(r"cannot borrow from a parked conversation|no room beside the parked conversation")),
+    ("picture changed", re.compile(r"has this prompt's tokens but picture \d+ .*cannot be reused")),
+    ("snapshot size failed", re.compile(r"skip parking \(")),
+)
 _CACHE_LOSS_SHOWN = 3
+
+
+def cache_loss_kind(line: str) -> Optional[str]:
+    """The reason class of an engine-log line where the cache lost a conversation, or None."""
+    for kind, pattern in _CACHE_LOSS_KINDS:
+        if pattern.search(line):
+            return kind
+    return None
 
 
 def _positive(name: str, value: Any) -> int:
@@ -691,6 +725,11 @@ class StrataSupervisor(LlamaServerSupervisor):
         self._engine_log_path = _base.DPC_HOME / "logs" / f"strata-{safe}-engine.log"
         # Where the cache-loss scan stopped in that file; None until primed.
         self._engine_scan_offset: Optional[int] = None
+        # The launcher's cumulative conversation_cache.evictions as the watcher
+        # last read it, and as the last INFO record had it. The engine counts
+        # every eviction, the budget and slot ones too, which have no log line.
+        self._cache_evictions_polled: Optional[int] = None
+        self._cache_evictions_logged = 0
         # A recorded engine death. While set, ensure_running refuses: DPC
         # never relaunches after it stopped the launcher on a death.
         self.failure: Optional[Dict[str, Any]] = None
@@ -1313,6 +1352,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             except Exception as e:
                 logger.debug("strata[%s]: /metrics read failed: %s", self.alias, e)
                 continue
+            self._note_cache_evictions(metrics)
             state = ((metrics or {}).get("live") or {}).get("state")
             if state == "unloaded" and not self._unload_expected():
                 await self._fail_closed(
@@ -1384,6 +1424,29 @@ class StrataSupervisor(LlamaServerSupervisor):
                            self.alias, previous.get("reason"))
         return previous
 
+    def _note_cache_evictions(self, metrics: Any) -> None:
+        """Keep the cache's cumulative eviction count from a /metrics body."""
+        cache = metrics.get("conversation_cache") if isinstance(metrics, dict) else None
+        value = cache.get("evictions") if isinstance(cache, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            self._cache_evictions_polled = value
+
+    def _new_cache_evictions(self) -> int:
+        """Evictions the engine counted since the last INFO record, as of the last poll.
+
+        The poll runs every `engine_watch_interval_s`, so an eviction can be
+        reported one call late. A smaller count than the one logged means the
+        engine started over with an empty cache.
+        """
+        polled = self._cache_evictions_polled
+        if polled is None:
+            return 0
+        if polled < self._cache_evictions_logged:
+            self._cache_evictions_logged = 0
+        delta = polled - self._cache_evictions_logged
+        self._cache_evictions_logged = polled
+        return delta
+
     def _tail_engine_log(self, n: int = 12) -> List[str]:
         try:
             with open(self._engine_log_path, "rb") as f:
@@ -1401,6 +1464,8 @@ class StrataSupervisor(LlamaServerSupervisor):
         and never carries a cache event. Called at launch by the base `_launch`.
         """
         super().prime_restore_scan()
+        self._cache_evictions_polled = None
+        self._cache_evictions_logged = 0
         try:
             self._engine_scan_offset = self._engine_log_path.stat().st_size
         except OSError:
@@ -1409,9 +1474,11 @@ class StrataSupervisor(LlamaServerSupervisor):
     def new_cache_losses(self) -> List[str]:
         """Engine-log lines since the last scan where the cache gave a conversation up.
 
-        Two events, both of which end in a re-prefill on a later call: a parked
-        conversation evicted to admit a snapshot, and a snapshot not parked at
-        all. `borrowed`, `parked` and `dropped ... superseded copy` lines are the
+        Each line is one of the engine's own reasons (`_CACHE_LOSS_KINDS`): a
+        parked conversation evicted, a snapshot not parked, a parked image
+        discarded or not borrowable at restore. Each ends in a re-prefill on a
+        later call. `borrowed`, `parked`, `restored` and `dropped ... superseded
+        copy` lines are the
         cache working, not losing, and are left out. Only whole lines are taken:
         the cursor stops after the last newline, so a line the engine is still
         writing is read next time, complete.
@@ -1438,7 +1505,7 @@ class StrataSupervisor(LlamaServerSupervisor):
         return [
             line.strip()
             for line in data[:whole].decode("utf-8", errors="replace").splitlines()
-            if _CACHE_LOSS_RE.search(line)
+            if cache_loss_kind(line) is not None
         ]
 
     def log_restore_refusals(self) -> int:
@@ -1448,13 +1515,23 @@ class StrataSupervisor(LlamaServerSupervisor):
         every call; the count is the number of events, not of calls.
         """
         lost = self.new_cache_losses()
+        evictions = self._new_cache_evictions()
         if lost:
             shown = [line[:300] for line in lost[:_CACHE_LOSS_SHOWN]]
             more = len(lost) - len(shown)
+            kinds = Counter(cache_loss_kind(line) for line in lost)
+            classes = ", ".join(f"{n} {kind}" for kind, n in kinds.most_common())
             logger.info(
-                "strata[%s]: %d conversation-cache loss(es) since the last call: %s%s",
-                self.alias, len(lost), " | ".join(shown),
+                "strata[%s]: %d conversation-cache loss(es) since the last call (%s): %s%s%s",
+                self.alias, len(lost), classes, " | ".join(shown),
                 f" (+{more} more in the engine log)" if more > 0 else "",
+                f"; engine eviction counter +{evictions}" if evictions else "",
+            )
+        elif evictions:
+            # Slot and budget evictions leave no log line; only the counter has them.
+            logger.info(
+                "strata[%s]: engine eviction counter +%d since the last call, no loss line in the engine log",
+                self.alias, evictions,
             )
         return len(lost)
 
