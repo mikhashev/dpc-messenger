@@ -29,7 +29,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import conversation_paths
 
@@ -46,6 +46,12 @@ RECORD_FIELDS = (
     "name", "provider", "instruction_set_name", "profile_name", "llm_provider", "compute_host",
 )
 _MAX_FIELD_LENGTH = 256
+
+# Set on a record written while the chat's history could not be (persistence
+# off for the chat): the history is still in the UI's old store, and an import
+# with persistence on brings it over and removes this mark. Not a RECORD_FIELD:
+# the UI never reads it, it only keeps the chat listed meanwhile.
+HISTORY_IMPORT_PENDING = "history_import_pending"
 
 # The ids the UI mints (`ai_chat_` + 8 hex) and Telegram's numeric chat ids,
 # which are negative for groups. Narrower than `is_safe_conversation_id` on
@@ -102,12 +108,13 @@ def write_record(
     base: Optional[Path] = None,
     *,
     keep_existing: bool = False,
+    drop: Tuple[str, ...] = (),
 ) -> str:
     """Merge `fields` into the chat's record; "written" or "kept".
 
     With `keep_existing` a value already on disk wins — the import's rule. A
     temp file and `os.replace`, because the record is what puts a chat in the
-    sidebar and a half-written one would hide it.
+    sidebar and a half-written one would hide it. `drop` names keys to remove.
     """
     store = _store_dir(conversation_id, base)
     current = read_record(conversation_id, base) or {}
@@ -116,6 +123,8 @@ def write_record(
         if keep_existing and current.get(key):
             continue
         merged[key] = value
+    for key in drop:
+        merged.pop(key, None)
     merged["conversation_id"] = conversation_id
     merged.setdefault("created_at", datetime.now(timezone.utc).isoformat())
     if merged == current:
@@ -165,7 +174,14 @@ def list_ai_chats(base: Optional[Path] = None) -> List[Dict[str, Any]]:
         if _store_dir(conversation_id, base).name.lower() != folder.name.lower():
             continue
         entry = {"conversation_id": conversation_id, **(clean_record(record) or {})}
-        entry["created_at"] = record.get("created_at")
+        created_at = record.get("created_at")
+        if created_at is not None and not isinstance(created_at, str):
+            # One hand-edited record must not take the whole sidebar down with
+            # the sort below: the chat is listed, undated.
+            logger.warning("Chat record in %s has a created_at that is not a string (%r); listing it undated",
+                           folder, created_at)
+            created_at = None
+        entry["created_at"] = created_at
         chats[conversation_id] = entry
     return sorted(chats.values(), key=lambda c: (c.get("created_at") or "", c["conversation_id"]))
 
@@ -250,14 +266,36 @@ def _ledger_path(base: Optional[Path]) -> Path:
 
 
 def _read_ledger(base: Optional[Path]) -> Dict[str, Any]:
+    """The chats the import has brought over; an unreadable ledger is empty.
+
+    A ledger that cannot be parsed would otherwise fail every chat on every
+    attempt until someone repaired the file by hand. It is moved aside, as a
+    torn history.json is (`ConversationMonitor.load_history`), and the import
+    starts from an empty one. If it cannot be moved it is left alone and the
+    error escapes: the caller fails the chat rather than write over it.
+    """
     path = _ledger_path(base)
     if not path.exists():
         return {}
-    with open(path, encoding="utf-8") as f:  # unreadable: the caller fails the chat
-        data = json.load(f)
-    imported = data.get("imported") if isinstance(data, dict) else None
-    if not isinstance(imported, dict):
-        raise ValueError(f"{path} is not an import ledger")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        imported = data.get("imported") if isinstance(data, dict) else None
+        if not isinstance(imported, dict):
+            raise ValueError(f"{path} is not an import ledger")
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+        aside = path.with_name(
+            f"{path.name}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+        )
+        try:
+            path.rename(aside)
+        except OSError as move_error:
+            logger.error("Unreadable import ledger %s (%s) and could not move it aside: %s; "
+                         "not importing over it", path, e, move_error)
+            raise
+        logger.warning("Unreadable import ledger %s (%s) moved aside to %s; starting empty",
+                       path, e, aside)
+        return {}
     return imported
 
 
@@ -321,8 +359,13 @@ def import_chat(
             if messages:
                 monitor = get_monitor(conversation_id)
                 if not monitor.persist_history:
-                    # Not written, and not final either: this may be the only
-                    # copy, so the UI keeps it until the chat persists again.
+                    # The history is not written, and the answer is not final
+                    # either: this may be the only copy, so the UI keeps it
+                    # until the chat persists again. The record is written, so
+                    # the chat is listed meanwhile instead of vanishing from a
+                    # sidebar that no longer reads the old store.
+                    write_record(conversation_id, {**fields, HISTORY_IMPORT_PENDING: True},
+                                 base, keep_existing=True)
                     return {**result, "status": "deferred",
                             "reason": "history persistence is off for this chat"}
                 have = set(monitor.message_ids) | {m.get("id") for m in monitor.message_history}
@@ -350,7 +393,8 @@ def import_chat(
                         rechain(monitor.message_history)
                     if not monitor.save_history():
                         return {**result, "status": "failed", "reason": "could not write history.json"}
-            written = write_record(conversation_id, fields, base, keep_existing=True)
+            written = write_record(conversation_id, fields, base, keep_existing=True,
+                                   drop=(HISTORY_IMPORT_PENDING,) if messages else ())
         if not partial:
             _mark_imported(conversation_id, base)
     except Exception as e:  # noqa: BLE001 — reported per chat, retried next start

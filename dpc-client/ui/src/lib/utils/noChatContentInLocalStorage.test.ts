@@ -15,7 +15,24 @@ const UI_PREFERENCE_KEYS = new Set([
     'permissionRequestedAt',
 ]);
 
-const sources = import.meta.glob('/src/**/*.{ts,svelte}', {
+// What each allow-listed key may be given, call site by call site. Pinning the
+// key name alone left a hole: `setItem('enableMarkdown', JSON.stringify(history))`
+// passes a key check and puts message text back in the WebView. The value
+// expression is pinned too (whitespace ignored), so a new or changed value has
+// to be added here on purpose, by someone who can say it is a small preference
+// and not chat content. Each of these is a number, a flag, a timestamp, a
+// panel position or a map of ids.
+const UI_PREFERENCE_VALUES: Record<string, string[]> = {
+    chatPanelHeight: ['chatPanelHeight.toString()'],
+    enableMarkdown: ['enableMarkdown.toString()'],
+    'dpc-cmd-chat-map': ['JSON.stringify([...commandToChatMap.entries()])'],
+    'dpc.activeTransfersPanel': ['JSON.stringify({collapsed:panelCollapsed,pos:panelPos})'],
+    notificationPermission: ['permission'],
+    notificationPreference: ["permissionGranted?'enabled':'disabled'"],
+    permissionRequestedAt: ['newDate().toISOString()'],
+};
+
+const sources = import.meta.glob('/src/**/*.{ts,js,svelte}', {
     query: '?raw', import: 'default', eager: true,
 }) as Record<string, string>;
 const files = Object.entries(sources).filter(([path]) => !path.endsWith('.test.ts'));
@@ -30,6 +47,39 @@ function resolveKey(arg: string, source: string): string | null {
     if (!/^[A-Za-z_$][\w$]*$/.test(name)) return null;
     const decl = source.match(new RegExp(`const\\s+${name}\\s*=\\s*(['"\`])([^'"\`]*)\\1`));
     return decl ? decl[2] : null;
+}
+
+/** The text of the two arguments of every `localStorage.setItem(` in `source`, brackets balanced. */
+function setItemArguments(source: string): Array<{ key: string; value: string }> {
+    const out: Array<{ key: string; value: string }> = [];
+    for (const m of source.matchAll(/localStorage\s*\.\s*setItem\s*\(/g)) {
+        const parts: string[] = [];
+        let depth = 0;
+        let start = m.index! + m[0].length;
+        let quote: string | null = null;
+        for (let i = start; i < source.length; i++) {
+            const c = source[i];
+            if (quote) {
+                if (c === '\\') i++;
+                else if (c === quote) quote = null;
+            } else if (c === "'" || c === '"' || c === '`') {
+                quote = c;
+            } else if ('([{'.includes(c)) {
+                depth++;
+            } else if (')]}'.includes(c)) {
+                if (depth === 0) {
+                    parts.push(source.slice(start, i));
+                    break;
+                }
+                depth--;
+            } else if (c === ',' && depth === 0) {
+                parts.push(source.slice(start, i));
+                start = i + 1;
+            }
+        }
+        out.push({ key: parts[0]?.trim() ?? '', value: (parts[1] ?? '').replace(/\s+/g, '') });
+    }
+    return out;
 }
 
 function calls(kind: string) {
@@ -50,6 +100,33 @@ describe('localStorage holds UI preferences only', () => {
     it('writes no key outside the preference allow-list', () => {
         const offending = calls('setItem').filter(c => !c.key || !UI_PREFERENCE_KEYS.has(c.key));
         expect(offending.map(c => `${c.path}: setItem(${c.arg})`)).toEqual([]);
+    });
+
+    it('gives each allow-listed key only the value expression listed for it', () => {
+        const offending: string[] = [];
+        for (const [path, source] of files) {
+            for (const { key, value } of setItemArguments(source)) {
+                const name = resolveKey(key, source);
+                const allowed = name ? UI_PREFERENCE_VALUES[name] : undefined;
+                if (!allowed || !allowed.includes(value)) offending.push(`${path}: setItem(${key}, ${value})`);
+            }
+        }
+        expect(offending).toEqual([]);
+    });
+
+    it('lists a value expression for every allow-listed key and no other', () => {
+        expect(Object.keys(UI_PREFERENCE_VALUES).sort()).toEqual([...UI_PREFERENCE_KEYS].sort());
+    });
+
+    it('catches message text stored under an allow-listed key (the check itself works)', () => {
+        const bad = `localStorage.setItem('enableMarkdown', JSON.stringify(messages));`;
+        const [call] = setItemArguments(bad);
+        expect(UI_PREFERENCE_VALUES[resolveKey(call.key, bad)!]).not.toContain(call.value);
+        const ok = `localStorage.setItem(
+ 'chatPanelHeight',
+ chatPanelHeight.toString());`;
+        const [good] = setItemArguments(ok);
+        expect(UI_PREFERENCE_VALUES[resolveKey(good.key, ok)!]).toContain(good.value);
     });
 
     it('writes through no other storage handle, except the import shrinking its own keys', () => {

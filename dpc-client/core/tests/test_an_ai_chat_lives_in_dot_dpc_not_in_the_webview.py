@@ -264,7 +264,6 @@ async def test_a_chat_that_does_not_persist_is_deferred_not_settled(home):
 
     assert result["results"][0]["status"] == "deferred"
     assert not _history_file(home).exists()
-    assert ai_chats.read_record(CID) is None
 
 
 @pytest.mark.asyncio
@@ -358,3 +357,87 @@ async def test_delete_refuses_an_id_that_leaves_the_conversations_folder(home):
 
     assert result["status"] == "error"
     assert victim.exists()
+
+
+# --- review fixes, 2026-10-20 -----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_import_ledger_is_moved_aside_and_the_import_goes_on(home):
+    ledger = home / ".dpc" / ai_chats.IMPORT_LEDGER
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text('{"imported": {"ai_chat_aaaa', encoding="utf-8")
+
+    result = await _service().import_ai_chats(chats={CID: UI_RECORD}, histories={CID: UI_HISTORY})
+
+    assert result["results"][0]["status"] == "imported"
+    aside = [p for p in ledger.parent.iterdir() if p.name.startswith(ai_chats.IMPORT_LEDGER + ".corrupt-")]
+    assert len(aside) == 1 and aside[0].read_text(encoding="utf-8") == '{"imported": {"ai_chat_aaaa'
+    assert CID in json.loads(ledger.read_text(encoding="utf-8"))["imported"]
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_of_the_wrong_shape_is_moved_aside_too(home):
+    ledger = home / ".dpc" / ai_chats.IMPORT_LEDGER
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text("[1, 2]", encoding="utf-8")
+
+    result = await _service().import_ai_chats(chats={CID: UI_RECORD}, histories={CID: UI_HISTORY})
+
+    assert result["results"][0]["status"] == "imported"
+    assert list(ledger.parent.glob(ai_chats.IMPORT_LEDGER + ".corrupt-*"))
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_that_cannot_be_moved_aside_is_not_written_over(home, monkeypatch):
+    ledger = home / ".dpc" / ai_chats.IMPORT_LEDGER
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text("{torn", encoding="utf-8")
+
+    def refuse(self, target):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(pathlib.Path, "rename", refuse)
+    result = await _service().import_ai_chats(chats={CID: UI_RECORD}, histories={CID: UI_HISTORY})
+
+    assert result["results"][0]["status"] == "failed"
+    assert ledger.read_text(encoding="utf-8") == "{torn"
+    assert not _history_file(home).exists()
+
+
+def test_one_record_with_a_bad_created_at_does_not_empty_the_list(home):
+    ai_chats.write_record("ai_chat_00000001", {"name": "good"})
+    bad = home / ".dpc" / "conversations" / "ai_chat_00000002"
+    bad.mkdir(parents=True)
+    (bad / "metadata.json").write_text(
+        json.dumps({"conversation_id": "ai_chat_00000002", "name": "hand edited", "created_at": 1760000000}),
+        encoding="utf-8")
+
+    listed = ai_chats.list_ai_chats()
+
+    assert {c["conversation_id"] for c in listed} == {"ai_chat_00000001", "ai_chat_00000002"}
+    assert next(c for c in listed if c["conversation_id"] == "ai_chat_00000002")["created_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_chat_is_still_listed_and_imports_later(home):
+    folder = home / ".dpc" / "conversations" / CID
+    folder.mkdir(parents=True)
+    settings = folder / "settings.json"
+    settings.write_text(json.dumps({"persist_history": False}), encoding="utf-8")
+
+    deferred = await _service().import_ai_chats(chats={CID: UI_RECORD}, histories={CID: UI_HISTORY})
+
+    assert deferred["results"][0]["status"] == "deferred"
+    assert not _history_file(home).exists()
+    assert [(c["conversation_id"], c["name"]) for c in ai_chats.list_ai_chats()] == [(CID, "qwen (q3)")]
+    assert ai_chats.read_record(CID)[ai_chats.HISTORY_IMPORT_PENDING] is True
+    shown = await _service().get_conversation_history(CID)  # what the UI asks for when the chat is opened
+    assert shown["status"] == "success" and shown["messages"] == []
+
+    settings.write_text(json.dumps({"persist_history": True}), encoding="utf-8")
+    later = await _service().import_ai_chats(chats={CID: UI_RECORD}, histories={CID: UI_HISTORY})
+
+    assert later["results"][0]["status"] == "imported" and later["results"][0]["messages_added"] == 2
+    assert [m["id"] for m in _stored(home)] == ["u1", "a1"]
+    assert ai_chats.HISTORY_IMPORT_PENDING not in ai_chats.read_record(CID)
