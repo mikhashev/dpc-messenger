@@ -11,6 +11,16 @@ class FileCancelHandler(MessageHandler):
     def command_name(self) -> str:
         return "FILE_CANCEL"
 
+    # A peer-supplied string that ends up on screen: bound it.
+    MAX_DENIAL_REASON_CHARS = 300
+
+    @classmethod
+    def _read_denial_reason(cls, payload: Dict[str, Any]) -> Optional[str]:
+        value = payload.get("denial_reason")
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()[:cls.MAX_DENIAL_REASON_CHARS]
+
     async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
         """
         Handle FILE_CANCEL message.
@@ -29,10 +39,12 @@ class FileCancelHandler(MessageHandler):
 
         Args:
             sender_node_id: Node ID of peer
-            payload: Contains transfer_id, reason
+            payload: Contains transfer_id, reason, and optionally denial_reason
+                (the receiver's prose for a firewall_denied; absent from older peers)
         """
         transfer_id = payload.get("transfer_id")
         reason = payload.get("reason", "unknown")
+        denial_reason = self._read_denial_reason(payload)
 
         self.logger.info(f"FILE_CANCEL from {sender_node_id} for transfer {transfer_id} (reason: {reason})")
 
@@ -44,13 +56,18 @@ class FileCancelHandler(MessageHandler):
         await file_transfer_manager.handle_file_cancel(sender_node_id, payload)
 
         # Broadcast cancellation event to UI
-        await self.service.local_api.broadcast_event("file_transfer_cancelled", {
+        event = {
             "transfer_id": transfer_id,
             "node_id": sender_node_id,
             "filename": transfer.filename if transfer else "unknown",
             "direction": transfer.direction if transfer else "unknown",
             "reason": reason,
             "status": "cancelled"
-        })
+        }
+        if denial_reason:
+            event["denial_reason"] = denial_reason
+        if transfer and transfer.group_id:
+            event["group_id"] = transfer.group_id
+        await self.service.local_api.broadcast_event("file_transfer_cancelled", event)
 
         return None

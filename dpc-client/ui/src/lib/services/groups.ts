@@ -10,6 +10,7 @@ import type {
     GroupDeletedEvent,
     GroupHistorySyncedEvent,
 } from '$lib/types';
+import { getLocalFileSize } from '$lib/fileSendTimeout';
 
 // Group state
 export const groupChats = writable<Map<string, GroupChat>>(new Map());
@@ -64,7 +65,7 @@ export async function sendGroupVoiceMessage(groupId: string, audioBase64: string
 }
 
 export async function sendGroupFile(groupId: string, filePath: string, sendCmd: SendCommandFn): Promise<any> {
-    return sendCmd('send_group_file', { group_id: groupId, file_path: filePath });
+    return sendCmd('send_group_file', { group_id: groupId, file_path: filePath, file_size_bytes: await getLocalFileSize(filePath) });
 }
 
 export async function addGroupMember(groupId: string, nodeId: string, sendCmd: SendCommandFn): Promise<any> {

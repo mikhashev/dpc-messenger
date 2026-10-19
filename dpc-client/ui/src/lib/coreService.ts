@@ -126,6 +126,7 @@ import { p2pMessages, unreadMessageCounts } from './services/messaging';
 import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries } from './services/providers';
 import { accountRowsFromBalances, accountLevel, balanceErrorText, providerTypeLabel, type AccountRow } from './components/inferenceSharing';
 import { showNotificationIfBackground } from './notificationService';
+import { fileSendTimeoutFor, getLocalFileSize } from './fileSendTimeout';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded } from './services/voice';
 import { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed } from './services/modelDownload';
@@ -1382,20 +1383,10 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // Image vision analysis timeout: 240s (v0.20.0+)
                     // Local vision models can be slow, especially on first load or with large images
                     timeout = 240000;
-                } else if (command === 'send_file') {
-                    // Dynamic timeout based on file size (v0.11.2+)
-                    const fileSizeBytes = payload.file_size_bytes || 0;
-                    const fileSizeGB = fileSizeBytes / (1024 * 1024 * 1024);
-
-                    // Formula: base (60s) + per_gb (40s/GB) + safety margin (20s)
-                    // Examples: 1GB=120s, 5GB=280s, 10GB=480s
-                    const baseTimeout = 60000;      // 60 seconds
-                    const perGBTimeout = 40000;     // 40 seconds per GB
-                    const safetyMargin = 20000;     // 20 seconds extra
-
-                    timeout = baseTimeout + (fileSizeGB * perGBTimeout) + safetyMargin;
-
-                    console.log(`File send timeout: ${Math.round(timeout/1000)}s for ${fileSizeGB.toFixed(2)}GB file`);
+                } else if (fileSendTimeoutFor(command, payload) !== null) {
+                    // send_file / send_group_file / send_group_image: scaled by file size (v0.11.2+)
+                    timeout = fileSendTimeoutFor(command, payload) as number;
+                    console.log(`File send timeout: ${Math.round(timeout/1000)}s for ${command}`);
                 }
 
                 const timeoutSeconds = timeout / 1000;
@@ -1554,16 +1545,8 @@ export function setActiveChat(chatId: string | null) {
 
 // File transfer helper functions (Week 1)
 export async function sendFile(nodeId: string, filePath: string): Promise<any> {
-    // Get file size for timeout calculation (v0.11.2+)
-    let fileSizeBytes = 0;
-    try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const metadata = await invoke('get_file_metadata', { path: filePath });
-        fileSizeBytes = (metadata as any).size;
-    } catch (e) {
-        console.warn('Could not get file size for timeout calculation:', e);
-        // Continue anyway - backend will use default timeout
-    }
+    // Get file size for timeout calculation (v0.11.2+); 0 makes the backend wait the default
+    const fileSizeBytes = await getLocalFileSize(filePath);
 
     return sendCommand('send_file', {
         node_id: nodeId,
@@ -1740,7 +1723,8 @@ export async function sendGroupVoiceMessage(groupId: string, audioBase64: string
 export async function sendGroupFile(groupId: string, filePath: string): Promise<any> {
     return sendCommand('send_group_file', {
         group_id: groupId,
-        file_path: filePath
+        file_path: filePath,
+        file_size_bytes: await getLocalFileSize(filePath)
     });
 }
 

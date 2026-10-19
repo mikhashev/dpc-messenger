@@ -6,6 +6,7 @@
   import type { Writable } from 'svelte/store';
   import { get } from 'svelte/store';
   import FileTransferUI from '$lib/components/FileTransferUI.svelte';
+  import { cancelReasonText, refusalNotice } from '$lib/fileTransferNotice';
   import VoiceRecorder from '$lib/components/VoiceRecorder.svelte';
   import TokenWarningBanner from '$lib/components/TokenWarningBanner.svelte';
   import ProviderRetryBanner from '$lib/components/ProviderRetryBanner.svelte';
@@ -305,16 +306,33 @@
     }
   });
 
-  // File transfer cancelled toast
+  // File transfer cancelled toast (and, for a refusal with a stated reason, a chat line)
+  let lastRefusalNoticeId = '';
   $effect(() => {
     if ($fileTransferCancelled) {
-      const { filename, reason } = $fileTransferCancelled;
+      const cancelled = $fileTransferCancelled;
+      const { filename } = cancelled;
+      const reason = cancelReasonText(cancelled);
       fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
       showFileOfferToast = true;
       setTimeout(() => (showFileOfferToast = false), 5000);
       (async () => {
         await showNotificationIfBackground({ title: 'Transfer Cancelled', body: `${filename} (${reason})` });
       })();
+      // The toast is gone in 5 s; the receiver's sentence stays in the chat. Guarded by
+      // transfer id because the effect also re-runs when a prop it reads changes.
+      if (cancelled.transfer_id !== lastRefusalNoticeId) {
+        const notice = refusalNotice(cancelled, (id) => peerDisplayNames.get(id));
+        if (notice) {
+          lastRefusalNoticeId = cancelled.transfer_id;
+          chatHistories.update(h => {
+            const m = new Map(h);
+            const hist = m.get(notice.chatId) || [];
+            m.set(notice.chatId, [...hist, { id: crypto.randomUUID(), sender: 'system', text: notice.text, timestamp: Date.now() }]);
+            return m;
+          });
+        }
+      }
     }
   });
 

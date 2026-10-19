@@ -117,13 +117,18 @@ class FileOfferHandler(MessageHandler):
             self.logger.warning(
                 f"{transfer_type} transfer denied by firewall from {sender_node_id}: {denial_reason}"
             )
-            # Send FILE_CANCEL (rejected)
+            # Send FILE_CANCEL (rejected). `denial_reason` is the prose behind the
+            # `firewall_denied` word (rule, size limit or MIME type), so the sender
+            # can tell the user why; an older peer ignores the field.
+            cancel_payload = {
+                "transfer_id": transfer_id,
+                "reason": "firewall_denied"
+            }
+            if denial_reason:
+                cancel_payload["denial_reason"] = str(denial_reason)
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "FILE_CANCEL",
-                "payload": {
-                    "transfer_id": transfer_id,
-                    "reason": "firewall_denied"
-                }
+                "payload": cancel_payload
             })
             return None
 

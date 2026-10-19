@@ -365,6 +365,11 @@ export interface FileTransferCancelledEvent {
     transfer_id: string;
     reason: string;
     filename?: string;
+    node_id?: string;
+    direction?: string;
+    group_id?: string;
+    /** The receiver's own sentence behind `firewall_denied`; absent from an older peer. */
+    denial_reason?: string;
 }
 
 export interface FilePreparationStartedEvent {

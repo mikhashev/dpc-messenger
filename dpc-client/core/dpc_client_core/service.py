@@ -7015,12 +7015,17 @@ class CoreService:
             logger.error("Error deleting group: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def send_group_file(self, group_id: str, file_path: str) -> Dict[str, Any]:
+    async def send_group_file(
+        self, group_id: str, file_path: str, file_size_bytes: int = None
+    ) -> Dict[str, Any]:
         """Send a file to all group members via fan-out file transfer.
+
+        The file is hashed once for the whole fan-out, not once per member.
 
         Args:
             group_id: Target group ID
             file_path: Path to file to send
+            file_size_bytes: Size the UI measured; it only sizes the UI's command timeout
         """
         try:
             group = self.group_manager.get_group(group_id)
@@ -7034,6 +7039,7 @@ class CoreService:
 
             connected_peers = self.p2p_coordinator.get_connected_peers()
             transfer_ids = []
+            fingerprint = None  # (file hash, chunk hashes), computed for the first member only
 
             for node_id in group.members:
                 if node_id == self.p2p_manager.node_id:
@@ -7043,10 +7049,14 @@ class CoreService:
                     continue
 
                 try:
+                    if fingerprint is None:
+                        fingerprint = await self.file_transfer_manager.compute_file_fingerprint(path)
                     tid = await self.file_transfer_manager.send_file(
                         node_id=node_id,
                         file_path=path,
-                        group_id=group_id
+                        group_id=group_id,
+                        file_hash=fingerprint[0],
+                        chunk_hashes=fingerprint[1]
                     )
                     transfer_ids.append(tid)
                 except Exception as e:
@@ -7237,6 +7247,7 @@ class CoreService:
             # Fan-out to connected members
             connected_peers = self.p2p_coordinator.get_connected_peers()
             transfer_ids = []
+            fingerprint = None  # hashed once for the whole fan-out
 
             for node_id in group.members:
                 if node_id == self.p2p_manager.node_id:
@@ -7245,11 +7256,15 @@ class CoreService:
                     continue
 
                 try:
+                    if fingerprint is None:
+                        fingerprint = await self.file_transfer_manager.compute_file_fingerprint(file_path)
                     tid = await self.file_transfer_manager.send_file(
                         node_id=node_id,
                         file_path=file_path,
                         image_metadata=image_metadata,
-                        group_id=group_id
+                        group_id=group_id,
+                        file_hash=fingerprint[0],
+                        chunk_hashes=fingerprint[1]
                     )
                     transfer_ids.append(tid)
                 except Exception as e:
