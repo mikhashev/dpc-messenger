@@ -18,6 +18,7 @@
     deleteConversation,
   } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
+  import { resolveNewChatTarget, defaultAgentLlmAlias } from '$lib/utils/newChatTarget';
 
   // ---------------------------------------------------------------------------
   // Types
@@ -121,6 +122,8 @@
     selectedProviderForNewChat = 'dpc_agent';
     selectedInstructionSetForNewChat = availableInstructionSets?.default || 'general';
     selectedProfileForNewAgent = 'default';
+    // The host survives a finished dialog; a peer's model is not the local one.
+    if (selectedDialogComputeHost !== 'local') onHostChange(selectedDialogComputeHost);
     showAddAIChatDialog = true;
   }
 
@@ -128,17 +131,36 @@
   // Handlers
   // ---------------------------------------------------------------------------
 
+  function providersOfHost(host: string): any[] {
+    return host === 'local'
+      ? ($availableProviders?.providers ?? [])
+      : ($peerProviders.get(host) ?? []);
+  }
+
+  // The agent's LLM select lists the host's models; one left over from another
+  // host is not in the list, and Create would send it.
+  function onHostChange(host: string) {
+    selectedAgentLLMProvider = defaultAgentLlmAlias(providersOfHost(host));
+  }
+
   async function confirmAddAIChat() {
     if (!selectedProviderForNewChat) return;
 
-    const dialogProviders = selectedDialogComputeHost === 'local'
-      ? $availableProviders.providers
-      : ($peerProviders.get(selectedDialogComputeHost) ?? []);
-    const provider = dialogProviders.find((p: any) => p.alias === selectedProviderForNewChat);
-    if (!provider) {
-      alert(`Provider '${selectedProviderForNewChat}' not found.`);
+    const peer = $nodeStatus?.peer_info?.find((p: any) => p.node_id === selectedDialogComputeHost);
+    const target = resolveNewChatTarget({
+      chatProvider: selectedProviderForNewChat,
+      llmAlias: selectedAgentLLMProvider,
+      host: selectedDialogComputeHost,
+      hostLabel: peer?.name || undefined,
+      localProviders: $availableProviders?.providers ?? [],
+      hostProviders: providersOfHost(selectedDialogComputeHost),
+      defaultProvider: $availableProviders?.default_provider,
+    });
+    if (!target.ok) {
+      alert(target.message);
       return;
     }
+    const provider = target.provider;
 
     let chatName: string;
     if (selectedProviderForNewChat === 'dpc_agent') {
@@ -151,19 +173,14 @@
 
     if (selectedProviderForNewChat === 'dpc_agent') {
       try {
-        const llmProviderAlias = selectedAgentLLMProvider || $availableProviders?.default_provider || 'dpc_agent';
-        const llmProviderList = selectedDialogComputeHost === 'local'
-          ? $availableProviders.providers
-          : ($peerProviders.get(selectedDialogComputeHost) ?? []);
-        const llmProviderInfo = llmProviderList.find((p: any) => p.alias === llmProviderAlias);
         const result = await createAgent(
           chatName,
-          llmProviderAlias,
+          target.agentLlmAlias,
           selectedProfileForNewAgent,
           'general',
           50.0, 200,
-          selectedDialogComputeHost !== 'local' ? selectedDialogComputeHost : undefined,
-          llmProviderInfo?.context_window,
+          target.computeHost,
+          target.contextWindow,
           selectedRetrievalVector,
           selectedRetrievalText,
         );
@@ -428,7 +445,7 @@
       {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
         <div class="dialog-provider-selector">
           <label for="new-chat-ai-host">AI Host:</label>
-          <select id="new-chat-ai-host" bind:value={selectedDialogComputeHost}>
+          <select id="new-chat-ai-host" bind:value={selectedDialogComputeHost} onchange={(e) => onHostChange(e.currentTarget.value)}>
             <option value="local">Local</option>
             {#each $nodeStatus.peer_info as peer}
               <option value={peer.node_id}>
@@ -443,7 +460,7 @@
         <div class="dialog-provider-selector">
           <label for="new-chat-provider">Chat Type:</label>
           <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
-            {#each (selectedDialogComputeHost === 'local' ? $availableProviders.providers : ($peerProviders.get(selectedDialogComputeHost) ?? [])) as provider}
+            {#each providersOfHost(selectedDialogComputeHost) as provider}
               <option value={provider.alias}>
                 {#if provider.alias === 'dpc_agent'}
                   DPC Agent (Autonomous AI with tools)
@@ -472,7 +489,7 @@
         <div class="dialog-provider-selector">
           <label for="new-chat-llm-provider">AI Model (LLM):</label>
           <select id="new-chat-llm-provider" bind:value={selectedAgentLLMProvider}>
-            {#each (selectedDialogComputeHost === 'local' ? $availableProviders.providers : ($peerProviders.get(selectedDialogComputeHost) ?? [])) as provider}
+            {#each providersOfHost(selectedDialogComputeHost) as provider}
               {#if provider.alias !== 'dpc_agent'}
                 <option value={provider.alias}>
                   {provider.alias} - {provider.model}
