@@ -15,7 +15,8 @@
   import { isProviderDraftFilled, validateProviderDraftForAdd, suggestProviderAlias } from '$lib/utils/providerDraft';
   import {
     STRATA_MODEL_PARAMS, parseModelParam, modelParamText, basePlaceholder, pleAfterNativeChange,
-    versionDiffers, cacheSummaryLine, type StrataParamSpec,
+    versionDiffers, cacheSummaryLine, freeCommitLine, type StrataParamSpec,
+    type FreeCommitReading,
   } from '$lib/utils/strataFields';
 
   export let open: boolean = false;
@@ -400,7 +401,7 @@
 
   // The local engines' state (local_engine_status): the card holder and each
   // strata alias's supervisor. Read only; loading it never starts an engine.
-  let engineStatus: { card_holder: any; strata: any[] } | null = null;
+  let engineStatus: { card_holder: any; strata: any[]; free_commit: FreeCommitReading | null } | null = null;
   let engineStatusError = '';
   let engineStatusLoading = false;
   let engineActionBusy = '';
@@ -410,7 +411,7 @@
     try {
       const r = await sendCommand('local_engine_status', {});
       if (r?.status === 'success') {
-        engineStatus = { card_holder: r.card_holder ?? null, strata: r.strata ?? [] };
+        engineStatus = { card_holder: r.card_holder ?? null, strata: r.strata ?? [], free_commit: r.free_commit ?? null };
         engineStatusError = '';
       } else {
         engineStatusError = r?.message || 'Could not read the local engines';
@@ -2564,6 +2565,7 @@
                         larger page file. The pair here is <strong>a measurement on this machine</strong>, not a
                         default — there is none{sp.tested_version_date ? `; this alias was tested ${sp.tested_version_date}` : ''}.
                         Re-measure after changing the page file, the model or the server window.
+                        <br />Now: {freeCommitLine(engineStatus ? engineStatus.free_commit : undefined)}.
                       </p>
 
                       <div class="form-group strata-pair">

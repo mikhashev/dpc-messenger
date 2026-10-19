@@ -14,6 +14,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from ..managers.commit_memory import read_free_commit
 from ..managers.llama_server_supervisor import effort_dictionary_of
 from ..managers.strata_supervisor import (
     StrataSupervisor, peer_being_served, reasoning_effort_error, strata_chat_template,
@@ -346,13 +347,16 @@ async def strata_status(sup: StrataSupervisor, metrics_timeout_s: float = 3.0) -
 
 
 async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
-    """Who holds the card, and every Strata alias's supervisor state. Read-only."""
+    """Who holds the card, and every Strata alias's supervisor state. Read-only.
+
+    `free_commit` is the host's GlobalMemoryStatusEx reading (commit_memory),
+    None off Windows: the conversation cache's hint names it (ADR-044)."""
     strata = [
         await strata_status(sup, metrics_timeout_s)
         for sup in list(_ACTIVE_SUPERVISORS.values())
         if isinstance(sup, StrataSupervisor)
     ]
-    return {"card_holder": card_holder(), "strata": strata}
+    return {"card_holder": card_holder(), "strata": strata, "free_commit": read_free_commit()}
 
 
 def strata_supervisor_of(alias: str) -> Optional[StrataSupervisor]:

@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from . import llama_server_supervisor as _base
+from .commit_memory import describe_free_commit, read_free_commit
 from .llama_server_supervisor import LlamaServerError, LlamaServerSupervisor, _free_port
 
 logger = logging.getLogger(__name__)
@@ -558,6 +559,26 @@ _COMMIT_LIMIT_NOTE = (
     "with an NTSTATUS code and no message"
 )
 
+
+def _commit_note(before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any]]) -> str:
+    """The commit-limit explanation of a death, with what GlobalMemoryStatusEx read.
+
+    `before` is the last reading the supervisor took (its `at` is monotonic),
+    `after` one taken now. Without either it is `_COMMIT_LIMIT_NOTE` and the
+    words that nothing was measured; the numbers are stated, never judged."""
+    if before is None and after is None:
+        return f"{_COMMIT_LIMIT_NOTE}; {describe_free_commit(None)}"
+    parts = []
+    if before is not None:
+        ago = max(0.0, time.monotonic() - float(before.get("at") or time.monotonic()))
+        parts.append(f"{describe_free_commit(before)} {ago:.0f} s before the death")
+    if after is not None:
+        parts.append(f"{describe_free_commit(after)} after it")
+    return (
+        "the Windows commit limit (RAM + page file) is where Strata can exit with an "
+        "NTSTATUS code and no message: " + "; ".join(parts)
+    )
+
 # Strata's own words for an engine that died (serve/server.py: EngineDied,
 # engine_exit_words, and the restart line).
 _EXIT_CODE_RE = re.compile(r"exit code\s+(-?0x[0-9A-Fa-f]+|-?\d+|None)(?::\s*([^)\n;]+))?")
@@ -679,6 +700,10 @@ class StrataSupervisor(LlamaServerSupervisor):
         self.vram_released: Optional[bool] = None
         self.last_stop_vram: Dict[str, Any] = {}
         self._vram_free_before: Optional[int] = None
+        # The last GlobalMemoryStatusEx reading (commit_memory) with `at`
+        # (monotonic): taken at the start and on every engine-watch poll, so a
+        # death is explained with what was free just before it.
+        self.last_free_commit: Optional[Dict[str, Any]] = None
         self._watch_task: Optional[asyncio.Task] = None
         # The start config the last launch used; the UI shows it (point 6).
         self.start_config_used: Optional[Path] = None
@@ -981,14 +1006,21 @@ class StrataSupervisor(LlamaServerSupervisor):
             creationflags=_base._CREATION_NEW_PROCESS_GROUP,
         )
 
+    def _sample_free_commit(self) -> Optional[Dict[str, Any]]:
+        reading = read_free_commit()
+        if reading is not None:
+            self.last_free_commit = {**reading, "at": time.monotonic()}
+        return reading
+
     def log_start(self, cache_type, env, binary=None) -> None:
         c = self.config
         logger.info(
             "strata[%s] starting on :%s (python=%s, config=%s, base=%s, "
-            "conversation_cache_mib=%s, conversation_cache_slots=%s, max_context=%s, "
+            "conversation_cache_mib=%s beside %s, conversation_cache_slots=%s, max_context=%s, "
             "context_window=%s, vision=%s, control_vector=%s, tested_version=%s%s)",
             self.alias, self.port, binary, self.start_config_used,
             c.get("strata_base_config"), c.get("conversation_cache_mib"),
+            describe_free_commit(self._sample_free_commit()),
             _base._fmt_knob(c.get("conversation_cache_slots")),
             _base._fmt_knob(c.get("max_context")), _base._fmt_knob(c.get("context_window")),
             "base config" if c.get("vision") is None else c.get("vision"),
@@ -1275,6 +1307,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             if proc.returncode is not None:
                 await self._fail_closed(f"the launcher exited on its own with {proc.returncode}")
                 return
+            self._sample_free_commit()
             try:
                 metrics = await self._get("/metrics")
             except Exception as e:
@@ -1323,10 +1356,12 @@ class StrataSupervisor(LlamaServerSupervisor):
             words = exit_code_words(body or "") or next(
                 (w for w in (exit_code_words(line) for line in reversed(tail)) if w), None
             )
-            reason = f"{observed}; {words or 'no exit code reported'}; {_COMMIT_LIMIT_NOTE}"
+            before, after = self.last_free_commit, read_free_commit()
+            reason = f"{observed}; {words or 'no exit code reported'}; {_commit_note(before, after)}"
         self.failure = {
             "reason": reason,
             "exit_code": words,
+            "free_commit": None if note is not None else {"before": before, "after": after},
             "observed": observed,
             "at": time.time(),
             "log_tail": tail[-12:],

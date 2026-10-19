@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   STRATA_MODEL_PARAMS, suggestPleGguf, pleAfterNativeChange, parseModelParam, modelParamText,
-  basePlaceholder, versionDiffers, cacheSummaryLine, formatMib,
+  basePlaceholder, versionDiffers, cacheSummaryLine, formatMib, freeCommitLine,
 } from './strataFields';
 
 const spec = (key: string) => STRATA_MODEL_PARAMS.find((s) => s.key === key)!;
@@ -97,5 +97,14 @@ describe('status formatting', () => {
     expect(cacheSummaryLine({ enabled: false })).toBe('off');
     expect(cacheSummaryLine(null)).toBe('not reported');
     expect(formatMib(undefined)).toBe('—');
+  });
+
+  it('names the free commit metric, commit first', () => {
+    expect(freeCommitLine({ avail_page_file_mib: 3686, total_page_file_mib: 108236,
+      avail_phys_mib: 11305, total_phys_mib: 63168 }))
+      .toBe('free commit (GlobalMemoryStatusEx ullAvailPageFile) 3,686 of 108,236 MiB; '
+        + 'free physical (ullAvailPhys) 11,305 of 63,168 MiB');
+    expect(freeCommitLine(null)).toBe('free commit (GlobalMemoryStatusEx): not measured on this OS');
+    expect(freeCommitLine(undefined)).toContain('not read yet');
   });
 });

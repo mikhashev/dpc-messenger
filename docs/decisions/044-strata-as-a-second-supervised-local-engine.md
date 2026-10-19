@@ -250,9 +250,13 @@ scheduler.
   prefill. Not measured; its compatibility with the conversation cache is not checked.
 - **`contain()` on this machine** — whether the job object applies; `stop`'s VRAM check
   (point 2) is the guard either way.
-- **Two commit metrics disagree** — `GetPerformanceInfo` and `GlobalMemoryStatusEx`
-  differed in the gate runs and are not reconciled; the UI hint must name which one it
-  reads.
+- **Two commit metrics disagree — closed (Mike's call, 2026-10-19): `GlobalMemoryStatusEx`.**
+  ~~`GetPerformanceInfo` and `GlobalMemoryStatusEx` differed in the gate runs and are not
+  reconciled; the UI hint must name which one it reads.~~ The reference is free commit,
+  `ullAvailPageFile` of `ullTotalPageFile`, the reading that predicted the gate run's
+  death; `managers/commit_memory.py` reads it on Windows (nothing elsewhere), and the
+  start log line, the engine-death reason and the cache hint print it by field name,
+  with `ullAvailPhys` after it.
 - **Vision smoke** — one image request to Strata; on failure, vision off (point 8).
 - **A conversation beyond what fits** is untested past the watchdog stop; the page-file
   size it would need is the owner's machine setting, not a DPC default.
