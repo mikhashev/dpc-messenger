@@ -635,6 +635,13 @@ def exit_code_words(text: str) -> Optional[str]:
     return out + (f": {words.strip()}" if words.strip() else "")
 
 
+# The engine's two ways of giving a conversation up (copied from its log):
+#   conversation cache: evicted 1 parked conversation to admit this snapshot (...)
+#   skip parking (snapshot ... exceeds available budget)
+_CACHE_LOSS_RE = re.compile(r"evicted \d+ parked conversation|skip parking")
+_CACHE_LOSS_SHOWN = 3
+
+
 def _positive(name: str, value: Any) -> int:
     try:
         return _base._positive_int(name, value)
@@ -661,6 +668,8 @@ class StrataSupervisor(LlamaServerSupervisor):
         # The engine's own log (the start config's "log"): the launcher opens
         # it itself, so it cannot share the file this process captures.
         self._engine_log_path = _base.DPC_HOME / "logs" / f"strata-{safe}-engine.log"
+        # Where the cache-loss scan stopped in that file; None until primed.
+        self._engine_scan_offset: Optional[int] = None
         # A recorded engine death. While set, ensure_running refuses: DPC
         # never relaunches after it stopped the launcher on a death.
         self.failure: Optional[Dict[str, Any]] = None
@@ -1347,6 +1356,72 @@ class StrataSupervisor(LlamaServerSupervisor):
             return lines[-n:]
         except OSError:
             return []
+
+    # --- the conversation cache, read where Strata says it ----------------------
+
+    def prime_restore_scan(self) -> None:
+        """Watch the engine log from here on; the launcher log is primed beside it.
+
+        The base primes `_log_path`, which for Strata is the launcher's stdout
+        and never carries a cache event. Called at launch by the base `_launch`.
+        """
+        super().prime_restore_scan()
+        try:
+            self._engine_scan_offset = self._engine_log_path.stat().st_size
+        except OSError:
+            self._engine_scan_offset = 0
+
+    def new_cache_losses(self) -> List[str]:
+        """Engine-log lines since the last scan where the cache gave a conversation up.
+
+        Two events, both of which end in a re-prefill on a later call: a parked
+        conversation evicted to admit a snapshot, and a snapshot not parked at
+        all. `borrowed`, `parked` and `dropped ... superseded copy` lines are the
+        cache working, not losing, and are left out. Only whole lines are taken:
+        the cursor stops after the last newline, so a line the engine is still
+        writing is read next time, complete.
+        """
+        offset = self._engine_scan_offset
+        if offset is None:
+            self.prime_restore_scan()
+            return []
+        try:
+            with open(self._engine_log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                # The file shrank — rotated or truncated under us: watch what is
+                # there now, including its first byte.
+                start = 0 if offset > size else offset
+                f.seek(start)
+                data = f.read(self._SCAN_CHUNK)
+        except OSError:
+            return []
+        whole = data.rfind(b"\n") + 1
+        if whole == 0 and len(data) == self._SCAN_CHUNK:
+            whole = len(data)  # one line longer than the cap must not stall the cursor
+        self._engine_scan_offset = start + whole
+        return [
+            line.strip()
+            for line in data[:whole].decode("utf-8", errors="replace").splitlines()
+            if _CACHE_LOSS_RE.search(line)
+        ]
+
+    def log_restore_refusals(self) -> int:
+        """Say what the conversation cache gave up since the last call; INFO.
+
+        Keeps the base name because the provider asks for it by that name after
+        every call; the count is the number of events, not of calls.
+        """
+        lost = self.new_cache_losses()
+        if lost:
+            shown = [line[:300] for line in lost[:_CACHE_LOSS_SHOWN]]
+            more = len(lost) - len(shown)
+            logger.info(
+                "strata[%s]: %d conversation-cache loss(es) since the last call: %s%s",
+                self.alias, len(lost), " | ".join(shown),
+                f" (+{more} more in the engine log)" if more > 0 else "",
+            )
+        return len(lost)
 
     def peer_slot_refusal(self) -> Optional[str]:
         """The peer policy's synchronous half, asked again at the call boundary.
