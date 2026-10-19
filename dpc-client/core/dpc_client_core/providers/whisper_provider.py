@@ -429,6 +429,13 @@ class LocalWhisperProvider(AIProvider):
             return 0.0
 
     @staticmethod
+    def _realtime_ratio(duration_seconds: float, elapsed: float) -> str:
+        """Audio seconds per wall second, for the log line; "n/a" when the clock did not advance."""
+        if elapsed <= 0:
+            return "n/a"
+        return f"{duration_seconds / elapsed:.1f}x"
+
+    @staticmethod
     def _segments_from_chunks(chunks: Any, duration_seconds: float) -> List[Dict[str, Any]]:
         """Normalise HF pipeline chunks into {start, end, text} segments.
 
@@ -517,7 +524,7 @@ class LocalWhisperProvider(AIProvider):
                 text = result.get("text", "").strip()
                 detected_language = result.get("language", "unknown")
 
-                logger.info(f"MLX transcription completed in {elapsed:.1f}s ({duration_seconds/elapsed:.1f}x real-time): {len(text)} chars")
+                logger.info(f"MLX transcription completed in {elapsed:.1f}s ({self._realtime_ratio(duration_seconds, elapsed)} real-time): {len(text)} chars")
 
                 return {
                     "text": text,
@@ -587,7 +594,7 @@ class LocalWhisperProvider(AIProvider):
 
                 segments = self._segments_from_chunks(chunks_list, duration_seconds)
 
-                logger.info(f"Local transcription completed in {elapsed:.1f}s ({duration_seconds/elapsed:.1f}x real-time): {len(text)} chars")
+                logger.info(f"Local transcription completed in {elapsed:.1f}s ({self._realtime_ratio(duration_seconds, elapsed)} real-time): {len(text)} chars")
 
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()

@@ -179,3 +179,63 @@ class TestPipelineIsAskedForTimestamps:
         ]
         assert result["duration"] == 20.0
         assert result["provider"] == "local_whisper"
+
+
+class TestZeroElapsedTimeDoesNotDivide:
+    """A clock that has not advanced (Windows resolution) must not crash the log line."""
+
+    @pytest.mark.asyncio
+    async def test_pytorch_path_survives_zero_elapsed(self, monkeypatch):
+        import asyncio
+        import sys
+        import types
+
+        class FakePipeline:
+            def __call__(self, audio_array, **kwargs):
+                return {"text": " hi", "chunks": [{"timestamp": (0.0, 1.0), "text": " hi"}]}
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+        fake_librosa = types.ModuleType("librosa")
+        fake_librosa.load = lambda path, sr=16000: ([0.0] * (16000 * 2), 16000)
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+        monkeypatch.setitem(sys.modules, "librosa", fake_librosa)
+        monkeypatch.setattr(
+            asyncio, "get_event_loop", lambda: types.SimpleNamespace(time=lambda: 5.0)
+        )
+
+        provider = make()
+        provider.model_loaded = True
+        provider.pipeline = FakePipeline()
+
+        result = await provider.transcribe("any.ogg")
+
+        assert result["text"] == "hi"
+
+    @pytest.mark.asyncio
+    async def test_mlx_path_survives_zero_elapsed(self, monkeypatch):
+        import asyncio
+        import sys
+        import types
+
+        fake_mlx = types.ModuleType("mlx_whisper")
+        fake_mlx.transcribe = lambda *a, **k: {"text": " hi", "language": "en", "segments": []}
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+        fake_librosa = types.ModuleType("librosa")
+        fake_librosa.load = lambda path, sr=16000: ([0.0] * (16000 * 2), 16000)
+        monkeypatch.setitem(sys.modules, "mlx_whisper", fake_mlx)
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+        monkeypatch.setitem(sys.modules, "librosa", fake_librosa)
+        monkeypatch.setattr(
+            asyncio, "get_event_loop", lambda: types.SimpleNamespace(time=lambda: 5.0)
+        )
+
+        provider = make()
+        provider.model_loaded = True
+        provider.pipeline = "mlx"
+
+        result = await provider.transcribe("any.ogg")
+
+        assert result["text"] == "hi"
+        assert result["provider"] == "local_whisper_mlx"
