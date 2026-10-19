@@ -723,23 +723,45 @@ class LlamaServerProvider(DeepSeekProvider):
         if max_tokens is not None:
             usage["max_tokens"] = max_tokens
         self._last_usage = usage
+        # The engine's own per-task timings give every path the phase
+        # split, not just the streaming one: the agents' tools path has no
+        # first-chunk boundary. The response carries them for the call that
+        # asked, so there is nothing to attribute; the log scrape stays as a
+        # fallback for a build that does not send them, and it is the one
+        # that cannot tell two concurrent tasks apart.
+        #
+        # Read outside the client-clock guard below: the counters and the raw
+        # milliseconds are the engine's word and depend on no clock of ours, so
+        # a call whose wall-clock reads zero or was never taken (a stub, a
+        # coarse timer) must not erase them from the row.
+        timings = _timings_from_response(engine_timings)
+        if timings is None and hasattr(self.supervisor, "last_task_timings"):
+            try:
+                timings = self.supervisor.last_task_timings()
+            except Exception:
+                timings = None
+        if timings:
+            for key in ("prompt_ms", "predicted_ms"):
+                if key in timings:
+                    usage[key] = timings[key]
+            # What the engine re-evaluated against what we sent. The
+            # response states the reused count outright; from the log it can
+            # only be derived, because the child logs a prompt-cache load
+            # solely when it FAILS (server-context.cpp:328, b10809).
+            prefilled = timings.get("engine_prompt_tokens")
+            if prefilled is not None and usage["prompt_tokens"] > 0:
+                usage["prefilled_tokens"] = prefilled
+                reused = timings.get("engine_cached_tokens")
+                usage["cached_tokens"] = (
+                    reused if reused is not None
+                    else max(0, usage["prompt_tokens"] - prefilled)
+                )
+        # The speed payload is derived from OUR clock, so it alone waits for it.
         if elapsed_s is not None and elapsed_s > 0:
             speed = self._speed_payload(
                 usage["prompt_tokens"], usage["completion_tokens"],
                 elapsed_s, t_first_chunk_s, self.alias, self.model or "",
             )
-            # The engine's own per-task timings give every path the phase
-            # split, not just the streaming one: the agents' tools path has no
-            # first-chunk boundary. The response carries them for the call that
-            # asked, so there is nothing to attribute; the log scrape stays as a
-            # fallback for a build that does not send them, and it is the one
-            # that cannot tell two concurrent tasks apart.
-            timings = _timings_from_response(engine_timings)
-            if timings is None and hasattr(self.supervisor, "last_task_timings"):
-                try:
-                    timings = self.supervisor.last_task_timings()
-                except Exception:
-                    timings = None
             if timings:
                 if "prefill_tok_s" in timings and "decode_tok_s" in timings:
                     speed.update({
@@ -747,21 +769,6 @@ class LlamaServerProvider(DeepSeekProvider):
                         "decode_tok_s": timings["decode_tok_s"],
                         "speed_source": "engine",
                     })
-                for key in ("prompt_ms", "predicted_ms"):
-                    if key in timings:
-                        usage[key] = timings[key]
-                # What the engine re-evaluated against what we sent. The
-                # response states the reused count outright; from the log it can
-                # only be derived, because the child logs a prompt-cache load
-                # solely when it FAILS (server-context.cpp:328, b10809).
-                prefilled = timings.get("engine_prompt_tokens")
-                if prefilled is not None and usage["prompt_tokens"] > 0:
-                    usage["prefilled_tokens"] = prefilled
-                    reused = timings.get("engine_cached_tokens")
-                    usage["cached_tokens"] = (
-                        reused if reused is not None
-                        else max(0, usage["prompt_tokens"] - prefilled)
-                    )
                 # Speculation was measured once, on one synthetic prompt, and the
                 # figure decided a default. The child has been printing its own
                 # counters per task all along; carrying them here makes the knob
