@@ -14,6 +14,8 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from dpc_protocol.protocol import ENGINE_STATE_STARTING
+
 from ..managers import llama_server_supervisor as _base
 from ..managers.commit_memory import read_free_commit
 from ..managers.llama_server_supervisor import effort_dictionary_of
@@ -46,6 +48,19 @@ _STRATA_FLAG_KEYS = (
     "native_gguf", "ple_gguf", "pack_dir", "mtp_dir", "expert_profile", "mmproj",
     "control_vector_file",
 )
+
+
+class StartingRefusal(str):
+    """The peer policy's answer while the launcher is starting: the text, and
+    the state word the P2P door sends beside it as `engine_state` (DPTP v1.9).
+
+    A `str`, because `peer_refusal` has always answered a text and every reader
+    of it compares or prints one; the door alone asks for `engine_state`. The
+    state rides on the answer rather than being read again at the door,
+    because a start the policy has just begun is not yet visible as
+    `starting` to a second look."""
+
+    engine_state = ENGINE_STATE_STARTING
 
 
 class StrataProvider(LlamaServerProvider):
@@ -209,7 +224,9 @@ class StrataProvider(LlamaServerProvider):
         return refusal
 
     def _loading(self) -> str:
-        return f"'{self.alias}' is loading (the Strata launcher is starting); try again shortly"
+        return StartingRefusal(
+            f"'{self.alias}' is loading (the Strata launcher is starting); try again shortly"
+        )
 
     async def _peer_refusal_now(self, peer_id: Optional[str] = None) -> Optional[str]:
         sup = self.supervisor

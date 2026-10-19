@@ -1193,8 +1193,12 @@ class DpcAgentManager:
             _has_content = response and response.strip() != _THINKING_FALLBACK
             _has_extras = _thinking or _streaming_raw
 
-            # Skip saving agent errors to history — they pollute context for future requests
-            _is_llm_error = response and response.startswith("⚠️")
+            # Skip saving agent errors to history — they pollute context for future requests.
+            # A host's refusal ends the turn with a notice that is no error and
+            # carries no prefix; the loop's trace names it, and it is kept out
+            # of the history for the same reason.
+            _peer_refused = (getattr(agent, '_last_trace', None) or {}).get("peer_refused")
+            _is_llm_error = bool(response and (response.startswith("⚠️") or _peer_refused))
             _is_empty_after_retry = not response and not _has_extras
 
             if _is_empty_after_retry:
@@ -1218,6 +1222,8 @@ class DpcAgentManager:
                     tool_calls=_tool_calls_for_msg if _tool_calls_for_msg else None,
                 )
                 monitor.save_history()  # Save to disk immediately
+            elif _peer_refused:
+                log.info("Host refusal notice not saved to history: %s", response[:100])
             elif _is_llm_error:
                 log.warning(f"LLM error not saved to history: {response[:100]}")
 

@@ -142,6 +142,12 @@ class RemoteInferenceResponseHandler(MessageHandler):
         retry_after_sec = payload.get("retry_after_sec")
         if not isinstance(retry_after_sec, (int, float)) or isinstance(retry_after_sec, bool):
             retry_after_sec = None
+        # v1.9: the host engine's state word beside a refusal (`starting` while
+        # the model loads). Carried like `code`: a word this node cannot place
+        # is read as absent by whoever reads it, and a non-string is no word.
+        engine_state = payload.get("engine_state")
+        if not isinstance(engine_state, str):
+            engine_state = ""
 
         # Extract token metadata
         tokens_used = payload.get("tokens_used")
@@ -228,6 +234,7 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         PeerRefused(
                             error or "Remote inference failed", code=code,
                             retry_after_sec=retry_after_sec,
+                            engine_state=engine_state,
                         )
                     )
             else:

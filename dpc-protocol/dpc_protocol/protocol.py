@@ -89,8 +89,23 @@ REFUSAL_MISCONFIGURED = "misconfigured"
 # hold its conversation cache. The word is the gateway's own for
 # a listed alias whose provider is not there (`provider_unavailable`, 503).
 # Retryable: the state ends without the guest changing anything, so the guest
-# may come back later, and nothing on either node retries it by itself.
+# may come back later. The host never retries it; a guest agent retries it by
+# itself only when the refusal says the engine is starting (`engine_state`
+# below, v1.9) — Mike's call 2026-10-20 — and every other refusal under this
+# word is told to its person once, with no retry.
 REFUSAL_PROVIDER_UNAVAILABLE = "provider_unavailable"
+
+#: `engine_state` on a `provider_unavailable` refusal (DPTP v1.9): the state of
+#: the host's local engine when that is what refused the call, in the engine's
+#: own state word (`StrataProvider`'s `stopped | starting | running | draining |
+#: failed`). Only `starting` is sent today — the launcher is loading the model,
+#: including a start a peer's request has just begun — because it is the one
+#: state that ends by itself soon enough for a guest to wait for. The code
+#: alone cannot say it: the same word covers a card held by the other engine
+#: and the owner's own parked conversations, which no wait of a guest's ends.
+#: Absent means the host named no such state (an older host, or another
+#: reason), and a guest reads it as "not starting": no retry.
+ENGINE_STATE_STARTING = "starting"
 
 #: The words a host may send today. A receiver reads it to recognise, never to
 #: refuse: a newer host may name a reason this one has no word for, and an
@@ -123,9 +138,16 @@ class PeerRefused(RuntimeError):
     reader that cannot name the cause says so rather than guessing one.
     """
 
-    def __init__(self, message: str, code: str = "", retry_after_sec: Optional[float] = None):
+    def __init__(
+        self, message: str, code: str = "", retry_after_sec: Optional[float] = None,
+        engine_state: str = "",
+    ):
         super().__init__(message)
         self.code = code or ""
+        # The host engine's state word beside a `provider_unavailable` (v1.9),
+        # or "" where the host sent none. Only `ENGINE_STATE_STARTING` is
+        # read today: it is what lets a guest agent wait instead of failing.
+        self.engine_state = engine_state or ""
         # Carried from the wire's own `retry_after_sec` (v1.8) so a refusal
         # that names a reset time (a spent vendor window, a daily-capacity
         # gate) survives the hop from `PeerRefused` to the guest's own
@@ -233,6 +255,7 @@ def create_remote_inference_response(
     finish_reason: str = None,
     code: str = None,
     retry_after_sec: float = None,
+    engine_state: str = None,
 ) -> Dict[str, Any]:
     """Creates a remote inference response message with optional token, model, and thinking metadata.
 
@@ -284,6 +307,12 @@ def create_remote_inference_response(
     UTC midnight for a daily gate (ADR-041 D5, amendment 2026-09-29). Absent
     means the host has no such time; a receiver that does not read the field
     is unaffected (additive, v1.8).
+
+    `engine_state` rides only on an error, beside `code`, and names the state
+    of the host's local engine that refused the call — today only
+    `ENGINE_STATE_STARTING`, sent while the model loads (v1.9). Absent means
+    the host named no such state; a receiver that does not read the field is
+    unaffected (additive).
     """
     payload = {"request_id": request_id}
     if response is not None:
@@ -335,6 +364,8 @@ def create_remote_inference_response(
             payload["code"] = code
         if retry_after_sec is not None:
             payload["retry_after_sec"] = retry_after_sec
+        if engine_state:
+            payload["engine_state"] = engine_state
     return {"command": "REMOTE_INFERENCE_RESPONSE", "payload": payload}
 
 def create_remote_transcription_request(

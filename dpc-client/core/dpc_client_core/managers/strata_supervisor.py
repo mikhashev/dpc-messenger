@@ -87,7 +87,9 @@ def peer_being_served() -> Optional[str]:
 
 class PeerCallRefused(LlamaServerError):
     """A peer's call refused by the Strata supervisor itself (ADR-044 point 9):
-    the host answers it `provider_unavailable`, and it is never retried."""
+    the host answers it `provider_unavailable`, and this node never retries it.
+    The guest does not either: this refusal carries no `engine_state`, which a
+    guest agent waits on only when it says `starting` (DPTP v1.9)."""
 
 
 class PeerStartRefused(PeerCallRefused):

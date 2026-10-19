@@ -1,8 +1,8 @@
-# DPTP Specification: D-PC Transfer Protocol v1.8
+# DPTP Specification: D-PC Transfer Protocol v1.9
 
-**Version:** 1.8
+**Version:** 1.9
 **Status:** Draft / PoC
-**Date:** September 2026
+**Date:** October 2026
 **License:** CC0 1.0 Universal (Public Domain)
 
 ## 1. Overview
@@ -449,7 +449,7 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
   - `insufficient_quota` — the alias the host serves is a vendor alias and a ceiling on it is spent for this guest. On a metered (pay-per-use) key it is money: the per-caller daily ceiling in `compute.vendor_quotas`, counted from the host's own usage rows, so it is the guest's own spending and not the host's total, and it clears at UTC midnight. On a subscription key, where that money ceiling never trips (its rows are `list_price_reference`, ADR-041 D3's amendment), the same code covers four other causes instead (ADR-041 D5, amendment 2026-09-29): the vendor's own per-guest request window (`vendor_request_quotas`, a fixed session or week grid), the vendor's per-guest token-per-day proxy (`vendor_token_quotas`), the vendor's own `daily_capacity.exhausted` spend gate (binding every caller, guest or owner), and a subscription alias with no `vendor_request_quotas` entry configured for it (refused rather than served unbounded). The text names which of the five applies; `retry_after_sec` carries when it is known
   - `unrated` — the alias the host serves is a vendor alias, and the host has no rate for its model, so what a call spends cannot be counted against the ceiling in `compute.vendor_quotas`: the meter is absent rather than slow, and the alias is refused rather than served against a ceiling that would read zero for ever. The repair is on the host and is a rate, not time — nothing about waiting makes this call succeed
   - `misconfigured` — the host cannot classify its own serving lists, so the class of the alias it would serve is unknown, and an alias whose class is unknown is not served (a paying alias filed under `compute.serving_local` is the state that reaches this gate). The host's own configuration, repaired by editing it; this names no fault of the guest's and nothing the guest can do
-  - `provider_unavailable` — the host's local engine behind the alias cannot take a peer now (ADR-044 points 4 and 9): on any local alias, the card is held by the host's other local engine; on a Strata alias also, it is loading (a peer's request may have started it), it is not running and a peer's request may not start it now, or the host owner's own conversations hold its conversation cache, a test made at the door and again when the call reaches the engine. The state ends without the guest changing anything, so the guest may come back later; the host does not queue or retry the call, and sends no `retry_after_sec`, because it does not know when the state ends. The word is the guest gateway's own for a listed alias whose provider is not there. Since 2026-10-18
+  - `provider_unavailable` — the host's local engine behind the alias cannot take a peer now (ADR-044 points 4 and 9): on any local alias, the card is held by the host's other local engine; on a Strata alias also, it is loading (a peer's request may have started it), it is not running and a peer's request may not start it now, or the host owner's own conversations hold its conversation cache, a test made at the door and again when the call reaches the engine. The state ends without the guest changing anything, so the guest may come back later; the host does not queue or retry the call, and sends no `retry_after_sec`, because it does not know when the state ends. While the engine is loading the host also sends `engine_state: "starting"` (v1.9, below), the one cause the code alone cannot tell apart from the others and the one a guest can sensibly wait for. The word is the guest gateway's own for a listed alias whose provider is not there. Since 2026-10-18
 
   The last three are one cause split into three words on 2026-09-15, while v1.7 is unreleased, because a code is read as an instruction: only `insufficient_quota` refills by itself, and answering the other two with the same word tells a client to retry a state that never changes on its own.
 
@@ -474,6 +474,7 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
   The 503s carry no `Retry-After`. `unrated` and `misconfigured` do not end with time, and a 429 there would set an auto-retrying client looping against a host only its owner can repair. Before the code every row above was the same 502, and an IDE could not tell a request it should fix from a door it should ask a person about.
 
 - `retry_after_sec` (number, optional, v1.8+): rides only on the error form, and only where the host knows when the refusal clears — the vendor's own window reset (`resets_at` minus the read window's length) or seconds to UTC midnight for a daily money gate (ADR-041 D5, amendment 2026-09-29, the per-guest ceiling counted in a subscription vendor's own request and token units). Absent means the host has no such time, which `misconfigured` and `unrated` never do. Additive: a receiver that does not read the field is unaffected, and the gateway's own `Retry-After` header for `insufficient_quota` (429) is set from it when present.
+- `engine_state` (string, optional, v1.9+): rides only on the error form, beside `code: provider_unavailable`, and names the state of the host's local engine that refused the call, in the engine's own state word. Only `starting` is sent: the engine is loading its model, including a start a peer's request has just begun. It exists because `provider_unavailable` also covers a card held by the host's other engine and the owner's own conversations holding the conversation cache, which no wait of the guest's ends, while a load does end, and soon. Absent means the host named no such state — another cause, or a host that predates the field — and a receiver reads it as "not starting". What a receiver does with it is its own: a guest **agent** in this tree asks again every 10 s for up to 120 s while it reads `starting`, shows its person that the model is loading, and ends the turn with a notice rather than an error when the wait runs out (Mike's call, 2026-10-20); every other refusal is told once, unretried. The host still retries nothing, and the gateway's HTTP answer is unchanged (503, no `Retry-After`). Additive: a receiver that does not read the field is unaffected.
 
 ---
 
@@ -2604,6 +2605,16 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.9 (October 2026)
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — `engine_state` (string, optional):
+  rides only on the error form beside `provider_unavailable`; today only
+  `starting`, sent while the host's engine loads its model. A guest agent
+  waits for it — asks again every 10 s, up to 120 s, and tells its person the
+  model is loading — where before nothing on either node retried a
+  `provider_unavailable` (Mike's call, 2026-10-20). Additive: absent reads as
+  "not starting", so an older host's refusal is told once and not retried, and
+  a receiver that does not read the field is unaffected.
 
 ### v1.8 (September 2026)
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — `retry_after_sec` (number, optional):

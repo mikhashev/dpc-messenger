@@ -33,7 +33,9 @@ from .utils import (
 from .context import CompactionState, apply_compaction
 from . import prompt_divergence
 from .tool_ledger import record_attempt, sweep_unfinished
-from .llm_adapter import DpcLlmAdapter
+from dpc_protocol.protocol import PeerRefused
+
+from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
     ContextLimitGuard,
@@ -929,6 +931,21 @@ class CallKilled(Exception):
     """The user pressed Kill while a model call was in flight."""
 
 
+def peer_refusal_notice(e: PeerRefused) -> str:
+    """What the person reads when the host refused the agent's call.
+
+    A notice, not an error: the host is up and answered, and the text says
+    whether waiting helps. `agent_manager` keeps it out of the history by
+    the trace's `peer_refused`, not by an error prefix."""
+    host = getattr(e, "host_name", "") or "the host"
+    if isinstance(e, PeerStillLoading):
+        return (
+            f"No answer this time: the model on {host} was still loading after "
+            f"{e.waited_sec:.0f} s. Send the message again in a minute or two."
+        )
+    return f"No answer this time: {host} did not take the request ({e})."
+
+
 async def _chat_unless_killed(coro, kill_event: Optional[asyncio.Event]):
     """Await `coro`; if `kill_event` fires first, cancel it and raise CallKilled.
 
@@ -1281,6 +1298,10 @@ async def run_llm_loop(
             # --- LLM call ---
             _seen = _observe_request(messages, tool_schemas, reasoning_effort)
             _row_id = None
+            # A wait inside the call (a peer host's model loading) speaks on
+            # this round's progress line. Set before the call's task exists,
+            # so the task copies it.
+            _progress_token = CALL_PROGRESS.set(lambda m: emit_progress(m, None, round_idx))
             try:
                 msg, usage = await _chat_unless_killed(
                     llm.chat(
@@ -1326,10 +1347,20 @@ async def run_llm_loop(
                     f"(the model's answer was not waited for).",
                     accumulated_usage, llm_trace,
                 )
+            except PeerRefused as e:
+                # The host answered and did not serve: a notice, not an LLM
+                # error, and no traceback — the adapter logged it at WARNING.
+                log.info("Round %d ended on the host's refusal: %s", round_idx, e)
+                notice = peer_refusal_notice(e)
+                llm_trace["peer_refused"] = {
+                    "code": e.code, "engine_state": e.engine_state, "notice": notice,
+                }
+                return notice, accumulated_usage, llm_trace
             except Exception as e:
                 log.error(f"LLM error: {e}", exc_info=True)
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace
             finally:
+                CALL_PROGRESS.reset(_progress_token)
                 prompt_divergence.log_observation(_seen, _row_id)
 
             # Handle empty response
