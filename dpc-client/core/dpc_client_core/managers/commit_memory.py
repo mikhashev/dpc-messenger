@@ -77,8 +77,8 @@ def describe_free_commit(reading: Optional[Dict[str, Any]]) -> str:
     if not reading:
         return NOT_MEASURED if sys.platform != "win32" else UNREAD
     return (
-        f"free commit ullAvailPageFile {reading['avail_page_file_mib']:,} of "
-        f"ullTotalPageFile {reading['total_page_file_mib']:,} MiB, free physical "
-        f"ullAvailPhys {reading['avail_phys_mib']:,} of ullTotalPhys "
-        f"{reading['total_phys_mib']:,} MiB ({reading.get('source', SOURCE)})"
+        f"free commit ullAvailPageFile {reading['avail_page_file_mib']} of "
+        f"ullTotalPageFile {reading['total_page_file_mib']} MiB, free physical "
+        f"ullAvailPhys {reading['avail_phys_mib']} of ullTotalPhys "
+        f"{reading['total_phys_mib']} MiB ({reading.get('source', SOURCE)})"
     )

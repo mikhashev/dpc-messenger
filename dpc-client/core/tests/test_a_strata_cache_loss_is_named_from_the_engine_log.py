@@ -144,7 +144,7 @@ class TestTheFileMovesUnderTheCursor:
 _E = "strata serve: conversation cache: "
 LOSSES = [
     (_E + "skip parking (3120 tokens, below the 8192 minimum; parked=2)", "below min tokens"),
-    (_E + "skip parking (stage CUDA1: no free device memory)", "snapshot size failed"),
+    (_E + "skip parking (stage CUDA1: no free device memory)", "stage CUDA failed"),
     (_E + "skip parking (unsupported layer kind)", "snapshot size failed"),
     (_E + "skip parking (snapshot 6144 MiB exceeds available budget)", "over budget"),
     (_E + "skip parking (physical RAM admission; need 4096 MiB plus 2560 MiB floor, "
@@ -197,7 +197,7 @@ class TestEveryLossTheEngineNamesIsCountedWithItsClass:
         assert f"{len(LOSSES)} conversation-cache loss" in text
         for kind in {kind for _, kind in LOSSES}:
             assert kind in text
-        assert "2 snapshot size failed" in text and "3 discarded at restore" in text
+        assert "1 snapshot size failed" in text and "1 stage CUDA failed" in text and "3 discarded at restore" in text
 
     def test_working_lines_alone_say_nothing(self, tmp_path, caplog):
         sup = _sup(tmp_path)
@@ -258,6 +258,34 @@ class TestTheLaunchersEvictionCounterRidesBesideTheLines:
             sup.log_restore_refusals()
 
         assert "eviction counter +1 " in caplog.records[-1].getMessage()
+
+    def test_a_counter_that_drops_without_a_restart_is_rebased_and_said(self, tmp_path, caplog):
+        sup = _sup(tmp_path)
+        sup.prime_restore_scan()
+        self._polled(sup, 9)
+        sup.log_restore_refusals()
+        self._polled(sup, 2)  # no prime_restore_scan: the engine's counter started over
+
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.managers.strata_supervisor"):
+            sup.log_restore_refusals()
+
+        texts = [r.getMessage() for r in caplog.records]
+        rebase = [t for t in texts if "started over" in t]
+        assert len(rebase) == 1
+        assert sup.alias in rebase[0] and "from 9 to 2" in rebase[0]
+        assert any("eviction counter +2 " in t for t in texts)
+
+    def test_a_counter_that_only_grows_says_nothing_about_starting_over(self, tmp_path, caplog):
+        sup = _sup(tmp_path)
+        sup.prime_restore_scan()
+        self._polled(sup, 3)
+        sup.log_restore_refusals()
+        self._polled(sup, 5)
+
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.managers.strata_supervisor"):
+            sup.log_restore_refusals()
+
+        assert not [r for r in caplog.records if "started over" in r.getMessage()]
 
     def test_a_metrics_body_without_the_counter_changes_nothing(self, tmp_path, caplog):
         sup = _sup(tmp_path)

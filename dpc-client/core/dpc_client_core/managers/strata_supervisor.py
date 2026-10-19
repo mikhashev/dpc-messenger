@@ -707,7 +707,8 @@ def exit_code_words(text: str) -> Optional[str]:
 # so the specific "skip parking" reasons stand before the generic one. A line is not a
 # loss when it says parked / restored / borrowed / dropped N superseded copies.
 #   skip parking (%zu tokens, below the %lld minimum; parked=%zu)
-#   skip parking (stage CUDA%d: %s)  /  skip parking (%s)        the size of the snapshot
+#   skip parking (stage CUDA%d: %s)                               one stage failed on the device
+#   skip parking (%s)                                             the size of the snapshot
 #   skip parking (snapshot %zu MiB exceeds available budget)
 #   skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)
 #   skip parking (RAM floor after capture: %lld MiB needed, %s)
@@ -728,6 +729,7 @@ _CACHE_LOSS_KINDS = (
     ("discarded at restore", re.compile(r"conversation cache: discard (?:invalid )?(?:stage )?snapshot")),
     ("borrow refused", re.compile(r"cannot borrow from a parked conversation|no room beside the parked conversation")),
     ("picture changed", re.compile(r"has this prompt's tokens but picture \d+ .*cannot be reused")),
+    ("stage CUDA failed", re.compile(r"skip parking \(stage CUDA\d+:")),
     ("snapshot size failed", re.compile(r"skip parking \(")),
 )
 _CACHE_LOSS_SHOWN = 3
@@ -1512,12 +1514,20 @@ class StrataSupervisor(LlamaServerSupervisor):
 
         The poll runs every `engine_watch_interval_s`, so an eviction can be
         reported one call late. A smaller count than the one logged means the
-        engine started over with an empty cache.
+        engine started over with an empty cache; that is said once, not rebased silently.
+
+        This counter is the authoritative count: Strata's `evict_oldest()`, which
+        `make_room()` calls (include/strata/core/conversation_cache.hpp), increments
+        `evictions_` and prints nothing, so the text lines of `_CACHE_LOSS_KINDS`
+        only name a reason for some of the evictions.
         """
         polled = self._cache_evictions_polled
         if polled is None:
             return 0
         if polled < self._cache_evictions_logged:
+            logger.info("strata[%s]: engine eviction counter went from %d to %d; "
+                        "the engine's counter started over",
+                        self.alias, self._cache_evictions_logged, polled)
             self._cache_evictions_logged = 0
         delta = polled - self._cache_evictions_logged
         self._cache_evictions_logged = polled

@@ -81,8 +81,8 @@ class TestTheReader:
     def test_the_text_leads_with_free_commit_and_names_each_field(self):
         text = cm.describe_free_commit(READING)
         assert text.index("ullAvailPageFile") < text.index("ullAvailPhys")
-        assert "free commit ullAvailPageFile 3,686 of ullTotalPageFile 108,236 MiB" in text
-        assert "ullAvailPhys 11,305 of ullTotalPhys 63,168 MiB" in text
+        assert "free commit ullAvailPageFile 3686 of ullTotalPageFile 108236 MiB" in text
+        assert "ullAvailPhys 11305 of ullTotalPhys 63168 MiB" in text
         assert text.endswith("(GlobalMemoryStatusEx)")
 
 
@@ -93,7 +93,7 @@ class TestTheSupervisor:
         with caplog.at_level(logging.INFO, logger=mod.__name__):
             sup.log_start(None, {}, binary=Path("python.exe"))
         [line] = [r.getMessage() for r in caplog.records if "starting on" in r.getMessage()]
-        assert "conversation_cache_mib=15360 beside free commit ullAvailPageFile 3,686" in line
+        assert "conversation_cache_mib=15360 beside free commit ullAvailPageFile 3686" in line
         assert "GlobalMemoryStatusEx" in line
         assert sup.last_free_commit["avail_page_file_mib"] == 3686
 
@@ -113,9 +113,9 @@ class TestTheSupervisor:
         await sup._fail_closed("the launcher reports the engine unloaded", stop=False)
         reason = sup.failure["reason"]
         assert "commit limit" in reason and "possibly" not in reason
-        assert "free commit ullAvailPageFile 3,686 of ullTotalPageFile 108,236 MiB" in reason
+        assert "free commit ullAvailPageFile 3686 of ullTotalPageFile 108236 MiB" in reason
         assert "4 s before the death" in reason
-        assert "free commit ullAvailPageFile 40,000" in reason and "after it" in reason
+        assert "free commit ullAvailPageFile 40000" in reason and "after it" in reason
         assert sup.failure["free_commit"]["before"]["avail_page_file_mib"] == 3686
         assert sup.failure["free_commit"]["after"]["avail_page_file_mib"] == 40000
 

@@ -29,6 +29,10 @@ from dpc_client_core.service import CoreService
 
 from tests.test_strata_supervisor import BASE_ARGS, home, _install, _sup, _value  # noqa: F401
 
+REPO = Path(__file__).resolve().parents[3]
+EXAMPLE_JSON = REPO / "dpc-client" / "providers.example.json"
+ADR_044 = REPO / "docs" / "decisions" / "044-strata-as-a-second-supervised-local-engine.md"
+
 UI_FIELDS = Path(__file__).resolve().parents[2] / "ui" / "src" / "lib" / "utils" / "strataFields.ts"
 
 # Strata 0.1.45 (src/program/generate.cpp, its help text and Options struct), read 2026-10-19.
@@ -154,3 +158,13 @@ def test_the_ui_lists_the_same_flags_and_defaults():
     assert [(k, f, int(d), int(m)) for k, f, d, m in found] == [
         (k, flag, default, hi) for k, (flag, default, hi) in CACHE_ADMISSION_FLAGS.items()
     ]
+
+
+def test_the_example_json_and_the_adr_prose_carry_the_code_defaults():
+    """The defaults are written three times outside the code; each copy is pinned here."""
+    fields = json.loads(EXAMPLE_JSON.read_text(encoding="utf-8"))["_field_reference"]["strata_fields"]
+    adr = ADR_044.read_text(encoding="utf-8")
+    for key, (flag, default, _hi) in CACHE_ADMISSION_FLAGS.items():
+        assert re.search(rf"default {default}\b", fields[key]), (key, fields[key])
+        # the ADR paragraph: `key` (`flag`, default N ...
+        assert re.search(rf"`{key}` \(`{re.escape(flag)}`,\s+default {default}\b", adr), key
