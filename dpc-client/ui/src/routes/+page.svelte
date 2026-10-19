@@ -314,7 +314,7 @@
   // Whisper loading effects moved to VoicePanel.svelte (Step 6)
   // Agent progress and streaming effects moved to AgentPanel.svelte (Step 5)
 
-  // AI chat + history localStorage persistence moved to PersistencePanel.svelte
+  // AI chats are listed from the backend by PersistencePanel.svelte
 
   // Telegram message effects moved to TelegramPanel.svelte (Step 8)
 
@@ -365,122 +365,10 @@
     // connection-gated $effect below (avoids the startup race where this
     // fired before the socket opened and logged "WebSocket not connected").
 
-    // Restore Telegram chats from localStorage (for page refresh recovery)
-    try {
-      const savedTelegramChats = localStorage.getItem('dpc-telegram-chats');
-      if (savedTelegramChats) {
-        const telegramChats = JSON.parse(savedTelegramChats);
-        let restoredCount = 0;
-
-        aiChats.update(chats => {
-          const newMap = new Map(chats);
-          for (const [id, info] of Object.entries(telegramChats)) {
-            // Only restore if not already in aiChats
-            if (!newMap.has(id)) {
-              newMap.set(id, info as { name: string; provider: string; instruction_set_name?: string });
-              restoredCount++;
-            }
-          }
-          return newMap;
-        });
-
-        // Also populate telegramLinkedChats by extracting chat_id from conversation_id
-        // Format: telegram-{chat_id} -> {chat_id}
-        const restoredLinks: Record<string, string> = {};
-        for (const conversationId of Object.keys(telegramChats)) {
-          if (conversationId.startsWith('telegram-')) {
-            const chatId = conversationId.replace('telegram-', '');
-            restoredLinks[conversationId] = chatId;
-          }
-        }
-
-        if (Object.keys(restoredLinks).length > 0) {
-          import('$lib/coreService.js').then(({ telegramLinkedChats }) => {
-            telegramLinkedChats.set(new Map(Object.entries(restoredLinks)));
-            console.log(`[Telegram] Restored ${Object.keys(restoredLinks).length} conversation links from localStorage`);
-          });
-        }
-
-        if (restoredCount > 0) {
-          console.log(`[Telegram] Restored ${restoredCount} Telegram chats from localStorage`);
-        }
-      }
-    } catch (error) {
-      console.error('[Telegram] Failed to restore chats from localStorage:', error);
-    }
-
-    // Restore AI chats (including Agent chats) from localStorage (for page refresh recovery)
-    try {
-      const savedAIChats = localStorage.getItem('dpc-ai-chats');
-      if (savedAIChats) {
-        const aiChatsData = JSON.parse(savedAIChats);
-        let restoredCount = 0;
-
-        aiChats.update(chats => {
-          const newMap = new Map(chats);
-          // Remove any stale entries where a P2P node_id was mistakenly stored as an AI/Telegram chat
-          for (const id of newMap.keys()) {
-            if (id.startsWith('dpc-node-')) {
-              newMap.delete(id);
-              console.warn(`[AI Chats] Removed stale P2P node entry from aiChats: ${id}`);
-            }
-          }
-          for (const [id, info] of Object.entries(aiChatsData)) {
-            // Only restore if not already in aiChats (excluding telegram chats and P2P node IDs)
-            if (!newMap.has(id) && !id.startsWith('telegram-') && !id.startsWith('dpc-node-')) {
-              newMap.set(id, info as { name: string; provider: string; instruction_set_name?: string });
-              restoredCount++;
-            }
-          }
-          return newMap;
-        });
-
-        if (restoredCount > 0) {
-          console.log(`[AI Chats] Restored ${restoredCount} AI chats from localStorage`);
-        }
-
-        // Populate chatProviders from restored aiChats (fixes Agent chat provider reset on refresh)
-        chatProviders.update(map => {
-          const newMap = new Map(map);
-          for (const [id, info] of Object.entries(aiChatsData)) {
-            const chatInfo = info as { name: string; provider: string; instruction_set_name?: string };
-            if (chatInfo.provider && !id.startsWith('telegram-') && !id.startsWith('dpc-node-')) {
-              newMap.set(id, chatInfo.provider);
-            }
-          }
-          return newMap;
-        });
-      }
-    } catch (error) {
-      console.error('[AI Chats] Failed to restore chats from localStorage:', error);
-    }
-
-    // Restore AI chat histories from localStorage (for page refresh recovery)
-    try {
-      const savedHistories = localStorage.getItem('dpc-ai-chat-histories');
-      if (savedHistories) {
-        const historiesData = JSON.parse(savedHistories);
-        let restoredCount = 0;
-
-        chatHistories.update(h => {
-          const newMap = new Map(h);
-          for (const [id, messages] of Object.entries(historiesData)) {
-            // Only restore if not already in chatHistories (excluding telegram chats)
-            if (!newMap.has(id) && !id.startsWith('telegram-')) {
-              newMap.set(id, messages as Message[]);
-              restoredCount++;
-            }
-          }
-          return newMap;
-        });
-
-        if (restoredCount > 0) {
-          console.log(`[AI Chats] Restored ${restoredCount} chat histories from localStorage`);
-        }
-      }
-    } catch (error) {
-      console.error('[AI Chats] Failed to restore chat histories from localStorage:', error);
-    }
+    // AI chats, Telegram chats and AI chat histories come from the backend
+    // (PersistencePanel lists them on connect, ChatHistorySyncPanel loads a
+    // history when its chat opens). They used to be restored here from
+    // localStorage without asking the backend — see aiChatStore.ts.
 
     // Group chats are loaded by the WebSocket open handler (coreService.ts)
     // on every (re)connect — no eager load here (it raced the socket open).
@@ -1661,8 +1549,8 @@
   onCloseNewGroupDialog={() => { showNewGroupDialog = false; }}
 />
 
-<!-- PersistencePanel: debounced localStorage persistence for aiChats + chatHistories -->
-<PersistencePanel {aiChats} {chatHistories} />
+<!-- PersistencePanel: lists AI chats + Telegram chats from the backend, one-time import of the old localStorage copy -->
+<PersistencePanel {aiChats} {chatProviders} />
 
 <!-- KnowledgeEventsPanel: commit/token/extraction/context hash events -->
 <KnowledgeEventsPanel

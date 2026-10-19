@@ -398,6 +398,16 @@
     if (chatMeta) {
       chatMeta.instruction_set_name = newInstructionSet;
       aiChats.update(map => new Map(map));
+      // Kept in the chat's record in ~/.dpc, which the sidebar is restored from.
+      if (activeChatId.startsWith('ai_')) {
+        const sent = sendCommand('save_ai_chat', {
+          conversation_id: activeChatId,
+          record: { instruction_set_name: newInstructionSet },
+        });
+        if (sent && typeof sent === 'object') {
+          sent.catch((error: unknown) => console.error('[AI Chats] Failed to save the instruction set:', error));
+        }
+      }
     }
   }
 

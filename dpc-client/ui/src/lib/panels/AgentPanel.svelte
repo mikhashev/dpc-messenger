@@ -171,10 +171,10 @@
         console.log(`[Agents] Loaded ${agentsResult.agents.length} agents from backend`);
 
         // Proactively fetch each agent's conversation history from the backend.
-        // The backend is authoritative (includes Telegram messages received while app was closed).
-        // We merge with any localStorage snapshot so that UI metadata (thinking blocks,
-        // raw tool-call output) is preserved for messages that already exist locally.
-        // New messages that arrived while the app was closed are added without metadata.
+        // The backend is authoritative (includes Telegram messages received while app was closed)
+        // and, since 2026-10-19, the only copy: history.json carries thinking and streaming_raw.
+        // What is already on screen in this session still lends its thinking blocks and raw
+        // tool-call output to the matching backend message.
         for (const agent of agentsResult.agents) {
           const conv_id = agent.agent_id;
           try {
@@ -183,7 +183,7 @@
               chatHistories.update(map => {
                 const newMap = new Map(map);
 
-                // Build a lookup of existing localStorage messages by stable ID so we can
+                // Build a lookup of messages already on screen by stable ID so we can
                 // carry over thinking blocks and streamingRaw onto matching backend messages.
                 const localHistory: any[] = newMap.get(conv_id) || [];
                 const localById = new Map(localHistory.map((m: any) => [m.id, m]));

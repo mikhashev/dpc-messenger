@@ -61,7 +61,7 @@
   // (HistorySyncPanel, ChatHistorySyncPanel, +page.svelte, AgentPanel) catch a
   // repeated id in a history batch, but a single append can also repeat one —
   // Telegram ids keyed on Date.now(), an agent tick, a bubble re-keyed to a
-  // resp.message_id, a localStorage restore. Whatever reaches `messages`, this
+  // resp.message_id. Whatever reaches `messages`, this
   // is the list actually rendered, so every index/order-dependent read below
   // uses it too, not the raw prop.
   let deduped = $derived(dedupeMessagesById(messages));

@@ -15,6 +15,7 @@
     createAgent,
     listAgentProfiles,
     sendCommand,
+    deleteConversation,
   } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
 
@@ -172,26 +173,42 @@
           onSetAgentChatToAgentId(chatId, chatId);
           onAgentToast(`Agent "${chatName}" created successfully`, 'info');
         } else {
+          // No chat without its agent: an `ai_` placeholder routed to dpc_agent
+          // would have two writers and a record the sidebar lists for ever.
           console.warn('[DPC Agent] Failed to create agent storage:', result?.message);
-          onAgentToast(`Warning: Agent chat created but storage failed: ${result?.message}`, 'warning');
+          onAgentToast(`Agent was not created: ${result?.message}`, 'error');
+          return;
         }
       } catch (e) {
         console.warn('[DPC Agent] Error creating agent storage:', e);
+        onAgentToast(`Agent was not created: ${e}`, 'error');
+        return;
       }
     }
 
+    const chatMeta: AIChatMeta = {
+      name: chatName,
+      provider: selectedProviderForNewChat,
+      compute_host: selectedDialogComputeHost !== 'local' ? selectedDialogComputeHost : undefined,
+      instruction_set_name: selectedProviderForNewChat === 'dpc_agent' ? 'general' : selectedInstructionSetForNewChat,
+      profile_name: selectedProviderForNewChat === 'dpc_agent' ? selectedProfileForNewAgent : undefined,
+      llm_provider: selectedProviderForNewChat === 'dpc_agent' ? selectedAgentLLMProvider : undefined,
+    };
     aiChats.update(chats => {
       const newMap = new Map(chats);
-      newMap.set(chatId, {
-        name: chatName,
-        provider: selectedProviderForNewChat,
-        compute_host: selectedDialogComputeHost !== 'local' ? selectedDialogComputeHost : undefined,
-        instruction_set_name: selectedProviderForNewChat === 'dpc_agent' ? 'general' : selectedInstructionSetForNewChat,
-        profile_name: selectedProviderForNewChat === 'dpc_agent' ? selectedProfileForNewAgent : undefined,
-        llm_provider: selectedProviderForNewChat === 'dpc_agent' ? selectedAgentLLMProvider : undefined,
-      });
+      newMap.set(chatId, chatMeta);
       return newMap;
     });
+
+    // The chat's record lives in ~/.dpc, so it is in the sidebar after a
+    // restart before anything has been said in it. An agent chat's is the
+    // agent's own config.
+    if (chatId.startsWith('ai_') && selectedProviderForNewChat !== 'dpc_agent') {
+      const sent = sendCommand('save_ai_chat', { conversation_id: chatId, record: chatMeta });
+      if (sent && typeof sent === 'object') {
+        sent.catch((error: unknown) => console.error('[AI Chats] Failed to save the new chat:', error));
+      }
+    }
 
     chatProviders.update(map => {
       const newMap = new Map(map);
@@ -267,18 +284,21 @@
       return newMap;
     });
 
-    if (chatId.startsWith('telegram-')) {
+    if (chatId.startsWith('ai_')) {
+      // The sidebar is listed from ~/.dpc now, so a chat removed only here
+      // would be back at the next start. The backend removes its folder —
+      // history, archive, record and files.
       try {
-        const savedTelegramChats = localStorage.getItem('dpc-telegram-chats');
-        if (savedTelegramChats) {
-          const telegramChats = JSON.parse(savedTelegramChats);
-          delete telegramChats[chatId];
-          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+        const result = await deleteConversation(chatId);
+        if (result?.status === 'error') {
+          console.error('Failed to delete AI chat in the backend:', result.message);
         }
       } catch (error) {
-        console.error('[Telegram] Failed to update dpc-telegram-chats:', error);
+        console.error('Error deleting AI chat in the backend:', error);
       }
+    }
 
+    if (chatId.startsWith('telegram-')) {
       telegramLinkedChats.update(links => {
         const newMap = new Map(links);
         newMap.delete(chatId);

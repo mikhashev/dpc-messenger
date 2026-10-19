@@ -10,6 +10,7 @@
     telegramVoiceReceived,
     telegramImageReceived,
     telegramFileReceived,
+    sendCommand,
   } from '$lib/coreService';
   import { showNotificationIfBackground } from '$lib/notificationService';
   import { normalizeTranscription, telegramBubbleId, telegramBubbleTime, upsertById } from '$lib/utils/telegramLiveMessage';
@@ -38,7 +39,7 @@
   } = $props();
 
   // ---------------------------------------------------------------------------
-  // Internal helper — auto-create Telegram conversation in aiChats + localStorage
+  // Internal helper — auto-create Telegram conversation in aiChats, name it in the backend
   // ---------------------------------------------------------------------------
   function ensureTelegramChat(conversation_id: string, sender_name: string) {
     if ($aiChats.has(conversation_id) || conversation_id.startsWith('dpc-node-')) return;
@@ -54,16 +55,16 @@
     });
     console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar`);
 
-    try {
-      const telegramChats = Object.fromEntries(
-        Array.from($aiChats.entries())
-          .filter(([_, info]) => info.provider === 'telegram')
-          .map(([id, info]) => [id, info])
-      );
-      localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
-      console.log('[Telegram] Persisted Telegram chats to localStorage:', Object.keys(telegramChats));
-    } catch (error) {
-      console.error('[Telegram] Failed to persist chats:', error);
+    // The name goes to the backend's record of the chat, not to localStorage:
+    // the chat itself exists because the bridge has a link for it (2026-10-19).
+    if (conversation_id.startsWith('telegram-')) {
+      const sent = sendCommand('save_ai_chat', {
+        conversation_id,
+        record: { name: `📱 Telegram (${sender_name})`, provider: 'telegram' },
+      });
+      if (sent && typeof sent === 'object') {
+        sent.catch((error: unknown) => console.error('[Telegram] Failed to save the chat name:', error));
+      }
     }
   }
 

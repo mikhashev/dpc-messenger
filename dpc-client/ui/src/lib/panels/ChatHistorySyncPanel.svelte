@@ -1,5 +1,5 @@
 <!-- src/lib/panels/ChatHistorySyncPanel.svelte -->
-<!-- Syncs chat history from backend when switching to a peer/agent/group chat with no messages. -->
+<!-- Syncs chat history from backend when switching to a peer/agent/group/AI chat with no messages. -->
 <!-- Handles page-refresh scenario: frontend loses chatHistories, backend keeps conversation_monitors. -->
 <!-- Logic-only panel — no markup, no styles. -->
 
@@ -8,6 +8,7 @@
   import { connectionStatus, sendCommand } from '$lib/coreService';
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import { mergeBackfillWithLive } from '$lib/utils/liveMessageIdentity';
+  import { isAIChatId, legacyImportPending } from '$lib/utils/aiChatStore';
   import { onMount, untrack } from 'svelte';
   import type { Message } from '$lib/types.js';
 
@@ -64,9 +65,15 @@
 
   // ---------------------------------------------------------------------------
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
+  // AI chats included since 2026-10-19: their history.json in ~/.dpc is the
+  // copy they are restored from, no longer the UI's localStorage.
   // ---------------------------------------------------------------------------
   $effect(() => {
-    if ($connectionStatus === 'connected' && canLoadHistory && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+    // An AI chat waits for the one-time import from the old UI store: fetched
+    // before it, the chat would be marked loaded with an empty history.
+    const importPending = $legacyImportPending;
+    if (importPending && activeChatId?.startsWith('ai_')) return;
+    if ($connectionStatus === 'connected' && canLoadHistory && activeChatId) {
       // activeChatId is reactive and can change while the async fetch awaits, so
       // capture it once and route the response strictly by this id (never the live chat).
       const reqChatId = activeChatId;
@@ -104,8 +111,11 @@
                 let previousTimestamp: number | undefined;
                 const loadedMessages: Message[] = result.messages.map((msg: any, index: number) => {
                   if (index === 0) console.log(`[ChatHistory] DIAG first msg keys:`, Object.keys(msg), `tool_calls:`, msg.tool_calls?.length, `sender_type:`, msg.sender_type, `msg_index:`, msg.msg_index);
-                  const fallbackSender = msg.sender_node_id || (msg.role === 'user' ? 'user' : reqChatId);
-                  const fallbackName = msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(reqChatId));
+                  // In an AI chat the other side is the model: the bubble the live
+                  // answer gets, named by the record's "AI (model)" when it has one.
+                  const aiAnswer = isAIChatId(reqChatId) && msg.role === 'assistant';
+                  const fallbackSender = aiAnswer ? 'ai' : (msg.sender_node_id || (msg.role === 'user' ? 'user' : reqChatId));
+                  const fallbackName = aiAnswer ? (msg.sender_name || '') : (msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(reqChatId)));
                   const mapped = mapBackendMessage(msg, {
                     fallbackSender,
                     fallbackSenderName: fallbackName,
@@ -202,9 +212,9 @@
           }
         })();
       } else if (reqChatId.startsWith('agent_') && !loadingHistory.has(reqChatId) && untrack(() => !hasTokenUsage(reqChatId))) {
-        // History was restored from localStorage but token counter needs refreshing.
-        // This happens after a full app restart: localStorage provides the messages but
-        // tokenUsageMap is empty, so the counter stays at 0 unless we fetch token data.
+        // History is on screen (AgentPanel loads every agent's at connect) but the
+        // token counter needs refreshing: tokenUsageMap is empty after a restart,
+        // so the counter stays at 0 unless we fetch token data.
         console.log(`[ChatHistory] Agent history cached but no token data - fetching from backend for ${reqChatId.slice(0,20)}`);
         loadingHistory.add(reqChatId);
         (async () => {
