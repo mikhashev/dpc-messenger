@@ -97,6 +97,10 @@ def _timings_from_response(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
 
     llama-server puts them in the response body, so they belong to the call
     that asked — the shared log cannot say that about anything.
+
+    A rate the engine left null does not void the counters beside it: Strata
+    sends `prompt_per_second: null` when `prompt_n` is 0, which is the fully
+    cached request, and `cache_n` is the one number that says so.
     """
     if not raw:
         return None
@@ -111,10 +115,13 @@ def _timings_from_response(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
         out["engine_gen_tokens"] = int(raw["predicted_n"])
     if raw.get("cache_n") is not None:
         out["engine_cached_tokens"] = int(raw["cache_n"])
+    for key in ("prompt_ms", "predicted_ms"):
+        if raw.get(key) is not None:
+            out[key] = float(raw[key])
     drafted = raw.get("draft_n")
     if drafted:
         out["draft_acceptance"] = round(raw.get("draft_n_accepted", 0) / drafted, 3)
-    return out if "prefill_tok_s" in out and "decode_tok_s" in out else None
+    return out or None
 
 
 class LlamaServerProvider(DeepSeekProvider):
@@ -734,11 +741,15 @@ class LlamaServerProvider(DeepSeekProvider):
                 except Exception:
                     timings = None
             if timings:
-                speed.update({
-                    "prefill_tok_s": timings["prefill_tok_s"],
-                    "decode_tok_s": timings["decode_tok_s"],
-                    "speed_source": "engine",
-                })
+                if "prefill_tok_s" in timings and "decode_tok_s" in timings:
+                    speed.update({
+                        "prefill_tok_s": timings["prefill_tok_s"],
+                        "decode_tok_s": timings["decode_tok_s"],
+                        "speed_source": "engine",
+                    })
+                for key in ("prompt_ms", "predicted_ms"):
+                    if key in timings:
+                        usage[key] = timings[key]
                 # What the engine re-evaluated against what we sent. The
                 # response states the reused count outright; from the log it can
                 # only be derived, because the child logs a prompt-cache load

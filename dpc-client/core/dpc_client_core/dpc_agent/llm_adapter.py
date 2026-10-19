@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from ..node_ledger import (
+    ENGINE_FIELDS,
     TARIFF_FIELDS,
     NodeLedger,
     default_ledger,
@@ -489,6 +490,10 @@ class DpcLlmAdapter:
                     alias or "", model, provider_type=facts.get("host_provider_type"),
                 ),
                 **{name: usage.get(name) for name in COST_FIELDS},
+                # The engine's word on the round, where the provider's usage
+                # dict carries it (llama-server and Strata today); the peer
+                # route does not copy these from the wire.
+                **{name: usage.get(name) for name in ENGINE_FIELDS},
                 # Copied from the wire on the peer route, never computed here.
                 **{name: facts.get(name) for name in TARIFF_FIELDS},
                 task_id=task_id,

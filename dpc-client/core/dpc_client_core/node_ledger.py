@@ -17,7 +17,8 @@ clamp — on the host's own row from the clamp, on the requester's row from the
 wire; None means no effort control was applied, which is not `off`, and a row
 written before the column reads as None), whether the node at the other end of
 the call had its key proved and over which tier (`peer_proved`,
-`peer_connection_type`; see `usage_row` for what «proved» means on each side)
+`peer_connection_type`; see `usage_row` for what «proved» means on each side),
+what the engine said about the round (`ENGINE_FIELDS`, null where it said nothing)
 and what it cost (`billing`, `cost_amount` in `cost_currency` on a
 `cost_basis`, and `cost_unpriced_reason` where nobody could price it) —
 priced at `started_at` by the node that made the call and never re-priced,
@@ -175,8 +176,19 @@ def usage_row(
     peer_connection_type: Optional[str] = None,
     content_chars: Any = None,
     tool_calls: Any = None,
+    finish_reason: Optional[str] = None,
+    max_tokens: Any = None,
+    prefilled_tokens: Any = None,
+    cached_tokens: Any = None,
+    prompt_ms: Any = None,
+    predicted_ms: Any = None,
 ) -> Dict[str, Any]:
     """One row in D3's column order.
+
+    `ENGINE_FIELDS` are the engine's own word on the round, named as the
+    provider's usage dict names them: why it stopped, the ceiling the request
+    carried, the prompt tokens re-read and reused, and each phase's raw clock.
+    Counters and milliseconds, never a rate; None is «not reported».
 
     `content_chars` and `tool_calls` say what the model left visible: the
     length of its stripped assistant text and the number of tool calls in the
@@ -284,6 +296,9 @@ def usage_row(
     for name, value in (("content_chars", content_chars), ("tool_calls", tool_calls)):
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise ValueError(f"{name}={value!r} is not a non-negative int or None")
+    engine = _engine_columns(
+        finish_reason, max_tokens, prefilled_tokens, cached_tokens, prompt_ms, predicted_ms,
+    )
     cost = _cost_columns(cost_amount, cost_currency, cost_basis, cost_unpriced_reason)
     row: Dict[str, Any] = {
         "request_id": str(request_id),
@@ -300,6 +315,7 @@ def usage_row(
         "thinking_source": thinking_source,
         "content_chars": content_chars,
         "tool_calls": tool_calls,
+        **engine,
         "served_effort": served_effort,
         "peer_proved": peer_proved,
         "peer_connection_type": peer_connection_type,
@@ -330,6 +346,44 @@ def response_counts(text: Any, tool_calls: Any) -> Dict[str, Optional[int]]:
     return {
         "content_chars": None if text is None else len(str(text).strip()),
         "tool_calls": None if tool_calls is None else len(tool_calls),
+    }
+
+
+#: The engine's own word on a round, in the row's column order (`usage_row`).
+ENGINE_FIELDS = (
+    "finish_reason", "max_tokens", "prefilled_tokens", "cached_tokens", "prompt_ms", "predicted_ms",
+)
+
+
+def _engine_columns(
+    finish_reason: Any, max_tokens: Any, prefilled_tokens: Any, cached_tokens: Any,
+    prompt_ms: Any, predicted_ms: Any,
+) -> Dict[str, Any]:
+    """The five engine columns, None where the provider reported nothing, or a
+    ValueError naming the one whose type is wrong."""
+    if finish_reason is not None and not isinstance(finish_reason, str):
+        raise ValueError(f"finish_reason={finish_reason!r} is not the engine's word for why it stopped")
+    # A ceiling is a positive whole number of tokens (`providers.base.positive_ceiling`).
+    if max_tokens is not None and (
+        isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0
+    ):
+        raise ValueError(f"max_tokens={max_tokens!r} is not a positive int or None")
+    for name, value in (("prefilled_tokens", prefilled_tokens), ("cached_tokens", cached_tokens)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(f"{name}={value!r} is not a non-negative int or None")
+    for name, value in (("prompt_ms", prompt_ms), ("predicted_ms", predicted_ms)):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0
+        ):
+            raise ValueError(f"{name}={value!r} is not a finite, non-negative number of milliseconds")
+    return {
+        "finish_reason": finish_reason,
+        "max_tokens": max_tokens,
+        "prefilled_tokens": prefilled_tokens,
+        "cached_tokens": cached_tokens,
+        "prompt_ms": None if prompt_ms is None else float(prompt_ms),
+        "predicted_ms": None if predicted_ms is None else float(predicted_ms),
     }
 
 
@@ -633,6 +687,9 @@ class NodeLedger:
                             # A row written before the two columns did not see the response.
                             row.setdefault("content_chars", None)
                             row.setdefault("tool_calls", None)
+                            # ... nor the engine's word on the round (2026-10-19).
+                            for name in ENGINE_FIELDS:
+                                row.setdefault(name, None)
                             row.setdefault("served_effort", None)
                             row.setdefault("peer_proved", None)
                             row.setdefault("peer_connection_type", None)

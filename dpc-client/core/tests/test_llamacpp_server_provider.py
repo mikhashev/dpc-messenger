@@ -1362,7 +1362,6 @@ class TestTheResponseIsTheSourceOfItsOwnTimings:
     def test_a_response_without_timings_is_not_a_source(self):
         assert llamacpp_server_provider._timings_from_response(None) is None
         assert llamacpp_server_provider._timings_from_response({}) is None
-        assert llamacpp_server_provider._timings_from_response({"cache_n": 3}) is None
 
     def test_the_response_wins_over_the_shared_log(self):
         p = self._provider_with_log_timings()

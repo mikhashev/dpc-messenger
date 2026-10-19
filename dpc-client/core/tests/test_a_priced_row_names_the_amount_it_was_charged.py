@@ -109,6 +109,7 @@ def test_the_amount_is_written_after_the_tariff_group_it_belongs_to():
         "request_id", "caller", "caller_kind", "alias", "model", "route",
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
         "output_includes_thinking", "thinking_source", "content_chars", "tool_calls",
+        "finish_reason", "max_tokens", "prefilled_tokens", "cached_tokens", "prompt_ms", "predicted_ms",
         "served_effort", "peer_proved",
         "peer_connection_type",
         "started_at", "duration_s", "billing", "cost_amount", "cost_currency", "cost_basis", "cost_unpriced_reason",
