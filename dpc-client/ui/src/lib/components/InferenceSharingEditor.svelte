@@ -570,7 +570,7 @@
             Two lists, by what an alias spends. A <strong>local</strong> alias (Ollama, llama.cpp) spends this
             card; every one listed is served to peers over P2P (Mike's call, 2026-09-18), and the one chosen
             below (else the first) is what a request naming no alias gets. A Strata alias answers a peer
-            503 while it loads, while it is not running (a peer never starts it) and while this node's own
+            503 while it loads, while it is not running (a peer's request starts it only when the card is free) and while this node's own
             conversations hold its conversation cache (ADR-044 point 9). A <strong>vendor</strong> alias spends money, so its ceiling is
             per caller, per day, in the currency its provider bills in; it is served over P2P too
             (Mike's call, 2026-09-28), only to a peer that names it, and never as the default. A remote peer's model and an agent are never offered: what is shared is

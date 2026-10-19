@@ -1013,7 +1013,7 @@ class P2PCoordinator:
                 # The engine's own state, asked after the wait and right before
                 # the call, so what was true when the peer queued is not what
                 # decides (ADR-044 point 9). Refused before any row.
-                engine_refusal = await self._local_engine_refusal(serving_alias)
+                engine_refusal = await self._local_engine_refusal(serving_alias, peer_id)
                 if engine_refusal:
                     raise EngineUnavailable(engine_refusal)
                 # Clocked inside the lock: the wait is not part of the call, and
@@ -1161,7 +1161,7 @@ class P2PCoordinator:
 
         return isinstance(self._provider_for_alias(alias), StrataProvider)
 
-    async def _local_engine_refusal(self, alias: str) -> Optional[str]:
+    async def _local_engine_refusal(self, alias: str, peer_id: Optional[str] = None) -> Optional[str]:
         """Why the local engine behind `alias` cannot take a peer now, or None.
 
         Only a Strata alias has a policy (ADR-044 point 9); a `llama-server`
@@ -1170,7 +1170,7 @@ class P2PCoordinator:
             return None
         provider = self._provider_for_alias(alias)
         try:
-            return await provider.peer_refusal()
+            return await provider.peer_refusal(peer_id)
         except Exception as e:
             logger.error("Strata peer policy failed for '%s': %s", alias, e, exc_info=True)
             return f"'{alias}': this node cannot tell whether its engine is free ({type(e).__name__})"

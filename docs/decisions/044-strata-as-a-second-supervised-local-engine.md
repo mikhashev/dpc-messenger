@@ -196,7 +196,11 @@ card.** Every point is Mike's call, 2026-10-18.
    conversation can evict our parked one. Policy, in bytes of the conversation-cache
    budget rather than slots, because the budget is what binds: a peer gets nothing from
    the budget while our own conversations hold it, and is answered 503; also 503 while
-   Strata is loading. With two local engines, "the default local alias" is no longer
+   Strata is loading. A peer's request may start a stopped launcher in the background,
+   one start at a time, when the other local engine does not hold the card and the
+   card's free VRAM is enough, and is answered 503 "loading" meanwhile; a launcher
+   stopped after an engine death stays the owner's to reset (Mike's call, 2026-10-20).
+   With two local engines, "the default local alias" is no longer
    unique: the upstream a peer is served from is set explicitly in Inference Sharing
    settings, and the ADR-041 gateway names its local upstream rather than inferring one
    (today `compute_serving_alias` takes the first `serving_local` entry).

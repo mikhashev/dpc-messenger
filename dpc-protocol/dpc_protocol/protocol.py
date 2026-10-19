@@ -85,7 +85,7 @@ REFUSAL_UNRATED = "unrated"
 REFUSAL_MISCONFIGURED = "misconfigured"
 # The host's local engine cannot take a peer now (ADR-044 points 4 and 9):
 # the card is held by the other local engine, or (Strata) it is loading, it is
-# not running and a peer does not start it, or the owner's own conversations
+# not running and a peer's request may not start it now, or the owner's own conversations
 # hold its conversation cache. The word is the gateway's own for
 # a listed alias whose provider is not there (`provider_unavailable`, 503).
 # Retryable: the state ends without the guest changing anything, so the guest

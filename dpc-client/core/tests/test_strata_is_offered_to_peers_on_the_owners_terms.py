@@ -6,9 +6,14 @@ Two decisions, Mike's call 2026-10-18:
   (`compute.serving_alias`, one of `serving_local`); absent, the first entry
   is taken as before and the P2P door says once that it was list order;
 * a Strata alias answers a peer 503 (`provider_unavailable`) while it loads,
-  while it is not running — a peer never starts it — and while this node's own
-  conversations may hold its conversation cache. The answer is not retried by
-  this node, and a `llama-server` alias is untouched by the Strata policy.
+  while it is not running, and while this node's own conversations may hold its
+  conversation cache. The answer is not retried by this node, and a
+  `llama-server` alias is untouched by the Strata policy.
+
+And one more, Mike's call 2026-10-20: a peer's request may begin the start of a
+stopped launcher in the background — once, when the other engine does not hold
+the card and the card's free VRAM is enough — and is answered "loading"
+meanwhile. A failed launcher stays the owner's to reset.
 
 The door is checked twice over. `TestTheWholePath` runs a peer request through
 a real `ContextFirewall` read from a rules file and a real `StrataProvider`
@@ -20,6 +25,7 @@ and the gate itself is proven by the whole-path class.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -30,7 +36,7 @@ import pytest
 
 from dpc_client_core.firewall import ContextFirewall
 from dpc_client_core.managers import llama_server_supervisor as base_mod
-from dpc_client_core.managers.llama_server_supervisor import CardHeldError
+from dpc_client_core.managers.llama_server_supervisor import CardHeldError, LlamaServerSupervisor
 from dpc_client_core.managers.strata_supervisor import (
     PeerCallRefused,
     PeerStartRefused,
@@ -53,9 +59,15 @@ PEER = "peer-1"
 @pytest.fixture(autouse=True)
 def _clean_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(base_mod, "DPC_HOME", tmp_path / "dpc-home")
+    # No test reads the real card: unreadable unless a test says otherwise,
+    # which refuses a peer's start.
+    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: None)
+    monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
     _ACTIVE_SUPERVISORS.clear()
+    base_mod._CARD_CLAIMS.clear()
     yield
     _ACTIVE_SUPERVISORS.clear()
+    base_mod._CARD_CLAIMS.clear()
 
 
 def _strata(tmp_path) -> StrataProvider:
@@ -156,12 +168,6 @@ class TestThePeerPolicy:
         p.supervisor.props = {}
         assert "loading" in await p.peer_refusal()
 
-    @pytest.mark.asyncio
-    async def test_stopped_and_failed_are_refused_as_not_running(self, tmp_path):
-        p = _strata(tmp_path)
-        assert "not running" in await p.peer_refusal()
-        p.supervisor.failure = {"reason": "engine died"}
-        assert "not running" in await p.peer_refusal()
 
     @pytest.mark.asyncio
     async def test_with_no_owner_call_since_the_start_a_peer_is_served_without_a_read(self, tmp_path):
@@ -220,6 +226,144 @@ class TestThePeerPolicy:
         sup.peer_metrics_read = (sup.owner_last_end - 0.1, EMPTY)
         await p.peer_refusal()
         assert sup._get.await_count == 2, "a read older than the owner's last call is read again"
+
+
+CARD_MIB = 32623  # this machine's card, nvidia-smi memory.total
+ENOUGH = CARD_MIB - 400  # the desktop's share is well under the reserve
+
+
+def _card(monkeypatch, free, total=CARD_MIB):
+    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: free)
+    monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: total)
+
+
+def _held_by_llama_server(alias="qwen27"):
+    holder = LlamaServerSupervisor(alias, {"gguf_path": "D:/models/q.gguf"})
+    holder._proc = _FakeProc()
+    holder.props = {"total_slots": 1}
+    base_mod._CARD_CLAIMS[holder] = "claimed"
+    return holder
+
+
+def _slow_start(sup):
+    """`ensure_running` that records the mark it ran under and loads until released."""
+    started, release = [], asyncio.Event()
+
+    async def ensure_running():
+        started.append(peer_being_served())
+        await release.wait()
+        return {}
+
+    sup.ensure_running = ensure_running
+    return started, release
+
+
+def _started_lines(caplog):
+    return [r for r in caplog.records if "started the launcher" in r.getMessage()]
+
+
+class TestAPeerStartsAStoppedLauncher:
+    """Mike's call 2026-10-20: stopped, the card not held and VRAM enough — one
+    background start, and the peer told "loading"; otherwise a named refusal."""
+
+    @pytest.mark.asyncio
+    async def test_the_card_free_starts_it_once_unmarked_and_the_peer_is_told_loading(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        p = _strata(tmp_path)
+        _card(monkeypatch, free=ENOUGH)
+        started, release = _slow_start(p.supervisor)
+
+        with caplog.at_level(logging.INFO, logger=strata_mod.__name__):
+            with serving_a_peer(PEER):
+                reason = await p.peer_refusal(PEER)
+            await asyncio.sleep(0)
+            assert "loading" in reason
+            assert started == [None], "one start, run as the owner's would be, not as the peer's call"
+            assert await p.peer_refusal("peer-2") == reason, "a start under way answers loading"
+            assert len(started) == 1
+        lines = _started_lines(caplog)
+        assert len(lines) == 1 and PEER in lines[0].getMessage()
+        assert p.supervisor.peer_cleared_at_owner_calls is None, "loading lets no call in"
+        release.set()
+        await p.supervisor.peer_start_task
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_peer_requests_begin_one_start(self, tmp_path, monkeypatch, caplog):
+        p = _strata(tmp_path)
+        _card(monkeypatch, free=ENOUGH)
+        started, release = _slow_start(p.supervisor)
+
+        with caplog.at_level(logging.INFO, logger=strata_mod.__name__):
+            answers = await asyncio.gather(p.peer_refusal(PEER), p.peer_refusal("peer-2"))
+            await asyncio.sleep(0)
+        assert all("loading" in a for a in answers)
+        assert len(started) == 1 and len(_started_lines(caplog)) == 1
+        release.set()
+        await p.supervisor.peer_start_task
+
+    @pytest.mark.asyncio
+    async def test_the_card_held_by_the_other_engine_is_refused_and_not_started(self, tmp_path, monkeypatch):
+        p = _strata(tmp_path)
+        _card(monkeypatch, free=ENOUGH)
+        _held_by_llama_server("qwen27")
+        started, _ = _slow_start(p.supervisor)
+
+        reason = await p.peer_refusal(PEER)
+        await asyncio.sleep(0)
+        assert "does not start it now" in reason
+        assert "the card is held by llama-server alias 'qwen27'" in reason
+        assert started == [] and p.supervisor.peer_start_task is None
+
+    @pytest.mark.asyncio
+    async def test_too_little_free_vram_is_refused_and_not_started(self, tmp_path, monkeypatch):
+        p = _strata(tmp_path)
+        _card(monkeypatch, free=20000)
+        started, _ = _slow_start(p.supervisor)
+
+        reason = await p.peer_refusal(PEER)
+        await asyncio.sleep(0)
+        needed = CARD_MIB - base_mod._DESKTOP_RESERVE_MIB
+        assert f"20000 MiB of VRAM free, {needed} MiB needed" in reason
+        assert started == []
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_card_is_refused_and_not_started(self, tmp_path):
+        p = _strata(tmp_path)  # the fixture's card reads None
+        started, _ = _slow_start(p.supervisor)
+        assert "free VRAM cannot be read" in await p.peer_refusal(PEER)
+        await asyncio.sleep(0)
+        assert started == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_launcher_stays_refused_and_is_not_started(self, tmp_path, monkeypatch):
+        """After an engine death a person resets the launcher (point 3); a free card changes nothing."""
+        p = _strata(tmp_path)
+        _card(monkeypatch, free=ENOUGH)
+        p.supervisor.failure = {"reason": "engine died"}
+        started, _ = _slow_start(p.supervisor)
+
+        reason = await p.peer_refusal(PEER)
+        await asyncio.sleep(0)
+        assert "not running" in reason and "engine failure" in reason
+        assert started == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_background_start_is_logged_and_a_later_request_may_begin_another(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        p = _strata(tmp_path)
+        _card(monkeypatch, free=ENOUGH)
+        sup = p.supervisor
+        sup.ensure_running = AsyncMock(side_effect=base_mod.LlamaServerError("no venv"))
+
+        with caplog.at_level(logging.WARNING, logger="dpc_client_core.managers.strata_supervisor"):
+            assert "loading" in await p.peer_refusal(PEER)
+            await sup.peer_start_task
+        assert any("begun for peer peer-1 failed" in r.getMessage() for r in caplog.records)
+        assert "loading" in await p.peer_refusal(PEER)
+        await sup.peer_start_task
+        assert sup.ensure_running.await_count == 2
 
 
 class TestTheSupervisorMarks:
@@ -339,8 +483,9 @@ class TestTheDoor:
         assert seen == [] and _rows(coord._ledger) == []
 
     @pytest.mark.asyncio
-    async def test_strata_stopped_is_a_503_and_no_start(self, tmp_path):
+    async def test_strata_stopped_with_too_little_vram_is_a_503_and_no_start(self, tmp_path, monkeypatch):
         p = _strata(tmp_path)
+        _card(monkeypatch, free=4096)
         launched = []
         p.supervisor._launch = AsyncMock(side_effect=lambda *a, **k: launched.append(a))
         coord, svc, seen = _door(tmp_path, p)
@@ -349,7 +494,30 @@ class TestTheDoor:
 
         payload = _answer(svc)
         assert payload["code"] == "provider_unavailable" and "not running" in payload["error"]
+        assert "4096 MiB of VRAM free" in payload["error"]
         assert seen == [] and launched == []
+
+    @pytest.mark.asyncio
+    async def test_strata_stopped_with_the_card_free_is_a_503_loading_and_one_start(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        p = _strata(tmp_path)
+        _card(monkeypatch, free=ENOUGH)
+        started, release = _slow_start(p.supervisor)
+        coord, svc, seen = _door(tmp_path, p)
+
+        with caplog.at_level(logging.INFO, logger=strata_mod.__name__):
+            await coord.handle_inference_request(PEER, "req-1", "ping")
+            await asyncio.sleep(0)
+
+        payload = _answer(svc)
+        assert payload["code"] == "provider_unavailable" and "loading" in payload["error"]
+        assert "retry_after_sec" not in payload
+        assert seen == [] and _rows(coord._ledger) == [], "the peer's call itself never ran"
+        assert started == [None]
+        assert PEER in _started_lines(caplog)[0].getMessage()
+        release.set()
+        await p.supervisor.peer_start_task
 
     @pytest.mark.asyncio
     async def test_owner_conversations_parked_are_a_503(self, tmp_path):

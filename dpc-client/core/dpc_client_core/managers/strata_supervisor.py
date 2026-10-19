@@ -37,9 +37,11 @@ What differs, by ADR-044 point:
   the start; if it does not, an engine outlived the launcher (`contain()` can
   fail harmlessly) and the card is not claimed free.
 - 9. A peer's call is marked (`serving_a_peer`) so the supervisor can tell the
-  owner's calls from a peer's: a peer never starts the launcher, and the
-  owner's calls since the start are what the peer policy in
-  `strata_provider.peer_refusal` weighs against the conversation cache.
+  owner's calls from a peer's: a peer's call never starts the launcher itself,
+  and the owner's calls since the start are what the peer policy in
+  `strata_provider.peer_refusal` weighs against the conversation cache. The
+  policy may begin a start in the background instead (`start_for_peer`), one
+  at a time, and answers the peer "loading" meanwhile.
 """
 
 import asyncio
@@ -89,7 +91,8 @@ class PeerCallRefused(LlamaServerError):
 
 
 class PeerStartRefused(PeerCallRefused):
-    """A peer's call met a launcher that is not up; a peer never starts it (ADR-044 point 9)."""
+    """A peer's call met a launcher that is not up; the call does not start it
+    (ADR-044 point 9 — only the peer policy may, in the background)."""
 
 
 # Typed alias key -> (engine flag, Strata's own default, highest value Strata
@@ -803,6 +806,9 @@ class StrataSupervisor(LlamaServerSupervisor):
         # `owner_calls` as it stood when the peer policy last let a peer in;
         # a peer's slot checks it again (`peer_slot_refusal`).
         self.peer_cleared_at_owner_calls: Optional[int] = None
+        # The background start a peer's request began (`start_for_peer`); while
+        # it runs, no second one begins.
+        self.peer_start_task: Optional[asyncio.Task] = None
         # (key, answer) of the last `start_reads_images`; the key holds the
         # base config's mtime and size, so an edit there is seen.
         self._start_vision_cache: Optional[tuple] = None
@@ -1178,9 +1184,10 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"the launcher exited on its own with {proc.returncode}", body=None, stop=True,
                 )
                 raise self._refusal()
-            # A peer never starts the owner's engine (ADR-044 point 9): this is
-            # the one place a start begins, so the rule holds whichever door
-            # or retry the call came through.
+            # A peer's call never starts the owner's engine (ADR-044 point 9):
+            # this is the one place a start begins, so the rule holds whichever
+            # door or retry the call came through. The peer policy's own start
+            # (`start_for_peer`) runs unmarked, as the owner's call would.
             peer = peer_being_served()
             if peer is not None:
                 raise PeerStartRefused(
@@ -1203,6 +1210,36 @@ class StrataSupervisor(LlamaServerSupervisor):
             except BaseException:
                 self._release_card_unless_live()
                 raise
+
+    def start_for_peer(self, peer_id: Optional[str]) -> bool:
+        """Begin the owner's own start (`ensure_running`) in the background for a
+        peer's request, without the peer mark; False when one is already under
+        way (ADR-044 point 9, Mike's call 2026-10-20).
+
+        The check and the task are made with no await between them, so
+        concurrent peer requests begin one start. The peer is not made to wait:
+        the policy answers it "loading", and the parking rule applies once the
+        launcher is up."""
+        task = self.peer_start_task
+        if task is not None and not task.done():
+            return False
+        ctx = contextvars.copy_context()
+        ctx.run(_PEER_CALL.set, None)
+        self.peer_start_task = asyncio.get_running_loop().create_task(
+            self._start_for_peer(peer_id), context=ctx,
+        )
+        return True
+
+    async def _start_for_peer(self, peer_id: Optional[str]) -> None:
+        try:
+            await self.ensure_running()
+        except Exception as e:
+            # Nobody awaits this task: the failure is recorded here, and the
+            # next peer request meets the state it left (failed, or stopped).
+            logger.warning(
+                "strata[%s]: the start begun for peer %s failed: %s",
+                self.alias, peer_id or "unknown", e,
+            )
 
     async def _launch(self, binary: Path, cache_type: Optional[str] = None) -> Dict[str, Any]:
         self._claim_card()

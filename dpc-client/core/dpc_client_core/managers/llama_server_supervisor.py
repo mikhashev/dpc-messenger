@@ -805,10 +805,20 @@ class LlamaServerSupervisor:
         otherwise hold it. Synchronous on purpose: see `_CARD_CLAIMS`."""
         if not self.on_the_card():
             return
+        held = self._card_held_error()
+        if held is not None:
+            raise held
+        _CARD_CLAIMS[self] = "claimed"
+
+    def _card_held_error(self) -> Optional[CardHeldError]:
+        """The refusal `_claim_card` would raise now, or None. Claims nothing,
+        so a policy can ask before it decides to start (ADR-044 point 9)."""
+        if not self.on_the_card():
+            return None
         for other, state in _live_claims():
             if other is self or other.alias == self.alias or not self._excludes(other):
                 continue
-            raise CardHeldError(
+            return CardHeldError(
                 f"{self.ENGINE}[{self.alias}] cannot load: the card is held by "
                 f"{other.ENGINE} alias '{other.alias}' ({state}). "
                 f"{self.ENGINE} and {other.ENGINE} cannot hold the card together and "
@@ -816,7 +826,7 @@ class LlamaServerSupervisor:
                 f"settings to free the card, or switch this agent to '{other.alias}'",
                 other.alias, other.ENGINE,
             )
-        _CARD_CLAIMS[self] = "claimed"
+        return None
 
     def _release_card_unless_live(self) -> None:
         """A start that failed before leaving a live child holds nothing."""

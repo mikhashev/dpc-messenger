@@ -14,6 +14,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from ..managers import llama_server_supervisor as _base
 from ..managers.commit_memory import read_free_commit
 from ..managers.llama_server_supervisor import effort_dictionary_of
 from ..managers.strata_supervisor import (
@@ -177,12 +178,14 @@ class StrataProvider(LlamaServerProvider):
             return False
         return super()._is_retryable(error)
 
-    async def peer_refusal(self) -> Optional[str]:
+    async def peer_refusal(self, peer_id: Optional[str] = None) -> Optional[str]:
         """Why a peer may not be served on this alias now, or None (ADR-044 point 9).
 
-        Starting, stopped, failed or draining: refused, and a peer never starts
-        the launcher. Running: refused while our own conversations may hold the
-        conversation cache. Strata keys the cache by token prefix and reports
+        Starting, failed or draining: refused; after an engine death a person
+        resets the launcher (point 3), a peer does not. Stopped: the request
+        may begin the start in the background and is answered loading, or is
+        refused with the reason it may not (`_peer_start_refusal`). Running:
+        refused while our own conversations may hold the conversation cache. Strata keys the cache by token prefix and reports
         it only in aggregate (`/metrics` `conversation_cache` parked / bytes,
         no owner per entry), so ownership is DPC's own count: the owner's calls
         on this launcher since it started. The rule —
@@ -201,21 +204,27 @@ class StrataProvider(LlamaServerProvider):
         reaches the engine (`StrataSupervisor.peer_slot_refusal`)."""
         sup = self.supervisor
         counted = sup.owner_calls
-        refusal = await self._peer_refusal_now()
+        refusal = await self._peer_refusal_now(peer_id)
         sup.peer_cleared_at_owner_calls = counted if refusal is None else None
         return refusal
 
-    async def _peer_refusal_now(self) -> Optional[str]:
+    def _loading(self) -> str:
+        return f"'{self.alias}' is loading (the Strata launcher is starting); try again shortly"
+
+    async def _peer_refusal_now(self, peer_id: Optional[str] = None) -> Optional[str]:
         sup = self.supervisor
         state = _strata_state(sup)
         if state == "starting":
-            return f"'{self.alias}' is loading (the Strata launcher is starting); try again shortly"
+            return self._loading()
         if state == "draining":
             return f"'{self.alias}' is stopping (the Strata launcher is draining)"
-        if state in ("stopped", "failed"):
+        if state == "failed":
             return (
-                f"'{self.alias}' is not running; this node's owner starts it, a peer's request does not"
+                f"'{self.alias}' is not running: it was stopped after an engine failure, "
+                "and this node's owner starts it again, a peer's request does not"
             )
+        if state == "stopped":
+            return await self._peer_start_refusal(peer_id) or self._loading()
         if sup.owner_in_flight > 0:
             return f"'{self.alias}' is serving this node's owner now; its conversation cache is not shared meanwhile"
         if sup.owner_calls == 0:
@@ -237,6 +246,52 @@ class StrataProvider(LlamaServerProvider):
                 f"'{self.alias}': this node's own conversations hold the conversation cache "
                 f"({parked} parked, {int(held) >> 20} MiB"
                 f"{f' of {budget} MiB' if budget is not None else ''})"
+            )
+        return None
+
+    async def _peer_start_refusal(self, peer_id: Optional[str]) -> Optional[str]:
+        """Why a peer's request may not begin a start of the stopped launcher, or
+        None when it began one or one is under way (ADR-044 point 9).
+
+        (a) The card: the refusal the owner's start would meet (`_card_held_error`).
+        (b) Free VRAM: Strata sizes its expert cache to what is free, so the
+            config holds no per-model figure; the bar is the llama-server
+            admission budget, physical VRAM less the desktop reserve."""
+        sup = self.supervisor
+        pending = sup.peer_start_task
+        if pending is not None and not pending.done():
+            return None
+        not_started = f"'{self.alias}' is not running, and a peer's request does not start it now"
+
+        def card_refusal() -> Optional[str]:
+            held = sup._card_held_error()
+            if held is None:
+                return None
+            return f"{not_started}: the card is held by {held.holder_engine} alias '{held.holder_alias}'"
+
+        refusal = card_refusal()
+        if refusal:
+            return refusal
+        free, total = await asyncio.gather(
+            asyncio.to_thread(_base._free_vram_mib), asyncio.to_thread(_base._total_vram_mib),
+        )
+        if free is None or total is None:
+            return f"{not_started}: the card's free VRAM cannot be read"
+        needed = total - _base._DESKTOP_RESERVE_MIB
+        if free < needed:
+            return (
+                f"{not_started}: {free} MiB of VRAM free, {needed} MiB needed "
+                f"(the card's {total} MiB less {_base._DESKTOP_RESERVE_MIB} MiB for the desktop)"
+            )
+        # Asked again: the reads above awaited, and an owner start may have claimed the card.
+        refusal = card_refusal()
+        if refusal:
+            return refusal
+        if sup.start_for_peer(peer_id):
+            logger.info(
+                "strata '%s': peer %s started the launcher (the card not held by the other "
+                "engine, %d MiB of VRAM free, %d MiB needed)",
+                self.alias, peer_id or "unknown", free, needed,
             )
         return None
 
