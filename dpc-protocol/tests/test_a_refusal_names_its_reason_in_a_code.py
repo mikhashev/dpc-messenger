@@ -43,7 +43,7 @@ def test_a_served_answer_never_wears_a_code():
     assert payload["status"] == "success" and "code" not in payload
 
 
-def test_the_vocabulary_is_exactly_these_ten_words():
+def test_the_vocabulary_is_exactly_these_eleven_words():
     """Written out rather than counted, so that adding a word to the frozenset
     is a change somebody has to make here too — and so that the three
     money-shaped refusals are visibly three words and not one (DPTP §3.4,
@@ -61,6 +61,8 @@ def test_the_vocabulary_is_exactly_these_ten_words():
         "misconfigured",
         # ADR-044 point 9: a local engine that cannot take a peer now.
         "provider_unavailable",
+        # DPTP v1.10: the same engine, loading - a wait ends it.
+        "provider_loading",
     }
 
 

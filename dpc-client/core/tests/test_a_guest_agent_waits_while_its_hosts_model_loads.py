@@ -1,15 +1,16 @@
 """A guest agent waits while its host's model loads (Mike's call, 2026-10-20).
 
 When a guest's agent asks a peer host for inference and the host refuses with
-`provider_unavailable` because its model is loading, the guest asks again by
+`provider_loading` because its model is loading, the guest asks again by
 itself, the person sees that the model is still loading while it waits, and
 if it never comes up the person reads a notice, not an "LLM error".
 
-The code alone cannot say "loading": the same word covers a card held by the
-host's other engine and the owner's own parked conversations, which no wait
-ends. So the host names the state beside it — `engine_state: "starting"`
-(DPTP v1.9) — only while the engine starts, and the guest waits only on that.
-A host that predates the field is told once and not retried.
+`provider_unavailable` cannot mean "loading": the same word covers a card held
+by the host's other engine and the owner's own parked conversations, which no
+wait ends. So a loading engine has its own refusal code, `provider_loading`
+(DPTP v1.9, Mike's call 2026-10-20), and the guest waits only on that. A host
+that says "loading" in the prose of a `provider_unavailable` is told once and
+not retried; so is a code this guest has no word for.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from dpc_protocol.protocol import (
-    ENGINE_STATE_STARTING,
+    REFUSAL_PROVIDER_LOADING,
     REFUSAL_PROVIDER_UNAVAILABLE,
     PeerRefused,
     create_remote_inference_response,
@@ -55,7 +56,7 @@ LOADING_TEXT = "'flash' is loading (the Strata launcher is starting); try again 
 
 
 def _loading() -> PeerRefused:
-    return PeerRefused(LOADING_TEXT, code=REFUSAL_PROVIDER_UNAVAILABLE, engine_state=ENGINE_STATE_STARTING)
+    return PeerRefused(LOADING_TEXT, code=REFUSAL_PROVIDER_LOADING)
 
 
 def _held() -> PeerRefused:
@@ -94,12 +95,12 @@ def _progress_lines():
     return lines, token
 
 
-# --- the host names the state only while the engine starts --------------------------
+# --- the host says provider_loading only while the engine starts -------------------
 
 
 class TestTheHostSaysStarting:
     @pytest.mark.asyncio
-    async def test_a_starting_launcher_is_refused_with_engine_state_starting(self, tmp_path):
+    async def test_a_starting_launcher_is_refused_with_provider_loading(self, tmp_path):
         p = _strata(tmp_path)
         p.supervisor._proc = _FakeProc()
         p.supervisor.props = {}
@@ -108,8 +109,8 @@ class TestTheHostSaysStarting:
         await coord.handle_inference_request(PEER, "req-1", "ping")
 
         payload = _answer(svc)
-        assert payload["code"] == "provider_unavailable"
-        assert payload["engine_state"] == "starting"
+        assert payload["code"] == "provider_loading"
+        assert "engine_state" not in payload
 
     @pytest.mark.asyncio
     async def test_a_start_a_peers_request_just_began_is_starting_too(self, tmp_path, monkeypatch):
@@ -121,12 +122,12 @@ class TestTheHostSaysStarting:
         await coord.handle_inference_request(PEER, "req-1", "ping")
         await asyncio.sleep(0)
 
-        assert _answer(svc)["engine_state"] == "starting"
+        assert _answer(svc)["code"] == "provider_loading"
         release.set()
         await p.supervisor.peer_start_task
 
     @pytest.mark.asyncio
-    async def test_parked_owner_conversations_name_no_state(self, tmp_path):
+    async def test_parked_owner_conversations_stay_provider_unavailable(self, tmp_path):
         p = _strata(tmp_path)
         _running(p, cache=PARKED, owner_calls=1)
         coord, svc, _seen = _door(tmp_path, p)
@@ -134,10 +135,10 @@ class TestTheHostSaysStarting:
         await coord.handle_inference_request(PEER, "req-1", "ping")
 
         payload = _answer(svc)
-        assert payload["code"] == "provider_unavailable" and "engine_state" not in payload
+        assert payload["code"] == "provider_unavailable"
 
     @pytest.mark.asyncio
-    async def test_too_little_vram_to_start_names_no_state(self, tmp_path, monkeypatch):
+    async def test_too_little_vram_to_start_stays_provider_unavailable(self, tmp_path, monkeypatch):
         p = _strata(tmp_path)
         _card(monkeypatch, free=4096)
         coord, svc, _seen = _door(tmp_path, p)
@@ -145,17 +146,47 @@ class TestTheHostSaysStarting:
         await coord.handle_inference_request(PEER, "req-1", "ping")
 
         payload = _answer(svc)
-        assert "not running" in payload["error"] and "engine_state" not in payload
+        assert "not running" in payload["error"] and payload["code"] == "provider_unavailable"
 
-    def test_the_field_rides_on_an_error_only(self):
-        served = create_remote_inference_response("r", response="ok", engine_state="starting")
-        refused = create_remote_inference_response("r", error="no", code="provider_unavailable")
+    @pytest.mark.asyncio
+    async def test_the_loading_refusal_is_logged_at_info_and_the_other_at_warning(
+        self, tmp_path, caplog,
+    ):
+        coord_logger = "dpc_client_core.p2p_coordinator"
+        p = _strata(tmp_path)
+        p.supervisor._proc = _FakeProc()
+        p.supervisor.props = {}
+        coord, _svc, _seen = _door(tmp_path, p)
+        with caplog.at_level(logging.INFO, logger=coord_logger):
+            await coord.handle_inference_request(PEER, "req-1", "ping")
+        refused = [r for r in caplog.records
+                   if r.name == coord_logger and "Peer inference refused" in r.getMessage()]
+        assert [r.levelno for r in refused] == [logging.INFO]
 
-        assert "engine_state" not in served["payload"]
+        caplog.clear()
+        second = tmp_path / "second"
+        second.mkdir()
+        parked = _strata(second)
+        _running(parked, cache=PARKED, owner_calls=1)
+        coord, _svc, _seen = _door(second, parked)
+        with caplog.at_level(logging.INFO, logger=coord_logger):
+            await coord.handle_inference_request(PEER, "req-1", "ping")
+        refused = [r for r in caplog.records
+                   if r.name == coord_logger and "Peer inference refused" in r.getMessage()]
+        assert [r.levelno for r in refused] == [logging.WARNING]
+
+    def test_the_code_rides_on_an_error_only_and_no_engine_state_exists(self):
+        served = create_remote_inference_response("r", response="ok", code="provider_loading")
+        refused = create_remote_inference_response("r", error="no", code="provider_loading")
+
+        assert "code" not in served["payload"]
+        assert refused["payload"]["code"] == "provider_loading"
         assert "engine_state" not in refused["payload"]
+        with pytest.raises(TypeError):
+            create_remote_inference_response("r", error="no", engine_state="starting")
 
 
-# --- the guest's handler carries the word ---------------------------------------------
+# --- the guest's handler carries the code ---------------------------------------------
 
 
 async def _settle(payload: dict) -> BaseException:
@@ -167,24 +198,37 @@ async def _settle(payload: dict) -> BaseException:
 
 
 @pytest.mark.asyncio
-async def test_the_handler_carries_engine_state_on_the_exception():
+async def test_the_handler_carries_provider_loading_on_the_exception():
     error = await _settle(create_remote_inference_response(
-        "req-1", error=LOADING_TEXT, code="provider_unavailable", engine_state="starting",
+        "req-1", error=LOADING_TEXT, code="provider_loading",
     )["payload"])
 
-    assert isinstance(error, PeerRefused) and error.engine_state == "starting"
+    assert isinstance(error, PeerRefused) and error.code == "provider_loading"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sent", [None, 1, True, ["starting"]])
-async def test_an_absent_or_non_string_state_is_no_state(sent):
-    payload = {"request_id": "req-1", "status": "error", "error": "no", "code": "provider_unavailable"}
+@pytest.mark.parametrize("sent", [None, 1, True, ["provider_loading"]])
+async def test_an_absent_or_non_string_code_is_no_code(sent):
+    payload = {"request_id": "req-1", "status": "error", "error": LOADING_TEXT}
     if sent is not None:
-        payload["engine_state"] = sent
+        payload["code"] = sent
 
     error = await _settle(payload)
 
-    assert isinstance(error, PeerRefused) and error.engine_state == ""
+    assert isinstance(error, PeerRefused) and error.code == ""
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_engine_state_field_beside_provider_unavailable_is_not_a_wait():
+    """A host that sent the field this version replaced (`engine_state: starting`
+    beside `provider_unavailable`) is read by its code alone: no wait."""
+    payload = {"request_id": "req-1", "status": "error", "error": LOADING_TEXT,
+               "code": "provider_unavailable", "engine_state": "starting"}
+
+    error = await _settle(payload)
+
+    assert isinstance(error, PeerRefused) and error.code == "provider_unavailable"
+    assert not hasattr(error, "engine_state")
 
 
 # --- the guest waits out a load, and nothing else -------------------------------------
@@ -216,7 +260,7 @@ async def test_a_load_that_outlasts_the_cap_ends_in_still_loading(fast_wait, cap
             await ask_peer_waiting_out_a_load(ask, "Linus")
 
     assert 2 <= ask.calls <= 6, "asked every step until the cap, then stopped"
-    assert raised.value.host_name == "Linus" and raised.value.code == "provider_unavailable"
+    assert raised.value.host_name == "Linus" and raised.value.code == "provider_loading"
     last = [r for r in caplog.records if r.name == adapter_mod.__name__][-1]
     assert last.levelno == logging.WARNING and last.exc_info is None
 
@@ -237,14 +281,28 @@ async def test_a_refusal_that_is_not_a_load_is_raised_at_once(fast_wait):
 
 
 @pytest.mark.asyncio
-async def test_a_host_that_predates_the_field_is_not_retried_even_saying_loading(fast_wait):
-    """Its prose says "loading"; the guest reads the word, never the prose."""
+async def test_a_host_that_predates_the_code_is_not_retried_even_saying_loading(fast_wait):
+    """Its prose says "loading"; the guest reads the code, never the prose."""
     ask = _Asks(PeerRefused(LOADING_TEXT, code="provider_unavailable"))
 
     with pytest.raises(PeerRefused):
         await ask_peer_waiting_out_a_load(ask, "Linus")
 
     assert ask.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["", "provider_starting", "something_newer", "insufficient_quota"])
+async def test_a_code_this_guest_has_no_word_for_is_read_as_absent_and_not_retried(fast_wait, code):
+    """A newer host may name a loading state differently, or name another cause;
+    either way the guest reads an unknown word as an absent one and tells its
+    person once (glossary: refusal code)."""
+    ask = _Asks(PeerRefused(LOADING_TEXT, code=code))
+
+    with pytest.raises(PeerRefused) as raised:
+        await ask_peer_waiting_out_a_load(ask, "Linus")
+
+    assert ask.calls == 1 and not isinstance(raised.value, PeerStillLoading)
 
 
 @pytest.mark.asyncio
@@ -368,7 +426,7 @@ async def test_a_load_that_never_ends_is_a_notice_not_an_llm_error(
 
     assert not text.startswith("⚠️") and "LLM error" not in text
     assert "still loading" in text and "Linus" in text
-    assert trace["peer_refused"]["engine_state"] == "starting"
+    assert trace["peer_refused"]["code"] == "provider_loading"
     assert sum("is loading, waiting" in m for m in progress) >= 1
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert not [r for r in caplog.records if r.exc_info]
@@ -423,8 +481,7 @@ async def test_the_notice_is_not_saved_to_history(tmp_path):
         _last_trace = {}
 
         async def process(self, **kwargs):
-            self._last_trace = {"peer_refused": {"code": "provider_unavailable",
-                                                 "engine_state": "starting", "notice": notice}}
+            self._last_trace = {"peer_refused": {"code": "provider_loading", "notice": notice}}
             return notice
 
     manager = am.DpcAgentManager.__new__(am.DpcAgentManager)

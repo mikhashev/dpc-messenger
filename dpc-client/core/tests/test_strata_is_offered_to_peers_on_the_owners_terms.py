@@ -5,8 +5,8 @@ Two decisions, Mike's call 2026-10-18:
 * the alias a peer request naming none is served from is set explicitly
   (`compute.serving_alias`, one of `serving_local`); absent, the first entry
   is taken as before and the P2P door says once that it was list order;
-* a Strata alias answers a peer 503 (`provider_unavailable`) while it loads,
-  while it is not running, and while this node's own conversations may hold its
+* a Strata alias answers a peer 503 (`provider_loading` while it loads, DPTP
+  v1.10; `provider_unavailable`) while it is not running, and while this node's own conversations may hold its
   conversation cache. The answer is not retried by this node, and a
   `llama-server` alias is untouched by the Strata policy.
 
@@ -478,7 +478,7 @@ class TestTheDoor:
         await coord.handle_inference_request(PEER, "req-1", "ping")
 
         payload = _answer(svc)
-        assert payload["status"] == "error" and payload["code"] == "provider_unavailable"
+        assert payload["status"] == "error" and payload["code"] == "provider_loading"
         assert "loading" in payload["error"] and "retry_after_sec" not in payload
         assert seen == [] and _rows(coord._ledger) == []
 
@@ -511,7 +511,7 @@ class TestTheDoor:
             await asyncio.sleep(0)
 
         payload = _answer(svc)
-        assert payload["code"] == "provider_unavailable" and "loading" in payload["error"]
+        assert payload["code"] == "provider_loading" and "loading" in payload["error"]
         assert "retry_after_sec" not in payload
         assert seen == [] and _rows(coord._ledger) == [], "the peer's call itself never ran"
         assert started == [None]

@@ -1353,7 +1353,7 @@ async def run_llm_loop(
                 log.info("Round %d ended on the host's refusal: %s", round_idx, e)
                 notice = peer_refusal_notice(e)
                 llm_trace["peer_refused"] = {
-                    "code": e.code, "engine_state": e.engine_state, "notice": notice,
+                    "code": e.code, "notice": notice,
                 }
                 return notice, accumulated_usage, llm_trace
             except Exception as e:

@@ -443,6 +443,8 @@ STATUS_FOR = {
     "misconfigured": 503,
     # The host's local engine cannot take a peer now (ADR-044 point 9).
     "provider_unavailable": 503,
+    # The host's engine is loading its model (DPTP v1.10): the same 503.
+    "provider_loading": 503,
 }
 OPENAI_TYPE_FOR = {400: "invalid_request_error", 403: "permission_error",
                    404: "invalid_request_error", 429: "insufficient_quota",
@@ -532,6 +534,30 @@ async def test_a_host_only_its_owner_can_repair_is_a_503_and_not_a_429(tmp_path,
         assert error["code"] == code
         assert word in error["message"]
         assert "Retry-After" not in headers, "no time repairs either of these"
+        assert _rows(ledger) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["provider_loading", "provider_unavailable"])
+async def test_a_host_loading_its_model_is_a_503_without_retry_after(tmp_path, code):
+    """`provider_loading` (DPTP v1.10) is answered like `provider_unavailable`:
+    503 with the host's own word, and no `Retry-After`, because the host does
+    not know when the load ends. The gateway's peer route never waits it out;
+    only a guest agent does."""
+    service = _peer_service(tmp_path, fail=PeerRefused("'flash' is loading", code=code))
+    async with _running(tmp_path, service) as (server, ledger):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{server.port}/v1/chat/completions",
+                json=_chat(REMOTE_MODEL),
+                headers={"Authorization": f"Bearer {_key(tmp_path)}"},
+            ) as resp:
+                status, text, headers = resp.status, await resp.text(), dict(resp.headers)
+
+        assert status == 503
+        assert json.loads(text)["error"]["code"] == code
+        assert "Retry-After" not in headers
+        assert len(service.peer_calls) == 1, "asked once: this route does not wait"
         assert _rows(ledger) == []
 
 

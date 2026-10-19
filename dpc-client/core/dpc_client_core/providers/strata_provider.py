@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-from dpc_protocol.protocol import ENGINE_STATE_STARTING
+from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING
 
 from ..managers import llama_server_supervisor as _base
 from ..managers.commit_memory import read_free_commit
@@ -52,15 +52,16 @@ _STRATA_FLAG_KEYS = (
 
 class StartingRefusal(str):
     """The peer policy's answer while the launcher is starting: the text, and
-    the state word the P2P door sends beside it as `engine_state` (DPTP v1.9).
+    the refusal code the P2P door sends it under, `provider_loading` (DPTP
+    v1.10) - not `provider_unavailable`, which no wait of a guest's ends.
 
     A `str`, because `peer_refusal` has always answered a text and every reader
-    of it compares or prints one; the door alone asks for `engine_state`. The
-    state rides on the answer rather than being read again at the door,
+    of it compares or prints one; the door alone asks for `refusal_code`. The
+    code rides on the answer rather than being read again at the door,
     because a start the policy has just begun is not yet visible as
     `starting` to a second look."""
 
-    engine_state = ENGINE_STATE_STARTING
+    refusal_code = REFUSAL_PROVIDER_LOADING
 
 
 class StrataProvider(LlamaServerProvider):

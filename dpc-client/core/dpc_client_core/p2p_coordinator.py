@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import websockets
-from dpc_protocol.protocol import PeerRefused
+from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, REFUSAL_PROVIDER_UNAVAILABLE, PeerRefused
 
 from .firewall import (
     SERVING_LOCAL_KEY,
@@ -46,14 +46,14 @@ class EngineUnavailable(RuntimeError):
     """The local engine behind the serving alias cannot take a peer now
     (ADR-044 point 9): answered `provider_unavailable`, never retried here.
 
-    `engine_state` is the engine's state word when the policy named one (only
-    `starting` today, `StartingRefusal`); it travels as the wire's
-    `engine_state`, which is what lets a guest agent wait for a load instead
-    of failing (DPTP v1.9, Mike's call 2026-10-20)."""
+    `code` is the refusal code it travels as: `provider_unavailable`, or
+    `provider_loading` when the policy said the engine is loading
+    (`StartingRefusal`) - the word that lets a guest agent wait for a load
+    instead of failing (DPTP v1.10, Mike's call 2026-10-20)."""
 
-    def __init__(self, message: str, engine_state: str = ""):
+    def __init__(self, message: str, code: str = REFUSAL_PROVIDER_UNAVAILABLE):
         super().__init__(message)
-        self.engine_state = engine_state or ""
+        self.code = code or REFUSAL_PROVIDER_UNAVAILABLE
 
 
 def _engine_unavailable_cause(error: BaseException, strata: bool) -> bool:
@@ -1027,7 +1027,7 @@ class P2PCoordinator:
                 if engine_refusal:
                     raise EngineUnavailable(
                         engine_refusal,
-                        engine_state=getattr(engine_refusal, "engine_state", ""),
+                        code=getattr(engine_refusal, "refusal_code", REFUSAL_PROVIDER_UNAVAILABLE),
                     )
                 # Clocked inside the lock: the wait is not part of the call, and
                 # the price depends on the hour the call is made (ADR-041 D3).
@@ -1118,12 +1118,11 @@ class P2PCoordinator:
 
         except EngineUnavailable as e:
             # A guest agent asks again every few seconds while the engine
-            # starts (DPTP v1.9), so that refusal is routine, not a warning.
-            level = logging.INFO if e.engine_state else logging.WARNING
+            # loads (`provider_loading`, DPTP v1.10), so that refusal is
+            # routine, not a warning.
+            level = logging.INFO if e.code == REFUSAL_PROVIDER_LOADING else logging.WARNING
             logger.log(level, "Peer inference refused for %s: %s", peer_id, e)
-            await self._send_engine_unavailable(
-                peer_id, request_id, str(e), engine_state=e.engine_state,
-            )
+            await self._send_engine_unavailable(peer_id, request_id, str(e), code=e.code)
         except Exception as e:
             if _engine_unavailable_cause(e, strata=self._serves_from_strata(serving_alias)):
                 # The other engine holds the card (any local alias), or Strata
@@ -1194,13 +1193,12 @@ class P2PCoordinator:
             return f"'{alias}': this node cannot tell whether its engine is free ({type(e).__name__})"
 
     async def _send_engine_unavailable(
-        self, peer_id: str, request_id: str, text: str, engine_state: str = "",
+        self, peer_id: str, request_id: str, text: str, code: str = REFUSAL_PROVIDER_UNAVAILABLE,
     ) -> None:
-        from dpc_protocol.protocol import REFUSAL_PROVIDER_UNAVAILABLE, create_remote_inference_response
+        from dpc_protocol.protocol import create_remote_inference_response
 
         error_response = create_remote_inference_response(
-            request_id=request_id, error=text, code=REFUSAL_PROVIDER_UNAVAILABLE,
-            engine_state=engine_state or None,
+            request_id=request_id, error=text, code=code,
         )
         try:
             await self.p2p_manager.send_message_to_peer(peer_id, error_response)
@@ -1441,12 +1439,11 @@ class P2PCoordinator:
         except PeerRefused as e:
             # The host's answer, not a failure of this node: its words and its
             # code, no traceback. The caller decides what the refusal means — a
-            # guest agent waits out `engine_state: starting`, the gateway maps
+            # guest agent waits out `provider_loading`, the gateway maps
             # the code to a status — and logs at the level that deserves.
             logger.info(
-                "Host %s refused the inference request: %s (code %s%s)",
+                "Host %s refused the inference request: %s (code %s)",
                 peer_id, e, e.code or "none",
-                f", engine {e.engine_state}" if e.engine_state else "",
             )
             raise
         except Exception as e:

@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from dpc_protocol.protocol import ENGINE_STATE_STARTING, PeerRefused
+from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, PeerRefused
 
 from ..node_ledger import (
     ENGINE_FIELDS,
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # How a guest agent waits for a model its host is still loading (Mike's call
-# 2026-10-20): a refusal that says `engine_state: starting` (DPTP v1.9) is asked
+# 2026-10-20): a refusal coded `provider_loading` (DPTP v1.10) is asked
 # again every PEER_LOADING_RETRY_EVERY_S, up to PEER_LOADING_WAIT_CAP_S in all.
 # Ten seconds: each ask is one small frame and the host answers it at its door
 # before anything runs, so asking often costs neither node anything, and a
@@ -73,13 +73,12 @@ CALL_PROGRESS: contextvars.ContextVar[Optional[Callable[[str], None]]] = context
 class PeerStillLoading(PeerRefused):
     """The host's model was still loading when the guest's wait ran out.
 
-    A `PeerRefused` (so a `RuntimeError`), carrying the last refusal's words,
-    code and state, plus who was waited for and for how long."""
+    A `PeerRefused` (so a `RuntimeError`), carrying the last refusal's words
+    and code, plus who was waited for and for how long."""
 
     def __init__(self, refusal: PeerRefused, host_name: str, waited_sec: float):
         super().__init__(
             str(refusal), code=refusal.code, retry_after_sec=refusal.retry_after_sec,
-            engine_state=refusal.engine_state,
         )
         self.host_name = host_name
         self.waited_sec = waited_sec
@@ -100,11 +99,13 @@ def _host_name(service: Any, peer_id: str) -> str:
 async def ask_peer_waiting_out_a_load(
     ask: Callable[[], Any], host_name: str,
 ) -> Any:
-    """`await ask()`; while the host refuses with `engine_state: starting`,
-    say so on the call's progress line, wait and ask again, up to
-    PEER_LOADING_WAIT_CAP_S. Any other refusal is raised at once, unretried —
-    the same code covers a card held by the host's other engine and the
-    owner's own parked conversations, which no wait of ours ends.
+    """`await ask()`; while the host refuses with `provider_loading`, say so
+    on the call's progress line, wait and ask again, up to
+    PEER_LOADING_WAIT_CAP_S. Any other refusal is raised at once, unretried -
+    `provider_unavailable` covers a card held by the host's other engine and
+    the owner's own parked conversations, which no wait of ours ends, and a
+    host that predates the code says "loading" in prose only, which is never
+    read.
 
     A cancelled task stops here: the sleep is where it is waiting, and the
     cancellation propagates out of it."""
@@ -114,7 +115,7 @@ async def ask_peer_waiting_out_a_load(
         try:
             return await ask()
         except PeerRefused as e:
-            if e.engine_state != ENGINE_STATE_STARTING:
+            if e.code != REFUSAL_PROVIDER_LOADING:
                 e.host_name = host_name
                 log.warning("Host %s did not serve the agent's call: %s (code %s)",
                             host_name, e, e.code or "none")
