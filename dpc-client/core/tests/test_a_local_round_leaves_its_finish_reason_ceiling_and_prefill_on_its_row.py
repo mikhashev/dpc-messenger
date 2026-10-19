@@ -174,8 +174,8 @@ def test_a_row_without_the_engines_word_validates_and_writes_nulls():
 
 @pytest.mark.asyncio
 async def test_a_provider_that_reports_none_of_them_leaves_them_null(tmp_path):
-    """A vendor's usage dict (DeepSeek, Anthropic, Ollama) carries none of the
-    keys; its row reads null, never a zero nobody measured."""
+    """A usage dict with none of the keys and no cache split (Ollama, OpenAI)
+    leaves its row null, never a zero nobody measured."""
 
     class _Vendor:
         alias, model = "flash", "deepseek-v4-flash"

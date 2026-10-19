@@ -28,6 +28,7 @@ from ..node_ledger import (
     TARIFF_FIELDS,
     NodeLedger,
     default_ledger,
+    prompt_cache_split,
     response_counts,
     stated_output_includes_thinking,
     stated_thinking_source,
@@ -491,9 +492,10 @@ class DpcLlmAdapter:
                 ),
                 **{name: usage.get(name) for name in COST_FIELDS},
                 # The engine's word on the round, where the provider's usage
-                # dict carries it (llama-server and Strata today); the peer
+                # dict carries it (llama-server and Strata today), with a
+                # vendor's cache split in the two prompt columns; the peer
                 # route does not copy these from the wire.
-                **{name: usage.get(name) for name in ENGINE_FIELDS},
+                **{**{name: usage.get(name) for name in ENGINE_FIELDS}, **prompt_cache_split(usage)},
                 # Copied from the wire on the peer route, never computed here.
                 **{name: facts.get(name) for name in TARIFF_FIELDS},
                 task_id=task_id,
@@ -502,7 +504,13 @@ class DpcLlmAdapter:
             )
         except Exception:
             log.error("Usage row for caller %s was not built", self._caller, exc_info=True)
+            if isinstance(usage, dict):
+                usage.pop("request_id", None)
             return
+        # Handed back with the call's own result, so the caller can name this
+        # row (the prompt divergence line does) without a shared attribute
+        # another call could overwrite in between.
+        usage["request_id"] = row["request_id"]
         (self._ledger or default_ledger()).append(row)
 
     async def _chat(

@@ -984,7 +984,7 @@ async def _finalize_after_guard_stop(
     stop_event: Optional[asyncio.Event] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
     reasoning_effort: Optional[str] = None,
-    observe_request: Optional[Callable[..., None]] = None,
+    observe_request: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Shared "guard fired → graceful termination" sequence.
 
@@ -1030,30 +1030,34 @@ async def _finalize_after_guard_stop(
 
     async def _final_call(tools_sent, tool_choice=None):
         """One finalising call; None when the user stopped it."""
-        if observe_request is not None:
-            observe_request(messages, tools_sent, reasoning_effort)
+        seen = observe_request(messages, tools_sent, reasoning_effort) if observe_request else None
+        row_id = None
         extra = {"tool_choice": tool_choice} if tool_choice else {}
-        chat_task = asyncio.ensure_future(llm.chat(
-            messages,
-            tools=tools_sent,
-            on_stream_chunk=on_stream_chunk,
-            conversation_id=conversation_id,
-            reasoning_effort=reasoning_effort,
-            task_id=task_id or None,
-            **extra,
-        ))
-        if stop_event is not None:
-            stop_task = asyncio.ensure_future(stop_event.wait())
-            try:
-                await asyncio.wait({chat_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                stop_task.cancel()
-            if not chat_task.done():
-                chat_task.cancel()
-                return None
-        final_msg, final_usage = await chat_task
-        accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
-        return final_msg or {}
+        try:
+            chat_task = asyncio.ensure_future(llm.chat(
+                messages,
+                tools=tools_sent,
+                on_stream_chunk=on_stream_chunk,
+                conversation_id=conversation_id,
+                reasoning_effort=reasoning_effort,
+                task_id=task_id or None,
+                **extra,
+            ))
+            if stop_event is not None:
+                stop_task = asyncio.ensure_future(stop_event.wait())
+                try:
+                    await asyncio.wait({chat_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    stop_task.cancel()
+                if not chat_task.done():
+                    chat_task.cancel()
+                    return None
+            final_msg, final_usage = await chat_task
+            row_id = (final_usage or {}).get("request_id")
+            accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
+            return final_msg or {}
+        finally:
+            prompt_divergence.log_observation(seen, row_id)
 
     try:
         final_msg = await _final_call(tools or None)
@@ -1209,7 +1213,9 @@ async def run_llm_loop(
     _divergence = {"requests": 0, "prefix_rewrites": 0, "rewrite_rounds": []}
     llm_trace["prompt_divergence"] = _divergence
 
-    def _observe_request(msgs, tools_sent, effort_sent) -> None:
+    def _observe_request(msgs, tools_sent, effort_sent) -> Optional[Dict[str, Any]]:
+        """Measure one request before it goes out; the caller logs the result
+        with the id of the row the call wrote (`prompt_divergence.log_observation`)."""
         try:
             seen = prompt_divergence.TRACKER.observe(
                 _divergence_key, msgs, tools_sent, effort_sent, round_idx,
@@ -1217,11 +1223,12 @@ async def run_llm_loop(
             )
         except Exception:
             log.debug("prompt divergence: not measured", exc_info=True)
-            return
+            return None
         if seen["prefix_rewritten"] and not (_shared_run_id and not _divergence["requests"]):
             _divergence["prefix_rewrites"] += 1
             _divergence["rewrite_rounds"].append(round_idx)
         _divergence["requests"] += 1
+        return seen
 
     round_idx = 0
     empty_retry_count = 0
@@ -1272,7 +1279,8 @@ async def run_llm_loop(
             )
 
             # --- LLM call ---
-            _observe_request(messages, tool_schemas, reasoning_effort)
+            _seen = _observe_request(messages, tool_schemas, reasoning_effort)
+            _row_id = None
             try:
                 msg, usage = await _chat_unless_killed(
                     llm.chat(
@@ -1285,6 +1293,7 @@ async def run_llm_loop(
                     ),
                     kill_event,
                 )
+                _row_id = (usage or {}).get("request_id")
                 accumulate_call_usage(accumulated_usage, usage)
                 round_prompt_tokens = accumulated_usage["last_prompt_tokens"]
                 if reasoning_effort:
@@ -1320,6 +1329,8 @@ async def run_llm_loop(
             except Exception as e:
                 log.error(f"LLM error: {e}", exc_info=True)
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace
+            finally:
+                prompt_divergence.log_observation(_seen, _row_id)
 
             # Handle empty response
             if msg is None:

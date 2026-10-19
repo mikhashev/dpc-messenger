@@ -18,7 +18,8 @@ wire; None means no effort control was applied, which is not `off`, and a row
 written before the column reads as None), whether the node at the other end of
 the call had its key proved and over which tier (`peer_proved`,
 `peer_connection_type`; see `usage_row` for what «proved» means on each side),
-what the engine said about the round (`ENGINE_FIELDS`, null where it said nothing)
+what the engine said about the round (`ENGINE_FIELDS`, null where it said nothing;
+a vendor's prompt cache split lands in two of them)
 and what it cost (`billing`, `cost_amount` in `cost_currency` on a
 `cost_basis`, and `cost_unpriced_reason` where nobody could price it) —
 priced at `started_at` by the node that made the call and never re-priced,
@@ -188,7 +189,9 @@ def usage_row(
     `ENGINE_FIELDS` are the engine's own word on the round, named as the
     provider's usage dict names them: why it stopped, the ceiling the request
     carried, the prompt tokens re-read and reused, and each phase's raw clock.
-    Counters and milliseconds, never a rate; None is «not reported».
+    Counters and milliseconds, never a rate; None is «not reported». A vendor
+    fills only the middle two, from the cache split it priced the call on
+    (`prompt_cache_split`).
 
     `content_chars` and `tool_calls` say what the model left visible: the
     length of its stripped assistant text and the number of tool calls in the
@@ -355,11 +358,42 @@ ENGINE_FIELDS = (
 )
 
 
+def _whole(value: Any) -> Optional[int]:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def prompt_cache_split(usage: Dict[str, Any]) -> Dict[str, Optional[int]]:
+    """`prefilled_tokens` and `cached_tokens` from a provider's usage dict.
+
+    A local engine names the two itself, and its words are kept. A vendor's
+    split goes into the same columns: the cache hit (`prompt_cache_hit_tokens`,
+    else `cache_read_input_tokens`) is `cached_tokens`, and the prompt read
+    fresh — `prompt_cache_miss_tokens`, else the rest of `prompt_tokens` — is
+    `prefilled_tokens`. Anthropic's `cache_creation_input_tokens` falls in that
+    rest: written into the cache, but read fresh on this call. No split
+    reported, or a hit larger than its prompt, leaves both None.
+    """
+    if usage.get("cached_tokens") is not None or usage.get("prefilled_tokens") is not None:
+        return {"prefilled_tokens": usage.get("prefilled_tokens"), "cached_tokens": usage.get("cached_tokens")}
+    if usage.get("prompt_cache_hit_tokens") is not None:
+        hit, fresh = _whole(usage["prompt_cache_hit_tokens"]), _whole(usage.get("prompt_cache_miss_tokens"))
+    elif usage.get("cache_read_input_tokens") is not None:
+        hit, fresh = _whole(usage["cache_read_input_tokens"]), None
+    else:
+        return {"prefilled_tokens": None, "cached_tokens": None}
+    prompt = _whole(usage.get("prompt_tokens"))
+    if hit is None or (prompt is not None and hit > prompt):
+        return {"prefilled_tokens": None, "cached_tokens": None}
+    if fresh is None and prompt is not None:
+        fresh = prompt - hit
+    return {"prefilled_tokens": fresh, "cached_tokens": hit}
+
+
 def _engine_columns(
     finish_reason: Any, max_tokens: Any, prefilled_tokens: Any, cached_tokens: Any,
     prompt_ms: Any, predicted_ms: Any,
 ) -> Dict[str, Any]:
-    """The five engine columns, None where the provider reported nothing, or a
+    """The six engine columns, None where the provider reported nothing, or a
     ValueError naming the one whose type is wrong."""
     if finish_reason is not None and not isinstance(finish_reason, str):
         raise ValueError(f"finish_reason={finish_reason!r} is not the engine's word for why it stopped")

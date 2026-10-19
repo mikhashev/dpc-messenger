@@ -27,7 +27,7 @@ from dpc_client_core.dpc_agent.guards import ResearchLimitGuard
 from dpc_client_core.dpc_agent.hooks import HookRegistry
 from dpc_client_core.dpc_agent.loop import _finalize_after_guard_stop, run_llm_loop
 from dpc_client_core.dpc_agent.prompt_divergence import (
-    PromptDivergenceTracker, first_divergence, message_fingerprint,
+    PromptDivergenceTracker, first_divergence, log_observation, message_fingerprint,
 )
 
 SCHEMAS = [{"type": "function", "function": {"name": "probe", "parameters": {}}}]
@@ -99,11 +99,12 @@ class TestTheDivergenceIndex:
     def test_a_first_observation_is_logged_as_first(self, caplog):
         tr = PromptDivergenceTracker()
         with caplog.at_level("INFO", logger="dpc_client_core.dpc_agent.prompt_divergence"):
-            tr.observe("c", [{"role": "user", "content": "q"}], None, None, 1, agent_id="ark")
-            tr.observe("c", [{"role": "user", "content": "q"}] * 2, None, None, 2, agent_id="ark")
+            for r, msgs in ((1, [{"role": "user", "content": "q"}]), (2, [{"role": "user", "content": "q"}] * 2)):
+                log_observation(tr.observe("c", msgs, None, None, r, agent_id="ark"), f"req-{r}")
         lines = [r.getMessage() for r in caplog.records if "prompt divergence" in r.getMessage()]
         assert "conv=c round=1 first_diff_msg=first/1 " in lines[0]
         assert "conv=c round=2 first_diff_msg=1/2 " in lines[1]
+        assert lines[1].endswith(" agent=ark request_id=req-2")
 
 
 # --- apply_compaction alone ----------------------------------------------------

@@ -65,6 +65,7 @@ class PromptDivergenceTracker:
 
         Keyed by both: in a group chat several agents share one conversation,
         and each one's prompt is a different prefix in the engine's cache.
+        Logs nothing: the caller hands the result to `log_observation`.
         """
         fingerprints = [message_fingerprint(m) for m in messages]
         tools_digest = _digest(tools) if tools else None
@@ -89,17 +90,10 @@ class PromptDivergenceTracker:
         self._last.move_to_end(key)
         while len(self._last) > self._max:
             self._last.popitem(last=False)
-        if previous is None:
-            shown = "first"
-        else:
-            shown = "none" if first_diff is None else str(first_diff)
-        log.info(
-            "prompt divergence: conv=%s round=%s first_diff_msg=%s/%d tools_changed=%s "
-            "effort_changed=%s agent=%s",
-            conversation_id, round_idx, shown, len(fingerprints), tools_changed,
-            effort_changed, agent_id or "-",
-        )
         return {
+            "conversation_id": conversation_id,
+            "round": round_idx,
+            "agent_id": agent_id,
             "first_diff_msg": first_diff,
             "messages": len(fingerprints),
             "tools_changed": tools_changed,
@@ -107,6 +101,28 @@ class PromptDivergenceTracker:
             "first_request": previous is None,
             "prefix_rewritten": rewritten,
         }
+
+
+def log_observation(seen: Optional[Dict[str, Any]], request_id: Optional[str]) -> None:
+    """The divergence line for one request, named by its usage row's `request_id`.
+
+    Written once the call has returned rather than when it was observed: the
+    adapter knows the row's id only then, and on the peer route the id is the
+    wire's, which arrives with the answer. `request_id=-` is a call that left
+    no row (it raised, or was killed); `seen` None was never measured.
+    """
+    if seen is None:
+        return
+    if seen["first_request"]:
+        shown = "first"
+    else:
+        shown = "none" if seen["first_diff_msg"] is None else str(seen["first_diff_msg"])
+    log.info(
+        "prompt divergence: conv=%s round=%s first_diff_msg=%s/%d tools_changed=%s "
+        "effort_changed=%s agent=%s request_id=%s",
+        seen["conversation_id"], seen["round"], shown, seen["messages"], seen["tools_changed"],
+        seen["effort_changed"], seen["agent_id"] or "-", request_id or "-",
+    )
 
 
 TRACKER = PromptDivergenceTracker()
