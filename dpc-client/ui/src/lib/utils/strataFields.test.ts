@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   STRATA_MODEL_PARAMS, suggestPleGguf, pleAfterNativeChange, parseModelParam, modelParamText,
   basePlaceholder, versionDiffers, cacheSummaryLine, formatMib, freeCommitLine,
+  STRATA_CACHE_ADMISSION, admissionPlaceholder, cacheFlagsLine, engineAdmissionLine,
 } from './strataFields';
 
 const spec = (key: string) => STRATA_MODEL_PARAMS.find((s) => s.key === key)!;
@@ -106,5 +107,41 @@ describe('status formatting', () => {
         + 'free physical (ullAvailPhys) 11,305 of 63,168 MiB');
     expect(freeCommitLine(null)).toBe('free commit (GlobalMemoryStatusEx): not measured on this OS');
     expect(freeCommitLine(undefined)).toContain('not read yet');
+  });
+});
+
+describe('the cache admission fields', () => {
+  const by = (key: string) => STRATA_CACHE_ADMISSION.find((s) => s.key === key)!;
+
+  it("carry Strata's own defaults and flags", () => {
+    expect(STRATA_CACHE_ADMISSION.map((s) => [s.key, s.flag, s.strataDefault])).toEqual([
+      ['conversation_cache_min_free_mib', '--conversation-cache-min-free-mib', 2560],
+      ['conversation_cache_min_tokens', '--conversation-cache-min-tokens', 0],
+      ['conversation_cache_park_gain', '--conversation-cache-park-gain', 0],
+    ]);
+  });
+
+  it('say the RAM floor is physical RAM, not commit', () => {
+    const help = by('conversation_cache_min_free_mib').help;
+    expect(help).toContain('Physical RAM');
+    expect(help).toContain('not free commit');
+  });
+
+  it('name the default that is written, and a base value it overrides', () => {
+    const spec = by('conversation_cache_min_free_mib');
+    expect(admissionPlaceholder(spec, undefined)).toBe('Strata default 2560, written');
+    expect(admissionPlaceholder(spec, 2560)).toBe('Strata default 2560, written');
+    expect(admissionPlaceholder(spec, 2048)).toBe("Strata default 2560, written — the base config's 2048 is not used");
+  });
+
+  it('summarise the start config flags and the engine report', () => {
+    expect(cacheFlagsLine({ conversation_cache_mib: 10240, conversation_cache_slots: null,
+      conversation_cache_min_free_mib: 2560, conversation_cache_min_tokens: 0, conversation_cache_park_gain: 4096 }))
+      .toBe('budget 10,240 MiB, slots engine default 4, RAM floor 2,560 MiB (physical RAM), '
+        + 'shortest parked 0 tokens, park gain 4,096 tokens');
+    expect(cacheFlagsLine(null)).toContain('no start config');
+    expect(engineAdmissionLine({ min_free_mib: 2560, min_tokens: 0, park_gain: null }))
+      .toBe('RAM floor 2,560 MiB, shortest parked 0 tokens, park gain not reported');
+    expect(engineAdmissionLine(undefined)).toBe('not reported');
   });
 });

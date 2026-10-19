@@ -37,7 +37,8 @@ OWNER_PARK_GRACE_S = 3.0
 # config file itself is not seen here and takes a restart by hand.
 _STRATA_FLAG_KEYS = (
     "strata_install_dir", "strata_base_config", "conversation_cache_mib",
-    "conversation_cache_slots", "max_context", "resident_budget_gib", "vram_reserve_mib",
+    "conversation_cache_slots", "conversation_cache_min_free_mib", "conversation_cache_min_tokens",
+    "conversation_cache_park_gain", "max_context", "resident_budget_gib", "vram_reserve_mib",
     "vision", "control_vector",
     "model_params", "extra_args",
     # Model-file overrides (ADR-044 point 7): each replaces a base config value.
@@ -311,6 +312,13 @@ def metrics_summary(metrics: Dict[str, Any]) -> Dict[str, Any]:
                 "enabled", "budget_mib", "slots", "parked", "bytes", "parks", "restores", "evictions",
             )
         },
+        # The admission rules as the engine's INFO line reports them: it names the
+        # RAM floor and the minimum length, not the park gain (None).
+        "cache_admission": {
+            "min_free_mib": engine.get("conversation_cache_min_free_mib"),
+            "min_tokens": engine.get("conversation_cache_min_tokens"),
+            "park_gain": engine.get("conversation_cache_park_gain"),
+        },
     }
 
 
@@ -334,6 +342,8 @@ async def strata_status(sup: StrataSupervisor, metrics_timeout_s: float = 3.0) -
         "vram_released": sup.vram_released,
         "last_stop_vram": dict(sup.last_stop_vram),
         "start_config": str(sup.start_config_used) if sup.start_config_used else None,
+        # The five cache flags as the start config that launch used writes them.
+        "start_cache_flags": sup.start_cache_flags(),
         "metrics": None,
         "metrics_error": None,
     }

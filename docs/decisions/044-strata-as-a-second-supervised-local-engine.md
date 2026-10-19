@@ -171,7 +171,16 @@ card.** Every point is Mike's call, 2026-10-18.
    today's configs were set for an older card layout; they are re-derived at the first
    supervised start and recorded beside the card state they were derived on. Both are
    typed alias fields (`resident_budget_gib`, `vram_reserve_mib`) over the base config's
-   values; the typed reserve wins over a `model_params.vram_reserve_mib`.
+   values; the typed reserve wins over a `model_params.vram_reserve_mib`. The cache's
+   admission rules are typed alias fields too, and unlike the pair above each is written
+   into every start config, Strata's own default included, so the value the engine parks
+   by is always ours and named (Mike's call, 2026-10-19):
+   `conversation_cache_min_free_mib` (`--conversation-cache-min-free-mib`, default 2560 —
+   a floor of **physical** RAM, `MemAvailable` / `ullAvailPhys`, not free commit),
+   `conversation_cache_min_tokens` (`--conversation-cache-min-tokens`, default 0 = park
+   every conversation) and `conversation_cache_park_gain` (`--conversation-cache-park-gain`,
+   default 0 = park every turn). The start line prints all five cache flags; the status
+   shows them as the start config wrote them and as the engine's `INFO` line reports them.
 8. **Vision by the fact of the start.** The subclass **overrides** `supports_vision`: the
    base class answers yes whenever the alias names an mmproj, even with no live child.
    For Strata it answers from the live start — `/props` `modalities.vision` of the running

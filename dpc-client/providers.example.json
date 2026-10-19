@@ -375,6 +375,14 @@
       "reasoning_budget_message": "Optional: the note the server writes into the thinking before it forces the end-of-thinking tag at the budget; sent only beside a budget. Absent = a short built-in line, empty string = no note (the server's own default)",
       "preserve_reasoning": "Optional, default false: replay each tool-call turn's own reasoning to the server as reasoning_content, which this model's template renders as a prior-turn <think> block. Off means the model sees a bare tool call and its result from round two and re-derives its plan; on costs those tokens on every later round and invalidates the prompt cache for one turn when it is switched. Local path only - no cloud provider is sent this field"
     },
+    "strata_fields": {
+      "_comment": "Not the whole key set: the model files, vision, control vector, model_params and the rest are listed in docs/decisions/044-strata-as-a-second-supervised-local-engine.md point 7 and read in managers/strata_supervisor.py. These are the conversation cache flags, each written into DPC's start config over the base config's value",
+      "conversation_cache_mib": "Required, no default: MiB of host RAM the engine parks conversations in (--conversation-cache-mib). Bounded by the Windows commit limit (RAM + page file); a value measured on this machine",
+      "conversation_cache_slots": "Optional: how many conversations it parks at most (--conversation-cache-slots). Unset keeps the base config's value, else the engine's default 4",
+      "conversation_cache_min_free_mib": "Optional, default 2560 (Strata's own), always written: the RAM floor in MiB that must stay free when a conversation is parked, saved or restored (--conversation-cache-min-free-mib). Physical RAM (MemAvailable; GlobalMemoryStatusEx ullAvailPhys on Windows, under the cgroup limits), not free commit",
+      "conversation_cache_min_tokens": "Optional, default 0 (Strata's own), always written: park only conversations of at least this many tokens (--conversation-cache-min-tokens); 0 parks every conversation",
+      "conversation_cache_park_gain": "Optional, default 0 (Strata's own), always written: park a conversation again only after it grew this many tokens past the copy it would replace (--conversation-cache-park-gain); 0 parks every turn"
+    },
     "gemini_fields": {
       "api_key_env": "Environment variable containing Google AI Studio API key (default: GEMINI_API_KEY)"
     },

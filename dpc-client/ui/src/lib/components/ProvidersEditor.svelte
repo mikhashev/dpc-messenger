@@ -16,7 +16,8 @@
   import {
     STRATA_MODEL_PARAMS, parseModelParam, modelParamText, basePlaceholder, pleAfterNativeChange,
     versionDiffers, cacheSummaryLine, freeCommitLine, type StrataParamSpec,
-    type FreeCommitReading,
+    type FreeCommitReading, STRATA_CACHE_ADMISSION, admissionPlaceholder, cacheFlagsLine,
+    engineAdmissionLine,
   } from '$lib/utils/strataFields';
 
   export let open: boolean = false;
@@ -92,6 +93,10 @@
     control_vector_file?: string; // file of --control-vector-scaled <file>:<scale>
     conversation_cache_mib?: number;   // no default: a dated measurement
     conversation_cache_slots?: number;
+    // The cache's admission rules: unset writes Strata's default, explicitly.
+    conversation_cache_min_free_mib?: number; // --conversation-cache-min-free-mib, physical RAM floor
+    conversation_cache_min_tokens?: number;   // --conversation-cache-min-tokens
+    conversation_cache_park_gain?: number;    // --conversation-cache-park-gain
     max_context?: number;        // the SERVER window, not context_window
     resident_budget_gib?: number; // --resident-budget-gib, host RAM pinned for experts
     vram_reserve_mib?: number;   // --vram-reserve-mib, VRAM left for other programs
@@ -1365,8 +1370,12 @@
           <strong>Images:</strong> {row.metrics.images ? 'on' : 'off'} ·
           <strong>Free VRAM:</strong> {row.metrics.vram_free_mib != null ? `${row.metrics.vram_free_mib.toLocaleString()} MiB` : '—'}</p>
         <p><strong>Conversation cache:</strong> {cacheSummaryLine(row.metrics.conversation_cache)}</p>
+        <p><strong>Admission, as the engine reports it:</strong> {engineAdmissionLine(row.metrics.cache_admission)}</p>
       {:else if row.metrics_error}
         <p class="help-text warn">/metrics unreadable: {row.metrics_error}</p>
+      {/if}
+      {#if row.start_cache_flags}
+        <p><strong>Cache flags in the start config:</strong> {cacheFlagsLine(row.start_cache_flags)}</p>
       {/if}
       {#if row.start_config}
         <p class="help-text">Start config used: <code>{row.start_config}</code></p>
@@ -2569,6 +2578,30 @@
                       </p>
 
                       <div class="form-group strata-pair">
+                        {#each STRATA_CACHE_ADMISSION as spec (spec.key)}
+                          <div>
+                            <label for="strata-{spec.key}-{i}">{spec.label} ({spec.flag})</label>
+                            <input
+                              id="strata-{spec.key}-{i}"
+                              type="number"
+                              min="0"
+                              max={spec.max}
+                              step="1"
+                              value={sp[spec.key] ?? ''}
+                              on:input={(e) => setNum(i, spec.key, e.currentTarget.value)}
+                              placeholder={admissionPlaceholder(spec, strataBase(strataInspect, i, spec.key))}
+                            />
+                            <p class="help-text">{spec.help} Strata default {spec.strataDefault}.</p>
+                          </div>
+                        {/each}
+                      </div>
+                      <p class="help-text">
+                        Which conversations the cache admits. Every start writes all three into its start config —
+                        Strata's default when a field is empty — so the value the engine parks by is always named
+                        here and in the start log line.
+                      </p>
+
+                      <div class="form-group strata-pair">
                         <div>
                           <label for="strata-resident-gib-{i}">Resident budget, GiB (--resident-budget-gib)</label>
                           <input
@@ -3283,6 +3316,8 @@
                       <p><strong>Conversation cache:</strong>
                         {provider.conversation_cache_mib != null ? `${provider.conversation_cache_mib.toLocaleString()} MiB` : 'not set (required)'}
                         {provider.conversation_cache_slots != null ? ` / ${provider.conversation_cache_slots} conversations` : ''}</p>
+                      <p><strong>Cache admission:</strong>
+                        {STRATA_CACHE_ADMISSION.map((s) => `${s.label} ${(provider[s.key] ?? s.strataDefault).toLocaleString()}${provider[s.key] == null ? ' (Strata default)' : ''}`).join(' · ')}</p>
                       {#if provider.max_context}
                         <p><strong>Server window:</strong> {provider.max_context.toLocaleString()} tokens</p>
                       {/if}

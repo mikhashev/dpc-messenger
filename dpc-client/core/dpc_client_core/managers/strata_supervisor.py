@@ -92,6 +92,41 @@ class PeerStartRefused(PeerCallRefused):
     """A peer's call met a launcher that is not up; a peer never starts it (ADR-044 point 9)."""
 
 
+# Typed alias key -> (engine flag, Strata's own default, highest value Strata
+# takes). The rules that decide what the conversation cache admits, from the
+# engine's flag parser and help (src/program/generate.cpp, Strata 0.1.45 at
+# 477ac13c, read 2026-10-19). Each is written into every start config, the
+# default too, so the value the engine parks by is ours and named even when the
+# alias sets none (Mike's call, 2026-10-19). The RAM floor is physical RAM —
+# MemAvailable, GlobalMemoryStatusEx ullAvailPhys on Windows, under the cgroup
+# limits and --memory-limit-mib — not free commit.
+CACHE_ADMISSION_FLAGS: Dict[str, tuple] = {
+    "conversation_cache_min_free_mib": ("--conversation-cache-min-free-mib", 2560, (2**63 - 1) // (1024 * 1024)),
+    "conversation_cache_min_tokens": ("--conversation-cache-min-tokens", 0, 2**31 - 1),
+    "conversation_cache_park_gain": ("--conversation-cache-park-gain", 0, 2**31 - 1),
+}
+
+
+def admission_error(key: str, value: Any) -> Optional[str]:
+    """Why `value` cannot be the alias's `key` in CACHE_ADMISSION_FLAGS, or None
+    (None is an absence: the Strata default is written)."""
+    if value is None:
+        return None
+    _flag, _default, hi = CACHE_ADMISSION_FLAGS[key]
+    if (not isinstance(value, bool) and isinstance(value, (int, float))
+            and value == int(value) and 0 <= value <= hi):
+        return None
+    return f"{key}: expected a whole number from 0 to {hi}, not {value!r}"
+
+
+def cache_admission(config: Dict[str, Any]) -> Dict[str, int]:
+    """The admission values a start of `config` writes: the alias's, else Strata's default."""
+    return {
+        key: int(config[key]) if config.get(key) is not None else default
+        for key, (_flag, default, _hi) in CACHE_ADMISSION_FLAGS.items()
+    }
+
+
 STRATA_DEFAULTS: Dict[str, Any] = {
     "strata_install_dir": None,
     "strata_base_config": None,
@@ -101,6 +136,9 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # alias, and a start without one is refused (ADR-044 point 7).
     "conversation_cache_mib": None,
     "conversation_cache_slots": None,
+    # The admission rules: Strata's own defaults, held here so that they are
+    # written explicitly (CACHE_ADMISSION_FLAGS).
+    **{key: default for key, (_flag, default, _hi) in CACHE_ADMISSION_FLAGS.items()},
     # The server's window (`--max-context`), not the agent's: that one is
     # `context_window`, a config field nothing derives.
     "max_context": None,
@@ -304,6 +342,7 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
             except LlamaServerError as e:
                 errors.append(str(e))
     errors.extend(e for e in (budget_error(k, config.get(k)) for k in BUDGET_FLAGS) if e)
+    errors.extend(e for e in (admission_error(k, config.get(k)) for k in CACHE_ADMISSION_FLAGS) if e)
     params = config.get("model_params")
     if params is not None and not isinstance(params, dict):
         errors.append(f"model_params must be an object, got {params!r}")
@@ -451,6 +490,11 @@ def inspect_base_config(path: Any, install_dir: Any = None) -> Dict[str, Any]:
     for key, flag in (("max_context", "--max-context"),
                       ("conversation_cache_mib", "--conversation-cache-mib"),
                       ("conversation_cache_slots", "--conversation-cache-slots")):
+        raw = _flag_value(args, flag)
+        values[key] = int(raw) if raw is not None and raw.isdigit() else raw
+    # Shown as "the base config's N is not used": the start writes the alias's
+    # value or Strata's default over it.
+    for key, (flag, _default, _hi) in CACHE_ADMISSION_FLAGS.items():
         raw = _flag_value(args, flag)
         values[key] = int(raw) if raw is not None and raw.isdigit() else raw
     for key, (flag, _whole, _lo) in BUDGET_FLAGS.items():
@@ -845,6 +889,13 @@ class StrataSupervisor(LlamaServerSupervisor):
         if c.get("conversation_cache_slots") is not None:
             args = _set_flag(args, "--conversation-cache-slots",
                              _positive("conversation_cache_slots", c["conversation_cache_slots"]))
+        # Always written, the Strata default included, over whatever the base says.
+        for key, (flag, _default, _hi) in CACHE_ADMISSION_FLAGS.items():
+            refusal = admission_error(key, c.get(key))
+            if refusal:
+                raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
+        for key, value in cache_admission(c).items():
+            args = _set_flag(args, CACHE_ADMISSION_FLAGS[key][0], value)
         if c.get("max_context") is not None:
             args = _set_flag(args, "--max-context", _positive("max_context", c["max_context"]))
 
@@ -1051,16 +1102,41 @@ class StrataSupervisor(LlamaServerSupervisor):
             self.last_free_commit = {**reading, "at": time.monotonic()}
         return reading
 
+    def start_cache_flags(self) -> Optional[Dict[str, Any]]:
+        """The conversation cache flags in the start config the last launch used,
+        keyed like the alias fields; None before a launch or when the file is unreadable.
+
+        The slots stay None when neither the alias nor the base set them: the
+        engine's own default (4) applies and the file names none."""
+        path = self.start_config_used
+        if path is None:
+            return None
+        try:
+            args = json.loads(Path(path).read_text(encoding="utf-8")).get("args")
+        except (OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(args, list):
+            return None
+        flags = {"conversation_cache_mib": "--conversation-cache-mib",
+                 "conversation_cache_slots": "--conversation-cache-slots",
+                 **{k: v[0] for k, v in CACHE_ADMISSION_FLAGS.items()}}
+        return {key: _number_or_raw(_flag_value(args, flag)) for key, flag in flags.items()}
+
     def log_start(self, cache_type, env, binary=None) -> None:
         c = self.config
+        admission = cache_admission(c)
         logger.info(
             "strata[%s] starting on :%s (python=%s, config=%s, base=%s, "
-            "conversation_cache_mib=%s beside %s, conversation_cache_slots=%s, max_context=%s, "
+            "conversation_cache_mib=%s beside %s, conversation_cache_slots=%s, "
+            "conversation_cache_min_free_mib=%s (physical RAM floor), conversation_cache_min_tokens=%s, "
+            "conversation_cache_park_gain=%s, max_context=%s, "
             "context_window=%s, vision=%s, control_vector=%s, tested_version=%s%s)",
             self.alias, self.port, binary, self.start_config_used,
             c.get("strata_base_config"), c.get("conversation_cache_mib"),
             describe_free_commit(self._sample_free_commit()),
             _base._fmt_knob(c.get("conversation_cache_slots")),
+            admission["conversation_cache_min_free_mib"], admission["conversation_cache_min_tokens"],
+            admission["conversation_cache_park_gain"],
             _base._fmt_knob(c.get("max_context")), _base._fmt_knob(c.get("context_window")),
             "base config" if c.get("vision") is None else c.get("vision"),
             "base config" if c.get("control_vector") is None else c.get("control_vector"),
