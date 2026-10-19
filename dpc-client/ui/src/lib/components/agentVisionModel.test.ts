@@ -40,3 +40,63 @@ describe("effectiveAgentVisionModel", () => {
     expect(r.isGlobal).toBe(true);
   });
 });
+
+describe("effectiveAgentVisionModel with the text model on a peer", () => {
+  const HOST = "dpc-node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const peerRows = (r: { alias: string; model?: string; supports_vision?: boolean }[]) =>
+    new Map([[HOST, r]]);
+
+  it("reports the agent's own model, on the host, when the peer row can see", () => {
+    const r = effectiveAgentVisionModel(
+      "strata flash-next", rows, "qwen-vl", HOST,
+      peerRows([{ alias: "strata flash-next", model: "flash-next-35b", supports_vision: true }]),
+      "Johnny"
+    );
+    expect(r.alias).toBe("strata flash-next");
+    expect(r.isGlobal).toBe(false);
+    expect(r.label).toBe("strata flash-next (flash-next-35b) - on Johnny");
+  });
+
+  it("names the node id when the host has no display name", () => {
+    const r = effectiveAgentVisionModel(
+      "strata flash-next", rows, "qwen-vl", HOST,
+      peerRows([{ alias: "strata flash-next", supports_vision: true }])
+    );
+    expect(r.isGlobal).toBe(false);
+    expect(r.label).toBe(`strata flash-next - on ${HOST.slice(0, 20)}...`);
+  });
+
+  it("falls back to global when the peer row cannot see", () => {
+    const r = effectiveAgentVisionModel(
+      "strata flash-next", rows, "qwen-vl", HOST,
+      peerRows([{ alias: "strata flash-next", model: "m", supports_vision: false }]),
+      "Johnny"
+    );
+    expect(r.alias).toBe("qwen-vl");
+    expect(r.isGlobal).toBe(true);
+  });
+
+  it("matches the alias in the host's rows, not a neighbour's", () => {
+    const r = effectiveAgentVisionModel(
+      "strata flash-next", rows, "qwen-vl", HOST,
+      peerRows([{ alias: "other", supports_vision: true }])
+    );
+    expect(r.isGlobal).toBe(true);
+  });
+
+  it("falls back to global when the peer is not connected (no rows)", () => {
+    const r = effectiveAgentVisionModel(
+      "strata flash-next", rows, "qwen-vl", HOST, new Map(), "Johnny"
+    );
+    expect(r.alias).toBe("qwen-vl");
+    expect(r.isGlobal).toBe(true);
+  });
+
+  it("ignores peer rows when the host is local", () => {
+    const r = effectiveAgentVisionModel(
+      "strata flash-next", rows, "qwen-vl", "local",
+      peerRows([{ alias: "strata flash-next", supports_vision: true }])
+    );
+    expect(r.isGlobal).toBe(true);
+  });
+});

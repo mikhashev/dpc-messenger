@@ -1101,6 +1101,7 @@
             defaultProviders={$defaultProviders}
             agentLlmProvider={$aiChats.get(activeChatId)?.llm_provider || ""}
             isAgentChat={isAgentChatHeader}
+            agentComputeHost={$aiChats.get(activeChatId)?.compute_host || ""}
           />
           {/if}
 

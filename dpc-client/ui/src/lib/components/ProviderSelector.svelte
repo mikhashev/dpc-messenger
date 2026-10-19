@@ -4,6 +4,7 @@
 <script lang="ts">
   import { menuSummary, priceLine, settingsLines, vendorLine, type MenuRow } from './peerMenu';
   import { effectiveAgentVisionModel } from './agentVisionModel';
+  import { agentHostDisplay } from './agentComputeHost';
 
   // Provider type definition: one row of PROVIDERS_RESPONSE (DPTP §3.5), which
   // since `ec686608` carries `tariff` and `settings` beside the capabilities.
@@ -57,7 +58,11 @@
 
     // An agent chat picks its own vision model (see agentVisionModel.ts), so the
     // dropdown becomes a read-only statement of what will happen.
-    isAgentChat = false
+    isAgentChat = false,
+
+    // The agent chat's own `compute_host` (peer node_id; empty = this node). For
+    // an agent chat this, not the page-global selectedComputeHost, is the host.
+    agentComputeHost = ""
   }: {
     selectedComputeHost?: string;
     selectedTextProvider?: string;
@@ -72,7 +77,13 @@
     defaultProviders?: DefaultProviders | null;
     agentLlmProvider?: string;
     isAgentChat?: boolean;
+    agentComputeHost?: string;
   } = $props();
+
+  // The host the requests go to: an agent chat's stored compute_host, otherwise
+  // the dropdown's value.
+  const hostDisplay = $derived(() => agentHostDisplay(agentComputeHost, nodeStatus?.peer_info));
+  const effectiveComputeHost = $derived(() => isAgentChat ? hostDisplay().host : selectedComputeHost);
 
   // Merged provider lists (Phase 2: combines local + remote providers)
   // Phase 2.3: Add uniqueId to track provider source for remote vision routing
@@ -97,15 +108,16 @@
       };
     });
 
-    if (selectedComputeHost === "local") {
+    const host = effectiveComputeHost();
+    if (host === "local") {
       return local;
     }
 
-    const remote = (peerProviders.get(selectedComputeHost) || []).map(p => ({
+    const remote = (peerProviders.get(host) || []).map(p => ({
       ...p,
       source: 'remote' as const,
       displayText: `${p.alias} (${p.model}) - remote`,
-      uniqueId: `remote:${selectedComputeHost}:${p.alias}`  // Include node_id for routing
+      uniqueId: `remote:${host}:${p.alias}`  // Include node_id for routing
     }));
 
     return [...local, ...remote];
@@ -118,7 +130,10 @@
   const agentVision = $derived(() => effectiveAgentVisionModel(
     agentLlmProvider,
     providersList || [],
-    defaultProviders?.vision_provider || ''
+    defaultProviders?.vision_provider || '',
+    agentComputeHost,
+    peerProviders,
+    hostDisplay().shortName
   ));
 
   // What the guest is about to call on someone else's machine. A local alias
@@ -173,6 +188,19 @@
     <div class="provider-selector-header">
       <!-- AI Host Selector (Phase 2: Remote Vision) -->
       <div class="provider-row-header">
+        {#if isAgentChat}
+          <!-- The agent's requests go to its own compute_host (ChatPanel send
+               path), so state it; the page-global value says nothing about it. -->
+          <span class="provider-row-label">AI Host:</span>
+          <span
+            class="vision-effective"
+            title={hostDisplay().connected
+              ? "This agent's requests go to this host."
+              : "This agent is bound to this host, but it is not connected now."}
+          >
+            {hostDisplay().label}
+          </span>
+        {:else}
         <label for="ai-host-header">AI Host:</label>
         <select id="ai-host-header" bind:value={selectedComputeHost}>
           <option value="local">Local</option>
@@ -189,6 +217,7 @@
             </optgroup>
           {/if}
         </select>
+        {/if}
       </div>
 
       <!-- Text Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
