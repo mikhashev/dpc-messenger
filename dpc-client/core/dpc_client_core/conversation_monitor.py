@@ -529,6 +529,9 @@ class Message:
     # Inside the signing preimage: an agent's tool calls set after signing
     # produce a record whose hash every peer recomputes differently.
     tool_calls: Optional[List[Dict[str, Any]]] = None
+    # Inside the v3 preimage (specs/dptp_v1.md §4.3): how many cross-node
+    # agent mentions stand behind an agent post. 0 or None for everything else.
+    mention_depth: Optional[int] = None
 
 
 class ConversationMonitor:
@@ -715,7 +718,8 @@ class ConversationMonitor:
                         sender_name=sender_name, message_id=message.message_id,
                         sender_type=sender_type, agent_owner=agent_owner,
                         tool_calls=getattr(message, "tool_calls", None),
-                        signature_fields=getattr(message, "signature_fields", None))
+                        signature_fields=getattr(message, "signature_fields", None),
+                        mention_depth=getattr(message, "mention_depth", None))
         logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
 
         # Only run automatic detection if enabled
@@ -2110,7 +2114,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     source: Optional[str] = None, sender_type: Optional[str] = None,
                     agent_owner: Optional[str] = None,
                     tool_calls: Optional[List[Dict[str, Any]]] = None,
-                    signature_fields: Optional[Dict[str, Any]] = None):
+                    signature_fields: Optional[Dict[str, Any]] = None,
+                    mention_depth: Optional[int] = None):
         """Add a message to the conversation history
 
         Args:
@@ -2166,6 +2171,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["agent_owner"] = agent_owner
         if tool_calls:
             message_dict["tool_calls"] = tool_calls
+        if mention_depth:
+            message_dict["mention_depth"] = mention_depth
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)
@@ -2204,6 +2211,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 timestamp=timestamp,
                 content=content,
                 tool_calls=tool_calls,
+                mention_depth=mention_depth,
             )
             # The value the preimage actually covers under v2. Stored, because a
             # peer receives this and never the calls themselves (ADR-042).
@@ -2560,6 +2568,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             content=record.get("content") or "",
             tool_calls=record.get("tool_calls"),
             tool_calls_digest=record.get("tool_calls_digest"),
+            mention_depth=record.get("mention_depth"),
             version=version,
         )
 
@@ -2924,7 +2933,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # them, so a v1 record that has any is unverifiable on the far side
             # either way — the eleven this pair already carries.
             for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner",
-                          "isAgent"):
+                          "isAgent", "mention_depth"):
                 if field in msg:
                     exported_msg[field] = msg[field]
             # Signature fields travel only when they were made over the current
@@ -3025,7 +3034,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             for field in ("sender_name", "sender_node_id", "sender_type", "agent_owner",
                           "timestamp", "id", "isAgent",
                           "content_hash", "signature", "signer_node_id",
-                          "preimage_version", "verification"):
+                          "preimage_version", "verification", "mention_depth"):
                 if field in msg:
                     imported_msg[field] = msg[field]
             # The digest is what v2 signs, so it has to survive an import or the

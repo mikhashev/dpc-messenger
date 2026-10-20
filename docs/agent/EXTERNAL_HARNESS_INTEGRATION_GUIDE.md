@@ -217,7 +217,7 @@ agent-chat bridge but reads from group history files and sends via
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only mentions of this bridge's tag, matched as a whole word (`@CC_mike`, not `@CC` or `@CC_mike2`). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "text"` | Post (or, with `--mentions`, scan) as one specific registered tag. |
-| `uv run python cc_group_chat_bridge.py --group GROUP_ID --listen` | Block and print one `[MENTION]` line per `cc_group_mention` event for this bridge's tag as the backend emits it; reconnects with backoff when the backend drops. `--once` exits 0 after the first match, `--json` prints the payload as one JSON object per line, `--all-tags` takes every tag in the group. |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --listen` | Block and print one `[MENTION]` line per `cc_group_mention` event for this bridge's tag as the backend emits it; reconnects with backoff when the backend drops. `--once` exits 0 after the first match, `--json` prints the payload as one JSON object per line, `--all-tags` takes every tag in the group. A line marked `[--mention-depth N]` is answered with `--send … --mention-depth N` (the payload's `mention_depth`), so two bridges on two nodes stop after one crossing ([DPTP §4.3](../../specs/dptp_v1.md#43-agent-mentions-across-nodes)). |
 
 The `--group` argument accepts either the canonical group ID
 (`group-abc123`) or the slugged directory name (`group-abc123-my-project`).

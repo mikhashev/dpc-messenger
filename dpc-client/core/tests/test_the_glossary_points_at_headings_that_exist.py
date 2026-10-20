@@ -86,3 +86,46 @@ class TestTheWalkItself:
             "4a-the-one-field-that-was-added-anyway--axis"
         assert slug("Vocabulary — read the project's words before naming anything") == \
             "vocabulary--read-the-projects-words-before-naming-anything"
+
+
+class TestThePreimageRowMatchesTheSigner:
+    """The «message signing / preimage» row names the preimage the signer builds.
+
+    It said ten fields tagged `dptp-msg-v1` for two versions after v1 was gone. The
+    count is read from the bytes `message_preimage` returns rather than copied from its
+    source, so the row goes red on the day a v4 appends a field.
+    """
+
+    NUMBER_WORDS = {9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
+                    14: "fourteen", 15: "fifteen"}
+
+    @staticmethod
+    def _row():
+        rows = [line for line in GLOSSARY.read_text(encoding="utf-8").splitlines()
+                if line.startswith("| **message signing / preimage** |")]
+        assert len(rows) == 1, f"expected one preimage row, found {len(rows)}"
+        return rows[0]
+
+    @staticmethod
+    def _field_count(preimage: bytes) -> int:
+        """Fields of a `len:bytes` concatenation (message_signing._length_prefixed)."""
+        count, pos = 0, 0
+        while pos < len(preimage):
+            colon = preimage.index(b":", pos)
+            pos = colon + 1 + int(preimage[pos:colon])
+            count += 1
+        assert pos == len(preimage), "the preimage is not length-prefixed fields end to end"
+        return count
+
+    def test_the_row_names_the_current_version_and_its_field_count(self):
+        from dpc_protocol.message_signing import (
+            LEGACY_PREIMAGE_VERSIONS, PREIMAGE_VERSION, message_preimage,
+        )
+        row = self._row()
+        count = self._field_count(message_preimage(
+            conversation_id="g", message_id="m", sender_node_id="n"))
+        assert f"`{PREIMAGE_VERSION}`" in row, f"the row does not name {PREIMAGE_VERSION}: {row}"
+        assert f"{self.NUMBER_WORDS[count]} fields" in row, (
+            f"the signer builds {count} fields; the row says otherwise: {row}")
+        for legacy in LEGACY_PREIMAGE_VERSIONS:
+            assert f"`{legacy}`" in row, f"the row no longer says {legacy} still verifies"

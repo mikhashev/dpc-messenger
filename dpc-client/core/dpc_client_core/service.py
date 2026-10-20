@@ -236,6 +236,26 @@ def menu_settings_row(provider: Any) -> Dict[str, Any]:
     return {key: value for key, value in settings.items() if value is not None}
 
 
+# Mike's call, 2026-10-20 ("A, depth 1"): an agent post arriving from another
+# node wakes an agent here only while its `mention_depth` is below this, so
+# exactly one cross-node agent mention is followed (specs/dptp_v1.md §4.3).
+CROSS_NODE_MENTION_DEPTH_LIMIT = 1
+
+# Fenced blocks first, then inline code: a name quoted as code is not a call.
+CODE_BLOCK_RE = re.compile(r'```[\s\S]*?```|`[^`\n]+`')
+
+
+def mentions_in(text) -> Set[str]:
+    """The lower-cased @names in `text`, code removed first.
+
+    Called from both mention paths. The peer path used to parse the raw text,
+    so a name in backticks was safe while the message stayed local and woke
+    the agent once the same message arrived from a peer.
+    """
+    plain_text = CODE_BLOCK_RE.sub('', text or "")
+    return {m.lower() for m in re.findall(r'@(\w+)\b', plain_text, re.IGNORECASE)}
+
+
 def external_agents_to_wake(allowed_agents, mention_names, cc_display_name,
                             mention_all=False, sender_name=""):
     """Which external agents on this node a mention wakes, and whether to warn.
@@ -6382,16 +6402,20 @@ class CoreService:
             logger.error("Error sending group message: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    _CODE_BLOCK_RE = re.compile(r'```[\s\S]*?```|`[^`\n]+`')
+    _CODE_BLOCK_RE = CODE_BLOCK_RE
 
     async def _handle_group_agent_mentions(
         self, group_id: str, text: str, sender_name: str,
         is_agent_sender: bool = False,
         trigger_message_id: Optional[str] = None,
+        mention_depth: int = 0,
     ) -> None:
-        """Detect @agent / @CC / @all mentions in outgoing group messages and route to agents."""
-        plain_text = self._CODE_BLOCK_RE.sub('', text)
-        mentions = {m.lower() for m in re.findall(r'@(\w+)\b', plain_text, re.IGNORECASE)}
+        """Detect @agent / @CC / @all mentions in outgoing group messages and route to agents.
+
+        `mention_depth` is the sending post's own; an agent woken here inherits
+        it, because a hop inside one node is not a cross-node mention.
+        """
+        mentions = mentions_in(text)
         logger.debug("_handle_group_agent_mentions: mentions=%s in group %s (agent_sender=%s)",
                       mentions, group_id, is_agent_sender)
 
@@ -6415,7 +6439,8 @@ class CoreService:
                 matched = "all" if mention_all else (aname if aname in mentions else aid)
                 logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
                 asyncio.ensure_future(self._invoke_agent_in_group_serialized(
-                    group_id, text, sender_name, aid, trigger_message_id))
+                    group_id, text, sender_name, aid, trigger_message_id,
+                    mention_depth=mention_depth))
 
         woken, warn = external_agents_to_wake(
             allowed_agents, mentions, self.get_cc_display_name(),
@@ -6436,11 +6461,15 @@ class CoreService:
                 "sender_name": sender_name,
                 "sender_node_id": self.p2p_manager.node_id,
                 "agent_tag": tag,
+                # Inherited, as by the embedded agents above: the bridge's
+                # reply carries it (specs/dptp_v1.md §4.3).
+                "mention_depth": mention_depth,
             })
 
     async def _invoke_agent_in_group_serialized(
         self, group_id: str, text: str, sender_name: str, agent_id: str = None,
         trigger_message_id: Optional[str] = None,
+        mention_depth: int = 0,
     ) -> None:
         """Run an agent in a group under the per-group lock — serializes agents so two
         @mentions in the same group queue (one at a time) instead of running in parallel.
@@ -6450,11 +6479,13 @@ class CoreService:
             self._group_agent_locks[group_id] = asyncio.Lock()
         async with self._group_agent_locks[group_id]:
             await self._invoke_agent_in_group(group_id, text, sender_name, agent_id,
-                                              trigger_message_id)
+                                              trigger_message_id,
+                                              mention_depth=mention_depth)
 
     async def _invoke_agent_in_group(
         self, group_id: str, text: str, sender_name: str, agent_id: str = None,
         trigger_message_id: Optional[str] = None,
+        mention_depth: int = 0,
     ) -> None:
         """Invoke a specific agent and post its response to the group."""
         try:
@@ -6497,7 +6528,8 @@ class CoreService:
                 agent = manager._last_used_agent
                 if agent and hasattr(agent, '_last_trace'):
                     tool_calls = (agent._last_trace or {}).get("accumulated_tool_calls")
-                await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls)
+                await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls,
+                                                    mention_depth=mention_depth)
         except Exception as e:
             logger.error("Agent group response failed: %s", e, exc_info=True)
 
@@ -6609,23 +6641,39 @@ class CoreService:
     async def send_group_agent_message(
         self, group_id: str, agent_name: str, text: str,
         tool_calls: Optional[list] = None,
+        mention_depth: int = 0,
     ) -> Optional[str]:
         """Send a group message attributed to an agent.
 
-        The message appears with agent_name as the sender and is marked
-        is_agent=True so the anti-loop guard in GroupTextHandler skips it.
+        The message appears with agent_name as the sender, sender_type "agent"
+        (signed), and is_agent=True for nodes older than DPTP v1.10. A peer's
+        GroupTextHandler routes its mentions only below the depth bound
+        (specs/dptp_v1.md §4.3).
 
         Args:
             group_id: Target group ID
             agent_name: Display name (from config.json or CC display name)
             text: Message text
+            mention_depth: How many cross-node agent mentions stand behind this
+                post (specs/dptp_v1.md §4.3) — 0 unless the run was woken by an
+                agent post from another node. Signed, and carried only when > 0.
 
         Returns:
             The generated message_id (16-char hex), or None if the group was not found.
             Callers use this to track posted messages for later deletion (e.g. morning
             brief replacement on Sleep button). A name this node did not register for
-            the group is refused with `{"status": "error", "message": ...}`.
+            the group is refused with `{"status": "error", "message": ...}`, and so
+            is a `mention_depth` that is not a whole number >= 0.
         """
+        # A bridge's value arrives through the local API unchecked, and is signed as given.
+        if mention_depth is None:
+            mention_depth = 0
+        if isinstance(mention_depth, bool) or not isinstance(mention_depth, int) or mention_depth < 0:
+            logger.warning("send_group_agent_message: mention_depth %r refused in group %s",
+                           mention_depth, group_id)
+            return {"status": "error", "message":
+                    f"mention_depth must be a whole number >= 0, got {mention_depth!r}"}
+
         group = self.group_manager.get_group(group_id)
         if not group:
             logger.warning("send_group_agent_message: group %s not found", group_id)
@@ -6672,6 +6720,7 @@ class CoreService:
             # Signed with the record. Patching them in afterwards left the
             # hash computed without them, and every peer refused the post.
             tool_calls=tool_calls or None,
+            mention_depth=mention_depth or None,
         ))
         monitor.save_history()
 
@@ -6701,6 +6750,9 @@ class CoreService:
             # signs, so it can verify the record without holding them (ADR-042).
             "tool_calls": tool_calls or [],
         }
+        if mention_depth:
+            # Inside the v3 preimage; absent means 0.
+            payload["mention_depth"] = mention_depth
 
         # Broadcast to UI
         await self.local_api.broadcast_event("group_text_received", payload)
@@ -6745,7 +6797,8 @@ class CoreService:
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
         await self._handle_group_agent_mentions(group_id, text, agent_name, is_agent_sender=True,
-                                                trigger_message_id=message_id)
+                                                trigger_message_id=message_id,
+                                                mention_depth=mention_depth)
 
         return message_id
 

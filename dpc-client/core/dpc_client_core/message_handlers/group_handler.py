@@ -24,6 +24,38 @@ from ..conversation_monitor import (
 from .group_access import may_share_group, refuse_group_access
 
 
+_PREIMAGES_WITHOUT_MENTION_DEPTH = ("dptp-msg-v1", "dptp-msg-v2")
+
+
+def signed_mention_depth(payload: Dict[str, Any], verification: str):
+    """(is_agent_post, mention_depth) of a GROUP_TEXT from another node.
+
+    Read only from what the author signed when the post is `verified` over a
+    preimage that covers both (v3 on): the signed `sender_type` says whether
+    an agent wrote it, the signed `mention_depth` how many cross-node agent
+    mentions stand behind it. The unsigned `is_agent` is not read there.
+
+    Anything else — v1/v2, unverified, legacy — keeps the earlier rule
+    (specs/dptp_v1.md §4.3): an agent post, by either flag, wakes nobody,
+    which a depth of None says.
+    """
+    version = payload.get("preimage_version")
+    if verification == "verified" and version not in _PREIMAGES_WITHOUT_MENTION_DEPTH:
+        if payload.get("sender_type") != "agent":
+            return False, 0
+        raw = payload.get("mention_depth")
+        if raw in (None, ""):
+            return True, 0
+        try:
+            depth = int(raw)
+        except (TypeError, ValueError):
+            return True, None
+        return True, (depth if depth >= 0 else None)
+    if payload.get("is_agent", False) or payload.get("sender_type") == "agent":
+        return True, None
+    return False, 0
+
+
 async def send_history_status(service, peer: str, group_id: str, log=None) -> bool:
     """Open the digest exchange for one group with one peer.
 
@@ -158,6 +190,7 @@ class GroupTextHandler(MessageHandler):
             # it was sent rather than what it was never given (ADR-042).
             tool_calls=payload.get("tool_calls"),
             tool_calls_digest=payload.get("tool_calls_digest"),
+            mention_depth=payload.get("mention_depth"),
             version=version,
         )
         if expected != content_hash:
@@ -310,6 +343,13 @@ class GroupTextHandler(MessageHandler):
                 # fails its own signature on re-export. [] hashes as None.
                 tool_calls=payload.get("tool_calls") or None,
                 signature_fields=signature_fields,
+                # Only where the author's signature covers it.
+                mention_depth=(
+                    payload.get("mention_depth")
+                    if signature_fields
+                    and signature_fields.get("preimage_version") not in _PREIMAGES_WITHOUT_MENTION_DEPTH
+                    else None
+                ),
             )
 
             # Buffer message for manual extraction
@@ -338,7 +378,8 @@ class GroupTextHandler(MessageHandler):
         })
 
         # Detect @Ark / @CC mentions and route to agents
-        await self._handle_agent_mentions(group_id, payload, text, sender_name, sender_node_id)
+        await self._handle_agent_mentions(group_id, payload, text, sender_name, sender_node_id,
+                                          verification=verification)
 
         return None
 
@@ -349,20 +390,47 @@ class GroupTextHandler(MessageHandler):
         text: str,
         sender_name: str,
         sender_node_id: str,
+        verification: str = "legacy",
     ) -> None:
-        """Detect @agent and @CC mentions and route to respective agents."""
-        import re
+        """Detect @agent and @CC mentions and route to respective agents.
 
-        # Anti-loop guard: is_agent is set by send_group_agent_message() server-side only.
-        # sender_name alone is insufficient — a user could rename themselves to match agent names.
-        if payload.get("is_agent", False):
+        A human's post routes as on the send path. An agent's post routes only
+        while its signed `mention_depth` is below the bound (Mike's call,
+        2026-10-20, "A, depth 1"; specs/dptp_v1.md §4.3), never by `@all`, and
+        the agent it wakes answers one level deeper — so the reply to a
+        cross-node agent mention wakes nobody on another node.
+        """
+        from dpc_client_core.service import (
+            CROSS_NODE_MENTION_DEPTH_LIMIT,
+            external_agents_to_wake,
+            mentions_in,
+        )
+
+        message_id = payload.get("message_id")
+        is_agent_post, depth = signed_mention_depth(payload, verification)
+        if is_agent_post and (depth is None or depth >= CROSS_NODE_MENTION_DEPTH_LIMIT):
+            self.logger.debug(
+                "Agent post %s from peer %s in group %s wakes nobody: %s",
+                str(message_id)[:8], sender_name, group_id,
+                f"mention_depth {depth} is not below {CROSS_NODE_MENTION_DEPTH_LIMIT}"
+                if depth is not None else
+                f"no signed mention_depth (verdict {verification}, "
+                f"preimage {payload.get('preimage_version')})")
             return
+        reply_depth = depth + 1 if is_agent_post else 0
 
-        mentions = re.findall(r'@(\w+)\b', text, re.IGNORECASE)
-        mention_names = {m.lower() for m in mentions}
+        mention_names = mentions_in(text)
         self.logger.debug(
             "_handle_agent_mentions (peer path): mentions=%s in group %s (sender=%s)",
             mention_names, group_id, sender_name)
+        if not mention_names:
+            return
+        if is_agent_post:
+            wake_line = ("Group @%s mention from peer agent %s at mention_depth " + str(depth)
+                         + " — %s in group %s")
+        else:
+            wake_line = "Group @%s mention from peer %s — %s in group %s"
+        sender_lower = sender_name.lower() if sender_name else ""
 
         # Get allowed agents for this group from metadata
         group = self.service.group_manager.get_group(group_id) if self.service.group_manager else None
@@ -372,10 +440,14 @@ class GroupTextHandler(MessageHandler):
         # Check if any mention matches agent name or agent_id
         agent_id = self.service._get_default_agent_id()
         agent_name = self.service._get_agent_display_name(agent_id).lower()
-        if agent_name in mention_names or agent_id in mention_names:
+        if agent_name == sender_lower:
+            pass  # never the sender itself, as on the send path
+        elif agent_name in mention_names or agent_id in mention_names:
             if agent_id in allowed_agents:
+                self.logger.info(wake_line, agent_name, sender_name,
+                                 f"invoking agent {agent_id}", group_id)
                 await self._invoke_agent(group_id, text, sender_name,
-                                         payload.get("message_id"))
+                                         message_id, mention_depth=reply_depth)
             else:
                 self.logger.debug("Skipping @%s — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
 
@@ -393,15 +465,13 @@ class GroupTextHandler(MessageHandler):
         # external agent for this group, registration decides; until then the old
         # behaviour stands and says so. The gate arrives per group, on the day
         # somebody fills the field, rather than on a release date.
-        from dpc_client_core.service import external_agents_to_wake
         cc_name = self.service.get_cc_display_name().lower()
-        # Same rule as the send path: @all is a human's word. The agent case
-        # already returned above, so here every sender is a human.
-        mention_all = "all" in mention_names
+        # Same rule as the send path: @all is a human's word.
+        mention_all = "all" in mention_names and not is_agent_post
         woken, warn = external_agents_to_wake(
             allowed_agents, mention_names, cc_name,
             mention_all=mention_all,
-            sender_name=sender_name.lower() if sender_name else "",
+            sender_name=sender_lower,
         )
         if warn:
             self.logger.warning(
@@ -414,19 +484,23 @@ class GroupTextHandler(MessageHandler):
             # Broadcast event — the MCP server bridge subscribes and queues it.
             # `agent_tag` says which name was matched: with several external agents
             # on one node, the bridge cannot tell from the text alone.
-            self.logger.info(
-                "Group @%s mention from peer %s — broadcasting cc_group_mention in group %s",
-                tag, sender_name, group_id)
+            # `mention_depth` is the depth its reply carries — the value the
+            # embedded agent above is given — so a bridge on each of two nodes
+            # cannot reset the count at every crossing (specs/dptp_v1.md §4.3).
+            self.logger.info(wake_line, tag, sender_name,
+                             "broadcasting cc_group_mention", group_id)
             await self.service.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
                 "text": text,
                 "sender_name": sender_name,
                 "sender_node_id": sender_node_id,
                 "agent_tag": tag,
+                "mention_depth": reply_depth,
             })
 
     async def _invoke_agent(self, group_id: str, text: str, sender_name: str,
-                            trigger_message_id: Optional[str] = None) -> None:
+                            trigger_message_id: Optional[str] = None,
+                            mention_depth: int = 0) -> None:
         """Invoke the default agent and post response to the group."""
         try:
             dpc_provider = self.service.llm_manager.providers.get("dpc_agent")
@@ -445,7 +519,8 @@ class GroupTextHandler(MessageHandler):
             )
             if response:
                 agent_display = self.service._get_agent_display_name(agent_id)
-                await self.service.send_group_agent_message(group_id, agent_display, response)
+                await self.service.send_group_agent_message(group_id, agent_display, response,
+                                                            mention_depth=mention_depth)
         except Exception as e:
             self.logger.error("Agent group response failed: %s", e, exc_info=True)
 

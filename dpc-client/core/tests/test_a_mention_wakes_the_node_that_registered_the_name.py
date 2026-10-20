@@ -225,7 +225,7 @@ class TestAnExternalTagIsNeverAnAgentFolder:
         async def _broadcast(event, payload):
             broadcast.append((event, payload))
 
-        async def _invoke(group_id, text, sender_name, aid, trigger_id=None):
+        async def _invoke(group_id, text, sender_name, aid, trigger_id=None, **_):
             invoked.append(aid)
 
         svc = SimpleNamespace(

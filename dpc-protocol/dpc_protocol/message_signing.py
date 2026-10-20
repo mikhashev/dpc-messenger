@@ -30,6 +30,11 @@ keeps the audit trail bound to its author while the calls stay on the node that
 ran them. v1 records keep verifying under the old rule for good — the version
 tag opens the preimage precisely so both can be read.
 
+**v3 appends `mention_depth`.** A peer's agent post may wake an agent on the
+receiving node only while its `mention_depth` is below the bound
+(specs/dptp_v1.md §4.3), so a relay that could lower the number would lift the
+bound. v1 and v2 records keep verifying under their own field sets.
+
 See specs/dptp_v1.md §4.1.
 """
 
@@ -38,8 +43,10 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-PREIMAGE_VERSION = "dptp-msg-v2"
-LEGACY_PREIMAGE_VERSIONS = ("dptp-msg-v1",)
+PREIMAGE_VERSION = "dptp-msg-v3"
+# Oldest first: a record that carries no version tag is read as v1, and the
+# callers take that default from index 0.
+LEGACY_PREIMAGE_VERSIONS = ("dptp-msg-v1", "dptp-msg-v2")
 
 __all__ = [
     "PREIMAGE_VERSION",
@@ -112,6 +119,25 @@ def digest_of_tool_calls(tool_calls: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _canonical_depth(value: Any) -> str:
+    """`mention_depth`, spelled one way: empty for 0 or absent, decimal otherwise.
+
+    Absent and 0 mean the same thing — no cross-node agent mention behind the
+    post — so they hash the same, as an empty tool-call list does. A value
+    that is not a whole number is covered verbatim rather than dropped, as the
+    timestamp is.
+    """
+    if value is None or value == "":
+        return ""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "" if value == 0 else str(value)
+    text = str(value).strip()
+    if text.lstrip("-").isdigit():
+        number = int(text)
+        return "" if number == 0 else str(number)
+    return str(value)
+
+
 def message_preimage(
     *,
     conversation_id: Optional[str],
@@ -124,6 +150,7 @@ def message_preimage(
     content: str = "",
     tool_calls: Any = None,
     tool_calls_digest: Optional[str] = None,
+    mention_depth: Any = None,
     version: str = PREIMAGE_VERSION,
 ) -> bytes:
     """Build the exact bytes a message signature covers.
@@ -158,6 +185,10 @@ def message_preimage(
         content or "",
         last,
     ]
+    if version not in LEGACY_PREIMAGE_VERSIONS:
+        # v3: the anti-loop count is inside the signature, so a relay cannot
+        # lower it to wake an agent the author's post may not wake.
+        fields.append(_canonical_depth(mention_depth))
 
     return _length_prefixed(fields)
 

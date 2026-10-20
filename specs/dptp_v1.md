@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.9
+# DPTP Specification: D-PC Transfer Protocol v1.10
 
-**Version:** 1.9
+**Version:** 1.10
 **Status:** Draft / PoC
 **Date:** October 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -2285,9 +2285,10 @@ authority participates.
 A message signature covers a **canonical preimage**, never the message dict
 and never a locally rebuilt string.
 
-**Version tag:** `dptp-msg-v2` (constant `PREIMAGE_VERSION`). `dptp-msg-v1` remains
-readable for good — a verifier builds the preimage for the version the record
-declares, never for the one it happens to run (`LEGACY_PREIMAGE_VERSIONS`).
+**Version tag:** `dptp-msg-v3` (constant `PREIMAGE_VERSION`, v1.10). `dptp-msg-v2`
+and `dptp-msg-v1` remain readable for good — a verifier builds the preimage for
+the version the record declares, never for the one it happens to run
+(`LEGACY_PREIMAGE_VERSIONS`). A record with no version tag is read as v1.
 
 **Covered fields, in this order — the order is part of the format:**
 
@@ -2302,7 +2303,10 @@ declares, never for the one it happens to run (`LEGACY_PREIMAGE_VERSIONS`).
 | 7 | `agent_owner` | not an agent message |
 | 8 | `timestamp`, canonicalised | absent |
 | 9 | `content` | empty message |
-| 10 | **v2:** `sha256` of the canonical JSON of `tool_calls`, hex — **v1:** that JSON itself | no tool calls (both spell it as empty) |
+| 10 | **v2, v3:** `sha256` of the canonical JSON of `tool_calls`, hex — **v1:** that JSON itself | no tool calls (all spell it as empty) |
+| 11 | **v3 only:** `mention_depth` in decimal (§4.3) | 0 or absent — the two are the same value and hash the same |
+
+v1 and v2 end at field 10; v3 appends field 11 and changes nothing before it.
 
 **Why the digest (ADR-042).** A verifier has to hold every field it checks, so
 covering the calls themselves meant shipping them: an agent's tool inputs, full
@@ -2319,7 +2323,7 @@ digest and never the calls.
 `<byte-length>":"<bytes>`, concatenated in the order above:
 
 ```
-11:dptp-msg-v2 21:group-b88b65076b85 36:c0ffee00-… …
+11:dptp-msg-v3 21:group-b88b65076b85 36:c0ffee00-… …
 ```
 (spaces shown for readability only; the wire form has none)
 
@@ -2391,6 +2395,67 @@ Every arriving record leaves verification carrying exactly one verdict:
 
 **Implementation:** `conversation_monitor._verify_incoming`,
 `message_handlers/group_handler._authenticate_author`
+
+### 4.3 Agent mentions across nodes
+
+An `@Name` in a group post wakes the named agent (docs/GROUP_CHAT.md — Mention
+routing). Inside one node an agent's post may wake another agent; across nodes
+an agent's post may wake one agent on the receiving node, and the post that
+agent writes may not wake anyone on another node again — **depth 1** (Mike's
+call, 2026-10-20).
+
+**`mention_depth`** (integer, optional, on a `GROUP_TEXT` with
+`sender_type: "agent"`): how many cross-node agent mentions stand behind the
+post. Absent means 0, and a sender writes it only when it is 1 or more. It is
+field 11 of the `dptp-msg-v3` preimage (§4.1), so a relay cannot lower it.
+
+**Counting.**
+
+| The post | Its `mention_depth` |
+|---|---|
+| a human's post | 0 (never carried) |
+| an agent's reply to a run woken by a human's post, local or from a peer | 0 |
+| an agent's reply to a run woken by an agent post from **this** node | that post's depth — a hop inside one node does not count |
+| an agent's reply to a run woken by an agent post from **another** node | that post's depth + 1 |
+
+**Receiving rule.** On a `GROUP_TEXT` from another node:
+
+1. A human's post routes as before.
+2. An agent's post that is `verified` (§4.2) over `dptp-msg-v3` or later is an
+   agent's post because its signed `sender_type` says `agent`; the unsigned
+   `is_agent` is not read. It may wake an agent on this node only while its
+   signed `mention_depth` is below **1** (`CROSS_NODE_MENTION_DEPTH_LIMIT`).
+3. An agent's post signed over v1 or v2, `unverified`, or `legacy` wakes
+   nobody — either `is_agent` or `sender_type: "agent"` is enough — which is
+   the rule every node followed before v1.10. An older peer's agent therefore
+   still reaches no agent across nodes.
+4. An agent's post never expands `@all`, and an agent named like the sender is
+   not woken by it — the send path's two rules, applied on receipt too.
+5. Code is removed before mentions are parsed, fenced and inline alike, as on
+   the send path.
+
+**Worked chain.** A human on node 1 asks `@A` (node 1); A's reply, depth 0,
+names `@B` (node 2); node 2 wakes B. B's reply carries depth 1 and names `@A`;
+node 1 receives an agent post at depth 1 and wakes nobody. A human on node 2
+asking `@A` gives the same chain: the human's post wakes A at 0, A's reply wakes
+B, B's reply stops.
+
+**External agents.** An external agent (`ext:` tag, the Claude Code bridge)
+posts through `send_group_agent_message` and is counted by the same table. The
+node's local `cc_group_mention` event carries `mention_depth`: the depth the
+woken agent's reply carries, the value an embedded agent woken by the same post
+is given. The bridge sends it back with `--mention-depth N`, and its history
+view marks an agent's post with the `N` a reply to it carries — one deeper for
+a post from another node even where the node would have woken nobody, the
+direction that stops a chain. A reply sent without it carries 0, so the bound
+holds for a bridge only as far as its caller passes the number on.
+
+**Not bounded here.** A `check_back` result and a morning brief carry 0.
+Agent-to-agent mentions inside one node have no bound of their own.
+
+**Implementation:** `message_handlers/group_handler.signed_mention_depth`,
+`GroupTextHandler._handle_agent_mentions`, `service.send_group_agent_message`,
+`cc_group_chat_bridge.py` (`--mention-depth`, `_reply_mention_depth`)
 
 ## 5. Connection Flow
 
@@ -2612,6 +2677,21 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.10 (October 2026)
+- **§4.1 Message Signing** — preimage `dptp-msg-v3`: v2's ten fields plus
+  `mention_depth` as field 11. v2 and v1 records keep verifying under their own
+  field sets.
+- **§4.3 Agent mentions across nodes** (new) — an agent post from another node
+  may wake an agent here while its signed `mention_depth` is below 1; the woken
+  agent's reply carries depth + 1, so it wakes nobody on another node (Mike's
+  call, 2026-10-20). On a verified v3 post the guard reads the signed
+  `sender_type`, not the unsigned `is_agent`. Not additive for a node running
+  v1.9 or older: it reads a v3 signature as `legacy` (§4.2 rule 4), so until it
+  updates it attributes a relayed post to the relay, and it still wakes nothing
+  from an agent post. An external agent's bridge is counted too: the local
+  `cc_group_mention` event hands it the depth its reply carries, and it posts
+  it with `--mention-depth`.
 
 ### v1.9 (October 2026)
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — refusal code `provider_loading` (the

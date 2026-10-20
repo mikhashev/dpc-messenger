@@ -55,7 +55,7 @@ holds nothing but `deleted_registry.json`.
 | `GROUP_DELETED_STATUS` | Exchange deleted group IDs on connect (notify of deletions that happened while offline) |
 | `GROUP_SYNC` | Metadata reconciliation on connect — carries the full group dict (incl. `agents`/`agent_names`); version + content-hash tie-break |
 | `GROUP_HISTORY_REQUEST` / `GROUP_HISTORY_RESPONSE` | Chat-history reconciliation (hash-based, bidirectional); the request may narrow to `authors` or to individual `content_hashes` |
-| `cc_group_mention` *(local event)* | Broadcasts an `@CC` mention to the Claude Code CLI bridge |
+| `cc_group_mention` *(local event)* | Broadcasts an `@CC` mention to the Claude Code CLI bridge, with the `mention_depth` the bridge's reply carries ([§4.3](../specs/dptp_v1.md#43-agent-mentions-across-nodes)) |
 
 Files, voice, and screenshots use the existing `FILE_OFFER` with an optional `group_id` field; each member runs an independent transfer.
 
@@ -73,6 +73,8 @@ A human message is parsed for mentions (fenced code blocks are stripped first, s
 - `@CC` — emits a `cc_group_mention` local event to the Claude Code bridge.
 
 An agent's own name is excluded when matching mentions in its own message, preventing self-trigger loops.
+
+An agent's message arriving from another node wakes a named agent here only at `mention_depth` 0, and the reply it starts carries 1, so it wakes nobody on another node (depth 1, [specs/dptp_v1.md §4.3](../specs/dptp_v1.md#43-agent-mentions-across-nodes)). The same code stripping, `@all` and own-name rules apply on receipt.
 
 ### Per-group serialization
 Agents in the same group run **sequentially** (one `asyncio.Lock` per `group_id`), so concurrent invocations don't clobber each other's progress or pile LLM load on one group. Different groups still run agents in parallel.

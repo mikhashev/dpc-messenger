@@ -12,6 +12,11 @@ Usage:
     python cc_group_chat_bridge.py --group GROUP_ID --mentions      # mentions of that tag
     python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "hi"  # pick a tag
     python cc_group_chat_bridge.py --group GROUP_ID --listen [--once] [--json]  # push, no cron
+    python cc_group_chat_bridge.py --group GROUP_ID --send "hi" --mention-depth 1  # answer at depth
+
+A [MENTION] line or a history line marked [--mention-depth N] is answered with
+--mention-depth N, so the count two bridges pass each other is not reset to 0
+at every crossing (specs/dptp_v1.md §4.3).
 
 Identity: --as, else the tag registered for this node in Group Settings
 (metadata.json agents/agent_names), else [agent_chat] cc_display_name.
@@ -200,18 +205,55 @@ def find_mentions(messages: list, since_index: int = 0, names: list = None) -> l
     return mentions
 
 
-def _build_send_command(group_id: str, name: str, text: str) -> dict:
-    """The send_group_agent_message command; the backend copies agent_name into sender_name."""
+def _build_send_command(group_id: str, name: str, text: str, mention_depth: int = 0) -> dict:
+    """The send_group_agent_message command; the backend copies agent_name into sender_name.
+
+    `mention_depth` is carried only when > 0, as the backend carries it on the wire.
+    """
     import uuid
+    payload = {
+        "group_id": group_id,
+        "agent_name": name,
+        "text": text,
+    }
+    if mention_depth:
+        payload["mention_depth"] = mention_depth
     return {
         "id": str(uuid.uuid4())[:8],
         "command": "send_group_agent_message",
-        "payload": {
-            "group_id": group_id,
-            "agent_name": name,
-            "text": text,
-        }
+        "payload": payload,
     }
+
+
+def _reply_mention_depth(msg: dict, node_id: str) -> int:
+    """The mention_depth a reply to history record `msg` carries (specs/dptp_v1.md §4.3).
+
+    The backend's rule for an agent it wakes: a human's post starts at 0, an
+    agent post from this node is inherited, an agent post from another node
+    adds one. Reading history, the bridge cannot ask whether the backend would
+    have woken anyone at all, so an agent post it would not have woken still
+    counts one deeper — the direction that stops a chain rather than resets it.
+    """
+    if msg.get("sender_type") != "agent":
+        return 0
+    try:
+        depth = max(int(msg.get("mention_depth") or 0), 0)
+    except (TypeError, ValueError):
+        depth = 0
+    if node_id and msg.get("sender_node_id") == node_id:
+        return depth
+    return depth + 1
+
+
+def _mention_depth_arg(value: str) -> int:
+    """argparse type for --mention-depth: a whole number >= 0."""
+    try:
+        depth = int(value)
+    except ValueError:
+        depth = -1
+    if depth < 0:
+        raise argparse.ArgumentTypeError(f"must be a whole number >= 0, got {value!r}")
+    return depth
 
 
 def _send_outcome(reply: dict) -> tuple:
@@ -248,8 +290,10 @@ async def _await_reply(ws, command_id: str, deadline: float) -> dict:
             return frame
 
 
-async def send_group_message(group_id: str, text: str, name: str = None) -> dict:
-    """Post `text` to the group via WebSocket, as `name` (default: resolved identity)."""
+async def send_group_message(group_id: str, text: str, name: str = None,
+                             mention_depth: int = 0) -> dict:
+    """Post `text` to the group via WebSocket, as `name` (default: resolved identity),
+    at `mention_depth` — the value printed for the mention being answered."""
     canonical_id = _resolve_group_id(group_id)
 
     try:
@@ -262,7 +306,7 @@ async def send_group_message(group_id: str, text: str, name: str = None) -> dict
         name = _resolve_identity(group_id)
     if name != _configured_display_name():
         print(f"[INFO] posting as {name}")
-    command = _build_send_command(canonical_id, name, text)
+    command = _build_send_command(canonical_id, name, text, mention_depth)
 
     ws_token_path = DPC_HOME / ".ws_token"
     try:
@@ -327,9 +371,10 @@ def _resolve_group_id(group_id: str) -> str:
     return group_id
 
 
-def send_group_message_sync(group_id: str, text: str, name: str = None) -> dict:
+def send_group_message_sync(group_id: str, text: str, name: str = None,
+                            mention_depth: int = 0) -> dict:
     """Sync wrapper for send_group_message."""
-    return asyncio.run(send_group_message(group_id, text, name))
+    return asyncio.run(send_group_message(group_id, text, name, mention_depth))
 
 
 def _send_exit_code(reply: dict) -> int:
@@ -352,12 +397,19 @@ def _mention_for_me(frame, canonical_group_id: str, names_lower, all_tags: bool 
     return payload
 
 
+def _depth_hint(depth) -> str:
+    """' [--mention-depth N]' for a reply that must carry N > 0, else ''."""
+    return f" [--mention-depth {depth}]" if depth else ""
+
+
 def _format_mention(payload: dict, ts: str = None) -> str:
-    """One human line per event: first line of the text, cut at 200 chars."""
+    """One human line per event: first line of the text, cut at 200 chars, and the
+    --mention-depth the reply must carry when the backend says it is above 0."""
     import time
     first = (str(payload.get("text") or "").splitlines() or [""])[0]
     return (f"[MENTION] {ts or time.strftime('%H:%M:%S')} {payload.get('sender_name', '?')} "
-            f"(@{payload.get('agent_tag', '?')}) in {payload.get('group_id', '?')}: {first[:200]}")
+            f"(@{payload.get('agent_tag', '?')}){_depth_hint(payload.get('mention_depth'))} "
+            f"in {payload.get('group_id', '?')}: {first[:200]}")
 
 
 async def listen_for_mentions(group_id: str, names: list, all_tags: bool = False,
@@ -419,15 +471,17 @@ def listen_sync(group_id: str, names: list, all_tags: bool = False,
         return 0
 
 
-def format_message(i: int, msg: dict) -> str:
-    """Format a message for display. Full content, no truncation."""
+def format_message(i: int, msg: dict, node_id: str = None) -> str:
+    """Format a message for display. Full content, no truncation. An agent post
+    shows the --mention-depth a reply to it must carry, when above 0."""
     sender = msg.get("sender_name", msg.get("sender", "?"))
     content = msg.get("content", "") or msg.get("text", "")
     ts = msg.get("timestamp", "")
     if ts and "T" in ts:
         ts = ts.split("T")[1][:8]
     preview = content.replace("\n", "\n       ")
-    return f"  [{i + 1}] {ts} {sender}: {preview}"
+    hint = _depth_hint(_reply_mention_depth(msg, node_id if node_id is not None else _get_node_id()))
+    return f"  [{i + 1}] {ts} {sender}{hint}: {preview}"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -444,6 +498,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--send", type=str, help="Send a response as this bridge's name")
     parser.add_argument("--send-file", type=str, dest="send_file",
                         help="Send a response from file as this bridge's name (backtick-safe)")
+    parser.add_argument("--mention-depth", type=_mention_depth_arg, default=0,
+                        dest="mention_depth", metavar="N",
+                        help="With --send/--send-file: the mention_depth the post carries, "
+                             "signed. Pass the N that the [MENTION] line or the history "
+                             "line of the mention being answered shows as "
+                             "[--mention-depth N]; no mark means 0, the default. An agent "
+                             "post from another node wakes an agent on its receiver only "
+                             "at 0, so a reply sent without it can start a loop between "
+                             "two bridges")
     parser.add_argument("--as", type=str, dest="as_name", metavar="TAG",
                         help="Post/scan as this tag (default: the tag registered in "
                              "Group Settings, else cc_display_name)")
@@ -487,7 +550,8 @@ if __name__ == "__main__":
 
     if args.send:
         name = _resolve_identity(args.group, args.as_name)
-        sys.exit(_send_exit_code(send_group_message_sync(args.group, args.send, name)))
+        sys.exit(_send_exit_code(send_group_message_sync(args.group, args.send, name,
+                                                         args.mention_depth)))
 
     if args.send_file:
         try:
@@ -496,17 +560,19 @@ if __name__ == "__main__":
             print(f"[ERROR] Cannot read --send-file: {e}", file=sys.stderr)
             sys.exit(1)
         name = _resolve_identity(args.group, args.as_name)
-        sys.exit(_send_exit_code(send_group_message_sync(args.group, text, name)))
+        sys.exit(_send_exit_code(send_group_message_sync(args.group, text, name,
+                                                         args.mention_depth)))
 
     messages = read_history(args.group, last_n=args.last)
     print(f"[CC Group Bridge] {len(messages)} messages (last {args.last})\n")
 
+    node_id = _get_node_id()
     if args.mentions:
         names = _identity_names(args.group, args.as_name)
         mentions = find_mentions(messages, names=names)
         print(_mentions_banner(names, len(mentions)))
         for i, msg in mentions:
-            print(format_message(i, msg))
+            print(format_message(i, msg, node_id))
     else:
         for i, msg in enumerate(messages):
-            print(format_message(i, msg))
+            print(format_message(i, msg, node_id))
