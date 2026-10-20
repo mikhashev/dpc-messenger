@@ -7,7 +7,8 @@ from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, OPENAI_THINKING_MODELS, image_base64, network_client_bounds
+from .base import (AIProvider, OPENAI_THINKING_MODELS, image_base64, network_client_bounds,
+                   with_tool_call_blocks)
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,9 @@ class OpenAICompatibleProvider(AIProvider):
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temperature,
             )
-            return response.choices[0].message.content
+            # A llama-server behind this alias parses a call with no tools sent.
+            msg = response.choices[0].message
+            return with_tool_call_blocks(msg.content or "", getattr(msg, "tool_calls", None))
         except Exception as e:
             raise RuntimeError(f"OpenAI compatible provider '{self.alias}' failed: {e}") from e
 

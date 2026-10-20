@@ -34,7 +34,7 @@ from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 from openai import AsyncOpenAI
 
 from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_base64,
-                   image_blocks_in_turns, positive_ceiling)
+                   image_blocks_in_turns, positive_ceiling, with_tool_call_blocks)
 from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
@@ -889,10 +889,13 @@ class LlamaServerProvider(DeepSeekProvider):
             _choice = resp.choices[0]
             msg = _choice.message
             self._last_thinking = getattr(msg, "reasoning_content", None)
+            # The template parses a call even when no tools were sent.
+            calls = getattr(msg, "tool_calls", None) or []
             self._record_usage(
                 getattr(resp, "usage", None),
                 path="plain",
                 conversation_id=kwargs.get("conversation_id"),
+                tool_calls=len(calls),
                 effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
                 served_effort=self._served_effort(extra_body),
                 reasoning_text=self._last_thinking,
@@ -901,7 +904,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 max_tokens=_eff_max,
                 engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
             )
-            return msg.content or ""
+            return with_tool_call_blocks(msg.content or "", calls)
 
         try:
             return await _call()
@@ -950,6 +953,9 @@ class LlamaServerProvider(DeepSeekProvider):
             _t_first: Optional[float] = None
             full_text = ""
             thinking_text = ""
+            # Tool-call deltas by index, which a template parses here as on
+            # the plain path; put back into the text after the stream.
+            calls: Dict[int, Dict[str, Any]] = {}
             # Carried across chunks: the terminal usage chunk has no choices,
             # so the reason arrives one chunk earlier than the accounting.
             finish_reason = None
@@ -981,6 +987,7 @@ class LlamaServerProvider(DeepSeekProvider):
                             t_first_chunk_s=_t_first,
                             finish_reason=finish_reason,
                             max_tokens=self.max_tokens,
+                            tool_calls=len(calls),
                         )
                     if not chunk.choices:
                         continue
@@ -996,6 +1003,20 @@ class LlamaServerProvider(DeepSeekProvider):
                         full_text += text
                         if on_chunk:
                             await on_chunk(text, conversation_id)
+                    for part in getattr(delta, "tool_calls", None) or []:
+                        call = calls.setdefault(
+                            getattr(part, "index", None) or 0, {"name": "", "arguments": ""})
+                        fn = getattr(part, "function", None)
+                        call["name"] = call["name"] or (getattr(fn, "name", None) or "")
+                        call["arguments"] += getattr(fn, "arguments", None) or ""
+            if calls:
+                # Streamed too, so the chunks still add up to the answer.
+                text = with_tool_call_blocks(full_text, [
+                    {"function": calls[i]} for i in sorted(calls)])
+                tail = text[len(full_text):]
+                full_text = text
+                if on_chunk and tail:
+                    await on_chunk(tail, conversation_id)
             if thinking_text:
                 self._last_thinking = thinking_text
                 logger.info("llamacpp streaming thinking: %d chars", len(thinking_text))

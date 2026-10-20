@@ -687,6 +687,38 @@ def image_blocks_in_turns(messages: Any) -> int:
     return count
 
 
+def with_tool_call_blocks(content: str, tool_calls: Any) -> str:
+    """`content` with each tool call appended as a ```tool_call block.
+
+    For a plain path, which sent no tools and returns text alone: a server with
+    a chat template (llama-server `--jinja`) parses the model's own call into
+    `tool_calls` even then, and the text that held it comes back empty. The
+    block is the format the agent's text path teaches and parses
+    (`llm_adapter._format_tools_for_prompt`), so a caller that put its tools in
+    the prompt — a guest of any version among them — reads the call it would
+    have read had the template not taken it. Takes SDK objects or dicts; an
+    argument string that is not a JSON object becomes `{}`, as on the tools path.
+    """
+    blocks = []
+    for call in tool_calls or []:
+        fn = call.get("function") if isinstance(call, dict) else getattr(call, "function", None)
+        if isinstance(fn, dict):
+            name, raw = fn.get("name"), fn.get("arguments")
+        else:
+            name, raw = getattr(fn, "name", None), getattr(fn, "arguments", None)
+        try:
+            args = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+        except json.JSONDecodeError:
+            args = None
+        if not isinstance(args, dict):
+            args = {}
+        blocks.append("```tool_call\n" + json.dumps(
+            {"name": name or "", "arguments": args}, ensure_ascii=False) + "\n```")
+    if not blocks:
+        return content
+    return "\n".join(([content] if content.strip() else []) + blocks)
+
+
 # --- Shared network bounds ---
 
 # The openai and anthropic SDKs default to read=600 with two automatic retries;
