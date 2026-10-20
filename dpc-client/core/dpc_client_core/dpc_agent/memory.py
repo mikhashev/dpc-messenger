@@ -698,7 +698,10 @@ class EmbeddingProvider:
     @property
     def dimensions(self) -> int:
         self._load_model()
-        return self._model.get_sentence_embedding_dimension()
+        # sentence-transformers 5.4 renamed it and warns on the old name.
+        dim = getattr(self._model, "get_embedding_dimension", None) \
+            or self._model.get_sentence_embedding_dimension
+        return dim()
 
     def unload(self):
         self._model = None
