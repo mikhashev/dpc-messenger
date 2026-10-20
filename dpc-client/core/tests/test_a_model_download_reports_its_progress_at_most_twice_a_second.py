@@ -143,12 +143,11 @@ def test_the_browser_download_runs_in_the_background_and_reports_bytes(tmp_path,
     assert [p["bytes_done"] for p in _progress(service)] == [250, 1000]
 
 
-def test_the_fetcher_hands_every_chunk_to_the_reporter(monkeypatch):
-    import io
+def test_the_fetcher_hands_every_chunk_to_the_reporter(monkeypatch, tmp_path):
+    import hashlib
 
     import requests
 
-    pkgman = pytest.importorskip("camoufox.pkgman")
     body = b"x" * (3 * 1024 * 1024)
 
     class _Response:
@@ -162,13 +161,15 @@ def test_the_fetcher_hands_every_chunk_to_the_reporter(monkeypatch):
                 yield body[i:i + size]
 
     monkeypatch.setattr(requests, "get", lambda *a, **k: _Response())
-    fetcher = object.__new__(camoufox_binary._fetcher_class())
     seen = []
-    fetcher.on_progress = lambda done, total: seen.append((done, total))
 
-    fetcher.download_file(io.BytesIO(), "https://example.invalid/c.zip")
+    camoufox_binary._fetch_verified(
+        "https://example.invalid/c.zip", tmp_path / "c.zip", label="Camoufox browser",
+        expected_size=len(body), expected_sha256="sha256:" + hashlib.sha256(body).hexdigest(),
+        on_bytes=seen.append,
+    )
 
-    assert seen == [(1 << 20, len(body)), (2 << 20, len(body)), (3 << 20, len(body))]
+    assert seen == [1 << 20, 1 << 20, 1 << 20]
 
 
 # --- Hugging Face downloads: the cache folder is read while it grows -------------

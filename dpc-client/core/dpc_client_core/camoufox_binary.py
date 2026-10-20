@@ -18,9 +18,15 @@ the binary is missing or outside the package's supported range.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
+import shutil
 import threading
 import time
+import zipfile
+from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -47,6 +53,36 @@ _PINNED_ASSET_SIZES: Dict[str, Dict[str, int]] = {
         "mac.x86_64": 319_866_512,
         "win.i686": 478_100_137,
         "win.x86_64": 492_370_020,
+    },
+}
+
+# SHA-256 GitHub lists for each asset of the pinned tag (the releases API's
+# `digest` field), read on 2026-10-21. The download is refused unless it
+# matches; a pin with no row here falls back to the digest the API returns.
+_PINNED_ASSET_SHA256: Dict[str, Dict[str, str]] = {
+    "v152.0.4-beta.28": {
+        "lin.arm64": "sha256:3a105a2fc929e80a79b4b7fce2c93ed62c4fb2c877f3c1ed2a5d66a1c4fe968f",
+        "lin.x86_64": "sha256:924f3109ccd6d47cd6a0384d67a345fadf975d48b6319f8dbbd5954c588982bd",
+        "mac.arm64": "sha256:8b7680a61818245cf4eb0150edab811d4ed937b6723514569e74c3e7df9685bd",
+        "mac.x86_64": "sha256:6e0efd66f6db46bece072827cb2c5a4851bca822ff4fed95b8a0c2fb6f61a3d4",
+        "win.i686": "sha256:a713aca14f4ef0429eab502bacf42548fe6202bb4e29da1ca64761ed08d409af",
+        "win.x86_64": "sha256:386fc2f41139685f9a1a9cef0d024bc041d899c315ea538d561171b5b282e57d",
+    },
+}
+
+# The uBlock Origin add-on the package puts into every browser (its
+# DefaultAddons.UBO), which the package itself fetches as AMO's `latest`.
+# Pinned to the build the Windows node has run since 2026-07-21 (its
+# addons/UBO/manifest.json); AMO's latest was 1.75.0 on 2026-10-21. URL, size
+# and hash from addons.mozilla.org/api/v5/addons/addon/ublock-origin/versions/
+# 1.72.2/, read 2026-10-21. Installed into the browser's addons/UBO folder,
+# where the package looks first and then fetches nothing.
+UBLOCK_ORIGIN_VERSION = "1.72.2"
+_UBLOCK_ORIGIN_FILES: Dict[str, Dict[str, object]] = {
+    "1.72.2": {
+        "url": "https://addons.mozilla.org/firefox/downloads/file/4888680/ublock_origin-1.72.2.xpi",
+        "size": 4_585_322,
+        "sha256": "sha256:40c315b0da7871868155ecfae7a50a58dfa0920aebd865e008214986f1b7c578",
     },
 }
 
@@ -140,16 +176,17 @@ def _platform_key() -> Optional[str]:
 
 
 def _fetcher_class():
-    """A CamoufoxFetcher that installs `PINNED_RELEASE_TAG` rather than the
-    newest release, reports into dpc-client.log rather than a tqdm bar on
-    stdout, and remembers the size GitHub lists for the asset it chose. Built
-    on demand: the package may be absent."""
+    """A CamoufoxFetcher that finds `PINNED_RELEASE_TAG` rather than the
+    newest release and remembers the size and digest GitHub lists for the
+    asset it chose. Only its lookup is used: the download, the check and the
+    install are this module's (`_install_pinned`). Built on demand: the
+    package may be absent."""
     import requests
     from camoufox import pkgman
 
     class _PinnedFetcher(pkgman.CamoufoxFetcher):
         asset_size: Optional[int] = None
-        on_progress: Optional[Callable[[int, Optional[int]], None]] = None
+        asset_digest: Optional[str] = None
 
         def get_asset(self):
             # The package reads page 1 of /releases and takes the first match;
@@ -160,6 +197,8 @@ def _fetcher_class():
             for asset in resp.json().get("assets", []):
                 found = self.check_asset(asset)
                 if found and (found[0].version, found[0].release) == want:
+                    self.asset_size = asset.get("size")
+                    self.asset_digest = asset.get("digest")
                     return found
             raise pkgman.MissingRelease(
                 f"Release {PINNED_RELEASE_TAG} has no asset for {pkgman.OS_NAME} "
@@ -167,45 +206,12 @@ def _fetcher_class():
                 f"({pkgman.CONSTRAINTS.as_range()})."
             )
 
-        def check_asset(self, asset):
-            found = super().check_asset(asset)
-            if found:
-                self.asset_size = asset.get("size")
-            return found
-
-        def download_file(self, file, url):
-            logger.info("Camoufox browser download started: %s", url)
-            # The package's own webdl passes no timeout at all.
-            response = requests.get(url, stream=True, timeout=(20, 120))
-            response.raise_for_status()
-            total = int(response.headers.get("content-length", 0)) or self.asset_size or 0
-            done = 0
-            next_mark = 10
-            for chunk in response.iter_content(1 << 20):
-                file.write(chunk)
-                done += len(chunk)
-                if self.on_progress is not None:
-                    self.on_progress(done, total or None)
-                if total and done * 100 >= next_mark * total:
-                    logger.info(
-                        "Camoufox browser download: %d%% (%d of %d bytes)",
-                        next_mark, done, total,
-                    )
-                    next_mark += 10
-            file.seek(0)
-            return file
-
-        def extract_zip(self, zip_file):
-            logger.info("Camoufox browser download: extracting to %s", pkgman.INSTALL_DIR)
-            super().extract_zip(zip_file)
-
     return _PinnedFetcher
 
 
-def size_bytes() -> Optional[int]:
-    """The size of the pinned release's zip for this platform: the table row,
-    else one GitHub API read of the pinned tag (no binary is downloaded),
-    else None."""
+def _zip_size() -> Optional[int]:
+    """The pinned release's zip for this platform: the table row, else one
+    GitHub API read of the pinned tag (no binary is downloaded), else None."""
     global _live_size, _offer_failed_at
     key = _platform_key()
     row = _PINNED_ASSET_SIZES.get(PINNED_RELEASE_TAG, {})
@@ -221,6 +227,13 @@ def size_bytes() -> Optional[int]:
         _offer_failed_at = time.monotonic()
         logger.info("Camoufox release lookup for %s failed: %s", PINNED_RELEASE_TAG, e)
     return _live_size
+
+
+def size_bytes() -> Optional[int]:
+    """Everything one consent downloads: the browser zip and the pinned
+    uBlock Origin add-on."""
+    size = _zip_size()
+    return size + _ublock_file()["size"] if size else None
 
 
 def size_text() -> str:
@@ -250,14 +263,178 @@ def log_versions() -> None:
     )
 
 
+# --- the install: fetched, checked and extracted beside the old one ----------
+
+
+def _ublock_file() -> Dict[str, object]:
+    return _UBLOCK_ORIGIN_FILES[UBLOCK_ORIGIN_VERSION]
+
+
+def _resources(root: Path) -> Path:
+    """Where the package's get_path() resolves inside an install root."""
+    from camoufox import pkgman
+    if pkgman.OS_NAME == "mac":
+        return root / "Camoufox.app" / "Contents" / "Resources"
+    return root
+
+
+def _fetch_verified(
+    url: str,
+    dest: Path,
+    *,
+    label: str,
+    expected_size: Optional[int],
+    expected_sha256: str,
+    on_bytes: Optional[Callable[[int], None]] = None,
+) -> None:
+    """Stream `url` into `dest` and refuse it unless its SHA-256 (and size,
+    where known) match. INFO line at every 10%; `on_bytes(n)` per chunk."""
+    import requests
+
+    logger.info("%s download started: %s", label, url)
+    # The package's own webdl passes no timeout at all.
+    response = requests.get(url, stream=True, timeout=(20, 120))
+    response.raise_for_status()
+    total = int(response.headers.get("content-length", 0)) or expected_size or 0
+    digest = hashlib.sha256()
+    done = 0
+    next_mark = 10
+    with open(dest, "wb") as f:
+        for chunk in response.iter_content(1 << 20):
+            f.write(chunk)
+            digest.update(chunk)
+            done += len(chunk)
+            if on_bytes is not None:
+                on_bytes(len(chunk))
+            if total and done * 100 >= next_mark * total:
+                # One line for the highest mark this chunk crossed.
+                while next_mark <= 100 and done * 100 >= next_mark * total:
+                    next_mark += 10
+                logger.info("%s download: %d%% (%d of %d bytes)", label, next_mark - 10, done, total)
+    if expected_size is not None and done != expected_size:
+        raise ValueError(f"{label}: received {done} bytes, expected {expected_size}")
+    got = "sha256:" + digest.hexdigest()
+    if got != expected_sha256:
+        raise ValueError(f"{label}: checksum {got} does not match the pinned {expected_sha256}")
+    logger.info("%s download: %d bytes, %s verified", label, done, got)
+
+
+def _extract(archive: Path, dest: Path, *, label: str) -> None:
+    """Unzip with INFO lines at every 10% of the members — the package's
+    own unzip draws a tqdm bar on stdout."""
+    with zipfile.ZipFile(archive) as zf:
+        members = zf.infolist()
+        logger.info("%s: extracting %d files to %s", label, len(members), dest)
+        next_mark = 10
+        for i, member in enumerate(members, 1):
+            zf.extract(member, dest)
+            if i * 100 >= next_mark * len(members):
+                while next_mark <= 100 and i * 100 >= next_mark * len(members):
+                    next_mark += 10
+                logger.info("%s: extracted %d%%", label, next_mark - 10)
+
+
+def _install_pinned(fetcher, on_progress: Optional[Callable[[int, Optional[int]], None]]) -> None:
+    """Download, verify and extract into a staging folder beside the install
+    folder, then swap the two; the old install is restored on any failure.
+
+    The package's `install()` deletes the old browser before fetching the new
+    one, so a failed download left no browser at all. Every step that can fail
+    here runs before the swap; the swap is two renames on one volume.
+    """
+    from camoufox import pkgman
+
+    install_dir = Path(pkgman.INSTALL_DIR)
+    parent = install_dir.parent
+    staging = parent / (install_dir.name + ".staging")
+    previous = parent / (install_dir.name + ".previous")
+    zip_part = parent / (install_dir.name + ".download.zip")
+    xpi_part = parent / (install_dir.name + ".ublock.xpi")
+    parent.mkdir(parents=True, exist_ok=True)
+
+    # A swap interrupted between its two renames left the old browser here.
+    if previous.exists() and not install_dir.exists():
+        logger.warning("Camoufox browser: restoring %s left by an interrupted install", previous)
+        os.replace(previous, install_dir)
+    for leftover in (staging, previous):
+        if leftover.exists():
+            shutil.rmtree(leftover, ignore_errors=True)
+
+    key = _platform_key()
+    expected_sha = _PINNED_ASSET_SHA256.get(PINNED_RELEASE_TAG, {}).get(key) or fetcher.asset_digest
+    if not expected_sha:
+        raise ValueError(f"no SHA-256 known for {PINNED_RELEASE_TAG} {key}; not installing an unchecked browser")
+    expected_size = _PINNED_ASSET_SIZES.get(PINNED_RELEASE_TAG, {}).get(key) or fetcher.asset_size
+    ublock = _ublock_file()
+    total = (expected_size or 0) + int(ublock["size"]) or None
+    done = [0]
+
+    def _bytes(n: int) -> None:
+        done[0] += n
+        if on_progress is not None:
+            on_progress(done[0], total)
+
+    try:
+        _fetch_verified(fetcher.url, zip_part, label="Camoufox browser",
+                        expected_size=expected_size, expected_sha256=expected_sha, on_bytes=_bytes)
+        _fetch_verified(str(ublock["url"]), xpi_part, label=f"uBlock Origin {UBLOCK_ORIGIN_VERSION}",
+                        expected_size=int(ublock["size"]), expected_sha256=str(ublock["sha256"]),
+                        on_bytes=_bytes)
+        staging.mkdir()
+        _extract(zip_part, staging, label="Camoufox browser")
+        _extract(xpi_part, _resources(staging) / "addons" / "UBO", label=f"uBlock Origin {UBLOCK_ORIGIN_VERSION}")
+        version, release = _pinned_version_release()
+        (staging / "version.json").write_text(json.dumps({"version": version, "release": release}))
+        if pkgman.OS_NAME != "win":
+            for root, dirs, files in os.walk(staging):
+                for name in dirs + files:
+                    os.chmod(os.path.join(root, name), 0o755)
+            os.chmod(staging, 0o755)
+
+        # Checked on the staged copy, before anything is replaced.
+        staged = pkgman.Version.from_path(staging)
+        if (staged.version, staged.release) != (version, release) or not staged.is_supported():
+            raise ValueError(f"staged Camoufox reads {staged.full_string}, not a supported {PINNED_RELEASE_TAG}")
+        launch = os.path.normpath(_resources(staging) / pkgman.LAUNCH_FILE[pkgman.OS_NAME])
+        if not os.path.exists(launch):
+            raise ValueError(f"staged Camoufox has no executable at {launch}")
+
+        had_old = install_dir.exists()
+        if had_old:
+            # On Windows this fails while a Camoufox from the old folder runs;
+            # nothing has been replaced yet, and the error says why.
+            os.replace(install_dir, previous)
+        try:
+            os.replace(staging, install_dir)
+        except Exception:
+            if had_old:
+                os.replace(previous, install_dir)
+            raise
+        if had_old:
+            shutil.rmtree(previous, ignore_errors=True)
+            if previous.exists():
+                logger.warning("Camoufox browser: could not remove the old install at %s", previous)
+        logger.info("Camoufox browser installed: %s-%s with uBlock Origin %s in %s",
+                    version, release, UBLOCK_ORIGIN_VERSION, install_dir)
+    finally:
+        for part in (zip_part, xpi_part):
+            try:
+                part.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("Camoufox browser: could not remove %s", part)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+
 def download(on_progress: Optional[Callable[[int, Optional[int]], None]] = None) -> str:
     """Download and install the pinned release, once; returns its version.
 
     Blocking — run it in a thread. `on_progress(bytes_done, total_bytes)` is
     called from that thread for every chunk; throttling is the caller's. A
-    second call while one runs raises instead of starting a second download:
-    the package's `install()` begins by deleting the install directory, so two
-    at once would destroy each other's files.
+    second call while one runs raises instead of starting a second download,
+    since both would stage into the same folder.
     """
     if not _install_lock.acquire(blocking=False):
         raise RuntimeError("the Camoufox browser is already being downloaded")
@@ -265,19 +442,11 @@ def download(on_progress: Optional[Callable[[int, Optional[int]], None]] = None)
         from camoufox import pkgman
 
         fetcher = _fetcher_class()()
-        fetcher.on_progress = on_progress
         logger.info(
-            "Camoufox browser download: release %s, %s bytes, into %s",
-            fetcher.verstr, fetcher.asset_size, pkgman.INSTALL_DIR,
+            "Camoufox browser download: release %s, %s bytes, uBlock Origin %s, into %s",
+            fetcher.verstr, fetcher.asset_size, UBLOCK_ORIGIN_VERSION, pkgman.INSTALL_DIR,
         )
-        fetcher.install()
-        # What `camoufox fetch` also does; otherwise the first launch fetches
-        # uBlock Origin from addons.mozilla.org inside a tool call.
-        try:
-            from camoufox.addons import DefaultAddons, maybe_download_addons
-            maybe_download_addons(list(DefaultAddons))
-        except Exception as e:
-            logger.warning("Camoufox default add-on download failed: %s", e)
+        _install_pinned(fetcher, on_progress)
         logger.info("Camoufox browser download completed: %s", fetcher.verstr)
         return fetcher.verstr
     finally:

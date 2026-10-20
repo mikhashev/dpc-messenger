@@ -304,22 +304,22 @@ def test_a_failed_download_is_reported_and_can_be_tried_again(tmp_path, monkeypa
 
 
 def test_two_installs_at_once_cannot_both_run(monkeypatch):
-    """The package's install() starts by deleting the install directory."""
+    """Both would stage into the same folder beside the install."""
     started = threading.Event()
     release = threading.Event()
     installs = []
 
     class _Fetcher:
-        verstr = "158.0-beta.40"
+        verstr = "152.0.4-beta.28"
         asset_size = 1
 
-        def install(self):
-            installs.append(1)
-            started.set()
-            release.wait(5)
+    def _install(fetcher, on_progress):
+        installs.append(1)
+        started.set()
+        release.wait(5)
 
     monkeypatch.setattr(camoufox_binary, "_fetcher_class", lambda: _Fetcher)
-    monkeypatch.setattr("camoufox.addons.maybe_download_addons", lambda *a, **k: None)
+    monkeypatch.setattr(camoufox_binary, "_install_pinned", _install)
 
     worker = threading.Thread(target=camoufox_binary.download)
     worker.start()
@@ -334,7 +334,7 @@ def test_two_installs_at_once_cannot_both_run(monkeypatch):
 
 
 def test_the_download_reports_its_progress_to_the_log(monkeypatch, caplog, tmp_path):
-    import io
+    import hashlib
 
     import requests
 
@@ -351,14 +351,16 @@ def test_the_download_reports_its_progress_to_the_log(monkeypatch, caplog, tmp_p
                 yield body[i:i + size]
 
     monkeypatch.setattr(requests, "get", lambda *a, **k: _Response())
-    fetcher_cls = camoufox_binary._fetcher_class()
-    fetcher = object.__new__(fetcher_cls)  # skips __init__, which asks GitHub
-    buffer = io.BytesIO()
+    dest = tmp_path / "c.zip"
 
     with caplog.at_level(logging.INFO, logger="dpc_client_core.camoufox_binary"):
-        fetcher.download_file(buffer, "https://example.invalid/camoufox.zip")
+        camoufox_binary._fetch_verified(
+            "https://example.invalid/camoufox.zip", dest, label="Camoufox browser",
+            expected_size=len(body),
+            expected_sha256="sha256:" + hashlib.sha256(body).hexdigest(),
+        )
 
-    assert buffer.getvalue() == body
+    assert dest.read_bytes() == body
     marks = [r.getMessage() for r in caplog.records if "%" in r.getMessage()]
     assert marks[0].startswith("Camoufox browser download: 10%")
     assert marks[-1].startswith("Camoufox browser download: 100%")

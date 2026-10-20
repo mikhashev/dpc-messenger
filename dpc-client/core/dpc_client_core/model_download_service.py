@@ -428,14 +428,30 @@ class ModelDownloadService:
             logger.warning("download_model refused: %r is not an allowed model", model_name)
             return {"status": "error", "error": f"model '{model_name}' is not one this app downloads"}
 
-        if model_name in self._in_flight:
-            logger.info("download_model: %s is already downloading, not starting a second", model_name)
-            return {"status": "error", "error": f"'{model_name}' is already being downloaded"}
-        self._in_flight.add(model_name)
+        if not self.claim(model_name):
+            return self.already_downloading(model_name)
         try:
             return await self._download_model(model_name, provider_alias)
         finally:
-            self._in_flight.discard(model_name)
+            self.release(model_name)
+
+    def claim(self, model_name: str) -> bool:
+        """Mark `model_name` as downloading; False when it already is. Every
+        door that downloads — `download_model` and the older
+        `download_whisper_model` — goes through here, so one name is fetched
+        once at a time whichever command the UI sent."""
+        if model_name in self._in_flight:
+            logger.info("Download of %s is already running, not starting a second", model_name)
+            return False
+        self._in_flight.add(model_name)
+        return True
+
+    def release(self, model_name: str) -> None:
+        self._in_flight.discard(model_name)
+
+    @staticmethod
+    def already_downloading(model_name: str) -> Dict[str, Any]:
+        return {"status": "error", "error": f"'{model_name}' is already being downloaded"}
 
     async def _download_model(self, model_name: str, provider_alias: Optional[str]) -> Dict[str, Any]:
         if model_name in _OTHER_DOWNLOADS:

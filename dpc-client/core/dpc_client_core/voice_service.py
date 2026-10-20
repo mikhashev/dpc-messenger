@@ -275,6 +275,7 @@ class VoiceService:
         Returns:
             dict with status and info
         """
+        claimed = None
         try:
             # Find Whisper provider
             provider_obj = None
@@ -308,6 +309,13 @@ class VoiceService:
                 }
 
             model_name = provider_obj.config.get("model", "unknown")
+
+            # The same one-at-a-time guard `download_model` uses, so the two
+            # commands cannot fetch one model twice side by side.
+            if self.model_download_service:
+                if not self.model_download_service.claim(model_name):
+                    return self.model_download_service.already_downloading(model_name)
+                claimed = model_name
 
             # Broadcast download started event — model_download_* family (2026-09-24),
             # shared with the embedding model rather than a Whisper-only name.
@@ -355,6 +363,9 @@ class VoiceService:
                 "status": "error",
                 "error": str(e)
             }
+        finally:
+            if claimed is not None:
+                self.model_download_service.release(claimed)
 
     def _load_voice_transcription_settings(self) -> None:
         """

@@ -114,6 +114,8 @@ def test_the_size_is_the_pinned_release_for_this_platform_without_a_network_read
         "win.i686": 478_100_137, "win.x86_64": 492_370_020,
     }[_this_platform()]
 
+    # The consent covers the pinned uBlock Origin add-on as well.
+    expected += 4_585_322
     assert camoufox_binary.size_bytes() == expected
     assert camoufox_binary.size_text() == f"about {expected / 1e9:.1f} GB"
 
@@ -126,7 +128,7 @@ def test_a_pin_with_no_table_row_asks_github_for_its_size(monkeypatch):
         asset_size = 777
 
     monkeypatch.setattr(camoufox_binary, "_fetcher_class", lambda: _Fetcher)
-    assert camoufox_binary.size_bytes() == 777
+    assert camoufox_binary.size_bytes() == 777 + 4_585_322
 
 
 # --- an installed binary of another version ------------------------------------
