@@ -1331,7 +1331,8 @@ Transfers a single chunk of file data.
 - `data` (string, required): Base64-encoded chunk data (typically 64KB when decoded)
 
 **Behavior:**
-- Receiver stores chunks to temporary buffer
+- Receiver writes each verified chunk at `chunk_index × chunk_size` (the FILE_OFFER's
+  `chunk_size`, never its own setting) into a temporary file; no chunk is held in memory
 - **Per-chunk verification (v0.11.1+):** If `chunk_hashes` provided in FILE_OFFER, receiver verifies CRC32 of each chunk
 - **Retry on failure (v0.11.1+):** If chunk verification fails, sends FILE_CHUNK_RETRY (max 3 retries per chunk)
 - Progress tracking: `(chunk_index + 1) / total_chunks * 100%`
@@ -1399,14 +1400,19 @@ Cancels an in-progress or pending file transfer.
     over the receiver's size limit (`file_offer_handler.py`)
   - `hash_mismatch` - SHA256 verification failed
   - `chunk_verification_failed` - Chunk CRC32 verification failed after max retries (v0.11.1+)
-  - `missing_chunks` - Reassembly timed out with chunks still missing
+  - `missing_chunks` - Reassembly timed out with chunks still missing: after 30 s with
+    no chunk the receiver re-asks up to 64 missing indices through FILE_CHUNK_RETRY, and
+    after 3 such rounds with no new chunk it cancels
   - `send_error` - Error occurred while sending
+  - `receive_error` - The receiver could not write the file to its own disk (no space,
+    no permission, the final rename failed); the sibling of `send_error`
   - The handler's own docstring (`file_cancel_handler.py`) additionally lists `timeout`
     among the reasons it expects; no sender in this tree produces it
 
 **Behavior:**
 - Both sender and receiver can send FILE_CANCEL
-- Receiver cleans up partial transfer data
+- Receiver deletes its partial file on any cancel, failure or disconnect; there is no
+  resume, a transfer that ends starts over
 - Sender stops sending chunks
 - Transfer marked as failed in UI
 
