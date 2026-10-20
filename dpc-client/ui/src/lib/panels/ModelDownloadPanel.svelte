@@ -12,6 +12,7 @@
     modelDownloadStarted,
     modelDownloadCompleted,
     modelDownloadFailed,
+    modelDownloadProgress,
     connectionStatus,
     sendCommand,
   } from '$lib/coreService';
@@ -21,7 +22,7 @@
     resetModelDownloadDecline,
     getModelDownloadStatus,
   } from '$lib/services/modelDownload';
-  import type { ModelDownloadRequiredEvent, ModelDownloadStatusEntry } from '$lib/types';
+  import type { ModelDownloadRequiredEvent, ModelDownloadStatusEntry, ModelDownloadProgressEvent } from '$lib/types';
   import ModelDownloadDialog from '$lib/components/ModelDownloadDialog.svelte';
   import Toast from '$lib/components/Toast.svelte';
 
@@ -39,6 +40,11 @@
   // to re-open the dialog for "ask again" without another round trip.
   let rememberedInfo: Record<string, ModelDownloadRequiredEvent> = {};
   let isDownloadingModel = $state(false);
+  // model_name -> latest progress, for every download running now. Kept
+  // apart from `current`: the dialog may be closed while the download runs,
+  // and the notice below keeps the bar.
+  let progressMap = $state<Record<string, ModelDownloadProgressEvent>>({});
+  let runningModels = $state<string[]>([]);
 
   let showModelDownloadToast = $state(false);
   let modelDownloadToastMessage = $state('');
@@ -56,6 +62,20 @@
       const result = await getModelDownloadStatus(sendCommand);
       if (result && result.models) {
         statusMap = result.models;
+        // A download that was running before this UI (re)connected.
+        for (const [name, entry] of Object.entries(result.models)) {
+          if (entry.state === 'downloading' && !runningModels.includes(name)) {
+            runningModels = [...runningModels, name];
+            if (entry.bytes_done != null) {
+              progressMap = { ...progressMap, [name]: {
+                model_name: name,
+                bytes_done: entry.bytes_done,
+                total_bytes: entry.total_bytes ?? null,
+                progress_percent: entry.progress_percent ?? null,
+              } };
+            }
+          }
+        }
       }
     } catch (e) {
       console.error('[ModelDownload] Failed to fetch download status:', e);
@@ -99,11 +119,31 @@
 
   // Update download status when download starts
   $effect(() => {
-    if ($modelDownloadStarted) {
-      console.log('[ModelDownload] Download started:', $modelDownloadStarted);
+    const payload = $modelDownloadStarted;
+    if (payload) {
+      console.log('[ModelDownload] Download started:', payload);
       isDownloadingModel = true;
+      if (!runningModels.includes(payload.model_name)) {
+        runningModels = [...runningModels, payload.model_name];
+      }
     }
   });
+
+  $effect(() => {
+    const payload = $modelDownloadProgress;
+    if (payload) {
+      progressMap = { ...progressMap, [payload.model_name]: payload };
+      if (!runningModels.includes(payload.model_name)) {
+        runningModels = [...runningModels, payload.model_name];
+      }
+    }
+  });
+
+  function finishRunning(modelName: string) {
+    runningModels = runningModels.filter((n) => n !== modelName);
+    const { [modelName]: _done, ...rest } = progressMap;
+    progressMap = rest;
+  }
 
   // Close dialog and show success toast when download completes
   $effect(() => {
@@ -112,6 +152,7 @@
       console.log('[ModelDownload] Download completed:', payload);
       const info = rememberedInfo[payload.model_name];
       isDownloadingModel = false;
+      finishRunning(payload.model_name);
       if (current?.model_name === payload.model_name) {
         showModelDownloadDialog = false;
         current = null;
@@ -130,6 +171,7 @@
     if (payload) {
       console.error('[ModelDownload] Download failed:', payload);
       isDownloadingModel = false;
+      finishRunning(payload.model_name);
       modelDownloadToastMessage = `❌ ${payload.model_name} download failed: ${payload.error}`;
       modelDownloadToastType = 'error';
       showModelDownloadToast = true;
@@ -166,8 +208,11 @@
   // so there is nothing useful to tell it. Next start (or "ask again") asks
   // once more.
   function handleModelClose() {
-    console.log('[ModelDownload] Dialog dismissed without a decision');
+    console.log(isDownloadingModel
+      ? '[ModelDownload] Dialog hidden; the download continues'
+      : '[ModelDownload] Dialog dismissed without a decision');
     showModelDownloadDialog = false;
+    isDownloadingModel = false;
     current = null;
     refreshStatus();
   }
@@ -187,12 +232,19 @@
     }
   }
 
+  // Running downloads get a notice with a bar, except the one whose dialog is
+  // open and already shows it.
+  let visibleRunning = $derived(
+    runningModels.filter((n) => !(showModelDownloadDialog && current?.model_name === n))
+  );
+
   // Models worth a compact "ask again" notice: declined or missing, and not
   // already the one being shown or queued.
   let askAgainModels = $derived(
     Object.entries(statusMap).filter(([name, entry]) =>
       (entry.state === 'declined' || entry.state === 'missing') &&
       current?.model_name !== name &&
+      !runningModels.includes(name) &&
       !queue.some((p) => p.model_name === name)
     )
   );
@@ -209,14 +261,31 @@
   cachePath={current?.cache_path || ''}
   providerAlias={current?.provider_alias ?? null}
   downloading={isDownloadingModel}
+  progressPercent={current ? (progressMap[current.model_name]?.progress_percent ?? null) : null}
+  bytesDone={current ? (progressMap[current.model_name]?.bytes_done ?? null) : null}
+  totalBytes={current ? (progressMap[current.model_name]?.total_bytes ?? null) : null}
   on:download={handleModelDownload}
   on:decline={handleModelDecline}
   on:close={handleModelClose}
 />
 
-<!-- Ask-again notices for models the user declined or never decided on -->
-{#if askAgainModels.length > 0}
+<!-- Running downloads, shown whether or not the dialog is open, and ask-again
+     notices for models the user declined or never decided on -->
+{#if askAgainModels.length > 0 || visibleRunning.length > 0}
   <div class="model-download-notices">
+    {#if visibleRunning.length > 0}
+      {#each visibleRunning as name (name)}
+        {@const p = progressMap[name]}
+        <div class="model-download-notice running">
+          <span class="notice-text">
+            Downloading <strong>{name}</strong>{p?.progress_percent != null ? ` — ${p.progress_percent.toFixed(0)}%` : '…'}
+          </span>
+          <div class="notice-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={p?.progress_percent ?? undefined}>
+            <div class="notice-fill" style="width: {p?.progress_percent ?? 0}%"></div>
+          </div>
+        </div>
+      {/each}
+    {/if}
     {#each askAgainModels as [name, entry] (name)}
       <div class="model-download-notice">
         <span class="notice-text">
@@ -272,6 +341,25 @@
 
   .notice-text strong {
     color: #4a9eff;
+  }
+
+  .model-download-notice.running {
+    flex-direction: column;
+    align-items: stretch;
+    border-left-color: #4a9eff;
+  }
+
+  .notice-bar {
+    height: 6px;
+    background: #3c3c3c;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .notice-fill {
+    height: 100%;
+    background: #4a9eff;
+    transition: width 0.4s ease;
   }
 
   .notice-action {

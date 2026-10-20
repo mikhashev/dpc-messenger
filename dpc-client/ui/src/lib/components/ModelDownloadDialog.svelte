@@ -14,8 +14,19 @@
   export let cachePath: string = '';
   export let providerAlias: string | null = null;
   export let downloading: boolean = false;
+  // From model_download_progress; null until the first report arrives.
+  export let progressPercent: number | null = null;
+  export let bytesDone: number | null = null;
+  export let totalBytes: number | null = null;
 
   const dispatch = createEventDispatcher();
+
+  const gb = (n: number) => (n / 1e9).toFixed(2);
+  $: progressText = bytesDone == null
+    ? ''
+    : totalBytes
+      ? `${gb(bytesDone)} of ${gb(totalBytes)} GB`
+      : `${gb(bytesDone)} GB so far`;
 
   $: sizeText = sizeBytes == null
     ? 'Size unknown'
@@ -48,7 +59,7 @@
     <div class="modal" role="dialog" aria-labelledby="dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="dialog-title">📥 Download Required</h2>
-        <button class="btn-close" on:click={handleClose} disabled={downloading} aria-label="Close">✕</button>
+        <button class="btn-close" on:click={handleClose} aria-label={downloading ? 'Hide (the download continues)' : 'Close'} title={downloading ? 'Hide — the download continues in the background' : 'Close'}>✕</button>
       </div>
 
       <div class="modal-body">
@@ -89,8 +100,12 @@
         <!-- Download Progress (if downloading) -->
         {#if downloading}
           <div class="section progress-section">
-            <p class="downloading-text">⏳ Downloading, please wait...</p>
-            <p class="downloading-note">This may take several minutes depending on your connection.</p>
+            <p class="downloading-text">⏳ Downloading{progressPercent != null ? ` — ${progressPercent.toFixed(0)}%` : '...'}</p>
+            <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={progressPercent ?? undefined}>
+              <div class="progress-fill" class:indeterminate={progressPercent == null} style="width: {progressPercent ?? 100}%"></div>
+            </div>
+            {#if progressText}<p class="downloading-note">{progressText}</p>{/if}
+            <p class="downloading-note">It runs in the background: you can close this window and keep working.</p>
           </div>
         {/if}
       </div>
@@ -273,6 +288,24 @@
     margin: 0;
     color: #b0b0b0;
     font-size: 0.85rem;
+  }
+
+  .progress-bar {
+    height: 8px;
+    background: #3c3c3c;
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 0 0 8px 0;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: #4a9eff;
+    transition: width 0.4s ease;
+  }
+
+  .progress-fill.indeterminate {
+    opacity: 0.35;
   }
 
   .modal-footer {

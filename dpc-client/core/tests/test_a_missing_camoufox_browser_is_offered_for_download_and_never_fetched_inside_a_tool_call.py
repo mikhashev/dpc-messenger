@@ -46,8 +46,7 @@ def binary_missing(monkeypatch):
     """Undo conftest's "present" for this file, and make sure nothing below
     can reach the real fetcher or the real Camoufox."""
     monkeypatch.setattr(camoufox_binary, "missing_reason", lambda: "missing")
-    monkeypatch.setattr(camoufox_binary, "size_bytes", lambda: 1_299_054_257)
-    monkeypatch.setattr(camoufox_binary, "_offer_cache", (1_299_054_257, "158.0-beta.40"))
+    monkeypatch.setattr(camoufox_binary, "size_bytes", lambda: 492_370_020)
     launched = []
 
     class _NeverLaunch:
@@ -169,12 +168,12 @@ def test_a_visible_window_call_is_refused_and_the_owner_is_asked_once(binary_mis
 
     for answer in (first, second):
         assert answer.startswith("⚠️ The Camoufox browser is not downloaded")
-        assert "about 1.3 GB" in answer
+        assert "about 0.5 GB" in answer
         assert "asked to confirm it in the D-PC Messenger app" in answer
     required = [p for name, p in service.local_api.events if name == "model_download_required"]
     assert len(required) == 1
     assert required[0]["model_name"] == "camoufox"
-    assert required[0]["size_bytes"] == 1_299_054_257
+    assert required[0]["size_bytes"] == 492_370_020
     assert binary_missing == []
 
 
@@ -187,7 +186,7 @@ def test_a_declined_download_is_said_to_be_declined(binary_missing, tmp_path):
     answer = asyncio.run(browser.browse_page(ctx, "https://example.org", keep_open=True))
 
     assert "the owner has declined" in answer
-    assert "uv run camoufox fetch" in answer
+    assert "started from the D-PC Messenger app" in answer
     assert service.local_api.events == []
 
 
@@ -262,7 +261,7 @@ def test_the_confirmed_download_runs_once_with_its_events(tmp_path, monkeypatch)
     release = threading.Event()
     calls = []
 
-    def _download():
+    def _download(on_progress=None):
         calls.append(1)
         release.wait(5)
         return "158.0-beta.40"
@@ -289,7 +288,7 @@ def test_the_confirmed_download_runs_once_with_its_events(tmp_path, monkeypatch)
 
 
 def test_a_failed_download_is_reported_and_can_be_tried_again(tmp_path, monkeypatch):
-    def _boom():
+    def _boom(on_progress=None):
         raise OSError("connection reset")
 
     monkeypatch.setattr(camoufox_binary, "download", _boom)

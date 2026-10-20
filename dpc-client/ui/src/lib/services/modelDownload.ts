@@ -14,6 +14,7 @@ import type {
     ModelDownloadStartedEvent,
     ModelDownloadCompletedEvent,
     ModelDownloadFailedEvent,
+    ModelDownloadProgressEvent,
     ModelDownloadStatusEntry,
 } from '$lib/types';
 
@@ -21,6 +22,7 @@ export const modelDownloadRequired = writable<ModelDownloadRequiredEvent | null>
 export const modelDownloadStarted = writable<ModelDownloadStartedEvent | null>(null);
 export const modelDownloadCompleted = writable<ModelDownloadCompletedEvent | null>(null);
 export const modelDownloadFailed = writable<ModelDownloadFailedEvent | null>(null);
+export const modelDownloadProgress = writable<ModelDownloadProgressEvent | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;

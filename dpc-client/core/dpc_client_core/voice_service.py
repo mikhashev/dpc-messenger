@@ -316,7 +316,11 @@ class VoiceService:
 
             logger.info(f"Starting Whisper model download for provider '{provider_alias}'...")
 
-            result = await provider_obj.download_model_async()
+            if self.model_download_service:
+                async with self.model_download_service.hf_progress(model_name):
+                    result = await provider_obj.download_model_async()
+            else:
+                result = await provider_obj.download_model_async()
 
             if result.get("success"):
                 if self.model_download_service:

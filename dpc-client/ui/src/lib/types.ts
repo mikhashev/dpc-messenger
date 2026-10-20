@@ -435,11 +435,25 @@ export interface ModelDownloadFailedEvent {
     error: string;
 }
 
+// At most one per 0.5 s per download (model_download_service.py,
+// PROGRESS_MIN_INTERVAL_S); total_bytes / progress_percent are null when the
+// size is unknown.
+export interface ModelDownloadProgressEvent {
+    model_name: string;
+    bytes_done: number;
+    total_bytes: number | null;
+    progress_percent: number | null;
+}
+
 export type ModelDownloadStatusState = 'cached' | 'missing' | 'downloading' | 'failed' | 'declined';
 
 export interface ModelDownloadStatusEntry {
     state: ModelDownloadStatusState;
     error?: string;
+    // Present while state is 'downloading' and a progress report has arrived.
+    bytes_done?: number;
+    total_bytes?: number | null;
+    progress_percent?: number | null;
 }
 
 // --- Group Chat Event Payloads ---

@@ -5,14 +5,19 @@ model); only "don't remind me" persists, to config.ini [model_downloads].
 The Camoufox browser binary rides the same flow (2026-10-21): it is not on
 Hugging Face, so `_OTHER_DOWNLOADS` answers its presence, size, location and
 download instead of the HF helpers.
+`model_download_progress` (Mike's word, 2026-10-21) carries the bytes of any
+running download, at most one event per PROGRESS_MIN_INTERVAL_S.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
-from typing import Any, Dict, Optional
+import threading
+import time
+from typing import Any, Callable, Dict, Optional
 
 from . import camoufox_binary
 from .providers.model_sizes import (
@@ -24,6 +29,28 @@ from .providers.model_sizes import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Progress reaches the UI over its local websocket. The file-transfer screen
+# lost that socket at ~13 events a second (file_transfer_manager.py,
+# PREPARATION_PROGRESS_MIN_INTERVAL_S), so the same time limit applies here.
+PROGRESS_MIN_INTERVAL_S = 0.5
+
+
+def _hf_repo_bytes(folder: str) -> int:
+    """Bytes on disk for one Hugging Face repo cache folder, partial
+    `blobs/*.incomplete` files included - what grows while it downloads.
+    A snapshot entry that is a symlink points into blobs and is skipped; on a
+    filesystem without symlinks the file itself sits in snapshots and counts."""
+    total = 0
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                if not os.path.islink(path):
+                    total += os.path.getsize(path)
+            except OSError:
+                pass
+    return total
 
 # Re-exported for callers that used to import these from here.
 __all__ = ["ModelDownloadService", "hf_cache_path", "is_model_cached"]
@@ -80,6 +107,8 @@ class ModelDownloadService:
         # Names whose download is running now: a second `download_model` for
         # one of them is refused rather than started beside the first.
         self._in_flight: set = set()
+        self._progress_futures: set = set()
+        self._clock = time.monotonic  # a test drives the throttle through this
 
     def _allowed_model_names(self) -> set:
         """Every model name `download_model` may fetch: the measured-size
@@ -243,6 +272,76 @@ class ModelDownloadService:
             return other.is_present()
         return is_model_cached(model_name)
 
+    def progress_reporter(self, model_name: str) -> Callable[[int, Optional[int]], None]:
+        """A `report(bytes_done, total_bytes)` callable for one download, safe
+        to call from the download's own thread as often as it likes: it sends
+        `model_download_progress` at most once per PROGRESS_MIN_INTERVAL_S,
+        plus the call that reaches the total. Create it on the event loop."""
+        loop = asyncio.get_running_loop()
+        lock = threading.Lock()
+        last: Dict[str, Any] = {"at": None, "sent": None}
+
+        def report(bytes_done: int, total_bytes: Optional[int]) -> None:
+            now = self._clock()
+            final = bool(total_bytes) and bytes_done >= total_bytes
+            with lock:
+                if last["sent"] == (bytes_done, total_bytes):
+                    return
+                if last["at"] is not None and now - last["at"] < PROGRESS_MIN_INTERVAL_S and not final:
+                    return
+                last["at"], last["sent"] = now, (bytes_done, total_bytes)
+            fut = asyncio.run_coroutine_threadsafe(
+                self.emit_progress(model_name, bytes_done, total_bytes), loop
+            )
+            self._progress_futures.add(fut)
+            fut.add_done_callback(self._progress_futures.discard)
+
+        return report
+
+    async def emit_progress(self, model_name: str, bytes_done: int, total_bytes: Optional[int]) -> None:
+        entry = self._status.get(model_name)
+        # A late report after completed/failed must not turn the state back.
+        if not entry or entry.get("state") != "downloading":
+            return
+        percent = min(100.0, round(bytes_done * 100 / total_bytes, 1)) if total_bytes else None
+        entry.update(bytes_done=bytes_done, total_bytes=total_bytes, progress_percent=percent)
+        try:
+            await self.local_api.broadcast_event("model_download_progress", {
+                "model_name": model_name,
+                "bytes_done": bytes_done,
+                "total_bytes": total_bytes,
+                "progress_percent": percent,
+            })
+        except Exception:
+            logger.debug("broadcast_event(model_download_progress) failed", exc_info=True)
+
+    @contextlib.asynccontextmanager
+    async def hf_progress(self, model_name: str):
+        """Report a Hugging Face download's progress while the block runs.
+
+        huggingface_hub 0.36 gives no public per-byte hook into a
+        `from_pretrained` or `SentenceTransformer` fetch (`snapshot_download`'s
+        `tqdm_class` counts files, the byte bars are built privately), so this
+        reads the repo's cache folder, where the partial file grows, every
+        PROGRESS_MIN_INTERVAL_S. The total is the size the consent dialog
+        showed, None when nobody knows it."""
+        total, _source = await asyncio.to_thread(model_size_bytes, model_name)
+        folder = os.path.join(hf_cache_path(), "models--" + model_name.replace("/", "--"))
+        report = self.progress_reporter(model_name)
+
+        async def _poll() -> None:
+            while True:
+                report(await asyncio.to_thread(_hf_repo_bytes, folder), total)
+                await asyncio.sleep(PROGRESS_MIN_INTERVAL_S)
+
+        task = asyncio.create_task(_poll())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
     async def download_other(self, model_name: str) -> Dict[str, Any]:
         """Run a non-Hugging-Face download in a thread, with the same
         started/completed/failed events the model executors send."""
@@ -250,7 +349,7 @@ class ModelDownloadService:
         logger.info("Download of %s confirmed by the owner, starting", model_name)
         await self.emit_started(model_name)
         try:
-            await asyncio.to_thread(other.download)
+            await asyncio.to_thread(other.download, self.progress_reporter(model_name))
         except Exception as e:
             logger.error("Download of %s failed: %s", model_name, e, exc_info=True)
             await self.emit_failed(model_name, str(e))
@@ -298,7 +397,8 @@ class ModelDownloadService:
             SentenceTransformer(model_name, device="cpu", local_files_only=False)
 
         try:
-            await asyncio.to_thread(_download)
+            async with self.hf_progress(model_name):
+                await asyncio.to_thread(_download)
         except Exception as e:
             logger.error("Embedding model download failed: %s", e, exc_info=True)
             await self.emit_failed(model_name, str(e))
@@ -347,7 +447,8 @@ class ModelDownloadService:
             if not hasattr(target_provider, "download_model_async"):
                 return {"status": "error", "error": f"Provider '{target_provider.alias}' doesn't support model download"}
             await self.emit_started(model_name)
-            result = await target_provider.download_model_async()
+            async with self.hf_progress(model_name):
+                result = await target_provider.download_model_async()
             if result.get("success"):
                 await self.emit_completed(model_name)
                 return {"status": "success", "model_name": model_name}

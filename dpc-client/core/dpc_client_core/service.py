@@ -941,6 +941,14 @@ class CoreService:
         logger.info("Running knowledge integrity check")
         await self._startup_integrity_check()
 
+        # Installed vs pinned Camoufox browser and the package's range: reads
+        # version.json only, never the network.
+        try:
+            from . import camoufox_binary
+            camoufox_binary.log_versions()
+        except Exception:
+            logger.debug("Camoufox version line failed", exc_info=True)
+
         # The tokenizers for the local models, if any are missing. Counting
         # happens while answering somebody, which is on the loop, and fetching
         # there is refused on purpose — so without this a missing tokenizer

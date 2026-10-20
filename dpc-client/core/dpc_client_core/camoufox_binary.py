@@ -3,24 +3,24 @@
 
 `uv sync --extra browser` installs the camoufox Python package and no browser.
 Left to itself, the package fetches the browser on the first `Camoufox(...)`
-(`pkgman.camoufox_path(download_if_missing=True)`): about 1.3 GB of the newest
-GitHub release, with a tqdm bar on stdout only, inside an agent's tool call.
-This module is the other half of that bargain: browser.py asks `missing_reason`
-before every launch and refuses while the binary is absent, and
-`ModelDownloadService` offers and runs the download through the same
-`model_download_*` consent flow Whisper and the embedding model use.
+(`pkgman.camoufox_path(download_if_missing=True)`): the newest GitHub release,
+inside an agent's tool call, with a tqdm bar on stdout only. This module is the
+other half of that bargain: browser.py asks `missing_reason` before every
+launch and refuses while the binary is absent, and `ModelDownloadService`
+offers and runs the download through the same `model_download_*` consent flow
+Whisper and the embedding model use.
 
-Which release is fetched is still the package's choice (`CamoufoxFetcher`: the
-first asset of the GitHub releases list inside the package's supported range);
-nothing here pins one.
+What is downloaded is the pinned release, `PINNED_RELEASE_TAG` (Mike's call,
+2026-10-21), not the package's newest. An installed binary of another version
+is left alone while the package supports it: the download is offered only when
+the binary is missing or outside the package's supported range.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-import time
-from typing import Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +29,25 @@ logger = logging.getLogger(__name__)
 # package's own name for its browser (`camoufox fetch`, `camoufox path`).
 DOWNLOAD_NAME = "camoufox"
 
-# Used only when the release lookup has not answered: the zip sizes GitHub
-# lists for v158.0-beta.40 (2026-10-19) run from 1 292 898 414 bytes
-# (lin.arm64) to 1 315 506 159 (win.x86_64), read from the releases API on
-# 2026-10-21. The 152.x builds were 0.3-0.66 GB, so this is a fact about
-# today's release and not about Camoufox.
-FALLBACK_SIZE_TEXT = "about 1.3 GB"
+# The one release this node downloads. The build the Windows node has run
+# since 2026-07 (its version.json reads 152.0.4 / beta.28); GitHub does not
+# mark it a prerelease. Mike's call, 2026-10-21.
+PINNED_RELEASE_TAG = "v152.0.4-beta.28"
+
+# Zip sizes GitHub lists for the pinned tag, read from
+# /repos/daijro/camoufox/releases/tags/v152.0.4-beta.28 on 2026-10-21, keyed
+# `<pkgman.OS_NAME>.<arch>` as in the asset names. Lets the consent dialog name
+# the size without a network read; a pin with no row here is looked up live.
+_PINNED_ASSET_SIZES: Dict[str, Dict[str, int]] = {
+    "v152.0.4-beta.28": {
+        "lin.arm64": 653_814_950,
+        "lin.x86_64": 663_387_175,
+        "mac.arm64": 312_626_286,
+        "mac.x86_64": 319_866_512,
+        "win.i686": 478_100_137,
+        "win.x86_64": 492_370_020,
+    },
+}
 
 PURPOSE = "Rendering web pages for agents (browse_page and the browser_* tools)"
 CONSEQUENCE_IF_DECLINED = (
@@ -43,11 +56,7 @@ CONSEQUENCE_IF_DECLINED = (
 )
 
 _install_lock = threading.Lock()
-_offer_cache: Optional[Tuple[int, str]] = None
-# A failed lookup is not repeated for this long: the offer is built on every
-# refused browser call, and offline each attempt waits out the 20 s timeout.
-_OFFER_RETRY_SECONDS = 600
-_offer_failed_at: Optional[float] = None
+_live_size: Optional[int] = None
 
 
 class CamoufoxBinaryMissing(RuntimeError):
@@ -58,13 +67,20 @@ class CamoufoxBinaryMissing(RuntimeError):
     """
 
 
+def _pinned_version_release() -> Tuple[str, str]:
+    """('152.0.4', 'beta.28') from 'v152.0.4-beta.28'."""
+    version, _, release = PINNED_RELEASE_TAG.lstrip("v").partition("-")
+    return version, release
+
+
 def is_downloading() -> bool:
     return _install_lock.locked()
 
 
 def _probe() -> Optional[str]:
-    """None when the binary is installed and the package supports its
-    version; otherwise `package_missing`, `outdated` or `missing`.
+    """None when a binary is installed that the package supports — the pinned
+    release or any other inside the package's range; otherwise
+    `package_missing`, `outdated` or `missing`.
 
     Asks with `download_if_missing=False`, so this never fetches anything.
     """
@@ -110,14 +126,41 @@ def location() -> str:
         return ""
 
 
+def _platform_key() -> Optional[str]:
+    try:
+        from camoufox import pkgman
+        return f"{pkgman.OS_NAME}.{pkgman.CamoufoxFetcher.get_platform_arch()}"
+    except Exception:
+        return None
+
+
 def _fetcher_class():
-    """A CamoufoxFetcher that reports into dpc-client.log rather than a tqdm
-    bar on stdout, and remembers the size GitHub lists for the asset it
-    chose. Built on demand: the package may be absent."""
+    """A CamoufoxFetcher that installs `PINNED_RELEASE_TAG` rather than the
+    newest release, reports into dpc-client.log rather than a tqdm bar on
+    stdout, and remembers the size GitHub lists for the asset it chose. Built
+    on demand: the package may be absent."""
+    import requests
     from camoufox import pkgman
 
-    class _LoggedFetcher(pkgman.CamoufoxFetcher):
+    class _PinnedFetcher(pkgman.CamoufoxFetcher):
         asset_size: Optional[int] = None
+        on_progress: Optional[Callable[[int, Optional[int]], None]] = None
+
+        def get_asset(self):
+            # The package reads page 1 of /releases and takes the first match;
+            # the pinned tag is read by name, so its age does not matter.
+            resp = requests.get(f"{self.api_url}/tags/{PINNED_RELEASE_TAG}", timeout=20)
+            resp.raise_for_status()
+            want = _pinned_version_release()
+            for asset in resp.json().get("assets", []):
+                found = self.check_asset(asset)
+                if found and (found[0].version, found[0].release) == want:
+                    return found
+            raise pkgman.MissingRelease(
+                f"Release {PINNED_RELEASE_TAG} has no asset for {pkgman.OS_NAME} "
+                f"{self.arch} inside the package's supported range "
+                f"({pkgman.CONSTRAINTS.as_range()})."
+            )
 
         def check_asset(self, asset):
             found = super().check_asset(asset)
@@ -126,8 +169,6 @@ def _fetcher_class():
             return found
 
         def download_file(self, file, url):
-            import requests
-
             logger.info("Camoufox browser download started: %s", url)
             # The package's own webdl passes no timeout at all.
             response = requests.get(url, stream=True, timeout=(20, 120))
@@ -138,6 +179,8 @@ def _fetcher_class():
             for chunk in response.iter_content(1 << 20):
                 file.write(chunk)
                 done += len(chunk)
+                if self.on_progress is not None:
+                    self.on_progress(done, total or None)
                 if total and done * 100 >= next_mark * total:
                     logger.info(
                         "Camoufox browser download: %d%% (%d of %d bytes)",
@@ -151,47 +194,62 @@ def _fetcher_class():
             logger.info("Camoufox browser download: extracting to %s", pkgman.INSTALL_DIR)
             super().extract_zip(zip_file)
 
-    return _LoggedFetcher
-
-
-def release_offer() -> Tuple[Optional[int], Optional[str]]:
-    """`(size_bytes, version)` of the release the package would install now,
-    from one GitHub API read (no binary is downloaded), or `(None, None)`
-    offline. A success is kept for the process."""
-    global _offer_cache, _offer_failed_at
-    if _offer_cache is not None:
-        return _offer_cache
-    if _offer_failed_at is not None and time.monotonic() - _offer_failed_at < _OFFER_RETRY_SECONDS:
-        return None, None
-    try:
-        fetcher = _fetcher_class()()
-        offer = (fetcher.asset_size, fetcher.verstr)
-    except Exception as e:
-        logger.info("Camoufox release lookup failed: %s", e)
-        _offer_failed_at = time.monotonic()
-        return None, None
-    if offer[0]:
-        _offer_cache = offer
-    return offer
+    return _PinnedFetcher
 
 
 def size_bytes() -> Optional[int]:
-    return release_offer()[0]
+    """The size of the pinned release's zip for this platform: the table row,
+    else one GitHub API read of the pinned tag (no binary is downloaded),
+    else None."""
+    global _live_size
+    key = _platform_key()
+    row = _PINNED_ASSET_SIZES.get(PINNED_RELEASE_TAG, {})
+    if key in row:
+        return row[key]
+    if _live_size is not None:
+        return _live_size
+    try:
+        _live_size = _fetcher_class()().asset_size
+    except Exception as e:
+        logger.info("Camoufox release lookup for %s failed: %s", PINNED_RELEASE_TAG, e)
+    return _live_size
 
 
-def size_text(size: Optional[int] = None) -> str:
-    if size is None and _offer_cache is not None:
-        size = _offer_cache[0]
-    return f"about {size / 1e9:.1f} GB" if size else FALLBACK_SIZE_TEXT
+def size_text() -> str:
+    size = size_bytes()
+    return f"about {size / 1e9:.1f} GB" if size else "unknown size"
 
 
-def download() -> str:
-    """Download and install the binary, once; returns the installed version.
+def log_versions() -> None:
+    """One INFO line at backend start: what is installed, what is pinned, and
+    the range the package supports — so a package upgrade that leaves the pin
+    outside its range shows here, not first as a tool refusal."""
+    try:
+        from camoufox import pkgman
+    except Exception:
+        logger.info("Camoufox browser: camoufox package not installed (pinned %s)", PINNED_RELEASE_TAG)
+        return
+    try:
+        installed = pkgman.installed_verstr()
+    except Exception:
+        installed = "not installed"
+    version, release = _pinned_version_release()
+    pin_supported = pkgman.Version(release=release, version=version).is_supported()
+    logger.info(
+        "Camoufox browser: installed %s, pinned %s, package supports %s%s",
+        installed, PINNED_RELEASE_TAG, pkgman.CONSTRAINTS.as_range(),
+        "" if pin_supported else " — the pinned release is OUTSIDE that range",
+    )
 
-    Blocking — run it in a thread. A second call while one runs raises
-    instead of starting a second download: the package's `install()` begins
-    by deleting the install directory, so two at once would destroy each
-    other's files.
+
+def download(on_progress: Optional[Callable[[int, Optional[int]], None]] = None) -> str:
+    """Download and install the pinned release, once; returns its version.
+
+    Blocking — run it in a thread. `on_progress(bytes_done, total_bytes)` is
+    called from that thread for every chunk; throttling is the caller's. A
+    second call while one runs raises instead of starting a second download:
+    the package's `install()` begins by deleting the install directory, so two
+    at once would destroy each other's files.
     """
     if not _install_lock.acquire(blocking=False):
         raise RuntimeError("the Camoufox browser is already being downloaded")
@@ -199,6 +257,7 @@ def download() -> str:
         from camoufox import pkgman
 
         fetcher = _fetcher_class()()
+        fetcher.on_progress = on_progress
         logger.info(
             "Camoufox browser download: release %s, %s bytes, into %s",
             fetcher.verstr, fetcher.asset_size, pkgman.INSTALL_DIR,
@@ -238,8 +297,7 @@ def refusal_text(reason: str, *, asked: bool, declined: bool) -> str:
     elif declined:
         tail = (
             f" It is a one-time download of {size}, which the owner has "
-            f"declined; it can be started from the D-PC Messenger app or with "
-            f"`uv run camoufox fetch` in dpc-client/core."
+            f"declined; it can be started from the D-PC Messenger app."
         )
     elif asked:
         tail = (
@@ -249,7 +307,7 @@ def refusal_text(reason: str, *, asked: bool, declined: bool) -> str:
         )
     else:
         tail = (
-            f" It is a one-time download of {size}: the owner can start it "
-            f"with `uv run camoufox fetch` in dpc-client/core."
+            f" It is a one-time download of {size}, which the owner starts from "
+            f"the D-PC Messenger app."
         )
     return head + tail
