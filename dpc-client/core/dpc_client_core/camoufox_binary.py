@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,10 @@ CONSEQUENCE_IF_DECLINED = (
 
 _install_lock = threading.Lock()
 _live_size: Optional[int] = None
+# A failed lookup is not retried for this long: the size is asked on every
+# refused browser call, and offline each attempt waits out the 20 s timeout.
+_OFFER_RETRY_SECONDS = 600
+_offer_failed_at: Optional[float] = None
 
 
 class CamoufoxBinaryMissing(RuntimeError):
@@ -201,16 +206,19 @@ def size_bytes() -> Optional[int]:
     """The size of the pinned release's zip for this platform: the table row,
     else one GitHub API read of the pinned tag (no binary is downloaded),
     else None."""
-    global _live_size
+    global _live_size, _offer_failed_at
     key = _platform_key()
     row = _PINNED_ASSET_SIZES.get(PINNED_RELEASE_TAG, {})
     if key in row:
         return row[key]
     if _live_size is not None:
         return _live_size
+    if _offer_failed_at is not None and time.monotonic() - _offer_failed_at < _OFFER_RETRY_SECONDS:
+        return None
     try:
         _live_size = _fetcher_class()().asset_size
     except Exception as e:
+        _offer_failed_at = time.monotonic()
         logger.info("Camoufox release lookup for %s failed: %s", PINNED_RELEASE_TAG, e)
     return _live_size
 
@@ -281,7 +289,7 @@ def refusal_text(reason: str, *, asked: bool, declined: bool) -> str:
     size = size_text()
     if reason == "outdated":
         head = (
-            "⚠️ The Camoufox browser on this node is older than the installed "
+            "⚠️ The Camoufox browser on this node is outside the range the installed "
             "camoufox package supports, so no browser was opened for this call."
         )
     else:

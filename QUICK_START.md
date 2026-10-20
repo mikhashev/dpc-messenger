@@ -241,12 +241,13 @@ uv sync --all-extras
 
 > **`browser` installs the package, not the browser.** The Camoufox browser
 > itself is a separate one-time download, pinned to release `v152.0.4-beta.28`
-> (0.3-0.7 GB depending on the platform). The first browser tool call that
+> (the dialog shows its size for this platform). The first browser tool call that
 > needs it is refused and the app offers the download in the same dialog it
 > uses for the Whisper model, with a progress bar. A browser already installed
 > by other means keeps working while the camoufox package supports its
-> version. `uv run camoufox fetch` also works, but installs the package's
-> newest release rather than the pinned one.
+> version. `uv run camoufox fetch` is not the supported path: it installs the
+> package's newest release over the pinned one, which only the backend's start
+> line (`installed … pinned …`) reveals.
 
 **To add one extra to an environment that already works, use `--inexact`:**
 

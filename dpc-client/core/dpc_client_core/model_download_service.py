@@ -283,7 +283,10 @@ class ModelDownloadService:
 
         def report(bytes_done: int, total_bytes: Optional[int]) -> None:
             now = self._clock()
-            final = bool(total_bytes) and bytes_done >= total_bytes
+            # Only the first report at the total skips the interval; a count
+            # that stays past it (a cache that was not empty) is throttled too.
+            final = (bool(total_bytes) and bytes_done >= total_bytes
+                     and not (last["sent"] and last["sent"][0] >= total_bytes))
             with lock:
                 if last["sent"] == (bytes_done, total_bytes):
                     return
@@ -328,10 +331,14 @@ class ModelDownloadService:
         total, _source = await asyncio.to_thread(model_size_bytes, model_name)
         folder = os.path.join(hf_cache_path(), "models--" + model_name.replace("/", "--"))
         report = self.progress_reporter(model_name)
+        # The folder may already hold other revisions (bge-m3 here: two, 4.6 GB
+        # against a 2.3 GB total), so only what grows from now on is progress.
+        baseline = await asyncio.to_thread(_hf_repo_bytes, folder)
 
         async def _poll() -> None:
             while True:
-                report(await asyncio.to_thread(_hf_repo_bytes, folder), total)
+                grown = await asyncio.to_thread(_hf_repo_bytes, folder) - baseline
+                report(max(0, grown), total)
                 await asyncio.sleep(PROGRESS_MIN_INTERVAL_S)
 
         task = asyncio.create_task(_poll())
