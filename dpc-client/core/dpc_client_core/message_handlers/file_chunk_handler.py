@@ -17,7 +17,7 @@ class FileChunkHandler(MessageHandler):
 
         Flow:
         1. Verify transfer exists and is active
-        2. Append chunk to file data
+        2. Write the chunk at its offset in the partial file (no bytes kept in memory)
         3. Track progress
         4. When all chunks received → finalize download
 

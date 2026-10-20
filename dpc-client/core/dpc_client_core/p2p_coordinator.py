@@ -1358,6 +1358,8 @@ class P2PCoordinator:
             "command": "FILE_ACCEPT",
             "payload": {"transfer_id": transfer_id}
         })
+        # From here a silence with chunks missing is noticed and re-asked
+        self.service.file_transfer_manager.begin_receiving(transfer_id)
         return {"transfer_id": transfer_id, "status": "accepted"}
 
     async def cancel_file_transfer(self, transfer_id: str, reason: str = "user_cancelled"):

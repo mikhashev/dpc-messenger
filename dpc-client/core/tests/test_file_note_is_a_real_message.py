@@ -24,6 +24,7 @@ The default in `add_message` is the half that matters longest: the next caller
 that forgets should not be able to produce an unorderable record at all.
 """
 
+import base64
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -89,7 +90,7 @@ def test_the_default_time_orders_after_what_came_before(monitor):
 async def test_a_received_file_is_attributed_to_the_peer_that_sent_it(tmp_path, monitor):
     """It was rendered as "You" on the node that received it, which is backwards."""
     manager = _manager(tmp_path, monitor)
-    await manager._finalize_download(PEER, _transfer())
+    await _receive(manager)
 
     note = monitor.message_history[-1]
     assert note["sender_node_id"] == PEER
@@ -101,7 +102,7 @@ async def test_a_received_file_is_attributed_to_the_peer_that_sent_it(tmp_path, 
 async def test_a_received_file_note_is_not_ours(tmp_path, monitor):
     """The regression half: stamping our own id would look fixed and read wrong."""
     manager = _manager(tmp_path, monitor)
-    await manager._finalize_download(PEER, _transfer())
+    await _receive(manager)
 
     assert monitor.message_history[-1]["sender_node_id"] != US
 
@@ -139,11 +140,31 @@ def _transfer():
         node_id=PEER,
         direction="download",
         status=TransferStatus.TRANSFERRING,
-        chunks_received={0},
+        chunks_received=set(),
         total_chunks=1,
     )
-    t.chunk_data = {0: b"hello"}
     return t
+
+
+async def _receive(manager):
+    """Register the transfer and deliver its one chunk; the last chunk finalises it."""
+    t = _transfer()
+    manager.active_transfers[t.transfer_id] = t
+    await _arrive(manager, PEER, t, b"hello")
+
+
+async def _arrive(manager, node_id, transfer, data):
+    """The file's one chunk, delivered the way the wire delivers it.
+
+    The receiver keeps no chunk in memory, so a test cannot hand it the bytes
+    beside the transfer; they reach the disk through the chunk handler, which
+    finalises the download when the last one lands.
+    """
+    await manager.handle_file_chunk(node_id, {
+        "transfer_id": transfer.transfer_id,
+        "chunk_index": 0,
+        "data": base64.b64encode(data).decode(),
+    })
 
 
 def _manager(tmp_path, monitor):
@@ -162,7 +183,6 @@ def _manager(tmp_path, monitor):
     )
     manager.verify_hash = False
     manager.local_api = SimpleNamespace(broadcast_event=_noop)
-    manager.active_transfers["t1"] = None
     return manager
 
 

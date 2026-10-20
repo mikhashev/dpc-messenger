@@ -18,6 +18,7 @@ Whichever arrives first, the sender's record is the one that survives:
     already recomputed from genesis on every reorder.
 """
 
+import base64
 from pathlib import Path
 
 import pytest
@@ -114,12 +115,26 @@ def two_nodes(tmp_path, monkeypatch, signing_identity, _test_signing_key):
     transfer = FileTransfer(
         transfer_id="t-1", filename=FILENAME, size_bytes=len(PAYLOAD), hash="none",
         mime_type="image/png", chunk_size=len(PAYLOAD), node_id=alice, direction="download",
-        status=TransferStatus.TRANSFERRING, chunks_received={0}, total_chunks=1,
-        chunk_data={0: PAYLOAD}, image_metadata={"dimensions": {"width": 1, "height": 1}},
+        status=TransferStatus.TRANSFERRING, chunks_received=set(), total_chunks=1,
+        image_metadata={"dimensions": {"width": 1, "height": 1}},
         group_id=GROUP,
     )
     manager.active_transfers[transfer.transfer_id] = transfer
     return alice, exported, receiver, manager, transfer, api
+
+
+async def _arrive(manager, node_id, transfer, data):
+    """The file's one chunk, delivered the way the wire delivers it.
+
+    The receiver keeps no chunk in memory, so a test cannot hand it the bytes
+    beside the transfer; they reach the disk through the chunk handler, which
+    finalises the download when the last one lands.
+    """
+    await manager.handle_file_chunk(node_id, {
+        "transfer_id": transfer.transfer_id,
+        "chunk_index": 0,
+        "data": base64.b64encode(data).decode(),
+    })
 
 
 def _the_one_record(receiver, alice):
@@ -141,7 +156,7 @@ async def test_sync_first_the_transfer_completes_the_senders_record(two_nodes):
     sender_id = receiver.message_history[0]["id"]
     content_hash = receiver.message_history[0]["content_hash"]
 
-    await manager._finalize_download(alice, transfer)
+    await _arrive(manager, alice, transfer, PAYLOAD)
 
     record = _the_one_record(receiver, alice)
     att = record["attachments"][0]
@@ -158,7 +173,7 @@ async def test_sync_first_the_completed_record_is_what_is_on_disk(two_nodes):
     alice, exported, receiver, manager, transfer, api = two_nodes
     receiver.merge_history(exported)
 
-    await manager._finalize_download(alice, transfer)
+    await _arrive(manager, alice, transfer, PAYLOAD)
 
     import json
     stored = json.loads(receiver._get_history_path().read_text(encoding="utf-8"))["messages"]
@@ -170,7 +185,7 @@ async def test_sync_first_the_completed_record_is_what_is_on_disk(two_nodes):
 async def test_transfer_first_our_note_gives_way_to_the_senders_record(two_nodes):
     alice, exported, receiver, manager, transfer, api = two_nodes
 
-    await manager._finalize_download(alice, transfer)
+    await _arrive(manager, alice, transfer, PAYLOAD)
     ours = receiver.message_history[0]["id"]
     assert receiver.message_history[0]["signer_node_id"] != alice, "the note is ours"
 
@@ -189,7 +204,7 @@ async def test_transfer_first_our_note_gives_way_to_the_senders_record(two_nodes
 @pytest.mark.asyncio
 async def test_transfer_first_the_dropped_note_is_gone_from_disk(two_nodes):
     alice, exported, receiver, manager, transfer, api = two_nodes
-    await manager._finalize_download(alice, transfer)
+    await _arrive(manager, alice, transfer, PAYLOAD)
 
     receiver.merge_history(exported)
 

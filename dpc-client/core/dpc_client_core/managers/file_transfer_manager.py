@@ -6,21 +6,28 @@ Files are split into chunks, transferred with hash verification, and support
 progress tracking and cancellation.
 
 Architecture:
-- Chunked transfer (64KB default) for resumability
-- SHA256 hash verification for integrity
+- Chunked transfer (64KB default). The receiver writes each verified chunk at
+  its offset (index * the offer's chunk_size) into a temporary file beside the
+  final one, so its memory grows with the number of chunks, not with the file
+- Per-chunk CRC32 (re-asked through FILE_CHUNK_RETRY), SHA256 of the whole file
+  read back from disk at the end
+- A chunk that has not arrived is re-asked after a silence; after a bounded
+  number of fruitless rounds the receiver gives up with `missing_chunks`
+- No resume: a transfer that ends (cancel, disconnect, restart, failure)
+  deletes its temporary file and starts over from the beginning next time
 - Progress callbacks for UI updates
-- Background transfer for large files (>50MB)
 - Firewall-gated (explicit allow rules required)
 
 Transfer Flow:
 1. Sender: Compute hash, create FILE_OFFER
 2. Receiver: Check firewall, prompt user, send FILE_ACCEPT
 3. Sender: Send FILE_CHUNK messages (with progress)
-4. Receiver: Reassemble, verify hash, send FILE_COMPLETE
+4. Receiver: Write each chunk to the temporary file, verify hash, rename, send FILE_COMPLETE
 5. Both: Update conversation history with attachment metadata
 
 Features:
-- No hard size limit (large files use background process)
+- No size limit in this module; the receiver's firewall may set one. The
+  offer still carries one CRC per chunk, which grows with the file
 - Direct TLS preferred for >100MB (fallback to WebRTC/relay for smaller)
 - Per-peer storage: ~/.dpc/conversations/{peer_id}/files/
 - Metadata references in conversation history (not full content)
@@ -34,6 +41,7 @@ Privacy:
 import asyncio
 import logging
 import hashlib
+import os
 import base64
 import time
 import uuid
@@ -60,6 +68,21 @@ PREPARATION_PROGRESS_MIN_INTERVAL_S = 0.5
 HASH_READ_BLOCK_BYTES = 8 * 1024 * 1024
 
 _monotonic = time.monotonic  # Indirection so a test can drive the clock
+
+# Receiving. The sender streams chunks back to back (chunk_delay apart), so a
+# silence means the stream has ended or lost something, not that it is slow:
+# 30 s of nothing is 64 KB at ~2 KB/s, slower than any relay we route through.
+RECEIVE_STALL_TIMEOUT_S = 30.0
+# Indices re-asked per round: 64 chunks (4 MB at the default size) keeps one
+# re-ask from flooding the sender, which answers each with its own file read.
+RECEIVE_REASK_BATCH = 64
+# Rounds in a row with no new chunk before the receiver gives up. With the
+# timeout above a chunk that is never sent ends the transfer within
+# (rounds + 1) * timeout = 120 s of the last chunk that did arrive.
+RECEIVE_STALL_ROUNDS = 3
+# FILE_CANCEL reason for a receive that cannot be written to the local disk
+# (disk full, permission). No word in DPTP §3.11 covered it: this one is new.
+RECEIVE_ERROR_REASON = "receive_error"
 
 
 def hash_file_in_one_pass(
@@ -148,7 +171,6 @@ class FileTransfer:
         status: Current transfer status
         chunks_received: Set of received chunk indices
         total_chunks: Total number of chunks
-        chunk_data: Dict[int, bytes] - Chunks indexed by chunk_index for out-of-order assembly (v0.11.1)
         file_path: Path to file being sent (for uploads)
         progress_callback: Optional callback for progress updates
         chunk_hashes: List of CRC32 hashes for each chunk (v0.11.1)
@@ -157,6 +179,9 @@ class FileTransfer:
         max_retries: Maximum retry attempts per chunk (default: 3)
         image_metadata: Optional dict with image metadata (dimensions, thumbnail, etc.) for v0.12.0+
         voice_metadata: Optional dict with voice metadata (duration, sample_rate, codec, etc.) for v0.13.0+
+
+    A download holds no file bytes: each chunk goes to `receive_path` at
+    index * chunk_size (the offer's chunk_size) and only its index is kept.
     """
     transfer_id: str
     filename: str
@@ -169,7 +194,6 @@ class FileTransfer:
     status: TransferStatus
     chunks_received: set
     total_chunks: int
-    chunk_data: Optional[dict] = None  # v0.11.1: Dict[int, bytes] - chunks indexed by chunk_index
     file_path: Optional[Path] = None
     progress_callback: Optional[Callable[[str, int, int], None]] = None
     chunk_hashes: Optional[list] = None  # CRC32 hashes for integrity
@@ -179,6 +203,62 @@ class FileTransfer:
     image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.) v0.12.0+
     voice_metadata: Optional[dict] = None  # Voice metadata (duration, sample_rate, codec) v0.13.0+
     group_id: Optional[str] = None  # Group ID for group file transfers (v0.19.0+)
+
+    # Receive side only. Decided at the first chunk: where the file goes and
+    # whether it goes to disk at all (a screenshot with save_screenshots_to_disk
+    # off is verified chunk by chunk and never written).
+    destination: Optional[Path] = None
+    save_to_disk: Optional[bool] = None
+    receive_path: Optional[Path] = None  # the temporary file, renamed to `destination` at the end
+    receive_file: Any = field(default=None, repr=False, compare=False)  # open handle on receive_path
+    quiet_since: float = 0.0             # monotonic time of the last chunk or re-ask
+    stall_rounds: int = 0                # re-ask rounds in a row without a new chunk
+    reasked: set = field(default_factory=set)  # indices of the current re-ask batch still owed
+    stall_watch: Any = field(default=None, repr=False, compare=False)  # asyncio.Task
+    finalizing: bool = False
+
+
+class _TransferTable(dict):
+    """`active_transfers`: leaving it, by any path, releases what a receive holds.
+
+    A transfer is dropped from the table in several places, some outside this
+    module (the peer-disconnect cleanup in service.py deletes the entry
+    directly). Each of them must close the temporary file, delete it and stop
+    the stall watch, so the table does it on removal rather than each caller.
+    """
+
+    def __init__(self, on_remove: Callable[[Any], None]):
+        super().__init__()
+        self._on_remove = on_remove
+
+    def __setitem__(self, key, value):
+        old = self.get(key)
+        super().__setitem__(key, value)
+        if old is not None and old is not value:
+            self._on_remove(old)
+
+    def __delitem__(self, key):
+        old = self[key]
+        super().__delitem__(key)
+        self._on_remove(old)
+
+    def pop(self, key, *default):
+        if key in self:
+            old = super().pop(key)
+            self._on_remove(old)
+            return old
+        return super().pop(key, *default)
+
+    def popitem(self):
+        key, old = super().popitem()
+        self._on_remove(old)
+        return key, old
+
+    def clear(self):
+        olds = list(self.values())
+        super().clear()
+        for old in olds:
+            self._on_remove(old)
 
 
 class FileTransferManager:
@@ -245,7 +325,7 @@ class FileTransferManager:
         self.service = service
 
         # Active transfers: transfer_id -> FileTransfer
-        self.active_transfers: Dict[str, FileTransfer] = {}
+        self.active_transfers: Dict[str, FileTransfer] = _TransferTable(self._release_receive)
 
         # Configuration (from settings)
         self.chunk_size = int(settings.get("file_transfer", "chunk_size", "65536"))  # 64KB
@@ -629,9 +709,186 @@ class FileTransferManager:
             transfer.status = TransferStatus.FAILED
             await self._send_file_cancel(node_id, transfer_id, "send_error")
 
+    # --- receiving ---------------------------------------------------------
+
+    def _incoming_destination(self, node_id: str, transfer: FileTransfer) -> Tuple[Path, bool]:
+        """Where a download lands, and whether it is written to disk at all."""
+        is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
+                    and transfer.image_metadata is not None)
+        subdir = "files/screenshots" if is_image else "files"
+
+        if transfer.group_id:
+            if self.service and hasattr(self.service, '_get_or_create_conversation_monitor'):
+                group_monitor = self.service._get_or_create_conversation_monitor(transfer.group_id)
+                storage_path = group_monitor._get_conversation_dir() / subdir
+            else:
+                storage_path = self.storage_base_path / transfer.group_id / subdir
+            storage_path.mkdir(parents=True, exist_ok=True)
+        else:
+            storage_path = self._get_peer_storage_path(node_id, subdir)
+
+        file_path = storage_path / self._safe_incoming_name(transfer.filename)
+
+        save_to_disk = True
+        if is_image and self.firewall:
+            img_rules = self.firewall.rules.get("image_transfer", {})
+            save_to_disk = img_rules.get("save_screenshots_to_disk", True)
+        return file_path, save_to_disk
+
+    @staticmethod
+    def _receive_path_for(file_path: Path, transfer_id: str) -> Path:
+        """The temporary file beside the final one, unique per transfer.
+
+        Two transfers of one name (a group file from its sender and from a
+        relaying member) would otherwise write into one file, and on Windows
+        the first rename fails while the other still holds it open. The id is
+        the peer's, so it is hashed rather than put into the path.
+        """
+        tag = hashlib.sha256(str(transfer_id).encode()).hexdigest()[:12]
+        return file_path.with_name(f"{file_path.name}.{tag}.tmp")
+
+    def _open_receive(self, node_id: str, transfer: FileTransfer) -> None:
+        """Decide the destination and open the temporary file, sized to the offer.
+
+        Sizing it up front makes a disk that cannot hold the file fail here on
+        NTFS (on ext4 the file is sparse and a full disk fails at a write).
+        """
+        file_path, save_to_disk = self._incoming_destination(node_id, transfer)
+        transfer.destination = file_path
+        transfer.save_to_disk = save_to_disk
+        if not save_to_disk:
+            return
+        receive_path = self._receive_path_for(file_path, transfer.transfer_id)
+        transfer.receive_path = receive_path
+        handle = open(receive_path, "w+b")
+        try:
+            handle.truncate(max(0, int(transfer.size_bytes or 0)))
+        except Exception:
+            handle.close()
+            raise
+        transfer.receive_file = handle
+
+    def _close_receive_file(self, transfer: FileTransfer) -> None:
+        handle = transfer.receive_file
+        transfer.receive_file = None
+        if handle is not None:
+            handle.close()
+
+    def _release_receive(self, transfer: Optional[FileTransfer]) -> None:
+        """Free what a download holds: the stall watch, the handle, the temporary file.
+
+        Called whenever a transfer leaves `active_transfers`. After a completed
+        download the temporary file has already been renamed and `receive_path`
+        is None, so only an unfinished one is deleted.
+        """
+        if transfer is None or getattr(transfer, "direction", None) != "download":
+            return
+        self._stop_stall_watch(transfer)
+        try:
+            self._close_receive_file(transfer)
+        except OSError as e:
+            logger.warning("Closing the partial file of %s failed: %s", transfer.transfer_id, e)
+        receive_path = transfer.receive_path
+        transfer.receive_path = None
+        if receive_path is not None:
+            try:
+                receive_path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("Could not delete partial file %s: %s", receive_path, e)
+
+    def _stop_stall_watch(self, transfer: FileTransfer) -> None:
+        task = transfer.stall_watch
+        transfer.stall_watch = None
+        if task is None or task.done():
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not current:
+            task.cancel()
+
+    def begin_receiving(self, transfer_id: str) -> None:
+        """Start the stall watch of an accepted download (idempotent).
+
+        Called when FILE_ACCEPT goes out, so a sender that never starts is
+        noticed too; the first chunk starts it as well when nothing did.
+        """
+        transfer = self.active_transfers.get(transfer_id)
+        if transfer is None or transfer.direction != "download":
+            return
+        if transfer.stall_watch is not None and not transfer.stall_watch.done():
+            return
+        transfer.quiet_since = _monotonic()
+        transfer.stall_watch = asyncio.create_task(
+            self._watch_receive_stall(transfer.node_id, transfer)
+        )
+
+    def _missing_indices(self, transfer: FileTransfer) -> List[int]:
+        received = transfer.chunks_received
+        return [i for i in range(transfer.total_chunks) if i not in received]
+
+    async def _reask_missing(self, node_id: str, transfer: FileTransfer, missing: List[int]) -> None:
+        batch = missing[:RECEIVE_REASK_BATCH]
+        transfer.reasked = set(batch)
+        transfer.quiet_since = _monotonic()
+        logger.info(
+            "Re-asking %d of %d missing chunks of %s (round %d/%d)",
+            len(batch), len(missing), transfer.filename, transfer.stall_rounds, RECEIVE_STALL_ROUNDS,
+        )
+        for index in batch:
+            await self._send_chunk_retry_request(node_id, transfer.transfer_id, index)
+
+    async def _watch_receive_stall(self, node_id: str, transfer: FileTransfer) -> None:
+        """Re-ask what has not arrived after a silence; give up after bounded rounds."""
+        tid = transfer.transfer_id
+        try:
+            while self.active_transfers.get(tid) is transfer and not transfer.finalizing:
+                idle = _monotonic() - transfer.quiet_since
+                if idle < RECEIVE_STALL_TIMEOUT_S:
+                    await asyncio.sleep(RECEIVE_STALL_TIMEOUT_S - idle)
+                    continue
+                missing = self._missing_indices(transfer)
+                if not missing:
+                    return
+                if transfer.stall_rounds >= RECEIVE_STALL_ROUNDS:
+                    logger.error(
+                        "Giving up on %s: %d chunks still missing after %d re-ask rounds",
+                        transfer.filename, len(missing), transfer.stall_rounds,
+                    )
+                    await self._fail_download(node_id, transfer, "missing_chunks")
+                    return
+                transfer.stall_rounds += 1
+                await self._reask_missing(node_id, transfer, missing)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error("Stall watch of %s failed: %s", tid, e, exc_info=True)
+
+    async def _fail_download(self, node_id: str, transfer: FileTransfer, reason: str) -> None:
+        """End a download as FAILED: tell the sender, tell the UI, free the state."""
+        transfer.status = TransferStatus.FAILED
+        await self._send_file_cancel(node_id, transfer.transfer_id, reason)
+        if self.local_api:
+            event = {
+                "transfer_id": transfer.transfer_id,
+                "node_id": node_id,
+                "filename": transfer.filename,
+                "direction": transfer.direction,
+                "reason": reason,
+                "status": "cancelled"
+            }
+            if transfer.group_id:
+                event["group_id"] = transfer.group_id
+            await self.local_api.broadcast_event("file_transfer_cancelled", event)
+        if self.active_transfers.get(transfer.transfer_id) is transfer:
+            del self.active_transfers[transfer.transfer_id]  # releases the receive
+        else:
+            self._release_receive(transfer)
+
     async def handle_file_chunk(self, node_id: str, payload: dict):
         """
-        Handle incoming FILE_CHUNK - reassemble file.
+        Handle incoming FILE_CHUNK: verify it and write it at its offset on disk.
 
         v0.11.1: Added per-chunk CRC32 verification with retry tracking.
 
@@ -647,84 +904,91 @@ class FileTransferManager:
         if not transfer or transfer.direction != "download":
             logger.warning(f"FILE_CHUNK for unknown download: {transfer_id}")
             return
+        if transfer.finalizing:
+            return
+        if not isinstance(chunk_index, int) or not 0 <= chunk_index < transfer.total_chunks:
+            logger.warning(f"FILE_CHUNK index {chunk_index!r} out of range for {transfer_id}")
+            return
 
-        # Initialize chunk data dict (v0.11.1: indexed storage for out-of-order assembly)
-        if transfer.chunk_data is None:
-            transfer.chunk_data = {}
+        transfer.quiet_since = _monotonic()
+        if transfer.stall_watch is None:
+            self.begin_receiving(transfer_id)
+        if chunk_index in transfer.chunks_received:
+            return  # a duplicate (a re-ask crossed the original); it is already on disk
+        if transfer.chunks_failed is None:
+            transfer.chunks_failed = set()
+        if transfer.retry_count is None:
+            transfer.retry_count = {}
+
+        # A chunk is chunk_size long except the last, from the offer's numbers
+        expected_len = min(transfer.chunk_size, transfer.size_bytes - chunk_index * transfer.chunk_size)
 
         # v0.11.1: Verify chunk CRC32 if hashes provided
-        chunk_verified = True
-        if transfer.chunk_hashes and chunk_index < len(transfer.chunk_hashes):
+        chunk_verified = len(chunk_data) == expected_len
+        if chunk_verified and transfer.chunk_hashes and chunk_index < len(transfer.chunk_hashes):
             expected_hash = transfer.chunk_hashes[chunk_index]
             computed_crc = zlib.crc32(chunk_data) & 0xffffffff
-            computed_hash = f"{computed_crc:08x}"
+            chunk_verified = f"{computed_crc:08x}" == expected_hash
 
-            if computed_hash != expected_hash:
-                chunk_verified = False
-                transfer.chunks_failed.add(chunk_index)
-
-                # Track retry count
-                if chunk_index not in transfer.retry_count:
-                    transfer.retry_count[chunk_index] = 0
-                transfer.retry_count[chunk_index] += 1
-
-                logger.warning(
-                    f"Chunk {chunk_index} CRC32 mismatch! "
-                    f"Expected {expected_hash}, got {computed_hash}. "
-                    f"Retry attempt {transfer.retry_count[chunk_index]}/{transfer.max_retries}"
-                )
-
-                # If max retries exceeded, fail transfer
-                if transfer.retry_count[chunk_index] >= transfer.max_retries:
-                    logger.error(f"Chunk {chunk_index} failed {transfer.max_retries} times, aborting transfer")
-                    transfer.status = TransferStatus.FAILED
-                    await self._send_file_cancel(node_id, transfer_id, "chunk_verification_failed")
-                    # Notify local UI so the progress toast resolves (other cancel paths do this)
-                    if self.local_api:
-                        await self.local_api.broadcast_event("file_transfer_cancelled", {
-                            "transfer_id": transfer_id,
-                            "node_id": node_id,
-                            "filename": transfer.filename,
-                            "direction": transfer.direction,
-                            "reason": "chunk_verification_failed",
-                            "status": "cancelled"
-                        })
-                    return
-                else:
-                    # Send retry request for this chunk
-                    await self._send_chunk_retry_request(node_id, transfer_id, chunk_index)
-                    return  # Don't process this chunk further, wait for retry
+        if not chunk_verified:
+            transfer.chunks_failed.add(chunk_index)
+            transfer.retry_count[chunk_index] = transfer.retry_count.get(chunk_index, 0) + 1
+            logger.warning(
+                f"Chunk {chunk_index} failed verification ({len(chunk_data)} bytes, "
+                f"{expected_len} expected). "
+                f"Retry attempt {transfer.retry_count[chunk_index]}/{transfer.max_retries}"
+            )
+            if transfer.retry_count[chunk_index] >= transfer.max_retries:
+                logger.error(f"Chunk {chunk_index} failed {transfer.max_retries} times, aborting transfer")
+                await self._fail_download(node_id, transfer, "chunk_verification_failed")
             else:
-                # Chunk verified successfully - remove from failed set if it was retried
-                if chunk_index in transfer.chunks_failed:
-                    transfer.chunks_failed.discard(chunk_index)
-                    logger.info(f"Chunk {chunk_index} verified successfully on retry")
+                await self._send_chunk_retry_request(node_id, transfer_id, chunk_index)
+            return  # Don't process this chunk further, wait for retry
 
-        # Only store chunk if verified (v0.11.1: indexed storage for out-of-order)
-        if chunk_verified:
-            # Store chunk by index (supports out-of-order arrival)
-            transfer.chunk_data[chunk_index] = chunk_data
-            transfer.chunks_received.add(chunk_index)
+        if chunk_index in transfer.chunks_failed:
+            transfer.chunks_failed.discard(chunk_index)
+            logger.info(f"Chunk {chunk_index} verified successfully on retry")
 
-            # Progress callback
-            if transfer.progress_callback:
-                transfer.progress_callback(transfer_id, len(transfer.chunks_received), transfer.total_chunks)
+        # Straight to disk at its offset; no await between seek and write, so
+        # chunks handled in concurrent tasks cannot interleave here.
+        try:
+            if transfer.save_to_disk is None:
+                self._open_receive(node_id, transfer)
+            if transfer.receive_file is not None:
+                transfer.receive_file.seek(chunk_index * transfer.chunk_size)
+                transfer.receive_file.write(chunk_data)
+        except OSError as e:
+            logger.error(f"Cannot write {transfer.filename} to disk: {e}")
+            await self._fail_download(node_id, transfer, RECEIVE_ERROR_REASON)
+            return
+
+        transfer.chunks_received.add(chunk_index)
+        transfer.stall_rounds = 0
+
+        # Progress callback
+        if transfer.progress_callback:
+            transfer.progress_callback(transfer_id, len(transfer.chunks_received), transfer.total_chunks)
 
         # Check if complete (all chunks received and verified)
         if len(transfer.chunks_received) == transfer.total_chunks:
             await self._finalize_download(node_id, transfer)
+            return
+
+        # A re-asked batch that has all come in: ask the next one now instead
+        # of waiting out another silence.
+        if transfer.reasked:
+            transfer.reasked.discard(chunk_index)
+            if not transfer.reasked:
+                missing = self._missing_indices(transfer)
+                if missing:
+                    await self._reask_missing(node_id, transfer, missing)
 
     async def _finalize_download(self, node_id: str, transfer: FileTransfer):
-        """Finalize download: write chunks to disk, verify hash async, save file."""
+        """Finalize download: verify the hash of the file on disk, rename it into place."""
         logger.info(f"All chunks received for {transfer.filename}, finalizing...")
-
-        for chunk_index in range(transfer.total_chunks):
-            if chunk_index not in transfer.chunk_data:
-                logger.error(f"Missing chunk {chunk_index} during finalization!")
-                transfer.chunk_data.clear()
-                transfer.status = TransferStatus.FAILED
-                await self._send_file_cancel(node_id, transfer.transfer_id, "missing_chunks")
-                return
+        transfer.finalizing = True
+        self._stop_stall_watch(transfer)
+        tid = transfer.transfer_id
 
         is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
                    and transfer.image_metadata is not None)
@@ -734,59 +998,53 @@ class FileTransferManager:
         # raised UnboundLocalError after the file was already on disk.
         is_voice = transfer.voice_metadata is not None
 
-        subdir = "files/screenshots" if is_image else "files"
-
-        if transfer.group_id:
-            if self.service and hasattr(self.service, '_get_or_create_conversation_monitor'):
-                group_monitor = self.service._get_or_create_conversation_monitor(transfer.group_id)
-                storage_path = group_monitor._get_conversation_dir() / subdir
-            else:
-                storage_path = self.storage_base_path / transfer.group_id / subdir
-            storage_path.mkdir(parents=True, exist_ok=True)
-        else:
-            storage_path = self._get_peer_storage_path(node_id, subdir)
-
-        safe_filename = self._safe_incoming_name(transfer.filename)
-        file_path = storage_path / safe_filename
-
-        save_to_disk = True
-        if is_image and self.firewall:
-            img_rules = self.firewall.rules.get("image_transfer", {})
-            save_to_disk = img_rules.get("save_screenshots_to_disk", True)
+        try:
+            if transfer.save_to_disk is None:
+                self._open_receive(node_id, transfer)  # no chunk ever came: an empty file
+            self._close_receive_file(transfer)
+        except OSError as e:
+            logger.error(f"Cannot write {transfer.filename} to disk: {e}")
+            await self._fail_download(node_id, transfer, RECEIVE_ERROR_REASON)
+            return
+        file_path = transfer.destination
+        save_to_disk = transfer.save_to_disk
 
         if save_to_disk:
-            temp_path = file_path.with_suffix(file_path.suffix + ".tmp")
-            total_bytes = 0
-            try:
-                with open(temp_path, 'wb') as f:
-                    for chunk_index in range(transfer.total_chunks):
-                        chunk = transfer.chunk_data[chunk_index]
-                        f.write(chunk)
-                        total_bytes += len(chunk)
-            except Exception:
-                temp_path.unlink(missing_ok=True)
-                raise
-            logger.info(f"Written {total_bytes} bytes from {transfer.total_chunks} chunks to {temp_path.name}")
-
-            transfer.chunk_data.clear()
-
+            temp_path = transfer.receive_path
             computed_hash = None
             if self.verify_hash and transfer.hash != "none":
-                computed_hash = await self._compute_file_hash_async(temp_path)
+                try:
+                    computed_hash = await self._compute_file_hash_async(temp_path)
+                except OSError as e:
+                    if self.active_transfers.get(tid) is not transfer:
+                        return  # cancelled while hashing; the release removed the file
+                    logger.error(f"Cannot read back {temp_path}: {e}")
+                    await self._fail_download(node_id, transfer, RECEIVE_ERROR_REASON)
+                    return
+                if self.active_transfers.get(tid) is not transfer:
+                    temp_path.unlink(missing_ok=True)  # cancelled while hashing
+                    return
                 if computed_hash != transfer.hash:
-                    logger.error(f"Hash mismatch! Expected {transfer.hash}, got {computed_hash}")
-                    temp_path.unlink(missing_ok=True)
-                    transfer.status = TransferStatus.FAILED
-                    await self._send_file_cancel(node_id, transfer.transfer_id, "hash_mismatch")
+                    logger.error(
+                        f"Hash mismatch for {transfer.filename}: expected {transfer.hash}, "
+                        f"got {computed_hash}; every chunk passed its CRC, the whole file is dropped"
+                    )
+                    await self._fail_download(node_id, transfer, "hash_mismatch")
                     return
             else:
                 computed_hash = "none"
 
-            temp_path.replace(file_path)
+            try:
+                os.replace(temp_path, file_path)
+            except OSError as e:
+                # On Windows a final file held open elsewhere cannot be replaced
+                logger.error(f"Cannot move {temp_path.name} into place: {e}")
+                await self._fail_download(node_id, transfer, RECEIVE_ERROR_REASON)
+                return
+            transfer.receive_path = None
             transfer.status = TransferStatus.COMPLETED
             logger.info(f"{'Screenshot' if is_image else 'File'} saved: {file_path}")
         else:
-            transfer.chunk_data.clear()
             computed_hash = "none"
             transfer.status = TransferStatus.COMPLETED
             logger.info(f"Screenshot received but not saved to disk (save_screenshots_to_disk=false): {transfer.filename}")
@@ -986,8 +1244,8 @@ class FileTransferManager:
                                     "Failed to relay group file to %s: %s", member_id[:20], e
                                 )
 
-        # Cleanup (chunk_data will be freed when transfer is deleted)
-        del self.active_transfers[transfer.transfer_id]  # Remove from active transfers
+        # Cleanup: leaving the table releases the receive (the file is already renamed)
+        self.active_transfers.pop(transfer.transfer_id, None)
         logger.debug(f"Cleaned up completed download transfer: {transfer.transfer_id}")
 
     async def handle_file_complete(self, node_id: str, payload: dict):

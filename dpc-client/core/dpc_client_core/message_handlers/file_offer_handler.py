@@ -229,6 +229,8 @@ class FileOfferHandler(MessageHandler):
             })
             # Update status to TRANSFERRING so UI refresh doesn't show acceptance dialog
             transfer.status = TransferStatus.TRANSFERRING
+            # From here a silence with chunks missing is noticed and re-asked
+            file_transfer_manager.begin_receiving(transfer_id)
             if is_voice:
                 transfer_type = 'Voice'
             elif is_image:

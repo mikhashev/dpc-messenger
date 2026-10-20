@@ -10,6 +10,7 @@ received file twice.
 Measured 2026-08-28 in Mike's 1:1 chat with the Linux node: two records on the
 backend, four bubbles on screen.
 """
+import base64
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,22 @@ from dpc_client_core.managers.file_transfer_manager import (
     FileTransferManager,
     TransferStatus,
 )
+
+
+PAYLOAD = b"a file that arrived"
+
+async def _arrive(manager, node_id, transfer, data):
+    """The file's one chunk, delivered the way the wire delivers it.
+
+    The receiver keeps no chunk in memory, so a test cannot hand it the bytes
+    beside the transfer; they reach the disk through the chunk handler, which
+    finalises the download when the last one lands.
+    """
+    await manager.handle_file_chunk(node_id, {
+        "transfer_id": transfer.transfer_id,
+        "chunk_index": 0,
+        "data": base64.b64encode(data).decode(),
+    })
 
 
 class _P2P:
@@ -94,23 +111,21 @@ def received_file(tmp_path):
         storage_base_path=tmp_path,
         service=_Service(monitor),
     )
-    payload = b"a file that arrived"
     transfer = FileTransfer(
         transfer_id="t-1",
         filename="paste_1787912268575.png",
-        size_bytes=len(payload),
+        size_bytes=len(PAYLOAD),
         # "none" is what a sender writes when it asks for no verification, and
         # it keeps this test off the hashing path, which is not what is under
         # test here.
         hash="none",
         mime_type="image/png",
-        chunk_size=len(payload),
+        chunk_size=len(PAYLOAD),
         node_id="dpc-node-peer",
         direction="download",
         status=TransferStatus.TRANSFERRING,
-        chunks_received={0},
+        chunks_received=set(),
         total_chunks=1,
-        chunk_data={0: payload},
         image_metadata={"dimensions": {"width": 1, "height": 1}},
     )
     # Tracked the way the chunk handler tracks it; finalisation drops it from
@@ -123,7 +138,7 @@ def received_file(tmp_path):
 async def test_the_bubble_and_the_record_carry_one_id(received_file):
     manager, transfer, api, monitor = received_file
 
-    await manager._finalize_download("dpc-node-peer", transfer)
+    await _arrive(manager, "dpc-node-peer", transfer, PAYLOAD)
 
     broadcast = api.event("new_p2p_message")
     assert len(monitor.added) == 1, monitor.added
@@ -141,7 +156,7 @@ async def test_the_record_says_who_sent_it_and_what_arrived(received_file):
     """The fields the chat renders, so a later edit cannot quietly drop them."""
     manager, transfer, api, monitor = received_file
 
-    await manager._finalize_download("dpc-node-peer", transfer)
+    await _arrive(manager, "dpc-node-peer", transfer, PAYLOAD)
 
     stored = monitor.added[0]
     assert stored["role"] == "assistant"

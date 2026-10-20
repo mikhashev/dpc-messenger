@@ -16,6 +16,7 @@ auto-accepted with no dialog, so neither the firewall nor the user stood between
 the wire and an arbitrary path.
 """
 
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -149,7 +150,7 @@ def test_a_name_that_sanitises_to_nothing_still_yields_a_file(tmp_path):
 
 @pytest.mark.asyncio
 async def test_the_written_file_lands_in_the_peer_directory(tmp_path):
-    """End to end through `_finalize_download`, because the name is used there."""
+    """End to end through the chunk handler and `_finalize_download`, because the name is used there."""
     manager = _manager(tmp_path, ALLOW_PEER)
     manager.verify_hash = False
     sent = []
@@ -168,13 +169,12 @@ async def test_the_written_file_lands_in_the_peer_directory(tmp_path):
         node_id=PEER,
         direction="download",
         status=TransferStatus.TRANSFERRING,
-        chunks_received={0},
+        chunks_received=set(),
         total_chunks=1,
     )
-    transfer.chunk_data = {0: b"hello"}
     manager.active_transfers[transfer.transfer_id] = transfer
 
-    await manager._finalize_download(PEER, transfer)
+    await _arrive(manager, PEER, transfer, b"hello")
 
     storage = manager._get_peer_storage_path(PEER)
     written = [p for p in storage.iterdir() if p.is_file()]
@@ -183,6 +183,20 @@ async def test_the_written_file_lands_in_the_peer_directory(tmp_path):
 
 
 # --- helpers ---------------------------------------------------------------
+
+
+async def _arrive(manager, node_id, transfer, data):
+    """The file's one chunk, delivered the way the wire delivers it.
+
+    The receiver keeps no chunk in memory, so a test cannot hand it the bytes
+    beside the transfer; they reach the disk through the chunk handler, which
+    finalises the download when the last one lands.
+    """
+    await manager.handle_file_chunk(node_id, {
+        "transfer_id": transfer.transfer_id,
+        "chunk_index": 0,
+        "data": base64.b64encode(data).decode(),
+    })
 
 
 def _offer(filename, size_bytes=1024):
