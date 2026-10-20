@@ -14,9 +14,12 @@ Usage:
     python cc_group_chat_bridge.py --group GROUP_ID --listen [--once] [--json]  # push, no cron
     python cc_group_chat_bridge.py --group GROUP_ID --send "hi" --mention-depth 1  # answer at depth
 
-A [MENTION] line or a history line marked [--mention-depth N] is answered with
---mention-depth N, so the count two bridges pass each other is not reset to 0
-at every crossing (specs/dptp_v1.md §4.3).
+A [MENTION] line or a history line marked [--mention-depth N] is answered at
+depth N, so the count two bridges pass each other is not reset to 0 at every
+crossing (specs/dptp_v1.md §4.3). The bridge remembers the N it printed for a
+mention of its own tag (MENTION_DEPTH_STATE_FILE under DPC_HOME, per group and
+tag) and the next --send/--send-file to that group carries it when no
+--mention-depth is given; that send consumes it. [SENT] names the depth sent.
 
 Identity: --as, else the tag registered for this node in Group Settings
 (metadata.json agents/agent_names), else [agent_chat] cc_display_name.
@@ -26,7 +29,9 @@ import json
 import os
 import re
 import sys
+import time
 import asyncio
+import tempfile
 import argparse
 from pathlib import Path
 
@@ -245,15 +250,168 @@ def _reply_mention_depth(msg: dict, node_id: str) -> int:
     return depth + 1
 
 
-def _mention_depth_arg(value: str) -> int:
-    """argparse type for --mention-depth: a whole number >= 0."""
+# --- the depth this bridge last printed, carried to its next send -------------
+#
+# A [MENTION] line or a history line for this bridge's tag shows the depth its
+# reply must carry; a caller that forgot --mention-depth sent 0 and so reset
+# the count at the crossing (Zcode's and Ark's review of 3706cf47).
+
+MENTION_DEPTH_STATE_FILE = "group_bridge_mention_depth.json"
+
+# A remembered depth older than this is ignored. Its age is the age of the
+# mention it was printed for — a [MENTION] event's arrival, a history record's
+# own timestamp — not of the print, because the cron re-reads the same last 10
+# lines every minute and would otherwise keep yesterday's mention fresh for
+# ever. An hour is many cron ticks past the answer a mention gets, and bounds
+# how long one deep mention can hold the bridge's later replies deep with it.
+MENTION_DEPTH_TTL_S = 3600
+
+
+def _depth_state_path() -> Path:
+    """Beside .ws_token, under DPC_HOME."""
+    return DPC_HOME / MENTION_DEPTH_STATE_FILE
+
+
+def _is_depth(value) -> bool:
+    """A whole number >= 0; a bool is not one, and neither is 1.5."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _load_depth_state() -> dict:
+    """{group_id: {tag_lower: {"depth": N, "at": epoch_s}}}; {} when absent or unreadable."""
     try:
-        depth = int(value)
+        state = json.loads(_depth_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _write_depth_state(state: dict) -> None:
+    """Temp file + os.replace, so a reader never sees half a file. A failed write
+    is said on stderr and does not stop the read or the send that caused it."""
+    path = _depth_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError as e:
+        print(f"[WARN] could not record mention_depth in {path}: {e}", file=sys.stderr)
+
+
+def _fresh_entry(entry, now: float):
+    """(depth, at) of an entry, or None when malformed or older than MENTION_DEPTH_TTL_S."""
+    if not isinstance(entry, dict) or not _is_depth(entry.get("depth")):
+        return None
+    at = entry.get("at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or now - at > MENTION_DEPTH_TTL_S:
+        return None
+    return entry["depth"], at
+
+
+def _remember_reply_depth(group_id: str, tag: str, depth, at: float = None) -> None:
+    """Record that a mention of `tag` in `group_id`, made at `at` (default now),
+    is answered at `depth`.
+
+    When several are printed before a send, the largest fresh one is kept: the
+    send answers one of them and the bridge cannot know which, and a reply too
+    deep only fails to wake a peer agent, where one too shallow restarts the
+    chain the bound exists to stop. A 0 adds nothing — an unflagged send
+    already carries 0 — so it writes nothing.
+    """
+    now = time.time()
+    at = now if at is None else at
+    if not tag or not _is_depth(depth) or depth == 0 or now - at > MENTION_DEPTH_TTL_S:
+        return
+    state = _load_depth_state()
+    per_group = state.get(group_id)
+    if not isinstance(per_group, dict):
+        per_group = state[group_id] = {}
+    key = tag.lower()
+    held = _fresh_entry(per_group.get(key), now)
+    # Keep the larger depth; between equal ones the later mention, which ages out last.
+    new = max(held, (depth, at)) if held else (depth, at)
+    if new == held:
+        return
+    per_group[key] = {"depth": new[0], "at": new[1]}
+    _write_depth_state(state)
+
+
+def _remembered_depth(group_id: str, tag: str) -> int:
+    """The fresh depth remembered for `tag` in `group_id`, 0 when none."""
+    per_group = _load_depth_state().get(group_id)
+    if not isinstance(per_group, dict):
+        return 0
+    held = _fresh_entry(per_group.get(tag.lower()), time.time())
+    return held[0] if held else 0
+
+
+def _forget_depth(group_id: str, tag: str) -> None:
+    """A send consumed it: the next send starts from nothing again."""
+    state = _load_depth_state()
+    per_group = state.get(group_id)
+    if isinstance(per_group, dict) and tag.lower() in per_group:
+        del per_group[tag.lower()]
+        if not per_group:
+            del state[group_id]
+        _write_depth_state(state)
+
+
+def _moment(ts):
+    """A history record's ISO timestamp as epoch seconds; naive reads as UTC; None if unreadable."""
+    from datetime import datetime, timezone
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        moment = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
-        depth = -1
-    if depth < 0:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
+
+
+def _tags_mentioned(msg: dict, names: list) -> list:
+    """Which of `names` a history record mentions, by find_mentions' rule (own posts skipped)."""
+    if not find_mentions([msg], names=names):
+        return []
+    content = msg.get("content", "") or msg.get("text", "")
+    return [n for n in names if any(p.search(content) for p in _mention_patterns([n]))]
+
+
+def _remember_history_line(group_id: str, msg: dict, names: list, node_id: str) -> None:
+    """A printed history record that mentions one of this bridge's tags leaves its hint.
+    An unreadable timestamp counts as now — the direction that stops a chain."""
+    depth = _reply_mention_depth(msg, node_id)
+    if not depth:
+        return
+    for tag in _tags_mentioned(msg, names):
+        _remember_reply_depth(group_id, tag, depth, _moment(msg.get("timestamp")))
+
+
+def _depth_for_send(group_id: str, tag: str, explicit) -> tuple:
+    """(depth, where it came from) for a send: --mention-depth when given, else the
+    remembered one, else 0."""
+    if explicit is not None:
+        return explicit, "--mention-depth"
+    remembered = _remembered_depth(group_id, tag)
+    return remembered, ("remembered" if remembered else "default")
+
+
+def _mention_depth_arg(value: str) -> int:
+    """argparse type for --mention-depth: a whole number >= 0 in ASCII digits.
+    int() alone would also take "1_0", " 1" or "+1"; "1.5" it refuses."""
+    if not re.fullmatch(r"[0-9]+", value):
         raise argparse.ArgumentTypeError(f"must be a whole number >= 0, got {value!r}")
-    return depth
+    return int(value)
 
 
 def _send_outcome(reply: dict) -> tuple:
@@ -337,10 +495,12 @@ async def send_group_message(group_id: str, text: str, name: str = None,
                 deadline = asyncio.get_running_loop().time() + 10
                 result = await _await_reply(ws, command["id"], deadline)
                 _, status = _send_outcome(result)
-                print(f"[SENT] {len(text)} chars → group {group_id}: {status}")
+                print(f"[SENT] {len(text)} chars → group {group_id}: {status} "
+                      f"(mention_depth={mention_depth})")
                 return result
             except asyncio.TimeoutError:
-                print(f"[SENT] {len(text)} chars → group {group_id} (no response, timeout)")
+                print(f"[SENT] {len(text)} chars → group {group_id} (no response, timeout) "
+                      f"(mention_depth={mention_depth})")
                 return {"status": "sent"}
     except ConnectionRefusedError:
         print("[ERROR] Cannot connect to backend. Is it running?")
@@ -350,25 +510,28 @@ async def send_group_message(group_id: str, text: str, name: str = None,
         return {"status": "error", "message": str(e)}
 
 
-def _resolve_group_id(group_id: str) -> str:
-    """Resolve canonical group_id from metadata.json.
+def _canonical_group_id(group_id: str) -> str:
+    """The canonical group_id from metadata.json, silently; `group_id` when unreadable.
 
     The --group argument may be a slugged directory name (e.g. group-abc123-dpc-discord)
     but the backend expects the canonical group_id from metadata.json (e.g. group-abc123).
     """
-    group_dir = _find_group_dir(group_id)
-    metadata_path = group_dir / "metadata.json"
-    if metadata_path.exists():
-        try:
+    try:
+        metadata_path = _find_group_dir(group_id) / "metadata.json"
+        if metadata_path.exists():
             with open(metadata_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            canonical = meta.get("group_id", group_id)
-            if canonical != group_id:
-                print(f"[INFO] Resolved {group_id} → {canonical}")
-            return canonical
-        except Exception:
-            pass
+                return json.load(f).get("group_id", group_id)
+    except Exception:
+        pass
     return group_id
+
+
+def _resolve_group_id(group_id: str) -> str:
+    """_canonical_group_id, saying so when it differs from what was typed."""
+    canonical = _canonical_group_id(group_id)
+    if canonical != group_id:
+        print(f"[INFO] Resolved {group_id} → {canonical}")
+    return canonical
 
 
 def send_group_message_sync(group_id: str, text: str, name: str = None,
@@ -452,6 +615,10 @@ async def listen_for_mentions(group_id: str, names: list, all_tags: bool = False
                         continue
                     print(json.dumps(payload, ensure_ascii=False) if as_json
                           else _format_mention(payload), flush=True)
+                    # --all-tags prints other tags' mentions too; only ours leave a hint.
+                    tag = str(payload.get("agent_tag") or "")
+                    if tag.lower() in names_lower:
+                        _remember_reply_depth(canonical_id, tag, payload.get("mention_depth"))
                     if once:
                         return 0
         except Exception as e:  # socket closed, backend down, bad auth frame — all transient
@@ -498,15 +665,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--send", type=str, help="Send a response as this bridge's name")
     parser.add_argument("--send-file", type=str, dest="send_file",
                         help="Send a response from file as this bridge's name (backtick-safe)")
-    parser.add_argument("--mention-depth", type=_mention_depth_arg, default=0,
+    parser.add_argument("--mention-depth", type=_mention_depth_arg, default=None,
                         dest="mention_depth", metavar="N",
                         help="With --send/--send-file: the mention_depth the post carries, "
-                             "signed. Pass the N that the [MENTION] line or the history "
-                             "line of the mention being answered shows as "
-                             "[--mention-depth N]; no mark means 0, the default. An agent "
-                             "post from another node wakes an agent on its receiver only "
-                             "at 0, so a reply sent without it can start a loop between "
-                             "two bridges")
+                             "signed. Optional: without it the post carries the largest N "
+                             "this bridge printed as [--mention-depth N] on a [MENTION] "
+                             "line or a history line for its tag in this group, for a "
+                             "mention made in the last hour, else 0; a post that goes out "
+                             "consumes it. Given, N (0 too) wins and also consumes it. An "
+                             "agent post from another node wakes an agent on its receiver "
+                             "only at 0, so a reply at 0 where N was shown can start a loop "
+                             "between two bridges. [SENT] names the depth sent")
     parser.add_argument("--as", type=str, dest="as_name", metavar="TAG",
                         help="Post/scan as this tag (default: the tag registered in "
                              "Group Settings, else cc_display_name)")
@@ -523,8 +692,22 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-if __name__ == "__main__":
-    args = _build_parser().parse_args()
+def _send_and_consume(group_id: str, text: str, name: str, explicit) -> int:
+    """Post at the depth _depth_for_send picks; a post that went out consumes the
+    remembered one. A refused or failed post keeps it, so the retry carries it too."""
+    canonical = _canonical_group_id(group_id)
+    depth, source = _depth_for_send(canonical, name, explicit)
+    if source == "remembered":
+        print(f"[INFO] mention_depth {depth} remembered from the last mention of @{name} shown")
+    code = _send_exit_code(send_group_message_sync(group_id, text, name, depth))
+    if code == 0:
+        _forget_depth(canonical, name)
+    return code
+
+
+def main(argv=None):
+    """The CLI. Exits through sys.exit as it always has; a read returns None."""
+    args = _build_parser().parse_args(argv)
 
     if args.list:
         groups = list_groups()
@@ -550,8 +733,7 @@ if __name__ == "__main__":
 
     if args.send:
         name = _resolve_identity(args.group, args.as_name)
-        sys.exit(_send_exit_code(send_group_message_sync(args.group, args.send, name,
-                                                         args.mention_depth)))
+        sys.exit(_send_and_consume(args.group, args.send, name, args.mention_depth))
 
     if args.send_file:
         try:
@@ -560,19 +742,24 @@ if __name__ == "__main__":
             print(f"[ERROR] Cannot read --send-file: {e}", file=sys.stderr)
             sys.exit(1)
         name = _resolve_identity(args.group, args.as_name)
-        sys.exit(_send_exit_code(send_group_message_sync(args.group, text, name,
-                                                         args.mention_depth)))
+        sys.exit(_send_and_consume(args.group, text, name, args.mention_depth))
 
     messages = read_history(args.group, last_n=args.last)
     print(f"[CC Group Bridge] {len(messages)} messages (last {args.last})\n")
 
     node_id = _get_node_id()
+    names = _identity_names(args.group, args.as_name)
+    canonical = _canonical_group_id(args.group)
     if args.mentions:
-        names = _identity_names(args.group, args.as_name)
         mentions = find_mentions(messages, names=names)
         print(_mentions_banner(names, len(mentions)))
-        for i, msg in mentions:
-            print(format_message(i, msg, node_id))
+        shown = mentions
     else:
-        for i, msg in enumerate(messages):
-            print(format_message(i, msg, node_id))
+        shown = list(enumerate(messages))
+    for i, msg in shown:
+        print(format_message(i, msg, node_id))
+        _remember_history_line(canonical, msg, names, node_id)
+
+
+if __name__ == "__main__":
+    main()

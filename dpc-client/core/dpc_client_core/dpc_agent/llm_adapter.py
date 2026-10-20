@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # How a guest agent waits for a model its host is still loading (Mike's call
-# 2026-10-20): a refusal coded `provider_loading` (DPTP v1.10) is asked
+# 2026-10-20): a refusal coded `provider_loading` (DPTP v1.9) is asked
 # again every PEER_LOADING_RETRY_EVERY_S, up to PEER_LOADING_WAIT_CAP_S in all.
 # Ten seconds: each ask is one small frame and the host answers it at its door
 # before anything runs, so asking often costs neither node anything, and a

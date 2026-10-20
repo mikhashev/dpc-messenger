@@ -49,7 +49,7 @@ class EngineUnavailable(RuntimeError):
     `code` is the refusal code it travels as: `provider_unavailable`, or
     `provider_loading` when the policy said the engine is loading
     (`StartingRefusal`) - the word that lets a guest agent wait for a load
-    instead of failing (DPTP v1.10, Mike's call 2026-10-20)."""
+    instead of failing (DPTP v1.9, Mike's call 2026-10-20)."""
 
     def __init__(self, message: str, code: str = REFUSAL_PROVIDER_UNAVAILABLE):
         super().__init__(message)
@@ -1118,7 +1118,7 @@ class P2PCoordinator:
 
         except EngineUnavailable as e:
             # A guest agent asks again every few seconds while the engine
-            # loads (`provider_loading`, DPTP v1.10), so that refusal is
+            # loads (`provider_loading`, DPTP v1.9), so that refusal is
             # routine, not a warning.
             level = logging.INFO if e.code == REFUSAL_PROVIDER_LOADING else logging.WARNING
             logger.log(level, "Peer inference refused for %s: %s", peer_id, e)

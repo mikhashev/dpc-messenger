@@ -1443,7 +1443,7 @@ class Gateway:
                 # running, or its cache held by the owner (ADR-044 point 9).
                 # A 503 the client may retry later; this route never retries it.
                 "provider_unavailable": 503,
-                # The host's engine is loading its model (DPTP v1.10): the same
+                # The host's engine is loading its model (DPTP v1.9): the same
                 # 503 and, like it, no `Retry-After` - the host does not know
                 # when the load ends. A guest agent waits it out; this route
                 # does not.

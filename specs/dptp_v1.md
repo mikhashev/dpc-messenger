@@ -2424,7 +2424,9 @@ field 11 of the `dptp-msg-v3` preimage (§4.1), so a relay cannot lower it.
 2. An agent's post that is `verified` (§4.2) over `dptp-msg-v3` or later is an
    agent's post because its signed `sender_type` says `agent`; the unsigned
    `is_agent` is not read. It may wake an agent on this node only while its
-   signed `mention_depth` is below **1** (`CROSS_NODE_MENTION_DEPTH_LIMIT`).
+   signed `mention_depth` is below **1** (`CROSS_NODE_MENTION_DEPTH_LIMIT`). A
+   `mention_depth` that is not a whole number >= 0 (`0.5`, `"0"`, `true`) wakes
+   nobody; it is not rounded.
 3. An agent's post signed over v1 or v2, `unverified`, or `legacy` wakes
    nobody — either `is_agent` or `sender_type: "agent"` is enough — which is
    the rule every node followed before v1.10. An older peer's agent therefore
@@ -2444,18 +2446,23 @@ B, B's reply stops.
 posts through `send_group_agent_message` and is counted by the same table. The
 node's local `cc_group_mention` event carries `mention_depth`: the depth the
 woken agent's reply carries, the value an embedded agent woken by the same post
-is given. The bridge sends it back with `--mention-depth N`, and its history
+is given. The bridge prints it as `[--mention-depth N]`, and its history
 view marks an agent's post with the `N` a reply to it carries — one deeper for
 a post from another node even where the node would have woken nobody, the
-direction that stops a chain. A reply sent without it carries 0, so the bound
-holds for a bridge only as far as its caller passes the number on.
+direction that stops a chain. The bridge carries the number itself: it
+remembers, per group and tag, the largest `N` it printed for a mention of its
+own tag within the last hour (by the mention's time), the next post it sends
+there carries it and consumes it, and `--mention-depth N` overrides it, 0
+included. The bound therefore no longer rests on the caller passing the number
+on; it is lost only to a send more than an hour after the mention.
 
 **Not bounded here.** A `check_back` result and a morning brief carry 0.
 Agent-to-agent mentions inside one node have no bound of their own.
 
 **Implementation:** `message_handlers/group_handler.signed_mention_depth`,
 `GroupTextHandler._handle_agent_mentions`, `service.send_group_agent_message`,
-`cc_group_chat_bridge.py` (`--mention-depth`, `_reply_mention_depth`)
+`cc_group_chat_bridge.py` (`--mention-depth`, `_reply_mention_depth`,
+`_remember_reply_depth`, `_depth_for_send`)
 
 ## 5. Connection Flow
 
@@ -2690,8 +2697,9 @@ DPTP is designed to be extensible. New commands can be added by:
   v1.9 or older: it reads a v3 signature as `legacy` (§4.2 rule 4), so until it
   updates it attributes a relayed post to the relay, and it still wakes nothing
   from an agent post. An external agent's bridge is counted too: the local
-  `cc_group_mention` event hands it the depth its reply carries, and it posts
-  it with `--mention-depth`.
+  `cc_group_mention` event hands it the depth its reply carries, and the
+  bridge carries it to its next post in that group itself (`--mention-depth`
+  overrides).
 
 ### v1.9 (October 2026)
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — refusal code `provider_loading` (the

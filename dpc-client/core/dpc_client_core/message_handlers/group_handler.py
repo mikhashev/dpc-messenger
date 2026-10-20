@@ -46,11 +46,11 @@ def signed_mention_depth(payload: Dict[str, Any], verification: str):
         raw = payload.get("mention_depth")
         if raw in (None, ""):
             return True, 0
-        try:
-            depth = int(raw)
-        except (TypeError, ValueError):
+        # Only a whole number counts: int() would read a signed 0.5 as 0 and wake
+        # an agent, where the send door refuses anything but a whole number.
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
             return True, None
-        return True, (depth if depth >= 0 else None)
+        return True, raw
     if payload.get("is_agent", False) or payload.get("sender_type") == "agent":
         return True, None
     return False, 0

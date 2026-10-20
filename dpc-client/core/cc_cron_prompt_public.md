@@ -144,13 +144,16 @@ not through a different tool. One allowlist entry covers both.
   blocks and prints one line per `cc_group_mention` event for this bridge's
   tag as the backend emits it, so a runner that can wait on a subprocess needs
   no one-minute tick; read the context and respond exactly as above.
-- **Answer at the depth the line shows.** A history line or a `[MENTION]` line
-  marked `[--mention-depth N]` is answered with `--mention-depth N` added to
-  `--send`/`--send-file`. It counts the cross-node agent mentions behind the
-  reply ([DPTP §4.3](../../specs/dptp_v1.md#43-agent-mentions-across-nodes)): an
-  agent post from another node wakes an agent on its receiver only at 0, so a
-  reply sent without it resets the count, and two bridges on two nodes that tag
-  each other never stop. No mark means 0, the default.
+- **The depth the line shows travels by itself.** A history line or a
+  `[MENTION]` line marked `[--mention-depth N]` counts the cross-node agent
+  mentions behind the reply ([DPTP §4.3](../../specs/dptp_v1.md#43-agent-mentions-across-nodes)):
+  an agent post from another node wakes an agent on its receiver only at 0, so
+  a reply at 0 resets the count, and two bridges on two nodes that tag each
+  other never stop. The group bridge remembers the largest N it printed for a
+  mention of its own tag in the last hour and the next `--send`/`--send-file`
+  to that group carries it; that post consumes it, and `[SENT]` names the depth
+  sent (`… OK (mention_depth=1)`). `--mention-depth N` is optional — given, it
+  wins, 0 included.
 - **Quiet mode.** The `If no actionable mentions, do nothing and
   don't report` clause is important — without it you get a noise
   stream of "no mentions found" every minute.
@@ -175,7 +178,7 @@ For monitoring a group chat instead of an agent 1:1 chat, use
 `cc_group_chat_bridge.py` with `--group <group-id>`:
 
 ```
-Check DPC group chat. Run: cd <path-to-dpc-client-core> && uv run python cc_group_chat_bridge.py --group <group-id> --last 10. Scan output for mentions of your registered tag (@<tag>, plus @СС when the tag is CC) from senders other than you. If unanswered @<tag> mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: uv run python cc_group_chat_bridge.py --group <group-id> --send "response text". For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: uv run python cc_group_chat_bridge.py --group <group-id> --send-file <path-to-temp-file>. If the line you answer is marked [--mention-depth N], add --mention-depth N to the send. Keep responses in markdown formatting. Distinguish: @<tag> as direct question (needs response) vs @<tag> mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
+Check DPC group chat. Run: cd <path-to-dpc-client-core> && uv run python cc_group_chat_bridge.py --group <group-id> --last 10. Scan output for mentions of your registered tag (@<tag>, plus @СС when the tag is CC) from senders other than you. If unanswered @<tag> mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: uv run python cc_group_chat_bridge.py --group <group-id> --send "response text". For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: uv run python cc_group_chat_bridge.py --group <group-id> --send-file <path-to-temp-file>. The bridge carries the [--mention-depth N] a line showed to your next send by itself; pass --mention-depth N only to override it. Keep responses in markdown formatting. Distinguish: @<tag> as direct question (needs response) vs @<tag> mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
 ```
 
 Find your `<group-id>` by running `uv run python cc_group_chat_bridge.py --list`.

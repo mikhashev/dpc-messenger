@@ -214,9 +214,11 @@ def test_the_send_command_carries_the_depth_only_above_zero(bridge):
 
 def test_the_cli_takes_mention_depth_and_refuses_a_negative_one(bridge):
     parser = bridge._build_parser()
-    assert parser.parse_args(["--group", GROUP, "--send", "x"]).mention_depth == 0
+    # Absent is None, not 0: the send then carries the depth the bridge remembers.
+    assert parser.parse_args(["--group", GROUP, "--send", "x"]).mention_depth is None
+    assert parser.parse_args(["--group", GROUP, "--send", "x", "--mention-depth", "0"]).mention_depth == 0
     assert parser.parse_args(["--group", GROUP, "--send", "x", "--mention-depth", "1"]).mention_depth == 1
-    for bad in ("-1", "one"):
+    for bad in ("-1", "one", "1.5", "1_0"):
         with pytest.raises(SystemExit):
             parser.parse_args(["--group", GROUP, "--send", "x", "--mention-depth", bad])
     assert "--mention-depth" in parser.format_help()
@@ -254,3 +256,14 @@ async def test_send_group_agent_message_refuses_a_depth_that_is_not_a_whole_numb
         "group_id": GROUP, "agent_name": "CC_a", "text": "x", "mention_depth": bad}})
     assert isinstance(result, dict) and result["status"] == "error", result
     assert a.broadcast == [], "a refused depth still reached the wire"
+
+
+# --- the receiving side reads only a whole number ------------------------------
+
+@pytest.mark.parametrize("raw,expected", [(0, 0), (1, 1), (0.5, None), (1.5, None),
+                                          (True, None), ("0", None), (-1, None)])
+def test_a_signed_depth_that_is_not_a_whole_number_wakes_nobody(raw, expected):
+    """int() read a signed 0.5 as 0, and 0 wakes an agent here."""
+    from dpc_client_core.message_handlers.group_handler import signed_mention_depth
+    payload = {"preimage_version": PREIMAGE_VERSION, "sender_type": "agent", "mention_depth": raw}
+    assert signed_mention_depth(payload, "verified") == (True, expected)

@@ -53,7 +53,7 @@ _STRATA_FLAG_KEYS = (
 class StartingRefusal(str):
     """The peer policy's answer while the launcher is starting: the text, and
     the refusal code the P2P door sends it under, `provider_loading` (DPTP
-    v1.10) - not `provider_unavailable`, which no wait of a guest's ends.
+    v1.9) - not `provider_unavailable`, which no wait of a guest's ends.
 
     A `str`, because `peer_refusal` has always answered a text and every reader
     of it compares or prints one; the door alone asks for `refusal_code`. The

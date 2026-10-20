@@ -199,8 +199,9 @@ Every command above accepts `--conversation-id NAME-OR-FOLDER`:
 - Folder ids that don't match any agent (group chats, P2P peers) pass
   through; the bridge prints a warning to stderr but does not exit.
 
-There is no state kept inside the bridge between invocations. Each
-call re-reads `history.json` from scratch.
+There is no state kept inside the agent-chat bridge between invocations.
+Each call re-reads `history.json` from scratch. (The group bridge keeps one
+small file, below.)
 
 ### The group bridge
 
@@ -217,7 +218,7 @@ agent-chat bridge but reads from group history files and sends via
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only mentions of this bridge's tag, matched as a whole word (`@CC_mike`, not `@CC` or `@CC_mike2`). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "text"` | Post (or, with `--mentions`, scan) as one specific registered tag. |
-| `uv run python cc_group_chat_bridge.py --group GROUP_ID --listen` | Block and print one `[MENTION]` line per `cc_group_mention` event for this bridge's tag as the backend emits it; reconnects with backoff when the backend drops. `--once` exits 0 after the first match, `--json` prints the payload as one JSON object per line, `--all-tags` takes every tag in the group. A line marked `[--mention-depth N]` is answered with `--send … --mention-depth N` (the payload's `mention_depth`), so two bridges on two nodes stop after one crossing ([DPTP §4.3](../../specs/dptp_v1.md#43-agent-mentions-across-nodes)). |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --listen` | Block and print one `[MENTION]` line per `cc_group_mention` event for this bridge's tag as the backend emits it; reconnects with backoff when the backend drops. `--once` exits 0 after the first match, `--json` prints the payload as one JSON object per line, `--all-tags` takes every tag in the group. A line marked `[--mention-depth N]` (the payload's `mention_depth`) is answered at depth N — the bridge carries it to the next send itself, see below — so two bridges on two nodes stop after one crossing ([DPTP §4.3](../../specs/dptp_v1.md#43-agent-mentions-across-nodes)). |
 
 The `--group` argument accepts either the canonical group ID
 (`group-abc123`) or the slugged directory name (`group-abc123-my-project`).
@@ -231,6 +232,33 @@ prints `[INFO] posting as <tag>` before `[SENT]`. With several tags
 registered and no `--as`, `--send` refuses with exit code 2 and lists them;
 `--mentions` scans for all of them and its banner names every tag scanned
 (`No mentions of @CC_mike found.` / `=== 2 mention(s) of @CC_mike ===`).
+
+**The depth a reply carries.** A `[MENTION]` line, and a history line from
+`--last N` or `--mentions`, is marked `[--mention-depth N]` when a reply to it
+must carry `mention_depth` N ([DPTP §4.3](../../specs/dptp_v1.md#43-agent-mentions-across-nodes)).
+The bridge remembers that N for the tag the line mentions, per group, in
+`~/.dpc/group_bridge_mention_depth.json` (beside `.ws_token`, written
+atomically), and the next `--send` / `--send-file` to that group under that tag
+carries it when no `--mention-depth` is given. The rules:
+
+- **One shot.** A post that goes out (an `OK` or a timed-out reply) consumes
+  it; the send after carries 0 again. A refused or failed post keeps it for the
+  retry.
+- **An explicit `--mention-depth N` wins**, 0 included, and consumes it too.
+- **Several lines before one send: the largest N.** The send answers one of
+  them and the bridge cannot tell which; a reply too deep only fails to wake a
+  peer agent, one too shallow restarts the chain.
+- **An hour, by the mention's own time.** A remembered N older than
+  `MENTION_DEPTH_TTL_S` (3600 s) is ignored, measured from the event's arrival
+  or the history record's timestamp, so re-reading the same last 10 lines every
+  minute does not keep an old mention alive.
+- Only a mention of a tag this bridge answers to counts; a line mentioning
+  someone else, or a `--listen --all-tags` line for another tag, leaves nothing.
+
+`[SENT]` always names the depth that went out, 0 included:
+`[SENT] 123 chars → group group-abc123: OK (mention_depth=1)`; when it came
+from memory an `[INFO] mention_depth 1 remembered …` line precedes it.
+`--mention-depth` takes ASCII digits only — `1.5`, `+1` and `1_0` are refused.
 
 **Harnesses without a cron: `--listen`.** Instead of polling `history.json`
 every minute, `--listen` authenticates on the local WebSocket (the same

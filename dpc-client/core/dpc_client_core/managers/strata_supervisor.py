@@ -89,7 +89,7 @@ class PeerCallRefused(LlamaServerError):
     """A peer's call refused by the Strata supervisor itself (ADR-044 point 9):
     the host answers it `provider_unavailable`, and this node never retries it.
     The guest does not either: this refusal is not coded `provider_loading`,
-    which is the only code a guest agent waits on (DPTP v1.10)."""
+    which is the only code a guest agent waits on (DPTP v1.9)."""
 
 
 class PeerStartRefused(PeerCallRefused):

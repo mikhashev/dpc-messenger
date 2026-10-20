@@ -443,7 +443,7 @@ STATUS_FOR = {
     "misconfigured": 503,
     # The host's local engine cannot take a peer now (ADR-044 point 9).
     "provider_unavailable": 503,
-    # The host's engine is loading its model (DPTP v1.10): the same 503.
+    # The host's engine is loading its model (DPTP v1.9): the same 503.
     "provider_loading": 503,
 }
 OPENAI_TYPE_FOR = {400: "invalid_request_error", 403: "permission_error",
@@ -540,7 +540,7 @@ async def test_a_host_only_its_owner_can_repair_is_a_503_and_not_a_429(tmp_path,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("code", ["provider_loading", "provider_unavailable"])
 async def test_a_host_loading_its_model_is_a_503_without_retry_after(tmp_path, code):
-    """`provider_loading` (DPTP v1.10) is answered like `provider_unavailable`:
+    """`provider_loading` (DPTP v1.9) is answered like `provider_unavailable`:
     503 with the host's own word, and no `Retry-After`, because the host does
     not know when the load ends. The gateway's peer route never waits it out;
     only a guest agent does."""
