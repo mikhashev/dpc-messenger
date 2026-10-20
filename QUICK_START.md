@@ -239,6 +239,13 @@ uv sync --all-extras
 | `pdf` | pypdfium2 — PDF reading for `read_document` |
 | `mlx` | macOS Apple Silicon only — GPU Whisper via MLX |
 
+> **`browser` installs the package, not the browser.** The Camoufox browser
+> itself is a separate one-time download of about 1.3 GB (the size of the
+> current release). The first browser tool call that needs it is refused and
+> the app offers the download in the same dialog it uses for the Whisper
+> model; to fetch it ahead of time instead, run `uv run camoufox fetch` in
+> `dpc-client/core`.
+
 **To add one extra to an environment that already works, use `--inexact`:**
 
 ```bash

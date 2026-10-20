@@ -39,6 +39,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from urllib.parse import urlparse as _urlparse
 
 from .registry import ToolEntry, ToolContext
+from dpc_client_core.camoufox_binary import CamoufoxBinaryMissing
 
 log = logging.getLogger(__name__)
 
@@ -616,12 +617,57 @@ def _is_session_dead(exc: BaseException) -> bool:
     return any(marker in text for marker in _SESSION_DEAD_MARKERS)
 
 
+def _require_camoufox_binary() -> None:
+    """Raise `CamoufoxBinaryMissing` instead of letting `Camoufox(...)` start
+    the package's own 1.3 GB download inside a tool call (2026-10-21, Linux
+    node: the first browse_page hung for minutes behind a tqdm bar nobody
+    saw). An absent *package* is left to the import that follows, which has
+    its own message."""
+    from dpc_client_core import camoufox_binary
+
+    reason = camoufox_binary.missing_reason()
+    if reason is None or reason == "package_missing":
+        return
+    log.info("Camoufox launch refused: browser binary %s", reason)
+    raise camoufox_binary.CamoufoxBinaryMissing(
+        camoufox_binary.refusal_text(reason, asked=False, declined=False)
+    )
+
+
+async def _camoufox_binary_refusal(ctx: Any, exc: Exception) -> str:
+    """The answer a browser tool gives when the binary is missing: asks the
+    owner through the model-download consent flow (once per session, as for
+    Whisper) and words the refusal by what that flow now knows."""
+    from dpc_client_core import camoufox_binary
+
+    reason = camoufox_binary.missing_reason() or "missing"
+    service = getattr(getattr(ctx, "dpc_service", None), "model_download_service", None)
+    asked = declined = False
+    if service is not None and reason != "downloading":
+        try:
+            await service.maybe_emit_required(
+                camoufox_binary.DOWNLOAD_NAME,
+                purpose=camoufox_binary.PURPOSE,
+                consequence_if_declined=camoufox_binary.CONSEQUENCE_IF_DECLINED,
+            )
+            declined = service.get_status(camoufox_binary.DOWNLOAD_NAME).get("state") == "declined"
+            asked = not declined
+        except Exception:
+            log.warning("could not offer the Camoufox browser download", exc_info=True)
+    if reason == "package_missing":
+        return str(exc)
+    return camoufox_binary.refusal_text(reason, asked=asked, declined=declined)
+
+
 def _browse_with_camoufox(url: str, agent_id: str = "<anonymous>") -> Optional[str]:
     try:
         from camoufox.sync_api import Camoufox
     except ImportError:
         return None
 
+    # Outside the try below on purpose: a missing binary is the caller's to
+    # report, not a fallback that quietly answers None.
+    _require_camoufox_binary()
     try:
         with Camoufox(headless=True, **_camoufox_launch_kwargs()) as browser:
             page = browser.new_page()
@@ -2525,6 +2571,7 @@ class AuthBrowser:
     def _open(self) -> None:
         from camoufox.sync_api import Camoufox
 
+        _require_camoufox_binary()
         before_pids = self._snapshot_child_pids()
         self._cm = Camoufox(headless=not self._headed, **_camoufox_launch_kwargs())
         self._browser = self._cm.__enter__()
@@ -4948,6 +4995,9 @@ async def _fetch_js_text(url: str, agent_id: Optional[str]) -> Optional[str]:
             session = await _get_or_create_fetch_session(agent_id)
             html = await _run_in_session(session, "fetch_html", url)
             return _html_to_markdown(html)
+        except CamoufoxBinaryMissing:
+            # The one-shot browser needs the same binary.
+            raise
         except Exception as exc:
             log.warning(
                 "pooled fetch browser failed (agent=%s, url=%s): %s — "
@@ -5223,6 +5273,11 @@ async def browse_page(
                 agent_id, use_auth, url, status="domain_mismatch"
             )
             return f"⚠️ {e}"
+        except CamoufoxBinaryMissing as e:
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="camoufox_missing"
+            )
+            return await _camoufox_binary_refusal(ctx, e)
         except ImportError:
             _web_auth_mod.audit_append(
                 agent_id, use_auth, url, status="camoufox_missing"
@@ -5275,6 +5330,8 @@ async def browse_page(
             session = await _get_or_create_session_async(agent_id, [], True)
             session = await _navigate_with_recovery(session, agent_id, url, [])
             html = await _run_in_session(session, "get_page_html")
+        except CamoufoxBinaryMissing as e:
+            return await _camoufox_binary_refusal(ctx, e)
         except Exception as e:
             return f"⚠️ Camoufox browser failed: {e}"
         text = _html_to_markdown(html)
@@ -5298,9 +5355,15 @@ async def browse_page(
     agent_id = getattr(getattr(ctx, "agent_root", None), "name", None)
     renderer = "static"
     rendered_chars: Optional[int] = None
+    binary_notice = ""
 
     if result.get("needs_js") or verify:
-        js_text = await _fetch_js_text(url, agent_id)
+        try:
+            js_text = await _fetch_js_text(url, agent_id)
+        except CamoufoxBinaryMissing as e:
+            # The static text is still an answer; say why it was not rendered.
+            js_text = None
+            binary_notice = "\n\n" + await _camoufox_binary_refusal(ctx, e)
         if js_text is not None:
             rendered_chars = len(js_text)
             if len(js_text) > len(text or ""):
@@ -5346,7 +5409,7 @@ async def browse_page(
         except Exception as e:  # auditing must never break a fetch
             log.warning("anonymous fetch audit failed (%s): %s", url, e)
 
-    return _page_answer(header, full_text, text, saved_to)
+    return _page_answer(header, full_text, text, saved_to) + binary_notice
 
 
 FETCH_JSON_WINDOW = 10_000  # chars of pretty-printed JSON per call

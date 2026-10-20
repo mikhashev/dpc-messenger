@@ -1,7 +1,8 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
 
-  // Props — generic across any model (Whisper, bge-m3, ...). No numeric
+  // Props — generic across any download (Whisper, bge-m3, the Camoufox
+  // browser binary, ...), so no text below names one source. No numeric
   // size default: size_bytes null means "unknown", shown as such rather
   // than guessed.
   export let open: boolean = false;
@@ -46,7 +47,7 @@
   <div class="modal-overlay" role="presentation">
     <div class="modal" role="dialog" aria-labelledby="dialog-title" tabindex="-1">
       <div class="modal-header">
-        <h2 id="dialog-title">📥 Download Model</h2>
+        <h2 id="dialog-title">📥 Download Required</h2>
         <button class="btn-close" on:click={handleClose} disabled={downloading} aria-label="Close">✕</button>
       </div>
 
@@ -54,11 +55,11 @@
         <!-- Model Info -->
         <div class="section">
           <p class="model-message">
-            The model <strong>{modelName}</strong> is not found in your local cache.
+            <strong>{modelName}</strong> is not on this machine yet.
           </p>
           {#if purpose}
             <p class="model-details">
-              This model is required for {purpose}. Would you like to download it now?
+              It is required for: {purpose}. Would you like to download it now?
             </p>
           {/if}
           {#if consequenceIfDeclined}
@@ -79,8 +80,8 @@
         <div class="section instructions">
           <p><strong>What happens next:</strong></p>
           <ul>
-            <li>The model will be downloaded from Hugging Face (may take a few minutes)</li>
-            <li>After download, it will be cached locally for offline use</li>
+            <li>It will be downloaded to the location above (may take a few minutes)</li>
+            <li>After download, it is kept there for offline use</li>
             <li>You only need to download once</li>
           </ul>
         </div>
@@ -88,7 +89,7 @@
         <!-- Download Progress (if downloading) -->
         {#if downloading}
           <div class="section progress-section">
-            <p class="downloading-text">⏳ Downloading model, please wait...</p>
+            <p class="downloading-text">⏳ Downloading, please wait...</p>
             <p class="downloading-note">This may take several minutes depending on your connection.</p>
           </div>
         {/if}

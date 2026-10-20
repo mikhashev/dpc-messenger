@@ -401,6 +401,8 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 
 Interactive headed/headless browser driven via Camoufox + Playwright. Disabled by default (least privilege) — enable per agent in the firewall.
 
+`uv sync --extra browser` installs the camoufox package and no browser. While the Camoufox browser binary (about 1.3 GB) is not on disk, every tool that would open a browser — `browse_page` included — answers with a refusal instead of downloading it inside the call, and the app asks the owner through the model-download dialog; `uv run camoufox fetch` in `dpc-client/core` fetches it by hand. The download is logged in `dpc-client.log` with its progress.
+
 | Tool | Description | Default |
 |------|-------------|---------|
 | `browser_snapshot` | Accessibility-tree snapshot of the page with element refs | ⛔ opt-in |

@@ -82,3 +82,15 @@ def service_with_ui(answer: str = "approve", **extra):
     import types
 
     return types.SimpleNamespace(local_api=ConnectedUi(answer), **extra)
+
+
+@pytest.fixture(autouse=True)
+def _camoufox_binary_counts_as_present(monkeypatch):
+    """browser.py refuses to launch while the Camoufox browser binary is not
+    on disk (2026-10-21). CI installs the package and never the binary, and a
+    developer box usually has it, so every test that stubs `Camoufox` would
+    pass here and refuse there. The answer is fixed to "present"; the tests of
+    the refusal itself set it back."""
+    from dpc_client_core import camoufox_binary
+
+    monkeypatch.setattr(camoufox_binary, "missing_reason", lambda: None)
