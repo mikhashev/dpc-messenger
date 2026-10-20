@@ -17,7 +17,9 @@ session: "DPC Project group chat, 2026-10-17/18 — epic STRATA-AS-A-SECOND-LOCA
 
 > **Accepted, 2026-10-18 (Mike's call).** Extends ADR-040: that record made local
 > inference a DPC-owned `llama-server` child; this one adds a second engine under the same
-> ownership model. No code exists yet.
+> ownership model. Implemented as the epic
+> `STRATA-AS-A-SECOND-LOCAL-PROVIDER-BESIDE-THE-LLAMA-SERVER-CHILD` (provider type `strata`,
+> `strata_supervisor.py`, `strata_provider.py`); the board holds what is still unobserved.
 >
 > **Amended the same day after Ark's and Johnny's reviews.** The decisions stand; the
 > mechanisms are corrected against Strata's source (the child is Strata's launcher, not
@@ -98,7 +100,9 @@ card.** Every point is Mike's call, 2026-10-18.
 3. **An engine death is fail-closed.** It is defined on what DPC can observe, since the
    engine is not DPC's child and its exit is not a child exit: an engine death seen
    through the launcher (`/metrics` `live.state` `unloaded` while DPC configured no idle
-   unload, or a 503 naming the engine's exit code) makes the supervisor stop the launcher
+   unload (since 2026-10-20 it does: `idle_unload_s` is 1800, Mike's call, 2026-10-20, and the supervisor reads a
+   configured unload as a state rather than a death, `_unload_expected` in `strata_supervisor.py`),
+   or a 503 naming the engine's exit code) makes the supervisor stop the launcher
    before it relaunches the engine, and show the reason — the exit code as the launcher
    reported it, with the commit-limit explanation — in the UI. The subclass overrides the
    inherited `ensure_running` so DPC itself never relaunches after such a stop; a person
