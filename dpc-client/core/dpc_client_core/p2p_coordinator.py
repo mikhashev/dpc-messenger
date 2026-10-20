@@ -22,7 +22,7 @@ from .firewall import (
     ServingLists,
     onward_sharing_refusal,
 )
-from .node_ledger import NodeLedger, default_ledger, response_counts, tariff_amount_for, usage_row
+from .node_ledger import ENGINE_FIELDS, NodeLedger, default_ledger, response_counts, tariff_amount_for, usage_row
 from .guest_vendor_quota import guest_vendor_quota_refusal
 
 logger = logging.getLogger(__name__)
@@ -712,6 +712,9 @@ class P2PCoordinator:
                 tariff_currency=tariff.currency if tariff else None,
                 tariff_at=tariff.at if tariff else None,
                 tariff_amount=tariff_amount,
+                # The engine's word on the call, as `llm_manager` read it from
+                # the provider's usage; only `finish_reason` goes on the wire.
+                **{name: result.get(name) for name in ENGINE_FIELDS},
                 # The `llm_manager` dict: `query` has no `tool_calls` key (null),
                 # `query_messages` always has the list it parsed.
                 **response_counts(result.get("response"), result.get("tool_calls")),
@@ -1107,8 +1110,8 @@ class P2PCoordinator:
                 # way to check the depth it paid for against the depth it asked for.
                 served_effort=ran_effort,
                 # The calls the model made, already `tool_use` blocks, and the
-                # word its provider stopped on. Both empty on the prompt path,
-                # where no entry point reports either.
+                # word its provider stopped on. On the prompt path the calls are
+                # empty and the word is the provider's last usage, or None.
                 tool_calls=result.get("tool_calls"),
                 finish_reason=result.get("finish_reason"),
             )

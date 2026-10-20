@@ -644,7 +644,7 @@ class DpcLlmAdapter:
                 # The engine's word on the round, where the provider's usage
                 # dict carries it (llama-server and Strata today), with a
                 # vendor's cache split in the two prompt columns; the peer
-                # route does not copy these from the wire.
+                # route copies only `finish_reason`, the one the wire carries.
                 **{**{name: usage.get(name) for name in ENGINE_FIELDS}, **prompt_cache_split(usage)},
                 # Copied from the wire on the peer route, never computed here.
                 **{name: facts.get(name) for name in TARIFF_FIELDS},
@@ -1530,8 +1530,9 @@ class DpcLlmAdapter:
             # whether or not the host counted, so the row carries it either way.
             if _peer.get("served_effort") is not None:
                 usage["served_effort"] = _peer["served_effort"]
-            # The host's provider's word, as a local provider's usage carries it.
-            if _peer.get("finish_reason") is not None:
+            # The host's provider's word, as a local provider's usage carries it;
+            # a non-string is dropped, since `usage_row` would refuse the row.
+            if isinstance(_peer.get("finish_reason"), str):
                 usage["finish_reason"] = _peer["finish_reason"]
             # Where the host's thinking count came from, checked as its
             # convention is; a word that is neither of the two is dropped.

@@ -129,6 +129,7 @@ from .firewall import ServingLists
 from .guest_vendor_quota import guest_vendor_quota_refusal
 from .llm_manager import accepts_reasoning_effort, entry_point_for, flatten_messages
 from .node_ledger import (
+    ENGINE_FIELDS,
     TARIFF_FIELDS,
     NodeLedger,
     default_ledger,
@@ -598,6 +599,12 @@ def _finish_reason(reported: Optional[str], tool_calls: List[Dict[str, Any]]) ->
     if tool_calls and reported in (None, "stop"):
         return "tool_calls"
     return reported
+
+
+def _wire_finish_reason(value: Any) -> Optional[str]:
+    """The host's `finish_reason` for this node's row: a string or None, since
+    `usage_row` refuses anything else and the wire can carry anything."""
+    return value if isinstance(value, str) else None
 
 
 def parse_remote_name(name: str) -> Optional[Tuple[str, str]]:
@@ -1237,6 +1244,9 @@ class Gateway:
                 duration_s=duration_s,
                 billing=billing,
                 **price,
+                # The engine's word on the call, as `llm_manager` read it from
+                # the provider's usage (`reported_engine`).
+                **{name: result.get(name) for name in ENGINE_FIELDS},
                 # `query` returns no `tool_calls` key and leaves that column
                 # null; `query_messages` always returns the list it parsed.
                 **response_counts(result.get("response"), result.get("tool_calls")),
@@ -1533,6 +1543,9 @@ class Gateway:
                 duration_s=duration_s,
                 billing=billing,
                 **tariff,
+                # The host's provider's stop word, the one engine field the wire
+                # carries; a non-string is dropped, not left to void the row.
+                finish_reason=_wire_finish_reason(result.get("finish_reason")),
                 # What reached this node; a host older than DPTP v1.7 sends no
                 # `tool_calls`, and that column stays null.
                 **response_counts(result.get("response"), result.get("tool_calls")),

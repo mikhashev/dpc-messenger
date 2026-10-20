@@ -182,7 +182,7 @@ async def test_a_chunk_callback_on_a_streaming_provider_is_called_per_piece_and_
 
 
 @pytest.mark.asyncio
-async def test_the_door_returns_every_key_query_returns_and_five_that_name_what_it_did(tmp_path):
+async def test_the_door_returns_every_key_query_returns_and_four_that_name_what_it_did(tmp_path):
     provider = _Plain()
     manager = _manager(tmp_path, provider)
 
@@ -190,7 +190,9 @@ async def test_the_door_returns_every_key_query_returns_and_five_that_name_what_
     new = await manager.query_messages(MESSAGES, system=SYSTEM, return_metadata=True)
 
     assert set(old) <= set(new), f"the row would lose {sorted(set(old) - set(new))}"
-    assert set(new) - set(old) == {"streamed", "flattened", "tools_used", "tool_calls", "finish_reason"}
+    # `finish_reason` is on both doors since the engine's word reached `query`
+    # too (`reported_engine`), so a peer's text call can say why it stopped.
+    assert set(new) - set(old) == {"streamed", "flattened", "tools_used", "tool_calls"}
     for key in ("response", "provider", "model", "tokens_used", "prompt_tokens",
                 "response_tokens", "model_max_tokens", "vision_used", "thinking", "thinking_tokens"):
         assert new[key] == old[key], key

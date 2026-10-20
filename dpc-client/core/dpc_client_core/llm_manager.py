@@ -18,7 +18,7 @@ from .providers import (
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
-from .node_ledger import OUTPUT_INCLUDES_THINKING, THINKING_SOURCES
+from .node_ledger import ENGINE_FIELDS, OUTPUT_INCLUDES_THINKING, THINKING_SOURCES, prompt_cache_split
 from .dpc_agent.pricing import COST_FIELDS
 from .providers.base import image_blocks_in_turns, image_pixel_limit_of, normalize_reasoning_effort
 from .utils.image_utils import normalise_flat_images, normalise_turn_images
@@ -315,6 +315,15 @@ def reported_cost(provider: Any) -> Dict[str, Any]:
     if "cost_amount" not in usage:
         return {}
     return {name: usage.get(name) for name in COST_FIELDS}
+
+
+def reported_engine(provider: Any) -> Dict[str, Any]:
+    """The engine's word on the provider's last call (`node_ledger.ENGINE_FIELDS`),
+    with a vendor's prompt cache split in the two prompt columns, read from
+    the provider's own usage dict so the split is never mixed with a recount
+    made here. None where the provider reported nothing."""
+    usage = provider.get_last_usage() or {}
+    return {**{name: usage.get(name) for name in ENGINE_FIELDS}, **prompt_cache_split(usage)}
 
 
 def _tool_use_block(call: Any) -> Dict[str, Any]:
@@ -948,6 +957,9 @@ class LLMManager:
                 # ... and the rung the provider says it ran on, which is the
                 # word a usage row wants and the only one that cannot be wrong.
                 "provider_served_effort": reported_served_effort(provider),
+                # The engine's word on the call, for the usage row; on this path
+                # `finish_reason` is the provider's last usage, or None.
+                **reported_engine(provider),
                 # The provider's own price, where it prices its calls.
                 **reported_cost(provider),
             }
@@ -966,7 +978,7 @@ class LLMManager:
         reasoning_effort: Optional[str] = None,
     ):
         """A conversation, optional tools and an optional chunk callback in;
-        `query(return_metadata=True)`'s dict plus five keys out.
+        `query(return_metadata=True)`'s dict plus four keys out.
 
         Beside `query`, not instead of it: `query` takes a flat prompt, so a
         caller above it must flatten `messages`, and a provider that streams
@@ -1124,6 +1136,9 @@ class LLMManager:
                 "flattened": flattened,
                 "tools_used": tools_used,
                 "tool_calls": tool_calls,
+                # The engine's word on the call, for the usage row; the
+                # `finish_reason` below, with its path fallback, wins over it.
+                **reported_engine(provider),
                 "finish_reason": finish_reason,
                 # The provider's own price, where it prices its calls.
                 **reported_cost(provider),
