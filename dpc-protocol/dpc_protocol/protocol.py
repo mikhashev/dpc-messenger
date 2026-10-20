@@ -85,12 +85,12 @@ REFUSAL_UNRATED = "unrated"
 REFUSAL_MISCONFIGURED = "misconfigured"
 # The host's local engine cannot take a peer now (ADR-044 points 4 and 9):
 # the card is held by the other local engine, or (Strata) it is not running and
-# a peer's request may not start it now, or the owner's own conversations hold
-# its conversation cache. The word is the gateway's own for
+# a peer's request may not start it now, or it is stopping, or it was stopped
+# after an engine failure. The word is the gateway's own for
 # a listed alias whose provider is not there (`provider_unavailable`, 503).
 # Retryable later: the state ends without the guest changing anything, but
 # not soon, and not by waiting for it here - no wait of a guest's ends a card
-# held by the other engine or the owner's parked conversations. Nothing on
+# held by the other engine or a launcher its owner has to reset. Nothing on
 # either node retries it by itself.
 REFUSAL_PROVIDER_UNAVAILABLE = "provider_unavailable"
 # The host's local engine is loading its model (DPTP v1.10, Mike's call

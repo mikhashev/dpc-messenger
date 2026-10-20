@@ -6,8 +6,8 @@ itself, the person sees that the model is still loading while it waits, and
 if it never comes up the person reads a notice, not an "LLM error".
 
 `provider_unavailable` cannot mean "loading": the same word covers a card held
-by the host's other engine and the owner's own parked conversations, which no
-wait ends. So a loading engine has its own refusal code, `provider_loading`
+by the host's other engine and a launcher stopped after an engine failure, which
+no wait ends. So a loading engine has its own refusal code, `provider_loading`
 (DPTP v1.9, Mike's call 2026-10-20), and the guest waits only on that. A host
 that says "loading" in the prose of a `provider_unavailable` is told once and
 not retried; so is a code this guest has no word for.
@@ -40,7 +40,6 @@ from dpc_client_core.message_handlers.inference_handler import RemoteInferenceRe
 from tests.test_p2p_coordinator import make_coordinator
 from tests.test_strata_is_offered_to_peers_on_the_owners_terms import (  # noqa: F401 — autouse fixture
     ENOUGH,
-    PARKED,
     PEER,
     _answer,
     _card,
@@ -127,9 +126,10 @@ class TestTheHostSaysStarting:
         await p.supervisor.peer_start_task
 
     @pytest.mark.asyncio
-    async def test_parked_owner_conversations_stay_provider_unavailable(self, tmp_path):
+    async def test_a_failed_launcher_stays_provider_unavailable(self, tmp_path):
         p = _strata(tmp_path)
-        _running(p, cache=PARKED, owner_calls=1)
+        _running(p)
+        p.supervisor.failure = {"reason": "engine died"}
         coord, svc, _seen = _door(tmp_path, p)
 
         await coord.handle_inference_request(PEER, "req-1", "ping")
@@ -166,9 +166,10 @@ class TestTheHostSaysStarting:
         caplog.clear()
         second = tmp_path / "second"
         second.mkdir()
-        parked = _strata(second)
-        _running(parked, cache=PARKED, owner_calls=1)
-        coord, _svc, _seen = _door(second, parked)
+        failed = _strata(second)
+        _running(failed)
+        failed.supervisor.failure = {"reason": "engine died"}
+        coord, _svc, _seen = _door(second, failed)
         with caplog.at_level(logging.INFO, logger=coord_logger):
             await coord.handle_inference_request(PEER, "req-1", "ping")
         refused = [r for r in caplog.records

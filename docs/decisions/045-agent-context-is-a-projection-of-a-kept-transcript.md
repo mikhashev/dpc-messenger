@@ -89,7 +89,8 @@ the invariants adopted below. None aligns a cut to an engine's cache boundaries.
      first grid checkpoint; after it 1 of 1 boundary above the root resumed from the
      turn-start checkpoint. One observation; the card records further ones.
    - One-off calls marking themselves with `strata_checkpoint: false` is decided, not
-     built: no DPC call sends it yet.
+     built: no owner call sends it yet (calls served to a peer do since 2026-10-20,
+     ADR-044 point 9).
    - llama-server keeps two checkpoints and pins none; it has no equivalent setting, so
      there the lever is decision 2 (fewer and cheaper cuts), not the engine.
    Aligning cuts to the engine's checkpoint grid was considered and dropped: under

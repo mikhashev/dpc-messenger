@@ -196,11 +196,15 @@ card.** Every point is Mike's call, 2026-10-18.
    (`VISION-ROUTING-NAMES-A-27B-THAT-IS-DOWN-WHILE-STRATA-HOLDS-THE-CARD`). An image request
    to Strata is **not yet verified**: it is the first smoke of the implementation, and if
    it fails, vision is off.
-9. **Inference Sharing: Strata is offered to peers.** Known cost: one engine, so a peer's
-   conversation can evict our parked one. Policy, in bytes of the conversation-cache
-   budget rather than slots, because the budget is what binds: a peer gets nothing from
-   the budget while our own conversations hold it, and is answered 503; also 503 while
-   Strata is loading. A peer's request may start a stopped launcher in the background,
+9. **Inference Sharing: Strata is offered to peers.** Every call served to a peer is
+   sent with checkpointing off (`strata_checkpoint: false`, the engine's `ckpt=0`): it
+   takes no checkpoint and parks no snapshot, so a peer is served while our own
+   conversations stay parked and while an owner call runs, which it queues behind (Mike's
+   call, 2026-10-20; it replaces the rule that answered a peer 503 while our conversations
+   held the cache budget). Known cost: one engine, serving one request at a time, so a
+   peer's request delays ours, and its arrival parks our live conversation as a switch
+   between two of our agents does, which can evict our oldest parked one when the cache
+   is full. 503 while Strata is loading. A peer's request may start a stopped launcher in the background,
    one start at a time, when the other local engine does not hold the card and the
    card's free VRAM is enough, and is answered 503 "loading" meanwhile; a launcher
    stopped after an engine death stays the owner's to reset (Mike's call, 2026-10-20).
@@ -245,7 +249,7 @@ scheduler.
   a vendor.
 - **Negative:** the card is exclusive and switching is manual; a DPC restart costs a cold
   prefill per conversation until `--slot-save-path` is tried; a peer can cost us a parked
-  conversation; Strata updates can break the launch between releases (point 5 watches for
+  conversation and delays our calls queued behind its own (point 9); Strata updates can break the launch between releases (point 5 watches for
   it); the capacity is a property of one machine's page file.
 - **Code the subclass cannot simply inherit** (read 2026-10-18,
   `llama_server_supervisor.py`): `ensure_running` relaunches whenever the child's

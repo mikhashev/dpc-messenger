@@ -103,7 +103,7 @@ async def ask_peer_waiting_out_a_load(
     on the call's progress line, wait and ask again, up to
     PEER_LOADING_WAIT_CAP_S. Any other refusal is raised at once, unretried -
     `provider_unavailable` covers a card held by the host's other engine and
-    the owner's own parked conversations, which no wait of ours ends, and a
+    a launcher stopped after an engine failure, which no wait of ours ends, and a
     host that predates the code says "loading" in prose only, which is never
     read.
 

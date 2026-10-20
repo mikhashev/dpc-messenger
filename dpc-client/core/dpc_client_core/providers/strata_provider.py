@@ -11,7 +11,6 @@ or, while none runs, from the start it would make.
 import asyncio
 import json
 import logging
-import time
 from typing import Any, Dict, Optional
 
 from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING
@@ -27,13 +26,14 @@ from .llamacpp_server_provider import _ACTIVE_SUPERVISORS, LlamaServerProvider, 
 
 logger = logging.getLogger(__name__)
 
-# How long one /metrics read answers the peer policy, so a burst of peer
-# requests reads the launcher once rather than once each.
-PEER_METRICS_TTL_S = 3.0
-# How long after the owner's call ends its conversation counts as live: the
-# engine parks at the end of the turn and the launcher learns it from the
-# engine's log, so a /metrics read just after the answer can miss the park.
-OWNER_PARK_GRACE_S = 3.0
+# ADR-044 point 9 (Mike's call, 2026-10-20): every call served to a peer goes
+# out with Strata's per-request checkpoint switch off. The launcher reads the
+# request body as its sampling dict and turns this key into the engine's
+# `ckpt=0` (serve/server.py:1216-1219, Strata 0.1.45 at 477ac13c); the engine
+# then takes no checkpoint for the request and neither continues nor parks its
+# session afterwards (src/program/generate.cpp:11638-11642, :14477), so a
+# peer's call leaves no snapshot in the conversation cache to compete with ours.
+PEER_CHECKPOINT_OFF = {"strata_checkpoint": False}
 
 # The keys that change what the launcher would be started with; a reload that
 # leaves them equal adopts the running launcher. An edit inside the base
@@ -167,6 +167,22 @@ class StrataProvider(LlamaServerProvider):
                 )
         return body
 
+    def _sampling_on_the_wire(
+        self,
+        extra_body: Dict[str, Any],
+        sampling: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """The base's, and on a call served to a peer the checkpoint switch off
+        (PEER_CHECKPOINT_OFF). Here because every request path — plain,
+        stream, tools, vision — passes its final `extra_body` through this
+        method just before the call, the vision path's thinking-off body
+        included, which `_build_extra_body` does not see. An owner's call is
+        sent as before: its conversation is the one the cache is for."""
+        sampling = super()._sampling_on_the_wire(extra_body, sampling)
+        if peer_being_served() is not None:
+            extra_body.update(PEER_CHECKPOINT_OFF)
+        return sampling
+
     def supports_vision(self) -> bool:
         """`/props` `modalities.vision` of a running launcher; otherwise what the
         start config would say (ADR-044 point 8).
@@ -201,28 +217,18 @@ class StrataProvider(LlamaServerProvider):
         resets the launcher (point 3), a peer does not. Stopped: the request
         may begin the start in the background and is answered loading, or is
         refused with the reason it may not (`_peer_start_refusal`). Running:
-        refused while our own conversations may hold the conversation cache. Strata keys the cache by token prefix and reports
-        it only in aggregate (`/metrics` `conversation_cache` parked / bytes,
-        no owner per entry), so ownership is DPC's own count: the owner's calls
-        on this launcher since it started. The rule —
-          - an owner call running now, or ended under OWNER_PARK_GRACE_S ago: refused;
-          - no owner call since the start: served (whatever is parked is a peer's);
-          - otherwise served only when the cache is off, or holds nothing
-            (parked == 0 and bytes == 0); refused when /metrics cannot be read.
-        So a peer is never served while a conversation of ours can be parked,
-        and a peer's park can therefore never evict one (Strata evicts oldest
-        first when its budget or slots run out). It is conservative: once the
-        owner has used the launcher, a peer waits until nothing is parked or
-        the launcher restarts.
+        served, whatever our own conversations hold in the conversation cache
+        and whether or not an owner call is running (Mike's call, 2026-10-20).
 
-        A None answer records the owner's call count it was given on; the
-        peer's slot refuses if that count has moved by the time the call
-        reaches the engine (`StrataSupervisor.peer_slot_refusal`)."""
-        sup = self.supervisor
-        counted = sup.owner_calls
-        refusal = await self._peer_refusal_now(peer_id)
-        sup.peer_cleared_at_owner_calls = counted if refusal is None else None
-        return refusal
+        Served with checkpointing off (PEER_CHECKPOINT_OFF), a peer's call
+        parks nothing, so it cannot evict a conversation of ours with a
+        snapshot of its own. What it can still do is the engine's ordinary
+        switch: its arrival parks the conversation of ours that is live, as a
+        switch between two of our own agents does, and with the cache full
+        that park evicts the oldest entry. Strata serves one request at a time
+        here (no `--batch` in the start config): a peer's call queues behind
+        an owner call running, and the owner's next call queues behind it."""
+        return await self._peer_refusal_now(peer_id)
 
     def _loading(self) -> str:
         return StartingRefusal(
@@ -243,28 +249,6 @@ class StrataProvider(LlamaServerProvider):
             )
         if state == "stopped":
             return await self._peer_start_refusal(peer_id) or self._loading()
-        if sup.owner_in_flight > 0:
-            return f"'{self.alias}' is serving this node's owner now; its conversation cache is not shared meanwhile"
-        if sup.owner_calls == 0:
-            return None
-        now = time.monotonic()
-        if sup.owner_last_end is not None and now - sup.owner_last_end < OWNER_PARK_GRACE_S:
-            return f"'{self.alias}' has just served this node's owner; its conversation cache is not shared meanwhile"
-        cache = await self._peer_cache_view(now)
-        if cache is None:
-            return f"'{self.alias}': the conversation cache cannot be read, so it is not shared"
-        if cache.get("enabled") is False:
-            return None
-        if cache.get("parked") is None and cache.get("bytes") is None:
-            return f"'{self.alias}': the launcher reports no conversation cache state, so it is not shared"
-        parked, held = cache.get("parked") or 0, cache.get("bytes") or 0
-        if parked > 0 or held > 0:
-            budget = cache.get("budget_mib")
-            return (
-                f"'{self.alias}': this node's own conversations hold the conversation cache "
-                f"({parked} parked, {int(held) >> 20} MiB"
-                f"{f' of {budget} MiB' if budget is not None else ''})"
-            )
         return None
 
     async def _peer_start_refusal(self, peer_id: Optional[str]) -> Optional[str]:
@@ -312,27 +296,6 @@ class StrataProvider(LlamaServerProvider):
                 self.alias, peer_id or "unknown", free, needed,
             )
         return None
-
-    async def _peer_cache_view(self, now: float) -> Optional[Dict[str, Any]]:
-        """`conversation_cache` of a recent /metrics read, or None when unreadable.
-
-        A read older than the owner's last call is not reused."""
-        sup = self.supervisor
-        cached = sup.peer_metrics_read
-        if cached is not None:
-            at, body = cached
-            fresh = now - at < PEER_METRICS_TTL_S
-            after_owner = sup.owner_last_end is None or at >= sup.owner_last_end
-            if fresh and after_owner:
-                return body
-        try:
-            metrics = await asyncio.wait_for(sup._get("/metrics"), PEER_METRICS_TTL_S)
-            body = metrics_summary(metrics if isinstance(metrics, dict) else {})["conversation_cache"]
-        except Exception as e:
-            logger.info("strata '%s': /metrics unreadable for the peer policy: %s", self.alias, e)
-            body = None
-        sup.peer_metrics_read = (time.monotonic(), body) if body is not None else None
-        return body
 
     def engine_failure(self) -> Optional[Dict[str, Any]]:
         return getattr(self.supervisor, "failure", None)

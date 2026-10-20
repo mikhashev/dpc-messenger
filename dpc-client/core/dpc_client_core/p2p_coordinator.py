@@ -1037,11 +1037,10 @@ class P2PCoordinator:
                 # the flat `images` field keeps `query`, and beside tools that
                 # field was refused above, so no tool is dropped on this branch.
                 # Marked as a peer's call: a Strata launcher that is down is not
-                # started for it and its failure is not retried. The owner does
-                # not queue behind this lock, so an owner call can begin between
-                # the policy above and the engine; the peer's slot asks the
-                # policy's synchronous half again (`peer_slot_refusal`) and
-                # refuses with the same word.
+                # started for it, its failure is not retried, and it goes out
+                # with checkpointing off, so it parks nothing in the owner's
+                # conversation cache (ADR-044 point 9). The owner does not queue
+                # behind this lock; the engine serves one request at a time.
                 with serving_a_peer(peer_id):
                     if messages and not images:
                         result = await self.service.llm_manager.query_messages(

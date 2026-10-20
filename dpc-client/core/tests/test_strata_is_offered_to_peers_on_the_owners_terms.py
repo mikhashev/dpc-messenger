@@ -6,14 +6,20 @@ Two decisions, Mike's call 2026-10-18:
   (`compute.serving_alias`, one of `serving_local`); absent, the first entry
   is taken as before and the P2P door says once that it was list order;
 * a Strata alias answers a peer 503 (`provider_loading` while it loads, DPTP
-  v1.10; `provider_unavailable`) while it is not running, and while this node's own conversations may hold its
-  conversation cache. The answer is not retried by this node, and a
-  `llama-server` alias is untouched by the Strata policy.
+  v1.10; `provider_unavailable`) while it is not running. The answer is not
+  retried by this node, and a `llama-server` alias is untouched by the Strata
+  policy.
 
 And one more, Mike's call 2026-10-20: a peer's request may begin the start of a
 stopped launcher in the background — once, when the other engine does not hold
 the card and the card's free VRAM is enough — and is answered "loading"
 meanwhile. A failed launcher stays the owner's to reset.
+
+And Mike's call of the same day, "let peers in": a peer is served while this
+node's own conversations stay parked and while an owner call runs, because
+every call served to a peer goes out with Strata's checkpoint switch off
+(`strata_checkpoint: false`, the engine's `ckpt=0`) and so parks nothing. An
+owner call is sent as before.
 
 The door is checked twice over. `TestTheWholePath` runs a peer request through
 a real `ContextFirewall` read from a rules file and a real `StrataProvider`
@@ -28,7 +34,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -38,7 +43,6 @@ from dpc_client_core.firewall import ContextFirewall
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.managers.llama_server_supervisor import CardHeldError, LlamaServerSupervisor
 from dpc_client_core.managers.strata_supervisor import (
-    PeerCallRefused,
     PeerStartRefused,
     peer_being_served,
     serving_a_peer,
@@ -78,14 +82,21 @@ def _strata(tmp_path) -> StrataProvider:
     })
 
 
-def _running(provider: StrataProvider, cache=None, owner_calls=0):
+def _running(provider: StrataProvider, cache=None):
+    """A launcher up and answering. `cache` is what its /metrics would report;
+    the peer policy no longer reads it, and the tests say so."""
     sup = provider.supervisor
     sup._proc = _FakeProc()
     sup.props = {"modalities": {"vision": False}}
-    sup.owner_calls = owner_calls
     metrics = {"conversation_cache": cache} if cache is not None else {}
     sup._get = AsyncMock(return_value=metrics)
     return sup
+
+
+async def _owner_has_called(sup) -> None:
+    """One owner call through the real slot, so what is parked can be ours."""
+    async with sup.call_slot():
+        pass
 
 
 def _firewall(tmp_path, compute: dict) -> ContextFirewall:
@@ -170,62 +181,38 @@ class TestThePeerPolicy:
 
 
     @pytest.mark.asyncio
-    async def test_with_no_owner_call_since_the_start_a_peer_is_served_without_a_read(self, tmp_path):
+    async def test_draining_is_refused(self, tmp_path):
         p = _strata(tmp_path)
-        sup = _running(p, cache=PARKED, owner_calls=0)
-        assert await p.peer_refusal() is None
+        _running(p, cache=EMPTY)
+        p.supervisor._draining = True
+        assert "stopping" in await p.peer_refusal()
+
+    @pytest.mark.asyncio
+    async def test_owner_conversations_parked_do_not_refuse_a_peer(self, tmp_path):
+        """Mike's call 2026-10-20: a peer's call parks nothing (ckpt=0), so what
+        is parked is no reason to refuse it, and the cache is not even read."""
+        p = _strata(tmp_path)
+        sup = _running(p, cache=PARKED)
+        await _owner_has_called(sup)
+        assert await p.peer_refusal(PEER) is None
         sup._get.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_owner_conversations_parked_refuse_a_peer(self, tmp_path):
+    async def test_an_unreadable_metrics_endpoint_does_not_refuse_a_peer(self, tmp_path):
         p = _strata(tmp_path)
-        _running(p, cache=PARKED, owner_calls=2)
-        reason = await p.peer_refusal()
-        assert reason and "own conversations hold the conversation cache" in reason
-        assert "1 parked" in reason and "3072 MiB of 10240 MiB" in reason
-
-    @pytest.mark.asyncio
-    async def test_nothing_parked_or_the_cache_off_serves_a_peer(self, tmp_path):
-        p = _strata(tmp_path)
-        _running(p, cache=EMPTY, owner_calls=2)
-        assert await p.peer_refusal() is None
-        p = _strata(tmp_path / "b")
-        _running(p, cache={"enabled": False, "budget_mib": None, "parked": 0, "bytes": 0}, owner_calls=2)
-        assert await p.peer_refusal() is None
-
-    @pytest.mark.asyncio
-    async def test_an_unreadable_cache_is_not_shared(self, tmp_path):
-        p = _strata(tmp_path)
-        sup = _running(p, cache=EMPTY, owner_calls=1)
+        sup = _running(p)
+        await _owner_has_called(sup)
         sup._get = AsyncMock(side_effect=ConnectionError("refused"))
-        assert "cannot be read" in await p.peer_refusal()
-        sup._get = AsyncMock(return_value={})
-        sup.peer_metrics_read = None
-        assert "no conversation cache state" in await p.peer_refusal()
+        assert await p.peer_refusal(PEER) is None
 
     @pytest.mark.asyncio
-    async def test_an_owner_call_running_or_just_ended_refuses_a_peer(self, tmp_path):
+    async def test_an_owner_call_running_does_not_refuse_a_peer(self, tmp_path):
+        """The engine serves one request at a time; the peer's waits behind
+        ours there, rather than being refused here."""
         p = _strata(tmp_path)
-        sup = _running(p, cache=EMPTY, owner_calls=1)
-        sup.owner_in_flight = 1
-        assert "serving this node's owner now" in await p.peer_refusal()
-        sup.owner_in_flight = 0
-        sup.owner_last_end = time.monotonic()
-        assert "just served this node's owner" in await p.peer_refusal()
-        sup.owner_last_end = time.monotonic() - strata_mod.OWNER_PARK_GRACE_S - 1
-        assert await p.peer_refusal() is None
-
-    @pytest.mark.asyncio
-    async def test_a_burst_reads_metrics_once_and_an_owner_call_makes_the_read_stale(self, tmp_path):
-        p = _strata(tmp_path)
-        sup = _running(p, cache=EMPTY, owner_calls=1)
-        for _ in range(5):
-            assert await p.peer_refusal() is None
-        assert sup._get.await_count == 1
-        sup.owner_last_end = time.monotonic() - strata_mod.OWNER_PARK_GRACE_S - 0.5
-        sup.peer_metrics_read = (sup.owner_last_end - 0.1, EMPTY)
-        await p.peer_refusal()
-        assert sup._get.await_count == 2, "a read older than the owner's last call is read again"
+        _running(p, cache=PARKED)
+        async with p.supervisor.call_slot():
+            assert await p.peer_refusal(PEER) is None
 
 
 CARD_MIB = 32623  # this machine's card, nvidia-smi memory.total
@@ -284,7 +271,6 @@ class TestAPeerStartsAStoppedLauncher:
             assert len(started) == 1
         lines = _started_lines(caplog)
         assert len(lines) == 1 and PEER in lines[0].getMessage()
-        assert p.supervisor.peer_cleared_at_owner_calls is None, "loading lets no call in"
         release.set()
         await p.supervisor.peer_start_task
 
@@ -386,50 +372,22 @@ class TestTheSupervisorMarks:
         assert len(launched) == 1
 
     @pytest.mark.asyncio
-    async def test_owner_calls_are_counted_and_peer_calls_are_not(self, tmp_path):
+    async def test_a_peer_slot_is_taken_beside_an_owner_slot(self, tmp_path):
+        """Nothing at the slot refuses a peer any longer: the race it guarded
+        (an owner call beginning after the policy) cannot cost us a park."""
         sup = _strata(tmp_path).supervisor
         async with sup.call_slot():
-            assert (sup.owner_calls, sup.owner_in_flight) == (1, 1)
-        sup.peer_cleared_at_owner_calls = 1
-        with serving_a_peer(PEER):
-            async with sup.call_slot():
-                assert (sup.owner_calls, sup.owner_in_flight) == (1, 0)
-        assert (sup.owner_calls, sup.owner_in_flight) == (1, 0)
+            with serving_a_peer(PEER):
+                async with sup.call_slot():
+                    assert sup._in_flight == 2
+        assert sup._in_flight == 0
 
-    def test_a_peer_slot_asks_the_policy_again(self, tmp_path):
-        """The race between the door's policy and the call (ADR-044 point 9)."""
+    def test_a_draining_launcher_refuses_any_slot(self, tmp_path):
         sup = _strata(tmp_path).supervisor
+        sup._draining = True
         with serving_a_peer(PEER):
-            with pytest.raises(PeerCallRefused, match="no peer policy decision"):
+            with pytest.raises(base_mod.LlamaServerError, match="draining"):
                 sup.call_slot()
-            sup.peer_cleared_at_owner_calls = 0
-            sup.owner_in_flight = 1
-            with pytest.raises(PeerCallRefused, match="began serving this node's owner"):
-                sup.call_slot()
-            sup.owner_in_flight, sup.owner_calls = 0, 1
-            with pytest.raises(PeerCallRefused, match="after the peer policy let the call in"):
-                sup.call_slot()
-            assert sup._in_flight == 0, "a refused slot is not counted"
-            sup.peer_cleared_at_owner_calls = 1
-            sup.call_slot()
-            assert sup._in_flight == 1
-
-    @pytest.mark.asyncio
-    async def test_the_policy_records_the_count_it_let_a_peer_in_on(self, tmp_path):
-        p = _strata(tmp_path)
-        sup = _running(p, cache=EMPTY, owner_calls=2)
-        assert await p.peer_refusal() is None
-        assert sup.peer_cleared_at_owner_calls == 2
-        sup.owner_in_flight = 1
-        assert await p.peer_refusal() is not None
-        assert sup.peer_cleared_at_owner_calls is None, "a refusal clears the standing decision"
-
-    @pytest.mark.asyncio
-    async def test_the_owner_slot_records_when_it_ended(self, tmp_path):
-        sup = _strata(tmp_path).supervisor
-        async with sup.call_slot():
-            assert sup.owner_in_flight == 1
-        assert sup.owner_in_flight == 0 and sup.owner_last_end is not None
 
     def test_a_peer_call_is_not_retried(self):
         err = RuntimeError("service unavailable: HTTP status 503")
@@ -520,21 +478,34 @@ class TestTheDoor:
         await p.supervisor.peer_start_task
 
     @pytest.mark.asyncio
-    async def test_owner_conversations_parked_are_a_503(self, tmp_path):
+    async def test_owner_conversations_parked_the_peer_is_served(self, tmp_path):
         p = _strata(tmp_path)
-        _running(p, cache=PARKED, owner_calls=1)
+        await _owner_has_called(_running(p, cache=PARKED))
         coord, svc, seen = _door(tmp_path, p)
 
         await coord.handle_inference_request(PEER, "req-1", "ping")
 
         payload = _answer(svc)
-        assert payload["code"] == "provider_unavailable"
-        assert "conversation cache" in payload["error"] and seen == []
+        assert payload["status"] == "success" and payload["response"] == "pong"
+        assert seen == [PEER]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_launcher_is_a_503(self, tmp_path):
+        p = _strata(tmp_path)
+        _running(p, cache=EMPTY)
+        p.supervisor.failure = {"reason": "engine died"}
+        coord, svc, seen = _door(tmp_path, p)
+
+        await coord.handle_inference_request(PEER, "req-1", "ping")
+
+        payload = _answer(svc)
+        assert payload["code"] == "provider_unavailable" and "engine failure" in payload["error"]
+        assert seen == []
 
     @pytest.mark.asyncio
     async def test_a_free_engine_serves_the_peer_under_the_peer_mark(self, tmp_path):
         p = _strata(tmp_path)
-        _running(p, cache=PARKED, owner_calls=0)
+        _running(p, cache=EMPTY)
         coord, svc, seen = _door(tmp_path, p)
 
         await coord.handle_inference_request(PEER, "req-1", "ping")
@@ -604,7 +575,7 @@ class TestTheDoor:
     @pytest.mark.asyncio
     async def test_a_card_held_on_a_strata_alias_is_a_503(self, tmp_path):
         p = _strata(tmp_path)
-        _running(p, cache=EMPTY, owner_calls=0)
+        _running(p, cache=EMPTY)
         coord, svc, _ = _door(tmp_path, p)
         held = CardHeldError(
             "strata[flash] cannot load: the card is held by llama-server alias 'qwen27'",
@@ -626,9 +597,11 @@ class _FakeClient:
 
     def __init__(self):
         self.calls = 0
+        self.bodies = []
 
         async def create(**params):
             self.calls += 1
+            self.bodies.append(params)
             message = SimpleNamespace(content="pong", reasoning_content=None, tool_calls=None)
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=message, finish_reason="stop")],
@@ -667,9 +640,9 @@ class TestTheWholePath:
     """Peer request -> real firewall gate -> Strata policy -> provider slot -> answer."""
 
     @pytest.mark.asyncio
-    async def test_owner_idle_the_peer_is_served(self, tmp_path):
+    async def test_owner_idle_the_peer_is_served_with_checkpointing_off(self, tmp_path):
         p = _strata(tmp_path)
-        _running(p, cache=EMPTY, owner_calls=0)
+        _running(p, cache=EMPTY)
         coord, svc, client = _whole_path(tmp_path, SERVED_TO_PEER, p)
 
         await coord.handle_inference_request(PEER, "req-1", "ping", provider="flash")
@@ -677,41 +650,37 @@ class TestTheWholePath:
         payload = _answer(svc)
         assert payload["status"] == "success" and payload["response"] == "pong"
         assert client.calls == 1
-        assert p.supervisor.owner_calls == 0, "the peer's call is not counted as the owner's"
+        assert client.bodies[0]["extra_body"]["strata_checkpoint"] is False
 
     @pytest.mark.asyncio
-    async def test_owner_conversations_parked_the_peer_gets_provider_unavailable(self, tmp_path):
+    async def test_owner_conversations_parked_and_an_owner_call_running_the_peer_is_served(
+        self, tmp_path,
+    ):
+        """The case the old rule refused all day (THE-PEER-POLICY-REFUSES-EVERY-PEER-...)."""
         p = _strata(tmp_path)
-        _running(p, cache=PARKED, owner_calls=1)
+        _running(p, cache=PARKED)
+        coord, svc, client = _whole_path(tmp_path, SERVED_TO_PEER, p)
+
+        async with p.supervisor.call_slot():  # an owner call in flight
+            await coord.handle_inference_request(PEER, "req-1", "ping", provider="flash")
+
+        payload = _answer(svc)
+        assert payload["status"] == "success" and payload["response"] == "pong"
+        assert client.calls == 1 and len(_rows(coord._ledger)) == 1
+        assert client.bodies[0]["extra_body"]["strata_checkpoint"] is False
+
+    @pytest.mark.asyncio
+    async def test_an_owner_call_on_the_same_provider_keeps_checkpointing(self, tmp_path):
+        p = _strata(tmp_path)
+        _running(p, cache=PARKED)
         coord, svc, client = _whole_path(tmp_path, SERVED_TO_PEER, p)
 
         await coord.handle_inference_request(PEER, "req-1", "ping", provider="flash")
+        await p.generate_response("the owner's own question")
 
-        payload = _answer(svc)
-        assert payload["status"] == "error" and payload["code"] == "provider_unavailable"
-        assert "own conversations hold the conversation cache" in payload["error"]
-        assert client.calls == 0 and _rows(coord._ledger) == []
-
-    @pytest.mark.asyncio
-    async def test_an_owner_call_begun_after_the_policy_refuses_the_peer_at_the_slot(self, tmp_path):
-        p = _strata(tmp_path)
-        sup = _running(p, cache=EMPTY, owner_calls=0)
-        coord, svc, client = _whole_path(tmp_path, SERVED_TO_PEER, p)
-        route = svc.llm_manager.query.side_effect
-
-        async def _owner_slips_in(prompt, provider_alias=None, **kwargs):
-            # What an owner call's own call_slot does, between the policy and the peer's slot.
-            sup.owner_calls += 1
-            sup.owner_in_flight += 1
-            return await route(prompt, provider_alias=provider_alias, **kwargs)
-
-        svc.llm_manager.query = AsyncMock(side_effect=_owner_slips_in)
-        await coord.handle_inference_request(PEER, "req-1", "ping", provider="flash")
-
-        payload = _answer(svc)
-        assert payload["code"] == "provider_unavailable"
-        assert "began serving this node's owner" in payload["error"]
-        assert client.calls == 0
+        peer_body, owner_body = client.bodies
+        assert peer_body["extra_body"]["strata_checkpoint"] is False
+        assert "strata_checkpoint" not in owner_body["extra_body"]
 
     @pytest.mark.asyncio
     async def test_the_gate_refuses_a_strata_alias_not_in_serving_local(self, tmp_path):
@@ -719,7 +688,7 @@ class TestTheWholePath:
         does not list is refused with the gate's own word, `not_allowed`, and
         the policy is never asked."""
         p = _strata(tmp_path)
-        _running(p, cache=EMPTY, owner_calls=0)
+        _running(p, cache=EMPTY)
         compute = {"enabled": True, "allow_nodes": [PEER], "serving_local": ["llama"]}
         coord, svc, client = _whole_path(tmp_path, compute, p)
         assert svc.firewall.can_request_inference(PEER) is True, "the peer itself is allowed"
@@ -730,3 +699,79 @@ class TestTheWholePath:
         payload = _answer(svc)
         assert payload["status"] == "error" and payload["code"] == "not_allowed"
         assert client.calls == 0
+
+
+# --- every path a peer call takes goes out with checkpointing off -----------------------
+
+
+def _wired(tmp_path, **overrides):
+    """The real provider over a fake HTTP client that keeps every body; the
+    stream path's `create` answers chunks."""
+    from tests.test_llamacpp_server_provider import _FakeSupervisor, _chat_resp, _fake_client
+    from tests.test_strata_provider import _config
+
+    p = StrataProvider("flash", _config(_install(tmp_path), **overrides))
+    p.supervisor = _FakeSupervisor()
+    tc = SimpleNamespace(id="c1", function=SimpleNamespace(name="t", arguments="{}"))
+    client, completions = _fake_client(_chat_resp(tool_calls=[tc]))
+    plain = completions.create
+
+    async def chunks():
+        delta = SimpleNamespace(content="ok", reasoning_content=None)
+        yield SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason="stop")], usage=None)
+
+    async def create(**params):
+        if params.get("stream"):
+            completions.bodies.append(params)
+            return chunks()
+        return await plain(**params)
+
+    completions.create = create
+
+    async def _ensure():
+        return client
+
+    p._ensure = _ensure
+    return p, completions
+
+
+async def _every_path(p):
+    await p.generate_response("hi")
+    await p.generate_response_stream("hi")
+    await p.generate_with_tools(
+        [{"role": "user", "content": [{"type": "text", "text": "x"}]}],
+        [{"name": "t", "description": "", "input_schema": {"type": "object"}}],
+    )
+    await p.generate_with_vision("what is this?", [{"mime_type": "image/png", "base64": "iVBORw0KGgo="}])
+
+
+class TestEveryPeerCallParksNothing:
+    """Mike's call 2026-10-20: `strata_checkpoint: false` on every call served to
+    a peer (Strata serve/server.py:1216-1219 turns it into the engine's ckpt=0)."""
+
+    @pytest.mark.asyncio
+    async def test_plain_stream_tools_and_vision_carry_it_for_a_peer(self, tmp_path):
+        p, completions = _wired(tmp_path)
+        with serving_a_peer(PEER):
+            await _every_path(p)
+        assert [b.get("stream", False) for b in completions.bodies] == [False, True, False, False]
+        assert [b["extra_body"].get("strata_checkpoint") for b in completions.bodies] == [False] * 4
+        # The vision call with nothing asked takes the thinking-off body that
+        # `_build_extra_body` never sees; it carries the switch too.
+        assert completions.bodies[3]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+    @pytest.mark.asyncio
+    async def test_vision_with_a_named_word_carries_it_too(self, tmp_path):
+        p, completions = _wired(tmp_path, reasoning_effort="low")
+        with serving_a_peer(PEER):
+            await p.generate_with_vision("what?", [{"mime_type": "image/png", "base64": "iVBORw0KGgo="}])
+        body = completions.bodies[0]["extra_body"]
+        assert body["chat_template_kwargs"] == {"reasoning_effort": "low"}
+        assert body["strata_checkpoint"] is False
+
+    @pytest.mark.asyncio
+    async def test_an_owner_call_on_any_path_does_not(self, tmp_path):
+        p, completions = _wired(tmp_path)
+        await _every_path(p)
+        assert len(completions.bodies) == 4
+        assert all("strata_checkpoint" not in b["extra_body"] for b in completions.bodies)

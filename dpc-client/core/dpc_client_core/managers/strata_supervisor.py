@@ -36,12 +36,13 @@ What differs, by ADR-044 point:
 - 2. `stop` waits for the card's free VRAM to come back to what it was before
   the start; if it does not, an engine outlived the launcher (`contain()` can
   fail harmlessly) and the card is not claimed free.
-- 9. A peer's call is marked (`serving_a_peer`) so the supervisor can tell the
-  owner's calls from a peer's: a peer's call never starts the launcher itself,
-  and the owner's calls since the start are what the peer policy in
-  `strata_provider.peer_refusal` weighs against the conversation cache. The
-  policy may begin a start in the background instead (`start_for_peer`), one
-  at a time, and answers the peer "loading" meanwhile.
+- 9. A peer's call is marked (`serving_a_peer`) so the supervisor and the
+  provider can tell it from the owner's: a peer's call never starts the
+  launcher itself, is never retried, and goes out with checkpointing off
+  (`strata_provider.PEER_CHECKPOINT_OFF`), so it parks no conversation of its
+  own (Mike's call, 2026-10-20). The peer policy in
+  `strata_provider.peer_refusal` may begin a start in the background instead
+  (`start_for_peer`), one at a time, and answers the peer "loading" meanwhile.
 """
 
 import asyncio
@@ -797,17 +798,6 @@ class StrataSupervisor(LlamaServerSupervisor):
         self._watch_task: Optional[asyncio.Task] = None
         # The start config the last launch used; the UI shows it (point 6).
         self.start_config_used: Optional[Path] = None
-        # The owner's calls on this launcher since it started, the ones running
-        # now, and when the last one ended (monotonic). Peer calls are not
-        # counted: the peer policy asks whether anything parked can be ours.
-        self.owner_calls = 0
-        self.owner_in_flight = 0
-        self.owner_last_end: Optional[float] = None
-        # The last /metrics read the peer policy made: (monotonic time, body).
-        self.peer_metrics_read: Optional[tuple] = None
-        # `owner_calls` as it stood when the peer policy last let a peer in;
-        # a peer's slot checks it again (`peer_slot_refusal`).
-        self.peer_cleared_at_owner_calls: Optional[int] = None
         # The background start a peer's request began (`start_for_peer`); while
         # it runs, no second one begins.
         self.peer_start_task: Optional[asyncio.Task] = None
@@ -1248,11 +1238,6 @@ class StrataSupervisor(LlamaServerSupervisor):
         self.write_start_config(self.port)
         self.vram_released = None
         self.engine_version = None
-        # A new launcher starts with an empty conversation cache.
-        self.owner_calls = 0
-        self.owner_last_end = None
-        self.peer_metrics_read = None
-        self.peer_cleared_at_owner_calls = None
         try:
             self._vram_free_before = await asyncio.to_thread(_base._free_vram_mib)
         except Exception:
@@ -1660,55 +1645,24 @@ class StrataSupervisor(LlamaServerSupervisor):
             )
         return len(lost)
 
-    def peer_slot_refusal(self) -> Optional[str]:
-        """The peer policy's synchronous half, asked again at the call boundary.
-
-        The policy (`StrataProvider.peer_refusal`) is asked by the P2P door
-        before the call, and the owner does not queue behind peers, so an owner
-        call can begin between that answer and this slot. Whatever an owner
-        call does, it raises `owner_calls` at its own slot, so a count that
-        moved since the policy let this peer in — or an owner call running —
-        refuses the peer here. No /metrics read: the slot is synchronous.
-        An owner call that begins after this slot is taken runs beside the
-        peer's; the policy cannot stop a call already running."""
-        if self.owner_in_flight > 0:
-            return f"'{self.alias}' began serving this node's owner while the peer's call was being prepared"
-        if self.peer_cleared_at_owner_calls is None:
-            return f"'{self.alias}': no peer policy decision stands for this call"
-        if self.owner_calls != self.peer_cleared_at_owner_calls:
-            return f"'{self.alias}' served this node's owner after the peer policy let the call in"
-        return None
-
     def call_slot(self):
         if self._draining:
             raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
-        owner = peer_being_served() is None
-        if not owner:
-            refusal = self.peer_slot_refusal()
-            if refusal:
-                raise PeerCallRefused(f"strata[{self.alias}]: {refusal}")
         self._in_flight += 1
         self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
-        if owner:
-            self.owner_calls += 1
-            self.owner_in_flight += 1
-        return self._StrataSlot(self, owner)
+        return self._StrataSlot(self)
 
     class _StrataSlot:
         """The base slot, and the one place every request's error passes through."""
 
-        def __init__(self, supervisor: "StrataSupervisor", owner: bool = True):
+        def __init__(self, supervisor: "StrataSupervisor"):
             self._supervisor = supervisor
-            self._owner = owner
 
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, exc_type, exc, tb):
             self._supervisor._in_flight -= 1
-            if self._owner:
-                self._supervisor.owner_in_flight -= 1
-                self._supervisor.owner_last_end = time.monotonic()
             if exc is not None:
                 body = self._supervisor.note_request_error(exc)
                 if body is not None:
