@@ -8,7 +8,8 @@ the user has configured in DPC Messenger.
 Key differences from Ouroboros's LLMClient:
 1. No OpenRouter API calls - uses DPC's LLMManager
 2. Message list converted to prompt string (DPC providers expect string input)
-3. Tool calling implemented via prompt injection (DPC providers don't natively support tools)
+3. Tool calling is native where the provider (or a peer host's menu row) offers it,
+   and prompt injection everywhere else
 4. Budget tracking delegated to DPC's existing system
 """
 
@@ -25,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, PeerRefused
+from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, REFUSAL_TOOLS_UNSUPPORTED, PeerRefused
 
 from ..node_ledger import (
     ENGINE_FIELDS,
@@ -238,6 +239,21 @@ def _text_of_content(content: Any) -> str:
     return str(content or "")
 
 
+def _image_of_url_part(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """An `image_url` part's data URL as `{base64, mime_type}`, else None."""
+    image_url = (block.get("image_url") or {}).get("url", "")
+    if not image_url.startswith("data:"):
+        return None
+    try:
+        header, data = image_url.split(",", 1)
+        # Extract mime type from header like "data:image/png;base64"
+        mime_type = header.split(";")[0].split(":")[1]
+    except (ValueError, IndexError) as e:
+        log.warning(f"Failed to parse image data URL: {e}")
+        return None
+    return {"base64": data, "mime_type": mime_type}
+
+
 class DpcLlmAdapter:
     """
     Adapts DPC's LLMManager to the interface expected by the Ouroboros agent loop.
@@ -250,6 +266,7 @@ class DpcLlmAdapter:
     # them: no caller named, the node's own ledger, nothing noted yet.
     _caller: Optional[str] = None
     _caller_kind: str = "agent"
+    _compute_host: str = ""
     _ledger: Optional[NodeLedger] = None
     _last_call: Optional[Dict[str, Any]] = None
     # The alias the last `chat()` call actually served with — set from the
@@ -382,6 +399,19 @@ class DpcLlmAdapter:
         """
         return bool(self._peer_menu_row(dpc_agent_provider, peer_id).get("supports_vision"))
 
+    def _peer_alias_supports_tools(self, dpc_agent_provider: Any, peer_id: str) -> bool:
+        """Whether the peer advertised a native tool-calling path for that alias.
+
+        DPTP §3.5: absent reads as false, and only a host that reads `messages`
+        and `tools` (v1.7+) sends the field at all.
+        """
+        return self._peer_menu_row(dpc_agent_provider, peer_id).get("supports_tools") is True
+
+    def _peer_alias_serves_images_with_tools(self, dpc_agent_provider: Any, peer_id: str) -> bool:
+        """Whether the peer serves image blocks in the turns beside tools on that
+        alias. Fail-closed (DPTP §3.5): an older host may drop the pictures."""
+        return self._peer_menu_row(dpc_agent_provider, peer_id).get("serves_images_with_tools") is True
+
     def _peer_menu_row(self, dpc_agent_provider: Any, peer_id: str) -> Dict[str, Any]:
         """The peer's PROVIDERS_RESPONSE row for the alias this agent will ask
         it to run, or an empty dict where there is none."""
@@ -422,6 +452,32 @@ class DpcLlmAdapter:
                 return []
             prepared.append({"base64": img["base64"], "mime_type": img["mime_type"]})
         return prepared
+
+    @staticmethod
+    def _turns_for_peer_tools(
+        turns: List[Dict[str, Any]], *, with_images: bool,
+    ) -> List[Dict[str, Any]]:
+        """Anthropic turns for a native tools request to a peer: each `image_url`
+        part of a user turn becomes the `image` block the host's tools path reads,
+        or is left out when no picture is to travel — on the text branch the
+        flattened prompt carries none either. Copies; the loop's turns are reused."""
+        out: List[Dict[str, Any]] = []
+        for turn in turns:
+            content = turn.get("content")
+            if turn.get("role") != "user" or not isinstance(content, list):
+                out.append(turn)
+                continue
+            blocks = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    image = _image_of_url_part(block) if with_images else None
+                    if image:
+                        blocks.append({"type": "image", "source": {
+                            "type": "base64", "media_type": image["mime_type"], "data": image["base64"]}})
+                    continue
+                blocks.append(block)
+            out.append(dict(turn, content=blocks or [{"type": "text", "text": ""}]))
+        return out
 
     def default_model(self) -> str:
         """Return the current DPC provider's model name."""
@@ -620,7 +676,7 @@ class DpcLlmAdapter:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """`chat` without the usage row: picks the route and makes the call."""
         # `tool_choice="none"` is honoured on the native tools path alone; every
-        # other route below gets no tools, which is what "none" meant there before.
+        # other route below sends no tools, which is what "none" meant there before.
         withhold_tools = tool_choice == "none"
         routed_tools = None if withhold_tools else tools
         # Check for remote peer routing — per-agent compute_host takes priority over global peer_id.
@@ -714,18 +770,22 @@ class DpcLlmAdapter:
                     timeout=getattr(dpc_agent_provider, 'timeout', 180) if dpc_agent_provider else 180,
                 )
                 log.debug(f"Routing to per-agent remote peer: {effective_peer_id} (provider={self._provider_alias})")
+                # The whole `tools` and the word: the peer route applies the
+                # local route's tool gate itself, from the host's menu row.
                 return await self._chat_via_remote_peer(
-                    remote_ctx, messages, routed_tools, on_stream_chunk, conversation_id,
+                    remote_ctx, messages, tools, on_stream_chunk, conversation_id,
                     images=peer_images,
                     reasoning_effort=reasoning_effort,
+                    tool_choice=tool_choice,
                 )
             else:
                 # Global peer_id routing (legacy KISS approach)
                 log.debug(f"Routing to remote peer: {effective_peer_id}")
                 return await self._chat_via_remote_peer(
-                    dpc_agent_provider, messages, routed_tools, on_stream_chunk, conversation_id,
+                    dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id,
                     images=peer_images,
                     reasoning_effort=reasoning_effort,
+                    tool_choice=tool_choice,
                 )
 
         alias = self._get_agent_provider_alias()
@@ -1234,12 +1294,15 @@ class DpcLlmAdapter:
         conversation_id: Optional[str] = None,
         images: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: Optional[str] = None,
+        tool_choice: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Route inference to remote peer when dpc_agent.peer_id is set.
 
-        This implements the KISS approach - instead of creating a separate
-        remote_peer provider, just add peer_id to dpc_agent config.
+        Tools go native (`messages`/`system`/`tools`, calls back in `tool_calls`,
+        DPTP v1.7) where the host's menu row says the alias serves them, and as
+        prompt text otherwise or when the host refuses with `tools_unsupported`.
+        `tool_choice="none"` withholds them, as on the local route.
 
         Args:
             dpc_agent_provider: The DpcAgentProvider instance with peer_id set
@@ -1249,6 +1312,7 @@ class DpcLlmAdapter:
             conversation_id: Optional conversation ID
             images: Optional list of image dicts for vision queries; sent only
                 as DPTP §3.4 allows, i.e. carrying base64 rather than a path
+            tool_choice: "none" withholds the tools
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -1267,7 +1331,24 @@ class DpcLlmAdapter:
         )
         self._note_call(peer_proved=proved, peer_connection_type=connection_type)
 
-        # Convert messages to prompt
+        peer_id = dpc_agent_provider.peer_id
+        peer_images = self._images_for_peer(images or [])
+        # The local route's gate (ADR-045), asked of the host's menu row. The
+        # wire has no `tool_choice` (DPTP §3.4) and the row states nothing about
+        # it, so a round that withholds the tools cannot keep them natively: it
+        # takes the text branch without them, as the local route does for a
+        # provider that does not take the word.
+        withhold_tools = tool_choice == "none"
+        native = bool(
+            tools and not withhold_tools
+            and self._peer_alias_supports_tools(dpc_agent_provider, peer_id)
+            and (not peer_images
+                 or self._peer_alias_serves_images_with_tools(dpc_agent_provider, peer_id))
+        )
+        if withhold_tools:
+            tools = None
+
+        # Convert messages to prompt (the text branch's; native renders its own)
         prompt = self._messages_to_prompt(messages)
 
         # Inject tools if provided
@@ -1281,22 +1362,62 @@ class DpcLlmAdapter:
             # Use configurable timeout from dpc_agent provider (default 1200s,
             # the host's own budget plus overhead — ADR-040 D4-0)
             timeout = getattr(dpc_agent_provider, 'timeout', 1200.0) or 1200.0
-            log.info(f"Routing agent inference to remote peer: {dpc_agent_provider.peer_id} (timeout={timeout}s)")
-            peer_images = self._images_for_peer(images or [])
-            result = await ask_peer_waiting_out_a_load(
-                lambda: service._request_inference_from_peer(
-                    peer_id=dpc_agent_provider.peer_id,
-                    prompt=prompt,
-                    model=dpc_agent_provider.remote_model,
-                    provider=dpc_agent_provider.remote_provider,
-                    # Re-checked at the wire, not only at the caller: this is the last
-                    # place a `path` could leave the machine (DPTP §3.4).
-                    images=peer_images,
-                    reasoning_effort=reasoning_effort,
-                    timeout=timeout
-                ),
-                _host_name(service, dpc_agent_provider.peer_id),
+            log.info(f"Routing agent inference to remote peer: {peer_id} (timeout={timeout}s)")
+            host_name = _host_name(service, peer_id)
+            ask = dict(
+                peer_id=peer_id,
+                prompt=prompt,
+                model=dpc_agent_provider.remote_model,
+                provider=dpc_agent_provider.remote_provider,
+                reasoning_effort=reasoning_effort,
+                timeout=timeout,
             )
+            result = None
+            if native:
+                from ..llm_manager import flatten_messages
+
+                system, turns = self._convert_messages_to_anthropic(messages)
+                # Beside tools the pictures ride in their turns, never on the
+                # flat field, which a host refuses beside tools (DPTP §3.4).
+                wire_turns = self._turns_for_peer_tools(turns, with_images=bool(peer_images))
+                native_ask = dict(
+                    ask,
+                    # From the turns and system alone, as the gateway renders
+                    # it (DPTP §3.4): the tools travel in `tools`.
+                    prompt=flatten_messages(wire_turns, system),
+                    messages=wire_turns,
+                    system=system or None,
+                    tools=self._convert_tools_to_anthropic(tools),
+                )
+                if on_stream_chunk is not None:
+                    # A chunk carries its delta alone; the agent's callback
+                    # takes the conversation too.
+                    async def _relay(delta: str) -> None:
+                        await on_stream_chunk(delta, conversation_id)
+                    native_ask["on_chunk"] = _relay
+                log.debug("Native tool calling on peer %s: %d tools", peer_id, len(tools))
+                try:
+                    result = await ask_peer_waiting_out_a_load(
+                        lambda: service._request_inference_from_peer(**native_ask), host_name,
+                    )
+                    # What was sent, for a count made here.
+                    prompt = native_ask["prompt"]
+                except PeerRefused as e:
+                    if e.code != REFUSAL_TOOLS_UNSUPPORTED:
+                        raise
+                    # The host's gate is the authority over its row: the round
+                    # goes again as text, which every host serves.
+                    log.warning("Host %s refused native tools (%s); sending this call as text", host_name, e)
+                    native = False
+            if not native:
+                result = await ask_peer_waiting_out_a_load(
+                    lambda: service._request_inference_from_peer(
+                        # Re-checked at the wire, not only at the caller: this is the last
+                        # place a `path` could leave the machine (DPTP §3.4).
+                        images=peer_images, **ask,
+                    ),
+                    host_name,
+                )
 
             # Extract response text from result dict
             # _request_inference_from_peer returns: {"response": str, "tokens_used": int, ...}
@@ -1329,8 +1450,20 @@ class DpcLlmAdapter:
             if remote_thinking:
                 response_msg["thinking"] = remote_thinking
 
-            # Parse for tool calls if tools were provided
-            if tools:
+            if native:
+                # `tool_use` blocks on the wire, the local native path's shape here.
+                tool_calls = [
+                    {"id": block.get("id"), "type": "function", "function": {
+                        "name": block.get("name"), "arguments": json.dumps(block.get("input") or {})}}
+                    for block in (result.get("tool_calls") or [] if isinstance(result, dict) else [])
+                    if isinstance(block, dict)
+                ]
+                if tool_calls:
+                    response_msg["tool_calls"] = tool_calls
+                    log.info("Native tool calling on peer: %d tool call(s): %s",
+                             len(tool_calls), [tc["function"]["name"] for tc in tool_calls])
+            elif tools:
+                # Parse for tool calls if tools were provided
                 log.debug(f"Parsing tool calls from remote response (len={len(response_text)})")
                 tool_calls = self._parse_tool_calls(response_text)
                 if tool_calls:
@@ -1397,6 +1530,9 @@ class DpcLlmAdapter:
             # whether or not the host counted, so the row carries it either way.
             if _peer.get("served_effort") is not None:
                 usage["served_effort"] = _peer["served_effort"]
+            # The host's provider's word, as a local provider's usage carries it.
+            if _peer.get("finish_reason") is not None:
+                usage["finish_reason"] = _peer["finish_reason"]
             # Where the host's thinking count came from, checked as its
             # convention is; a word that is neither of the two is dropped.
             _source = stated_thinking_source(
@@ -1435,19 +1571,9 @@ class DpcLlmAdapter:
                 if isinstance(content, list):
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "image_url":
-                            # Parse data URL
-                            image_url = block.get("image_url", {}).get("url", "")
-                            if image_url.startswith("data:"):
-                                try:
-                                    header, data = image_url.split(",", 1)
-                                    # Extract mime type from header like "data:image/png;base64"
-                                    mime_type = header.split(";")[0].split(":")[1]
-                                    images.append({
-                                        "base64": data,
-                                        "mime_type": mime_type,
-                                    })
-                                except (ValueError, IndexError) as e:
-                                    log.warning(f"Failed to parse image data URL: {e}")
+                            image = _image_of_url_part(block)
+                            if image:
+                                images.append(image)
         return images
 
     def _extract_user_text(self, messages: List[Dict[str, Any]]) -> str:

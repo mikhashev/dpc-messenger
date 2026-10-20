@@ -8426,17 +8426,28 @@ class CoreService:
             logger.error("request_skill_from_peer error: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None, timeout: float = None) -> str:
+    async def _request_inference_from_peer(
+        self, peer_id: str, prompt: str, model: str = None, provider: str = None,
+        images: list = None, reasoning_effort: str = None, timeout: float = None,
+        messages: list = None, system: Any = None, tools: list = None,
+        on_chunk: Optional[Any] = None, request_id: Optional[str] = None,
+    ) -> str:
         """Delegated to P2PCoordinator.
 
         The UI door used to carry a hardcoded 240 s that no configuration could
         reach, while the host it calls budgets 900 s for the same work (ADR-040
         D4-0). The caller still wins when it names a timeout.
+
+        No narrower than the coordinator it calls: it once dropped the DPTP v1.7
+        half (`messages`, `system`, `tools`, `on_chunk`, `request_id`), so the
+        guest agent could only send its tools as prompt text.
         """
         if timeout is None:
             timeout = self.settings.get_remote_inference_timeout()
         return await self.p2p_coordinator.request_inference_from_peer(
-            peer_id, prompt, model, provider, images, reasoning_effort, timeout
+            peer_id, prompt, model, provider, images, reasoning_effort, timeout,
+            messages=messages, system=system, tools=tools,
+            on_chunk=on_chunk, request_id=request_id,
         )
 
     async def _request_transcription_from_peer(
