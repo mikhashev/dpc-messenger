@@ -381,7 +381,8 @@
       "conversation_cache_slots": "Optional: how many conversations it parks at most (--conversation-cache-slots). Unset keeps the base config's value, else the engine's default 4",
       "conversation_cache_min_free_mib": "Optional, default 2560 (Strata's own), always written: the RAM floor in MiB that must stay free when a conversation is parked, saved or restored (--conversation-cache-min-free-mib). Physical RAM (MemAvailable; GlobalMemoryStatusEx ullAvailPhys on Windows, under the cgroup limits), not free commit",
       "conversation_cache_min_tokens": "Optional, default 0 (Strata's own), always written: park only conversations of at least this many tokens (--conversation-cache-min-tokens); 0 parks every conversation",
-      "conversation_cache_park_gain": "Optional, default 0 (Strata's own), always written: park a conversation again only after it grew this many tokens past the copy it would replace (--conversation-cache-park-gain); 0 parks every turn"
+      "conversation_cache_park_gain": "Optional, default 0 (Strata's own), always written: park a conversation again only after it grew this many tokens past the copy it would replace (--conversation-cache-park-gain); 0 parks every turn",
+      "model_params.idle_unload_s": "Optional, a key of the model_params block (not a field of this one): seconds of idle after which the launcher unloads the model, 0 or unset = never. DPC reads it so an unloaded engine counts as a configured state, not a death (strata_supervisor.py _unload_expected)"
     },
     "gemini_fields": {
       "api_key_env": "Environment variable containing Google AI Studio API key (default: GEMINI_API_KEY)"

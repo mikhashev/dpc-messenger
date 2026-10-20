@@ -1,7 +1,7 @@
 ---
 adr: 044
 title: "Run Strata as a second local engine, supervised by DPC as a child beside the llama-server child"
-status: accepted
+status: implemented
 date: 2026-10-18
 axis: network
 deciders: [Mike]
@@ -111,12 +111,13 @@ card.** Every point is Mike's call, 2026-10-18.
    child in settings; there is no automatic swap today. The launcher's
    `--min-free-vram-mib`, `--before-load` and `--idle-unload` are the named way to relax
    this later. An agent whose engine cannot load because the other holds the card gets an
-   error naming the other engine, which needs a **card-holder check that does not exist
-   yet**: `_admission` budgets from physical VRAM minus the desktop reserve, and with an
-   explicit KV cache type `_warn_if_explicit_type_exceeds_budget` only warns and loads, so
-   today the `llama-server` child would start while Strata holds the card and silently
-   page through WDDM. Both supervisors check for the other before starting. The
-   supervisor's existing stop is exposed for a manual switch.
+   error naming the other engine. The **card-holder check** (b97b2beb) does that: before a
+   start, each supervisor looks for the other, and the second start raises
+   `CardHeldError` naming the holder, never retried. It was needed because `_admission`
+   budgets from physical VRAM minus the desktop reserve, and with an explicit KV cache
+   type `_warn_if_explicit_type_exceeds_budget` only warns and loads, so the
+   `llama-server` child would otherwise start while Strata holds the card and silently
+   page through WDDM. The supervisor's existing stop is exposed for a manual switch.
 5. **Updates are mixed.** Strata installs and updates through its own scripts
    (`START-HERE.bat`, `UPDATE.bat`); DPC starts `serve/server.py` directly with its own
    `--config` file (point 6). DPC stores a *tested version* with its date in the provider
@@ -194,8 +195,8 @@ card.** Every point is Mike's call, 2026-10-18.
    already sends images to its own provider through `_resolve_vision_alias`, and a global
    default on Strata would break `llama-server` agents whenever Strata is off
    (`VISION-ROUTING-NAMES-A-27B-THAT-IS-DOWN-WHILE-STRATA-HOLDS-THE-CARD`). An image request
-   to Strata is **not yet verified**: it is the first smoke of the implementation, and if
-   it fails, vision is off.
+   to Strata was the first smoke of the implementation, and if it failed, vision was off;
+   the smoke card is closed on the board (2026-10-20).
 9. **Inference Sharing: Strata is offered to peers.** Every call served to a peer is
    sent with checkpointing off (`strata_checkpoint: false`, the engine's `ckpt=0`): it
    takes no checkpoint and parks no snapshot, so a peer is served while our own
@@ -278,10 +279,8 @@ scheduler.
   death; `managers/commit_memory.py` reads it on Windows (nothing elsewhere), and the
   start log line, the engine-death reason and the cache hint print it by field name,
   with `ullAvailPhys` after it.
-- **Vision smoke** — one image request to Strata; on failure, vision off (point 8).
 - **A conversation beyond what fits** is untested past the watchdog stop; the page-file
   size it would need is the owner's machine setting, not a DPC default.
-- **The card-holder guard** of point 4, on both supervisors.
 - `THE-2026-10-17-STRATA-EVAL-ROWS-IN-THE-LEDGER-CARRY-NO-COST-AND-NO-STATEMENT-OF-THEIR-ORIGIN`,
   `THE-EVAL-PREFLIGHT-REFUSES-ANY-LOCAL-TYPE-BUT-LLAMACPP-SERVER` and
   `THE-PROVIDERS-EDITOR-HAS-NO-STRATA-TYPE` stay open under the epic.

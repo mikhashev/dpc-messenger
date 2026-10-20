@@ -1389,6 +1389,10 @@ Cancels an in-progress or pending file transfer.
 
 **Fields:**
 - `transfer_id` (string, required): Transfer identifier
+- `denial_reason` (string, optional): With `firewall_denied`, the receiver's firewall
+  sentence saying why the offer was refused. The sender's reader keeps at most the
+  first 300 characters (`file_cancel_handler.py`). A sender that does not know the
+  field ignores it.
 - `reason` (string, required): Cancellation reason. The set below is what senders in
   this tree actually emit (`managers/file_transfer_manager.py`;
   `message_handlers/file_offer_handler.py`); it replaces an earlier list that mixed in
@@ -2686,6 +2690,13 @@ DPTP is designed to be extensible. New commands can be added by:
 ## 9. Changelog
 
 ### v1.10 (October 2026)
+- **§3.11 FILE_CANCEL** — optional `denial_reason` (the receiver's firewall
+  sentence, read to 300 characters); reason `receive_error` for a receive that
+  cannot be written to disk. Receiving is a behaviour change with no new
+  command: chunks are written at their offsets into a temporary file, renamed
+  on completion; after 30 s with no chunk the receiver re-asks up to 64
+  missing indices, and after 3 rounds with no new chunk it cancels with
+  `missing_chunks`.
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — `provider_unavailable` no longer
   covers the host owner's parked conversations: a Strata host sends a peer's
   call with checkpointing off, so the call parks nothing and is served beside

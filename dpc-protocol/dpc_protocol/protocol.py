@@ -93,7 +93,7 @@ REFUSAL_MISCONFIGURED = "misconfigured"
 # held by the other engine or a launcher its owner has to reset. Nothing on
 # either node retries it by itself.
 REFUSAL_PROVIDER_UNAVAILABLE = "provider_unavailable"
-# The host's local engine is loading its model (DPTP v1.10, Mike's call
+# The host's local engine is loading its model (DPTP v1.9, Mike's call
 # 2026-10-20), including a start a peer's request has just begun. Its own
 # word, not a flavour of `provider_unavailable`, because a code is read as an
 # instruction (above) and this one's differs: a load ends by itself, soon, so

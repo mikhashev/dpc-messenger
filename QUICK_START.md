@@ -327,7 +327,9 @@ Your data is stored in `~/.dpc/` (Windows: `C:\Users\<YourName>\.dpc\`). Here's 
 | `personal.json` | Your profile and context | UI: click **"Personal Context"** in sidebar | [personal_context_example.json](./dpc-client/personal_context_example.json) |
 | `device_context.json` | Your hardware/software info | Auto-collected, no action needed | [device_context_example.json](./dpc-client/device_context_example.json) |
 
-Other folders (`knowledge/`, `conversations/`, `agents/`, `logs/`) are created automatically as you use the app.
+Other folders (`knowledge/`, `conversations/`, `agents/`, `logs/`) are created automatically as you use the app. AI chat history lives in `conversations/ai_*`.
+
+Deleting or renaming `~/.dpc` means a clean install: the backend notes that the folder was absent (a fresh-install marker), the old chat store the UI still holds is erased, and nothing from it is imported.
 
 ---
 

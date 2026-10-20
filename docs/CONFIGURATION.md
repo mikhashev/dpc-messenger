@@ -272,7 +272,7 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
 ```
 
 - `serving_local` — aliases whose provider runs on this machine (`ollama`,
-  `llamacpp_server`, `local_whisper`). The card is the scarce resource: a request queues
+  `llamacpp_server`, `strata`, `local_whisper`). The card is the scarce resource: a request queues
   behind peer inference on the same lock, and one that would wait longer than
   `[connection] remote_inference_timeout` is answered `503` (the card is busy). The
   whole list is also what the P2P door serves peers from — every entry, the first being
@@ -283,6 +283,10 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   permission — but it transcribes and does not chat, so the gateway leaves it off
   `/v1/models` and answers a completion addressed to it `404` saying so. The same
   applies to a peer's `local_whisper` row: it is not listed as `remote:<peer>:<alias>`.
+  A `strata` alias serves a peer with checkpointing off, so it parks nothing and is served
+  beside this node's own parked conversations, queued behind an owner call that is
+  running. A peer's request may start a stopped engine when the card is free, and while
+  the engine loads the peer gets the refusal code `provider_loading` (ADR-044 point 9).
 - `serving_vendor` — aliases whose provider is a paid API (`anthropic`, `deepseek`,
   `neuraldeep`, `zai`, `openai_compatible`, `gemini`, `github_models`, `gigachat`). Money is the
   scarce resource, so **every entry needs a ceiling in `vendor_quotas`** — one number per
@@ -790,10 +794,10 @@ An empty default means the key is written blank and the feature stays off until 
 | `direct_tls_only_threshold_mb` | `100` | Direct TLS preference threshold in MB |
 | `max_concurrent_transfers` | `3` | Max concurrent file transfers |
 | `verify_hash` | `true` | Verify file hash after transfer (SHA256) |
-| `preparation_timeout_base` | `60` | Base timeout in seconds (for small files) |
-| `preparation_timeout_per_gb` | `40` | Additional timeout per GB (40s/GB) |
-| `preparation_progress_interval_mb` | `100` | Emit progress every N MB during SHA256 |
-| `preparation_progress_interval_chunks` | `10000` | Emit progress every N chunks during CRC32 |
+| `preparation_timeout_base` | `60` | **Inert: nothing reads it.** The UI's own wait is in `ui/src/lib/fileSendTimeout.ts` (60 s + 40 s per GB + 20 s margin) |
+| `preparation_timeout_per_gb` | `40` | **Inert**, as above |
+| `preparation_progress_interval_mb` | `100` | **Inert: nothing reads it.** Preparation progress is throttled by time, `PREPARATION_PROGRESS_MIN_INTERVAL_S` (0.5 s) in `file_transfer_manager.py` |
+| `preparation_progress_interval_chunks` | `10000` | **Inert**, as above |
 
 #### `[gateway]`
 

@@ -10,7 +10,7 @@ Group chat is "fan-out the same message to N participants under a `group_id` env
 
 There are **two participant types**:
 - **Humans** — P2P peer nodes.
-- **Agents** — local LLM instances. Agents are **per-node**: each node decides which of its own agents participate in a given group. Agent messages are attributed with `is_agent=True` and a display name.
+- **Agents** — local LLM instances. Agents are **per-node**: each node decides which of its own agents participate in a given group. Agent messages are attributed with a display name and, from `dptp-msg-v3`, a signed `sender_type`, which the receiver reads; `is_agent` is the pre-v3 flag.
 
 ### Data Model
 
@@ -193,6 +193,7 @@ On connect, nodes reconcile group history so all members converge.
 ## Limitations
 
 - **Agent `@all` is human-only** — agents cannot trigger cascading agent invocations.
+- **Cross-node agent-to-agent mentions are bounded at depth 1** — an agent post from another node may wake one agent here, and that agent's reply wakes nobody on another node; mentions between agents on the same node are not bounded (specs/dptp_v1.md §4.3).
 - **No cross-node agent sharing** — an agent runs only on the node it is assigned to.
 - **No offline delivery** — messages reach only connected members (gossip integration deferred).
 - **No typing indicators**, **no invite codes** — deferred.

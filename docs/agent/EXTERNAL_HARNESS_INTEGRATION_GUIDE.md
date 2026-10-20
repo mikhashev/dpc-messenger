@@ -266,7 +266,8 @@ every minute, `--listen` authenticates on the local WebSocket (the same
 `cc_group_mention` event whose `group_id` is this group and whose `agent_tag`
 is one of the names resolved above (`--as` applies). The backend emits the
 event on both the local send path and the peer path with
-`{group_id, text, sender_name, sender_node_id, agent_tag}`. `--once` returns 0
+`{group_id, text, sender_name, sender_node_id, agent_tag, mention_depth}`
+(`mention_depth` is the depth the bridge's reply carries, specs/dptp_v1.md §4.3). `--once` returns 0
 after the first match, so `--listen --once --json` is "block until mentioned"
 for a script; without `--once` it runs until Ctrl-C (exit 0, `[LISTEN] stopped`
 on stderr) and reconnects with 1s→30s backoff when the backend restarts. Status

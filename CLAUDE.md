@@ -509,7 +509,8 @@ Rollback: remove the keys + restart; FAISS state at
   - Anti-entropy sync loop (5-minute interval, vector clock reconciliation)
   - Message deduplication, TTL enforcement
 - `managers/file_transfer_manager.py` - File transfer coordination (v0.11.0)
-  - Chunked file transfer (64KB chunks, SHA256 verification)
+  - Chunked file transfer (64KB chunks, SHA256 verification; the file is read once for both digests)
+  - Receiving writes chunks at their offsets into a `.tmp` file beside the final one, renamed on completion; after 30 s with no chunk the receiver re-asks up to 64 missing indices, and after 3 empty rounds cancels with `missing_chunks`
   - Active transfer tracking (upload/download progress)
   - Background process for large files (>50MB)
   - Hash verification and cleanup on cancel/error
@@ -518,6 +519,8 @@ Rollback: remove the keys + restart; FAISS state at
 - `hub_client.py` - Federation Hub communication (OAuth, WebSocket signaling)
 - `llm_manager.py` - AI provider registry and routing (implementations in `providers/`)
   - `providers/base.py` - `AIProvider`, the base class every provider extends (a conventional base class, not an `abc.ABC`)
+  - `providers/llamacpp_server_provider.py` (provider type `llamacpp_server`) - DPC-owned `llama-server` child, supervised by `managers/llama_server_supervisor.py` (ADR-040)
+  - `providers/strata_provider.py` (provider type `strata`) - Strata launcher as a second supervised local child, `managers/strata_supervisor.py`; one local engine holds the card at a time (ADR-044)
   - `providers/ollama_provider.py`, `openai_provider.py`, `anthropic_provider.py`, `zai_provider.py`
   - `providers/gemini_provider.py`, `gigachat_provider.py`, `github_models_provider.py`
   - `providers/whisper_provider.py` - local Whisper transcription
@@ -615,7 +618,7 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
 {"command": "FILE_ACCEPT", "payload": {"transfer_id": "..."}}
 {"command": "FILE_CHUNK", "payload": {"transfer_id": "...", "chunk_index": 0, "total_chunks": 10, "data": "base64..."}}
 {"command": "FILE_COMPLETE", "payload": {"transfer_id": "...", "hash": "sha256:..."}}
-{"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|timeout|hash_mismatch"}}
+{"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|firewall_denied|hash_mismatch|chunk_verification_failed|missing_chunks|send_error|receive_error", "denial_reason": "optional, with firewall_denied"}}
 
 # Voice Messages (v0.13.0) - Reuses FILE_OFFER with voice_metadata
 {"command": "FILE_OFFER", "payload": {"transfer_id": "...", "filename": "voice_2026-01-04_12-34-56.webm", "size_bytes": 245000, "hash": "sha256:...", "mime_type": "audio/webm", "voice_metadata": {"duration_seconds": 30.5, "sample_rate": 48000, "channels": 1, "codec": "opus", "recorded_at": "2026-01-04T12:34:56Z"}}}
@@ -1429,6 +1432,8 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 
 ### Supported Providers
 - **Ollama**: Local models (llama3, mistral, qwen, etc.) via Ollama API
+- **llama-server child** (`llamacpp_server`): local GGUF models served by a `llama-server` process DPC starts and stops itself ([ADR-040](docs/decisions/040-local-inference-second-path-as-a-dpc-owned-llama-server.md))
+- **Strata** (`strata`): Flash-Next served by a Strata launcher DPC supervises as a child, with conversation parking; a peer call is served with checkpointing off ([ADR-044](docs/decisions/044-strata-as-a-second-supervised-local-engine.md))
 - **OpenAI Compatible**: OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
 - **Anthropic**: Claude models (Claude 3.5 Sonnet, Claude Opus, etc.)
 - **DeepSeek**: Pay-per-token V4 models (`deepseek-v4-flash` / `deepseek-v4-pro`) via OpenAI-compatible endpoint; native pay-per-token cost + account-balance tracking and per-call reasoning-effort control (`deepseek` provider type, `deepseek_provider.py`)

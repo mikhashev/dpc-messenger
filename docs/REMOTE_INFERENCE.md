@@ -106,6 +106,7 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 - Only visible in `local_ai` chat mode
 - Automatically populates from `peer_info` in node status
 - Persists selection across messages
+- An agent chat's header shows that chat's own `compute_host` (this node or a peer) read-only; the dropdown does not change it
 
 ---
 
@@ -155,7 +156,9 @@ Edit `~/.dpc/privacy_rules.json` to enable inference sharing:
   host's own 900 s budget — so work that outlived the requester was abandoned while the
   host kept generating and paying for it (ADR-040 D4-0)
 - Failed requests return clear error messages
-- No automatic retries (user must retry manually)
+- No automatic retries (user must retry manually), with one exception: a guest agent whose
+  host answers `provider_loading` waits and re-asks every 10 s, up to 120 s in all
+  (`PEER_LOADING_RETRY_EVERY_S`, `PEER_LOADING_WAIT_CAP_S` in `dpc_agent/llm_adapter.py`)
 
 ---
 
