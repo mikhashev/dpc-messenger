@@ -3886,6 +3886,8 @@
 
   .modal {
     background: #1e1e1e;
+    /* A dark card on a light page: text without its own colour inherits black. */
+    color: #e0e0e0;
     border-radius: 8px;
     width: 90%;
     max-width: 800px;
