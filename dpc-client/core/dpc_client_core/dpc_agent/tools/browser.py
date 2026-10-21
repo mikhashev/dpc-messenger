@@ -13,6 +13,7 @@ to keep dependencies minimal. These tools use simple HTTP requests.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import itertools
 import functools
 import hashlib
@@ -53,6 +54,84 @@ except ImportError:
     HAS_REQUESTS = False
 
 
+_HEADER_CHARSET_RE = re.compile(r"charset\s*=\s*[\"']?\s*([^\s;\"',]+)", re.IGNORECASE)
+# Matches <meta charset=..> and <meta http-equiv="Content-Type" content="..; charset=..">.
+_META_CHARSET_RE = re.compile(
+    rb"<meta\s[^>]*?charset\s*=\s*[\"']?\s*([A-Za-z0-9_.:\-]+)", re.IGNORECASE
+)
+_XML_ENCODING_RE = re.compile(
+    rb"^\s*<\?xml[^>]*?encoding\s*=\s*[\"']([A-Za-z0-9_.:\-]+)[\"']", re.IGNORECASE
+)
+_CHARSET_SNIFF_BYTES = 2048
+# Browsers (WHATWG) read a declared latin-1 / ascii as windows-1252.
+_BROWSER_CHARSET_ALIASES = {"iso8859-1": "cp1252", "latin-1": "cp1252", "ascii": "cp1252"}
+
+
+def _codec_name(label: Optional[str]) -> Optional[str]:
+    """Canonical Python codec name for a charset label, or None if unknown."""
+    if not label:
+        return None
+    try:
+        name = codecs.lookup(label.strip()).name
+    except (LookupError, ValueError):
+        return None
+    return _BROWSER_CHARSET_ALIASES.get(name, name)
+
+
+def _decode_body(
+    raw: bytes,
+    content_type: str = "",
+    guess: Optional[Any] = None,
+) -> str:
+    """Decode a fetched body the way a browser would; never by locale.
+
+    ``requests`` reads a ``text/*`` response without ``charset=`` as ISO-8859-1
+    and ignores ``<meta charset>``, so UTF-8 pages came back as mojibake.
+    Order: BOM, Content-Type ``charset=``, ``<meta>`` in the first 2 KB, XML
+    declaration, strict UTF-8, ``guess()`` (a callable returning a codec
+    label), windows-1252. The final decode replaces what it cannot read.
+    """
+    if not raw:
+        return ""
+    # UTF-32 first: its LE mark begins with the UTF-16 LE one.
+    if raw.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        return raw.decode("utf-32", errors="replace")
+    if raw.startswith(codecs.BOM_UTF8):
+        return raw.decode("utf-8-sig", errors="replace")
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16", errors="replace")
+
+    head = raw[:_CHARSET_SNIFF_BYTES]
+    declared: List[Optional[str]] = []
+    header_match = _HEADER_CHARSET_RE.search(content_type or "")
+    if header_match:
+        declared.append(_codec_name(header_match.group(1)))
+    if "json" not in (content_type or "").lower():
+        for pattern in (_META_CHARSET_RE, _XML_ENCODING_RE):
+            found = pattern.search(head)
+            if found:
+                name = _codec_name(found.group(1).decode("ascii", errors="ignore"))
+                # Wide codec named inside ASCII-compatible bytes: browsers read UTF-8.
+                if name and name.startswith(("utf-16", "utf-32")):
+                    name = "utf-8"
+                declared.append(name)
+    for name in declared:
+        if name:
+            return raw.decode(name, errors="replace")
+
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    fallback = None
+    if guess is not None:
+        try:
+            fallback = _codec_name(guess())
+        except Exception:
+            fallback = None
+    return raw.decode(fallback or "cp1252", errors="replace")
+
+
 def _fetch_url(url: str, timeout: int = 30) -> Dict[str, Any]:
     """
     Fetch content from a URL.
@@ -78,24 +157,29 @@ def _fetch_url(url: str, timeout: int = 30) -> Dict[str, Any]:
         if HAS_REQUESTS:
             response = requests.get(url, headers=headers, timeout=timeout)
             response.raise_for_status()
-            content = response.text
+            content_type = response.headers.get("Content-Type", "")
+            # Not response.text: it assumes ISO-8859-1 when the header has no charset.
+            content = _decode_body(
+                response.content, content_type, lambda: response.apparent_encoding
+            )
             return {
                 "success": True,
                 "content": content,
                 "status_code": response.status_code,
-                "content_type": response.headers.get("Content-Type", ""),
+                "content_type": content_type,
             }
         else:
             req = urllib.request.Request(url, headers=headers)
             # Create SSL context with system certificates for proper TLS verification
             ssl_context = ssl.create_default_context()
             with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
-                content = response.read().decode("utf-8", errors="replace")
+                content_type = response.headers.get("Content-Type", "")
+                content = _decode_body(response.read(), content_type)
                 return {
                     "success": True,
                     "content": content,
                     "status_code": 200,
-                    "content_type": response.headers.get("Content-Type", ""),
+                    "content_type": content_type,
                 }
 
     except Exception as e:
