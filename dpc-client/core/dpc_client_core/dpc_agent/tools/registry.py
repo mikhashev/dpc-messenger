@@ -19,7 +19,9 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import pathlib
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -62,6 +64,162 @@ def _resolve_arg_aliases(handler: Callable, args: Dict[str, Any], tool_name: str
         resolved[canonical] = resolved.pop(alias)
         log.debug("Tool %s: argument %r accepted as %r", tool_name, alias, canonical)
     return resolved
+
+
+_JSON_TYPE_OF = {bool: "boolean", int: "integer", float: "number", str: "string",
+                 list: "array", dict: "object", type(None): "null"}
+_INTEGER_TEXT = re.compile(r"[+-]?\d+")
+
+
+def _json_type(value: Any) -> str:
+    return _JSON_TYPE_OF.get(type(value), type(value).__name__)
+
+
+def _declared_types(prop: Any) -> Optional[List[str]]:
+    """The JSON types a schema property admits, or None when it does not say.
+
+    `"type": "x"`, `"type": [...]` and an `anyOf`/`oneOf` whose every branch
+    names a type are read; anything else (no type, a `$ref`, a branch without
+    one) is unknown, and an unknown property is left to the handler.
+    """
+    if not isinstance(prop, dict):
+        return None
+    t = prop.get("type")
+    if isinstance(t, str):
+        return [t]
+    if isinstance(t, list) and t and all(isinstance(x, str) for x in t):
+        return list(t)
+    for key in ("anyOf", "oneOf"):
+        branches = prop.get(key)
+        if isinstance(branches, list) and branches:
+            out: List[str] = []
+            for b in branches:
+                bt = _declared_types(b)
+                if bt is None:
+                    return None
+                out.extend(bt)
+            return out
+    return None
+
+
+def _matches(value: Any, json_type: str) -> bool:
+    if json_type == "null":
+        return value is None
+    if json_type == "boolean":
+        return isinstance(value, bool)
+    if json_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if json_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if json_type == "string":
+        return isinstance(value, str)
+    if json_type == "array":
+        return isinstance(value, list)
+    if json_type == "object":
+        return isinstance(value, dict)
+    return True  # a type word we do not know is not ours to police
+
+
+_NO_COERCION = object()
+
+
+def _coerce_one(value: Any, json_type: str) -> Any:
+    """`value` as `json_type`, or _NO_COERCION. Never guesses from the look alone:
+    the declared type picks the reading, so "1-5" for a string stays a string."""
+    if json_type == "boolean":
+        # "true"/"false" only. "1"/"0", "yes" and integers are refused rather than
+        # read: none was seen in the logs, and a guess lands on flags such as
+        # repo_delete(recursive) and git_reset(hard).
+        if isinstance(value, str):
+            word = value.strip().lower()
+            if word == "true":
+                return True
+            if word == "false":
+                return False
+        return _NO_COERCION
+    if json_type == "integer":
+        if isinstance(value, bool):
+            return _NO_COERCION
+        if isinstance(value, str) and _INTEGER_TEXT.fullmatch(value.strip()):
+            return int(value.strip())
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return _NO_COERCION
+    if json_type == "number":
+        if isinstance(value, str):
+            text = value.strip()
+            if _INTEGER_TEXT.fullmatch(text):
+                return int(text)
+            try:
+                f = float(text)
+            except ValueError:
+                return _NO_COERCION
+            return f if math.isfinite(f) else _NO_COERCION
+        return _NO_COERCION
+    if json_type == "string":
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        return _NO_COERCION
+    if json_type in ("array", "object"):
+        if isinstance(value, str) and value.strip()[:1] in ("[", "{"):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                return _NO_COERCION
+            if _matches(parsed, json_type):
+                return parsed
+        return _NO_COERCION
+    return _NO_COERCION
+
+
+def coerce_args_to_schema(
+    schema: Dict[str, Any], args: Dict[str, Any], tool_name: str,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Bring model-supplied arguments to the types the tool's schema declares.
+
+    Returns (args, None), or (args, error) when a value cannot be read as its
+    declared type — the error is the registry's TOOL_ARG_ERROR string, and the
+    handler must not run. Local models send booleans as "True"/"False"; a
+    handler that tests truthiness runs a string "False" as True.
+
+    Only declared properties with a known type are touched; None passes as
+    "not given". A mismatched array or object that is not a JSON string of
+    that type is left to the handler, since a handler may accept more than
+    its schema says. Every coercion is logged at INFO, one line per call.
+    """
+    params = schema.get("parameters") if isinstance(schema, dict) else None
+    props = params.get("properties") if isinstance(params, dict) else None
+    if not args or not isinstance(props, dict):
+        return args, None
+
+    out = dict(args)
+    changed: List[str] = []
+    for pname, value in args.items():
+        types = _declared_types(props.get(pname))
+        if not types or value is None:
+            continue
+        if any(_matches(value, t) for t in types):
+            continue
+        for t in types:
+            coerced = _coerce_one(value, t)
+            if coerced is not _NO_COERCION:
+                out[pname] = coerced
+                changed.append(f"{pname} {value!r} ({_json_type(value)}) -> {coerced!r} ({t})")
+                break
+        else:
+            if all(t in ("array", "object") for t in types if t != "null"):
+                continue
+            shown = repr(value)
+            if len(shown) > 60:
+                shown = shown[:57] + "..."
+            expected = " or ".join(types)
+            return args, (
+                f"⚠️ TOOL_ARG_ERROR ({tool_name}): parameter '{pname}' expects "
+                f"{expected}, got {_json_type(value)} {shown}"
+            )
+    if changed:
+        log.info("Tool %s: arguments coerced to the schema: %s", tool_name, "; ".join(changed))
+    return out, None
 
 
 def agent_display_name(ctx: Any) -> str:
@@ -525,6 +683,9 @@ class ToolRegistry:
             return f"⚠️ Tool '{name}' is not in the allowed tools list"
 
         args = _resolve_arg_aliases(entry.handler, args, name)
+        args, arg_error = coerce_args_to_schema(entry.schema, args, name)
+        if arg_error is not None:
+            return arg_error
 
         try:
             result = entry.handler(_ctx, **args)
