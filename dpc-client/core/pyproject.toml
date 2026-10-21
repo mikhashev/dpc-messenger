@@ -68,7 +68,10 @@ mlx = [
     "mlx-whisper>=0.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 browser = [
-    "camoufox>=0.4.11",
+    # <0.5: camoufox_binary.py subclasses the 0.4 fetcher and reads its Version;
+    # 0.5 changed both (Mike's call 2026-10-21). See backlog
+    # CAMOUFOX-0-5-CHANGED-THE-API-OUR-BROWSER-PIN-SUBCLASSES.
+    "camoufox>=0.4.11,<0.5",
     # Playwright 1.61 sends isMobile in Juggler setDefaultViewport, which the
     # Camoufox Firefox build rejects — pin <1.61 until a Windows build with the
     # upstream cap (daijro/camoufox#653, commit 195298d0) ships. See backlog
