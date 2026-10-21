@@ -177,6 +177,22 @@ def test_a_visible_window_call_is_refused_and_the_owner_is_asked_once(binary_mis
     assert binary_missing == []
 
 
+def test_a_pin_outside_the_package_range_asks_for_a_dpc_update_and_offers_nothing(
+    binary_missing, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(camoufox_binary, "PINNED_RELEASE_TAG", "v135.0-beta.18")
+    service = _download_service(tmp_path)
+    ctx = _ctx(tmp_path, service)
+    browser._active_browser_sessions.pop("agent_test", None)
+
+    answer = asyncio.run(browser.browse_page(ctx, "https://example.org", keep_open=True))
+
+    assert "v135.0-beta.18" in answer
+    assert "D-PC Messenger needs an update" in answer
+    assert service.local_api.events == []
+    assert binary_missing == []
+
+
 def test_a_declined_download_is_said_to_be_declined(binary_missing, tmp_path):
     service = _download_service(tmp_path)
     service.decline("camoufox", remember=True)
@@ -345,6 +361,12 @@ def test_the_download_reports_its_progress_to_the_log(monkeypatch, caplog, tmp_p
 
         def raise_for_status(self):
             pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
 
         def iter_content(self, size):
             for i in range(0, len(body), size):

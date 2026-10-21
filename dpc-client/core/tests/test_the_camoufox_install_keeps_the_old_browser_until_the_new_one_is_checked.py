@@ -57,12 +57,23 @@ XPI = _zip({"manifest.json": json.dumps({"version": "1.72.2"}).encode()})
 
 
 class _Response:
+    opened = 0
+    closed = 0
+
     def __init__(self, body):
         self._body = body
         self.headers = {"content-length": str(len(body))}
 
     def raise_for_status(self):
         pass
+
+    def __enter__(self):
+        _Response.opened += 1
+        return self
+
+    def __exit__(self, *exc):
+        _Response.closed += 1
+        return False
 
     def iter_content(self, size):
         for i in range(0, len(self._body), size):
@@ -222,10 +233,110 @@ def test_the_pinned_add_on_is_fetched_checked_and_placed_where_the_package_looks
     assert json.loads((addon / "manifest.json").read_text())["version"] == "1.72.2"
 
 
-def test_a_tampered_add_on_keeps_the_old_browser(world):
+def test_a_tampered_add_on_is_left_out_and_the_browser_installed(world, caplog):
     world.served["xpi"] = _flip_last_byte(XPI)
-    with pytest.raises(ValueError, match="does not match"):
+    seen = []
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.camoufox_binary"):
+        camoufox_binary._install_pinned(world.fetcher, lambda d, t: seen.append((d, t)))
+
+    assert not (world.install / "OLD_BROWSER").exists()
+    assert json.loads((world.install / "version.json").read_text())["release"] == "beta.28"
+    # No addons/UBO at all: the package fetches its own copy when it is missing.
+    assert not Path(pkgman.get_path(os.path.join("addons", "UBO"))).exists()
+    assert any("uBlock Origin 1.72.2 not installed" in r.getMessage() for r in caplog.records)
+    assert seen[-1][0] == seen[-1][1]
+
+
+def test_an_unreachable_add_on_is_left_out_and_the_browser_installed(world, monkeypatch):
+    import requests
+
+    def _get(url, *a, **k):
+        world.asked.append(url)
+        if url == world.ublock_url:
+            raise requests.ConnectionError("addons.mozilla.org unreachable")
+        return _Response(world.served["zip"])
+
+    monkeypatch.setattr(requests, "get", _get)
+    seen = []
+    camoufox_binary._install_pinned(world.fetcher, lambda d, t: seen.append((d, t)))
+
+    assert json.loads((world.install / "version.json").read_text())["release"] == "beta.28"
+    assert not Path(pkgman.get_path(os.path.join("addons", "UBO"))).exists()
+    assert seen[-1] == (len(world.served["zip"]), len(world.served["zip"]))
+
+
+def test_an_add_on_that_breaks_while_unpacking_leaves_no_half_folder(world, monkeypatch):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("manifest.json", b"{" + b" " * 4000 + b"}")
+    data = bytearray(buf.getvalue())
+    data[2000] ^= 0x01  # inside the stored member: the CRC fails mid-extract
+    bad = bytes(data)
+    world.served["xpi"] = bad
+    monkeypatch.setattr(camoufox_binary, "_UBLOCK_ORIGIN_FILES", {
+        camoufox_binary.UBLOCK_ORIGIN_VERSION: {"url": world.ublock_url, "size": len(bad), "sha256": _sha(bad)},
+    })
+
+    camoufox_binary._install_pinned(world.fetcher, None)
+
+    assert json.loads((world.install / "version.json").read_text())["release"] == "beta.28"
+    assert not Path(pkgman.get_path(os.path.join("addons", "UBO"))).exists()
+
+
+def test_a_mismatch_names_a_replaced_release_asset_and_not_the_disk(world):
+    world.served["zip"] = _flip_last_byte(world.served["zip"])
+    with pytest.raises(ValueError) as e:
         camoufox_binary._install_pinned(world.fetcher, None)
+    text = str(e.value)
+    assert "replaced since it was pinned" in text
+    assert "pin table needs updating" in text
+    assert "not a disk problem" in text
+
+
+def test_every_response_is_closed_also_after_a_mismatch(world):
+    _Response.opened = _Response.closed = 0
+    world.served["zip"] = _flip_last_byte(world.served["zip"])
+    with pytest.raises(ValueError):
+        camoufox_binary._install_pinned(world.fetcher, None)
+    assert _Response.opened == _Response.closed == 1
+
+
+def test_an_unknown_zip_size_gives_no_total_rather_than_the_add_on_alone(world, monkeypatch):
+    monkeypatch.setattr(camoufox_binary, "_PINNED_ASSET_SIZES", {})
+    seen = []
+    camoufox_binary._install_pinned(world.fetcher, lambda d, t: seen.append(t))
+    assert seen and set(seen) == {None}
+
+
+def test_the_add_on_size_is_counted_as_a_number(monkeypatch):
+    monkeypatch.setattr(camoufox_binary, "_zip_size", lambda: 1000)
+    monkeypatch.setattr(camoufox_binary, "_UBLOCK_ORIGIN_FILES", {
+        camoufox_binary.UBLOCK_ORIGIN_VERSION: {"url": "u", "size": "250", "sha256": "s"},
+    })
+    assert camoufox_binary.size_bytes() == 1250
+
+
+def test_a_leftover_folder_that_cannot_be_cleared_stops_before_anything_changes(world, monkeypatch):
+    staging = world.install.parent / "Cache.staging"
+    staging.mkdir()
+    (staging / "locked.dll").write_text("held by a running browser")
+    monkeypatch.setattr(camoufox_binary.shutil, "rmtree", lambda *a, **k: None)
+
+    with pytest.raises(OSError, match="cannot clear .*Cache.staging.*running"):
+        camoufox_binary._install_pinned(world.fetcher, None)
+    assert (world.install / "OLD_BROWSER").read_text() == "old"
+    assert world.asked == []
+
+
+def test_a_staging_folder_that_fills_up_meanwhile_is_not_extracted_into(world):
+    staging = world.install.parent / "Cache.staging"
+
+    def _meanwhile(done, total):
+        staging.mkdir(exist_ok=True)
+        (staging / "stray").write_text("x")
+
+    with pytest.raises(OSError, match="not empty"):
+        camoufox_binary._install_pinned(world.fetcher, _meanwhile)
     assert (world.install / "OLD_BROWSER").read_text() == "old"
 
 
@@ -268,7 +379,7 @@ class _FakeLocalApi:
         self.events.append((name, payload))
 
 
-def test_the_older_whisper_command_waits_its_turn_behind_download_model(tmp_path, monkeypatch):
+def test_the_older_whisper_command_is_refused_while_download_model_fetches_the_same_model(tmp_path, monkeypatch):
     from dpc_client_core import model_download_service as mds
     from dpc_client_core.model_download_service import ModelDownloadService
     from dpc_client_core.settings import Settings

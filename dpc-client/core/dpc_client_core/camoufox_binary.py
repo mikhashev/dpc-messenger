@@ -233,7 +233,19 @@ def size_bytes() -> Optional[int]:
     """Everything one consent downloads: the browser zip and the pinned
     uBlock Origin add-on."""
     size = _zip_size()
-    return size + _ublock_file()["size"] if size else None
+    return size + int(_ublock_file()["size"]) if size else None
+
+
+def pin_supported() -> bool:
+    """Whether the installed camoufox package accepts `PINNED_RELEASE_TAG`.
+    False after a package upgrade that moved its range past the pin: then a
+    download would be refused on the staged copy, so none is offered."""
+    try:
+        from camoufox import pkgman
+    except Exception:
+        return True  # no package: the import that follows says so itself
+    version, release = _pinned_version_release()
+    return pkgman.Version(release=release, version=version).is_supported()
 
 
 def size_text() -> str:
@@ -278,6 +290,34 @@ def _resources(root: Path) -> Path:
     return root
 
 
+_logged_launch_without_ublock = False
+
+
+def addon_launch_kwargs(install_dir: Optional[Path] = None) -> Dict[str, object]:
+    """The add-on half of the launch arguments, decided here rather than by
+    the package: with `addons/UBO` absent the package's launch fetches AMO's
+    latest inside the tool call, and when that fails it leaves an empty
+    folder that every later launch rejects (`InvalidAddonPath`). So a folder
+    without its manifest is removed and the launch excludes the add-on; the
+    only fetch of it is our install."""
+    global _logged_launch_without_ublock
+    try:
+        from camoufox import pkgman
+        from camoufox.addons import DefaultAddons
+    except Exception:
+        return {}
+    folder = _resources(Path(install_dir or pkgman.INSTALL_DIR)) / "addons" / "UBO"
+    if (folder / "manifest.json").is_file():
+        return {}
+    if folder.exists():
+        shutil.rmtree(folder, ignore_errors=True)
+        logger.warning("Camoufox: removed the add-on folder %s, which held no manifest", folder)
+    if not _logged_launch_without_ublock:
+        logger.info("Camoufox: launching without uBlock Origin: not installed (%s)", folder)
+        _logged_launch_without_ublock = True
+    return {"exclude_addons": [DefaultAddons.UBO]}
+
+
 def _fetch_verified(
     url: str,
     dest: Path,
@@ -293,13 +333,12 @@ def _fetch_verified(
 
     logger.info("%s download started: %s", label, url)
     # The package's own webdl passes no timeout at all.
-    response = requests.get(url, stream=True, timeout=(20, 120))
-    response.raise_for_status()
-    total = int(response.headers.get("content-length", 0)) or expected_size or 0
-    digest = hashlib.sha256()
-    done = 0
-    next_mark = 10
-    with open(dest, "wb") as f:
+    with requests.get(url, stream=True, timeout=(20, 120)) as response, open(dest, "wb") as f:
+        response.raise_for_status()
+        total = int(response.headers.get("content-length", 0)) or expected_size or 0
+        digest = hashlib.sha256()
+        done = 0
+        next_mark = 10
         for chunk in response.iter_content(1 << 20):
             f.write(chunk)
             digest.update(chunk)
@@ -315,7 +354,15 @@ def _fetch_verified(
         raise ValueError(f"{label}: received {done} bytes, expected {expected_size}")
     got = "sha256:" + digest.hexdigest()
     if got != expected_sha256:
-        raise ValueError(f"{label}: checksum {got} does not match the pinned {expected_sha256}")
+        # The size matched, so the file arrived whole: what changed is the
+        # file at the source. A GitHub release is not immutable (the pinned
+        # one reads "immutable": false), so an asset can be replaced in place.
+        raise ValueError(
+            f"{label}: checksum {got} does not match the pinned {expected_sha256}. "
+            f"The file published at {url} has most likely been replaced since it was "
+            f"pinned (GitHub release assets can be re-uploaded); the pin table needs "
+            f"updating. This is not a disk problem."
+        )
     logger.info("%s download: %d bytes, %s verified", label, done, got)
 
 
@@ -340,7 +387,16 @@ def _install_pinned(fetcher, on_progress: Optional[Callable[[int, Optional[int]]
 
     The package's `install()` deletes the old browser before fetching the new
     one, so a failed download left no browser at all. Every step that can fail
-    here runs before the swap; the swap is two renames on one volume.
+    here runs before the swap; the swap is two renames on one volume. Between
+    those two renames the target folder does not exist, and another process
+    calling `camoufox_path(download_if_missing=True)` in that instant would make
+    the package install its newest release there; every launch path of ours is
+    gated on `missing_reason`, and a manual `camoufox fetch` is not supported.
+
+    The browser is fail-closed: no checksum, no install. The uBlock Origin
+    add-on is not: if it cannot be fetched or checked, the browser is installed
+    without `addons/UBO`, and the package fetches its own copy at first launch
+    (`addons.maybe_download_addons` does so whenever that folder is missing).
     """
     from camoufox import pkgman
 
@@ -359,6 +415,13 @@ def _install_pinned(fetcher, on_progress: Optional[Callable[[int, Optional[int]]
     for leftover in (staging, previous):
         if leftover.exists():
             shutil.rmtree(leftover, ignore_errors=True)
+            if leftover.exists():
+                raise OSError(
+                    f"Camoufox browser: cannot clear {leftover} left by an earlier install — "
+                    f"most likely a browser started from it is still running, or an "
+                    f"antivirus holds a file in it. Close it and try again; the installed "
+                    f"browser was not touched."
+                )
 
     key = _platform_key()
     expected_sha = _PINNED_ASSET_SHA256.get(PINNED_RELEASE_TAG, {}).get(key) or fetcher.asset_digest
@@ -366,23 +429,44 @@ def _install_pinned(fetcher, on_progress: Optional[Callable[[int, Optional[int]]
         raise ValueError(f"no SHA-256 known for {PINNED_RELEASE_TAG} {key}; not installing an unchecked browser")
     expected_size = _PINNED_ASSET_SIZES.get(PINNED_RELEASE_TAG, {}).get(key) or fetcher.asset_size
     ublock = _ublock_file()
-    total = (expected_size or 0) + int(ublock["size"]) or None
+    ublock_size = int(ublock["size"])
+    # Unknown zip size: no total at all, rather than the add-on's alone.
+    total = [expected_size + ublock_size if expected_size else None]
     done = [0]
 
     def _bytes(n: int) -> None:
         done[0] += n
         if on_progress is not None:
-            on_progress(done[0], total)
+            on_progress(done[0], total[0])
 
     try:
         _fetch_verified(fetcher.url, zip_part, label="Camoufox browser",
                         expected_size=expected_size, expected_sha256=expected_sha, on_bytes=_bytes)
-        _fetch_verified(str(ublock["url"]), xpi_part, label=f"uBlock Origin {UBLOCK_ORIGIN_VERSION}",
-                        expected_size=int(ublock["size"]), expected_sha256=str(ublock["sha256"]),
-                        on_bytes=_bytes)
-        staging.mkdir()
+        staging.mkdir(exist_ok=True)
+        if any(staging.iterdir()):
+            raise OSError(f"Camoufox browser: staging folder {staging} is not empty; the installed browser was not touched.")
         _extract(zip_part, staging, label="Camoufox browser")
-        _extract(xpi_part, _resources(staging) / "addons" / "UBO", label=f"uBlock Origin {UBLOCK_ORIGIN_VERSION}")
+
+        ublock_label = f"uBlock Origin {UBLOCK_ORIGIN_VERSION}"
+        addon_dir = _resources(staging) / "addons" / "UBO"
+        ublock_installed = False
+        try:
+            _fetch_verified(str(ublock["url"]), xpi_part, label=ublock_label,
+                            expected_size=ublock_size, expected_sha256=str(ublock["sha256"]),
+                            on_bytes=_bytes)
+            _extract(xpi_part, addon_dir, label=ublock_label)
+            ublock_installed = True
+        except Exception as e:
+            # An empty addons/UBO would be taken for an installed add-on.
+            shutil.rmtree(addon_dir, ignore_errors=True)
+            logger.warning(
+                "%s not installed (%s); the browser is installed without it and the "
+                "camoufox package fetches its own copy at first launch", ublock_label, e,
+            )
+            if on_progress is not None:
+                # The bar ends where the download ended.
+                total[0] = done[0]
+                on_progress(done[0], done[0])
         version, release = _pinned_version_release()
         (staging / "version.json").write_text(json.dumps({"version": version, "release": release}))
         if pkgman.OS_NAME != "win":
@@ -414,8 +498,9 @@ def _install_pinned(fetcher, on_progress: Optional[Callable[[int, Optional[int]]
             shutil.rmtree(previous, ignore_errors=True)
             if previous.exists():
                 logger.warning("Camoufox browser: could not remove the old install at %s", previous)
-        logger.info("Camoufox browser installed: %s-%s with uBlock Origin %s in %s",
-                    version, release, UBLOCK_ORIGIN_VERSION, install_dir)
+        logger.info("Camoufox browser installed: %s-%s %s uBlock Origin %s in %s",
+                    version, release, "with" if ublock_installed else "without",
+                    UBLOCK_ORIGIN_VERSION, install_dir)
     finally:
         for part in (zip_part, xpi_part):
             try:
@@ -456,6 +541,12 @@ def download(on_progress: Optional[Callable[[int, Optional[int]], None]] = None)
 def refusal_text(reason: str, *, asked: bool, declined: bool) -> str:
     """The sentence a browser tool returns instead of launching."""
     size = size_text()
+    if reason != "downloading" and not pin_supported():
+        return (
+            f"⚠️ The Camoufox browser this app pins ({PINNED_RELEASE_TAG}) is outside "
+            f"the range the installed camoufox package supports, so no browser was "
+            f"opened and no download is offered: D-PC Messenger needs an update."
+        )
     if reason == "outdated":
         head = (
             "⚠️ The Camoufox browser on this node is outside the range the installed "

@@ -156,6 +156,12 @@ def test_the_fetcher_hands_every_chunk_to_the_reporter(monkeypatch, tmp_path):
         def raise_for_status(self):
             pass
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
         def iter_content(self, size):
             for i in range(0, len(body), size):
                 yield body[i:i + size]

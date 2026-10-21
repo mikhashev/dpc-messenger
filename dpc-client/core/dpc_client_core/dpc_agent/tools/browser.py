@@ -531,6 +531,10 @@ def _camoufox_launch_kwargs() -> Dict[str, Any]:
     cam_os = _CAMOUFOX_OS_MAP.get(platform.system())
     if cam_os:
         kwargs["os"] = cam_os
+    # Excludes uBlock Origin when it is not installed, so the package never
+    # fetches it inside a tool call.
+    from dpc_client_core import camoufox_binary
+    kwargs.update(camoufox_binary.addon_launch_kwargs())
     return kwargs
 
 
@@ -643,7 +647,9 @@ async def _camoufox_binary_refusal(ctx: Any, exc: Exception) -> str:
     reason = camoufox_binary.missing_reason() or "missing"
     service = getattr(getattr(ctx, "dpc_service", None), "model_download_service", None)
     asked = declined = False
-    if service is not None and reason != "downloading":
+    # A pin outside the package's range would be refused on the staged copy:
+    # offer nothing, the refusal text says DPC needs an update.
+    if service is not None and reason != "downloading" and camoufox_binary.pin_supported():
         try:
             await service.maybe_emit_required(
                 camoufox_binary.DOWNLOAD_NAME,
