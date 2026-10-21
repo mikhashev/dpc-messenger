@@ -104,3 +104,16 @@ def test_the_launch_without_it_is_logged_once_per_process(install, caplog):
         browser._camoufox_launch_kwargs()
     lines = [r.getMessage() for r in caplog.records if "launching without uBlock Origin" in r.getMessage()]
     assert len(lines) == 1
+
+
+def test_a_folder_that_cannot_be_removed_is_not_logged_as_removed(install, caplog, monkeypatch):
+    _ubo(install).mkdir(parents=True)
+    monkeypatch.setattr(camoufox_binary.shutil, "rmtree", lambda *a, **k: None)  # a locked file
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.camoufox_binary"):
+        kwargs = browser._camoufox_launch_kwargs()
+
+    assert kwargs["exclude_addons"] == [DefaultAddons.UBO]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("could not remove the add-on folder" in m for m in messages)
+    assert not any("removed the add-on folder" in m for m in messages)

@@ -241,7 +241,7 @@ def test_a_tampered_add_on_is_left_out_and_the_browser_installed(world, caplog):
 
     assert not (world.install / "OLD_BROWSER").exists()
     assert json.loads((world.install / "version.json").read_text())["release"] == "beta.28"
-    # No addons/UBO at all: the package fetches its own copy when it is missing.
+    # No addons/UBO at all: every launch then excludes it (addon_launch_kwargs).
     assert not Path(pkgman.get_path(os.path.join("addons", "UBO"))).exists()
     assert any("uBlock Origin 1.72.2 not installed" in r.getMessage() for r in caplog.records)
     assert seen[-1][0] == seen[-1][1]

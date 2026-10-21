@@ -311,7 +311,11 @@ def addon_launch_kwargs(install_dir: Optional[Path] = None) -> Dict[str, object]
         return {}
     if folder.exists():
         shutil.rmtree(folder, ignore_errors=True)
-        logger.warning("Camoufox: removed the add-on folder %s, which held no manifest", folder)
+        if folder.exists():
+            logger.warning("Camoufox: could not remove the add-on folder %s, which holds no "
+                           "manifest (a file is locked); the add-on stays excluded", folder)
+        else:
+            logger.warning("Camoufox: removed the add-on folder %s, which held no manifest", folder)
     if not _logged_launch_without_ublock:
         logger.info("Camoufox: launching without uBlock Origin: not installed (%s)", folder)
         _logged_launch_without_ublock = True
@@ -395,8 +399,8 @@ def _install_pinned(fetcher, on_progress: Optional[Callable[[int, Optional[int]]
 
     The browser is fail-closed: no checksum, no install. The uBlock Origin
     add-on is not: if it cannot be fetched or checked, the browser is installed
-    without `addons/UBO`, and the package fetches its own copy at first launch
-    (`addons.maybe_download_addons` does so whenever that folder is missing).
+    without `addons/UBO`, and every launch then excludes it (`addon_launch_kwargs`),
+    so it stays absent until a later install of ours fetches it.
     """
     from camoufox import pkgman
 
@@ -460,8 +464,8 @@ def _install_pinned(fetcher, on_progress: Optional[Callable[[int, Optional[int]]
             # An empty addons/UBO would be taken for an installed add-on.
             shutil.rmtree(addon_dir, ignore_errors=True)
             logger.warning(
-                "%s not installed (%s); the browser is installed without it and the "
-                "camoufox package fetches its own copy at first launch", ublock_label, e,
+                "%s not installed (%s); the browser is installed without it, and "
+                "launches exclude it until a later install fetches it", ublock_label, e,
             )
             if on_progress is not None:
                 # The bar ends where the download ended.

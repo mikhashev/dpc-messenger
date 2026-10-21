@@ -164,3 +164,21 @@ def test_browser_screenshot_full_page_true_as_a_string_reaches_the_browser_as_tr
 
     registry.execute("browser_screenshot", {"full_page": "False"}, ctx=registry._ctx)
     assert calls[-1][1][0] is False
+
+
+def test_a_number_for_a_string_parameter_reaches_it_as_text(registry):
+    seen = _probe(registry, {"pages": {"type": "string"}})
+    assert _run(registry, {"pages": 3}) == "ran"
+    assert seen[-1]["pages"] == "3"
+
+
+def test_a_fractional_string_for_an_integer_is_refused(registry):
+    seen = _probe(registry, {"count": {"type": "integer"}})
+    assert "TOOL_ARG_ERROR" in _run(registry, {"count": "3.5"})
+    assert seen == []
+
+
+def test_a_boolean_that_is_already_a_boolean_is_left_as_sent(registry):
+    seen = _probe(registry, {"flag": {"type": "boolean"}})
+    assert _run(registry, {"flag": False}) == "ran"
+    assert seen[-1]["flag"] is False
