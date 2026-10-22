@@ -6,6 +6,8 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { get } from 'svelte/store';
+  import { untrack } from 'svelte';
+  import { consumeEvent } from '$lib/utils/consumeEvent';
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import {
     historyRestored,
@@ -123,8 +125,12 @@
   // Handle group history synced via P2P (v0.20.0)
   $effect(() => {
     if ($groupHistorySynced && $groupHistorySynced.group_id) {
-      const syncedGroupId = $groupHistorySynced.group_id;
-      const messageCount = $groupHistorySynced.message_count || 0;
+      // Copy the event out and clear the store: left set, the stale payload
+      // was handled again on every re-run of this effect.
+      const synced = consumeEvent(groupHistorySynced);
+      if (!synced) return;
+      const syncedGroupId = synced.group_id;
+      const messageCount = synced.message_count || 0;
       console.log(`[GroupHistorySync] Group ${syncedGroupId} synced with ${messageCount} messages`);
 
       // The event says this group's stored history changed; the backend holds the
@@ -132,7 +138,8 @@
       // active chat left a merged message invisible until a restart, and
       // message_count is the *peer's* count, so comparing it with ours skipped
       // reloads whenever the peer held fewer messages than we did.
-      const isActive = activeChatId === syncedGroupId;
+      // untrack: a chat switch must not re-run this effect.
+      const isActive = untrack(() => activeChatId) === syncedGroupId;
 
       console.log(`[GroupHistorySync] Reloading history for group ${syncedGroupId}`);
 
