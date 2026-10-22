@@ -30,7 +30,19 @@ CHILD = r'''
 import http.server, json, os, signal, sys, threading
 port, ready, exit_delay, marks = int(sys.argv[1]), sys.argv[2], float(sys.argv[3]), sys.argv[4]
 
-class Server(http.server.HTTPServer):
+# Armed before the bind and before the "bound" mark: a test that reacts to the
+# mark may signal at once, and a signal that finds no handler is lost.
+def asked_to_stop(signum, frame):
+    open(os.path.join(marks, f"{os.getpid()}.stopping"), "w").close()
+    threading.Timer(exit_delay, lambda: os._exit(0)).start()
+
+signal.signal(signal.SIGBREAK if os.name == "nt" else signal.SIGINT, asked_to_stop)
+
+# Threaded, as a real llama-server is. A single-threaded server sits in recv on
+# a connection whose client was cancelled before it sent anything, and Windows
+# runs a Python signal handler only when the main thread comes back from that
+# call: the stop signal is then not heard until the connection goes away.
+class Server(http.server.ThreadingHTTPServer):
     # Windows SO_REUSEADDR lets a second socket bind over a live listener;
     # without it a second child dies at bind, as a real one does.
     allow_reuse_address = os.name != "nt"
@@ -60,10 +72,6 @@ except OSError as exc:
     sys.exit(98)
 open(os.path.join(marks, f"{os.getpid()}.bound"), "w").close()
 
-def asked_to_stop(signum, frame):
-    threading.Timer(exit_delay, lambda: os._exit(0)).start()
-
-signal.signal(signal.SIGBREAK if os.name == "nt" else signal.SIGINT, asked_to_stop)
 server.serve_forever(poll_interval=0.05)
 '''
 
@@ -127,6 +135,10 @@ class _Rig:
     def bound(self):
         return sorted(p.stem for p in self.marks.glob("*.bound"))
 
+    def stopping(self):
+        """Children that have received the stop signal and are counting down."""
+        return sorted(p.stem for p in self.marks.glob("*.stopping"))
+
     def bind_failures(self):
         return sorted(p.name for p in self.marks.glob("*.bindfail"))
 
@@ -177,12 +189,24 @@ class TestACancelledStartOnARealPort:
     ):
         """The second cancel leaves the first child exiting, the waiter behind it
         is cancelled too, and the old child answers /health 200 while it exits:
-        the third start must wait it out, not take its answers."""
-        rig = _Rig(tmp_path, monkeypatch, exit_delay=2.0)
+        the third start must wait it out, not take its answers.
+
+        The cancels are tied to events, not to a clock. The first /health poll of
+        a child still binding can swallow a cancel for up to the client's 2 s
+        timeout (a refused connect on Windows is that slow), and a stop that has
+        not begun yet is not the stop the second cancel is meant to hit: both
+        cancels then land before it and the start ends only after the child has
+        exited (`assert 0 is None`, about 1 run in 12). So the second cancel waits
+        for the child's own mark that the stop signal reached it, and the child's
+        exit delay (3 s) is long against the few milliseconds left to the check."""
+        rig = _Rig(tmp_path, monkeypatch, exit_delay=3.0)
         try:
             a = await rig.start_and_wait_for_the_bind()
             a.cancel()
-            await asyncio.sleep(0.2)
+            await _until(lambda: rig.stopping() or a.done(), 15)
+            assert not a.done(), "the start ended before the stop reached the child"
+            stop = rig.sup._abandoned_stop
+            assert stop is not None and not stop.done(), "the stop is running on its own task"
             a.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(a, 30)
@@ -191,7 +215,9 @@ class TestACancelledStartOnARealPort:
             rig.ready.touch()
 
             b = asyncio.ensure_future(rig.sup.ensure_running())
-            await asyncio.sleep(0.1)
+            # Holding the start lock, b is parked on the abandoned stop.
+            await _until(lambda: rig.sup._start_lock.locked(), 5)
+            await asyncio.sleep(0.05)
             b.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await b
