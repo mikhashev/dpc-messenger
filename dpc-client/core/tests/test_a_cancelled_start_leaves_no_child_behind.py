@@ -494,6 +494,79 @@ class TestACancelTheHttpClientSwallowed:
         assert sup._proc is None and sup.failure is None
 
 
+    @pytest.mark.asyncio
+    async def test_a_swallowed_cancel_on_the_last_poll_is_a_cancel_not_a_timeout(
+        self, tmp_path, monkeypatch,
+    ):
+        """The deadline passes inside the poll that swallowed the cancel: the
+        start ends in CancelledError, not "did not become healthy"."""
+        sup, spawned, _ = TestACancelledLlamaServerStart()._sup(tmp_path, monkeypatch, healthy=[False])
+        sup.config["start_timeout_s"] = 0.3
+        polling = asyncio.Event()
+
+        async def health():
+            polling.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.4)  # past the deadline before returning
+            return False
+
+        sup._health_ok = health
+        task = asyncio.ensure_future(sup.ensure_running())
+        await asyncio.wait_for(polling.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert ("signal", STOP_SIGNAL) in spawned[0].calls and sup._proc is None
+
+    @pytest.mark.asyncio
+    async def test_a_props_read_that_returns_through_a_cancel_still_ends_the_start(
+        self, tmp_path, monkeypatch,
+    ):
+        """/props is the same httpx call as a /health poll: a cancel it swallows
+        must not hand back a started child to a caller that was cancelled."""
+        sup, spawned, _ = TestACancelledLlamaServerStart()._sup(tmp_path, monkeypatch, healthy=[True])
+        reading = asyncio.Event()
+
+        async def get(path):
+            reading.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+            return {"total_slots": 1}
+
+        sup._get = get
+        task = asyncio.ensure_future(sup.ensure_running())
+        await asyncio.wait_for(reading.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert ("signal", STOP_SIGNAL) in spawned[0].calls
+        assert sup._proc is None and sup.props is None
+
+
+class TestTheStopLineNamesTheEngine:
+    @pytest.mark.asyncio
+    async def test_a_strata_stop_is_logged_as_strata(self, tmp_path, home, monkeypatch, caplog):
+        sup, spawned, _ = _strata(tmp_path, monkeypatch, healthy=[True])
+        await sup.ensure_running()
+        with caplog.at_level("INFO", logger=base_mod.logger.name):
+            await sup.stop()
+        lines = [r.getMessage() for r in caplog.records if "stopped (rc=" in r.getMessage()]
+        assert lines == [f"strata[{sup.alias}] stopped (rc=0)"]
+
+    @pytest.mark.asyncio
+    async def test_a_llama_server_stop_is_logged_as_before(self, tmp_path, monkeypatch, caplog):
+        sup, spawned, _ = TestACancelledLlamaServerStart()._sup(tmp_path, monkeypatch, healthy=[True])
+        await sup.ensure_running()
+        with caplog.at_level("INFO", logger=base_mod.logger.name):
+            await sup.stop()
+        lines = [r.getMessage() for r in caplog.records if "stopped (rc=" in r.getMessage()]
+        assert lines == ["llama-server[local_qwen38] stopped (rc=0)"]
+
+
 class TestAStrataStopThatIsCancelled:
     @pytest.mark.asyncio
     async def test_a_cancel_during_the_fail_closed_stop_does_not_leave_the_launcher(

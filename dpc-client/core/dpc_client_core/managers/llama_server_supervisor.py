@@ -331,10 +331,11 @@ def window_outgrows_pool(window: Any, n_ctx: int) -> bool:
 def _reraise_a_swallowed_cancel() -> None:
     """Raise the cancellation an awaited call returned through.
 
-    httpx (anyio underneath) can return normally from a request whose task was
-    cancelled during it — seen on the first /health poll of a child still
-    binding — and the start then polls on to its timeout. `cancelling()` still
-    counts the request, so the task is cancelled here instead."""
+    httpcore runs each socket step under `anyio.fail_after`. A task.cancel()
+    landing as that timeout fires is taken by anyio's `CancelScope.__exit__`
+    for its own (`is_anyio_cancellation` reads the `__context__` chain) and
+    swallowed; `uncancel()` drops only the scope's count. The request ends in
+    ConnectTimeout and `cancelling()` stays above zero, so it is raised here."""
     task = asyncio.current_task()
     if task is not None and task.cancelling():
         raise asyncio.CancelledError()
@@ -1186,6 +1187,7 @@ class LlamaServerSupervisor:
             await self._wait_healthy()
             self._answered_by(proc, "/health")
             props = await self._get("/props")
+            _reraise_a_swallowed_cancel()
             self._answered_by(proc, "/props")
             self.props = props
             return self.props
@@ -1223,12 +1225,14 @@ class LlamaServerSupervisor:
             return
         await self._stop_shielded()
 
+    @on_the_owner_loop
     async def _stop_shielded(self) -> None:
         """`stop()` as its own task under a shield: a second cancellation that
         arrives while the child is asked to stop leaves the stop running, and the
         next start waits for it (`_await_abandoned_stop`). A stop already in
         flight is joined, not doubled: a second one would find `_proc` cleared,
-        release the card and stand in for the first while that one still runs."""
+        release the card and stand in for the first while that one still runs.
+        Forwarded by itself: the task is made on the owner loop whoever calls."""
         task = self._abandoned_stop
         if task is None or task.done():
             task = self._abandoned_stop = asyncio.ensure_future(self._stop_logged())
@@ -1245,6 +1249,7 @@ class LlamaServerSupervisor:
                 self.ENGINE, self.alias, exc,
             )
 
+    @on_the_owner_loop
     async def _await_abandoned_stop(self) -> None:
         """Wait for the abandoned stop, and forget it only once it has finished.
         A waiter cancelled mid-wait leaves it in place for the next start: it is
@@ -1287,7 +1292,7 @@ class LlamaServerSupervisor:
         while time.monotonic() < deadline:
             if self._proc and self._proc.returncode is not None:
                 raise LlamaServerError(
-                    f"llama-server[{self.alias}] exited with {self._proc.returncode} before "
+                    f"{self.ENGINE}[{self.alias}] exited with {self._proc.returncode} before "
                     f"becoming healthy",
                     self.tail_log(),
                 )
@@ -1297,7 +1302,7 @@ class LlamaServerSupervisor:
                 return
             await asyncio.sleep(0.5)
         raise LlamaServerError(
-            f"llama-server[{self.alias}] did not become healthy within "
+            f"{self.ENGINE}[{self.alias}] did not become healthy within "
             f"{self.config['start_timeout_s']}s",
             self.tail_log(),
         )
@@ -1324,7 +1329,7 @@ class LlamaServerSupervisor:
     async def slots(self) -> Dict[str, Any]:
         """Live slot occupancy, read through without interpretation."""
         if not self.port:
-            raise LlamaServerError(f"llama-server[{self.alias}] is not running")
+            raise LlamaServerError(f"{self.ENGINE}[{self.alias}] is not running")
         return await self._get("/slots")
 
     def _read_tail(self, window: int = 65536) -> Optional[Tuple[bytes, int]]:
@@ -1471,9 +1476,9 @@ class LlamaServerSupervisor:
                     self._predecessor = None
                 break
             logger.info(
-                "llama-server[%s]: waiting for the superseded child to finish its "
+                "%s[%s]: waiting for the superseded child to finish its "
                 "in-flight work and release the card before starting",
-                self.alias,
+                self.ENGINE, self.alias,
             )
             await asyncio.wait({task})
             if self._predecessor is task:
@@ -1483,12 +1488,12 @@ class LlamaServerSupervisor:
             exc = task.exception()
             if exc is not None:  # a failed drain must not block the successor
                 logger.warning(
-                    "llama-server[%s]: the superseded child's drain ended badly (%s); "
-                    "starting anyway", self.alias, exc,
+                    "%s[%s]: the superseded child's drain ended badly (%s); "
+                    "starting anyway", self.ENGINE, self.alias, exc,
                 )
             if self._draining:
                 raise LlamaServerError(
-                    f"llama-server[{self.alias}] was itself superseded while waiting "
+                    f"{self.ENGINE}[{self.alias}] was itself superseded while waiting "
                     "for its predecessor; refusing to start a child nobody holds"
                 )
 
@@ -1535,8 +1540,8 @@ class LlamaServerSupervisor:
                 await asyncio.wait_for(self._wait_idle(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(
-                "llama-server[%s]: drain timed out with %d call(s) still in flight",
-                self.alias,
+                "%s[%s]: drain timed out with %d call(s) still in flight",
+                self.ENGINE, self.alias,
                 self._in_flight,
             )
         await self.stop()
@@ -1551,8 +1556,8 @@ class LlamaServerSupervisor:
             waited += 0.2
             if waited % 15 < 0.2:
                 logger.info(
-                    "llama-server[%s]: draining, %d call(s) still in flight after %.0fs",
-                    self.alias,
+                    "%s[%s]: draining, %d call(s) still in flight after %.0fs",
+                    self.ENGINE, self.alias,
                     self._in_flight,
                     waited,
                 )
@@ -1601,7 +1606,7 @@ class LlamaServerSupervisor:
         finally:
             self._close_log()
             if self._proc is not proc:
-                logger.info("llama-server[%s] stopped (rc=%s)", self.alias, proc.returncode)
+                logger.info("%s[%s] stopped (rc=%s)", self.ENGINE, self.alias, proc.returncode)
 
     def _kill_or_keep(self, proc: Any) -> None:
         """`proc.kill()`; when even that fails, the child is put back in `_proc`
@@ -1636,8 +1641,8 @@ class LlamaServerSupervisor:
         peak, self._peak_in_flight = self._peak_in_flight, self._in_flight
         if peak > 1:
             logger.debug(
-                "llama-server[%s]: %d slots in flight since the last read, so the "
-                "engine's timing block is not this caller's", self.alias, peak,
+                "%s[%s]: %d slots in flight since the last read, so the "
+                "engine's timing block is not this caller's", self.ENGINE, self.alias, peak,
             )
             return None
         read = self._read_tail()

@@ -4287,18 +4287,25 @@ class AuthBrowser:
         navigates under it, wait for the document to settle and run it again,
         `_NAVIGATION_RETRIES` more times at most. Any other error propagates
         at once. Runs on the session thread, which owns the thread-affine
-        `Page`; the tool's session lock still wraps the whole call."""
+        `Page`; the tool's session lock still wraps the whole call. A call its
+        waiter has given up on (`_call_abandoned`, as `collect` reads it) is
+        neither settled nor retried: nobody reads the answer."""
         attempts = _NAVIGATION_RETRIES + 1
         last: Optional[BaseException] = None
         for attempt in range(1, attempts + 1):
+            if attempt > 1 and self._call_abandoned():
+                raise PageKeptNavigating(
+                    f"the {what} call was abandoned after {attempt - 1} attempt(s) "
+                    "lost the page to a navigation; not retried"
+                ) from last
             try:
                 return call()
             except Exception as exc:
                 if not _is_navigation_during_evaluate(exc):
                     raise
                 last = exc
-                if attempt == attempts:
-                    break
+                if attempt == attempts or self._call_abandoned():
+                    continue  # the check above, or the loop's end, decides
                 log.warning(
                     "%s hit a navigation (attempt %d of %d, url=%s): %s; "
                     "waiting for the page to settle and retrying",

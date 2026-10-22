@@ -319,6 +319,69 @@ class TestAStartFromAToolCall:
         await _no_supervisor_task_left()
 
 
+class _GatedProc(_LoopBoundProc):
+    """A child that exits only once `gate` is set: a stop in progress."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    async def wait(self):
+        if self.returncode is None:
+            await self.gate.wait()
+        return await super().wait()
+
+
+class TestAStopHelperCalledFromAToolCall:
+    """`_stop_shielded` and `_await_abandoned_stop` make and wait on loop-bound
+    tasks; called from a per-call loop they forward themselves, whoever calls."""
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_shielded_stop_from_a_tool_loop_finishes_on_the_service_loop(
+        self, home, monkeypatch, caplog,
+    ):
+        owner = asyncio.get_running_loop()
+        bind_owner_loop(owner)
+        sup, spawned = _llama(monkeypatch)
+
+        async def spawn(cmd, env):
+            proc = _GatedProc()
+            spawned.append(proc)
+            return proc
+
+        sup._spawn = spawn
+        await sup.ensure_running()
+        child = spawned[0]
+
+        async def stop_then_cancel():
+            task = asyncio.ensure_future(sup._stop_shielded())
+            deadline = time.monotonic() + 5
+            while ("signal", STOP_SIGNAL) not in child.calls and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            task.cancel()
+            await task
+
+        with caplog.at_level(logging.WARNING):
+            call = _PerCallLoop(stop_then_cancel)
+            await call.join()
+            assert isinstance(call.error, asyncio.CancelledError)
+            assert call.loop.is_closed()
+            stop = sup._abandoned_stop
+            assert stop is not None and stop.get_loop() is owner, "the shielded stop lives on the service loop"
+            assert not stop.done(), "the cancel left the stop running"
+
+            waiter = _PerCallLoop(lambda: sup._await_abandoned_stop())
+            await asyncio.sleep(0.05)
+            child.gate.set()
+            await waiter.join(timeout=5.0)
+            assert waiter.error is None, waiter.error
+            await _until(lambda: sup._proc is None)
+            await _no_supervisor_task_left()
+            gc.collect()
+        assert child.returncode == 0 and sup._abandoned_stop is None
+        assert _loop_errors(caplog) == []
+
+
 class TestTheSameLoopAndNoOwner:
     @pytest.mark.asyncio
     async def test_a_call_on_the_service_loop_runs_inline(self, tmp_path, home, monkeypatch):
@@ -369,7 +432,11 @@ def test_every_lifecycle_coroutine_runs_on_the_owner_loop():
             if inspect.iscoroutinefunction(fn) and not name.startswith("_"):
                 if not getattr(fn, "runs_on_the_owner_loop", False):
                     missing.append(f"{cls.__name__}.{name}")
-    for fn in (StrataSupervisor._fail_closed, provider_mod.stop_all_supervisors, provider_mod.stop_local_engine):
+    for fn in (
+        StrataSupervisor._fail_closed, LlamaServerSupervisor._stop_shielded,
+        LlamaServerSupervisor._await_abandoned_stop,
+        provider_mod.stop_all_supervisors, provider_mod.stop_local_engine,
+    ):
         if not getattr(fn, "runs_on_the_owner_loop", False):
             missing.append(fn.__qualname__)
     assert missing == []
@@ -383,3 +450,36 @@ def test_the_service_binds_its_own_loop_at_start():
     from dpc_client_core.service import CoreService
 
     assert "bind_owner_loop(asyncio.get_running_loop())" in inspect.getsource(CoreService.start)
+
+
+@pytest.mark.asyncio
+async def test_the_service_unbinds_its_loop_once_the_engines_are_stopped(monkeypatch):
+    """After the supervisors stop, a late call from a tool's loop runs where it is
+    made rather than being forwarded into a loop that is about to close. Driven
+    through the real `CoreService.shutdown` with every component stubbed."""
+    from unittest.mock import AsyncMock, Mock
+
+    from dpc_client_core.dpc_agent import index_writer
+    from dpc_client_core.service import CoreService
+
+    monkeypatch.setattr(index_writer, "begin_shutdown", lambda: None)
+    owner = asyncio.get_running_loop()
+    bind_owner_loop(owner)
+    bound_while_stopping = []
+
+    class _LLM:
+        providers = {}
+
+        async def shutdown(self):
+            bound_while_stopping.append(base_mod._OWNER_LOOP is owner)
+
+    svc = CoreService.__new__(CoreService)
+    svc._background_tasks = set()
+    svc.conversation_monitors = {}
+    svc.llm_manager = _LLM()
+    svc.p2p_manager, svc.local_api, svc.hub_client = AsyncMock(), AsyncMock(), AsyncMock()
+    svc.file_server = Mock()
+    svc.gateway = None
+    await svc.shutdown()
+    assert bound_while_stopping == [True], "the engines are stopped on the bound loop"
+    assert base_mod._OWNER_LOOP is None

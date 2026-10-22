@@ -143,6 +143,52 @@ def test_a_settle_that_times_out_does_not_hang_or_stop_the_retry(_session):
     assert page.evaluate_calls == 2 and page.settled == 1
 
 
+class _Abandoning(_Page):
+    """Marks the running call abandoned on the `abandon_at`-th evaluate, or
+    during the settle wait, as the session's waiter does when it gives up."""
+
+    def __init__(self, errors, record, abandon_at=None, abandon_in_settle=False):
+        super().__init__(errors)
+        self._record, self._at, self._in_settle = record, abandon_at, abandon_in_settle
+
+    def evaluate(self, script, arg=None):
+        if self.evaluate_calls + 1 == self._at:
+            self._record.abandoned = True
+        return super().evaluate(script, arg)
+
+    def wait_for_load_state(self, state, timeout=None):
+        super().wait_for_load_state(state, timeout)
+        if self._in_settle:
+            self._record.abandoned = True
+
+
+def _abandonable(_session, **kw):
+    from types import SimpleNamespace
+
+    record = browser_mod._CallRecord("browser_snapshot")
+    page = _Abandoning([Exception(_NAV_ERROR)] * 10, record, **kw)
+    session = _session(page)
+    session._executor = SimpleNamespace(current=record)
+    return session, page
+
+
+def test_an_abandoned_call_is_not_settled_or_retried(_session, caplog):
+    session, page = _abandonable(_session, abandon_at=1)
+    with caplog.at_level(logging.WARNING, logger=browser_mod.log.name):
+        with pytest.raises(PageKeptNavigating, match="abandoned after 1 attempt"):
+            session.a11y_snapshot()
+    assert page.evaluate_calls == 1, "no attempt after the waiter gave up"
+    assert page.settled == 0, "no settle wait for a call nobody reads"
+    assert _retries(caplog) == []
+
+
+def test_a_call_abandoned_during_the_settle_wait_is_not_retried(_session):
+    session, page = _abandonable(_session, abandon_in_settle=True)
+    with pytest.raises(PageKeptNavigating, match="abandoned after 1 attempt"):
+        session.a11y_snapshot()
+    assert page.evaluate_calls == 1 and page.settled == 1
+
+
 def test_the_settle_wait_is_bounded_by_a_short_timeout():
     assert 0 < browser_mod._NAVIGATION_SETTLE_TIMEOUT_MS <= 10000
     assert browser_mod._NAVIGATION_RETRIES == 2

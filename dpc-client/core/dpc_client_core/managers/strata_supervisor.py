@@ -46,6 +46,7 @@ What differs, by ADR-044 point:
 """
 
 import asyncio
+import concurrent.futures
 import contextlib
 import contextvars
 import json
@@ -56,7 +57,7 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from . import llama_server_supervisor as _base
 from .commit_memory import describe_free_commit, read_free_commit
@@ -799,8 +800,9 @@ class StrataSupervisor(LlamaServerSupervisor):
         # The start config the last launch used; the UI shows it (point 6).
         self.start_config_used: Optional[Path] = None
         # The background start a peer's request began (`start_for_peer`); while
-        # it runs, no second one begins.
-        self.peer_start_task: Optional[asyncio.Task] = None
+        # it runs, no second one begins. A concurrent future when begun from a
+        # foreign loop: readers use only `done()` and `is not None`.
+        self.peer_start_task: Optional[Union[asyncio.Task, concurrent.futures.Future]] = None
         # (key, answer) of the last `start_reads_images`; the key holds the
         # base config's mtime and size, so an edit there is seen.
         self._start_vision_cache: Optional[tuple] = None

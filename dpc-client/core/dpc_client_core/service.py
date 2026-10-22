@@ -1315,7 +1315,13 @@ class CoreService:
             logger.error(f"Error unloading Whisper model during shutdown: {e}", exc_info=True)
 
         # Shutdown LLMManager (close async HTTP clients to prevent event loop errors)
-        await self.llm_manager.shutdown()
+        try:
+            await self.llm_manager.shutdown()
+        finally:
+            # The supervisors are stopped: a late call from a tool's loop must not
+            # be forwarded into a loop that is about to close.
+            from .managers.llama_server_supervisor import bind_owner_loop
+            bind_owner_loop(None)
 
         # S144 SHUTDOWN-PIPE-DRAIN: close any AuthBrowser (Camoufox)
         # subprocesses still alive. Without this they keep stdin/stdout
