@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 # Bound here rather than imported inside the callee: the route gate resolves
 # a host per request, and that is the hot path.
 from urllib.parse import urlparse as _urlparse
@@ -703,6 +703,28 @@ def _is_session_dead(exc: BaseException) -> bool:
     """
     text = f"{type(exc).__name__}: {exc}".lower()
     return any(marker in text for marker in _SESSION_DEAD_MARKERS)
+
+
+_NAVIGATION_MARKERS = (
+    "execution context was destroyed",
+    "cannot find context with specified id",
+)
+_NAVIGATION_RETRIES = 2
+_NAVIGATION_SETTLE_TIMEOUT_MS = 5000
+_NAVIGATION_SETTLE_PAUSE_MS = 250
+
+
+class PageKeptNavigating(RuntimeError):
+    """Every attempt at an evaluate lost the page to a navigation."""
+
+
+def _is_navigation_during_evaluate(exc: BaseException) -> bool:
+    """True when `exc` says the page navigated under an `evaluate`.
+    A dead session is never one: it matches `_is_session_dead` first."""
+    if _is_session_dead(exc):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _NAVIGATION_MARKERS)
 
 
 def _require_camoufox_binary() -> None:
@@ -4260,6 +4282,48 @@ class AuthBrowser:
         self._require_open()
         return self._page.wait_for_event("popup", timeout=timeout)
 
+    def _evaluate_through_navigation(self, what: str, call: Callable[[], Any]) -> Any:
+        """Run `call` (a closure over `self._page.evaluate`); when the page
+        navigates under it, wait for the document to settle and run it again,
+        `_NAVIGATION_RETRIES` more times at most. Any other error propagates
+        at once. Runs on the session thread, which owns the thread-affine
+        `Page`; the tool's session lock still wraps the whole call."""
+        attempts = _NAVIGATION_RETRIES + 1
+        last: Optional[BaseException] = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return call()
+            except Exception as exc:
+                if not _is_navigation_during_evaluate(exc):
+                    raise
+                last = exc
+                if attempt == attempts:
+                    break
+                log.warning(
+                    "%s hit a navigation (attempt %d of %d, url=%s): %s; "
+                    "waiting for the page to settle and retrying",
+                    what, attempt, attempts, getattr(self._page, "url", ""),
+                    str(exc).strip().split("\n", 1)[0],
+                )
+                self._settle_after_navigation()
+        reason = str(last).strip().split("\n", 1)[0]
+        raise PageKeptNavigating(
+            f"the page kept navigating: {attempts} {what} attempts each lost "
+            f"the page under them ({reason}). Wait a few seconds and call it "
+            "again, or use browser_screenshot to see the page as it is."
+        ) from last
+
+    def _settle_after_navigation(self) -> None:
+        """Bounded wait for DOMContentLoaded plus a short beat; a timeout or
+        error is swallowed, the retry that follows reports the truth."""
+        try:
+            self._page.wait_for_load_state(
+                "domcontentloaded", timeout=_NAVIGATION_SETTLE_TIMEOUT_MS,
+            )
+            self._page.wait_for_timeout(_NAVIGATION_SETTLE_PAUSE_MS)
+        except Exception as exc:
+            log.debug("settle after navigation did not complete: %s", exc)
+
     def a11y_snapshot(self) -> tuple[str, dict]:
         """Build an accessibility-tree snapshot of the current page.
 
@@ -4269,14 +4333,19 @@ class AuthBrowser:
         cached on `self._last_refs` so subsequent `click`/`fill`/
         `wait_for` calls can resolve refs against the same snapshot.
         Refs are NOT stable across snapshots — a fresh call rebuilds
-        the map from scratch."""
+        the map from scratch. A page navigating mid-evaluate is waited
+        out and retried (`_evaluate_through_navigation`)."""
         self._require_open()
         url = self._page.url
-        try:
+
+        def _evaluate() -> Any:
             self._snapshot_serial += 1
-            raw = self._page.evaluate(
+            return self._page.evaluate(
                 _A11Y_DOM_SNAPSHOT_JS, self._snapshot_serial,
             )
+
+        try:
+            raw = self._evaluate_through_navigation("snapshot", _evaluate)
             tree_text, refs = _build_a11y_tree(raw) if raw else ("", {})
             self._last_refs = refs
         except Exception as exc:
