@@ -1162,7 +1162,11 @@ class StrataSupervisor(LlamaServerSupervisor):
         returncode is set: after an engine death DPC stops the launcher and a
         person, not this method, decides when it runs again (ADR-044 point 3).
         A launcher that exited on its own is recorded as such a death too —
-        DPC's own stops clear `_proc`, so a dead `_proc` here was not asked to go."""
+        DPC's own stops clear `_proc`, so a dead `_proc` here was not asked to go.
+        Only a launcher that had answered /props is a started engine: one that
+        died inside its own start is that start's failure, not a death of the
+        engine the next caller asks for (2026-10-22: a stale exit from 09:16 was
+        charged to a peer's start at 10:16)."""
         async with self._start_lock:
             if self.failure is not None:
                 raise self._refusal()
@@ -1172,10 +1176,18 @@ class StrataSupervisor(LlamaServerSupervisor):
             if proc is not None and proc.returncode is None and self.props:
                 return self.props
             if proc is not None and proc.returncode is not None:
-                await self._fail_closed(
-                    f"the launcher exited on its own with {proc.returncode}", body=None, stop=True,
+                if self.props:
+                    await self._fail_closed(
+                        f"the launcher exited on its own with {proc.returncode}", body=None, stop=True,
+                    )
+                    raise self._refusal()
+                logger.warning(
+                    "strata[%s]: the launcher of an unfinished start (pid %s) exited with %s "
+                    "before it answered /props — that start's failure, not an engine death; "
+                    "clearing it",
+                    self.alias, getattr(proc, "pid", None), proc.returncode,
                 )
-                raise self._refusal()
+                await self.stop()
             # A peer's call never starts the owner's engine (ADR-044 point 9):
             # this is the one place a start begins, so the rule holds whichever
             # door or retry the call came through. The peer policy's own start
@@ -1186,6 +1198,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"strata[{self.alias}] is not running, and a call served to peer "
                     f"{peer} does not start it"
                 )
+            await self._clear_unfinished_start()
             await self._await_predecessor()
             self._claim_card()
             try:
@@ -1243,20 +1256,29 @@ class StrataSupervisor(LlamaServerSupervisor):
         except Exception:
             self._vram_free_before = None
         props = await super()._launch(binary)
-        if await self._check_version() is None:
-            # ADR-044 point 5: the smoke counts only after the version check,
-            # because the mock engine answers /health and /props like a real
-            # one. No version is refused like an engine death: stopped, and
-            # not started again until a person resets it.
-            await self._fail_closed(NO_ENGINE_VERSION, note=_NO_VERSION_NOTE)
-            raise self._refusal()
-        failed = await self._smoke()
-        if failed is not None:
-            body = failed if exit_code_words(failed) else None
-            await self._fail_closed(
-                f"{SMOKE_FAILED}: {failed}", body=body, note=None if body else _SMOKE_NOTE,
-            )
-            raise self._refusal()
+        proc = self._proc
+        try:
+            if await self._check_version() is None:
+                # ADR-044 point 5: the smoke counts only after the version check,
+                # because the mock engine answers /health and /props like a real
+                # one. No version is refused like an engine death: stopped, and
+                # not started again until a person resets it.
+                await self._fail_closed(NO_ENGINE_VERSION, note=_NO_VERSION_NOTE)
+                raise self._refusal()
+            failed = await self._smoke()
+            if failed is not None:
+                body = failed if exit_code_words(failed) else None
+                await self._fail_closed(
+                    f"{SMOKE_FAILED}: {failed}", body=body, note=None if body else _SMOKE_NOTE,
+                )
+                raise self._refusal()
+        except BaseException:
+            # Interrupted after /props (a cancelled caller during the version
+            # check or the smoke): the launcher answers /props but was neither
+            # smoked nor watched, and the next call would take it as running.
+            # A no-op after `_fail_closed`, whose stop already cleared `_proc`.
+            await self._stop_the_spawned(proc)
+            raise
         self._start_watch()
         return self.props or props
 

@@ -300,7 +300,9 @@ class TestFailClosed:
     async def test_a_launcher_that_exited_on_its_own_is_not_relaunched(self, tmp_path, home, monkeypatch):
         sup = _sup(_install(tmp_path))
         monkeypatch.setattr(sup, "_launch", lambda *a, **k: pytest.fail("relaunched"))
-        sup._proc = _FakeProc(returncode=3221226505)
+        # A started launcher: it had answered /props, and dying on its own does
+        # not clear them. One that died inside its own start is not this case.
+        sup._proc, sup.props = _FakeProc(returncode=3221226505), {"x": 1}
         with pytest.raises(LlamaServerError, match="will not start it again"):
             await sup.ensure_running()
         assert "3221226505" in sup.failure["reason"]

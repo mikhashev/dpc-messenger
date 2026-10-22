@@ -698,6 +698,10 @@ class LlamaServerSupervisor:
         # last timing block in the shared log belongs to the caller asking.
         self._peak_in_flight = 0
         self._start_lock = asyncio.Lock()
+        # The stop of a child whose start was interrupted, while it runs. It runs
+        # as its own task so a second cancellation cannot leave it half done, and
+        # the next start waits for it: the old child still holds the port.
+        self._abandoned_stop: Optional["asyncio.Task"] = None
         # Where the restore-refusal scan has already looked. The log is opened
         # "ab" and outlives restarts, so None means "not primed yet": the first
         # scan starts at the end of the file rather than reporting a previous
@@ -829,7 +833,10 @@ class LlamaServerSupervisor:
         return None
 
     def _release_card_unless_live(self) -> None:
-        """A start that failed before leaving a live child holds nothing."""
+        """A start that failed before leaving a live child holds nothing. A child
+        still being stopped holds the card until its stop lets go of it."""
+        if self._abandoned_stop is not None and not self._abandoned_stop.done():
+            return
         if self._proc is None or self._proc.returncode is not None:
             _CARD_CLAIMS.pop(self, None)
 
@@ -851,6 +858,7 @@ class LlamaServerSupervisor:
                 raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
             if self._proc and self._proc.returncode is None and self.props:
                 return self.props
+            await self._clear_unfinished_start()
             await self._await_predecessor()
             # Before the ladder: its free-VRAM refusal would otherwise name the
             # model's size instead of the engine that holds the card.
@@ -1086,6 +1094,14 @@ class LlamaServerSupervisor:
             )
 
     async def _launch(self, binary: Path, cache_type: Optional[str] = None) -> Dict[str, Any]:
+        # A second child on the same port dies at bind, and assigning it would
+        # lose the only handle on the first (2026-10-22: the orphan on :64276).
+        live = self._proc
+        if live is not None and live.returncode is None:
+            raise LlamaServerError(
+                f"{self.ENGINE}[{self.alias}]: a child (pid {getattr(live, 'pid', None)}) "
+                f"is still running on :{self.port}; refusing to start a second over it"
+            )
         # Again per rung: a failed rung's stop released the card, and another
         # engine may have taken it since.
         self._claim_card()
@@ -1100,14 +1116,60 @@ class LlamaServerSupervisor:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_fh = open(self._log_path, "ab")
         self.prime_restore_scan()
-        self._proc = await self._spawn(cmd, env)
+        proc = self._proc = await self._spawn(cmd, env)
         try:
             await self._wait_healthy()
             self.props = await self._get("/props")
             return self.props
-        except Exception as e:
-            await self.stop()
+        except BaseException:
+            # BaseException, not Exception: a caller cancelled mid-start (an agent
+            # killed mid-call) raises CancelledError, and that path used to leave
+            # the child running with no props and nobody holding it.
+            await self._stop_the_spawned(proc)
             raise
+
+    async def _stop_the_spawned(self, proc: Any) -> None:
+        """Stop `proc`, the child an unfinished start spawned, and nothing else.
+
+        The stop runs as its own task under a shield: a second cancellation that
+        arrives while the child is asked to stop leaves the stop running, and the
+        next start waits for it (`_await_abandoned_stop`)."""
+        if proc is None or self._proc is not proc:
+            return
+        task = asyncio.ensure_future(self._stop_logged())
+        self._abandoned_stop = task
+        await asyncio.shield(task)
+
+    async def _stop_logged(self) -> None:
+        # Never raises: an error here would replace the start's own exception,
+        # a cancellation included, in the handler that called it.
+        try:
+            await self.stop()
+        except Exception as exc:
+            logger.warning(
+                "%s[%s]: could not stop the child of an unfinished start: %s",
+                self.ENGINE, self.alias, exc,
+            )
+
+    async def _await_abandoned_stop(self) -> None:
+        task, self._abandoned_stop = self._abandoned_stop, None
+        if task is not None and not task.done():
+            # `wait`, not `await task`: a cancelled waiter leaves the stop running.
+            await asyncio.wait({task})
+
+    async def _clear_unfinished_start(self) -> None:
+        """Under the start lock: a live child without /props belongs to a start
+        nobody is running any more. Stop it before spawning another on its port."""
+        await self._await_abandoned_stop()
+        proc = self._proc
+        if proc is not None and proc.returncode is None and not self.props:
+            logger.warning(
+                "%s[%s]: a child (pid %s) of an unfinished start is still running on "
+                ":%s; stopping it before starting again",
+                self.ENGINE, self.alias, getattr(proc, "pid", None), self.port,
+            )
+            await self._stop_the_spawned(proc)
+            await self._await_abandoned_stop()
 
     async def _spawn(self, cmd: List[str], env: Dict[str, str]) -> asyncio.subprocess.Process:
         return await asyncio.create_subprocess_exec(
