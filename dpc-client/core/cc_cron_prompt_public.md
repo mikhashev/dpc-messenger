@@ -129,6 +129,9 @@ not through a different tool. One allowlist entry covers both.
   Display Name; persists to `[agent_chat] cc_display_name` in
   `~/.dpc/config.ini`). Whatever the name, put the same `@<name>` in the
   scan instruction of the prompt.
+- **`@all`.** A human's `@all` (outside code) counts as a mention of every
+  tag; an agent's does not. The bridge refuses to send `@all` outside code
+  (exit 1, nothing posted) — write `` `@all` `` to talk about the tag.
 - **The name must be unique across machines, and `-` will not make it so.**
   In a group an unregistered external agent is reached by name match alone,
   with no check that it belongs to this node — so two bridges with the same

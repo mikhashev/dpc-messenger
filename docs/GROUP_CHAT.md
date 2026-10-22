@@ -72,6 +72,8 @@ A human message is parsed for mentions (fenced code blocks are stripped first, s
 - `@all` — fans out to **all** agents in the group. Human-sender only; agents cannot `@all` (anti-cascade).
 - `@CC` — emits a `cc_group_mention` local event to the Claude Code bridge.
 
+A group bridge (`cc_group_chat_bridge.py`) follows the same rules on the history it reads: a human's `@all` outside code is a `[MENTION]` of its tag, an agent's is not, and `--send`/`--send-file` refuse any text carrying `@all` outside code (inline code and fenced blocks pass), so a bridge can never start a cascade.
+
 An agent's own name is excluded when matching mentions in its own message, preventing self-trigger loops.
 
 An agent's message arriving from another node wakes a named agent here only at `mention_depth` 0, and the reply it starts carries 1, so it wakes nobody on another node (depth 1, [specs/dptp_v1.md §4.3](../specs/dptp_v1.md#43-agent-mentions-across-nodes)). The same code stripping, `@all` and own-name rules apply on receipt.

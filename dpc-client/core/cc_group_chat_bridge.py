@@ -21,6 +21,10 @@ mention of its own tag (MENTION_DEPTH_STATE_FILE under DPC_HOME, per group and
 tag) and the next --send/--send-file to that group carries it when no
 --mention-depth is given; that send consumes it. [SENT] names the depth sent.
 
+@all: a human's @all (outside code) counts as a mention of this bridge; an agent's
+does not, as on the backend. --send/--send-file refuse a text carrying @all outside
+code, so a bridge can never start a cascade.
+
 Identity: --as, else the tag registered for this node in Group Settings
 (metadata.json agents/agent_names), else [agent_chat] cc_display_name.
 """
@@ -189,10 +193,37 @@ def _mention_patterns(names: list) -> list:
     return patterns
 
 
+# Mirrors dpc_client_core.service.CODE_BLOCK_RE / mentions_in (fenced blocks, then
+# inline code: a name quoted as code is not a call). Not imported: service.py pulls
+# the whole backend in, and this CLI runs standalone under any tag. A test pins the
+# pattern to the backend's so the two cannot drift.
+_CODE_RE = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
+_ALL_RE = re.compile(r"(?<!\w)@all(?!\w)", re.IGNORECASE)
+
+
+def _has_all(text) -> bool:
+    """True when `text` carries @all (any case, whole word) outside code."""
+    return bool(_ALL_RE.search(_CODE_RE.sub("", text or "")))
+
+
+def _is_agent_post(msg: dict) -> bool:
+    """The backend's test for an agent sender: signed sender_type, or legacy is_agent."""
+    return msg.get("sender_type") == "agent" or bool(msg.get("is_agent"))
+
+
+def _all_mention(msg: dict) -> bool:
+    """A human's @all in `msg`. Only a human may broadcast it — an agent's @all
+    wakes nobody on the backend (service.py `mention_all`), so it is no mention here."""
+    if _is_agent_post(msg):
+        return False
+    return _has_all(msg.get("content", "") or msg.get("text", ""))
+
+
 def find_mentions(messages: list, since_index: int = 0, names: list = None) -> list:
     """Find @<name> mentions after since_index. Returns [(index, msg), ...].
 
     names defaults to [cc_display_name]; the CLI passes the resolved identity list.
+    A human's @all counts as a mention of every name, as on the backend.
     """
     if not names:
         names = [_configured_display_name()]
@@ -205,7 +236,7 @@ def find_mentions(messages: list, since_index: int = 0, names: list = None) -> l
         sender = msg.get("sender_name", "")
         if sender in names:
             continue
-        if any(p.search(content) for p in patterns):
+        if any(p.search(content) for p in patterns) or _all_mention(msg):
             mentions.append((i, msg))
     return mentions
 
@@ -383,6 +414,8 @@ def _tags_mentioned(msg: dict, names: list) -> list:
     """Which of `names` a history record mentions, by find_mentions' rule (own posts skipped)."""
     if not find_mentions([msg], names=names):
         return []
+    if _all_mention(msg):
+        return list(names)
     content = msg.get("content", "") or msg.get("text", "")
     return [n for n in names if any(p.search(content) for p in _mention_patterns([n]))]
 
@@ -452,6 +485,13 @@ async def send_group_message(group_id: str, text: str, name: str = None,
                              mention_depth: int = 0) -> dict:
     """Post `text` to the group via WebSocket, as `name` (default: resolved identity),
     at `mention_depth` — the value printed for the mention being answered."""
+    # Cascade guard: a bridge never broadcasts @all (docs/GROUP_CHAT.md). Code spans
+    # and fenced blocks are exempt, so the tag can be talked about.
+    if _has_all(text):
+        print("[ERROR] refused: the text contains @all outside code. A bridge never "
+              "broadcasts @all (anti-cascade); name the tags, or put `@all` in backticks.")
+        return {"status": "error", "message": "@all refused"}
+
     canonical_id = _resolve_group_id(group_id)
 
     try:
