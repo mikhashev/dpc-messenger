@@ -1155,6 +1155,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             f.get("log_tail"),
         )
 
+    @_base.on_the_owner_loop
     async def ensure_running(self) -> Dict[str, Any]:
         """The launcher is up and its /props are returned; started if needed.
 
@@ -1230,6 +1231,14 @@ class StrataSupervisor(LlamaServerSupervisor):
             return False
         ctx = contextvars.copy_context()
         ctx.run(_PEER_CALL.set, None)
+        owner = _base._foreign_owner_loop()
+        if owner is not None:
+            # Called from a foreign loop: the start is begun on the owner loop,
+            # held by the concurrent future, whose `done()` the check above reads.
+            self.peer_start_task = ctx.run(
+                asyncio.run_coroutine_threadsafe, self._start_for_peer(peer_id), owner,
+            )
+            return True
         self.peer_start_task = asyncio.get_running_loop().create_task(
             self._start_for_peer(peer_id), context=ctx,
         )
@@ -1502,6 +1511,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             return None
         return text
 
+    @_base.on_the_owner_loop
     async def _fail_closed(
         self, observed: str, body: Optional[str] = None, stop: bool = True,
         note: Optional[str] = None,

@@ -18,6 +18,7 @@ than remembered:
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -123,6 +124,55 @@ DEFAULTS: Dict[str, Any] = {
     "start_timeout_s": 300.0,
     "extra_args": [],
 }
+
+
+# A supervisor's child, watcher, start lock and shielded stops are loop-bound, and
+# agent tools run on a per-call loop that closes when the call returns
+# (`ToolRegistry.execute`). The service binds its own loop here at start; a call
+# arriving on another running loop is run there instead, as
+# `LocalApiServer._send_on_owner_loop` reroutes a send. Unbound or not running:
+# the caller's loop, as before.
+_OWNER_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def bind_owner_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
+    """Make `loop` the one every supervisor runs its lifecycle on; None unbinds."""
+    global _OWNER_LOOP
+    _OWNER_LOOP = loop
+
+
+def _foreign_owner_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """The owner loop when the caller runs on another one and the owner is alive."""
+    owner = _OWNER_LOOP
+    if owner is None or owner.is_closed() or not owner.is_running():
+        return None
+    try:
+        here = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    return None if here is owner else owner
+
+
+def on_the_owner_loop(fn):
+    """Run the coroutine function `fn` on the owner loop when called from another.
+
+    The caller awaits the result there. Cancelling the caller cancels the
+    owner-side task (`wrap_future` cancels the concurrent future, which cancels
+    the task through `call_soon_threadsafe`), and that task runs its own cleanup
+    on a loop that lives; the caller does not wait for it. Contextvars travel:
+    `run_coroutine_threadsafe` schedules from the caller's context, so a peer
+    mark (`serving_a_peer`) reaches the owner-side call."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        owner = _foreign_owner_loop()
+        if owner is None:
+            return await fn(*args, **kwargs)
+        future = asyncio.run_coroutine_threadsafe(fn(*args, **kwargs), owner)
+        return await asyncio.wrap_future(future)
+
+    wrapper.runs_on_the_owner_loop = True
+    return wrapper
 
 
 class LlamaServerError(RuntimeError):
@@ -861,6 +911,7 @@ class LlamaServerSupervisor:
 
     # --- lifecycle -----------------------------------------------------------
 
+    @on_the_owner_loop
     async def ensure_running(self) -> Dict[str, Any]:
         """The server is up and its /props are returned; starts it if needed.
 
@@ -1269,6 +1320,7 @@ class LlamaServerSupervisor:
             resp.raise_for_status()
             return resp.json()
 
+    @on_the_owner_loop
     async def slots(self) -> Dict[str, Any]:
         """Live slot occupancy, read through without interpretation."""
         if not self.port:
@@ -1465,6 +1517,7 @@ class LlamaServerSupervisor:
             self._supervisor._in_flight -= 1
             return False
 
+    @on_the_owner_loop
     async def drain(self, timeout: Optional[float] = 120.0) -> None:
         """Refuse new work, let in-flight calls finish, then stop.
 
@@ -1504,6 +1557,7 @@ class LlamaServerSupervisor:
                     waited,
                 )
 
+    @on_the_owner_loop
     async def stop(self) -> None:
         """Stop the child, and only then let go of the card."""
         if self in _CARD_CLAIMS:

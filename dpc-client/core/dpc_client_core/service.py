@@ -937,6 +937,11 @@ class CoreService:
 
         self._shutdown_event = asyncio.Event()
 
+        # Local engines (llama-server, Strata) live on this loop; a start reached
+        # from an agent tool's per-call loop is forwarded here.
+        from .managers.llama_server_supervisor import bind_owner_loop
+        bind_owner_loop(asyncio.get_running_loop())
+
         # Run knowledge integrity check
         logger.info("Running knowledge integrity check")
         await self._startup_integrity_check()

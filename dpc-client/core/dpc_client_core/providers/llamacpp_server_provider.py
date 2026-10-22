@@ -40,6 +40,7 @@ from .deepseek_provider import DeepSeekProvider
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
 from ..managers.llama_server_supervisor import CardHeldError, LlamaServerSupervisor, card_holders
 from ..managers.llama_server_supervisor import gguf_effort_dictionary, gguf_integer_keys
+from ..managers.llama_server_supervisor import on_the_owner_loop
 
 logger = logging.getLogger(__name__)
 
@@ -1305,6 +1306,7 @@ def retire_absent(known_aliases: Iterable[str]) -> List[str]:
     return retired
 
 
+@on_the_owner_loop
 async def stop_all_supervisors() -> List[str]:
     """Stop every live child, whatever provider object happens to hold it.
 
@@ -1356,6 +1358,7 @@ def card_holder() -> Optional[Dict[str, Any]]:
     return holders[0] if holders else None
 
 
+@on_the_owner_loop
 async def stop_local_engine(alias: str, timeout: Optional[float] = None) -> bool:
     """Stop an alias's child by hand to free the card for the other engine.
 
