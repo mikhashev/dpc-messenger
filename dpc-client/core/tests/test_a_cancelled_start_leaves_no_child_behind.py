@@ -286,3 +286,259 @@ class TestACancelledLlamaServerStart:
         with pytest.raises(LlamaServerError, match="still running on :5000"):
             await sup._launch(Path("C:/bin/llama-server.exe"))
         assert spawned == [] and sup._proc is live
+
+
+# --- the tail: what the first fix left (reviews and scratch checks, 2026-10-22) ---
+
+
+def _swap_spawn(sup, spawned, procs):
+    """The n-th spawn returns `procs[n]()` when given, else the plain fake."""
+    real_spawn, n = sup._spawn, [0]
+
+    async def spawn(cmd, env):
+        proc = await real_spawn(cmd, env)
+        make = procs[n[0]] if n[0] < len(procs) else None
+        n[0] += 1
+        if make is not None:
+            spawned[-1] = proc = make()
+        return proc
+
+    sup._spawn = spawn
+
+
+def _slow_to_exit(release):
+    class _Slow(_FakeProc):
+        async def wait(self):
+            await release.wait()
+            self.returncode = 0
+            return 0
+
+    return _Slow()
+
+
+async def _cancel_twice_while_it_stops(sup, spawned, first):
+    """A start cancelled, then cancelled again while its child is being stopped."""
+    task = asyncio.ensure_future(sup.ensure_running())
+    await _until(lambda: len(spawned) == 1)
+    task.cancel()
+    await _until(lambda: ("signal", STOP_SIGNAL) in first.calls)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+class _Unsignalable(_FakeProc):
+    def send_signal(self, sig):
+        self.calls.append(("signal", sig))
+        raise PermissionError("access denied")
+
+
+class _Unstoppable(_Unsignalable):
+    def kill(self):
+        self.calls.append(("kill",))
+        raise PermissionError("access denied")
+
+
+class TestAChildThatCannotBeSignalled:
+    @pytest.mark.asyncio
+    async def test_it_is_killed_and_the_next_start_spawns_over_nothing(self, tmp_path, home, monkeypatch):
+        healthy = [False]
+        sup, spawned, alive_at_spawn = _strata(tmp_path, monkeypatch, healthy)
+        _swap_spawn(sup, spawned, [_Unsignalable])
+        await _start_and_cancel(sup, spawned)
+        assert ("kill",) in spawned[0].calls, "a signal that cannot be sent falls back to a kill"
+        assert spawned[0].returncode is not None and sup._proc is None
+        healthy[0] = True
+        assert await sup.ensure_running()
+        assert alive_at_spawn == [[], []]
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_one_that_cannot_be_killed_either_stays_visible_and_no_second_is_spawned(
+        self, tmp_path, home, monkeypatch,
+    ):
+        healthy = [False]
+        sup, spawned, _ = _strata(tmp_path, monkeypatch, healthy)
+        _swap_spawn(sup, spawned, [_Unstoppable])
+        await _start_and_cancel(sup, spawned)
+        stuck = spawned[0]
+        assert stuck.returncode is None
+        assert sup._proc is stuck, "a child DPC could not stop is still DPC's to see"
+        assert base_mod._CARD_CLAIMS.get(sup) == "claimed", "and it still holds the card"
+        healthy[0] = True
+        with pytest.raises(LlamaServerError, match="refusing to start a second over it"):
+            await sup.ensure_running()
+        assert len(spawned) == 1
+        assert sup.failure is None
+        base_mod._CARD_CLAIMS.pop(sup, None)
+
+
+class TestAStopIsWaitedForByEveryStart:
+    @pytest.mark.asyncio
+    async def test_a_waiter_cancelled_mid_wait_leaves_the_stop_for_the_next_start(
+        self, tmp_path, home, monkeypatch,
+    ):
+        healthy = [False]
+        sup, spawned, alive_at_spawn = _strata(tmp_path, monkeypatch, healthy)
+        release = asyncio.Event()
+        first = _slow_to_exit(release)
+        _swap_spawn(sup, spawned, [lambda: first])
+        await _cancel_twice_while_it_stops(sup, spawned, first)
+        stop = sup._abandoned_stop
+        assert stop is not None and not stop.done()
+
+        waiter = asyncio.ensure_future(sup.ensure_running())
+        await asyncio.sleep(0.05)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert sup._abandoned_stop is stop, "a cancelled waiter does not take the handle with it"
+
+        healthy[0] = True
+        nxt = asyncio.ensure_future(sup.ensure_running())
+        await asyncio.sleep(0.2)
+        assert len(spawned) == 1, "no launcher while the first still holds the port"
+        release.set()
+        assert await asyncio.wait_for(nxt, 5)
+        assert alive_at_spawn == [[], []]
+        assert sup._abandoned_stop is None
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_wait_for_the_predecessor_neither_cancels_nor_forgets_its_drain(self):
+        sup = LlamaServerSupervisor("successor", {"gguf_path": "x.gguf"})
+        release = asyncio.Event()
+        drain = asyncio.ensure_future(release.wait())
+        sup.supersedes(drain)
+        waiter = asyncio.ensure_future(sup._await_predecessor())
+        await asyncio.sleep(0.05)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not drain.cancelled(), "the drain belongs to the predecessor"
+        assert sup._predecessor is drain, "and the next start still waits on it"
+        nxt = asyncio.ensure_future(sup._await_predecessor())
+        await asyncio.sleep(0.05)
+        assert not nxt.done()
+        release.set()
+        await asyncio.wait_for(nxt, 5)
+        assert sup._predecessor is None
+
+
+class TestAnAnswerFromAnotherProcess:
+    """/health and /props are read from the port. A child already dead when they
+    answer did not give the answer; the props are not this start's."""
+
+    @pytest.mark.asyncio
+    async def test_health_answered_after_the_child_died_is_that_starts_failure_not_a_death(
+        self, tmp_path, home, monkeypatch,
+    ):
+        sup, spawned, _ = _strata(tmp_path, monkeypatch, healthy=[True])
+
+        async def health():
+            if len(spawned) == 1:
+                spawned[0].returncode = 1  # died at bind; the old launcher answers
+            return True
+
+        sup._health_ok = health
+        with pytest.raises(LlamaServerError, match="that start's failure, not an engine death"):
+            await sup.ensure_running()
+        assert sup.props is None and sup._proc is None
+        assert sup.failure is None
+        assert await sup.ensure_running(), "the next start is not refused as an engine death"
+        assert sup.failure is None and sup._proc is spawned[1]
+        await sup.stop()
+
+    @pytest.mark.asyncio
+    async def test_props_answered_after_the_child_died_are_not_kept(self, tmp_path, monkeypatch):
+        sup, spawned, _ = TestACancelledLlamaServerStart()._sup(tmp_path, monkeypatch, healthy=[True])
+
+        async def get(path):
+            if len(spawned) == 1:
+                spawned[0].returncode = 1
+            return {"total_slots": 1}
+
+        sup._get = get
+        with pytest.raises(LlamaServerError, match="that start's failure"):
+            await sup.ensure_running()
+        assert sup.props is None and sup._proc is None
+        assert await sup.ensure_running() == {"total_slots": 1}
+        await sup.stop()
+
+
+class TestACancelTheHttpClientSwallowed:
+    @pytest.mark.asyncio
+    async def test_a_health_poll_that_returns_through_a_cancel_still_ends_the_start(
+        self, tmp_path, home, monkeypatch,
+    ):
+        """What the real-port test caught httpx doing mid-connect: the request
+        completes and the CancelledError is gone, so the start polled on."""
+        sup, spawned, _ = _strata(tmp_path, monkeypatch, healthy=[False])
+        polling = asyncio.Event()
+
+        async def health():
+            polling.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+            return False
+
+        sup._health_ok = health
+        task = asyncio.ensure_future(sup.ensure_running())
+        await asyncio.wait_for(polling.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert ("signal", STOP_SIGNAL) in spawned[0].calls
+        assert sup._proc is None and sup.failure is None
+
+
+class TestAStrataStopThatIsCancelled:
+    @pytest.mark.asyncio
+    async def test_a_cancel_during_the_fail_closed_stop_does_not_leave_the_launcher(
+        self, tmp_path, home, monkeypatch,
+    ):
+        sup, spawned, _ = _strata(tmp_path, monkeypatch, healthy=[True])
+        release = asyncio.Event()
+        first = _slow_to_exit(release)
+        _swap_spawn(sup, spawned, [lambda: first])
+
+        async def no_tool_call(path, body, timeout):
+            return {"choices": [{"message": {}, "finish_reason": "stop"}]}
+
+        sup._post = no_tool_call  # the smoke fails, so the start fails closed
+        task = asyncio.ensure_future(sup.ensure_running())
+        await _until(lambda: ("signal", STOP_SIGNAL) in first.calls)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert sup.failure is not None, "the smoke's verdict stands"
+        stop = sup._abandoned_stop
+        assert stop is not None and not stop.done(), "the stop outlives its cancelled caller"
+        release.set()
+        await asyncio.wait_for(stop, 5)
+        assert first.returncode == 0
+
+    @pytest.mark.asyncio
+    async def test_a_start_cancelled_during_the_version_check_stops_its_launcher(
+        self, tmp_path, home, monkeypatch,
+    ):
+        sup, spawned, _ = _strata(tmp_path, monkeypatch, healthy=[True])
+        in_check = asyncio.Event()
+
+        async def get(path):
+            if path == "/metrics":
+                in_check.set()
+                await asyncio.sleep(60)
+            return {"total_slots": 1}
+
+        sup._get = get
+        task = asyncio.ensure_future(sup.ensure_running())
+        await asyncio.wait_for(in_check.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert ("signal", STOP_SIGNAL) in spawned[0].calls
+        assert sup._proc is None and sup.props is None
+        assert sup.failure is None, "a cancelled start is not an engine death"

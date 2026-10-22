@@ -1536,7 +1536,12 @@ class StrataSupervisor(LlamaServerSupervisor):
             self.alias, "engine death" if note is None else "start refused", reason,
         )
         if stop:
-            await self.stop()
+            if self._watch_task is asyncio.current_task():
+                # The watcher failing closed itself: the stop's own task must not cancel it.
+                self._watch_task = None
+            # Shielded, as an interrupted start's stop is: a caller cancelled here
+            # (an agent killed mid-call) must not leave the launcher running.
+            await self._stop_shielded()
 
     def reset_failure(self) -> Optional[Dict[str, Any]]:
         """Clear a recorded engine death so the next call may start the launcher.
