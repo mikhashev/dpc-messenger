@@ -1385,6 +1385,7 @@ class CompactionState:
         self.max_fails = 3
         self.compacting = False   # True while usage sits above release
         self.fail_streak = 0
+        self.skip_logged = False  # a "cut skipped" line was written since the last real cut
 
 
 # A cut rewrites the prompt from its boundary on, and a local engine re-reads
@@ -1395,6 +1396,14 @@ class CompactionState:
 CUT_MIN_BATCH = 6
 EMERGENCY_KEEP = 2
 OFF_ROUND_BOUND = 24
+# A cut costs one prefix-cache miss from its boundary whatever it frees, so a planned
+# cut whose replaceable results add up to fewer tokens than this is not worth it and is
+# skipped (never at pressure). Live 2026-10-22: a cut of one 4,092-char result (~1k
+# tokens) left the prompt at 80.4k and re-read ~17k tokens; the cuts that paid for
+# themselves freed 8-11k. 4k sits between: four times the empty one, a third of the
+# smallest useful one. Absolute, not a share of the window: the re-read the cut causes
+# does not shrink with the window.
+CUT_MIN_FREED_TOKENS = 4000
 
 
 def uncut_rounds(messages: List[Dict[str, Any]]) -> int:
@@ -1408,23 +1417,39 @@ def uncut_rounds(messages: List[Dict[str, Any]]) -> int:
 _EVICTED_LOGGED = 10
 
 
-def evicted_calls(messages: List[Dict[str, Any]], keep_recent: int) -> str:
-    """The results a cut keeping `keep_recent` rounds replaces, for the log line:
-    `tool:chars@address`, at most _EVICTED_LOGGED of them, then a count."""
+def _evictable(messages: List[Dict[str, Any]], keep_recent: int):
+    """(parent_index, message) for each tool result a cut keeping `keep_recent`
+    rounds would replace: older than the kept rounds, not already cut, longer than
+    _KEEP_ASIS_CHARS. The one definition both the log line and the size guard use."""
     starts = [i for i, m in enumerate(messages)
               if m.get("role") == "assistant" and m.get("tool_calls")]
     if len(starts) <= keep_recent:
-        return "none"
+        return
     cut = set(starts[:-keep_recent])
-    entries = []
+    starts_set = set(starts)
     parent = None
     for i, msg in enumerate(messages):
-        if i in starts:
+        if i in starts_set:
             parent = i
             continue
         if (msg.get("role") != "tool" or parent not in cut or msg.get("_compacted")
                 or len(str(msg.get("content") or "")) <= _KEEP_ASIS_CHARS):
             continue
+        yield parent, msg
+
+
+def freeable_tokens(messages: List[Dict[str, Any]], keep_recent: int) -> int:
+    """Tokens in the tool results a cut keeping `keep_recent` rounds would replace
+    (the same chars/4 estimate the rest of the module uses)."""
+    return sum(estimate_tokens(str(m.get("content") or ""))
+               for _, m in _evictable(messages, keep_recent))
+
+
+def evicted_calls(messages: List[Dict[str, Any]], keep_recent: int) -> str:
+    """The results a cut keeping `keep_recent` rounds replaces, for the log line:
+    `tool:chars@address`, at most _EVICTED_LOGGED of them, then a count."""
+    entries = []
+    for parent, msg in _evictable(messages, keep_recent):
         tool, _ = _call_of(messages, parent, msg.get("tool_call_id"))
         chars = int(msg.get("_output_chars") or len(str(msg.get("content") or "")))
         entries.append(f"{tool}:{chars}@{msg.get('_output_at') or 'unstored'}")
@@ -1501,6 +1526,22 @@ async def apply_compaction(
     keep_after = plan_cut(messages, state, ratio, entered=entered, summariser=summariser)
     if keep_after is None:
         return messages
+    # The size guard: a planned cut that would replace almost nothing is skipped, not
+    # postponed by any state change, so the uncut rounds keep piling up and the same
+    # test runs on the larger batch next round. The pressure path is never held back
+    # (the window is the thing failing there); the compaction-off round bound is, since
+    # its cut costs the same cache miss.
+    if not (state.compacting and ratio >= UNDER_PRESSURE):
+        freed = freeable_tokens(messages, keep_after)
+        if freed < CUT_MIN_FREED_TOKENS:
+            # INFO once per skipped stretch, DEBUG for the rounds that repeat it.
+            (log.debug if state.skip_logged else log.info)(
+                "context cut skipped: round=%d would free ~%d tokens (< %d)",
+                round_idx, freed, CUT_MIN_FREED_TOKENS,
+            )
+            state.skip_logged = True
+            return messages
+    state.skip_logged = False
     log.info(
         "context cut: round=%d usage=%.1f%% uncut_rounds=%d keep=%d summariser=%s evicted=%s",
         round_idx, ratio * 100, uncut_rounds(messages), keep_after, summariser,
