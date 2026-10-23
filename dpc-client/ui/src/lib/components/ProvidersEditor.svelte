@@ -77,7 +77,7 @@
     kv_unified?: boolean;       // unset = true; only meaningful above one slot
     cache_ram_mib?: number;     // host RAM prompt cache, not VRAM
     vram_overhead_mib?: number; // what a loaded context costs beyond weights and KV
-    slot_save_path?: string;    // where slot state is persisted
+    slot_save_path?: string;    // llamacpp_server: where slot state is persisted; strata: the folder of session files
     jinja?: boolean;            // unset = true
     start_timeout_s?: number;   // unset = 300
     extra_args?: string[];      // raw flags appended last, one token per entry
@@ -262,7 +262,7 @@
   // --- strata (ADR-044 point 7) ---------------------------------------------
 
   type StrataPathKey = 'strata_install_dir' | 'strata_base_config' | 'native_gguf' | 'ple_gguf'
-    | 'pack_dir' | 'mtp_dir' | 'expert_profile' | 'mmproj' | 'control_vector_file';
+    | 'pack_dir' | 'mtp_dir' | 'expert_profile' | 'mmproj' | 'control_vector_file' | 'slot_save_path';
 
   const STRATA_PICK: Record<StrataPathKey, { title: string; directory?: boolean; ext?: string[] }> = {
     strata_install_dir: { title: 'Select the Strata folder (serve/server.py, .venv)', directory: true },
@@ -274,6 +274,7 @@
     expert_profile: { title: 'Select the expert profile (--expert-profile)', ext: ['bin'] },
     mmproj: { title: 'Select the vision projector (mmproj)', ext: ['gguf'] },
     control_vector_file: { title: 'Select the control vector (.gguf)', ext: ['gguf'] },
+    slot_save_path: { title: 'Select the folder for Strata session files (slot_save_path)', directory: true },
   };
 
   // The model files, each overriding the base config's value (empty = keep it).
@@ -2644,6 +2645,31 @@
                         <p class="help-text">
                           The most the <strong>server</strong> holds for one conversation. The agent's window is
                           «Context Window» below, a separate field nothing derives from this one.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="strata-slot-save-{i}">Session files folder (slot_save_path)</label>
+                        <div class="path-row">
+                          <input
+                            id="strata-slot-save-{i}"
+                            type="text"
+                            value={sp.slot_save_path ?? ''}
+                            on:change={(e) => setStrataPath(i, 'slot_save_path', e.currentTarget.value)}
+                            placeholder={basePlaceholder(strataBase(strataInspect, i, 'slot_save_path'), 'off — empty')}
+                          />
+                          {#if canBrowse}
+                            <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, 'slot_save_path')}
+                              title="Pick the session files folder">Browse…</button>
+                          {/if}
+                        </div>
+                        <p class="help-text">
+                          Lets Strata save a conversation to a file here and restore it later, so it survives
+                          an eviction from the cache and an engine restart (<code>/slots/0</code> save and restore,
+                          slot 0 only). Size: about 18 KiB per token, so a 230k-token conversation is about 4 GiB.
+                          Strata never deletes these files, and a file stops being valid after a Strata version
+                          change. DPC creates the folder if it is missing; it does not call save or restore
+                          itself yet. Empty = off.
                         </p>
                       </div>
 

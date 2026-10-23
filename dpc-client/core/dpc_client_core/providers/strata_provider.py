@@ -42,6 +42,7 @@ _STRATA_FLAG_KEYS = (
     "strata_install_dir", "strata_base_config", "conversation_cache_mib",
     "conversation_cache_slots", "conversation_cache_min_free_mib", "conversation_cache_min_tokens",
     "conversation_cache_park_gain", "max_context", "resident_budget_gib", "vram_reserve_mib",
+    "slot_save_path",
     "vision", "control_vector",
     "model_params", "extra_args",
     # Model-file overrides (ADR-044 point 7): each replaces a base config value.

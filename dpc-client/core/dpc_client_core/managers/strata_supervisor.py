@@ -154,6 +154,12 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # the desktop and other programs). None keeps the base config's value.
     "resident_budget_gib": None,
     "vram_reserve_mib": None,
+    # Strata's own top-level config key `slot_save_path`: the folder its
+    # `/slots/0` save and restore write session files in. A key of the start
+    # config, not an engine flag - the engine rejects `--slot-save-path`
+    # (unknown argument, seen 2026-10-23) - so it never goes through `args`.
+    # None / empty = off: no key is written and the base config's is kept.
+    "slot_save_path": None,
     # None keeps whatever the base config says; True / False decide.
     "vision": None,
     "control_vector": None,
@@ -243,6 +249,26 @@ def budget_error(key: str, value: Any) -> Optional[str]:
         return None
     rule = "a whole number, at least 0" if whole else "a number more than 0"
     return f"{key}: expected {rule}, not {value!r}"
+
+
+def slot_save_path_error(value: Any) -> Optional[str]:
+    """Why `value` cannot be the alias's `slot_save_path`, or None (None / "" is off).
+
+    Strata takes a string with no control characters naming a directory
+    (serve/server.py `slot_save_dir`); DPC also wants it absolute on this OS,
+    so the folder is the same whatever directory the launcher runs in. `~` and
+    environment variables are not expanded."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        return f"slot_save_path: expected a folder path, not {value!r}"
+    if not value.strip():
+        return "slot_save_path: expected a folder path, not blank text"
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return "slot_save_path: the path has a control character"
+    if not os.path.isabs(value):
+        return f"slot_save_path: expected an absolute path, not {value!r}"
+    return None
 
 
 # Alias key -> the engine flag whose value it replaces (ADR-044 point 7).
@@ -350,6 +376,9 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
                 errors.append(str(e))
     errors.extend(e for e in (budget_error(k, config.get(k)) for k in BUDGET_FLAGS) if e)
     errors.extend(e for e in (admission_error(k, config.get(k)) for k in CACHE_ADMISSION_FLAGS) if e)
+    slot_error = slot_save_path_error(config.get("slot_save_path"))
+    if slot_error:
+        errors.append(slot_error)
     params = config.get("model_params")
     if params is not None and not isinstance(params, dict):
         errors.append(f"model_params must be an object, got {params!r}")
@@ -369,6 +398,9 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
                 path = install / path
             if not path.exists():
                 errors.append(f"{key}: {path} does not exist")
+        slot = config.get("slot_save_path")
+        if slot and slot_save_path_error(slot) is None and Path(slot).exists() and not Path(slot).is_dir():
+            errors.append(f"slot_save_path: {slot} exists and is not a folder")
         word_error = reasoning_effort_error(config)
         if word_error:
             errors.append(word_error)
@@ -507,6 +539,7 @@ def inspect_base_config(path: Any, install_dir: Any = None) -> Dict[str, Any]:
     for key, (flag, _whole, _lo) in BUDGET_FLAGS.items():
         values[key] = _number_or_raw(_flag_value(args, flag))
     block = cfg.get("vision") if isinstance(cfg.get("vision"), dict) else None
+    values["slot_save_path"] = cfg.get("slot_save_path") if isinstance(cfg.get("slot_save_path"), str) else None
     values["vision"] = reads_images(cfg)
     values["mmproj"] = (block or {}).get("mmproj")
     cvec = _flag_value(args, "--control-vector-scaled")
@@ -978,6 +1011,16 @@ class StrataSupervisor(LlamaServerSupervisor):
             if refusal:
                 raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
             args = _set_flag(args, flag, value)
+        # Session files: a top-level key, never an engine flag. Set, it replaces
+        # the base config's value; unset (or empty), the base's stays. The
+        # folder is created by `write_start_config`, not here: this method is
+        # pure and `start_reads_images` calls it without starting anything.
+        slot_value = c.get("slot_save_path")
+        refusal = slot_save_path_error(slot_value)
+        if refusal:
+            raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
+        if slot_value:
+            cfg["slot_save_path"] = str(slot_value)
         if cfg.get("lazy_load") is True and cfg.get("vision"):
             raise LlamaServerError(
                 f"strata[{self.alias}]: lazy_load is text-only and this start reads images "
@@ -1028,6 +1071,16 @@ class StrataSupervisor(LlamaServerSupervisor):
     def write_start_config(self, port: int) -> Path:
         """Write DPC's start config whole (temp file, then replace) and return its path."""
         cfg = self.build_start_config(port)
+        slot_dir = cfg.get("slot_save_path") if self.config.get("slot_save_path") else None
+        if slot_dir:
+            # Strata refuses a session folder that does not exist (`slot_save_dir`).
+            try:
+                os.makedirs(slot_dir, exist_ok=True)
+            except OSError as e:
+                raise LlamaServerError(
+                    f"strata[{self.alias}]: cannot create the session files folder "
+                    f"slot_save_path {slot_dir}: {e}"
+                ) from None
         path = self.start_config_path()
         install = self.install_dir().resolve()
         target = path.resolve()

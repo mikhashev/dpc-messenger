@@ -186,6 +186,11 @@ card.** Every point is Mike's call, 2026-10-18.
    every conversation) and `conversation_cache_park_gain` (`--conversation-cache-park-gain`,
    default 0 = park every turn). The start line prints all five cache flags; the status
    shows them as the start config wrote them and as the engine's `INFO` line reports them.
+   The typed field `slot_save_path` (Strata's own key) names the folder of its `/slots/0`
+   save and restore (session files); it is written as a top-level key of the start config,
+   not an engine flag (`strata.exe` rejects `--slot-save-path`), replaces the base config's
+   value when set, and DPC creates the folder. DPC does not call save or restore itself yet
+   (Mike's call, 2026-10-23: first a measurement).
 8. **Vision by the fact of the start.** The subclass **overrides** `supports_vision`: the
    base class answers yes whenever the alias names an mmproj, even with no live child.
    For Strata it answers from the live start — `/props` `modalities.vision` of the running
