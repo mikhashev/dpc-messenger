@@ -136,7 +136,7 @@ def test_run_ceiling_mb_records_the_applied_value_not_zero_or_none():
     run_default = run_supervised(
         [sys.executable, "-c", "pass"], launcher="test", timeout=30,
     )
-    assert run_default.ceiling_mb == process_mod._MEMORY_CEILING_MB
+    assert run_default.ceiling_mb == process_mod._read_memory_ceiling()
 
     run_off = run_supervised(
         [sys.executable, "-c", "pass"], launcher="test", timeout=30, ceiling_mb=0,

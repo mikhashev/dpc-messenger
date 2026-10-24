@@ -16,6 +16,7 @@ it, and no amount of logging inside this repository would name that one.
 
 from __future__ import annotations
 
+import configparser
 import logging
 import os
 import platform
@@ -23,6 +24,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Sequence
 
 log = logging.getLogger(__name__)
@@ -36,24 +38,92 @@ log = logging.getLogger(__name__)
 # The ceiling is deliberately generous. A guardrail that stops a real build is
 # switched off within a week, and the failure it exists for is two orders of
 # magnitude above ordinary work, not two times.
-def _read_memory_ceiling() -> int:
-    """Parse the ceiling, and never fail the import over it.
+_DEFAULT_MEMORY_CEILING_MB = 8192
+_CEILING_ENV = "DPC_SHELL_MEMORY_LIMIT_MB"
+# The generic name every config.ini key accepts (`Settings.get`); the older
+# name above wins over it, because it is the one already set on machines.
+_CEILING_ENV_GENERIC = "DPC_SYSTEM_SHELL_MEMORY_LIMIT_MB"
+_CEILING_SECTION, _CEILING_KEY = "system", "shell_memory_limit_mb"
 
-    A bad value used to raise at module scope, which takes the whole tools
-    package — every agent tool — down for a misconfigured limit.
+# What a refusal tells the agent, kept in one place for every caller.
+CEILING_HINT = (
+    f"Raise {_CEILING_KEY} in [{_CEILING_SECTION}] of config.ini (the next "
+    f"command reads it, no restart; {_CEILING_ENV} in the environment overrides it)"
+)
+
+# (path, mtime_ns, size) -> the raw value, so a command costs one stat().
+_config_cache: tuple = (None, None)
+_bad_ceilings_announced: set = set()
+
+
+def _config_ceiling_raw() -> Optional[str]:
+    """The key's raw value from config.ini, re-read only when the file changed.
+
+    Not `Settings(home)`: its constructor rewrites a file it cannot parse with
+    the defaults, and a read that lands inside `Settings.set()`'s truncate-and-
+    write would hand it exactly that file. This reads with the same parser and
+    never writes; an unreadable file keeps the last value it read.
     """
-    raw = os.environ.get("DPC_SHELL_MEMORY_LIMIT_MB", "8192")
+    global _config_cache
+    path = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "config.ini"
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    stamp = (str(path), st.st_mtime_ns, st.st_size)
+    cached_stamp, cached_raw = _config_cache
+    if stamp == cached_stamp:
+        return cached_raw
+    if cached_stamp is None or cached_stamp[0] != stamp[0]:
+        cached_raw = None  # another file's value is not this one's last
+    parser = configparser.ConfigParser(inline_comment_prefixes=("#",))
+    try:
+        parser.read(path)
+        if not parser.sections():  # Settings' own test for an invalid file
+            raise configparser.Error("no sections")
+    except (configparser.Error, OSError, UnicodeDecodeError) as exc:
+        log.warning("%s could not be read for the memory ceiling (%s); "
+                    "keeping the last value read", path, exc)
+        _config_cache = (stamp, cached_raw)
+        return cached_raw
+    raw = parser.get(_CEILING_SECTION, _CEILING_KEY, fallback=None)
+    _config_cache = (stamp, raw)
+    return raw
+
+
+def _read_memory_ceiling() -> int:
+    """The ceiling for the next command: environment, config.ini, then 8192.
+
+    Read at every command, so a change to config.ini applies at once. It never
+    raises: a bad value used to raise at module scope, which takes the whole
+    tools package — every agent tool — down for a misconfigured limit.
+    """
+    for source, raw in (
+        (_CEILING_ENV, os.environ.get(_CEILING_ENV)),
+        (_CEILING_ENV_GENERIC, os.environ.get(_CEILING_ENV_GENERIC)),
+    ):
+        if raw is not None:
+            break
+    else:
+        source = f"[{_CEILING_SECTION}] {_CEILING_KEY}"
+        raw = _config_ceiling_raw()
+        if raw is None:
+            return _DEFAULT_MEMORY_CEILING_MB
     try:
         return int(raw)
     except (TypeError, ValueError):
-        log.warning(
-            "DPC_SHELL_MEMORY_LIMIT_MB is %r, which is not a number — "
-            "using the default 8192 MB", raw,
-        )
-        return 8192
+        # Once per value: this runs at every command.
+        if (source, raw) not in _bad_ceilings_announced:
+            _bad_ceilings_announced.add((source, raw))
+            log.warning(
+                "%s is %r, which is not a number — using the default %s MB",
+                source, raw, _DEFAULT_MEMORY_CEILING_MB,
+            )
+        return _DEFAULT_MEMORY_CEILING_MB
 
 
-_MEMORY_CEILING_MB = _read_memory_ceiling()
+# A pin for tests; None in service, where the ceiling is read at each command.
+_MEMORY_CEILING_MB: Optional[int] = None
 _MEMORY_POLL_SECONDS = 2.0
 _PSUTIL_MISSING_ANNOUNCED = False
 
@@ -348,7 +418,9 @@ def run_supervised(
     once the process is gone, which is exactly the position this machine was in
     on 2026-08-26, so every process started here announces who asked for it.
     """
-    ceiling = _MEMORY_CEILING_MB if ceiling_mb is None else ceiling_mb
+    ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
+    if ceiling is None:
+        ceiling = _read_memory_ceiling()
     kwargs = dict(popen_kwargs or {})
     if platform.system() != "Windows":
         # A session of its own, so one killpg reaches the whole descendant set.

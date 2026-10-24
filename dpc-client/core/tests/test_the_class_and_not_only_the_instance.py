@@ -172,9 +172,11 @@ class TestABadEnvironmentVariableIsNotAnOutage:
         monkeypatch.setenv("DPC_SHELL_MEMORY_LIMIT_MB", "0")
         assert _read_memory_ceiling() == 0
 
-    def test_the_default_holds_when_nothing_is_set(self, monkeypatch):
+    def test_the_default_holds_when_nothing_is_set(self, monkeypatch, tmp_path):
         from dpc_client_core.dpc_agent.tools.shell import _read_memory_ceiling
         monkeypatch.delenv("DPC_SHELL_MEMORY_LIMIT_MB", raising=False)
+        monkeypatch.delenv("DPC_SYSTEM_SHELL_MEMORY_LIMIT_MB", raising=False)
+        monkeypatch.setenv("DPC_HOME", str(tmp_path))  # no config.ini there
         assert _read_memory_ceiling() == 8192
 
 

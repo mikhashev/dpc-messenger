@@ -31,8 +31,9 @@ from .registry import ToolEntry, ToolContext, agent_display_name, conversation_o
 # Moved to `process.py` on 2026-08-26 so they cover every spawn this service
 # makes, not only this file's. Imported under their old names on purpose: the
 # tests monkeypatch `shell._MEMORY_CEILING_MB`, and a module global is what they
-# have to be able to reach.
+# have to be able to reach. Unpatched it is None, and the ceiling is read live.
 from .process import (  # noqa: F401  (re-exported for the tests that patch them here)
+    CEILING_HINT,
     _DRAIN_AFTER_KILL_SECONDS,
     _MEMORY_CEILING_MB,
     _MEMORY_POLL_SECONDS,
@@ -2486,10 +2487,7 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
             # the wrong cause, so the timeout adds only what it knows.
             if run.killed:
                 note += f" - {run.killed}"
-            note += (
-                ". Raise DPC_SHELL_MEMORY_LIMIT_MB (a restart applies it) "
-                "if this work genuinely needs more."
-            )
+            note += f". {CEILING_HINT} if this work genuinely needs more."
         elif run.timed_out:
             note = f"Error: command timed out after {timeout}s - {run.killed}."
 

@@ -682,6 +682,14 @@ person, not only as a machine (Mike's call, 2026-09-14; ADR-041 D7, amendment
 - **Valid Values:** `true`, `false`
 - **Privacy Note:** Disabled by default. Enable only if you want to share compute resources with peers.
 
+#### `shell_memory_limit_mb`
+- **Description:** Memory ceiling, in MB, for one agent command and every process it starts (`run_shell`, `read_document`'s DjVu tools, the git tool). Past it the whole tree is killed and the agent is told the number and this key.
+- **Default:** `8192`
+- **Environment Variable:** `DPC_SHELL_MEMORY_LIMIT_MB` overrides the file; `DPC_SYSTEM_SHELL_MEMORY_LIMIT_MB` is honoured below it
+- **Valid Values:** a whole number of MB; `0` turns the ceiling off
+- **Applies:** at the next command, no restart — the file is re-read when its modification time or size changes. An environment variable is fixed for the life of the process, so while one is set an edit here changes nothing until it is removed and the service restarted
+- **Bad value:** a value that is not a number is logged once and the default `8192` is used; it never stops the agent tools from loading
+
 **Example Configuration:**
 ```ini
 [system]
@@ -689,6 +697,7 @@ auto_collect_device_info = true
 collect_hardware_specs = true
 collect_dev_tools = true
 collect_ai_models = false  # Opt-in only
+shell_memory_limit_mb = 8192  # 0 = off
 ```
 
 **Device Context Schema:**
@@ -713,7 +722,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **26 sections, 155 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **26 sections, 157 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -929,6 +938,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `collect_hardware_specs` | `true` | Collect hardware tiers (RAM, CPU, disk, GPU) |
 | `collect_dev_tools` | `true` | Collect installed dev tools and versions |
 | `collect_ai_models` | `false` | Collect locally available AI models (opt-in for compute-sharing) |
+| `shell_memory_limit_mb` | `8192` | Memory ceiling for an agent command and its children, in MB; 0 = off. Read at each command, no restart; DPC_SHELL_MEMORY_LIMIT_MB overrides it |
 
 #### `[telegram]`
 
@@ -1331,7 +1341,7 @@ chmod 600 ~/.dpc/config.ini
 ## Reference: Environment Variables
 
 **Every key in every section has one.** The name is built mechanically —
-`DPC_<SECTION>_<KEY>`, upper case — so all 155 keys in the reference above can be set
+`DPC_<SECTION>_<KEY>`, upper case — so all 157 keys in the reference above can be set
 from the environment without appearing in any list. That includes the secrets this page
 tells you to keep out of version control: `DPC_TELEGRAM_BOT_TOKEN`, `DPC_TURN_USERNAME`,
 `DPC_TURN_CREDENTIAL`.

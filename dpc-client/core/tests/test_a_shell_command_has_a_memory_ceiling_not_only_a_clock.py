@@ -54,7 +54,9 @@ def test_the_refusal_tells_the_agent_the_number_and_how_to_raise_it(monkeypatch)
     result = _execute_shell_command(HUNGRY_GRANDCHILD, None, 120)
 
     assert "200 MB ceiling" in result
-    assert "DPC_SHELL_MEMORY_LIMIT_MB" in result, "say which knob moves it"
+    assert "shell_memory_limit_mb in [system] of config.ini" in result, "say which knob moves it"
+    assert "no restart" in result, "and that moving it needs no restart"
+    assert "DPC_SHELL_MEMORY_LIMIT_MB" in result, "and what overrides it"
     assert "killed" in result
 
 
