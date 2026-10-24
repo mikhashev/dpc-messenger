@@ -23,7 +23,7 @@ import queue
 import re
 import threading
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .utils import (
     utc_now_iso, append_jsonl, truncate_for_log,
@@ -419,12 +419,19 @@ def _store_tool_output(
     the address gives back at least what the model saw. A failed write leaves
     the call without an address; it never fails the round.
     """
-    rel = f"{TOOL_OUTPUT_DIR}/{turn_id}/r{round_idx}-{position}.txt"
+    return _store_turn_text(agent_root, turn_id, f"r{round_idx}-{position}.txt", output)
+
+
+def _store_turn_text(
+    agent_root: pathlib.Path, turn_id: str, name: str, text: str,
+) -> Optional[str]:
+    """Write one text into the turn's directory of the store; its address, or None."""
+    rel = f"{TOOL_OUTPUT_DIR}/{turn_id}/{name}"
     target = agent_root / rel
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".tmp")
-        tmp.write_bytes(output.encode("utf-8", errors="replace"))
+        tmp.write_bytes(text.encode("utf-8", errors="replace"))
         tmp.replace(target)
     except OSError:
         log.warning("tool output store: could not write %s", target, exc_info=True)
@@ -705,6 +712,129 @@ def _strip_role_boundaries(content: str) -> str:
     return content
 
 
+# DeepSeek's call markup (DSML), which the model writes into its text when the
+# request gave it no tool channel. The vendor template spells it
+# `<｜DSML｜invoke name="…">`; Ark wrote `<｜｜DSML｜｜ invoke name="write_file">`
+# on 2026-10-25, a 16 481-character call stored as his answer and never run — so
+# bars and spaces are matched loosely. Group 1 is the slash, group 2 the tag word.
+_DSML_TAG = re.compile(r"<\s*(/?)\s*[|｜]+\s*DSML\s*[|｜]+\s*([A-Za-z_]+)[^<>]*>")
+_DSML_NAME = re.compile(r'\bname\s*=\s*"([^"]+)"')
+# Code in an answer is the agent *showing* the format, which this project does
+# often; markup inside a fence or a backtick span is never read as a call.
+_CODE_SPAN = re.compile(r"```.*?(?:```|\Z)|`[^`\n]*`", re.DOTALL)
+_WHOLE_FENCE = re.compile(r"^```[A-Za-z_]*[ \t]*\n?(.*?)\n?```$", re.DOTALL)
+
+
+def _lone_call_json(content: str) -> Optional[str]:
+    """The tool name when the whole answer is one `{"name", "arguments"}` object.
+
+    Whole answer only, fenced or bare: the shape of GUARD-FORCED-ANSWER-LOSES-
+    TOOL-CHANNEL (2026-07-18). A JSON example with a sentence beside it is prose.
+    """
+    text = (content or "").strip()
+    fenced = _WHOLE_FENCE.match(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        return None
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return None
+    if (isinstance(obj, dict) and set(obj) == {"name", "arguments"}
+            and isinstance(obj["name"], str) and isinstance(obj["arguments"], dict)):
+        return obj["name"]
+    return None
+
+
+def _written_tool_calls(content: str) -> Tuple[List[str], str]:
+    """Tools an answer wrote out as a call instead of making one, and the prose left.
+
+    `([], content)` when there are none. A DSML block counts only with its
+    structure — an `invoke` opener followed by a `parameter` tag or the `invoke`
+    closer — outside code, so a sentence that names one tag is left alone. The
+    block is cut from its first tag to its last; an unclosed one (cut by
+    max_tokens) runs to the end, since what follows is the call's argument.
+    """
+    if not content:
+        return [], content or ""
+    lone = _lone_call_json(content)
+    if lone:
+        return [lone], ""
+    code = [m.span() for m in _CODE_SPAN.finditer(content)]
+    tags = [m for m in _DSML_TAG.finditer(content)
+            if not any(a <= m.start() < b for a, b in code)]
+    openers = [i for i, m in enumerate(tags) if m.group(2).lower() == "invoke" and not m.group(1)]
+    if not openers:
+        return [], content
+    first = openers[0]
+    if not any(m.group(2).lower() == "parameter" or (m.group(2).lower() == "invoke" and m.group(1))
+               for m in tags[first + 1:]):
+        return [], content
+    names = list(dict.fromkeys(
+        n.group(1) for n in (_DSML_NAME.search(tags[i].group(0)) for i in openers) if n
+    )) or ["an unnamed tool"]
+    closed = any(m.group(2).lower() == "invoke" and m.group(1) for m in tags[openers[-1] + 1:])
+    end = tags[-1].end() if closed else len(content)
+    prose = "\n\n".join(p for p in (content[:tags[0].start()].strip(), content[end:].strip()) if p)
+    return names, prose
+
+
+def _not_executed_note(names: List[str], prose: str, kept_at: Optional[str] = None) -> str:
+    """What the reader sees in place of a call that was written and not made."""
+    called = ", ".join(f"`{n}`" for n in names)
+    note = (
+        f"⚠️ Not done: the agent wrote its last action as text instead of running it, "
+        f"so {called} was never executed. Nothing that call would have done has "
+        f"happened; ask again to have it done."
+    )
+    if kept_at:
+        note += (
+            f" The text of the call is kept at `{kept_at}` in the agent's folder"
+            f" for {TOOL_OUTPUT_KEEP_DAYS} days."
+        )
+    return f"{note}\n\n{prose}" if prose else note
+
+
+def _answer_without_unrun_calls(
+    content: str,
+    llm_trace: Dict[str, Any],
+    calls: Optional[List[Dict[str, Any]]] = None,
+    keep: Optional[Callable[[str], Optional[str]]] = None,
+) -> str:
+    """A final answer with no tool call passed off as one.
+
+    `calls` are the calls the caller knows were returned and will not be run
+    (native, or parsed from the text); the rest is found by `_written_tool_calls`.
+    An answer that is a call is a claim the action happened; the note says it
+    did not, by the tool's name (A-GUARD-STOP-ON-DEEPSEEK-..., 2026-10-25).
+
+    `keep` writes the replaced text somewhere and returns its address. Without
+    it the call's body is gone: the trace is not persisted, and Ark rebuilt
+    his 16k write-up from the chat text the note now takes the place of.
+    """
+    names = [tc.get("function", {}).get("name") or "an unnamed tool" for tc in (calls or [])]
+    prose = _prose_outside_tool_calls(content) if calls else (content or "")
+    written, prose = _written_tool_calls(prose)
+    names = list(dict.fromkeys(names + written))
+    if not names:
+        return content
+    body = content or ""
+    if calls:
+        # Native calls carry their arguments outside the text.
+        body += "\n\n--- tool calls ---\n" + json.dumps(calls, ensure_ascii=False, indent=2)
+    kept_at = keep(body) if keep is not None else None
+    log.warning(
+        "Final answer carried %s as a call that was never executed (%d chars); "
+        "stored as a not-executed note instead, the text kept at %s",
+        ", ".join(names), len(content or ""), kept_at or "(nowhere)",
+    )
+    llm_trace.setdefault("unexecuted_tool_calls", []).append(
+        {"tools": names, "chars": len(content or ""), "kept_at": kept_at}
+    )
+    return _not_executed_note(names, prose, kept_at)
+
+
 def _classify_tool_error(result: str) -> str:
     """Classify tool error category from result string prefix."""
     r = str(result)
@@ -975,17 +1105,23 @@ async def _chat_unless_killed(coro, kill_event: Optional[asyncio.Event]):
     raise CallKilled()
 
 
-def _answers_with_tool_calls(msg: Dict[str, Any], llm: Any) -> bool:
-    """A reply that is a tool call, native or written into the text."""
+def _calls_in(msg: Dict[str, Any], llm: Any) -> List[Dict[str, Any]]:
+    """A reply's tool calls, native or written into the text in a shape the
+    adapter parses."""
     if msg.get("tool_calls"):
-        return True
+        return list(msg["tool_calls"])
     content = msg.get("content") or ""
     if "tool_call" in content.lower() and hasattr(llm, "_parse_tool_calls"):
         try:
-            return bool(llm._parse_tool_calls(content))
+            return list(llm._parse_tool_calls(content) or [])
         except Exception:
-            return False
-    return False
+            return []
+    return []
+
+
+def _answers_with_tool_calls(msg: Dict[str, Any], llm: Any) -> bool:
+    """A reply that is a tool call, native or written into the text."""
+    return bool(_calls_in(msg, llm))
 
 
 async def _finalize_after_guard_stop(
@@ -1002,6 +1138,8 @@ async def _finalize_after_guard_stop(
     tools: Optional[List[Dict[str, Any]]] = None,
     reasoning_effort: Optional[str] = None,
     observe_request: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+    execute_tool_calls: Optional[Callable[..., Awaitable[bool]]] = None,
+    keep_unexecuted: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Shared "guard fired → graceful termination" sequence.
 
@@ -1019,6 +1157,13 @@ async def _finalize_after_guard_stop(
     messages and tools, so the prefix holds where the provider takes the
     word, and no tools where it does not. If the calls fail the
     fallback_reason (or the stop message) is returned instead.
+
+    With `execute_tool_calls` (the loop's own dispatch) the calls of that
+    answer are run once before the retry: the answer to "stop and answer" is
+    often the action the user asked for, and discarding it lost Ark's
+    write_file on 2026-10-25. One round only — calls in the retry's answer are
+    not run, and the answer says so (`_answer_without_unrun_calls`), so the
+    research the guard stopped cannot resume.
 
     Two exceptions: after ContextLimitGuard the call is skipped, and a
     user stop during the call cancels it.
@@ -1078,18 +1223,43 @@ async def _finalize_after_guard_stop(
 
     try:
         final_msg = await _final_call(tools or None)
-        if final_msg is not None and tools and _answers_with_tool_calls(final_msg, llm):
+        calls = _calls_in(final_msg, llm) if final_msg is not None and tools else []
+        if calls:
+            if execute_tool_calls is not None:
+                log.warning(
+                    "Finalising call answered with %d tool call(s) (%s); running them "
+                    "once, then asking for the answer with tool_choice=none",
+                    len(calls), ", ".join(tc["function"]["name"] for tc in calls),
+                )
+                content = final_msg.get("content") or ""
+                prefix = _extract_thinking_prefix(content)
+                turn: Dict[str, Any] = {"role": "assistant", "content": prefix, "tool_calls": calls}
+                notes = (final_msg.get("thinking") or "").strip()
+                if notes:
+                    turn["thinking"] = notes
+                messages.append(turn)
+                reasoning = _round_reasoning(final_msg.get("thinking"), prefix, content, calls)
+                if not await execute_tool_calls(messages, calls, reasoning):
+                    log.info("Agent stopped by user during the finalising round's tool calls")
+                    llm_trace["stopped_by_user"] = True
+                    return user_stopped, accumulated_usage, llm_trace
+            else:
+                log.info("Finalising call answered with tool calls; asking again with tool_choice=none")
             # Not tools=None: on the adapter that is the flattened text path, one
             # user message the engine shares no prefix with (live: 101,547 tokens
             # re-read). "none" keeps the native shape where the provider takes it.
-            log.info("Finalising call answered with tool calls; asking again with tool_choice=none")
             final_msg = await _final_call(tools, tool_choice="none")
         if final_msg is None:
             log.info("Agent stopped by user during the finalising call after a guard stop")
             llm_trace["stopped_by_user"] = True
             return user_stopped, accumulated_usage, llm_trace
-        if final_msg.get("content"):
-            return final_msg["content"], accumulated_usage, llm_trace
+        # Calls still in this answer are not run: one round was the allowance.
+        unrun = _calls_in(final_msg, llm) if tools else []
+        answer = _answer_without_unrun_calls(
+            final_msg.get("content") or "", llm_trace, unrun, keep=keep_unexecuted,
+        )
+        if answer:
+            return answer, accumulated_usage, llm_trace
     except Exception:
         log.warning("Failed to get final response after guard stop", exc_info=True)
     return stop_msg or fallback_reason, accumulated_usage, llm_trace
@@ -1247,6 +1417,100 @@ async def run_llm_loop(
         _divergence["requests"] += 1
         return seen
 
+    _kept_unexecuted = [0]
+
+    def _keep_unexecuted(text: str) -> Optional[str]:
+        """The text of a call that will not run, beside this turn's tool outputs."""
+        _kept_unexecuted[0] += 1
+        return _store_turn_text(agent_root, turn_id, f"unexecuted-{_kept_unexecuted[0]}.txt", text)
+
+    async def _dispatch_round(target, calls, round_reasoning) -> bool:
+        """Run one round's calls through the registry and record each result
+        in `target`, the trace and the live view; False when the user stopped
+        between calls. One function for the loop and for the round a guard's
+        finalising call asks for, so that round passes the same firewall,
+        approvals and ledger as every other."""
+        for position, tc in enumerate(calls):
+            if stop_event and stop_event.is_set():
+                return False
+            tool_name = tc["function"]["name"]
+            # Emit the tool's arguments (JSON) so the live row shows WHAT the agent is
+            # doing — which file it reads, which pattern it searches — not just "Executing".
+            _raw_args = tc.get("function", {}).get("arguments")
+            if isinstance(_raw_args, str):
+                _args_msg = _raw_args
+            elif _raw_args:
+                _args_msg = json.dumps(_raw_args, default=str)
+            else:
+                _args_msg = ""
+            emit_progress(_args_msg or f"Executing {tool_name}...", tool_name, round_idx)
+            timeout = tools.get_timeout(tc["function"]["name"])
+            exec_result = await _execute_with_timeout(
+                tools, tc, logs_dir, timeout, task_id,
+                round_number=round_idx,
+                session_id=conversation_id or "",
+                ctx=_loop_ctx,
+            )
+
+            truncated_result = _truncate_tool_result(exec_result["result"])
+            safe_result = _sanitize_tool_result(truncated_result)
+
+            # When a tool fails, wrap the result in an explicit failure envelope
+            # so the LLM cannot misinterpret it as a success and hallucinate outcomes.
+            if exec_result["is_error"]:
+                tool_content = (
+                    f"[TOOL_FAILED: {exec_result['fn_name']}]\n"
+                    f"{safe_result}\n"
+                    f"The tool call above FAILED. Do NOT report success or fabricate results. "
+                    f"Acknowledge the failure and tell the user exactly what went wrong."
+                )
+            else:
+                tool_content = safe_result
+
+            full_output = str(exec_result["result"])
+            tool_msg: Dict[str, Any] = {
+                "role": "tool",
+                "tool_call_id": exec_result["tool_call_id"],
+                "content": tool_content,
+                # Read by the cut (context.compact_tool_history); providers
+                # rebuild messages from known keys and never send these.
+                "_output_chars": len(full_output),
+            }
+            address = _store_tool_output(agent_root, turn_id, round_idx, position, full_output)
+            if address:
+                tool_msg["_output_at"] = address
+            target.append(tool_msg)
+
+            llm_trace["tool_calls"].append({
+                "tool": exec_result["fn_name"],
+                "args": exec_result["args_for_log"],
+                "result": truncate_for_log(exec_result["result"], 700),
+                "is_error": exec_result["is_error"],
+            })
+            _accumulated_tool_calls.append({
+                "tool": exec_result["fn_name"],
+                "input": json.dumps(exec_result["args_for_log"], default=str),
+                "output": exec_result["result"],
+                "is_error": exec_result["is_error"],
+                "duration_ms": exec_result.get("duration_ms", 0),
+                "round": round_idx,
+                # per-round reasoning text (same for every tool in the round) so the
+                # collapsible can show the agent's "thought -> did -> got" flow.
+                # round_reasoning prefers the model's CoT so every round has reasoning.
+                "round_text": round_reasoning,
+            })
+
+            # Emit tool result so frontend can show it in Raw output
+            status_icon = "❌" if exec_result["is_error"] else "✓"
+            result_preview = truncate_for_log(exec_result["result"], 200)
+            emit_progress(
+                f"{status_icon} {exec_result['fn_name']}: {result_preview}",
+                None,
+                round_idx,
+                list(_accumulated_tool_calls),  # full snapshot so the UI renders authoritatively
+            )
+        return True
+
     round_idx = 0
     empty_retry_count = 0
     MAX_EMPTY_RETRIES = 3
@@ -1281,6 +1545,8 @@ async def run_llm_loop(
                     tools=tool_schemas,
                     reasoning_effort=reasoning_effort,
                     observe_request=_observe_request,
+                    execute_tool_calls=_dispatch_round,
+                    keep_unexecuted=_keep_unexecuted,
                 )
 
             # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
@@ -1416,6 +1682,8 @@ async def run_llm_loop(
                     tools=tool_schemas,
                     reasoning_effort=reasoning_effort,
                     observe_request=_observe_request,
+                    execute_tool_calls=_dispatch_round,
+                    keep_unexecuted=_keep_unexecuted,
                 )
 
             # No tool calls — final response or empty-response retry
@@ -1436,6 +1704,9 @@ async def run_llm_loop(
                 append_jsonl(logs_dir / "reasoning.jsonl", _final_quality)
 
                 if _answered:
+                    # Before the role cut, which would eat a lone fenced call to
+                    # nothing and leave an empty answer instead of the note.
+                    content = _answer_without_unrun_calls(content, llm_trace, keep=_keep_unexecuted)
                     clean_content = _strip_history_markers(_strip_role_boundaries(content))
                     # Intermediate per-round text is shown per-round (round_text), not
                     # assembled into the final answer (Variant 2). Final = this last round.
@@ -1526,88 +1797,11 @@ async def run_llm_loop(
                 llm_trace["assistant_notes"].append(thinking.strip()[:320])
 
             # Execute tool calls
-            for position, tc in enumerate(tool_calls):
-                if stop_event and stop_event.is_set():
-                    log.info("Agent stopped by user mid-round %d (between tool calls)", round_idx)
-                    llm_trace["stopped_by_user"] = True
-                    llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
-                    return f"⚠️ Stopped by user after {round_idx} rounds.", accumulated_usage, llm_trace
-                tool_name = tc["function"]["name"]
-                # Emit the tool's arguments (JSON) so the live row shows WHAT the agent is
-                # doing — which file it reads, which pattern it searches — not just "Executing".
-                _raw_args = tc.get("function", {}).get("arguments")
-                if isinstance(_raw_args, str):
-                    _args_msg = _raw_args
-                elif _raw_args:
-                    _args_msg = json.dumps(_raw_args, default=str)
-                else:
-                    _args_msg = ""
-                emit_progress(_args_msg or f"Executing {tool_name}...", tool_name, round_idx)
-                timeout = tools.get_timeout(tc["function"]["name"])
-                exec_result = await _execute_with_timeout(
-                    tools, tc, logs_dir, timeout, task_id,
-                    round_number=round_idx,
-                    session_id=conversation_id or "",
-                    ctx=_loop_ctx,
-                )
-
-                truncated_result = _truncate_tool_result(exec_result["result"])
-                safe_result = _sanitize_tool_result(truncated_result)
-
-                # When a tool fails, wrap the result in an explicit failure envelope
-                # so the LLM cannot misinterpret it as a success and hallucinate outcomes.
-                if exec_result["is_error"]:
-                    tool_content = (
-                        f"[TOOL_FAILED: {exec_result['fn_name']}]\n"
-                        f"{safe_result}\n"
-                        f"The tool call above FAILED. Do NOT report success or fabricate results. "
-                        f"Acknowledge the failure and tell the user exactly what went wrong."
-                    )
-                else:
-                    tool_content = safe_result
-
-                full_output = str(exec_result["result"])
-                tool_msg: Dict[str, Any] = {
-                    "role": "tool",
-                    "tool_call_id": exec_result["tool_call_id"],
-                    "content": tool_content,
-                    # Read by the cut (context.compact_tool_history); providers
-                    # rebuild messages from known keys and never send these.
-                    "_output_chars": len(full_output),
-                }
-                address = _store_tool_output(agent_root, turn_id, round_idx, position, full_output)
-                if address:
-                    tool_msg["_output_at"] = address
-                messages.append(tool_msg)
-
-                llm_trace["tool_calls"].append({
-                    "tool": exec_result["fn_name"],
-                    "args": exec_result["args_for_log"],
-                    "result": truncate_for_log(exec_result["result"], 700),
-                    "is_error": exec_result["is_error"],
-                })
-                _accumulated_tool_calls.append({
-                    "tool": exec_result["fn_name"],
-                    "input": json.dumps(exec_result["args_for_log"], default=str),
-                    "output": exec_result["result"],
-                    "is_error": exec_result["is_error"],
-                    "duration_ms": exec_result.get("duration_ms", 0),
-                    "round": round_idx,
-                    # per-round reasoning text (same for every tool in the round) so the
-                    # collapsible can show the agent's "thought -> did -> got" flow.
-                    # round_reasoning prefers the model's CoT so every round has reasoning.
-                    "round_text": round_reasoning,
-                })
-
-                # Emit tool result so frontend can show it in Raw output
-                status_icon = "❌" if exec_result["is_error"] else "✓"
-                result_preview = truncate_for_log(exec_result["result"], 200)
-                emit_progress(
-                    f"{status_icon} {exec_result['fn_name']}: {result_preview}",
-                    None,
-                    round_idx,
-                    list(_accumulated_tool_calls),  # full snapshot so the UI renders authoritatively
-                )
+            if not await _dispatch_round(messages, tool_calls, round_reasoning):
+                log.info("Agent stopped by user mid-round %d (between tool calls)", round_idx)
+                llm_trace["stopped_by_user"] = True
+                llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
+                return f"⚠️ Stopped by user after {round_idx} rounds.", accumulated_usage, llm_trace
 
             # Snapshot this round's tool results so LoopGuard can tell a
             # genuinely-stuck poll (identical output) from a long-running one

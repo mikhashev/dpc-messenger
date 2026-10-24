@@ -579,11 +579,20 @@ class DeepSeekProvider(AIProvider):
         on_chunk: Optional[callable] = None,
         conversation_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        tool_choice: str = "auto",
     ) -> Dict[str, Any]:
         """
         Native tool calling. Returns {content, tool_calls_raw, thinking, usage}
         where tool_calls_raw items expose .id/.name/.input (Anthropic tool_use shape)
         as consumed by llm_adapter._chat_native_tools.
+
+        `tool_choice="none"` asks for an answer and no call while the request
+        keeps its tools, so the cached prefix holds; the post-guard retry sends
+        it. Without the parameter the adapter flattened that retry into one
+        prompt, and the model wrote its call as DSML text (2026-10-25). The
+        vendor documents none/auto/required/named and refuses the last two in
+        thinking mode with 400 (api-docs.deepseek.com/api/create-chat-completion,
+        read 2026-10-25); the agent loop sends only "none".
         """
         self._last_thinking = None
         self._last_usage = None
@@ -613,7 +622,7 @@ class DeepSeekProvider(AIProvider):
                 "max_tokens": self.max_tokens,
                 "messages": openai_messages,
                 "tools": openai_tools,
-                "tool_choice": "auto",
+                "tool_choice": tool_choice,
                 "extra_body": extra_body,
                 **self._sampling_params(reasoning_effort=reasoning_effort),
             }
