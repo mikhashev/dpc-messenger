@@ -6,7 +6,7 @@
   import type { Writable } from 'svelte/store';
   import { get } from 'svelte/store';
   import FileTransferUI from '$lib/components/FileTransferUI.svelte';
-  import { cancelReasonText, refusalNotice } from '$lib/fileTransferNotice';
+  import { cancelReasonText, refusalNotice, notOfferedNotice } from '$lib/fileTransferNotice';
   import VoiceRecorder from '$lib/components/VoiceRecorder.svelte';
   import TokenWarningBanner from '$lib/components/TokenWarningBanner.svelte';
   import ProviderRetryBanner from '$lib/components/ProviderRetryBanner.svelte';
@@ -306,6 +306,23 @@
       })();
     }
   });
+
+  // A group send that left connected members out: a toast and, because the toast is gone in
+  // 10 s, the whole account as a system line in the group chat. True when it warned.
+  function reportNotOffered(groupId: string, result: any): boolean {
+    const notice = notOfferedNotice(result, (id) => peerDisplayNames.get(id));
+    if (!notice) return false;
+    fileOfferToastMessage = notice.toast;
+    showFileOfferToast = true;
+    setTimeout(() => (showFileOfferToast = false), 10000);
+    chatHistories.update(h => {
+      const m = new Map(h);
+      const hist = m.get(groupId) || [];
+      m.set(groupId, [...hist, { id: crypto.randomUUID(), sender: 'system', text: notice.text, timestamp: Date.now() }]);
+      return m;
+    });
+    return true;
+  }
 
   // File transfer cancelled toast (and, for a refusal with a stated reason, a chat line)
   let lastRefusalNoticeId = '';
@@ -647,7 +664,7 @@
       });
       autoScroll();
       try {
-        await sendGroupImage(gid, imageData.dataUrl, imageData.filename, text, dfa);
+        reportNotOffered(gid, await sendGroupImage(gid, imageData.dataUrl, imageData.filename, text, dfa));
       } catch (error) {
         // Drop the optimistic bubble if the send failed.
         chatHistories.update(h => {
@@ -782,25 +799,29 @@
     if (!pendingFileSend || isSendingFile) return;
     isSendingFile = true;
     try {
+      let groupResult: any = null;
       if (pendingFileSend.imageData) {
         if (pendingFileSend.recipientId.startsWith('group-')) {
-          await sendGroupImage(pendingFileSend.recipientId, pendingFileSend.imageData.dataUrl, pendingFileSend.imageData.filename, pendingFileSend.caption || '', describeForAgents);
+          groupResult = await sendGroupImage(pendingFileSend.recipientId, pendingFileSend.imageData.dataUrl, pendingFileSend.imageData.filename, pendingFileSend.caption || '', describeForAgents);
         } else {
           await sendCommand('send_p2p_image', { node_id: pendingFileSend.recipientId, image_base64: pendingFileSend.imageData.dataUrl, filename: pendingFileSend.imageData.filename, text: pendingFileSend.caption || '' });
         }
       } else {
         if (pendingFileSend.recipientId.startsWith('group-')) {
-          await sendGroupFile(pendingFileSend.recipientId, pendingFileSend.filePath);
+          groupResult = await sendGroupFile(pendingFileSend.recipientId, pendingFileSend.filePath);
         } else {
           await sendFile(pendingFileSend.recipientId, pendingFileSend.filePath);
         }
       }
+      const groupId = pendingFileSend.recipientId;
       showSendFileDialog = false;
       pendingFileSend = null;
       describeForAgents = false;
-      fileOfferToastMessage = 'Sending...';
-      showFileOfferToast = true;
-      setTimeout(() => (showFileOfferToast = false), 3000);
+      if (!(groupResult && reportNotOffered(groupId, groupResult))) {
+        fileOfferToastMessage = 'Sending...';
+        showFileOfferToast = true;
+        setTimeout(() => (showFileOfferToast = false), 3000);
+      }
     } catch (error) {
       fileOfferToastMessage = `Failed to send: ${error}`;
       showFileOfferToast = true;
@@ -942,7 +963,7 @@
           return;
         }
         const base64Audio = await _blobToBase64(blob);
-        await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm');
+        reportNotOffered(activeChatId, await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm'));
       } else if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_')) {
         await handleTranscribeVoiceMessage();
         return;

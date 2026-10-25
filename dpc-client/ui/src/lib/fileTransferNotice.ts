@@ -46,3 +46,72 @@ export function refusalNotice(
     const file = event.filename && event.filename !== 'unknown' ? event.filename : 'the file';
     return { chatId, text: `Not sent: ${who} refused ${file} (${detail})` };
 }
+
+/**
+ * A group send's answer when some connected members were not offered the file.
+ *
+ * `send_group_file`, `send_group_image` and `send_group_voice_message` answer
+ * success with the offers they made in `transfer_ids`. A connected member the
+ * backend could not offer the file to is a row in `not_offered` (`reason` is
+ * `max_concurrent_transfers` for the upload limit, `send_error` with its own
+ * `detail` for anything else); when the limit was hit, `upload_limit.sentence`
+ * says what holds the slots. The sentence is the backend's, the same one a
+ * one-to-one send at the limit raises. A send that offered everyone carries
+ * none of these.
+ */
+export interface NotOfferedRow {
+    node_id: string;
+    name?: string | null;
+    reason: string;
+    detail?: string;
+}
+
+export interface GroupSendResult {
+    transfer_ids?: string[];
+    not_offered?: NotOfferedRow[];
+    upload_limit?: { limit: number; sentence: string };
+}
+
+const UPLOAD_LIMIT_REASON = 'max_concurrent_transfers';
+const TOAST_NAMES = 3;
+
+/**
+ * The warning for a group send that left members out, or null when it offered
+ * everyone connected. `toast` is short; `text` is the whole account and belongs
+ * in the chat, where the 5-second toast cannot lose it.
+ */
+export function notOfferedNotice(
+    result: GroupSendResult | null | undefined,
+    nameOf: (nodeId: string) => string | undefined,
+): { toast: string; text: string } | null {
+    const rows = result?.not_offered;
+    if (!result || !Array.isArray(rows) || rows.length === 0) return null;
+
+    const who = (row: NotOfferedRow) => nameOf(row.node_id) || row.name || row.node_id;
+    const offered = Array.isArray(result.transfer_ids) ? result.transfer_ids.length : 0;
+    const names = rows.map(who);
+    const limit = result.upload_limit;
+    const hitLimit = rows.some((r) => r.reason === UPLOAD_LIMIT_REASON);
+
+    const parts = [`Not offered to ${rows.length} of ${offered + rows.length} connected members: ${names.join(', ')}.`];
+    if (hitLimit) {
+        parts.push(limit?.sentence || 'Upload limit reached.');
+    }
+    for (const row of rows) {
+        if (row.reason !== UPLOAD_LIMIT_REASON) {
+            parts.push(`${who(row)}: ${row.detail || row.reason}.`);
+        }
+    }
+
+    const shown = names.slice(0, TOAST_NAMES).join(', ') + (names.length > TOAST_NAMES ? ` and ${names.length - TOAST_NAMES} more` : '');
+    const reasons = new Set<string>();
+    for (const row of rows) {
+        reasons.add(row.reason === UPLOAD_LIMIT_REASON
+            ? (limit ? `upload limit of ${limit.limit} reached` : 'upload limit reached')
+            : (row.detail || row.reason));
+    }
+    return {
+        toast: `Not sent to ${shown}: ${[...reasons].join('; ')}. Details in the chat.`,
+        text: parts.join(' '),
+    };
+}

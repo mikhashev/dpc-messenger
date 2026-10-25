@@ -345,6 +345,94 @@ class _TransferTable(dict):
             self._on_remove(old)
 
 
+# `reason` of a fan-out's `not_offered` row. The cap's word is the setting's own
+# name; every other refusal to make the offer is `send_error`, FILE_CANCEL's word
+# for a send that failed, with the exception's text in `detail`.
+NOT_OFFERED_UPLOAD_LIMIT = "max_concurrent_transfers"
+NOT_OFFERED_SEND_ERROR = "send_error"
+UPLOAD_LIMIT_SETTING = "[file_transfer] max_concurrent_transfers"
+# How many open uploads the sentence names before it says "and N more".
+_UPLOAD_LIMIT_SENTENCE_LISTS = 6
+_UPLOAD_STATUS_WORDS = {
+    TransferStatus.PENDING.value: "waiting for an answer",
+    TransferStatus.TRANSFERRING.value: "sending",
+}
+
+
+def upload_limit_sentence(limit: int, open_uploads: List[Dict[str, Any]]) -> str:
+    """The one sentence a sender is told when `send_file` finds every upload slot taken.
+
+    The 1:1 senders get it as the error's text; a group fan-out puts it in the
+    result's `upload_limit`, so both screens say the same thing. `open_uploads`
+    are the rows `FileTransferManager.open_uploads` returns.
+    """
+    shown = [
+        f"{u['filename']} to {u.get('name') or u['node_id']} "
+        f"({_UPLOAD_STATUS_WORDS.get(u['status'], u['status'])})"
+        for u in open_uploads[:_UPLOAD_LIMIT_SENTENCE_LISTS]
+    ]
+    more = len(open_uploads) - len(shown)
+    if more > 0:
+        shown.append(f"and {more} more")
+    return (
+        f"Upload limit reached: {len(open_uploads)} uploads are open and the limit is {limit} "
+        f"({UPLOAD_LIMIT_SETTING} in config.ini, read at start). "
+        f"Open now: {'; '.join(shown)}. "
+        "Each stays open until its receiver answers and the transfer ends."
+    )
+
+
+class MaxConcurrentTransfersExceeded(RuntimeError):
+    """`send_file` found as many open uploads as `max_concurrent_transfers` allows.
+
+    A `RuntimeError`, as it was before it had a type, so a caller that catches
+    that keeps working. `str()` is `upload_limit_sentence`; `limit` and
+    `open_uploads` are what it was built from, taken at the moment of the refusal.
+    """
+
+    def __init__(self, limit: int, open_uploads: List[Dict[str, Any]]):
+        self.limit = limit
+        self.open_uploads = open_uploads
+        super().__init__(upload_limit_sentence(limit, open_uploads))
+
+
+class NotOfferedReport:
+    """The members of a group fan-out that were not offered the file, and why.
+
+    A fan-out visits the members connected to this node; one that fails is
+    recorded here with `record`, and `fields` is what goes into the result next
+    to `transfer_ids`. Nothing is added when everyone was offered, so a send
+    that went through looks as it always did.
+    """
+
+    def __init__(self, label: Callable[[str], Optional[str]] = lambda node_id: None):
+        self._label = label
+        self.rows: List[Dict[str, Any]] = []
+        self._cap: Optional[MaxConcurrentTransfersExceeded] = None
+
+    def record(self, node_id: str, error: BaseException) -> None:
+        row: Dict[str, Any] = {"node_id": node_id, "name": self._label(node_id)}
+        if isinstance(error, MaxConcurrentTransfersExceeded):
+            row["reason"] = NOT_OFFERED_UPLOAD_LIMIT
+            self._cap = error  # the last one saw the fullest table
+        else:
+            row["reason"] = NOT_OFFERED_SEND_ERROR
+            row["detail"] = str(error) or type(error).__name__
+        self.rows.append(row)
+
+    def fields(self) -> Dict[str, Any]:
+        if not self.rows:
+            return {}
+        out: Dict[str, Any] = {"not_offered": self.rows}
+        if self._cap is not None:
+            out["upload_limit"] = {
+                "limit": self._cap.limit,
+                "open_uploads": self._cap.open_uploads,
+                "sentence": str(self._cap),
+            }
+        return out
+
+
 class FileTransferManager:
     """
     Manages P2P file transfers with chunking, hash verification, and progress tracking.
@@ -642,7 +730,7 @@ class FileTransferManager:
         Raises:
             FileNotFoundError: If file doesn't exist
             PermissionError: If firewall denies file transfer
-            RuntimeError: If max concurrent transfers exceeded
+            MaxConcurrentTransfersExceeded: (a RuntimeError) if every upload slot is taken
         """
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -650,7 +738,7 @@ class FileTransferManager:
         # Check concurrent transfer limit
         active_uploads = sum(1 for t in self.active_transfers.values() if t.direction == "upload")
         if active_uploads >= self.max_concurrent_transfers:
-            raise RuntimeError(f"Max concurrent transfers ({self.max_concurrent_transfers}) exceeded")
+            raise MaxConcurrentTransfersExceeded(self.max_concurrent_transfers, self.open_uploads())
 
         # Receiver will check firewall permission upon FILE_OFFER receipt (receiver-only control)
         # Sender-side permission check removed in v0.13.3 - receiver has full control
@@ -745,6 +833,25 @@ class FileTransferManager:
 
         logger.info(f"File transfer initiated: {file_path.name} ({file_size} bytes) to {node_id}")
         return transfer_id
+
+    def peer_label(self, node_id: str) -> Optional[str]:
+        """The name this node knows `node_id` by, if it has one."""
+        meta = getattr(self.service, "peer_metadata", None) or {}
+        entry = meta.get(node_id) or {}
+        return entry.get("name") or None
+
+    def open_uploads(self) -> List[Dict[str, Any]]:
+        """Every upload that holds a slot: to whom, what, and `pending` (waiting
+        for the receiver) or `transferring` (sending)."""
+        return [
+            {
+                "node_id": t.node_id,
+                "name": self.peer_label(t.node_id),
+                "filename": t.filename,
+                "status": t.status.value,
+            }
+            for t in self.active_transfers.values() if t.direction == "upload"
+        ]
 
     _MAX_GROUP_FILES_HELD = 10000
 

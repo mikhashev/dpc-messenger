@@ -135,7 +135,8 @@ from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
     SkillDataHandler, SkillOfferHandler,
 )
 from .managers.file_transfer_manager import (
-    FileTransferManager, group_file_ui_key, saves_screenshots_to_disk,
+    FileTransferManager, MaxConcurrentTransfersExceeded, NotOfferedReport,
+    group_file_ui_key, saves_screenshots_to_disk,
 )
 from .voice_service import VoiceService
 from .knowledge_service import KnowledgeService
@@ -3747,6 +3748,8 @@ class CoreService:
             # Clean up file if transfer fails to start
             if file_path.exists():
                 file_path.unlink()
+            if isinstance(e, MaxConcurrentTransfersExceeded):
+                raise  # its text is the sentence the user reads; a prefix would only bury it
             raise ValueError(f"Failed to start file transfer: {e}")
 
         # 11. Return details for frontend
@@ -3870,6 +3873,8 @@ class CoreService:
             # Clean up file if transfer fails to start
             if file_path.exists():
                 file_path.unlink()
+            if isinstance(e, MaxConcurrentTransfersExceeded):
+                raise  # its text is the sentence the user reads; a prefix would only bury it
             raise ValueError(f"Failed to start voice transfer: {e}")
 
         # 12. Return details for frontend
@@ -7113,6 +7118,7 @@ class CoreService:
 
             connected_peers = self.p2p_coordinator.get_connected_peers()
             transfer_ids = []
+            not_offered = NotOfferedReport(self.file_transfer_manager.peer_label)
             fingerprint = None  # (file hash, chunk hashes), computed for the first member only
             # One id for the whole fan-out: every member's copy, and every
             # relay of it, is this one message. The clock keeps a second send
@@ -7145,8 +7151,9 @@ class CoreService:
                     transfer_ids.append(tid)
                 except Exception as e:
                     logger.warning("Failed to send file to %s: %s", node_id[:20], e)
+                    not_offered.record(node_id, e)
 
-            return {"status": "success", "transfer_ids": transfer_ids}
+            return {"status": "success", "transfer_ids": transfer_ids, **not_offered.fields()}
         except Exception as e:
             logger.error("Error sending group file: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
@@ -7341,6 +7348,7 @@ class CoreService:
             # Fan-out to connected members
             connected_peers = self.p2p_coordinator.get_connected_peers()
             transfer_ids = []
+            not_offered = NotOfferedReport(self.file_transfer_manager.peer_label)
             fingerprint = None  # hashed once for the whole fan-out
 
             # Held for the whole fan-out: a member that completes while the next
@@ -7367,6 +7375,7 @@ class CoreService:
                         transfer_ids.append(tid)
                     except Exception as e:
                         logger.warning("Failed to send group image to %s: %s", node_id[:20], e)
+                        not_offered.record(node_id, e)
             if not keeps_file:
                 # No member was online, or every upload already finished
                 self.file_transfer_manager.delete_unsaved_screenshot(file_path)
@@ -7408,6 +7417,7 @@ class CoreService:
                 "height": height,
                 "mime_type": mime_type,
                 "vl_description_status": vl_description_status,
+                **not_offered.fields(),
             }
             if vl_description_status == "failed":
                 result["warnings"] = [
@@ -7554,6 +7564,7 @@ class CoreService:
             # Fan-out to connected members
             connected_peers = self.p2p_coordinator.get_connected_peers()
             transfer_ids = []
+            not_offered = NotOfferedReport(self.file_transfer_manager.peer_label)
 
             for node_id in group.members:
                 if node_id == self.p2p_manager.node_id:
@@ -7572,6 +7583,7 @@ class CoreService:
                     transfer_ids.append(tid)
                 except Exception as e:
                     logger.warning("Failed to send group voice to %s: %s", node_id[:20], e)
+                    not_offered.record(node_id, e)
 
             return {
                 "status": "success",
@@ -7580,7 +7592,8 @@ class CoreService:
                 "size_bytes": len(audio_data),
                 "duration_seconds": duration_seconds,
                 "voice_metadata": voice_metadata,
-                "mime_type": mime_type
+                "mime_type": mime_type,
+                **not_offered.fields(),
             }
         except Exception as e:
             logger.error("Error sending group voice: %s", e, exc_info=True)
