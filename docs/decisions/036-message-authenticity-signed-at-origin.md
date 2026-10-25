@@ -419,3 +419,43 @@ this codebase produces most often.
 - [RFC 8785 — JSON Canonicalization Scheme](https://www.rfc-editor.org/info/rfc8785/)
 - [RFC 9420 — Messaging Layer Security](https://en.wikipedia.org/wiki/Messaging_Layer_Security)
 - [Secure Scuttlebutt — append-only feeds](https://ssbc.github.io/ssb-db/)
+
+## Amendment, 2026-10-25 — a group file's identity on FILE_OFFER is unsigned
+
+*(Mike's call, 2026-10-25: a group file carries its author's `message_id` and
+`sender_node_id` so a full mesh relays one file once, `69f9ae63`,
+[specs/dptp_v1.md §3.11](../../specs/dptp_v1.md). This note records where that identity
+stands against the rule of this record.)*
+
+The pair on a group `FILE_OFFER` is **not signed.** The offer travels over a hop that may
+be a relay, and the two fields are copied unchanged by each relay; nothing binds them to
+the author's key. This record's rule is untouched, and the pair is held to it in this way:
+
+- **What the identity decides:** whether a member takes a copy (answers `already_received`
+  to an identity it holds or is receiving or sent itself, or to an offer that names it as
+  the author), and where a relay may go (never back to the author, once per identity).
+- **What it never decides:** whom the file is credited to. Credit comes from the author's
+  **signed record** of the file, found by `message_id` when history sync brings it; until
+  then the receiver's note names the hop the file arrived from, and the author's record
+  takes its place. A relay that names someone else as the author therefore cannot make
+  a file appear under that name.
+
+Residual risks, named so they are not found later:
+
+1. **Suppression by claiming first.** A member that sees an identity first, or names a
+   victim as the author, can make others refuse the real copy (`already_received`) or make
+   the named member refuse a copy of its own file. The harm is a missing file, never a
+   forged one; it is the class the spec's suppression paragraph already describes, and
+   a limit of an unsigned field, not a defect to patch.
+2. **Patching a record. Not verified.** Whether an unsigned `message_id` lets a member
+   alter fields (hash, MIME type, path) of another member's record on a receiver that does
+   not save to disk, and whether a record with no hash can be completed by a different file
+   of the same name and size, depends on how `find_file_record` matches. Raised in review
+   and not yet read to the end or run. Card
+   `A-GROUP-FILE-RELAY-HAS-NO-STABLE-ID-SO-A-FULL-MESH-RELAYS-ONE-FILE-FOREVER`
+   (gitignored `backlog.md`) carries the check.
+
+If either is confirmed to reach a credited or stored field, the repair is on this record's
+side of the line: the identity is signed with the offer or the record is completed only
+by a hash the author's signature covers. Until then the identity stays a hint that
+chooses between taking and refusing a copy.

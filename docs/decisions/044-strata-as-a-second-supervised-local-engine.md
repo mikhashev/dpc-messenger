@@ -308,3 +308,40 @@ scheduler.
   `compute_serving_alias`
 - [ADR-040](040-local-inference-second-path-as-a-dpc-owned-llama-server.md),
   [ADR-041](041-openai-compatible-gateway-as-a-dpc-surface.md)
+
+## Amendment, 2026-10-25 — the launcher joins the backend's registry and job (ADR-046)
+
+*(Mike's call, 2026-10-25: the Strata launcher is in the registry and in the job.
+[ADR-046](046-the-backend-owns-every-process-it-starts.md) is the record; this note is what
+it changes here.)*
+
+- **Ownership.** The launcher is registered when `StrataSupervisor._spawn` starts it
+  (launcher `strata`, pid and start time, its log file's modification time as last output,
+  peak RSS, peak commit and VRAM from the sampler) and the registry is told when it ends.
+  Resources are reported over the tree, so the engine and `strata-vision.exe` are counted
+  with the launcher that owns them. Commit is shown beside RSS because point 3's death is a
+  commit death.
+- **The supervisor's stop stays first,** as in ADR-040's amendment of the same day:
+  CTRL_BREAK and the grace period, then the verify that the card's VRAM is released
+  (point 2). At the backend's orderly stop it runs after the command children are killed
+  and before the job closes.
+- **Session files are saved before the job closes.** When DPC calls `/slots/0` save (it
+  does not yet; point 7, Mike's call, 2026-10-23: first a measurement), the save runs from
+  the stopping thread and finishes before the backend's job can close, because the job
+  kills hard and a kill in the middle of a write leaves a truncated file. The job is the
+  backstop; the save is part of the orderly stop.
+- **The launcher's own job nests inside the backend's.** `serve/winjob.py` `contain()`
+  puts the engine and the vision process in a kill-on-close job of the launcher's, and the
+  launcher is itself a member of the backend's. Nested jobs work since Windows 8; nobody
+  has run this pair here, and ADR-046's Confirmation lists the test (kill the backend with
+  `TerminateProcess`, assert the launcher and its engine are gone).
+- **What the backend's job changes in point 2 and in the "`contain()` on this machine"
+  open item.** If `contain()` fails to apply, the engine could outlive the launcher; the
+  backend's job now makes sure it cannot outlive the *backend*, since the engine is born a
+  member. It does not make it die with the launcher while the backend runs, so `stop`'s
+  check that the card is released stays.
+- **Exit reasons.** A commit-limit death, or any NTSTATUS-class exit nobody sent, is
+  `crashed`; the launcher's `0xC000013A` (STATUS_CONTROL_C_EXIT) after the supervisor's
+  CTRL_BREAK is not, because the stop was sent. At the backend's stop it is
+  `backend_stop`; a stop while the backend runs (idle unload, a stop from the UI, a switch
+  of engines) has no word yet, ADR-046 Q8. Point 3's fail-closed rule is unchanged.

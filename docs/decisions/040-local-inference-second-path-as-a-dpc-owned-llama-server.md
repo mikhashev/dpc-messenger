@@ -1208,3 +1208,33 @@ these agents live in and which no fit test can see.
   `williamliao/Qwen3.8-27B-NVFP4-GGUF`, `esatapedico/Qwen3.8-27B-NVFP4-MTP-GGUF`,
   `ggml-org/Qwen3.8-27B-GGUF`, `turboderp/Qwen3.8-27B-exl3`; ExLlamaV3 v1.4.2 release; vLLM GPU
   installation docs.
+
+## Amendment, 2026-10-25 — the child joins the backend's registry and job (ADR-046)
+
+*(Mike's call, 2026-10-25: the `llama-server` child and the Strata launcher are in the
+registry and in the job. [ADR-046](046-the-backend-owns-every-process-it-starts.md) is the
+record; this note says what it changes here and what it leaves.)*
+
+- **Ownership.** The child is registered in the backend's process registry when
+  `LlamaServerSupervisor._spawn` starts it (launcher `llamacpp_server`, pid and start
+  time, the log file's modification time as its last output), and the registry is told
+  when it ends. The `--version` probes the supervisor runs go through the registry's probe
+  helper, so they are entries too. `_spawn` stays an `asyncio.create_subprocess_exec` and
+  is on the structural test's allow-list; it does not move into `run_supervised`.
+- **The supervisor's own stop stays first.** CTRL_BREAK on Windows (SIGINT elsewhere) so
+  llama.cpp flushes, with the grace period and the kill that follow it, is unchanged and
+  is not replaced by anything in ADR-046. At the backend's orderly stop the engines are
+  stopped by their supervisors, softly, after the command children are killed hard and
+  before the job closes. The job is the backstop for a crash, a closed window and an
+  end-task, when no supervisor runs.
+- **Creation flags are not touched.** The child keeps `CREATE_NEW_PROCESS_GROUP`, which
+  CTRL_BREAK needs and which keeps it on the service console. Being in the backend's job
+  needs no flag.
+- **Exit reasons.** The child's end is recorded with ADR-046's closed vocabulary: a stop
+  the supervisor asked for is `backend_stop` at the backend's stop (a stop while the
+  backend runs, such as an idle unload, has no word yet, ADR-046 Q8); an exit the engine
+  chose is `exited`; a death by signal or by an NTSTATUS-class code nobody sent is
+  `crashed`. The existing engine-death rule of ADR-044 point 3 (fail closed, show the
+  reason) is unchanged and reads the same facts.
+- **Not changed:** residency, the admission arithmetic, the card-holder check, pinned
+  builds. This note adds no figure.
