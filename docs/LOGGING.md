@@ -200,6 +200,20 @@ Look for:
 - JSON serialization failures
 - Command validation errors
 
+### Ctrl+C Does Not Stop the Backend (Windows)
+
+A process on the backend's console that switches it to raw input and is killed
+before switching back leaves `ENABLE_PROCESSED_INPUT` off, and Ctrl+C is then
+read as a character. The backend checks its console input mode once a second
+(`dpc_client_core.console_guard`) and turns PROCESSED, LINE and ECHO input back
+on by itself. Look for:
+- `Console input lost ENABLE_PROCESSED_INPUT` (WARNING) — the old and new mode
+  and every process on the console at that moment, which is what names the
+  culprit
+- `Console input mode restored` (INFO) — Ctrl+C works again
+- `Console input mode could not be restored` (WARNING, once) — it does not;
+  stop the backend from the UI or Task Manager
+
 ## Viewing Logs
 
 ### Real-time Monitoring (Linux/macOS)

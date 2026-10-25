@@ -258,6 +258,7 @@ from dpc_client_core.service import CoreService
 from dpc_client_core.dpc_agent.loop import shutdown_shared_executor
 from dpc_client_core.__version__ import __version__
 from dpc_client_core import ai_chats, single_instance
+from dpc_client_core.console_guard import start_console_guard
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +460,10 @@ async def main():
     # Setup logging infrastructure before service starts
     setup_logging(service.settings)
 
+    # Right after logging, so its lines reach the file: a console left in raw
+    # mode by a killed child swallows Ctrl+C, and the guard puts it back.
+    console_guard = start_console_guard()
+
     # --- THE CORE FIX: Cross-platform shutdown logic ---
 
     # Create a future that will be used to signal shutdown
@@ -543,6 +548,8 @@ async def main():
             )
         except Exception as e:
             logger.warning("Default executor did not shut down cleanly: %s", e)
+        if console_guard is not None:
+            console_guard.stop()
         # Named before the loop closes: after this point a stuck overlapped
         # op parks the process inside IocpProactor.close and nothing else
         # reaches the log.
