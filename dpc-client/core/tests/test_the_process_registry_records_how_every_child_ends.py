@@ -141,7 +141,7 @@ class TestTheClosedVocabulary:
         assert entry.exit_reason == reason and _stop_of(entry) is None and entry.ended_at
 
     @pytest.mark.parametrize("stop", STOP_VALUES)
-    def test_every_stop_reason_goes_with_stopped(self, registry, stop):
+    def test_every_stop_kind_goes_with_stopped(self, registry, stop):
         registry.register(7_100_001, launcher="strata", launcher_kind="subsystem", command="x")
         entry = registry.end(7_100_001, 0, reason="stopped", stop=stop)
         assert (entry.exit_reason, _stop_of(entry)) == ("stopped", stop)
@@ -159,11 +159,25 @@ class TestTheClosedVocabulary:
         assert registry.open_entries(), "a refused word closes nothing"
 
     def test_the_stop_field_is_named_once(self):
-        """The owner may rename the field; the constant and the dataclass field are the two places."""
+        """The constant and the dataclass field are the two places that name it."""
         from dataclasses import fields
 
         assert STOP_FIELD in {f.name for f in fields(ProcessEntry)}
         assert STOP_FIELD in ProcessEntry(1, None, None, None, "x", "tool").to_dict()
+
+    def test_the_field_is_stop_kind_so_as_not_to_collide_with_the_gateways_wire_field(self):
+        written = ProcessEntry(1, None, None, None, "x", "tool").to_dict()
+        assert STOP_FIELD == "stop_kind" and "stop_kind" in written
+        assert "stop_reason" not in written, "stop_reason is the Anthropic field the gateway writes"
+
+    def test_the_list_holds_what_something_produces_and_engine_switch_is_not_in_it(self, registry):
+        assert set(STOP_VALUES) == {"idle_unload", "ui_stop", "engine_died", "failed_start", "browser_closed"}
+        registry.register(7_100_003, launcher="strata", launcher_kind="subsystem", command="x")
+        with pytest.raises(ValueError):
+            registry.end(7_100_003, 0, reason="stopped", stop="engine_switch")
+        with pytest.raises(ValueError):
+            registry.note_stop_sent(7_100_003, "stopped", "engine_switch")
+        assert registry.open_entries(), "a refused word closes nothing"
 
 
 class TestHowAnEndGetsItsWord:
@@ -230,11 +244,34 @@ class TestHowAnEndGetsItsWord:
 
 class TestPrecedence:
     @pytest.mark.parametrize("stop_sent", [("stopped", "ui_stop"), ("cancelled_by_agent", None)])
-    def test_during_the_orderly_stop_it_is_backend_stop_whoever_signalled(self, registry, stop_sent):
+    def test_a_stop_announced_after_the_orderly_stop_began_is_backend_stop_whoever_signalled(self, registry, stop_sent):
         registry.register(7_300_001, launcher="strata", launcher_kind="subsystem", command="x")
-        registry.note_stop_sent(7_300_001, *stop_sent)
         registry.begin_shutdown()
+        registry.note_stop_sent(7_300_001, *stop_sent)
         ended = registry.end(7_300_001, 0)
+        assert (ended.exit_reason, _stop_of(ended)) == ("backend_stop", None)
+
+    def test_a_failed_start_still_being_stopped_when_the_backends_stop_began_stays_failed_start(self, registry):
+        registry.register(7_300_005, launcher="strata", launcher_kind="subsystem", command="x")
+        registry.note_stop_sent(7_300_005, "stopped", "failed_start")
+        registry.begin_shutdown()
+        ended = registry.end(7_300_005, 0)
+        assert (ended.exit_reason, _stop_of(ended)) == ("stopped", "failed_start")
+
+    @pytest.mark.parametrize("stop_sent", [("stopped", "ui_stop"), ("cancelled_by_agent", None)])
+    def test_every_word_a_sender_may_give_keeps_its_announcement_made_before_the_stop(self, registry, stop_sent):
+        registry.register(7_300_006, launcher="run_shell", launcher_kind="tool", command="x", origin=SpawnOrigin())
+        registry.note_stop_sent(7_300_006, *stop_sent)
+        registry.begin_shutdown()
+        ended = registry.end(7_300_006, 0)
+        assert (ended.exit_reason, _stop_of(ended)) == (stop_sent[0], stop_sent[1])
+
+    def test_the_first_announcement_decides_which_side_of_the_window_a_stop_is_on(self, registry):
+        registry.register(7_300_007, launcher="strata", launcher_kind="subsystem", command="x")
+        registry.begin_shutdown()
+        registry.note_stop_sent(7_300_007, "stopped", "ui_stop")
+        registry.note_stop_sent(7_300_007, "stopped", "failed_start")  # ignored: the first stands
+        ended = registry.end(7_300_007, 0)
         assert (ended.exit_reason, _stop_of(ended)) == ("backend_stop", None)
 
     def test_while_the_backend_runs_it_is_stopped(self, registry):
@@ -257,7 +294,7 @@ class TestPrecedence:
 
 
 class TestTheLogLines:
-    def test_the_end_line_names_pid_launcher_reason_stop_reason_code_and_signal(self, caplog):
+    def test_the_end_line_names_pid_launcher_reason_stop_kind_code_and_signal(self, caplog):
         registry = ProcessRegistry(platform="linux")
         with caplog.at_level(logging.INFO, logger="dpc_client_core.process_registry"):
             registry.register(7_400_001, launcher="llamacpp_server", launcher_kind="subsystem", command="x")
@@ -269,9 +306,9 @@ class TestTheLogLines:
             registry.end(7_400_003, None, reason="backend_stop")
         ends = [r for r in caplog.records if r.message.startswith("process ended")]
         assert [r.message.split(" after ")[0] for r in ends] == [
-            "process ended: pid 7400001 launcher llamacpp_server reason stopped stop_reason ui_stop exit_code -2 signal SIGINT",
-            "process ended: pid 7400002 launcher strata reason crashed stop_reason none exit_code -9 signal SIGKILL",
-            "process ended: pid 7400003 launcher strata reason backend_stop stop_reason none exit_code unseen signal none",
+            "process ended: pid 7400001 launcher llamacpp_server reason stopped stop_kind ui_stop exit_code -2 signal SIGINT",
+            "process ended: pid 7400002 launcher strata reason crashed stop_kind none exit_code -9 signal SIGKILL",
+            "process ended: pid 7400003 launcher strata reason backend_stop stop_kind none exit_code unseen signal none",
         ]
         assert [r.levelno for r in ends] == [logging.INFO, logging.WARNING, logging.INFO], "a crash is a WARNING"
 
@@ -345,6 +382,199 @@ class TestPersistence:
         outcome = pr.start_persistent()
         assert pr.get_registry().path == tmp_path / "process_registry.json" and (tmp_path / "process_registry.json").exists()
         assert outcome.records == []
+
+
+def _utc(*args):
+    from datetime import datetime, timezone
+
+    return datetime(*args, tzinfo=timezone.utc).timestamp()
+
+
+def _history_lines(directory):
+    """Every parsed line of every daily file, oldest file first, with the file's name."""
+    found = []
+    for path in sorted(directory.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            found.append((path.name, json.loads(line)))
+    return found
+
+
+class TestTheStateFileAndTheDailyHistory:
+    def test_a_file_written_before_the_rename_is_read_with_its_old_key_as_stop_kind(self, tmp_path):
+        old = ProcessEntry(7_900_001, None, None, None, "strata", "subsystem", command="x",
+                           started_at="2026-10-25T10:00:00.000+00:00", ended_at="2026-10-25T10:05:00.000+00:00",
+                           exit_reason="stopped", exit_code=0).to_dict()
+        del old["stop_kind"]
+        old["stop_reason"] = "ui_stop"
+        both = dict(old, pid=7_900_002, stop_kind="failed_start")
+        path = tmp_path / "process_registry.json"
+        path.write_text(json.dumps({"schema": 1, "entries": [old, both]}), encoding="utf-8")
+        registry = ProcessRegistry(path)
+        registry.load()
+        first, second = registry.entries()
+        assert (first.exit_reason, _stop_of(first)) == ("stopped", "ui_stop"), "yesterday's key was lost"
+        assert _stop_of(second) == "failed_start", "when both keys are there the new one wins"
+        registry.register(7_900_003, launcher="strata", launcher_kind="subsystem", command="y")
+        on_disk = json.loads(path.read_text(encoding="utf-8"))["entries"]
+        assert [e["stop_kind"] for e in on_disk[:2]] == ["ui_stop", "failed_start"]
+        assert all("stop_reason" not in e for e in on_disk), "the old key is read, never written back"
+
+    def test_the_state_file_is_synced_before_it_is_swapped_in(self, tmp_path, monkeypatch):
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def fsync(fd):
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def replace(src, dst):
+            events.append("replace")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(pr.os, "fsync", fsync)
+        monkeypatch.setattr(pr.os, "replace", replace)
+        registry = ProcessRegistry(tmp_path / "process_registry.json")
+        registry.register(7_900_010, launcher="strata", launcher_kind="subsystem", command="x")
+        assert events == ["fsync", "replace"], "the swap must come after the sync"
+        registry.end(7_900_010, 0)
+        assert events == ["fsync", "replace"] * 2
+
+    def test_a_finished_entry_is_appended_as_one_line_to_the_file_of_the_day_it_ended(self, tmp_path):
+        now = [_utc(2026, 10, 25, 23, 59, 58)]
+        path = tmp_path / "process_registry.json"
+        registry = ProcessRegistry(path, clock=lambda: now[0])
+        assert registry.history_dir == tmp_path / "process_registry"
+        registry.register(7_910_001, launcher="run_shell", launcher_kind="tool", command="a",
+                          origin=SpawnOrigin(agent_id="agent_1", conversation_id="c", tool="run_shell", round=2))
+        registry.register(7_910_002, launcher="strata", launcher_kind="subsystem", command="b")
+        assert not registry.history_dir.exists(), "an open entry is not history yet"
+        registry.note_stop_sent(7_910_002, "stopped", "ui_stop")
+        registry.end(7_910_001, 0)
+        now[0] = _utc(2026, 10, 26, 0, 0, 3)
+        registry.end(7_910_002, 0)
+        lines = _history_lines(registry.history_dir)
+        assert [name for name, _row in lines] == ["2026-10-25.jsonl", "2026-10-26.jsonl"]
+        first, second = (row for _name, row in lines)
+        assert first == registry.entries()[0].to_dict() and second == registry.entries()[1].to_dict()
+        assert (first["pid"], first["agent_id"], first["round"], first["exit_reason"], first["stop_kind"]) == (
+            7_910_001, "agent_1", 2, "exited", None)
+        assert (second["exit_reason"], second["stop_kind"], second["ended_at"][:10]) == ("stopped", "ui_stop", "2026-10-26")
+        raw = (registry.history_dir / "2026-10-25.jsonl").read_bytes()
+        assert raw.endswith(b"\n") and b"\r\n" not in raw, "one LF-terminated line, on Windows too"
+
+    def test_the_history_keeps_what_the_state_file_drops(self, tmp_path):
+        now = [_utc(2026, 10, 25, 12, 0, 0)]
+        registry = ProcessRegistry(tmp_path / "process_registry.json", clock=lambda: now[0], keep_finished_max=3)
+        for pid in range(7_920_001, 7_920_011):
+            registry.register(pid, launcher="strata", launcher_kind="subsystem", command="x")
+            registry.end(pid, 0)
+            now[0] += 1
+        assert len(registry.entries()) == 3
+        assert [row["pid"] for _n, row in _history_lines(registry.history_dir)] == list(range(7_920_001, 7_920_011))
+
+    def test_a_sweep_closing_an_entry_of_an_earlier_run_is_history_too(self, tmp_path):
+        path = _file_with_an_open_entry(tmp_path, 7_930_001, 1_700_000_000.0)
+        registry = ProcessRegistry(path)
+        registry.load()
+        registry.sweep_orphans()
+        ((_name, row),) = _history_lines(registry.history_dir)
+        assert (row["pid"], row["exit_reason"], row["exit_code"]) == (7_930_001, "backend_stop", None)
+
+    def test_files_dated_more_than_seven_days_ago_are_removed_and_nothing_else(self, tmp_path):
+        now = _utc(2026, 10, 25, 3, 0, 0)
+        registry = ProcessRegistry(tmp_path / "process_registry.json", clock=lambda: now)
+        folder = registry.history_dir
+        folder.mkdir()
+        for name in ("2026-10-17.jsonl", "2026-10-18.jsonl", "2026-10-25.jsonl", "notes.jsonl", "2026-10-10.jsonl.lock"):
+            (folder / name).write_text("{}\n", encoding="utf-8")
+        removed = registry.prune_history()
+        assert sorted(p.name for p in removed) == ["2026-10-17.jsonl"]
+        assert sorted(p.name for p in folder.iterdir()) == [
+            "2026-10-10.jsonl.lock", "2026-10-18.jsonl", "2026-10-25.jsonl", "notes.jsonl"]
+
+    def test_the_start_of_a_persistent_registry_prunes_the_history(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DPC_HOME", str(tmp_path))
+        folder = tmp_path / "process_registry"
+        folder.mkdir()
+        (folder / "2020-01-01.jsonl").write_text("{}\n", encoding="utf-8")
+        pr.start_persistent()
+        assert not (folder / "2020-01-01.jsonl").exists()
+        assert pr.get_registry().history_dir == folder
+
+    def test_a_memory_only_registry_has_no_history_and_writes_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        registry = ProcessRegistry()
+        assert registry.history_dir is None and pr.get_registry().history_dir is None
+        registry.register(7_940_001, launcher="strata", launcher_kind="subsystem", command="x")
+        registry.end(7_940_001, 0)
+        assert registry.prune_history() == []
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_failed_append_is_logged_once_and_takes_neither_a_spawn_nor_an_end_down(self, tmp_path, caplog):
+        path = tmp_path / "process_registry.json"
+        (tmp_path / "process_registry").write_text("a file where the folder should be", encoding="utf-8")
+        registry = ProcessRegistry(path)
+        with caplog.at_level(logging.WARNING, logger="dpc_client_core.process_registry"):
+            for pid in (7_950_001, 7_950_002, 7_950_003):
+                registry.register(pid, launcher="strata", launcher_kind="subsystem", command="x")
+                ended = registry.end(pid, 0)
+                assert ended.exit_reason == "exited"
+        said = [r for r in caplog.records if "history" in r.getMessage()]
+        assert len(said) == 1 and said[0].levelno == logging.WARNING
+        assert [e["pid"] for e in json.loads(path.read_text(encoding="utf-8"))["entries"]] == [7_950_001, 7_950_002, 7_950_003]
+
+    def test_a_torn_last_line_does_not_swallow_the_next_append(self, tmp_path):
+        now = _utc(2026, 10, 25, 12, 0, 0)
+        registry = ProcessRegistry(tmp_path / "process_registry.json", clock=lambda: now)
+        registry.history_dir.mkdir()
+        torn = registry.history_dir / "2026-10-25.jsonl"
+        torn.write_bytes(b'{"pid": 1, "launc')
+        registry.register(7_960_001, launcher="strata", launcher_kind="subsystem", command="x")
+        registry.end(7_960_001, 0)
+        parsed = []
+        for line in torn.read_text(encoding="utf-8").splitlines():
+            try:
+                parsed.append(json.loads(line)["pid"])
+            except ValueError:
+                pass
+        assert parsed == [7_960_001], "the new line was glued to the torn one"
+
+    def test_a_stale_lock_is_cleared_and_no_lock_is_left_behind(self, tmp_path):
+        now = _utc(2026, 10, 25, 12, 0, 0)
+        registry = ProcessRegistry(tmp_path / "process_registry.json", clock=lambda: now)
+        registry.history_dir.mkdir()
+        lock = registry.history_dir / "2026-10-25.jsonl.lock"
+        lock.write_text("", encoding="utf-8")
+        old = time.time() - 60
+        os.utime(lock, (old, old))
+        registry.register(7_970_001, launcher="strata", launcher_kind="subsystem", command="x")
+        registry.end(7_970_001, 0)
+        assert len(_history_lines(registry.history_dir)) == 1 and not lock.exists()
+
+
+class TestAKillNobodyInDpcSent:
+    """The honest asymmetry: what the registry can say about a process somebody else killed."""
+
+    @pytest.mark.skipif(not WINDOWS, reason="taskkill is the Windows way of a foreign hard kill")
+    def test_on_windows_a_foreign_taskkill_leaves_code_1_and_reads_exited(self, registry, started):
+        child = subprocess.Popen(SLEEP)
+        started.append(child)
+        registry.register(child.pid, launcher="strata", launcher_kind="subsystem", command=SLEEP, handle=child)
+        done = subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"], capture_output=True)
+        assert done.returncode == 0, done.stderr
+        code = child.wait(timeout=20)
+        entry = registry.end(child.pid, code)
+        assert (entry.exit_reason, entry.exit_code, entry.signal) == ("exited", 1, None)
+
+    @pytest.mark.skipif(WINDOWS, reason="a signal from outside is the POSIX way of a foreign kill")
+    def test_on_posix_a_foreign_sigkill_reads_crashed_with_the_signal_by_name(self, registry, started):
+        child = subprocess.Popen(SLEEP)
+        started.append(child)
+        registry.register(child.pid, launcher="strata", launcher_kind="subsystem", command=SLEEP, handle=child)
+        os.kill(child.pid, signal.SIGKILL)
+        code = child.wait(timeout=20)
+        entry = registry.end(child.pid, code)
+        assert (entry.exit_reason, entry.exit_code, entry.signal) == ("crashed", -9, "SIGKILL")
 
 
 # ================================================== the origin through the real pool
@@ -568,12 +798,55 @@ class TestTheSupervisorsRegisterAndEndTheirChild:
         assert (entry.exit_reason, _stop_of(entry)) == ("stopped", "failed_start")
 
     @pytest.mark.asyncio
-    async def test_a_strata_engine_death_the_launcher_is_stopped_for_is_failed_start_provisionally(self, tmp_path, monkeypatch, registry):
+    async def test_a_strata_engine_that_died_after_the_start_succeeded_is_stopped_as_engine_died(self, tmp_path, monkeypatch, registry):
+        """The watcher's unloaded state and the 503 path both reach `_fail_closed` with no `refused_start`."""
         sup = _strata(tmp_path, monkeypatch)
         _exec_returning(monkeypatch, _FakeChild())
         sup._proc = await sup._spawn(["e"], {})
         await sup._fail_closed("the launcher reports the engine unloaded")
         (entry,) = registry.entries()
+        assert (entry.exit_reason, _stop_of(entry)) == ("stopped", "engine_died")
+
+    @pytest.mark.asyncio
+    async def test_a_503_naming_the_exit_code_stops_the_launcher_as_engine_died(self, tmp_path, monkeypatch, registry):
+        sup = _strata(tmp_path, monkeypatch)
+        _exec_returning(monkeypatch, _FakeChild())
+        sup._proc = await sup._spawn(["e"], {})
+        failure = OSError("the engine stopped unexpectedly (exit code 3221226505)")
+        failure.status_code = 503
+        with pytest.raises(OSError):
+            async with sup.call_slot():
+                raise failure
+        (entry,) = registry.entries()
+        assert (entry.exit_reason, _stop_of(entry)) == ("stopped", "engine_died")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reply", [
+        None,  # a launcher that names no engine version: the version check refuses
+        {"choices": []},  # a version, and a smoke that gets no tool call back
+    ], ids=["no-version", "smoke-fails"])
+    async def test_a_start_the_launcher_refuses_stays_failed_start_through_the_real_launch(
+        self, tmp_path, monkeypatch, registry, reply,
+    ):
+        from tests.test_strata_supervisor import _started_through_the_real_launch
+
+        sup = _strata(tmp_path, monkeypatch)
+        metrics = {"engine": {"version": "0.1.46"}} if reply else {}
+        _started_through_the_real_launch(sup, monkeypatch, metrics=metrics, smoke=reply)
+        child = _FakeChild()
+        _exec_returning(monkeypatch, child)
+        real_spawn = type(sup)._spawn
+
+        async def spawn(cmd, env):
+            return await real_spawn(sup, cmd, env)
+
+        sup._spawn = spawn
+        from dpc_client_core.managers.llama_server_supervisor import LlamaServerError
+
+        with pytest.raises(LlamaServerError):
+            await sup.ensure_running()
+        (entry,) = registry.entries()
+        assert entry.pid == child.pid
         assert (entry.exit_reason, _stop_of(entry)) == ("stopped", "failed_start")
 
     @pytest.mark.asyncio

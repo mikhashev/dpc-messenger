@@ -1332,13 +1332,14 @@ class StrataSupervisor(LlamaServerSupervisor):
                 # because the mock engine answers /health and /props like a real
                 # one. No version is refused like an engine death: stopped, and
                 # not started again until a person resets it.
-                await self._fail_closed(NO_ENGINE_VERSION, note=_NO_VERSION_NOTE)
+                await self._fail_closed(NO_ENGINE_VERSION, note=_NO_VERSION_NOTE, refused_start=True)
                 raise self._refusal()
             failed = await self._smoke()
             if failed is not None:
                 body = failed if exit_code_words(failed) else None
                 await self._fail_closed(
                     f"{SMOKE_FAILED}: {failed}", body=body, note=None if body else _SMOKE_NOTE,
+                    refused_start=True,
                 )
                 raise self._refusal()
         except BaseException:
@@ -1575,12 +1576,15 @@ class StrataSupervisor(LlamaServerSupervisor):
     @_base.on_the_owner_loop
     async def _fail_closed(
         self, observed: str, body: Optional[str] = None, stop: bool = True,
-        note: Optional[str] = None,
+        note: Optional[str] = None, refused_start: bool = False,
     ) -> None:
         """Record an engine death with its reason and stop the launcher.
 
         `note` replaces the exit-code words and the commit-limit explanation,
-        for a refusal that is not a death (no engine version reported)."""
+        for a refusal that is not a death (no engine version reported).
+        `refused_start` is a start the launcher did not pass (the version check,
+        the smoke): the process registry records its stop `failed_start`. Any
+        other caller reports an engine that was up and died: `engine_died`."""
         if self.failure is not None:
             return
         tail = self.tail_log(20) + self._tail_engine_log(20)
@@ -1612,12 +1616,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                 self._watch_task = None
             # Shielded, as an interrupted start's stop is: a caller cancelled here
             # (an agent killed mid-call) must not leave the launcher running.
-            #
-            # `failed_start` is exact for a refused start (no engine version, the
-            # smoke) and the nearest word for an engine that died after it was up
-            # (the watcher, a 503): the closed list has no word for "stopped
-            # because the engine died". Candidates for the owner: `engine_died`.
-            await self._stop_shielded("failed_start")
+            await self._stop_shielded("failed_start" if refused_start else "engine_died")
 
     def reset_failure(self) -> Optional[Dict[str, Any]]:
         """Clear a recorded engine death so the next call may start the launcher.

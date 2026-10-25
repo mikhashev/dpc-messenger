@@ -740,9 +740,9 @@ class LlamaServerSupervisor:
     PROCESS_LAUNCHER = "llamacpp_server"
     # A stop DPC asks for outside its own shutdown and outside a failed start is a
     # person's action in the UI (the stop button, a settings save that retires the
-    # child). `idle_unload` and `engine_switch` have no path of their own in the
-    # code: no child is stopped for being idle, and a switch to the other engine
-    # reaches here as the same stop button.
+    # child). `idle_unload` has no path of its own in the code (no child is stopped
+    # for being idle), and a switch to the other engine reaches here as the same stop
+    # button, so there is no word for it.
     DEFAULT_STOP = "ui_stop"
 
     @classmethod

@@ -12,9 +12,15 @@ with its own creation time), the `launcher` and its kind (`tool` for an agent's
 tool call, `subsystem` for an engine or the browser), the spawn origin (`agent_id`,
 `conversation_id`, `tool`, `round`, read from the `SPAWN_ORIGIN` context variable
 the tool dispatcher sets), the command (bounded), when it started and ended, the
-`exit_reason`, the stop field (`STOP_FIELD`) when the reason is `stopped`, and the raw
-`exit_code` and `signal`. The resource peaks and `last_output_at` are fields
-that exist and stay `None` until the sampler is written.
+`exit_reason`, the stop field (`STOP_FIELD`, `stop_kind`) when the reason is `stopped`,
+and the raw `exit_code` and `signal`. The resource peaks and `last_output_at` are
+fields that exist and stay `None` until the sampler is written.
+
+**Spawn origin of a subsystem.** An engine started inside an agent's tool call
+carries that call's origin (`register` reads the context variable at the moment of
+the spawn), while its `launcher_kind` is `subsystem`, its owner is the backend and its parent is the
+backend. For a subsystem the spawn origin is the call that woke it; it says who
+asked for the process, never who owns it (ADR-046 point 3).
 
 **How an end gets its word.** The rule is one sentence: a process the registry
 was told a stop was sent to ends with the reason of that stop; a process nobody
@@ -25,28 +31,45 @@ gone calls `end` with the return code. Either order of two parties reporting
 the same end gives the same record: the first `end` wins, and a later one may only
 complete an `exit_code` the first did not have.
 
-**Precedence.** During the backend's orderly stop (`begin_shutdown`) a stop is
-`backend_stop` whoever sent the signal; `stopped` and `cancelled_by_agent` exist only
-while the backend runs. A timeout or a memory-ceiling kill keeps its own word.
+**Precedence.** A stop announced after the backend's orderly stop began
+(`begin_shutdown`) is `backend_stop` whoever sent the signal, and so is the stop's
+own kill. A stop announced *before* it keeps the word it was announced with: a
+start that failed at 10:00:00 and is still being cleared away when Ctrl+C arrives
+is `stopped`/`failed_start`, because the refusal stopped it and the shutdown only
+found it on the way out. A timeout or a memory-ceiling kill keeps its own word.
 
 **What a number is worth.** `exit_code` is stored as given (on Windows as the
-unsigned 32-bit value); `signal` is the POSIX signal's name. `exit_code: None`
-means this backend did not see the end (a process found gone at the next start).
-The return code confirms a reading and never decides one: `crashed` also needs
-that nobody sent a stop.
+unsigned 32-bit value); `signal` is the POSIX signal's name (`SIGKILL`, never its
+number). `exit_code: None` means this backend did not see the end (a process found
+gone at the next start). The return code confirms a reading and never decides one:
+`crashed` also needs that nobody sent a stop. A kill nobody in DPC sent reads
+differently by platform: on POSIX a foreign SIGKILL is `crashed` (signal `SIGKILL`);
+on Windows a foreign `taskkill /F` leaves exit code 1, which is an ordinary code, so
+it reads `exited` and cannot be told from a normal exit (measured 2026-10-25).
 
 **Where it lives.** The default registry is in memory only. A backend that wants
 the list to survive it calls `start_persistent()` (`run_service.py` does, once);
-tests, probes and a module loaded on its own never touch `~/.dpc`. The file is
-`<DPC_HOME>/process_registry.json`, rewritten whole through a temporary file and
-`os.replace` on every spawn and every end - never a truncating open of the file
-itself, so a crash in the middle of a write leaves the old list.
+tests, probes and a module loaded on its own never touch `~/.dpc`. Two places,
+both written only by a persistent registry:
 
-**How many finished entries are kept** (the owner left this open, ADR Q7): the
-newest `KEEP_FINISHED_MAX` (200), and none older than `KEEP_FINISHED_DAYS` (7).
-Open entries are never dropped. A busy agent starts a few hundred commands a day;
-200 is about a day of history, 7 days bounds a quiet install, and a few hundred
-entries are a file of ~100 KB, rewritten on each change.
+- `<DPC_HOME>/process_registry.json` holds the open entries and the newest
+  `KEEP_FINISHED_MAX` (200) finished ones: what the startup sweep and "what runs now"
+  read. Rewritten whole through a temporary file that is fsynced and then swapped in
+  with `os.replace` on every spawn and every end - never a truncating open of the
+  file itself, so a crash in the middle of a write leaves the old list, and a power
+  cut leaves either list, not half of one.
+- `<DPC_HOME>/process_registry/YYYY-MM-DD.jsonl` receives every finished entry as one
+  JSON line, in the file of the UTC date of its end (the history the graph reads).
+  Appended as the node ledger appends (a `.lock` sibling, `O_APPEND`, a torn last
+  line healed by the next append); files whose date is more than `HISTORY_DAYS` (7)
+  days old are removed at start. A failed append is logged once and never takes a
+  spawn or an end down.
+
+**How many finished entries are kept in the state file** (ADR Q7): the newest
+`KEEP_FINISHED_MAX` (200), and none older than `KEEP_FINISHED_DAYS` (7). Open
+entries are never dropped. 200 would cut the graph to hours, and a whole-file
+rewrite of thousands of entries on every spawn and end is too heavy, so the long
+history is the daily files, which are append-only.
 
 Imports nothing beyond the standard library (psutil lazily) so that
 `run_service.py` can use it before anything else exists. The tree kills it needs
@@ -65,7 +88,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -83,27 +106,34 @@ EXIT_REASONS = (
     "crashed",
     "stopped",
 )
-# The name of the field that says why a `stopped` process was stopped, and its
-# words. The owner may rename the field (it collides with the model's own
-# `stop_reason` elsewhere in the code): the dataclass field below and this
-# constant are the two places that name it; every log line, the check and the
-# persisted key are built from them, and the module refuses to import if they
-# disagree.
-STOP_FIELD = "stop_reason"
-STOP_VALUES = ("idle_unload", "ui_stop", "engine_switch", "failed_start", "browser_closed")
+# The field that says what kind of stop a `stopped` process got. Not `stop_reason`:
+# the gateway writes that name on the wire (the Anthropic Messages API field). The
+# dataclass field and this constant are the two places that name it; every log line,
+# the check and the persisted key are built from them, and the module refuses to
+# import if they disagree.
+STOP_FIELD = "stop_kind"
+_OLD_STOP_FIELD = "stop_reason"  # read from an older file, never written
+# A value stays only while something produces it or a named decision will create its
+# producer (ADR-046 point 4). `browser_closed` waits on browser registration;
+# `idle_unload` on the owner's open choice of who unloads an idle engine.
+STOP_VALUES = ("idle_unload", "ui_stop", "engine_died", "failed_start", "browser_closed")
 LAUNCHER_KINDS = ("tool", "subsystem")
 # A subsystem's launcher is one of these words; a tool's is the tool's name.
 SUBSYSTEMS = ("strata", "llamacpp_server", "browser")
 
-# Reasons a sender other than the backend's own stop can give; during the
-# orderly stop they read `backend_stop` (the precedence rule).
+# Reasons a sender other than the backend's own stop can give; announced after the
+# orderly stop began, they read `backend_stop` (the precedence rule).
 _YIELDS_TO_BACKEND_STOP = ("stopped", "cancelled_by_agent")
 
 COMMAND_MAX_CHARS = 120
 KEEP_FINISHED_MAX = 200
 KEEP_FINISHED_DAYS = 7
+HISTORY_DAYS = 7
 SCHEMA_VERSION = 1
 REGISTRY_FILE = "process_registry.json"
+LOCK_TIMEOUT_S = 2.0
+LOCK_STALE_S = 10.0
+LOCK_SLEEP_S = 0.01
 # psutil's creation time is a float of the OS clock; two reads of one process agree.
 START_TIME_TOLERANCE_S = 1.0
 
@@ -216,7 +246,7 @@ class ProcessEntry:
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
     exit_reason: Optional[str] = None
-    stop_reason: Optional[str] = None
+    stop_kind: Optional[str] = None
     exit_code: Optional[int] = None
     signal: Optional[str] = None
     # Present, and None until the sampler exists (a later card).
@@ -238,6 +268,9 @@ class ProcessEntry:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ProcessEntry":
         known = {f.name for f in fields(cls)}
+        data = dict(data)
+        if _OLD_STOP_FIELD in data and STOP_FIELD not in data:
+            data[STOP_FIELD] = data[_OLD_STOP_FIELD]
         entry = cls(**{k: v for k, v in data.items() if k in known})
         if not isinstance(entry.pid, int) or not entry.launcher or entry.launcher_kind not in LAUNCHER_KINDS:
             raise ValueError(f"not a process entry: {data!r}")
@@ -254,6 +287,8 @@ class _Live:
     handle: Any = None
     log: Optional[logging.Logger] = None
     stop_sent: Optional[Tuple[str, Optional[str]]] = None
+    # Whether the backend's orderly stop had already begun when `stop_sent` was announced.
+    stop_sent_while_stopping: bool = False
 
 
 # --- one place to find a process by its identity ---------------------------------
@@ -305,6 +340,52 @@ def _epoch(iso: Optional[str]) -> Optional[float]:
         return None
 
 
+def _ends_mid_line(path: Path) -> bool:
+    """True when the last byte is not a newline: the mark a killed writer leaves."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell() == 0:
+                return False
+            f.seek(-1, os.SEEK_END)
+            return f.read(1) != b"\n"
+    except FileNotFoundError:
+        return False
+
+
+@contextlib.contextmanager
+def _history_lock(path: Path) -> Iterator[None]:
+    """The `.lock` sibling, taken as `node_ledger._partition_lock` takes it (exclusive
+    create, stale after 10 s, after 2 s of waiting the append goes ahead without it).
+    Copied, not imported: the ledger's module pulls in the firewall, and this one
+    imports nothing but the standard library."""
+    lock_path = path.with_name(path.name + ".lock")
+    fd = None
+    deadline = time.monotonic() + LOCK_TIMEOUT_S
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime > LOCK_STALE_S:
+                    lock_path.unlink()
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                logger.warning("process registry: lock %s held for over %.0fs; appending without it", lock_path, LOCK_TIMEOUT_S)
+                break
+            time.sleep(LOCK_SLEEP_S)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+            with contextlib.suppress(OSError):
+                lock_path.unlink()
+
+
 def _one_line(command: Any) -> str:
     text = command if isinstance(command, str) else " ".join(str(c) for c in command)
     return " ".join(text.split())[:COMMAND_MAX_CHARS]
@@ -335,7 +416,7 @@ def describe_start(entry: ProcessEntry, detail: str = "") -> str:
 
 
 def describe_end(entry: ProcessEntry) -> str:
-    """The end line: pid, launcher, reason, stop reason, code, signal."""
+    """The end line: pid, launcher, reason, stop kind, code, signal."""
     began, ended = _epoch(entry.started_at), _epoch(entry.ended_at)
     after = f" after {max(0.0, ended - began):.1f}s" if began is not None and ended is not None else ""
     return (
@@ -385,8 +466,21 @@ class ProcessRegistry:
         platform: Optional[str] = None,
         keep_finished_max: int = KEEP_FINISHED_MAX,
         keep_finished_days: float = KEEP_FINISHED_DAYS,
+        history_dir: Optional[Path] = None,
+        history_days: float = HISTORY_DAYS,
     ):
         self.path = Path(path) if path is not None else None
+        # The daily files sit beside the state file under its own name without the
+        # suffix (`process_registry.json` -> `process_registry/`); none without a path.
+        if history_dir is not None:
+            self.history_dir: Optional[Path] = Path(history_dir)
+        else:
+            self.history_dir = None
+            if self.path is not None:
+                beside = self.path.with_suffix("")
+                self.history_dir = beside if beside != self.path else self.path.with_name(self.path.name + ".days")
+        self._history_days = history_days
+        self._last_history_error: Optional[str] = None
         self._clock = clock
         self._create_time = create_time
         self._platform = platform
@@ -478,7 +572,10 @@ class ProcessRegistry:
         tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, indent=1))
+                handle.flush()
+                os.fsync(handle.fileno())  # on disk before the swap, or a power cut swaps in half a list
             last: Optional[OSError] = None
             for _ in range(10):
                 try:
@@ -513,6 +610,61 @@ class ProcessRegistry:
         if drop:
             self._entries = [e for e in self._entries if id(e) not in drop]
             self._last_closed = {p: e for p, e in self._last_closed.items() if id(e) not in drop}
+
+    # -- the daily history ----------------------------------------------------------
+
+    def _append_history_locked(self, entry: ProcessEntry) -> None:
+        """One JSON line for a finished entry, in the file of the UTC date of its end.
+        Never raises: a spawn or an end must not fail because the history could not
+        be written. The same failure is logged once, not on every end."""
+        if self.history_dir is None:
+            return
+        try:
+            day = (entry.ended_at or _iso(self._clock()))[:10]
+            path = self.history_dir / f"{day}.jsonl"
+            self.history_dir.mkdir(parents=True, exist_ok=True)
+            data = (json.dumps(entry.to_dict(), ensure_ascii=False) + "\n").encode("utf-8")
+            with _history_lock(path):
+                if _ends_mid_line(path):
+                    data = b"\n" + data  # a killed writer's torn last line must not swallow this one
+                # O_BINARY where it exists: the Windows CRT would turn the newline into CRLF.
+                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
+                fd = os.open(str(path), flags, 0o644)
+                try:
+                    os.write(fd, data)
+                finally:
+                    os.close(fd)
+            self._last_history_error = None
+        except Exception as exc:
+            said = f"{type(exc).__name__}: {exc}"
+            if said != self._last_history_error:
+                self._last_history_error = said
+                logger.warning(
+                    "process registry: could not append pid %s to the history under %s (%s)",
+                    entry.pid, self.history_dir, said,
+                )
+
+    def prune_history(self) -> List[Path]:
+        """Remove the daily files dated more than `history_days` before today (UTC).
+        Called once at start; files whose names are not a date are left alone.
+        Never raises; returns what it removed."""
+        removed: List[Path] = []
+        if self.history_dir is None:
+            return removed
+        try:
+            today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
+            cutoff = today - timedelta(days=self._history_days)
+            for path in sorted(self.history_dir.glob("????-??-??.jsonl")):
+                try:
+                    dated = date.fromisoformat(path.stem)
+                    if dated < cutoff:
+                        path.unlink()
+                        removed.append(path)
+                except (ValueError, OSError) as exc:
+                    logger.warning("process registry: could not prune %s (%s)", path, exc)
+        except OSError as exc:
+            logger.warning("process registry: could not list %s (%s)", self.history_dir, exc)
+        return removed
 
     def _own_start_time(self) -> Optional[float]:
         if self._backend_start_time is None:
@@ -596,12 +748,14 @@ class ProcessRegistry:
         """Announce, before signalling, that a stop is being sent to `pid`.
 
         The first announcement stands. `end` then gives the process this reason
-        instead of reading its return code as a crash."""
+        instead of reading its return code as a crash. Whether the backend's own
+        stop had begun at this moment is kept with it: that decides the precedence."""
         _check_reasons(reason, stop)
         with self._lock:
             live = self._live.get(pid)
             if live is not None and live.stop_sent is None:
                 live.stop_sent = (reason, stop)
+                live.stop_sent_while_stopping = self._stopping
 
     def end(
         self,
@@ -614,8 +768,9 @@ class ProcessRegistry:
         """Record that `pid` ended. Returns the entry (the existing one when it
         was already closed), or None when the registry never saw this pid.
 
-        Without `reason` the word is derived: the stop that was announced, else
-        `crashed` for an abnormal code, else `exited`. A second `end` for the
+        Without `reason` the word is derived: the stop that was announced (kept as
+        announced if it was announced before the backend's stop began, `backend_stop`
+        if after), else `crashed` for an abnormal code, else `exited`. A second `end` for the
         same process changes nothing but an `exit_code` the first lacked."""
         if reason is not None:
             _check_reasons(reason, stop)
@@ -629,15 +784,20 @@ class ProcessRegistry:
                     self._persist_locked()
                 return closed
             live = self._live.get(pid)
+            announced_before_the_stop = False
             if reason is None:
                 sent = live.stop_sent if live is not None else None
                 if sent is not None:
                     reason, stop = sent
+                    announced_before_the_stop = not live.stop_sent_while_stopping
                 elif is_abnormal_exit(returncode, self._platform):
                     reason = "crashed"
                 else:
                     reason = "exited"
-            return self._finish_locked(entry, reason, stop, returncode, announce=True)
+            return self._finish_locked(
+                entry, reason, stop, returncode, announce=True,
+                announced_before_the_stop=announced_before_the_stop,
+            )
 
     def _finish_locked(
         self,
@@ -647,8 +807,9 @@ class ProcessRegistry:
         returncode: Optional[int],
         *,
         announce: bool,
+        announced_before_the_stop: bool = False,
     ) -> ProcessEntry:
-        if self._stopping and reason in _YIELDS_TO_BACKEND_STOP:
+        if self._stopping and reason in _YIELDS_TO_BACKEND_STOP and not announced_before_the_stop:
             reason, stop = "backend_stop", None
         _check_reasons(reason, stop)
         entry.ended_at = _iso(self._clock())
@@ -664,6 +825,7 @@ class ProcessRegistry:
         if self._stopping:
             self._ended_in_the_stop.append(entry)
         self._persist_locked()
+        self._append_history_locked(entry)
         if announce:
             out = (live.log if live is not None and live.log is not None else logger)
             out.log(logging.WARNING if reason == "crashed" else logging.INFO, "%s", describe_end(entry))
@@ -914,6 +1076,7 @@ def start_persistent(path: Optional[Path] = None) -> SweepOutcome:
     try:
         registry = ProcessRegistry(path if path is not None else registry_path())
         registry.load()
+        registry.prune_history()
         outcome = registry.sweep_orphans()
         set_registry(registry)
         with registry._lock:

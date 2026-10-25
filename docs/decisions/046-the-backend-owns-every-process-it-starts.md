@@ -15,8 +15,12 @@ session: "DPC Project group chat, 2026-10-25 — card THE-BACKEND-KEEPS-NO-LIST-
 
 # ADR-046 — The backend owns every process it starts
 
-> **Accepted, 2026-10-25 (Mike's call). Point 1 is implemented (`2ebdb0a3`); the rest is
-> pending.** The sequence Mike set is this record and the amendments to ADR-040, ADR-044
+> **Accepted, 2026-10-25 (Mike's call). Implemented: point 1, the job (`2ebdb0a3`); points
+> 3, 4, 6 and 7 in the registry core (`4ea0560f`: registry, sweep, shutdown order,
+> `run_supervised` and both supervisors) with the review fixes of the same day (below).
+> Pending: the sampler, the spawn sites moved to the module with the structural test
+> (point 5), the local API command and the agent tools (point 8), and the UI.** The
+> sequence Mike set is this record and the amendments to ADR-040, ADR-044
 > and ADR-036 first, then the code. Mike's own calls in the thread were four: an agent
 > sees only its own processes; Strata and the `llama-server` child join the registry and
 > the job; the list is shown on screen, and shows duration, who started a process, when,
@@ -24,9 +28,19 @@ session: "DPC Project group chat, 2026-10-25 — card THE-BACKEND-KEEPS-NO-LIST-
 > shown as a graph of who started what, when and how it ended. Everything else below is
 > the mechanism Ark, Zcode and CC converged on, taken into this record by his go, with the
 > amendments of the same day (parent fields, `launcher_kind`, `exit_code` and `signal`,
-> `stopped` with `stop_reason`, the cross-platform rule), which he accepted as a set. The
+> `stopped` with `stop_kind`, the cross-platform rule), which he accepted as a set. The
 > words the record introduces are listed in **New words** and are accepted (Mike's call,
 > 2026-10-25).
+>
+> **Review fixes of 2026-10-25 (Mike's call, on the reviews of Ark, Zcode and CC).** The
+> field `stop_reason` is `stop_kind` (the gateway writes `stop_reason` on the wire as the
+> Anthropic Messages API field, which cannot be renamed, so the registry yields; an older
+> file's key is read as `stop_kind`). `engine_died` is added to the stop kinds and
+> `engine_switch` removed, under the rule in point 4. The precedence of `backend_stop` applies to
+> stops announced after the backend's stop began. The state file is fsynced before the swap and the
+> finished entries are also appended to daily files (answers Q7). The text about a
+> foreign `taskkill`, the signal's name and the weaker guarantee on POSIX is corrected
+> to what the code does and what was measured.
 >
 > **Axis `knowledge, network`.** `knowledge` because most spawns are an agent's tool
 > calls and the board card carries that axis; `network` because the two local engines of
@@ -102,7 +116,10 @@ Windows has the job object. The registry, the exit reasons, the startup sweep, t
 shutdown order and the API are the same on Windows, Linux and macOS (processes are read
 through psutil, which is already a dependency). On POSIX the backend ends what it tracks
 at an orderly stop (point 2); a crash there is covered by the sweep (point 6), not by the
-kernel.
+kernel. **So the guarantee is weaker on Linux and macOS:** with no kernel mechanism, after
+a backend crash the children live until the next start's sweep. "The backend owns every
+process it starts" is the rule everywhere; "and they die with it, whatever happens to it"
+holds on Windows only.
 
 1. **Windows: the backend puts itself in a kill-on-close job before it spawns anything.**
    At start, in `run_service.py` before `dependency_setup` (which already spawns
@@ -164,7 +181,7 @@ kernel.
    call, the **spawn origin** `agent_id`, `conversation_id`, `tool`, `round`, read from a
    context variable (below); the **command**, bounded in length as the log line already
    bounds it (120 characters, the full text where an agent's tool record holds it); start
-   and end time; the **exit reason** with its `stop_reason` where it has one (point 4);
+   and end time; the **exit reason** with its `stop_kind` where it has one (point 4);
    `exit_code` and `signal`; **resource peaks**; and `last_output_at`.
    - **The parent, and the graph.** Every entry names its parent by pid and start time, so
      the registry is a tree rooted at the backend's own process, and the graph Mike asked
@@ -184,7 +201,8 @@ kernel.
      below); it is never read as "DPC started it itself".
    - **`exit_code` and `signal` are stored on every entry,** `exited` with 0 included, so
      that "how it ended" is a fact and not only a word. `exit_code: null` means this
-     backend did not see the end; `signal` is the POSIX signal number where there was one.
+     backend did not see the end; `signal` is the POSIX signal's **name** where there was
+     one (`SIGKILL`, stored as that string, never the number).
    - **Attribution by contextvar.** The tool dispatcher sets `(agent_id, conversation_id,
      tool, round)` in a `contextvars.ContextVar` before it runs a tool; every spawn site
      reads it. The signature of `run_supervised` and its callers stay as they are, and a
@@ -196,7 +214,12 @@ kernel.
      `conversation_id`, the code's word; "chat" is the screen's. A spawn that no tool made
      is `launcher_kind: subsystem` and carries the **subsystem** in `launcher` instead:
      `strata`, `llamacpp_server` (their provider types), `browser`, `device_probe`,
-     `git_helper`.
+     `git_helper`. **A subsystem started inside an agent's tool call** (an engine woken by
+     that agent's request) keeps that call's origin, because `register` reads the context
+     variable at the moment of the spawn, and this is left as it is: **for a subsystem the
+     spawn origin is the call that woke it; its owner is the backend, which is also its
+     parent.** The graph can draw agent, tool call, engine, and the parent fields still
+     say whose child it is.
    - **Resources are peaks, sampled.** One sampler thread, every 2 seconds, over the
      registry: peak working set (RSS) and peak **commit (private bytes)** over the tree,
      CPU seconds, IO read and write bytes, and for the engines peak VRAM. No series is
@@ -208,10 +231,22 @@ kernel.
      with one `communicate(timeout=…)`, which hides it, so this field means reading the
      streams incrementally; for an engine it is the modification time of its log file.
      It is what makes a stuck `| more` visible in a glance instead of an afternoon in logs.
-   - **Persisted** on disk, written atomically (a temporary file and a replace, never a
-     truncating open), on spawn, on end and when a peak rises by a threshold, so that the
-     sweep of point 6 can read a crashed run's open entries. Finished entries are kept for
-     a bounded window; its size is the implementation card's, not this record's.
+   - **Persisted in two places,** both written only by the persistent registry
+     (`start_persistent()`, which `run_service.py` calls once; the in-memory default and the
+     tests never touch the home). The state file `<DPC_HOME>/process_registry.json` holds the
+     open entries and the newest 200 finished ones (none older than 7 days): what the sweep
+     of point 6 and "what runs now" read. It is rewritten whole on spawn and on end through a
+     temporary file that is fsynced and then swapped in with `os.replace`, never a truncating
+     open, so a crash or a power cut leaves the old list or the new one (and when a peak
+     rises by a threshold, once the sampler exists). Every finished entry is also appended
+     as one JSON line to `<DPC_HOME>/process_registry/YYYY-MM-DD.jsonl`, the UTC date of
+     its end, the way the node ledger appends (a `.lock` sibling, `O_APPEND`, a torn last
+     line healed by the next append); files dated more than 7 days back are removed at
+     start, and a failed append is logged once and never takes a spawn or an end down. The
+     graph of point 8 reads the daily files: 200 entries would cut it to hours, and
+     rewriting thousands of entries on every spawn and every end is too heavy. A line holds
+     the entry as it was at its end; an `exit_code` that only a later report supplies is not
+     appended again.
    - **A log line at both ends,** one at the start and one at the end that carries the exit
      reason; the start line `spawned pid N …` exists and gains the origin.
 
@@ -225,11 +260,19 @@ kernel.
    - `cancelled_by_agent` — killed by its own agent through `kill_my_process` (point 8).
    - `orphan_swept` — a process of an earlier run found alive at start and killed (point 6).
    - `stopped` — a stop DPC asked for while the backend runs, with a second field,
-     `stop_reason`: `idle_unload` (an engine unloaded after sitting idle), `ui_stop` (a
-     person stopped it from the UI), `engine_switch` (the card passed to the other local
-     engine), `failed_start` (an unfinished start cleared away), `browser_closed` (the
-     browser closed on purpose). The word says that DPC did it; `stop_reason` says why.
-     Mike's call, 2026-10-25, on the proposal of Ark and CC.
+     `stop_kind`: `ui_stop` (a person stopped it from the UI), `failed_start` (a start
+     that did not finish, or that the launcher refused at the version check or the smoke,
+     cleared away), `engine_died` (the engine died after its start had succeeded and DPC
+     stopped the launcher: Strata's watcher and a 503 naming the engine's exit code; the
+     llama-server supervisor has no such branch, so Strata is the only producer today and
+     the word waits ready for a watcher there), `browser_closed` (the browser closed on
+     purpose) and `idle_unload` (an engine unloaded after sitting idle). The word says that
+     DPC did it; `stop_kind` says what kind of stop. The field is named `stop_kind`, not
+     `stop_reason`, so as not to collide with the `stop_reason` the gateway writes on the
+     wire (the Anthropic Messages API field), which cannot be renamed. Mike's call,
+     2026-10-25, on the proposal of Ark and CC; the rename and `engine_died` the same day
+     on the reviews of Ark, Zcode and CC. A switch of local engines has no kind of its
+     own: it reaches the supervisor as the UI's stop button and is `ui_stop`.
    - `crashed` — ended by a signal or by an NTSTATUS error code (`0xC0000000` up to, not
      including, `0xE0000000`: the customer bit marks codes a program chose, so `exit(-1)`,
      `0xFFFFFFFF`, stays an ordinary exit) that nobody sent. The rule is **who sent, not
@@ -238,11 +281,34 @@ kernel.
      only confirms it. A commit-limit death is this (`0xC000012D`, STATUS_COMMITMENT_LIMIT,
      recalled and not measured here). `0xC000013A` (STATUS_CONTROL_C_EXIT) is not: it is
      what the CTRL_BREAK a supervisor sends produces, and the registry, which knows the
-     stop was sent, does not read it as a crash. A `taskkill` from somebody else's
-     terminal reads `crashed`, because it is indistinguishable from a real crash, and that
-     is correct.
-   **Precedence:** during the backend's orderly stop (point 7) the word is `backend_stop`
-   whoever sent the signal; `stopped` is only for a stop while the backend runs.
+     stop was sent, does not read it as a crash.
+     **A kill nobody in DPC sent reads differently by platform, and this is the honest
+     asymmetry.** On POSIX a foreign SIGKILL arrives as a negative return code and reads
+     `crashed`, `signal` `SIGKILL`. On Windows a foreign `taskkill /F` leaves exit code 1,
+     which is outside the NTSTATUS range, so it reads `exited` and cannot be told from an
+     ordinary exit with code 1 (Zcode measured it live; the test
+     `test_on_windows_a_foreign_taskkill_leaves_code_1_and_reads_exited` pins it, and an
+     earlier version of this record said the opposite). What protects the reading on
+     Windows is the rule above, not the number: a stop the registry sent is never read as
+     a crash, whatever code it leaves.
+   **Precedence:** a stop **announced after the backend's orderly stop began** (point 7) is
+   `backend_stop` whoever sent the signal, and so is the orderly stop's own kill. A stop
+   **announced before** it keeps the word it was announced with: a start that failed at
+   10:00:00 and is still being cleared away when Ctrl+C arrives is `stopped`/`failed_start`,
+   because the refusal stopped it and the shutdown only found it on the way out. `stopped`
+   is otherwise only for a stop while the backend runs. A timeout and a memory-ceiling kill
+   keep their own words in both cases.
+   **Which values stay in the closed lists.** A value stays only if something produces it
+   or a named decision will create its producer; a value with neither is removed and comes
+   back in the commit that adds its producer. The list is an allowlist, so a value nothing
+   produces cannot appear in the data by accident, and the only way it gets in is a person
+   writing it, whereupon the entry says something that did not happen and the check stays
+   silent. By that rule `engine_switch` was removed (no path to it will ever exist),
+   `browser_closed` stays (its producer is browser registration, point 5, the next phase),
+   and `idle_unload` stays tied to an open question: its producer exists only if the owner
+   decides that DPC, and not the engine, unloads an idle model (the question about Strata
+   session files, open when the reviews were written). Today the engine unloads its model itself and the
+   launcher stays up.
    `inference_engine_stop` was proposed and not taken: it would give one event at
    shutdown two names, and it names a class of process, where the other words answer who
    ended it and why. A new reason is a change to this list and is argued here; a code path
@@ -334,7 +400,7 @@ kernel.
      the path from the root is the answer to who started it, when, from where and how it
      ended. The API command returns the entries with their parent fields; the UI draws the
      tree and the registry does not store a picture.
-   - A **human stop** from the UI ends `stopped` with `stop_reason: ui_stop` (point 4);
+   - A **human stop** from the UI ends `stopped` with `stop_kind: ui_stop` (point 4);
      it needs no word of its own.
 
 ### Rationale
@@ -394,7 +460,10 @@ kernel.
 
 ## Confirmation
 
-Compliance, not progress. Every item is a test or a recorded measurement.
+Compliance, not progress. Every item is a test or a recorded measurement. The tests marked
+"registry tests" are in
+`dpc-client/core/tests/test_the_process_registry_records_how_every_child_ends.py`
+(run 2026-10-25 on Windows; the CI run for the ref has not been read).
 
 - [x] **Job survives nothing.** On Windows: start the backend's job setup in a child
   interpreter, spawn a grandchild through `run_supervised`, `TerminateProcess` the
@@ -406,44 +475,81 @@ Compliance, not progress. Every item is a test or a recorded measurement.
   `serve.server --engine mock` and `winjob.contain()`.)
 - [ ] **Failure is survivable.** With job creation forced to fail, the backend starts,
   logs the WARNING, and the sweep still reaps a recorded orphan.
-- [ ] **Sweep, with pid reuse.** An entry whose pid is alive with a different start time
+- [x] **Sweep, with pid reuse.** An entry whose pid is alive with a different start time
   is left alone; with the same start time, it is killed and closed `orphan_swept`.
-- [ ] **Never its own pid,** and never an ancestor's.
-- [ ] **Origin from a pool thread.** A tool run through the real `_DaemonToolPool` that
+  (Registry tests `TestTheStartupSweep`: the same-start-time and the different-start-time
+  cases, with a real child.)
+- [x] **Never its own pid,** and never an ancestor's.
+  (`test_never_its_own_pid_and_never_an_ancestors`,
+  `test_the_stop_never_aims_at_the_backends_own_pid`.)
+- [x] **Origin from a pool thread.** A tool run through the real `_DaemonToolPool` that
   spawns reads back `(agent_id, conversation_id, tool, round)`.
+  (`TestTheOriginReachesThePoolThread`.)
 - [ ] **The structural test** finds the sites it guards (a positive control), fails on a
   planted `subprocess.run` outside `process.py`, and passes with the allow-list.
 - [ ] **`kill_my_process`** refuses a pid that is not in the registry, another agent's
   pid and the backend's pid, and ends its own as `cancelled_by_agent`.
 - [ ] **Exit reasons** are one of the eight words on every path that ends a process, a
-  `stopped` carries one of the five `stop_reason` values, and `exit_code` and `signal` are
+  `stopped` carries one of the five `stop_kind` values, and `exit_code` and `signal` are
   stored on every entry (`exited` with 0 included); a test enumerates the code paths.
-- [ ] **Precedence.** An engine ended by the backend's orderly stop is `backend_stop`; the
-  same engine unloaded after idle while the backend runs is `stopped` with `idle_unload`.
-- [ ] **Closed at start.** An entry whose process is gone at the next start is closed
+  (Partly done: the registry refuses a word outside the lists, tests
+  `TestTheClosedVocabulary`; the enumeration of every code path is not written.)
+- [x] **Stop kinds.** The field is `stop_kind`, not `stop_reason`; a file written before the
+  rename is read with its old key as `stop_kind` and written back under the new one;
+  `engine_switch` is refused by the closed check. (Registry tests
+  `test_the_field_is_stop_kind_so_as_not_to_collide_with_the_gateways_wire_field`,
+  `test_a_file_written_before_the_rename_is_read_with_its_old_key_as_stop_kind`,
+  `test_the_list_holds_what_something_produces_and_engine_switch_is_not_in_it`.)
+- [x] **`engine_died` against `failed_start`.** A Strata engine that died after its start
+  succeeded (the watcher, a 503 naming its exit code) is `stopped`/`engine_died`; a start
+  the launcher refused (no engine version, the smoke) stays `stopped`/`failed_start`, through
+  the real launch. (Registry tests `TestTheSupervisorsRegisterAndEndTheirChild`:
+  `test_a_strata_engine_that_died_after_the_start_succeeded_is_stopped_as_engine_died`,
+  `test_a_503_naming_the_exit_code_stops_the_launcher_as_engine_died`,
+  `test_a_start_the_launcher_refuses_stays_failed_start_through_the_real_launch`.)
+- [x] **Precedence.** A stop announced after the backend's orderly stop began is
+  `backend_stop`; a stop announced before it keeps its word (a `failed_start` still being
+  cleared when the stop begins stays `stopped`/`failed_start`); while the backend runs a
+  stop is `stopped`. (Registry tests `TestPrecedence`, and
+  `test_the_orderly_stop_is_backend_stop_even_though_the_supervisor_sent_the_signal`.)
+  The idle-unload example this item once gave is gone with its producer (point 4).
+- [x] **Closed at start.** An entry whose process is gone at the next start is closed
   `backend_stop` with `exit_code: null`, and the log line says it was found closed at
-  start.
-- [ ] **`crashed` is decided by who sent.** A POSIX timeout (SIGKILL) is recorded
+  start. (`test_a_process_that_is_gone_is_closed_backend_stop_with_no_code_and_says_so`.)
+- [x] **`crashed` is decided by who sent.** A POSIX timeout (SIGKILL) is recorded
   `timeout`, never `crashed`. Python returns an NTSTATUS death as a negative returncode on
   Windows (`0xC000013A` arrives as −1073741510), so any comparison uses the unsigned value
-  and the number only confirms, never decides. A `taskkill` from somebody else's terminal
-  reads `crashed`, and the test pins that so it is not "fixed" later. `0xC000012D` (a
-  commit-limit death) is named as an example of `crashed` from recall; it is not measured
-  here.
+  and the number only confirms, never decides. A foreign kill reads differently by
+  platform: on Windows a `taskkill /T /F` from outside the registry leaves code 1 and reads
+  `exited` (`test_on_windows_a_foreign_taskkill_leaves_code_1_and_reads_exited`, run); on
+  POSIX a foreign SIGKILL reads `crashed` with `signal` `SIGKILL`
+  (`test_on_posix_a_foreign_sigkill_reads_crashed_with_the_signal_by_name`, written and not
+  yet run: it waits for CI or the Linux node). `0xC000012D` (a commit-limit death) is
+  named as an example of `crashed` from recall; it is not measured here.
+- [x] **Storage.** The state file is fsynced before the swap; every finished entry is
+  appended as one line to the daily file of its end's UTC date, and the state file keeps
+  only the newest 200; daily files dated more than 7 days back are removed at start; a
+  failed append is logged once and raises nothing; a torn last line and a stale lock are
+  survived. (Registry tests `TestTheStateFileAndTheDailyHistory`; the in-memory registry
+  writes nothing.)
 - [ ] **Parent fields.** A descendant the backend did not start (the `ping` under a
   `cmd /c`) is entered with `parent_pid` and `parent_start_time`, the tree from the
   backend down to it can be rebuilt from the entries alone, and a parent whose start time
   differs from its pid's current one is not followed.
-- [ ] **`launcher_kind`.** An entry written with `launcher_kind: tool` and no spawn origin
+- [x] **`launcher_kind`.** An entry written with `launcher_kind: tool` and no spawn origin
   is reported as a defect, and a subsystem spawn (`strata`, `llamacpp_server`, `browser`)
-  is `subsystem`.
+  is `subsystem`. (`test_a_tool_child_without_an_origin_is_a_lost_attribution`,
+  `test_a_subsystem_names_its_parent_and_a_made_up_one_is_refused`; `browser` is not
+  registered yet.)
 - [x] **No breakaway.** A member of the job that asks for `CREATE_BREAKAWAY_FROM_JOB`
   fails to start (Windows refused with WinError 5), and the control without the job
   starts: `test_a_member_of_the_job_that_asks_for_breakaway_fails_to_start` in
   `dpc-client/core/tests/test_a_backend_in_a_kill_on_close_job_takes_every_process_with_it.py`.
   (Run 2026-10-25, passed.)
-- [ ] **Shutdown order** holds on a fake clock: spawns refused, then commands killed, then
+- [x] **Shutdown order** holds: spawns refused, then commands killed, then
   engines through their supervisors, then the verify step and one line per process.
+  (`test_the_order_is_refuse_then_commands_then_histories_then_engines_then_verify`, a
+  recorded order and not a fake clock.)
 - [x] **Camoufox and Playwright** launch, browse and close under the job without a
   breakaway error (Windows, 2026-10-25, the opt-in test with `DPC_JOB_CHECKS=1`).
 
@@ -499,9 +605,10 @@ the table rests on `rg` and the reading, not on the graph. Not counted: `webbrow
 |------|--------|--------|
 | This record and the amendments to ADR-040, ADR-044, ADR-036 | Written 2026-10-25 | — |
 | Job in `run_service.py`, with its tests (`job_object.py`); the Hub login opens its URL through `explorer.exe`, outside the job | Done 2026-10-25 | `2ebdb0a3` |
-| Registry (`process_registry.py`): entries with parent and `launcher_kind`, `SPAWN_ORIGIN` set in the pool thread, the eight exit reasons, persistence (newest 200, none older than 7 days, open entries kept); `run_supervised` and both supervisors register and end their children | Done 2026-10-25 | the commit that adds `process_registry.py` |
-| Startup sweep | Done 2026-10-25 | the same commit |
-| Shutdown order in `service.shutdown` | Done 2026-10-25 | the same commit |
+| Registry (`process_registry.py`): entries with parent and `launcher_kind`, `SPAWN_ORIGIN` set in the pool thread, the eight exit reasons, persistence; `run_supervised` and both supervisors register and end their children | Done 2026-10-25 | `4ea0560f` |
+| Startup sweep | Done 2026-10-25 | `4ea0560f` |
+| Shutdown order in `service.shutdown` | Done 2026-10-25 | `4ea0560f` |
+| Review fixes: `stop_kind` (old key read), `engine_died`, `engine_switch` removed, precedence for stops announced after the stop began, fsync before the swap, the state file plus daily JSONL history, the asymmetry of a foreign kill written down; tests in `tests/test_the_process_registry_records_how_every_child_ends.py` | Done 2026-10-25 (written; not committed when this row was written) | the commit that carries this row |
 | Resource sampler (peaks, `last_output_at`) | Pending | — |
 | Spawn sites to the module; structural test | Pending | — |
 | Local API command; agent tools | Pending | — |
@@ -537,34 +644,43 @@ the table rests on `rg` and the reading, not on the graph. Not counted: `webbrow
 - **Q5 — the detail view: current work only, or the last ten runs.** Asked of Mike on
   2026-10-25, no answer in the thread. Belongs to the UI card.
 - **Q6 — a human stop from the UI, and its exit reason. Answered, 2026-10-25 (Mike's
-  call).** `stopped` with `stop_reason: ui_stop` (point 4).
-- **Q7 — the size and age of the finished-entry window** and the file's name. The
-  implementation card.
+  call).** `stopped` with `stop_kind: ui_stop` (point 4).
+- **Q7 — the size and age of the finished-entry window** and the file's name. **Answered,
+  2026-10-25 (Mike's call, on the reviews).** The state file `process_registry.json` keeps
+  the open entries and the newest 200 finished ones (none older than 7 days); every
+  finished entry is also appended to `process_registry/YYYY-MM-DD.jsonl`, files older than
+  7 days removed at start (point 3, "Persisted in two places"). A single 200-entry window
+  would have cut the graph to hours, and a whole-file rewrite of thousands of entries on
+  every spawn and end was judged too heavy.
 - **Q8 — an engine stopped by its supervisor while the backend runs. Answered,
-  2026-10-25 (Mike's call).** An idle unload, a stop from the UI and a switch to the other
-  local engine end the child with a stop DPC sent, outside the backend's own stop. The
-  word is `stopped`, with `stop_reason` saying why; during the orderly stop the word is
-  `backend_stop` whoever sent the signal (point 4). `inference_engine_stop` and a widened
-  `backend_stop` were not taken.
+  2026-10-25 (Mike's call).** A stop from the UI (a switch to the other local engine
+  arrives as the same button) and an unfinished or refused start cleared away end the child
+  with a stop DPC sent, outside the backend's own stop; an engine that died after it was up
+  and had its launcher stopped is `engine_died`. The word is `stopped`, with `stop_kind`
+  saying what kind; a stop announced after the orderly stop began is `backend_stop`
+  whoever sent the signal (point 4). An idle unload would be `idle_unload` if DPC ever does
+  it (point 4). `inference_engine_stop` and a widened `backend_stop` were not taken.
 
 ## New words
 
 Every name this record introduces. Each is built from words the project already has and
 is **accepted (Mike's call, 2026-10-25);** the rows are in `docs/GLOSSARY.md`, section
-"Processes the backend starts", and none of the names is in code yet except `launcher`.
-`rg --no-ignore` over the repository (this record excluded) on 2026-10-25 found no hit
-for any compound name below, and one for `last_output_at`, on the board card that proposes
-it; the same search for `parent_pid`, `parent_start_time` and `launcher_kind` found hits
-only on the board card. The plain words in the exit-reason list (`exited`, `timeout`,
-`crashed`, `stopped`) are ordinary English with earlier uses of their own, and
-`stop_reason` is met elsewhere on other objects (see its row).
+"Processes the backend starts"; the names are in code since `4ea0560f` (the registry core),
+except the sampler's fields' values, the API command and the agent tools, which are
+pending. `rg --no-ignore` over the repository (this record excluded) on 2026-10-25, before the code,
+found no hit for any compound name below, and one for `last_output_at`, on the board card
+that proposes it; the same search for `parent_pid`, `parent_start_time` and `launcher_kind`
+found hits only on the board card. The plain words in the exit-reason list (`exited`,
+`timeout`, `crashed`, `stopped`) are ordinary English with earlier uses of their own.
+`stop_kind` was `stop_reason` in the first draft; that name is the gateway's wire field
+and is not used for the registry.
 
 | Word | Built from | Note |
 |---|---|---|
-| **process registry** (`ProcessRegistry`, a module `process_registry.py`, a file `~/.dpc/process_registry.json`) | `AgentRegistry` in `dpc_agent/utils.py`: a list the backend keeps and persists | "registry" is crowded (agents, tools); the qualifier carries it. "Ledger" was not used: the **node ledger** is the usage record. |
+| **process registry** (`ProcessRegistry`, a module `process_registry.py`, a state file `~/.dpc/process_registry.json` and daily files `~/.dpc/process_registry/YYYY-MM-DD.jsonl`) | `AgentRegistry` in `dpc_agent/utils.py`: a list the backend keeps and persists; the daily files follow the **node ledger**'s way of appending | "registry" is crowded (agents, tools); the qualifier carries it. "Ledger" was not used: the **node ledger** is the usage record. |
 | **exit reason** (`exit_reason`), the eight values `exited`, `timeout`, `memory_ceiling`, `backend_stop`, `cancelled_by_agent`, `orphan_swept`, `crashed`, `stopped` | `timed_out`, `ceiling_mb`, `exceeded_mb`, `killed` on `SupervisedRun`; "stop" from `stop_all_supervisors`; "orphan" from `retire_orphan`; `stopped` from `provider_unavailable` ("stopped after an engine failure") | `crashed` has no earlier use; its meaning is Q2, answered in point 4. |
-| **`stop_reason`** with `idle_unload`, `ui_stop`, `engine_switch`, `failed_start`, `browser_closed` | `idle_unload_s` of ADR-044; `_clear_unfinished_start` | Present only on `stopped`. The name is also met on the gateway's Anthropic response and on a browser scroll loop, where it answers other questions; the registry's is a field of an entry, so the readings do not meet in one object. |
-| **`exit_code`**, **`signal`** | `returncode` on `SupervisedRun`; POSIX signal numbers | Stored on every entry; `exit_code: null` means this backend did not see the end. |
+| **`stop_kind`** with `idle_unload`, `ui_stop`, `engine_died`, `failed_start`, `browser_closed` | `launcher_kind` (a closed set that qualifies a broader word); `idle_unload_s` of ADR-044; `_clear_unfinished_start`; `_fail_closed` | Present only on `stopped`. Named `stop_kind` so as not to collide with the `stop_reason` the gateway writes on the wire (the Anthropic Messages API field; the browser tool's scroll loop and the file search have a `stop_reason` of their own too); a file written under the first spelling is read as `stop_kind`. Not `stop_cause`: beside `exit_reason` it would read as a synonym. |
+| **`exit_code`**, **`signal`** | `returncode` on `SupervisedRun`; POSIX signal names | Stored on every entry; `exit_code: null` means this backend did not see the end; `signal` is the signal's name (`SIGKILL`). |
 | **`parent_pid`**, **`parent_start_time`** | `pid` and the start time of point 3 | Make the registry a tree; the graph of point 8 is a view over it. |
 | **spawn origin** (`SPAWN_ORIGIN`, a context variable) with `agent_id`, `conversation_id`, `tool`, `round` | `CALL_PROGRESS` in `llm_adapter.py`; `agent_id` and `conversation_id` are the code's words | "origin" also means who raised a board entry (glossary, **origin**); the two senses are different and do not meet in one file, and both glossary rows now say so. |
 | **launcher** values `strata`, `llamacpp_server`, `browser`, `device_probe`, `git_helper`; **`launcher_kind`** `tool` or `subsystem` | `launcher` already exists in `run_supervised` (`run_shell`, `git_tool(sandbox)`, `read_document`); `strata` and `llamacpp_server` are provider types | The first two are existing words; the last three are new labels. `launcher_kind` is new. |
@@ -580,12 +696,19 @@ only on the board card. The plain words in the exit-reason list (`exited`, `time
 - **Ark** — the registry-at-the-source and structural-guard conditions, the closed
   vocabulary, peaks, `last_output_at`, the agent's own-process check, the startup sweep,
   the count of spawn sites; the parent fields, `launcher_kind`, `exit_code: null`,
-  `stopped` with `stop_reason` and the precedence rule, "who sent" as the test of
-  `crashed`, the breakaway check.
+  `stopped` with its second field and the precedence rule, "who sent" as the test of
+  `crashed`, the breakaway check. In the review of the registry core: the name
+  `stop_kind` and why (the wire field), `engine_died`, the rule for what stays in the closed
+  lists, the 200-entry ceiling on the graph, the window in which a stop announced before
+  the backend's stop was rewritten, and the weaker guarantee on POSIX.
 - **Zcode** — no soft stop for a `CREATE_NO_WINDOW` child, the job as backstop and the
   session files before it closes, the nested-job test, commit beside RSS; the negative
-  returncode of an NTSTATUS death, the MB and MiB families.
-- **CC** — the backend-in-the-job design, this record and its amendments of 2026-10-25.
+  returncode of an NTSTATUS death, the MB and MiB families. In the review of the registry
+  core: the live measurement that a foreign `taskkill /F` reads `exited` on Windows, the
+  signal stored by name, the missing fsync, and the question of a subsystem started inside
+  a tool call.
+- **CC** — the backend-in-the-job design, this record and its amendments of 2026-10-25;
+  the storage split (state file and daily history).
 
 ## References
 
