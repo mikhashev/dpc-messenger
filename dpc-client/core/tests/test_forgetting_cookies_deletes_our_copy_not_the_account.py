@@ -73,10 +73,14 @@ async def _list(agent_id: str):
     )
 
 
-def _jar(agent_id: str, domain: str) -> None:
+def _jar(agent_id: str, domain: str) -> list[dict]:
+    """Store a jar and return exactly what was stored: `_cookies` reads the clock,
+    so a second call can carry another `expires`."""
     from dpc_client_core import web_auth
 
-    web_auth.save_cookies(agent_id, domain, _cookies(domain))
+    cookies = _cookies(domain)
+    web_auth.save_cookies(agent_id, domain, cookies)
+    return cookies
 
 
 def test_both_commands_are_reachable_from_the_ui():
@@ -160,12 +164,12 @@ async def test_forgetting_one_site_leaves_the_others_intact(vault_home):  # noqa
     from dpc_client_core import web_auth
 
     _jar("agent_a", TEST_DOMAIN)
-    _jar("agent_a", OTHER_DOMAIN)
+    other = _jar("agent_a", OTHER_DOMAIN)
 
     await _forget("agent_a", TEST_DOMAIN)
 
     assert [row["domain"] for row in web_auth.list_domains("agent_a")] == [OTHER_DOMAIN]
-    assert web_auth.load_cookies("agent_a", OTHER_DOMAIN) == _cookies(OTHER_DOMAIN)
+    assert web_auth.load_cookies("agent_a", OTHER_DOMAIN) == other
 
 
 @pytest.mark.asyncio
