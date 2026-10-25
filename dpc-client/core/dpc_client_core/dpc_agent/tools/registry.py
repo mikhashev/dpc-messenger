@@ -332,6 +332,13 @@ class ToolContext:
     conversation_id: Optional[str] = None
     conversation_title: Optional[str] = None
 
+    # Where the loop keeps this call's output (ADR-045 store, loop.TOOL_OUTPUT_DIR):
+    # the turn's directory and the call's name, `r<round>-<position>`. Set by the
+    # loop before each call, so a tool can keep more than it returns beside its
+    # own result — run_shell does after a timeout. None outside a loop.
+    tool_output_turn: Optional[str] = None
+    tool_output_name: Optional[str] = None
+
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)
     # -----------------------------------------------------------------------

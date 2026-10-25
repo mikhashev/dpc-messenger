@@ -328,7 +328,7 @@ def test_an_approved_kill_runs(service, tmp_path, monkeypatch, on_windows):
                         lambda drive: frozenset(), raising=False)
     spawned = []
     monkeypatch.setattr(shell, "_execute_shell_command",
-                        lambda command, cwd, timeout: spawned.append(command) or "SUCCESS")
+                        lambda command, cwd, timeout, **_: spawned.append(command) or "SUCCESS")
     granted = []
 
     def _approve(ctx, command, reason, cwd, timeout):

@@ -425,6 +425,8 @@ Interactive headed/headless browser driven via Camoufox + Playwright. Disabled b
 |------|-------------|---------|
 | `run_shell` | Run a shell command with 3-tier safety guardrails (Tier-0/2 blocklist, Tier-1 user approval + per-agent whitelist, cwd sandbox). Restricted to 1:1 chats by default. | ⛔ opt-in |
 
+> **No console, no keyboard.** A command runs on a hidden console of its own (Windows) or in a session with no controlling terminal (Linux, macOS), with stdin closed, and its output is captured. A pager (`| more`, `less`) or a prompt therefore waits until the timeout kills the command and its descendants. The result of such a kill says so, gives the captured stdout/stderr sizes and their last lines, adds a sentence when the output ends at a pager prompt, and names where the full captured output is stored (`state/tool_results/<turn>/r<round>-<position>.stdout.txt`, read with `read_file`).
+
 ### Web Auth Tools (ADR-028, ADR-029 Task 7)
 
 | Tool | Description | Default |

@@ -278,7 +278,7 @@ def test_the_command_that_runs_is_not_rewritten(posix, box, monkeypatch):
     """The expansion is a view for the check; the shell still gets the text."""
     spawned = []
     monkeypatch.setattr(shell, "_execute_shell_command",
-                        lambda command, cwd, timeout: spawned.append(command) or "ok")
+                        lambda command, cwd, timeout, **_: spawned.append(command) or "ok")
 
     assert shell.run_shell(_Ctx(box), "cat $DPC_WORK/notes.txt") == "ok"
     assert spawned == ["cat $DPC_WORK/notes.txt"]

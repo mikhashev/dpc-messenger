@@ -46,7 +46,6 @@ import math
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -55,7 +54,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .core import _resolve_file_path
-from .process import CEILING_HINT, run_supervised
+from .process import CEILING_HINT, captured_sizes, run_supervised
 from .registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
@@ -660,15 +659,14 @@ def _run_djvu(binary: str, args: List[str]) -> Tuple[int, str, str]:
     a `\\r` a raw-byte decode would have kept; `_djvu_page_count` and
     `_djvu_page_shape` do not count `\\r`, so only a page's `chars` moves.
     """
-    popen_kwargs: Dict[str, Any] = {}
-    if sys.platform == "win32":
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # No creationflags of its own any more: run_supervised gives every child a
+    # hidden console of its own on Windows (CREATE_NO_WINDOW), which is what
+    # this call used to ask for by hand.
     try:
         run = run_supervised(
             [binary, *args],
             launcher="read_document",
             timeout=DJVU_CALL_SECONDS,
-            popen_kwargs=popen_kwargs,
         )
     except OSError as exc:
         return -1, "", f"{Path(binary).name} could not be run: {type(exc).__name__}: {exc}"
@@ -682,6 +680,7 @@ def _run_djvu(binary: str, args: List[str]) -> Tuple[int, str, str]:
     if run.timed_out:
         return -1, "", (
             f"{Path(binary).name} did not finish within {DJVU_CALL_SECONDS} s"
+            f" and was killed - {run.killed}. {captured_sizes(run)}"
         )
     return run.returncode, run.stdout, run.stderr
 

@@ -214,6 +214,19 @@ on by itself. Look for:
 - `Console input mode could not be restored` (WARNING, once) — it does not;
   stop the backend from the UI or Task Manager
 
+The writer found on 2026-10-25 was `more` at its `-- More --` prompt in an
+agent's `run_shell` command, killed by the command's timeout. Agent commands
+(`run_shell`, the git tools, `read_document`'s DjVuLibre calls) now run on a
+hidden console of their own on Windows and in a session of their own with no
+controlling terminal on Linux and macOS, so they cannot reach the backend's
+console. A command killed at its timeout is logged by
+`dpc_client_core.dpc_agent.tools.process`, beside the memory-ceiling kill:
+- `the command tree of pid … for run_shell ran past its 240s timeout - the
+  command and its descendants were killed; 1151755 chars of stdout and 0 of
+  stderr captured; the output ends at a pager prompt '-- More  --': <the first
+  200 characters of the command>` (WARNING) — the pager clause appears only
+  when the output ends at one
+
 ## Viewing Logs
 
 ### Real-time Monitoring (Linux/macOS)

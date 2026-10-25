@@ -16,7 +16,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
-from .process import run_supervised
+from .process import run_supervised, timeout_details
 
 # Conventional commits: type(optional-scope): description
 # Types: feat fix docs style refactor perf test chore build ci revert
@@ -85,7 +85,8 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
                              f"over the {result.ceiling_mb} MB ceiling, and were killed - {result.killed}"}
         if result.timed_out:
             return {"success": False,
-                    "error": f"Git command timed out (30s) - {result.killed}"}
+                    "error": "\n".join([f"Git command timed out (30s) - {result.killed}.",
+                                        *timeout_details(result, tool="git_tool")])}
 
         return {
             "success": result.returncode == 0,
@@ -151,7 +152,8 @@ def _run_git_external(repo_path: str, args: List[str], timeout: int = 30) -> Dic
                              f"over the {result.ceiling_mb} MB ceiling, and were killed - {result.killed}"}
         if result.timed_out:
             return {"success": False,
-                    "error": f"Git command timed out ({timeout}s) - {result.killed}"}
+                    "error": "\n".join([f"Git command timed out ({timeout}s) - {result.killed}.",
+                                        *timeout_details(result, tool="git_tool")])}
         return {
             "success": result.returncode == 0,
             "output": result.stdout.strip() if result.stdout else "",

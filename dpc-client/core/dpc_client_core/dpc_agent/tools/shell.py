@@ -44,6 +44,7 @@ from .process import (  # noqa: F401  (re-exported for the tests that patch them
     _tree_memory_mb,
     _watch_memory,
     run_supervised,
+    timeout_details,
 )
 
 log = logging.getLogger(__name__)
@@ -2408,7 +2409,9 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
         return entry.get("result") or "❌ Command rejected by user."
 
     log.info("Shell approval granted: %s — executing %r", request_id, command)
-    return _execute_shell_command(command, entry.get("cwd"), entry.get("timeout", 120))
+    return _execute_shell_command(
+        command, entry.get("cwd"), entry.get("timeout", 120), store_at=_call_store(ctx),
+    )
 
 
 def _cap_stream(text: str, stream: str) -> str:
@@ -2444,12 +2447,78 @@ def _cap_stream(text: str, stream: str) -> str:
 
 
 
-def _execute_shell_command(command: str, working_dir: str | None, timeout: int) -> str:
-    """Run a shell command, format stdout/stderr/exit. Executor-thread only."""
+def _call_store(ctx) -> Optional[tuple]:
+    """(agent_root, turn, call name) of this call in the loop's output store, or None.
+
+    Read when the call starts: the loop sets the two names on the context
+    before each call, and a later call of the same turn sets them again.
+    """
+    turn = getattr(ctx, "tool_output_turn", None)
+    name = getattr(ctx, "tool_output_name", None)
+    root = getattr(ctx, "agent_root", None)
+    if turn and name and root is not None:
+        return (root, turn, name)
+    return None
+
+
+def _store_streams(run, store_at: Optional[tuple]) -> dict:
+    """Keep a killed command's full captured streams beside its call's result.
+
+    The result the agent reads holds the first MAX_OUTPUT chars of each
+    stream; the timeout is where the end of the output matters, so the whole
+    of what was captured goes into the loop's own store (loop.TOOL_OUTPUT_DIR),
+    under the same retention. Returns {"stdout": address, ...} for what was kept.
+    """
+    if store_at is None:
+        return {}
+    from ..loop import store_beside_call
+    root, turn, name = store_at
+    kept = {}
+    for stream in ("stdout", "stderr"):
+        text = getattr(run, stream) or ""
+        if text:
+            addr = store_beside_call(root, turn, name, stream, text)
+            if addr:
+                kept[stream] = addr
+    return kept
+
+
+_COMMAND_VAR = "DPC_RUN_SHELL_COMMAND"
+
+
+def _windows_utf8_command_line(command: str, env: dict) -> str:
+    """The cmd line that runs `command` with UTF-8 output on its own console.
+
+    cmd reads the console code page once, at start, so a `chcp 65001` inside
+    the same cmd does not reach its own `echo`/`dir`/`set` output. The outer
+    cmd switches the console and starts a second one, which starts at 65001.
+    The command travels in the environment and is substituted by delayed
+    expansion after the outer cmd has parsed its line, so the outer cmd
+    never parses a character of it; the second cmd parses it exactly as the
+    single cmd used to.
+    """
+    comspec = env.get("COMSPEC") or os.environ.get("COMSPEC") or "cmd.exe"
+    env[_COMMAND_VAR] = command
+    return (
+        f'"{comspec}" /d /v:on /s /c '
+        f'"chcp 65001 >nul && "{comspec}" /s /c "!{_COMMAND_VAR}!""'
+    )
+
+
+def _execute_shell_command(
+    command: str, working_dir: str | None, timeout: int, store_at: Optional[tuple] = None,
+) -> str:
+    """Run a shell command, format stdout/stderr/exit. Executor-thread only.
+
+    `store_at` is `_call_store(ctx)`: where a timed-out command's full output
+    is kept so the agent can read it. None keeps nothing.
+    """
     is_windows = platform.system() == "Windows"
     timeout = min(max(timeout, 5), 300)
+    env = _child_environment()
+    spawn, use_shell = command, True
     if is_windows:
-        command = f"chcp 65001 >nul && {command}"
+        spawn, use_shell = _windows_utf8_command_line(command, env), False
 
     popen_kwargs: dict = {}
     if not is_windows:
@@ -2465,14 +2534,15 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
         # version behind - so they live in `process.py` now and this is one of
         # its two callers.
         run = run_supervised(
-            command,
+            spawn,
             launcher="run_shell",
             timeout=timeout,
             cwd=working_dir,
-            shell=True,
-            env=_child_environment(),
+            shell=use_shell,
+            env=env,
             ceiling_mb=_MEMORY_CEILING_MB,
             popen_kwargs=popen_kwargs,
+            log_as=command,
         )
 
         note = ""
@@ -2489,7 +2559,10 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
                 note += f" - {run.killed}"
             note += f". {CEILING_HINT} if this work genuinely needs more."
         elif run.timed_out:
-            note = f"Error: command timed out after {timeout}s - {run.killed}."
+            note = "\n".join([
+                f"Error: command timed out after {timeout}s - {run.killed}.",
+                *timeout_details(run, tool="run_shell", stored=_store_streams(run, store_at)),
+            ])
 
         parts = []
         if run.stdout:
@@ -2535,7 +2608,7 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
         working_dir = str(ctx.agent_root)
 
     log.info("run_shell: %s (cwd=%s, timeout=%ds)", command, working_dir, min(max(timeout, 5), 300))
-    return _execute_shell_command(command, working_dir, timeout)
+    return _execute_shell_command(command, working_dir, timeout, store_at=_call_store(ctx))
 
 
 def get_tools() -> List[ToolEntry]:
@@ -2548,7 +2621,11 @@ def get_tools() -> List[ToolEntry]:
                     "Execute a shell command and return stdout/stderr. "
                     "Uses cmd.exe on Windows, /bin/sh on Unix. "
                     "Default working directory is the agent sandbox. "
-                    "Max timeout 300s. Output truncated at 50K chars."
+                    "Max timeout 300s. Output truncated at 50K chars. "
+                    "The command runs with no console and no keyboard, so a pager "
+                    "(`| more`, `less`) or a prompt waits until the timeout kills it; "
+                    "after a timeout the result names the captured sizes, the last "
+                    "lines and where the full output is stored for read_file."
                 ),
                 "parameters": {
                     "type": "object",

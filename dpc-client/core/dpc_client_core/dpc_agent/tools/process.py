@@ -20,6 +20,7 @@ import configparser
 import logging
 import os
 import platform
+import re
 import subprocess
 import threading
 import time
@@ -377,6 +378,103 @@ def _drain_after_kill(process: "subprocess.Popen") -> tuple:
         log.warning("draining pid %s after kill failed: %s", process.pid, exc)
         return ("", "")
 
+
+# `subprocess.CREATE_NO_WINDOW` exists only on Windows; the value is spelled
+# here so the Windows branch can be tested by injection on any platform.
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+
+def _command_text(cmd) -> str:
+    return cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd)
+
+
+# ------------------------------------------- what a timeout leaves behind
+#
+# A command killed at its timeout is the one whose output the agent most needs
+# to see the end of: that is where it stopped. Measured 2026-10-24: Ark's
+# `llama-tokenize … | findstr … | more +0` captured 1 151 755 chars of stdout
+# and the agent was shown the first 50 000 — nothing that said `more` was
+# sitting at its prompt waiting for a key.
+
+TAIL_LINES = 20
+TAIL_CHARS = 2000
+
+_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_PAGER_PROMPTS = (
+    re.compile(r"^--\s*More\b.*--\s*$"),           # Windows more: `-- More  --`, `-- More (12%) --`
+    re.compile(r"^--More--(\(\d+%\))?\s*$"),       # util-linux more
+    re.compile(r"^(:|\(END\))\s*$"),               # less
+)
+
+PAGER_HINT = (
+    "The output ends at a pager prompt ({prompt!r}): the command was waiting "
+    "for a key, and {tool} has no keyboard - drop the `| more` (or other "
+    "pager) and {then}."
+)
+
+
+def pager_prompt_at_end(text: Optional[str]) -> Optional[str]:
+    """The pager prompt the text ends at, or None.
+
+    Windows `more` writes its prompt to stdout even when stdout is a pipe,
+    and then waits for a key on the console. A POSIX pager with a pipe for
+    stdout copies instead of paging, so the other two patterns are a belt.
+    """
+    if not text:
+        return None
+    last = _ANSI_CSI.sub("", text.rstrip("\r\n").rsplit("\n", 1)[-1]).strip()
+    if last and any(p.match(last) for p in _PAGER_PROMPTS):
+        return last
+    return None
+
+
+def output_tail(text: str, lines: int = TAIL_LINES, max_chars: int = TAIL_CHARS) -> str:
+    """The last `lines` lines of `text`, never longer than `max_chars`."""
+    tail = "\n".join(text.rstrip("\r\n").split("\n")[-lines:])
+    return tail[-max_chars:]
+
+
+def _lines(text: str) -> int:
+    return text.count("\n") + (0 if text.endswith("\n") else 1) if text else 0
+
+
+def captured_sizes(run: "SupervisedRun") -> str:
+    """One sentence: how much of each stream was captured before the kill."""
+    def one(name: str, text: str) -> str:
+        if not text:
+            return f"{name} empty"
+        return f"{name} {len(text):,} chars in {_lines(text):,} lines"
+    return f"Captured before the kill: {one('stdout', run.stdout or '')}, {one('stderr', run.stderr or '')}."
+
+
+def timeout_details(
+    run: "SupervisedRun", *, tool: str, stored: Optional[dict] = None,
+) -> list:
+    """What a timed-out run tells the agent after its first sentence.
+
+    The sizes; the pager sentence when the output ends at a pager prompt;
+    where the full captured streams are kept, when the caller stored them
+    (`stored` maps "stdout"/"stderr" to an address read_file resolves); and
+    the last lines of each stream that is longer than its tail.
+    """
+    out = [captured_sizes(run)]
+    prompt = pager_prompt_at_end(run.stdout) or pager_prompt_at_end(run.stderr)
+    if prompt:
+        out.append(PAGER_HINT.format(
+            prompt=prompt, tool=tool,
+            then="read the stored output instead" if stored else "run it again without it",
+        ))
+    if stored:
+        where = ", ".join(f"{name} at {addr}" for name, addr in stored.items())
+        out.append(f"Full captured output: {where} (read_file reads it).")
+    for name in ("stdout", "stderr"):
+        text = getattr(run, name) or ""
+        tail = output_tail(text)
+        if text and len(tail) < len(text.rstrip("\r\n")):
+            out.append(f"[last {tail.count(chr(10)) + 1} lines of {name}]\n{tail}")
+    return out
+
+
 @dataclass
 class SupervisedRun:
     """What happened, in the terms a caller has to report to an agent."""
@@ -406,6 +504,7 @@ def run_supervised(
     env: Optional[dict] = None,
     ceiling_mb: Optional[int] = None,
     popen_kwargs: Optional[dict] = None,
+    log_as: Optional[str] = None,
 ) -> SupervisedRun:
     """Spawn, watch, and never wait unbounded on anything.
 
@@ -417,13 +516,25 @@ def run_supervised(
     `launcher` is not decoration. A spawn that no log names cannot be attributed
     once the process is gone, which is exactly the position this machine was in
     on 2026-08-26, so every process started here announces who asked for it.
+    `log_as` is the command the log names when `cmd` is a wrapper around it.
     """
     ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
     if ceiling is None:
         ceiling = _read_memory_ceiling()
     kwargs = dict(popen_kwargs or {})
-    if platform.system() != "Windows":
+    if platform.system() == "Windows":
+        # A hidden console of its own, not the service's. A closed stdin is not
+        # enough: `more` at its `-- More --` prompt opens CONIN$ itself, turns
+        # PROCESSED|LINE|ECHO off to read a key, and when the timeout tree-kills
+        # it the console it shared stays raw — on 2026-10-22 and 2026-10-24 that
+        # was the service's, and Ctrl+C stopped reaching the backend. A caller's
+        # own creationflags are kept as given.
+        kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+    else:
         # A session of its own, so one killpg reaches the whole descendant set.
+        # It is also why a pager cannot reach the operator's terminal here: a
+        # new session has no controlling terminal, so opening /dev/tty fails
+        # (ENXIO), and a pager whose stdout is a pipe pages nothing anyway.
         kwargs.setdefault("start_new_session", True)
 
     process = subprocess.Popen(
@@ -443,8 +554,7 @@ def run_supervised(
     )
     log.info(
         "spawned pid %s for %s (timeout %ss, ceiling %s MB): %.120s",
-        process.pid, launcher, timeout, ceiling or "off",
-        cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd),
+        process.pid, launcher, timeout, ceiling or "off", log_as or _command_text(cmd),
     )
 
     verdict: dict = {}
@@ -468,6 +578,18 @@ def run_supervised(
         run.killed = _kill_process_tree(process)
         run.stdout, run.stderr = _drain_after_kill(process)
         run.returncode = process.returncode
+        # The ceiling kill always said so here; the timeout kill did not, and
+        # three agent commands that left the console raw were visible only in
+        # the agents' tools.jsonl.
+        prompt = pager_prompt_at_end(run.stdout) or pager_prompt_at_end(run.stderr)
+        log.warning(
+            "the command tree of pid %s for %s ran past its %ss timeout - %s; "
+            "%d chars of stdout and %d of stderr captured%s: %.200s",
+            process.pid, launcher, timeout, run.killed,
+            len(run.stdout or ""), len(run.stderr or ""),
+            f"; the output ends at a pager prompt {prompt!r}" if prompt else "",
+            (log_as or _command_text(cmd)).replace("\r", " ").replace("\n", " "),
+        )
     if watch_thread is not None:
         # communicate() can return before the watcher has written its verdict.
         # A watcher mid-kill finishes it (it is past its sleep); one asleep is

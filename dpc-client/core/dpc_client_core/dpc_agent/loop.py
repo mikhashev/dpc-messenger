@@ -422,6 +422,22 @@ def _store_tool_output(
     return _store_turn_text(agent_root, turn_id, f"r{round_idx}-{position}.txt", output)
 
 
+def store_beside_call(
+    agent_root: pathlib.Path, turn_id: Optional[str], call_name: Optional[str],
+    suffix: str, text: str,
+) -> Optional[str]:
+    """Keep a text a tool did not return beside that call's own result file.
+
+    `call_name` is the `r<round>-<position>` the loop put on the ToolContext,
+    so `suffix="stdout"` lands at `<turn>/r3-0.stdout.txt` next to `r3-0.txt`,
+    under the same retention. None when the call has no address (run outside
+    a loop) or the write failed.
+    """
+    if not turn_id or not call_name:
+        return None
+    return _store_turn_text(agent_root, turn_id, f"{call_name}.{suffix}.txt", text)
+
+
 def _store_turn_text(
     agent_root: pathlib.Path, turn_id: str, name: str, text: str,
 ) -> Optional[str]:
@@ -1445,6 +1461,11 @@ async def run_llm_loop(
                 _args_msg = ""
             emit_progress(_args_msg or f"Executing {tool_name}...", tool_name, round_idx)
             timeout = tools.get_timeout(tc["function"]["name"])
+            if _loop_ctx is not None:
+                # The address _store_tool_output gives this call, for a tool that
+                # keeps more than it returns (store_beside_call).
+                _loop_ctx.tool_output_turn = turn_id
+                _loop_ctx.tool_output_name = f"r{round_idx}-{position}"
             exec_result = await _execute_with_timeout(
                 tools, tc, logs_dir, timeout, task_id,
                 round_number=round_idx,
