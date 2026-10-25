@@ -91,8 +91,11 @@ class FileCompleteHandler(MessageHandler):
 
             # Add image-specific fields
             if is_image:
-                # Only include file_path if file still exists (not deleted by privacy settings)
-                if transfer.file_path and transfer.file_path.exists():
+                # No file_path for a screenshot that is not kept: its delete may
+                # still be waiting for the upload to close the file, and a record
+                # pointing at it would outlive it. The thumbnail is the preview.
+                if (transfer.save_to_disk is not False
+                        and transfer.file_path and transfer.file_path.exists()):
                     attachment["file_path"] = str(transfer.file_path)
                 if transfer.image_metadata:
                     attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})

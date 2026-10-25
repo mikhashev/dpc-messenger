@@ -184,6 +184,17 @@ def group_file_ui_key(group_id: str, filename: str) -> str:
     return f"group_file_ui:{group_id}:{filename}"
 
 
+def saves_screenshots_to_disk(firewall) -> bool:
+    """The owner's `image_transfer.save_screenshots_to_disk`; true when unset.
+
+    Off, a screenshot is kept on neither side: the receiver never writes it and
+    the sender deletes its copy once no upload needs it. The chat then shows the
+    thumbnail the record carries, so no record may point at the deleted file.
+    """
+    rules = getattr(firewall, "rules", None) or {}
+    return bool(rules.get("image_transfer", {}).get("save_screenshots_to_disk", True))
+
+
 @dataclass
 class FileTransfer:
     """
@@ -237,11 +248,13 @@ class FileTransfer:
     # answers "allow files from X?"; a decline meanwhile tells the sender why.
     awaiting_permission: bool = False
 
-    # Receive side only. Decided at the first chunk: where the file goes and
-    # whether it goes to disk at all (a screenshot with save_screenshots_to_disk
-    # off is verified chunk by chunk and never written).
-    destination: Optional[Path] = None
+    # Whether the file stays on disk. A download decides it at the first chunk
+    # (a screenshot with save_screenshots_to_disk off is verified chunk by chunk
+    # and never written); an upload at the offer (False: the sender's copy is
+    # deleted once no upload of it needs it).
     save_to_disk: Optional[bool] = None
+    # Receive side only. Decided at the first chunk: where the file goes.
+    destination: Optional[Path] = None
     receive_path: Optional[Path] = None  # the temporary file, renamed to `destination` at the end
     receive_file: Any = field(default=None, repr=False, compare=False)  # open handle on receive_path
     quiet_since: float = 0.0             # monotonic time of the last chunk or re-ask
@@ -358,7 +371,10 @@ class FileTransferManager:
         self.service = service
 
         # Active transfers: transfer_id -> FileTransfer
-        self.active_transfers: Dict[str, FileTransfer] = _TransferTable(self._release_receive)
+        self.active_transfers: Dict[str, FileTransfer] = _TransferTable(self._release_transfer)
+        # Files an upload is reading or a fan-out is about to offer: path -> holders.
+        # A screenshot that is not kept is deleted only when nothing holds it.
+        self._files_in_use: Dict[Path, int] = {}
 
         # Configuration (from settings)
         self.chunk_size = int(settings.get("file_transfer", "chunk_size", "65536"))  # 64KB
@@ -637,6 +653,7 @@ class FileTransferManager:
             voice_metadata=voice_metadata,  # Store voice metadata for voice messages (v0.13.0+)
             group_id=group_id              # Group ID for group file transfers (v0.19.0+)
         )
+        transfer.save_to_disk = self._saves_to_disk(transfer)
         self.active_transfers[transfer_id] = transfer
 
         # Send FILE_OFFER (with optional image_metadata for v0.12.0+ or voice_metadata for v0.13.0+)
@@ -697,9 +714,11 @@ class FileTransferManager:
                 "total_chunks": transfer.total_chunks
             })
 
-        # Send chunks
+        # Send chunks. The file is held until it is closed: on Windows a
+        # FILE_COMPLETE that arrives during the last chunk's pause could not
+        # delete it, and the error took the sender's own message with it.
         try:
-            with open(transfer.file_path, 'rb') as f:
+            with self.using_file(transfer.file_path), open(transfer.file_path, 'rb') as f:
                 for chunk_index in range(transfer.total_chunks):
                     # Read chunk
                     chunk_data = f.read(self.chunk_size)
@@ -741,13 +760,85 @@ class FileTransferManager:
             logger.error(f"Error sending chunks: {e}", exc_info=True)
             transfer.status = TransferStatus.FAILED
             await self._send_file_cancel(node_id, transfer_id, "send_error")
+        finally:
+            # A completion that came while the file was open left the delete to us
+            self._release_upload(transfer)
+
+    # --- what stays on disk ------------------------------------------------
+
+    @staticmethod
+    def _is_screenshot(transfer: FileTransfer) -> bool:
+        return bool(transfer.mime_type and transfer.mime_type.startswith("image/")
+                    and transfer.image_metadata is not None)
+
+    def _saves_to_disk(self, transfer: FileTransfer) -> bool:
+        """False for a screenshot when the owner turned save_screenshots_to_disk off."""
+        if not self._is_screenshot(transfer) or not self.firewall:
+            return True
+        return saves_screenshots_to_disk(self.firewall)
+
+    class _FileHold:
+        def __init__(self, manager: "FileTransferManager", path: Optional[Path]):
+            self.manager, self.path = manager, path
+
+        def __enter__(self):
+            if self.path is not None:
+                held = self.manager._files_in_use
+                held[self.path] = held.get(self.path, 0) + 1
+            return self
+
+        def __exit__(self, *exc):
+            if self.path is not None:
+                held = self.manager._files_in_use
+                left = held.get(self.path, 1) - 1
+                if left > 0:
+                    held[self.path] = left
+                else:
+                    held.pop(self.path, None)
+            return False
+
+    def using_file(self, path: Optional[Path]) -> "FileTransferManager._FileHold":
+        """Hold `path` so an unsaved screenshot is not deleted under a reader."""
+        return self._FileHold(self, path)
+
+    def delete_unsaved_screenshot(self, path: Optional[Path]) -> bool:
+        """Delete a screenshot that is not kept, once no upload of it needs it.
+
+        Called by whichever user of the file finishes last: a transfer leaving
+        `active_transfers`, the chunk loop closing it, a fan-out that offered
+        it to nobody. Returns True when the file is gone.
+        """
+        if path is None:
+            return False
+        if self._files_in_use.get(path):
+            return False
+        if any(t.direction == "upload" and t.file_path == path
+               for t in list(self.active_transfers.values())):
+            return False
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Could not delete unsaved screenshot %s: %s", path, e)
+            return False
+        logger.info(f"Deleted screenshot after upload (save_screenshots_to_disk=false): {path}")
+        return True
+
+    def _release_upload(self, transfer: Optional[FileTransfer]) -> None:
+        if transfer is None or getattr(transfer, "direction", None) != "upload":
+            return
+        if transfer.save_to_disk is False:
+            self.delete_unsaved_screenshot(transfer.file_path)
+
+    def _release_transfer(self, transfer: Optional[FileTransfer]) -> None:
+        """Whatever a transfer leaving `active_transfers` held, by direction."""
+        self._release_receive(transfer)
+        self._release_upload(transfer)
 
     # --- receiving ---------------------------------------------------------
 
     def _incoming_destination(self, node_id: str, transfer: FileTransfer) -> Tuple[Path, bool]:
         """Where a download lands, and whether it is written to disk at all."""
-        is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
-                    and transfer.image_metadata is not None)
+        is_image = self._is_screenshot(transfer)
         subdir = "files/screenshots" if is_image else "files"
 
         if transfer.group_id:
@@ -762,11 +853,7 @@ class FileTransferManager:
 
         file_path = storage_path / self._safe_incoming_name(transfer.filename)
 
-        save_to_disk = True
-        if is_image and self.firewall:
-            img_rules = self.firewall.rules.get("image_transfer", {})
-            save_to_disk = img_rules.get("save_screenshots_to_disk", True)
-        return file_path, save_to_disk
+        return file_path, self._saves_to_disk(transfer)
 
     @staticmethod
     def _receive_path_for(file_path: Path, transfer_id: str) -> Path:
@@ -1299,26 +1386,12 @@ class FileTransferManager:
         transfer.status = TransferStatus.COMPLETED
         logger.info(f"File transfer completed: {transfer.filename}")
 
-        # Detect if this is an image transfer
-        is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
-                   and transfer.image_metadata is not None)
-
-        # Check privacy settings - delete screenshot if save_screenshots_to_disk is false
-        if is_image and transfer.file_path and self.firewall:
-            img_rules = self.firewall.rules.get("image_transfer", {})
-            save_to_disk = img_rules.get("save_screenshots_to_disk", True)
-            logger.debug(f"Screenshot cleanup check: save_to_disk={save_to_disk}, file_exists={transfer.file_path.exists()}")
-
-            if not save_to_disk and transfer.file_path.exists():
-                transfer.file_path.unlink()  # Delete the screenshot file
-                logger.info(f"Deleted screenshot after upload (save_screenshots_to_disk=false): {transfer.file_path}")
-        elif is_image:
-            logger.debug(f"Screenshot cleanup skipped: file_path={transfer.file_path}, firewall={self.firewall is not None}")
-
         # Note: FileCompleteHandler broadcasts new_p2p_message and file_transfer_complete
         # for upload direction, so we don't duplicate broadcasts here
 
-        # Cleanup
+        # Cleanup. Leaving the table deletes a screenshot that is not kept, when
+        # this was the last upload of it: a group fan-out deleted it on the first
+        # member's completion, and the members still to be sent got nothing.
         del self.active_transfers[transfer_id]  # Remove from active transfers
         logger.debug(f"Cleaned up completed upload transfer: {transfer_id}")
 
@@ -1405,7 +1478,7 @@ class FileTransferManager:
 
         try:
             # Read and send the specific chunk
-            with open(transfer.file_path, 'rb') as f:
+            with self.using_file(transfer.file_path), open(transfer.file_path, 'rb') as f:
                 f.seek(chunk_index * transfer.chunk_size)
                 chunk = f.read(transfer.chunk_size)
 
@@ -1430,6 +1503,8 @@ class FileTransferManager:
 
         except Exception as e:
             logger.error(f"Error resending chunk {chunk_index}: {e}", exc_info=True)
+        finally:
+            self._release_upload(transfer)
 
     async def handle_file_cancel(self, node_id: str, payload: dict):
         """Handle FILE_CANCEL from peer."""

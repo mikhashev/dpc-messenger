@@ -134,7 +134,9 @@ from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
     SkillSearchHandler, SkillsCatalogHandler, SkillRequestHandler,
     SkillDataHandler, SkillOfferHandler,
 )
-from .managers.file_transfer_manager import FileTransferManager, group_file_ui_key
+from .managers.file_transfer_manager import (
+    FileTransferManager, group_file_ui_key, saves_screenshots_to_disk,
+)
 from .voice_service import VoiceService
 from .knowledge_service import KnowledgeService
 from .telegram_service import TelegramService
@@ -7275,13 +7277,18 @@ class CoreService:
             attachment = {
                 "type": "image",
                 "filename": filename,
-                "file_path": str(file_path),
                 "mime_type": mime_type,
                 "size_bytes": len(image_data),
                 "thumbnail": thumbnail_base64,
                 "dimensions": {"width": width, "height": height},
                 "status": "completed",
             }
+            # With save_screenshots_to_disk off the file lives only until the
+            # fan-out is done, so the record keeps the thumbnail and no path:
+            # a path here outlived the file it named.
+            keeps_file = saves_screenshots_to_disk(self.firewall)
+            if keeps_file:
+                attachment["file_path"] = str(file_path)
             image_msg_id = hashlib.sha256(
                 f"{self.p2p_manager.node_id}:group-image-send:{group_id}:{filename}".encode()
             ).hexdigest()[:16]
@@ -7321,26 +7328,32 @@ class CoreService:
             transfer_ids = []
             fingerprint = None  # hashed once for the whole fan-out
 
-            for node_id in group.members:
-                if node_id == self.p2p_manager.node_id:
-                    continue
-                if node_id not in connected_peers:
-                    continue
+            # Held for the whole fan-out: a member that completes while the next
+            # is being offered must not delete a file that is not kept yet.
+            with self.file_transfer_manager.using_file(file_path):
+                for node_id in group.members:
+                    if node_id == self.p2p_manager.node_id:
+                        continue
+                    if node_id not in connected_peers:
+                        continue
 
-                try:
-                    if fingerprint is None:
-                        fingerprint = await self.file_transfer_manager.compute_file_fingerprint(file_path)
-                    tid = await self.file_transfer_manager.send_file(
-                        node_id=node_id,
-                        file_path=file_path,
-                        image_metadata=image_metadata,
-                        group_id=group_id,
-                        file_hash=fingerprint[0],
-                        chunk_hashes=fingerprint[1]
-                    )
-                    transfer_ids.append(tid)
-                except Exception as e:
-                    logger.warning("Failed to send group image to %s: %s", node_id[:20], e)
+                    try:
+                        if fingerprint is None:
+                            fingerprint = await self.file_transfer_manager.compute_file_fingerprint(file_path)
+                        tid = await self.file_transfer_manager.send_file(
+                            node_id=node_id,
+                            file_path=file_path,
+                            image_metadata=image_metadata,
+                            group_id=group_id,
+                            file_hash=fingerprint[0],
+                            chunk_hashes=fingerprint[1]
+                        )
+                        transfer_ids.append(tid)
+                    except Exception as e:
+                        logger.warning("Failed to send group image to %s: %s", node_id[:20], e)
+            if not keeps_file:
+                # No member was online, or every upload already finished
+                self.file_transfer_manager.delete_unsaved_screenshot(file_path)
 
             # Route the message text into the group agents so they can act on it.
             # @mentions in the caption decide which agents respond, exactly as with
