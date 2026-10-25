@@ -27,9 +27,9 @@ measured both from git and found the number had no source.
 
 | axis | decisions | board entries | awaiting observation |
 |---|---|---|---|
-| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted | 204 | 58 |
+| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted | 205 | 58 |
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 proposed | 194 | 34 |
-| **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 proposed | 284 | 70 |
+| **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 proposed | 283 | 70 |
 | **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 229 | 50 |
 | **reach** | ADR-035 accepted · ADR-043 proposed | 40 | 8 |
 
