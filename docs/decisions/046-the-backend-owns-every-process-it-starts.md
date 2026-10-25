@@ -337,12 +337,14 @@ each one ends.** Eight points.
 
 Compliance, not progress. Every item is a test or a recorded measurement.
 
-- [ ] **Job survives nothing.** On Windows: start the backend's job setup in a child
+- [x] **Job survives nothing.** On Windows: start the backend's job setup in a child
   interpreter, spawn a grandchild through `run_supervised`, `TerminateProcess` the
   interpreter, assert the grandchild is gone. The same for a grandchild started by a
-  `cmd /c` in the first milliseconds.
-- [ ] **Nesting.** The Strata launcher (mock engine) under the backend's job: kill the
-  backend, assert the launcher and its engine are gone.
+  `cmd /c` in the first milliseconds. (2026-10-25, with a control that survives without
+  the job.)
+- [x] **Nesting.** The Strata launcher (mock engine) under the backend's job: kill the
+  backend, assert the launcher and its engine are gone. (2026-10-25, the real
+  `serve.server --engine mock` and `winjob.contain()`.)
 - [ ] **Failure is survivable.** With job creation forced to fail, the backend starts,
   logs the WARNING, and the sweep still reaps a recorded orphan.
 - [ ] **Sweep, with pid reuse.** An entry whose pid is alive with a different start time
@@ -358,8 +360,8 @@ Compliance, not progress. Every item is a test or a recorded measurement.
   test enumerates the code paths.
 - [ ] **Shutdown order** holds on a fake clock: spawns refused, then commands killed, then
   engines through their supervisors, then the verify step and one line per process.
-- [ ] **Camoufox and Playwright** launch, browse and close under the job without a
-  breakaway error (Windows, once, by hand, recorded).
+- [x] **Camoufox and Playwright** launch, browse and close under the job without a
+  breakaway error (Windows, 2026-10-25, the opt-in test with `DPC_JOB_CHECKS=1`).
 
 ## Scope
 
@@ -412,7 +414,7 @@ the table rests on `rg` and the reading, not on the graph. Not counted: `webbrow
 | Task | Status | Commit |
 |------|--------|--------|
 | This record and the amendments to ADR-040, ADR-044, ADR-036 | Written 2026-10-25 | — |
-| Job in `run_service.py`, with its tests | Pending | — |
+| Job in `run_service.py`, with its tests (`job_object.py`); the Hub login opens its URL through `explorer.exe`, outside the job | Done 2026-10-25 | the commit that adds `job_object.py` |
 | Registry, contextvar, exit reasons, sampler, persistence | Pending | — |
 | Spawn sites to the module; structural test | Pending | — |
 | Startup sweep | Pending | — |
@@ -429,14 +431,22 @@ the table rests on `rg` and the reading, not on the graph. Not counted: `webbrow
   is a new word. Mike.
 - **Q2 — what `crashed` means,** as defined in point 4. Ark proposed the word without a
   definition. Ark, Mike.
-- **Q3 — the browser the OAuth login opens.** `hub_client` opens the user's default
-  browser with `webbrowser.open`. If that browser starts as a descendant of the backend it
-  would be in the job and die with it, which is wrong for a program the user runs. Not
-  checked. Test: with the browser closed, open the login URL, close the job, see whether
-  the browser survives. If it does not, that one launch needs `BREAKAWAY_OK` or a
-  launch through the shell. CC.
-- **Q4 — Camoufox and Playwright under a job with no breakaway.** Firefox-family
-  browsers use job objects and may ask for breakaway. Not checked; see Confirmation. CC.
+- **Q3 — the browser the OAuth login opens. Answered for that launch, 2026-10-25.** A
+  classic Win32 program started through ShellExecute from a member of the job is in the
+  job (measured with `ping.exe` and a `.vbs` run by `wscript.exe`: `IsProcessInJob` True,
+  parent the backend's interpreter), so a browser the login starts while none is running
+  would die with the backend. Started through `explorer.exe <target>`, the same `.vbs`
+  landed outside the job in three runs out of three (parent an `explorer.exe` of the
+  shell). `hub_client` now opens the login URL with `job_object.open_url_outside_the_job`,
+  which takes that road when the job is in place on Windows and falls back to
+  `webbrowser.open` otherwise. Not measured with Chrome itself (no real browser was
+  opened), and a machine with no running shell would start the target inside the job. A
+  browser an agent's own command opens (`start <url>`) is in the job and ends with the
+  backend, as point 8's consequence says.
+- **Q4 — Camoufox and Playwright under a job with no breakaway. Answered, 2026-10-25.**
+  The browser tool's headless launch, a page and a close ran from inside the job with no
+  breakaway error; the node driver and all seven `camoufox.exe` were members of the job,
+  and nothing was left after the close.
 - **Q5 — the detail view: current work only, or the last ten runs.** Asked of Mike on
   2026-10-25, no answer in the thread. Belongs to the UI card.
 - **Q6 — a human kill from the UI,** and its exit reason. Not decided.

@@ -259,6 +259,7 @@ from dpc_client_core.dpc_agent.loop import shutdown_shared_executor
 from dpc_client_core.__version__ import __version__
 from dpc_client_core import ai_chats, single_instance
 from dpc_client_core.console_guard import start_console_guard
+from dpc_client_core.job_object import enter_kill_on_close_job
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +453,12 @@ async def main():
     """Main entrypoint to start and run the Core Service."""
     args = _parse_args()
 
+    # First, before dependency_setup (it spawns nvidia-smi) and before anything
+    # else can: every process this one starts from here on is born inside the
+    # job and ends with the backend, however the backend ends (ADR-046, point 1).
+    # Logging does not exist yet, so the outcome is written right after it does.
+    job_outcome = enter_kill_on_close_job()
+
     # GPU status check (ADR-012)
     dependency_setup()
 
@@ -459,6 +466,7 @@ async def main():
 
     # Setup logging infrastructure before service starts
     setup_logging(service.settings)
+    job_outcome.log()
 
     # Right after logging, so its lines reach the file: a console left in raw
     # mode by a killed child swallows Ctrl+C, and the guard puts it back.

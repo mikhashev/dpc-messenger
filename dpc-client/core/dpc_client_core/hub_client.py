@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 import threading
@@ -17,6 +16,7 @@ import httpx
 import websockets
 import certifi
 
+from .job_object import open_url_outside_the_job
 from .token_cache import TokenCache
 from typing import Optional
 
@@ -254,7 +254,7 @@ class HubClient:
                    self.oauth_callback_host, self.oauth_callback_port)
         login_url = f"{self.api_base_url}/login/{provider}"
         logger.info("Opening browser for %s authentication: %s", provider.upper(), login_url)
-        webbrowser.open(login_url)
+        open_url_outside_the_job(login_url)
 
         try:
             tokens = await asyncio.wait_for(token_future, timeout=180)  # 3 minute timeout
