@@ -4,7 +4,7 @@
 <script lang="ts">
   import Toast from './Toast.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
-  import { offerQuestion, senderLabel } from '$lib/fileTransferPermission';
+  import { alwaysAllowLabel, alwaysAllowLimits, offerQuestion, senderLabel } from '$lib/fileTransferPermission';
 
   // Props (Svelte 5 runes mode)
   let {
@@ -26,6 +26,8 @@
     // File offer dialog state
     showFileOfferDialog = false,
     currentFileOffer = null,
+    firewallRules = null,
+    nameOf,
     onAcceptFile,
     onRejectFile,
 
@@ -62,6 +64,8 @@
     canSendAudio?: boolean;
     showFileOfferDialog?: boolean;
     currentFileOffer?: any;
+    firewallRules?: any;
+    nameOf?: (nodeId: string) => string | undefined;
     onAcceptFile: (remember?: boolean) => void;
     onRejectFile: () => void;
     showSendFileDialog?: boolean;
@@ -89,7 +93,8 @@
 
   // "Always allow files from this peer" on an asked offer; a new offer starts unchecked
   let rememberSender = $state(false);
-  const question = $derived(currentFileOffer ? offerQuestion(currentFileOffer) : null);
+  const question = $derived(currentFileOffer ? offerQuestion(currentFileOffer, nameOf) : null);
+  const rememberText = $derived(currentFileOffer ? alwaysAllowLabel(currentFileOffer, alwaysAllowLimits(firewallRules)) : '');
   $effect(() => {
     void currentFileOffer?.transfer_id;
     rememberSender = false;
@@ -303,7 +308,7 @@
       {#if question}
         <label class="remember-sender">
           <input type="checkbox" bind:checked={rememberSender} />
-          Always allow files from this peer (adds it to Firewall &gt; File Transfer, where it can be revoked)
+          {rememberText}
         </label>
       {/if}
       <div class="modal-buttons">

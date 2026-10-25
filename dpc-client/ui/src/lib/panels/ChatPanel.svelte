@@ -6,7 +6,7 @@
   import type { Writable } from 'svelte/store';
   import { get } from 'svelte/store';
   import FileTransferUI from '$lib/components/FileTransferUI.svelte';
-  import { cancelReasonText, refusalNotice, notOfferedNotice } from '$lib/fileTransferNotice';
+  import { cancelNotice, refusalNotice, unansweredNotice, notOfferedNotice } from '$lib/fileTransferNotice';
   import VoiceRecorder from '$lib/components/VoiceRecorder.svelte';
   import TokenWarningBanner from '$lib/components/TokenWarningBanner.svelte';
   import ProviderRetryBanner from '$lib/components/ProviderRetryBanner.svelte';
@@ -42,6 +42,7 @@
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
   import { offerOpensDialog, offerQuestion } from '$lib/fileTransferPermission';
+  import { untrack } from 'svelte';
   import { confirmAsync } from '$lib/utils/dialog';
   import { appendToChatDraft, switchChatDraft } from '$lib/utils/chatDraftInputs';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
@@ -171,6 +172,7 @@
   // File offer (incoming from peer)
   let showFileOfferDialog = $state(false);
   let currentFileOffer = $state<any>(null);
+  let fileOfferRules = $state<any>(null);
   let showFileOfferToast = $state(false);
   let fileOfferToastMessage = $state('');
 
@@ -285,14 +287,25 @@
       }
       currentFileOffer = $fileTransferOffer;
       showFileOfferDialog = true;
+      if ($fileTransferOffer.awaiting_permission) loadFileOfferRules();
       (async () => {
         await showNotificationIfBackground({
-          title: offerQuestion($fileTransferOffer)?.title ?? `File from ${sender_name || node_id.slice(0, 16)}`,
+          title: offerQuestion($fileTransferOffer, (id) => peerDisplayNames.get(id))?.title ?? `File from ${sender_name || node_id.slice(0, 16)}`,
           body: `${filename} (${(size_bytes / 1048576).toFixed(2)} MB)`,
         });
       })();
     }
   });
+
+  // The rules "Always allow" copies its limits from, read when a question opens; the box falls back to the default
+  async function loadFileOfferRules() {
+    try {
+      const result = await sendCommand('get_firewall_rules', {});
+      fileOfferRules = result?.status === 'success' ? result.rules : null;
+    } catch {
+      fileOfferRules = null;
+    }
+  }
 
   // File transfer complete toast
   $effect(() => {
@@ -329,24 +342,31 @@
   $effect(() => {
     if ($fileTransferCancelled) {
       const cancelled = $fileTransferCancelled;
-      const { filename } = cancelled;
-      const reason = cancelReasonText(cancelled);
-      fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
+      const nameOf = (id: string) => peerDisplayNames.get(id);
+      const notice = cancelNotice(cancelled, nameOf);
+      fileOfferToastMessage = notice.toast;
       showFileOfferToast = true;
       setTimeout(() => (showFileOfferToast = false), 5000);
       (async () => {
-        await showNotificationIfBackground({ title: 'Transfer Cancelled', body: `${filename} (${reason})` });
+        await showNotificationIfBackground({ title: notice.title, body: notice.body });
       })();
+      // An offer that lapsed (or was withdrawn) closes its dialog; untracked, so the toast is not re-raised when a dialog opens
+      untrack(() => {
+        if (currentFileOffer && currentFileOffer.transfer_id === cancelled.transfer_id) {
+          showFileOfferDialog = false;
+          currentFileOffer = null;
+        }
+      });
       // The toast is gone in 5 s; the receiver's sentence stays in the chat. Guarded by
       // transfer id because the effect also re-runs when a prop it reads changes.
       if (cancelled.transfer_id !== lastRefusalNoticeId) {
-        const notice = refusalNotice(cancelled, (id) => peerDisplayNames.get(id));
-        if (notice) {
+        const line = refusalNotice(cancelled, nameOf) ?? unansweredNotice(cancelled, nameOf);
+        if (line) {
           lastRefusalNoticeId = cancelled.transfer_id;
           chatHistories.update(h => {
             const m = new Map(h);
-            const hist = m.get(notice.chatId) || [];
-            m.set(notice.chatId, [...hist, { id: crypto.randomUUID(), sender: 'system', text: notice.text, timestamp: Date.now() }]);
+            const hist = m.get(line.chatId) || [];
+            m.set(line.chatId, [...hist, { id: crypto.randomUUID(), sender: 'system', text: line.text, timestamp: Date.now() }]);
             return m;
           });
         }
@@ -1167,6 +1187,8 @@
     canSendAudio={voiceAudioSinkExists(activeChatId)}
     showFileOfferDialog={showFileOfferDialog}
     currentFileOffer={currentFileOffer}
+    firewallRules={fileOfferRules}
+    nameOf={(id) => peerDisplayNames.get(id)}
     onAcceptFile={handleAcceptFile}
     onRejectFile={handleRejectFile}
     showSendFileDialog={showSendFileDialog}

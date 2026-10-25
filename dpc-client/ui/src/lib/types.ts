@@ -344,6 +344,7 @@ export interface FileTransferOfferEvent {
     group_id?: string;             // Present for group file transfers
     voice_metadata?: MessageAttachment['voice_metadata'];
     awaiting_permission?: boolean; // No rule names the sender: the dialog asks "allow files from X?"
+    sender_node_id?: string;       // A group file's author as the offer claims it (unsigned); node_id is the hop
     kind?: 'file' | 'image' | 'voice';  // Sent with awaiting_permission
 }
 

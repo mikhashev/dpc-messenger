@@ -33,6 +33,9 @@ class FileCancelHandler(MessageHandler):
         - timeout: Transfer timed out
         - send_error: Error occurred during sending
         - already_received: the peer already has this group file; not shown
+        - no_answer: the offer expired unanswered (the receiver's person did not
+          answer in time, or the sender released it); the UI words it as such,
+          not as a failure
 
         Flow:
         1. Mark transfer as cancelled

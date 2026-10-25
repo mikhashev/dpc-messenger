@@ -27,6 +27,56 @@ export function cancelReasonText(event: TransferCancelledEvent): string {
     return detail ? `${event.reason}: ${detail}` : event.reason;
 }
 
+/** FILE_CANCEL `reason` of an offer that expired unanswered: not a refusal, not a failure. */
+export const NO_ANSWER_REASON = 'no_answer';
+
+function fileOf(event: TransferCancelledEvent): string {
+    return event.filename && event.filename !== 'unknown' ? event.filename : 'the file';
+}
+
+function whoOf(event: TransferCancelledEvent, nameOf: (nodeId: string) => string | undefined): string {
+    return (event.node_id && nameOf(event.node_id)) || event.node_id || 'the peer';
+}
+
+/**
+ * The toast and the desktop notification for a cancelled transfer. An offer that
+ * expired unanswered is worded as information (the sender is told the receiver
+ * did not answer, the receiver that the offer lapsed), anything else as before.
+ */
+export function cancelNotice(
+    event: TransferCancelledEvent,
+    nameOf: (nodeId: string) => string | undefined,
+): { title: string; body: string; toast: string } {
+    const file = fileOf(event);
+    if (event.reason === NO_ANSWER_REASON) {
+        const who = whoOf(event, nameOf);
+        const body = event.direction === 'upload'
+            ? `${who} did not answer: ${file} was not sent`
+            : `You did not answer in time: the offer of ${file} from ${who} lapsed`;
+        return { title: 'File offer unanswered', body, toast: `ℹ ${body}` };
+    }
+    const body = `${event.filename} (${cancelReasonText(event)})`;
+    return { title: 'Transfer Cancelled', body, toast: `✗ Transfer cancelled: ${body}` };
+}
+
+/** The chat line for an offer that expired unanswered, in the chat of the peer or the group. */
+export function unansweredNotice(
+    event: TransferCancelledEvent,
+    nameOf: (nodeId: string) => string | undefined,
+): { chatId: string; text: string } | null {
+    if (event.reason !== NO_ANSWER_REASON) return null;
+    const chatId = event.group_id || event.node_id;
+    if (!chatId) return null;
+    const who = whoOf(event, nameOf);
+    const file = fileOf(event);
+    return {
+        chatId,
+        text: event.direction === 'upload'
+            ? `Not sent: ${who} did not answer for ${file}`
+            : `Offer lapsed: you did not answer in time for ${file} from ${who}`,
+    };
+}
+
 /**
  * The chat line for a refusal of an upload, or null when there is nothing to add:
  * only an upload the peer refused with a stated reason gets a line (a local

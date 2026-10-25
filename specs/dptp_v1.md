@@ -1312,6 +1312,17 @@ when it arrives. A relaying member adds no record of its own when its relay comp
 
 **UI Behavior:** Opens accept/reject dialog showing filename, size, sender, and hash for user approval
 
+**Deadline.** An offer that waits for a person — the question "allow files from X?" put
+for a sender no rule decides for, and the accept button of an ordinary file alike —
+is held for 120 s (`OFFER_ANSWER_DEADLINE_S`). With no answer the receiver refuses it
+with FILE_CANCEL `no_answer` and drops the download. The sender keeps its upload slot
+until the receiver answers and, independently, frees an upload that has had neither
+FILE_ACCEPT nor FILE_CANCEL for 180 s (`UNANSWERED_UPLOAD_RELEASE_S`), so a receiver
+that never sends `no_answer` cannot hold a slot for good; it then sends FILE_CANCEL
+`no_answer` itself, which clears the offer an older receiver may still be showing.
+Neither number is configurable. An offer the receiver accepts on arrival (a voice
+message, a screenshot or a group file from a sender a rule allows) has no deadline.
+
 ---
 
 #### FILE_ACCEPT
@@ -1432,6 +1443,12 @@ Cancels an in-progress or pending file transfer.
   - `user_rejected` - The receiving user declined the offer in its accept dialog,
     including an offer from a peer no rule names that was put to them
     (`ChatPanel.svelte`; see `awaiting_permission` in the glossary)
+  - `no_answer` - The offer expired unanswered; see *Deadline* under FILE_OFFER. The
+    receiver sends it when its user did not answer within 120 s; the sender sends it
+    when it releases an upload that got neither FILE_ACCEPT nor FILE_CANCEL within
+    180 s. Not a refusal and not a failure: the sender frees the upload and tells its
+    user the receiver did not answer, without an error tone. An older peer takes it as
+    any other cancel
   - `already_received` - The receiver already has this group file under the same
     identity (see *Group file relay and its identity* under FILE_OFFER): received,
     receiving, or sent by itself. Not a failure: the sender frees the upload and shows
@@ -2740,6 +2757,14 @@ DPTP is designed to be extensible. New commands can be added by:
   2026-10-25). A relay never goes back to the author. An older peer sends
   neither field and is judged by `group_id` + `hash`. `user_rejected`, sent
   since the accept dialog existed, is now listed.
+- **§3.11 FILE_CANCEL** — reason `no_answer`: an offer that waited for a person
+  and was not answered is refused by the receiver after 120 s, and an upload with
+  neither FILE_ACCEPT nor FILE_CANCEL is freed by the sender after 180 s, which
+  also sends `no_answer` (Mike's call, 2026-10-25). An older peer takes it as any
+  other cancel; an older receiver never sends it, which is what the sender's 180 s
+  is for. The receiver's default for a sender on a proved (direct TLS) connection
+  that no rule names is now to ask its user, as for any stranger: a proved key says
+  the peer holds the key of its node id, not that the user knows it. No wire change.
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — `provider_unavailable` no longer
   covers the host owner's parked conversations: a Strata host sends a peer's
   call with checkpointing off, so the call parks nothing and is served beside

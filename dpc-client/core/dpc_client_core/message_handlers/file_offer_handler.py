@@ -180,6 +180,10 @@ class FileOfferHandler(MessageHandler):
             }
             if group_id:
                 event_data["group_id"] = group_id
+                if author_node_id:
+                    # The author as the offer claims it (unsigned). `node_id` is
+                    # the hop, the node the dialog's answer is about.
+                    event_data["sender_node_id"] = author_node_id
             await self.service.local_api.broadcast_event("file_transfer_offered", event_data)
         elif is_image:
             # Image offer: include thumbnail and dimensions
@@ -264,6 +268,8 @@ class FileOfferHandler(MessageHandler):
         )
         file_transfer_manager.active_transfers[transfer_id] = transfer
 
+        # Every offer that is left waiting for a person below (the question, or the
+        # accept button of an ordinary file) has a deadline: see begin_waiting_for_answer.
         # Auto-accept voice messages, images, and group files (v0.19.1+) - these are
         # automatically accepted without showing a dialog, similar to how text messages work.
         # Voice messages: Typically small (< 10MB), personal communication
@@ -288,8 +294,10 @@ class FileOfferHandler(MessageHandler):
             self.logger.info(f"{transfer_type} transfer auto-accepted: {transfer_id}")
         elif awaiting_permission:
             self.logger.info(f"Transfer from {sender_node_id} waits for the user's permission: {transfer_id}")
+            file_transfer_manager.begin_waiting_for_answer(transfer_id)
         else:
             transfer_type = 'File'
             self.logger.info(f"{transfer_type} transfer pending user acceptance: {transfer_id}")
+            file_transfer_manager.begin_waiting_for_answer(transfer_id)
 
         return None

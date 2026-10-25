@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { notOfferedNotice, type GroupSendResult } from './fileTransferNotice';
+import { cancelNotice, notOfferedNotice, unansweredNotice, type GroupSendResult } from './fileTransferNotice';
 
 const SENTENCE = 'Upload limit reached: 3 uploads are open and the limit is 3 ([file_transfer] max_concurrent_transfers in config.ini, read at start). Open now: a.txt to Ann (waiting for an answer). Each stays open until its receiver answers and the transfer ends.';
 const names: Record<string, string> = { 'dpc-node-d': 'Dora' };
@@ -70,5 +70,34 @@ describe('notOfferedNotice', () => {
     it('still warns if an older backend sends the rows without the limit block', () => {
         const notice = notOfferedNotice({ transfer_ids: [], not_offered: [{ node_id: 'dpc-node-d', reason: 'max_concurrent_transfers' }] }, nameOf)!;
         expect(notice.text).toBe('Not offered to 1 of 1 connected members: Dora. Upload limit reached.');
+    });
+});
+
+describe('an offer that expired unanswered', () => {
+    const upload = { transfer_id: 't1', reason: 'no_answer', filename: 'a.zip', node_id: 'dpc-node-d', direction: 'upload' };
+    const download = { ...upload, direction: 'download' };
+
+    it('tells the sender the receiver did not answer, in a neutral tone', () => {
+        const n = cancelNotice(upload, nameOf);
+        expect(n.body).toBe('Dora did not answer: a.zip was not sent');
+        expect(n.toast.startsWith('\u2139 ')).toBe(true);
+        expect(n.toast).not.toContain('cancelled');
+        expect(n.title).toBe('File offer unanswered');
+    });
+
+    it('tells the receiver its offer lapsed', () => {
+        expect(cancelNotice(download, nameOf).body).toBe('You did not answer in time: the offer of a.zip from Dora lapsed');
+    });
+
+    it('puts one line in the chat of the peer, or of the group', () => {
+        expect(unansweredNotice(upload, nameOf)).toEqual({ chatId: 'dpc-node-d', text: 'Not sent: Dora did not answer for a.zip' });
+        expect(unansweredNotice({ ...upload, group_id: 'g' }, nameOf)?.chatId).toBe('g');
+        expect(unansweredNotice(download, nameOf)?.text).toBe('Offer lapsed: you did not answer in time for a.zip from Dora');
+    });
+
+    it('leaves every other reason as a cancellation with its own word', () => {
+        const refused = { ...upload, reason: 'firewall_denied', denial_reason: 'too big' };
+        expect(cancelNotice(refused, nameOf).toast).toBe('\u2717 Transfer cancelled: a.zip (firewall_denied: too big)');
+        expect(unansweredNotice(refused, nameOf)).toBeNull();
     });
 });

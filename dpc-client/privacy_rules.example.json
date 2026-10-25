@@ -125,9 +125,9 @@
   },
 
   "file_transfer": {
-    "_comment": "File Transfer Permissions - Controls who can send/receive files with you. Order: node entry, then the sender's first group with an entry, then proved_connection (a peer on a direct TLS connection), else you are asked on the first offer",
+    "_comment": "File Transfer Permissions - Controls who can send/receive files with you. Order: node entry, then the sender's first group with an entry, then proved_connection (a peer on a direct TLS connection: it proved the key of its node id, which does not mean you know it; allow, ask or deny, ask by default), else you are asked on the first offer",
     "proved_connection": {
-      "file_transfer.allow": "allow",
+      "file_transfer.allow": "ask",
       "file_transfer.max_size_mb": 1000,
       "file_transfer.allowed_mime_types": ["*"]
     },

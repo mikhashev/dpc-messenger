@@ -120,15 +120,29 @@ FREE_GROUPS_KEY = 'free_groups'
 
 # `file_transfer.proved_connection`: the entry that decides for a sender no node
 # or group entry names while this node holds a proved connection with it
-# (`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS) — the two people exchanged
-# an address and a node id. Shaped like a node entry. Mike's call, 2026-10-25.
-# The default stands in when the key is absent, so an older rules file allows too.
+# (`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS). Shaped like a node entry,
+# plus one value a node entry does not take: `file_transfer.allow` = "ask".
+#
+# "Proved" means the peer proved it holds the key of its own node id during the
+# TLS handshake. It does not mean the two people know each other: an inbound
+# direct connection is accepted from any DPC node that can reach the port, and
+# where a DHT is configured it hands a node's address to anyone who asks for its
+# node id. So the default is "ask":
+# the first file from a sender no entry names is put to the user, a proved
+# connection included, and "Always allow" there writes a node entry. "allow"
+# here means every directly connected peer may send within the limits below
+# without a question; the owner opts in. The limits are not applied while the
+# value is "ask" (the user sees the file) — they are what "Always allow" copies
+# into the node entry it writes. Mike's call, 2026-10-25.
+# The default stands in when the key is absent, so an older rules file asks too.
 FILE_TRANSFER_PROVED_CONNECTION_KEY = 'proved_connection'
 FILE_TRANSFER_PROVED_CONNECTION_DEFAULT = {
-    "file_transfer.allow": "allow",
+    "file_transfer.allow": "ask",
     "file_transfer.max_size_mb": 1000,
     "file_transfer.allowed_mime_types": ["*"],
 }
+# The values `file_transfer.proved_connection.file_transfer.allow` takes.
+FILE_TRANSFER_PROVED_CONNECTION_ALLOW_VALUES = ('allow', 'ask', 'deny')
 
 # ISO 4217 List One (current currencies and funds) as published by SIX, the
 # standard's maintenance agency: list-one.xml, Pblshd="2026-01-01", 178 codes.
@@ -1762,7 +1776,7 @@ class ContextFirewall:
                     "tools": {}
                 },
                 "file_transfer": {
-                    "_comment": "File transfer permissions (v0.11.0+). Order: node entry, then the sender's first group with an entry, then proved_connection (a peer on a direct TLS connection), else the user is asked.",
+                    "_comment": "File transfer permissions (v0.11.0+). Order: node entry, then the sender's first group with an entry, then proved_connection (a peer on a direct TLS connection, whose key it proved: not an acquaintance; allow, ask or deny, ask by default), else the user is asked.",
                     FILE_TRANSFER_PROVED_CONNECTION_KEY: deepcopy(FILE_TRANSFER_PROVED_CONNECTION_DEFAULT),
                     "groups": {
                         "friends": {
@@ -2610,8 +2624,8 @@ class ContextFirewall:
                             errors.append(f"'{label}' must be a dictionary")
                         else:
                             allow = entry.get('file_transfer.allow')
-                            if allow is not None and allow not in ('allow', 'deny'):
-                                errors.append(f"'{label}.file_transfer.allow' must be 'allow' or 'deny', not {allow!r}")
+                            if allow is not None and allow not in FILE_TRANSFER_PROVED_CONNECTION_ALLOW_VALUES:
+                                errors.append(f"'{label}.file_transfer.allow' must be 'allow', 'ask' or 'deny', not {allow!r}")
                             size = entry.get('file_transfer.max_size_mb')
                             # None (the editor's empty field) and 0 both mean no limit, as for a node entry
                             if size is not None and (isinstance(size, bool) or not isinstance(size, (int, float)) or size < 0):

@@ -8,7 +8,7 @@
   import InferenceSharingEditor from './InferenceSharingEditor.svelte';
   import type { ComputeRules } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
-  import { provedConnectionEntry, setProvedConnectionRule } from '$lib/fileTransferPermission';
+  import { PROVED_CONNECTION_ALLOW_VALUES, provedConnectionEntry, setProvedConnectionRule } from '$lib/fileTransferPermission';
 
   export let open: boolean = false;
 
@@ -1648,7 +1648,7 @@
             <!-- Peers on a direct connection: decides after node and group entries -->
             <h4>Peers on a Direct Connection</h4>
             <p class="help-text-small">
-              A peer you hold a direct TLS connection with (you exchanged address and node id) may send files, screenshots and voice messages under these limits unless a node or group entry below says otherwise. Anyone else is asked about on their first offer.
+              Direct means the peer proved the key of its node id over TLS, not that you know it, so by default it is asked about on its first offer like anyone else. Choose allow to let such peers send files, screenshots and voice messages under these limits without a question, or deny to refuse them; a node or group entry below wins over this. While it is set to ask, the limits are what "Always allow" writes into the node entry.
             </p>
             <div class="peer-card">
               <div class="group-header">
@@ -1659,8 +1659,9 @@
                   <span><strong>File Transfer Allowed:</strong></span>
                   {#if editMode && editedRules}
                     <select value={proved.entry['file_transfer.allow'] || 'deny'} on:change={(e) => setProvedRule('file_transfer.allow', e.currentTarget.value)}>
-                      <option value="allow">allow</option>
-                      <option value="deny">deny</option>
+                      {#each PROVED_CONNECTION_ALLOW_VALUES as choice}
+                        <option value={choice}>{choice}</option>
+                      {/each}
                     </select>
                   {:else}
                     <span class="value">{proved.entry['file_transfer.allow'] || 'deny'}</span>
@@ -1881,7 +1882,7 @@
 
             {#if !editMode}
               <div class="info-box">
-                <strong>Info:</strong> File transfer permissions control who can send you files and what types/sizes are allowed. The first that names the sender decides: its node entry, then its first group with an entry, then the direct-connection entry; anyone else is asked on their first offer, and "Always allow" there adds a node entry. MIME type wildcards are supported (e.g., "image/*", "application/pdf"). Use Edit mode to modify permissions.
+                <strong>Info:</strong> File transfer permissions control who can send you files and what types/sizes are allowed. The first that names the sender decides: its node entry, then its first group with an entry, then the direct-connection entry (ask unless you change it); anyone else is asked on their first offer, and "Always allow" there adds a node entry. MIME type wildcards are supported (e.g., "image/*", "application/pdf"). Use Edit mode to modify permissions.
               </div>
             {/if}
           </div>

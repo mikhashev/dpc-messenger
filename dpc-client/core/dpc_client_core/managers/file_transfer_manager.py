@@ -16,7 +16,10 @@ Architecture:
 - No resume: a transfer that ends (cancel, disconnect, restart, failure)
   deletes its temporary file and starts over from the beginning next time
 - Progress callbacks for UI updates
-- Firewall-gated: node or group entry, else a direct (proved) connection, else the user is asked
+- Firewall-gated: node or group entry, else the direct-connection entry (ask by
+  default: a proved key is not an acquaintance), else the user is asked
+- An offer that waits for a person has a deadline on both sides (see
+  OFFER_ANSWER_DEADLINE_S, UNANSWERED_UPLOAD_RELEASE_S)
 
 Transfer Flow:
 1. Sender: Compute hash, create FILE_OFFER
@@ -33,7 +36,8 @@ Features:
 - Metadata references in conversation history (not full content)
 
 Privacy:
-- A sender no rule names and not on a direct connection is put to the user
+- A sender no rule names is put to the user, a directly connected one included
+  unless the owner set `file_transfer.proved_connection` to allow
 - Optional per-peer size limits
 - Optional MIME type restrictions
 """
@@ -71,6 +75,7 @@ PREPARATION_PROGRESS_MIN_INTERVAL_S = 0.5
 HASH_READ_BLOCK_BYTES = 8 * 1024 * 1024
 
 _monotonic = time.monotonic  # Indirection so a test can drive the clock
+_answer_sleep = asyncio.sleep  # Indirection so a test can hold the answer clocks
 
 # Receiving. The sender streams chunks back to back (chunk_delay apart), so a
 # silence means the stream has ended or lost something, not that it is slow:
@@ -93,28 +98,45 @@ ALREADY_RECEIVED_REASON = "already_received"
 # An identity field read off a peer's offer becomes a record id here: bounded.
 _MAX_IDENTITY_CHARS = 128
 
+# FILE_CANCEL reason for an offer nobody answered in time. The receiver sends it
+# when its person did not answer within OFFER_ANSWER_DEADLINE_S; the sender sends
+# it when it released an upload that got neither FILE_ACCEPT nor FILE_CANCEL
+# within UNANSWERED_UPLOAD_RELEASE_S. Either way it means "the offer expired
+# unanswered": not a refusal and not a failure. Mike's word, 2026-10-25.
+NO_ANSWER_REASON = "no_answer"
+# How long a receiver lets an offer wait for its person (the question "allow
+# files from X?" and the accept button of an ordinary file alike) before it
+# refuses on its own with NO_ANSWER_REASON. Not a setting: the sender's release
+# below is derived from it. Mike's call, 2026-10-25.
+OFFER_ANSWER_DEADLINE_S = 120.0
+# How long a sender keeps an upload that has had neither FILE_ACCEPT nor
+# FILE_CANCEL before it frees the slot by itself. Longer than the receiver's
+# deadline by the transit time of its NO_ANSWER_REASON plus a margin, so a
+# current receiver answers first; it exists for an older receiver that never
+# sends the word, so that no peer can hold an upload slot for good.
+UNANSWERED_UPLOAD_RELEASE_S = 180.0
+
 # The receiver's answer to an offer. Explicit entries win in this order: the
 # node entry, then the sender's first group that has an entry (allow or deny
 # alike), then `file_transfer.proved_connection` when the sender is on a
-# proved (direct TLS) connection; a sender none of these names is ASKed — the
-# offer waits for the user instead of being refused. Mike's call, 2026-10-25.
+# proved (direct TLS) connection; a sender none of these names, or whose
+# proved_connection entry says "ask" (the default), is ASKed — the offer waits
+# for the user instead of being refused. Mike's call, 2026-10-25.
 FILE_TRANSFER_ALLOW = "allow"
 FILE_TRANSFER_DENY = "deny"
 FILE_TRANSFER_ASK = "ask"
 FIREWALL_DENIED_TEXT = "File transfer not permitted by firewall rules"
 # `denial_reason` of the FILE_CANCEL the sender gets when the user declines an
 # offer that was put to them; the `reason` word stays the one the UI sends.
-ASKED_OFFER_DECLINED_TEXT = (
-    "The receiver declined files from your node: it is not on a direct connection "
-    "with them and no File Transfer rule of theirs names it"
-)
+ASKED_OFFER_DECLINED_TEXT = "The receiver declined this file"
 
 
 class FileTransferDecision(NamedTuple):
     """`outcome` is FILE_TRANSFER_ALLOW / _DENY / _ASK — a word, never a truth value.
 
-    `basis` names what decided: `node`, `group`, `proved_connection`, or `none`
-    for an ASK. `reason` is the sentence a FILE_CANCEL carries as `denial_reason`.
+    `basis` names what decided: `node`, `group`, `proved_connection` (also for an
+    ASK when that entry says "ask"), or `none` for an ASK no entry caused.
+    `reason` is the sentence a FILE_CANCEL carries as `denial_reason`.
     """
     outcome: str
     reason: Optional[str]
@@ -300,6 +322,10 @@ class FileTransfer:
     reasked: set = field(default_factory=set)  # indices of the current re-ask batch still owed
     stall_watch: Any = field(default=None, repr=False, compare=False)  # asyncio.Task
     finalizing: bool = False
+    # The clock of an offer nobody has answered yet: on a download the receiver's
+    # deadline (OFFER_ANSWER_DEADLINE_S), on an upload the sender's release
+    # (UNANSWERED_UPLOAD_RELEASE_S). Stopped by the answer or by leaving the table.
+    answer_timer: Any = field(default=None, repr=False, compare=False)  # asyncio.Task
 
 
 class _TransferTable(dict):
@@ -832,6 +858,7 @@ class FileTransferManager:
         })
 
         logger.info(f"File transfer initiated: {file_path.name} ({file_size} bytes) to {node_id}")
+        self._start_answer_timer(transfer, UNANSWERED_UPLOAD_RELEASE_S, self._release_unanswered_upload)
         return transfer_id
 
     def peer_label(self, node_id: str) -> Optional[str]:
@@ -914,6 +941,7 @@ class FileTransferManager:
             return
 
         transfer.status = TransferStatus.TRANSFERRING
+        self._stop_answer_timer(transfer)
         logger.info(f"FILE_ACCEPT received, starting chunk transfer: {transfer.filename}")
 
         # Broadcast file transfer started event to UI
@@ -1044,8 +1072,111 @@ class FileTransferManager:
 
     def _release_transfer(self, transfer: Optional[FileTransfer]) -> None:
         """Whatever a transfer leaving `active_transfers` held, by direction."""
+        self._stop_answer_timer(transfer)
         self._release_receive(transfer)
         self._release_upload(transfer)
+
+    # --- offers nobody has answered ------------------------------------------
+
+    def _stop_answer_timer(self, transfer: Optional[FileTransfer]) -> None:
+        if transfer is None:
+            return
+        task = transfer.answer_timer
+        transfer.answer_timer = None
+        if task is None or task.done():
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not current:
+            task.cancel()
+
+    def _start_answer_timer(self, transfer: FileTransfer, seconds: float, on_silence) -> None:
+        """Run `on_silence(transfer)` if `transfer` is still unanswered after `seconds`."""
+        self._stop_answer_timer(transfer)
+        try:
+            transfer.answer_timer = asyncio.get_running_loop().create_task(
+                self._answer_clock(transfer, seconds, on_silence)
+            )
+        except RuntimeError:
+            logger.debug("No running loop: the answer clock of %s is not started", transfer.transfer_id)
+
+    def _still_unanswered(self, transfer: FileTransfer) -> bool:
+        """The transfer is in the table, pending, and nobody has accepted it."""
+        if self.active_transfers.get(transfer.transfer_id) is not transfer:
+            return False
+        if transfer.status != TransferStatus.PENDING:
+            return False
+        return transfer.direction != "download" or transfer.stall_watch is None
+
+    async def _answer_clock(self, transfer: FileTransfer, seconds: float, on_silence) -> None:
+        try:
+            await _answer_sleep(seconds)
+            if self._still_unanswered(transfer):
+                await on_silence(transfer)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:  # noqa: BLE001 - a clock must not take the loop down
+            logger.error("Answer clock of %s failed: %s", transfer.transfer_id, e, exc_info=True)
+
+    def begin_waiting_for_answer(self, transfer_id: str) -> None:
+        """Give a download that waits for a person its deadline (idempotent).
+
+        Called for every offer that is neither refused nor accepted on arrival:
+        the question "allow files from X?" and the accept button of an ordinary
+        file. After OFFER_ANSWER_DEADLINE_S with no answer the receiver refuses
+        with NO_ANSWER_REASON, so the sender's slot is not held by a person who
+        walked away. An answer (`mark_answered`, or the accept that starts the
+        receive) stops the clock.
+        """
+        transfer = self.active_transfers.get(transfer_id)
+        if transfer is None or transfer.direction != "download":
+            return
+        if transfer.answer_timer is not None and not transfer.answer_timer.done():
+            return
+        self._start_answer_timer(transfer, OFFER_ANSWER_DEADLINE_S, self._expire_unanswered_offer)
+
+    def mark_answered(self, transfer: Optional[FileTransfer]) -> None:
+        """The person has answered: stop the deadline before the answer is acted on."""
+        self._stop_answer_timer(transfer)
+
+    async def _expire_unanswered_offer(self, transfer: FileTransfer) -> None:
+        """The receiver's deadline ran out: refuse, tell the sender and the UI, drop the offer."""
+        logger.info(
+            "Offer %s (%s) from %s went unanswered for %.0f s; refusing it as %s",
+            transfer.transfer_id, transfer.filename, transfer.node_id,
+            OFFER_ANSWER_DEADLINE_S, NO_ANSWER_REASON,
+        )
+        await self._fail_download(
+            transfer.node_id, transfer, NO_ANSWER_REASON, status=TransferStatus.CANCELLED
+        )
+
+    async def _release_unanswered_upload(self, transfer: FileTransfer) -> None:
+        """The sender's release: no FILE_ACCEPT and no FILE_CANCEL within
+        UNANSWERED_UPLOAD_RELEASE_S. Free the slot, tell the receiver (an older
+        one may still be asking its person) and the UI."""
+        logger.warning(
+            "Upload %s (%s) to %s had no answer for %.0f s; releasing its slot",
+            transfer.transfer_id, transfer.filename, transfer.node_id,
+            UNANSWERED_UPLOAD_RELEASE_S,
+        )
+        transfer.status = TransferStatus.CANCELLED
+        await self._send_file_cancel(transfer.node_id, transfer.transfer_id, NO_ANSWER_REASON)
+        if self.local_api:
+            event = {
+                "transfer_id": transfer.transfer_id,
+                "node_id": transfer.node_id,
+                "filename": transfer.filename,
+                "direction": transfer.direction,
+                "reason": NO_ANSWER_REASON,
+                "status": "cancelled",
+            }
+            if transfer.group_id:
+                event["group_id"] = transfer.group_id
+            await self.local_api.broadcast_event("file_transfer_cancelled", event)
+        if self.active_transfers.get(transfer.transfer_id) is transfer:
+            del self.active_transfers[transfer.transfer_id]  # frees the slot
 
     # --- receiving ---------------------------------------------------------
 
@@ -1150,6 +1281,7 @@ class FileTransferManager:
         transfer = self.active_transfers.get(transfer_id)
         if transfer is None or transfer.direction != "download":
             return
+        self._stop_answer_timer(transfer)  # accepted: no deadline any more
         if transfer.stall_watch is not None and not transfer.stall_watch.done():
             return
         transfer.quiet_since = _monotonic()
@@ -1198,9 +1330,11 @@ class FileTransferManager:
         except Exception as e:
             logger.error("Stall watch of %s failed: %s", tid, e, exc_info=True)
 
-    async def _fail_download(self, node_id: str, transfer: FileTransfer, reason: str) -> None:
-        """End a download as FAILED: tell the sender, tell the UI, free the state."""
-        transfer.status = TransferStatus.FAILED
+    async def _fail_download(self, node_id: str, transfer: FileTransfer, reason: str,
+                             status: TransferStatus = TransferStatus.FAILED) -> None:
+        """End a download (FAILED unless `status` says otherwise): tell the sender,
+        tell the UI, free the state."""
+        transfer.status = status
         await self._send_file_cancel(node_id, transfer.transfer_id, reason)
         if self.local_api:
             event = {
@@ -1757,6 +1891,11 @@ class FileTransferManager:
             if reason == ALREADY_RECEIVED_REASON:
                 # Not a failure: the peer has this file already.
                 logger.info(f"Peer already has {transfer.filename}, offer withdrawn: {transfer_id}")
+            elif reason == NO_ANSWER_REASON:
+                # Not a failure either: nobody answered the offer in time. On an
+                # upload this frees the slot; on a download it drops the offer a
+                # sender gave up on.
+                logger.info(f"Offer {transfer_id} ({transfer.filename}) expired unanswered, peer sent {reason}")
             else:
                 logger.info(f"Transfer cancelled by peer: {transfer_id} (reason: {reason})")
             del self.active_transfers[transfer_id]
@@ -1820,12 +1959,20 @@ class FileTransferManager:
             basis = FILE_TRANSFER_PROVED_CONNECTION_KEY
 
         if entry is None:
-            reason = f"No File Transfer rule names {node_id} and it is not on a direct connection"
+            reason = f"No File Transfer rule names {node_id}"
             logger.info(f"File transfer from {node_id} is put to the user: {reason}")
             return FileTransferDecision(FILE_TRANSFER_ASK, reason, basis)
 
         if not isinstance(entry, dict):
             entry = {}  # a hand-edited non-entry decides nothing but deny
+        if basis == FILE_TRANSFER_PROVED_CONNECTION_KEY and entry.get('file_transfer.allow') == FILE_TRANSFER_ASK:
+            # "Proved" says the peer holds its key, not that anyone knows it: the
+            # entry has no answer for this sender, so the user is asked. Only this
+            # entry takes the value; on a node or group entry anything but "allow"
+            # still reads as a refusal.
+            reason = f"{node_id} is on a direct connection and the direct-connection rule says ask"
+            logger.info(f"File transfer from {node_id} is put to the user: {reason}")
+            return FileTransferDecision(FILE_TRANSFER_ASK, reason, basis)
         allowed = entry.get('file_transfer.allow', 'deny') == 'allow'
         max_size_mb = entry.get('file_transfer.max_size_mb')
         allowed_types = entry.get('file_transfer.allowed_mime_types', ['*'])

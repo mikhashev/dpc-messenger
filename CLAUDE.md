@@ -618,7 +618,7 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
 {"command": "FILE_ACCEPT", "payload": {"transfer_id": "..."}}
 {"command": "FILE_CHUNK", "payload": {"transfer_id": "...", "chunk_index": 0, "total_chunks": 10, "data": "base64..."}}
 {"command": "FILE_COMPLETE", "payload": {"transfer_id": "...", "hash": "sha256:..."}}
-{"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|user_rejected|already_received|firewall_denied|hash_mismatch|chunk_verification_failed|missing_chunks|send_error|receive_error", "denial_reason": "optional, with firewall_denied or user_rejected"}}
+{"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|user_rejected|already_received|no_answer|firewall_denied|hash_mismatch|chunk_verification_failed|missing_chunks|send_error|receive_error", "denial_reason": "optional, with firewall_denied or user_rejected"}}
 
 # Voice Messages (v0.13.0) - Reuses FILE_OFFER with voice_metadata
 {"command": "FILE_OFFER", "payload": {"transfer_id": "...", "filename": "voice_2026-01-04_12-34-56.webm", "size_bytes": 245000, "hash": "sha256:...", "mime_type": "audio/webm", "voice_metadata": {"duration_seconds": 30.5, "sample_rate": 48000, "channels": 1, "codec": "opus", "recorded_at": "2026-01-04T12:34:56Z"}}}
@@ -1292,7 +1292,7 @@ Access control file format (`~/.dpc/privacy_rules.json`):
   },
   "file_transfer": {
     "proved_connection": {
-      "file_transfer.allow": "allow",
+      "file_transfer.allow": "ask",
       "file_transfer.max_size_mb": 1000,
       "file_transfer.allowed_mime_types": ["*"]
     },
@@ -1324,12 +1324,23 @@ microphone. Both send lists default to empty, meaning never; a peer chosen by ha
 by the first entry that names the sender, allow or deny, with that entry's size and MIME
 limits: its `file_transfer.nodes` entry; else its first group in `node_groups` order that
 has a `file_transfer.groups` entry; else, when this node holds a proved connection with it
-(`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS — the two people exchanged address and
-node id), `file_transfer.proved_connection`, which an older rules file without the key gets
-from a code default (allow, 1000 MB, `*`). A sender none of these names is not refused: the
-offer waits for the user's "allow files from X?", "always allow" writes a node entry
-through the editor's save, and a decline sends FILE_CANCEL with a `denial_reason` (Mike's
-call, 2026-10-25).
+(`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS), `file_transfer.proved_connection`,
+which an older rules file without the key gets from a code default. **Proved means the
+peer proved the key of its own node id, not that anyone knows it**: an inbound direct
+connection is accepted from any DPC node that reaches the port, so the default of that
+entry is `ask` (allow, 1000 MB, `*` was the first form and was changed after review);
+`allow` with its limits is the owner's opt-in, `deny` refuses, and `ask` is a value of
+this entry alone. A sender none of these decides for, or whose entry says ask, is not
+refused: the offer waits for the user's "allow files from X?", "always allow" writes a
+node entry through the editor's save — with the limits of the `proved_connection` entry,
+which the dialog prints beside the box — and a decline sends FILE_CANCEL with a
+`denial_reason`. For a group file the decision is about the node that sent the offer; its
+author is an unsigned field, so the dialog reads "from X via Y" when they differ and the
+entry is written for Y. An offer that waits for a person has a deadline: after 120 s with
+no answer the receiver refuses it with FILE_CANCEL `no_answer` and drops the download, and
+a sender that has had neither FILE_ACCEPT nor FILE_CANCEL for 180 s frees the upload by
+itself (`OFFER_ANSWER_DEADLINE_S`, `UNANSWERED_UPLOAD_RELEASE_S` in
+`file_transfer_manager.py`, constants and not settings). Mike's call, 2026-10-25.
 
 **Adding a new agent tool — `default_enabled` is required (S148):**
 

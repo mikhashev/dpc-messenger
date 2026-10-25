@@ -1367,6 +1367,9 @@ class P2PCoordinator:
 
         result: Dict[str, Any] = {"transfer_id": transfer_id, "status": "accepted"}
         waiting: List[Any] = []
+        # The person has answered: the offer's deadline stops before the answer
+        # (a save, a send) is acted on, so it cannot expire under its own accept.
+        manager.mark_answered(transfer)
         if remember:
             remembered, message = await self._allow_files_from(transfer.node_id)
             result["remembered"] = remembered
@@ -1379,6 +1382,8 @@ class P2PCoordinator:
             else:
                 result["remember_error"] = message
 
+        for accepted in [transfer, *waiting]:
+            manager.mark_answered(accepted)  # all of them, before the first send yields
         for accepted in [transfer, *waiting]:
             accepted.awaiting_permission = False
             await self.p2p_manager.send_message_to_peer(accepted.node_id, {

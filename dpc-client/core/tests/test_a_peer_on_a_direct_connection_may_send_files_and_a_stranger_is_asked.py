@@ -8,10 +8,13 @@ The receiver now decides in this order, the first that names the sender wins:
 1. its node entry (allow or deny, with its limits);
 2. its first group that has an entry (allow or deny);
 3. `file_transfer.proved_connection` when the sender is on a proved connection
-   (`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS) — a code default stands
-   in when an older rules file lacks the key;
-4. otherwise the offer, of any kind, waits for the user's "allow files from X?";
-   "always allow" writes a node entry, a decline tells the sender why.
+   (`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS). Its default, which also
+   stands in when an older rules file lacks the key, is "ask" (Mike's call,
+   2026-10-25: a proved key is not an acquaintance); "allow" is the owner's
+   opt-in, with its limits;
+4. otherwise — and when that entry says ask — the offer, of any kind, waits for
+   the user's "allow files from X?"; "always allow" writes a node entry, a
+   decline tells the sender why.
 
 The firewall and the transfer manager are real; only the wire and the UI socket
 are collected.
@@ -23,6 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 
 from dpc_client_core.firewall import (
     FILE_TRANSFER_PROVED_CONNECTION_DEFAULT,
@@ -48,12 +52,30 @@ DIRECT = "direct_tls"
 WEBRTC = "webrtc"
 
 NO_ENTRIES = {"file_transfer": {"nodes": {}, "groups": {}}}  # an older file: no proved_connection key
+# The owner's opt-in: every directly connected peer may send within these limits
+ALLOW_DIRECT = {"file_transfer": {"nodes": {}, "groups": {}, FILE_TRANSFER_PROVED_CONNECTION_KEY: {
+    "file_transfer.allow": "allow",
+    "file_transfer.max_size_mb": 1000,
+    "file_transfer.allowed_mime_types": ["*"],
+}}}
+
+
+_NODES = []
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _close_every_node():
+    """An offer left waiting owns an answer clock; stop it before the loop goes."""
+    yield
+    while _NODES:
+        await _NODES.pop().close()
 
 
 class _Node:
     """One receiving node: real firewall, real manager, real handler and coordinator."""
 
     def __init__(self, tmp_path: Path, rules: dict, connection_type=None):
+        _NODES.append(self)
         self.rules_path = tmp_path / "privacy_rules.json"
         self.rules_path.write_text(json.dumps(rules), encoding="utf-8")
         self.firewall = ContextFirewall(self.rules_path)
@@ -185,8 +207,8 @@ async def test_the_first_group_with_an_entry_decides_even_when_it_denies(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_direct_peer_is_allowed_within_the_default_limits(tmp_path):
-    node = _Node(tmp_path, NO_ENTRIES, connection_type=DIRECT)
+async def test_a_direct_peer_is_allowed_within_the_limits_of_an_explicit_allow_entry(tmp_path):
+    node = _Node(tmp_path, ALLOW_DIRECT, connection_type=DIRECT)
 
     decision = await node.manager._file_transfer_decision(PEER, "x.bin", 999 * MB, "application/zip")
 
@@ -194,9 +216,9 @@ async def test_a_direct_peer_is_allowed_within_the_default_limits(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_direct_peer_over_the_default_limit_is_refused_naming_it(tmp_path):
-    node = _Node(tmp_path, NO_ENTRIES, connection_type=DIRECT)
-    limit = FILE_TRANSFER_PROVED_CONNECTION_DEFAULT["file_transfer.max_size_mb"]
+async def test_a_direct_peer_over_the_limit_of_an_allow_entry_is_refused_naming_it(tmp_path):
+    node = _Node(tmp_path, ALLOW_DIRECT, connection_type=DIRECT)
+    limit = ALLOW_DIRECT["file_transfer"][FILE_TRANSFER_PROVED_CONNECTION_KEY]["file_transfer.max_size_mb"]
 
     await node.handler.handle(PEER, _offer(size_bytes=(limit + 1) * MB))
 
@@ -205,8 +227,8 @@ async def test_a_direct_peer_over_the_default_limit_is_refused_naming_it(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_an_old_rules_file_without_the_key_still_lets_a_direct_peer_paste_an_image(tmp_path):
-    node = _Node(tmp_path, NO_ENTRIES, connection_type=DIRECT)
+async def test_an_explicit_allow_entry_lets_a_direct_peer_paste_an_image(tmp_path):
+    node = _Node(tmp_path, ALLOW_DIRECT, connection_type=DIRECT)
 
     await node.handler.handle(PEER, _offer(kind="image"))
 
@@ -216,8 +238,8 @@ async def test_an_old_rules_file_without_the_key_still_lets_a_direct_peer_paste_
 
 
 @pytest.mark.asyncio
-async def test_a_direct_peers_file_still_shows_the_ordinary_dialog_without_the_question(tmp_path):
-    node = _Node(tmp_path, NO_ENTRIES, connection_type=DIRECT)
+async def test_an_allowed_direct_peers_file_still_shows_the_ordinary_dialog_without_the_question(tmp_path):
+    node = _Node(tmp_path, ALLOW_DIRECT, connection_type=DIRECT)
 
     await node.handler.handle(PEER, _offer())
 
@@ -244,6 +266,71 @@ async def test_a_connection_that_proves_no_key_is_not_a_direct_one(tmp_path):
     decision = await node.manager._file_transfer_decision(PEER, "x.bin", 10, "text/plain")
 
     assert decision.outcome == FILE_TRANSFER_ASK
+
+
+# --- a proved key is not an acquaintance: a direct peer is asked by default ---
+
+
+@pytest.mark.asyncio
+async def test_the_default_sends_a_direct_stranger_to_the_question(tmp_path):
+    node = _Node(tmp_path, NO_ENTRIES, connection_type=DIRECT)
+
+    decision = await node.manager._file_transfer_decision(PEER, "x.bin", 10, "text/plain")
+
+    assert decision.outcome == FILE_TRANSFER_ASK
+    assert decision.basis == FILE_TRANSFER_PROVED_CONNECTION_KEY
+
+
+@pytest.mark.parametrize("kind,group_id", [
+    ("file", None), ("image", None), ("voice", None), ("file", "group-x"),
+])
+@pytest.mark.asyncio
+async def test_an_old_rules_file_without_the_key_asks_a_direct_peer_of_any_kind(tmp_path, kind, group_id):
+    node = _Node(tmp_path, NO_ENTRIES, connection_type=DIRECT)
+
+    await node.handler.handle(PEER, _offer(kind=kind, group_id=group_id))
+
+    assert node.commands() == []  # neither refused nor auto-accepted
+    [event] = node.offered()
+    assert event["awaiting_permission"] is True
+    assert event["kind"] == kind
+    assert node.manager.active_transfers["t1"].awaiting_permission is True
+    await node.close()
+
+
+@pytest.mark.asyncio
+async def test_a_node_entry_still_beats_the_ask_of_the_direct_connection_rule(tmp_path):
+    rules = {"file_transfer": {"nodes": {PEER: {"file_transfer.allow": "allow"}}, "groups": {}}}
+    node = _Node(tmp_path, rules, connection_type=DIRECT)
+
+    decision = await node.manager._file_transfer_decision(PEER, "x.bin", 10, "text/plain")
+
+    assert (decision.outcome, decision.basis) == (FILE_TRANSFER_ALLOW, "node")
+
+
+@pytest.mark.asyncio
+async def test_ask_is_a_value_of_the_direct_connection_entry_only(tmp_path):
+    """On a node entry anything but "allow" still reads as a refusal."""
+    rules = {"file_transfer": {"nodes": {PEER: {"file_transfer.allow": "ask"}}, "groups": {}}}
+    node = _Node(tmp_path, rules, connection_type=DIRECT)
+
+    decision = await node.manager._file_transfer_decision(PEER, "x.bin", 10, "text/plain")
+
+    assert (decision.outcome, decision.basis) == (FILE_TRANSFER_DENY, "node")
+
+
+@pytest.mark.asyncio
+async def test_an_always_allow_on_a_direct_peers_question_writes_its_node_entry(tmp_path):
+    node = _Node(tmp_path, NO_ENTRIES, connection_type=DIRECT)
+    await node.handler.handle(PEER, _offer("t1"))
+
+    await node.coordinator.accept_file_transfer("t1", remember=True)
+
+    on_disk = json.loads(node.rules_path.read_text(encoding="utf-8"))
+    assert on_disk["file_transfer"]["nodes"][PEER]["file_transfer.allow"] == "allow"
+    decision = await node.manager._file_transfer_decision(PEER, "x.bin", 10, "text/plain")
+    assert (decision.outcome, decision.basis) == (FILE_TRANSFER_ALLOW, "node")
+    await node.close()
 
 
 # --- a stranger is asked, not refused ----------------------------------------
@@ -343,7 +430,7 @@ async def test_a_decline_tells_the_sender_why_in_words(tmp_path):
 @pytest.mark.asyncio
 async def test_rejecting_an_ordinary_offer_adds_no_sentence(tmp_path):
     """The regression half: only an answer to the question carries one."""
-    node = _Node(tmp_path, NO_ENTRIES, connection_type=DIRECT)
+    node = _Node(tmp_path, ALLOW_DIRECT, connection_type=DIRECT)
     await node.handler.handle(PEER, _offer("t1"))
 
     await node.coordinator.cancel_file_transfer("t1", "user_rejected")
@@ -373,7 +460,7 @@ def test_a_new_rules_file_carries_the_direct_connection_entry(tmp_path):
     written = json.loads((tmp_path / "privacy_rules.json").read_text(encoding="utf-8"))
 
     assert written["file_transfer"][FILE_TRANSFER_PROVED_CONNECTION_KEY] == FILE_TRANSFER_PROVED_CONNECTION_DEFAULT
-    assert firewall.rules["file_transfer"][FILE_TRANSFER_PROVED_CONNECTION_KEY]["file_transfer.allow"] == "allow"
+    assert firewall.rules["file_transfer"][FILE_TRANSFER_PROVED_CONNECTION_KEY]["file_transfer.allow"] == "ask"
 
 
 @pytest.mark.parametrize("entry", [
@@ -393,6 +480,8 @@ def test_the_validator_refuses_a_malformed_direct_connection_entry(entry):
 @pytest.mark.parametrize("entry", [
     dict(FILE_TRANSFER_PROVED_CONNECTION_DEFAULT),
     {"file_transfer.allow": "deny"},
+    {"file_transfer.allow": "ask"},
+    {"file_transfer.allow": "allow"},
     {"file_transfer.allow": "allow", "file_transfer.max_size_mb": None},  # the editor's empty field
 ])
 def test_the_validator_accepts_a_direct_connection_entry(entry):
