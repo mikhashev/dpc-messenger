@@ -118,6 +118,18 @@ TARIFF_CURRENCY_NODE = 'node'
 FREE_NODES_KEY = 'free_nodes'
 FREE_GROUPS_KEY = 'free_groups'
 
+# `file_transfer.proved_connection`: the entry that decides for a sender no node
+# or group entry names while this node holds a proved connection with it
+# (`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS) — the two people exchanged
+# an address and a node id. Shaped like a node entry. Mike's call, 2026-10-25.
+# The default stands in when the key is absent, so an older rules file allows too.
+FILE_TRANSFER_PROVED_CONNECTION_KEY = 'proved_connection'
+FILE_TRANSFER_PROVED_CONNECTION_DEFAULT = {
+    "file_transfer.allow": "allow",
+    "file_transfer.max_size_mb": 1000,
+    "file_transfer.allowed_mime_types": ["*"],
+}
+
 # ISO 4217 List One (current currencies and funds) as published by SIX, the
 # standard's maintenance agency: list-one.xml, Pblshd="2026-01-01", 178 codes.
 # Two of them are left out on purpose — XXX «no currency» and XTS «for
@@ -1750,7 +1762,8 @@ class ContextFirewall:
                     "tools": {}
                 },
                 "file_transfer": {
-                    "_comment": "File transfer permissions (v0.11.0+). Configure per-group or per-node settings.",
+                    "_comment": "File transfer permissions (v0.11.0+). Order: node entry, then the sender's first group with an entry, then proved_connection (a peer on a direct TLS connection), else the user is asked.",
+                    FILE_TRANSFER_PROVED_CONNECTION_KEY: deepcopy(FILE_TRANSFER_PROVED_CONNECTION_DEFAULT),
                     "groups": {
                         "friends": {
                             "file_transfer.allow": "allow",
@@ -2589,6 +2602,23 @@ class ContextFirewall:
                     if 'allowed_mime_types' in file_transfer:
                         if not isinstance(file_transfer['allowed_mime_types'], list):
                             errors.append("'file_transfer.allowed_mime_types' must be a list")
+
+                    if FILE_TRANSFER_PROVED_CONNECTION_KEY in file_transfer:
+                        label = f"file_transfer.{FILE_TRANSFER_PROVED_CONNECTION_KEY}"
+                        entry = file_transfer[FILE_TRANSFER_PROVED_CONNECTION_KEY]
+                        if not isinstance(entry, dict):
+                            errors.append(f"'{label}' must be a dictionary")
+                        else:
+                            allow = entry.get('file_transfer.allow')
+                            if allow is not None and allow not in ('allow', 'deny'):
+                                errors.append(f"'{label}.file_transfer.allow' must be 'allow' or 'deny', not {allow!r}")
+                            size = entry.get('file_transfer.max_size_mb')
+                            # None (the editor's empty field) and 0 both mean no limit, as for a node entry
+                            if size is not None and (isinstance(size, bool) or not isinstance(size, (int, float)) or size < 0):
+                                errors.append(f"'{label}.file_transfer.max_size_mb' must be a number, 0 or more")
+                            mimes = entry.get('file_transfer.allowed_mime_types')
+                            if mimes is not None and (not isinstance(mimes, list) or not all(isinstance(m, str) for m in mimes)):
+                                errors.append(f"'{label}.file_transfer.allowed_mime_types' must be a list of strings")
 
             # Validate notifications section
             if 'notifications' in config_dict:

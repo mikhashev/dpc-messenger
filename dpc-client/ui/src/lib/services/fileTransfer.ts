@@ -47,8 +47,8 @@ export async function sendFile(nodeId: string, filePath: string, sendCmd: SendCo
     });
 }
 
-export async function acceptFileTransfer(transferId: string, sendCmd: SendCommandFn): Promise<any> {
-    return sendCmd('accept_file_transfer', { transfer_id: transferId });
+export async function acceptFileTransfer(transferId: string, sendCmd: SendCommandFn, remember: boolean = false): Promise<any> {
+    return sendCmd('accept_file_transfer', { transfer_id: transferId, ...(remember ? { remember: true } : {}) });
 }
 
 export async function cancelFileTransfer(transferId: string, sendCmd: SendCommandFn, reason: string = 'user_cancelled'): Promise<any> {

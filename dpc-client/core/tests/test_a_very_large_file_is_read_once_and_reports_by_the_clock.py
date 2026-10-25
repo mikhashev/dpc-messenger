@@ -297,7 +297,9 @@ def _offer():
 @pytest.mark.asyncio
 async def test_a_firewall_refusal_carries_the_receivers_sentence(tmp_path):
     sent = []
-    handler = _offer_handler(tmp_path, {"file_transfer": {"nodes": {}, "groups": {}}}, sent)
+    # A deny entry: a sender no rule names is asked, not refused (2026-10-25)
+    rules = {"file_transfer": {"nodes": {PEER: {"file_transfer.allow": "deny"}}, "groups": {}}}
+    handler = _offer_handler(tmp_path, rules, sent)
 
     await handler.handle(PEER, _offer())
 

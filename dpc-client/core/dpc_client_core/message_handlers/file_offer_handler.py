@@ -105,14 +105,18 @@ class FileOfferHandler(MessageHandler):
                 )
                 return None
 
-        # Check firewall permission. The answer is a pair — testing the pair
-        # itself is always true, which is how every allow-list, size cap and
-        # MIME filter came to be unreachable on the receiving side.
-        allowed, denial_reason = await file_transfer_manager._check_file_transfer_permission(
+        # Check firewall permission. The outcome is a word compared by value —
+        # testing a tuple for truth is how every allow-list, size cap and MIME
+        # filter once came to be unreachable on the receiving side.
+        from ..managers.file_transfer_manager import FILE_TRANSFER_ALLOW, FILE_TRANSFER_ASK
+        decision = await file_transfer_manager._file_transfer_decision(
             sender_node_id, filename, size_bytes, mime_type
         )
+        denial_reason = decision.reason
+        # A sender no rule names: every kind of offer waits for the user's answer
+        awaiting_permission = decision.outcome == FILE_TRANSFER_ASK
 
-        if not allowed:
+        if decision.outcome not in (FILE_TRANSFER_ALLOW, FILE_TRANSFER_ASK):
             transfer_type = 'Image' if is_image else 'Voice' if is_voice else 'File'
             self.logger.warning(
                 f"{transfer_type} transfer denied by firewall from {sender_node_id}: {denial_reason}"
@@ -135,8 +139,25 @@ class FileOfferHandler(MessageHandler):
         # Get sender name for UI display
         sender_name = self.service.peer_metadata.get(sender_node_id, {}).get("name") or sender_node_id
 
-        # Broadcast appropriate event based on type
-        if is_image:
+        # Broadcast appropriate event based on type. An asked offer goes out as
+        # the dialog's event whatever it carries, naming its kind.
+        if awaiting_permission:
+            event_data = {
+                "transfer_id": transfer_id,
+                "node_id": sender_node_id,
+                "sender_name": sender_name,
+                "filename": filename,
+                "size_bytes": size_bytes,
+                "size_mb": round(size_bytes / (1024 * 1024), 2),
+                "mime_type": mime_type,
+                "hash": hash_value,
+                "awaiting_permission": True,
+                "kind": "image" if is_image else "voice" if is_voice else "file",
+            }
+            if group_id:
+                event_data["group_id"] = group_id
+            await self.service.local_api.broadcast_event("file_transfer_offered", event_data)
+        elif is_image:
             # Image offer: include thumbnail and dimensions
             event_data = {
                 "transfer_id": transfer_id,
@@ -212,7 +233,8 @@ class FileOfferHandler(MessageHandler):
             retry_count={},  # v0.11.1: Track retry attempts per chunk
             image_metadata=image_metadata,  # Store image metadata for chat display (v0.12.0+)
             voice_metadata=voice_metadata,  # Store voice metadata for chat display (v0.13.0+)
-            group_id=group_id              # Group ID for group file transfers (v0.19.0+)
+            group_id=group_id,             # Group ID for group file transfers (v0.19.0+)
+            awaiting_permission=awaiting_permission,
         )
         file_transfer_manager.active_transfers[transfer_id] = transfer
 
@@ -221,7 +243,7 @@ class FileOfferHandler(MessageHandler):
         # Voice messages: Typically small (< 10MB), personal communication
         # Images (screenshots): Pasted from clipboard, shared in conversation context
         # Group files: Shared in group chat context, should flow like messages
-        if is_voice or is_image or group_id:
+        if (is_voice or is_image or group_id) and not awaiting_permission:
             # Send FILE_ACCEPT to peer immediately to start the download
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "FILE_ACCEPT",
@@ -238,6 +260,8 @@ class FileOfferHandler(MessageHandler):
             else:
                 transfer_type = 'Group file'
             self.logger.info(f"{transfer_type} transfer auto-accepted: {transfer_id}")
+        elif awaiting_permission:
+            self.logger.info(f"Transfer from {sender_node_id} waits for the user's permission: {transfer_id}")
         else:
             transfer_type = 'File'
             self.logger.info(f"{transfer_type} transfer pending user acceptance: {transfer_id}")

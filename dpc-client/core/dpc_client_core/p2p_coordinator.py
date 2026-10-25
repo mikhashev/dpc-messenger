@@ -10,12 +10,15 @@ import asyncio
 import contextlib
 import logging
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import websockets
 from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, REFUSAL_PROVIDER_UNAVAILABLE, PeerRefused
 
 from .firewall import (
+    FILE_TRANSFER_PROVED_CONNECTION_DEFAULT,
+    FILE_TRANSFER_PROVED_CONNECTION_KEY,
     SERVING_LOCAL_KEY,
     SERVING_VENDOR_KEY,
     AppliedTariff,
@@ -1348,21 +1351,70 @@ class P2PCoordinator:
             "size_bytes": size_bytes
         }
 
-    async def accept_file_transfer(self, transfer_id: str):
-        """Accept an incoming file transfer offer."""
-        transfer = self.service.file_transfer_manager.active_transfers.get(transfer_id)
+    async def accept_file_transfer(self, transfer_id: str, remember: bool = False):
+        """Accept an incoming file transfer offer.
+
+        `remember` is the dialog's "always allow files from this peer" on an
+        offer that was put to the user: it writes the sender's node entry and
+        accepts the sender's other offers still waiting on the same question.
+        """
+        manager = self.service.file_transfer_manager
+        transfer = manager.active_transfers.get(transfer_id)
         if not transfer:
             raise ValueError(f"Unknown transfer: {transfer_id}")
         if transfer.direction != "download":
             raise ValueError(f"Transfer {transfer_id} is not a download")
 
-        await self.p2p_manager.send_message_to_peer(transfer.node_id, {
-            "command": "FILE_ACCEPT",
-            "payload": {"transfer_id": transfer_id}
-        })
-        # From here a silence with chunks missing is noticed and re-asked
-        self.service.file_transfer_manager.begin_receiving(transfer_id)
-        return {"transfer_id": transfer_id, "status": "accepted"}
+        result: Dict[str, Any] = {"transfer_id": transfer_id, "status": "accepted"}
+        waiting: List[Any] = []
+        if remember:
+            remembered, message = await self._allow_files_from(transfer.node_id)
+            result["remembered"] = remembered
+            if remembered:
+                waiting = [
+                    t for t in manager.active_transfers.values()
+                    if t is not transfer and t.direction == "download"
+                    and t.node_id == transfer.node_id and t.awaiting_permission
+                ]
+            else:
+                result["remember_error"] = message
+
+        for accepted in [transfer, *waiting]:
+            accepted.awaiting_permission = False
+            await self.p2p_manager.send_message_to_peer(accepted.node_id, {
+                "command": "FILE_ACCEPT",
+                "payload": {"transfer_id": accepted.transfer_id}
+            })
+            # From here a silence with chunks missing is noticed and re-asked
+            manager.begin_receiving(accepted.transfer_id)
+        if waiting:
+            result["also_accepted"] = [t.transfer_id for t in waiting]
+        return result
+
+    async def _allow_files_from(self, node_id: str) -> tuple:
+        """Write `file_transfer.nodes.<node_id>` = allow through the editor's own
+        save, so it is validated, shown and revocable in Firewall > File Transfer
+        and `firewall_rules_updated` reaches the UI. Limits are the
+        proved-connection entry's. An existing node entry is left as it is."""
+        rules = self.service.firewall.get_rules_as_dict()
+        file_transfer = rules.setdefault("file_transfer", {})
+        nodes = file_transfer.setdefault("nodes", {})
+        if nodes.get(node_id):
+            return True, "node entry already present"
+        limits = file_transfer.get(FILE_TRANSFER_PROVED_CONNECTION_KEY)
+        if not isinstance(limits, dict):
+            limits = FILE_TRANSFER_PROVED_CONNECTION_DEFAULT
+        entry = {"file_transfer.allow": "allow"}
+        for key in ("file_transfer.max_size_mb", "file_transfer.allowed_mime_types"):
+            if key in limits:
+                entry[key] = deepcopy(limits[key])
+        nodes[node_id] = entry
+        saved = await self.service.save_firewall_rules(rules)
+        if saved.get("status") != "success":
+            logger.warning("Could not remember file sender %s: %s", node_id, saved.get("message"))
+            return False, saved.get("message") or "save failed"
+        logger.info("Files from %s are allowed from now on (node entry written)", node_id)
+        return True, saved.get("message")
 
     async def cancel_file_transfer(self, transfer_id: str, reason: str = "user_cancelled"):
         """Cancel an active file transfer."""

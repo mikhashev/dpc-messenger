@@ -4,6 +4,7 @@
 <script lang="ts">
   import Toast from './Toast.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
+  import { offerQuestion, senderLabel } from '$lib/fileTransferPermission';
 
   // Props (Svelte 5 runes mode)
   let {
@@ -61,7 +62,7 @@
     canSendAudio?: boolean;
     showFileOfferDialog?: boolean;
     currentFileOffer?: any;
-    onAcceptFile: () => void;
+    onAcceptFile: (remember?: boolean) => void;
     onRejectFile: () => void;
     showSendFileDialog?: boolean;
     pendingFileSend?: {
@@ -85,6 +86,14 @@
     fileOfferToastMessage?: string;
     onDismissToast: () => void;
   } = $props();
+
+  // "Always allow files from this peer" on an asked offer; a new offer starts unchecked
+  let rememberSender = $state(false);
+  const question = $derived(currentFileOffer ? offerQuestion(currentFileOffer) : null);
+  $effect(() => {
+    void currentFileOffer?.transfer_id;
+    rememberSender = false;
+  });
 
   // ── Active-transfers panel: movable and foldable ──────────────────────
   // It is fixed to the bottom-right corner and sits on top of whatever is
@@ -284,12 +293,21 @@
 {#if showFileOfferDialog && currentFileOffer}
   <div class="modal-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && onRejectFile()}>
     <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1">
-      <h3>Incoming File</h3>
+      <h3>{question ? question.title : 'Incoming File'}</h3>
+      {#if question}
+        <p class="offer-question">{question.detail}</p>
+      {/if}
       <p><strong>File:</strong> {currentFileOffer.filename}</p>
       <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
-      <p><strong>From:</strong> {currentFileOffer.node_id.slice(0, 20)}...</p>
+      <p><strong>From:</strong> {senderLabel(currentFileOffer)}</p>
+      {#if question}
+        <label class="remember-sender">
+          <input type="checkbox" bind:checked={rememberSender} />
+          Always allow files from this peer (adds it to Firewall &gt; File Transfer, where it can be revoked)
+        </label>
+      {/if}
       <div class="modal-buttons">
-        <button class="accept-button" onclick={onAcceptFile}>Accept</button>
+        <button class="accept-button" onclick={() => onAcceptFile(question ? rememberSender : false)}>Accept</button>
         <button class="reject-button" onclick={onRejectFile}>Reject</button>
       </div>
     </div>
@@ -727,5 +745,19 @@
   .modal-dialog {
     max-height: calc(100vh - 2rem);
     overflow-y: auto;
+  }
+
+  .offer-question {
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .remember-sender {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    margin: 10px 0;
+    font-size: 13px;
+    cursor: pointer;
   }
 </style>

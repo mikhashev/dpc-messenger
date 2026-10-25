@@ -1558,9 +1558,11 @@ export async function sendFile(nodeId: string, filePath: string): Promise<any> {
     });
 }
 
-export async function acceptFileTransfer(transferId: string): Promise<any> {
+/** `remember` (an offer that was put to the user): also allow this sender's files from now on. */
+export async function acceptFileTransfer(transferId: string, remember: boolean = false): Promise<any> {
     return sendCommand('accept_file_transfer', {
-        transfer_id: transferId
+        transfer_id: transferId,
+        ...(remember ? { remember: true } : {})
     });
 }
 

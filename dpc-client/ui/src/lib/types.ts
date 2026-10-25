@@ -343,6 +343,8 @@ export interface FileTransferOfferEvent {
     sender_name?: string;
     group_id?: string;             // Present for group file transfers
     voice_metadata?: MessageAttachment['voice_metadata'];
+    awaiting_permission?: boolean; // No rule names the sender: the dialog asks "allow files from X?"
+    kind?: 'file' | 'image' | 'voice';  // Sent with awaiting_permission
 }
 
 export interface FileTransferProgressEvent {

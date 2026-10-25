@@ -16,7 +16,7 @@ Architecture:
 - No resume: a transfer that ends (cancel, disconnect, restart, failure)
   deletes its temporary file and starts over from the beginning next time
 - Progress callbacks for UI updates
-- Firewall-gated (explicit allow rules required)
+- Firewall-gated: node or group entry, else a direct (proved) connection, else the user is asked
 
 Transfer Flow:
 1. Sender: Compute hash, create FILE_OFFER
@@ -33,7 +33,7 @@ Features:
 - Metadata references in conversation history (not full content)
 
 Privacy:
-- Files require explicit firewall rules (not auto-allowed)
+- A sender no rule names and not on a direct connection is put to the user
 - Optional per-peer size limits
 - Optional MIME type restrictions
 """
@@ -48,9 +48,12 @@ import uuid
 import zlib  # For CRC32 checksums
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Callable, List, Any, Tuple, TYPE_CHECKING
+from typing import Optional, Dict, Callable, List, Any, NamedTuple, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
+
+from ..firewall import FILE_TRANSFER_PROVED_CONNECTION_DEFAULT, FILE_TRANSFER_PROVED_CONNECTION_KEY
+from ..p2p_manager import peer_proof
 
 if TYPE_CHECKING:
     from ..p2p_manager import P2PManager
@@ -83,6 +86,33 @@ RECEIVE_STALL_ROUNDS = 3
 # FILE_CANCEL reason for a receive that cannot be written to the local disk
 # (disk full, permission). No word in DPTP §3.11 covered it: this one is new.
 RECEIVE_ERROR_REASON = "receive_error"
+
+# The receiver's answer to an offer. Explicit entries win in this order: the
+# node entry, then the sender's first group that has an entry (allow or deny
+# alike), then `file_transfer.proved_connection` when the sender is on a
+# proved (direct TLS) connection; a sender none of these names is ASKed — the
+# offer waits for the user instead of being refused. Mike's call, 2026-10-25.
+FILE_TRANSFER_ALLOW = "allow"
+FILE_TRANSFER_DENY = "deny"
+FILE_TRANSFER_ASK = "ask"
+FIREWALL_DENIED_TEXT = "File transfer not permitted by firewall rules"
+# `denial_reason` of the FILE_CANCEL the sender gets when the user declines an
+# offer that was put to them; the `reason` word stays the one the UI sends.
+ASKED_OFFER_DECLINED_TEXT = (
+    "The receiver declined files from your node: it is not on a direct connection "
+    "with them and no File Transfer rule of theirs names it"
+)
+
+
+class FileTransferDecision(NamedTuple):
+    """`outcome` is FILE_TRANSFER_ALLOW / _DENY / _ASK — a word, never a truth value.
+
+    `basis` names what decided: `node`, `group`, `proved_connection`, or `none`
+    for an ASK. `reason` is the sentence a FILE_CANCEL carries as `denial_reason`.
+    """
+    outcome: str
+    reason: Optional[str]
+    basis: str
 
 
 def hash_file_in_one_pass(
@@ -203,6 +233,9 @@ class FileTransfer:
     image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.) v0.12.0+
     voice_metadata: Optional[dict] = None  # Voice metadata (duration, sample_rate, codec) v0.13.0+
     group_id: Optional[str] = None  # Group ID for group file transfers (v0.19.0+)
+    # A download whose sender no rule names (FILE_TRANSFER_ASK), until the user
+    # answers "allow files from X?"; a decline meanwhile tells the sender why.
+    awaiting_permission: bool = False
 
     # Receive side only. Decided at the first chunk: where the file goes and
     # whether it goes to disk at all (a screenshot with save_screenshots_to_disk
@@ -1302,22 +1335,29 @@ class FileTransferManager:
             logger.warning(f"Cannot cancel unknown transfer: {transfer_id}")
             return
 
+        # Declining an offer that was put to the user: the sender learns why
+        # rather than seeing a bare cancel (its UI shows `denial_reason`).
+        denial_reason = None
+        if transfer.awaiting_permission and transfer.direction == "download":
+            denial_reason = ASKED_OFFER_DECLINED_TEXT
+
         transfer.status = TransferStatus.CANCELLED
-        await self._send_file_cancel(transfer.node_id, transfer_id, reason)
+        await self._send_file_cancel(transfer.node_id, transfer_id, reason, denial_reason)
 
         # Cleanup
         del self.active_transfers[transfer_id]
         logger.info(f"Transfer cancelled: {transfer_id} (reason: {reason})")
 
-    async def _send_file_cancel(self, node_id: str, transfer_id: str, reason: str):
+    async def _send_file_cancel(self, node_id: str, transfer_id: str, reason: str,
+                                denial_reason: Optional[str] = None):
         """Send FILE_CANCEL message to peer (gracefully handles disconnected peer)."""
+        payload = {"transfer_id": transfer_id, "reason": reason}
+        if denial_reason:
+            payload["denial_reason"] = denial_reason
         try:
             await self.p2p_manager.send_message_to_peer(node_id, {
                 "command": "FILE_CANCEL",
-                "payload": {
-                    "transfer_id": transfer_id,
-                    "reason": reason
-                }
+                "payload": payload
             })
         except ConnectionError:
             # Peer already disconnected, no need to send FILE_CANCEL
@@ -1409,51 +1449,72 @@ class FileTransferManager:
         size_bytes: int = None,
         mime_type: str = None
     ) -> tuple:
+        """`_file_transfer_decision` folded to `(allowed, error_message)` for a
+        caller that cannot ask the user: an ASK is a no here (fail closed)."""
+        decision = await self._file_transfer_decision(node_id, file_path_or_name, size_bytes, mime_type)
+        if decision.outcome == FILE_TRANSFER_ALLOW:
+            return (True, None)
+        return (False, decision.reason or FIREWALL_DENIED_TEXT)
+
+    def _on_proved_connection(self, node_id: str) -> bool:
+        """The live connection to `node_id` has its key proved (direct TLS),
+        the line the gateway draws for serving peer inference."""
+        proved, _connection_type = peer_proof(getattr(self.p2p_manager, "peers", None), node_id)
+        return proved is True
+
+    async def _file_transfer_decision(
+        self,
+        node_id: str,
+        file_path_or_name: any = None,
+        size_bytes: int = None,
+        mime_type: str = None
+    ) -> FileTransferDecision:
         """
-        Check if firewall allows file transfer with peer.
+        Allow, deny or ask for an offer from `node_id`, in the order above
+        FILE_TRANSFER_ALLOW. The deciding entry's size and MIME limits apply;
+        an ASK has none, because the user sees the file.
 
         Args:
             node_id: Peer node ID
             file_path_or_name: Path object (for upload) or filename string (for download)
             size_bytes: File size in bytes (optional, for downloads)
             mime_type: MIME type (optional, for downloads)
-
-        Returns:
-            Tuple of (allowed: bool, error_message: str|None)
-            - (True, None) if allowed
-            - (False, error_msg) if denied with specific reason
         """
-        # Get file transfer rules from firewall
-        file_transfer_rules = self.firewall.rules.get('file_transfer', {})
+        file_transfer_rules = self.firewall.rules.get('file_transfer', {}) or {}
 
-        # Check node-specific rules first
-        node_rules = file_transfer_rules.get('nodes', {}).get(node_id, {})
+        entry = None
+        basis = "none"
+        node_rules = (file_transfer_rules.get('nodes') or {}).get(node_id, {})
         if node_rules:
-            allowed = node_rules.get('file_transfer.allow', 'deny') == 'allow'
-            max_size_mb = node_rules.get('file_transfer.max_size_mb')
-            allowed_types = node_rules.get('file_transfer.allowed_mime_types', ['*'])
+            entry, basis = node_rules, "node"
         else:
-            # Check group rules
-            allowed = False
-            max_size_mb = None
-            allowed_types = ['*']
-
-            groups = self.firewall._get_groups_for_node(node_id)
-            group_rules = file_transfer_rules.get('groups', {})
-
-            for group_name in groups:
+            group_rules = file_transfer_rules.get('groups') or {}
+            for group_name in self.firewall._get_groups_for_node(node_id):
                 if group_name in group_rules:
-                    group_rule = group_rules[group_name]
-                    if group_rule.get('file_transfer.allow') == 'allow':
-                        allowed = True
-                        max_size_mb = group_rule.get('file_transfer.max_size_mb', max_size_mb)
-                        allowed_types = group_rule.get('file_transfer.allowed_mime_types', allowed_types)
-                        break  # Use first matching group
+                    entry, basis = group_rules[group_name], "group"
+                    break  # the first group with an entry decides, deny included
+
+        if entry is None and self._on_proved_connection(node_id):
+            entry = file_transfer_rules.get(
+                FILE_TRANSFER_PROVED_CONNECTION_KEY, FILE_TRANSFER_PROVED_CONNECTION_DEFAULT
+            )
+            basis = FILE_TRANSFER_PROVED_CONNECTION_KEY
+
+        if entry is None:
+            reason = f"No File Transfer rule names {node_id} and it is not on a direct connection"
+            logger.info(f"File transfer from {node_id} is put to the user: {reason}")
+            return FileTransferDecision(FILE_TRANSFER_ASK, reason, basis)
+
+        if not isinstance(entry, dict):
+            entry = {}  # a hand-edited non-entry decides nothing but deny
+        allowed = entry.get('file_transfer.allow', 'deny') == 'allow'
+        max_size_mb = entry.get('file_transfer.max_size_mb')
+        allowed_types = entry.get('file_transfer.allowed_mime_types', ['*'])
 
         if not allowed:
-            error_msg = "File transfer not permitted by firewall rules"
-            logger.warning(f"{error_msg} for {node_id}")
-            return (False, error_msg)
+            error_msg = FIREWALL_DENIED_TEXT
+            logger.warning(f"{error_msg} for {node_id} (by its {basis} entry)")
+            return FileTransferDecision(FILE_TRANSFER_DENY, error_msg, basis)
 
         # Get size and mime type
         if isinstance(file_path_or_name, Path):
@@ -1474,16 +1535,16 @@ class FileTransferManager:
         if max_size_mb and max_size_mb > 0 and size_mb > max_size_mb:
             error_msg = f"File too large: {size_mb:.1f} MB exceeds {max_size_mb} MB limit"
             logger.warning(f"{error_msg} for {node_id}")
-            return (False, error_msg)
+            return FileTransferDecision(FILE_TRANSFER_DENY, error_msg, basis)
 
         # Check MIME type restrictions (optional)
         if allowed_types and "*" not in allowed_types:
             if not any(self._mime_match(mime_type, pattern) for pattern in allowed_types):
                 error_msg = f"File type '{mime_type}' not allowed (allowed: {', '.join(allowed_types)})"
                 logger.warning(f"{error_msg} for {node_id}")
-                return (False, error_msg)
+                return FileTransferDecision(FILE_TRANSFER_DENY, error_msg, basis)
 
-        return (True, None)
+        return FileTransferDecision(FILE_TRANSFER_ALLOW, None, basis)
 
     def _detect_mime_type(self, file_path: Path) -> str:
         """Detect MIME type from file extension."""

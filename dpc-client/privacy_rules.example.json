@@ -125,7 +125,12 @@
   },
 
   "file_transfer": {
-    "_comment": "File Transfer Permissions - Controls who can send/receive files with you",
+    "_comment": "File Transfer Permissions - Controls who can send/receive files with you. Order: node entry, then the sender's first group with an entry, then proved_connection (a peer on a direct TLS connection), else you are asked on the first offer",
+    "proved_connection": {
+      "file_transfer.allow": "allow",
+      "file_transfer.max_size_mb": 1000,
+      "file_transfer.allowed_mime_types": ["*"]
+    },
     "groups": {
       "friends": {
         "file_transfer.allow": "allow",

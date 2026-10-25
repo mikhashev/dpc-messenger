@@ -8149,9 +8149,9 @@ class CoreService:
         except Exception as e:  # noqa: BLE001 — the answer still reaches the UI
             logger.error("Could not keep the image turn of %s: %s", monitor.conversation_id, e, exc_info=True)
 
-    async def accept_file_transfer(self, transfer_id: str):
+    async def accept_file_transfer(self, transfer_id: str, remember: bool = False):
         """Delegated to P2PCoordinator."""
-        return await self.p2p_coordinator.accept_file_transfer(transfer_id)
+        return await self.p2p_coordinator.accept_file_transfer(transfer_id, remember=remember)
 
     async def cancel_file_transfer(self, transfer_id: str, reason: str = "user_cancelled"):
         """Delegated to P2PCoordinator."""

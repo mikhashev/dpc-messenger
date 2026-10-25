@@ -1291,10 +1291,17 @@ Access control file format (`~/.dpc/privacy_rules.json`):
     "send_to_groups": []
   },
   "file_transfer": {
-    "allow_nodes": ["dpc-node-alice-123"],
-    "allow_groups": ["friends"],
-    "max_size_mb": 1000,
-    "allowed_mime_types": ["*"]
+    "proved_connection": {
+      "file_transfer.allow": "allow",
+      "file_transfer.max_size_mb": 1000,
+      "file_transfer.allowed_mime_types": ["*"]
+    },
+    "groups": {
+      "friends": {"file_transfer.allow": "allow", "file_transfer.max_size_mb": 100}
+    },
+    "nodes": {
+      "dpc-node-alice-123": {"file_transfer.allow": "allow", "file_transfer.allowed_mime_types": ["image/*"]}
+    }
   },
   "notifications": {
     "enabled": true,
@@ -1312,6 +1319,17 @@ configured, which is when the fallback chain asks a peer (Mike's call, 2026-09-0
 are separate because sharing a model with a friend is not consent to hand them your
 microphone. Both send lists default to empty, meaning never; a peer chosen by hand as
 `remote:<node>:<alias>` bypasses them, because choosing it is the consent.
+
+**Who may send this node a file** (files, pasted screenshots and voice alike) is decided
+by the first entry that names the sender, allow or deny, with that entry's size and MIME
+limits: its `file_transfer.nodes` entry; else its first group in `node_groups` order that
+has a `file_transfer.groups` entry; else, when this node holds a proved connection with it
+(`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS — the two people exchanged address and
+node id), `file_transfer.proved_connection`, which an older rules file without the key gets
+from a code default (allow, 1000 MB, `*`). A sender none of these names is not refused: the
+offer waits for the user's "allow files from X?", "always allow" writes a node entry
+through the editor's save, and a decline sends FILE_CANCEL with a `denial_reason` (Mike's
+call, 2026-10-25).
 
 **Adding a new agent tool — `default_enabled` is required (S148):**
 

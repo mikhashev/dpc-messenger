@@ -41,6 +41,7 @@
   } from '$lib/coreService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
+  import { offerOpensDialog, offerQuestion } from '$lib/fileTransferPermission';
   import { confirmAsync } from '$lib/utils/dialog';
   import { appendToChatDraft, switchChatDraft } from '$lib/utils/chatDraftInputs';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
@@ -276,7 +277,7 @@
   $effect(() => {
     if ($fileTransferOffer) {
       const { node_id, filename, size_bytes, transfer_id, sender_name, group_id } = $fileTransferOffer;
-      if (group_id) {
+      if (!offerOpensDialog($fileTransferOffer)) {
         fileOfferToastMessage = `Receiving file: ${filename} from ${sender_name || 'group member'}`;
         showFileOfferToast = true;
         setTimeout(() => (showFileOfferToast = false), 3000);
@@ -286,7 +287,7 @@
       showFileOfferDialog = true;
       (async () => {
         await showNotificationIfBackground({
-          title: `File from ${sender_name || node_id.slice(0, 16)}`,
+          title: offerQuestion($fileTransferOffer)?.title ?? `File from ${sender_name || node_id.slice(0, 16)}`,
           body: `${filename} (${(size_bytes / 1048576).toFixed(2)} MB)`,
         });
       })();
@@ -820,14 +821,16 @@
     filePreparationCompleted.set(null);
   }
 
-  async function handleAcceptFile() {
+  async function handleAcceptFile(remember: boolean = false) {
     if (!currentFileOffer) return;
     try {
       const filename = currentFileOffer.filename;
-      await acceptFileTransfer(currentFileOffer.transfer_id);
+      const result = await acceptFileTransfer(currentFileOffer.transfer_id, remember);
       showFileOfferDialog = false;
       currentFileOffer = null;
-      fileOfferToastMessage = `Downloading: ${filename}`;
+      fileOfferToastMessage = remember && result && result.remembered === false
+        ? `Downloading: ${filename} (not remembered: ${result.remember_error ?? 'save failed'})`
+        : `Downloading: ${filename}`;
       showFileOfferToast = true;
       setTimeout(() => (showFileOfferToast = false), 3000);
     } catch (error) {

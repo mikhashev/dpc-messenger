@@ -8,6 +8,7 @@
   import InferenceSharingEditor from './InferenceSharingEditor.svelte';
   import type { ComputeRules } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
+  import { provedConnectionEntry, setProvedConnectionRule } from '$lib/fileTransferPermission';
 
   export let open: boolean = false;
 
@@ -71,6 +72,7 @@
     }>;
     file_transfer?: {
       _comment?: string;
+      proved_connection?: Record<string, any>;
       groups?: Record<string, any>;
       nodes?: Record<string, any>;
     };
@@ -364,6 +366,8 @@
 
   // Get the rules to display (edited or original)
   $: displayRules = editMode && editedRules ? editedRules : rules;
+  // File Transfer tab: the direct-connection entry, or the default while the file has none
+  $: proved = provedConnectionEntry(displayRules);
 
   // Helper functions for editing
   function addNodeGroup() {
@@ -969,6 +973,11 @@
   function cancelAddFileTransferNode() {
     addingFileTransferNodeInline = false;
     newFileTransferNodeIdInput = '';
+  }
+
+  function setProvedRule(key: string, value: any) {
+    setProvedConnectionRule(editedRules, key, value);
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function removeFileTransferNode(nodeId: string) {
@@ -1636,6 +1645,66 @@
             <h3>File Transfer Permissions</h3>
             <p class="help-text">Control who can send/receive files with you and set size/type limits.</p>
 
+            <!-- Peers on a direct connection: decides after node and group entries -->
+            <h4>Peers on a Direct Connection</h4>
+            <p class="help-text-small">
+              A peer you hold a direct TLS connection with (you exchanged address and node id) may send files, screenshots and voice messages under these limits unless a node or group entry below says otherwise. Anyone else is asked about on their first offer.
+            </p>
+            <div class="peer-card">
+              <div class="group-header">
+                <h5>Direct connection{proved.isDefault ? ' (default)' : ''}</h5>
+              </div>
+              <div class="subsection">
+                <div class="setting-item">
+                  <span><strong>File Transfer Allowed:</strong></span>
+                  {#if editMode && editedRules}
+                    <select value={proved.entry['file_transfer.allow'] || 'deny'} on:change={(e) => setProvedRule('file_transfer.allow', e.currentTarget.value)}>
+                      <option value="allow">allow</option>
+                      <option value="deny">deny</option>
+                    </select>
+                  {:else}
+                    <span class="value">{proved.entry['file_transfer.allow'] || 'deny'}</span>
+                  {/if}
+                </div>
+                <div class="setting-item">
+                  <span><strong>Max File Size (MB):</strong></span>
+                  {#if editMode && editedRules}
+                    <input
+                      type="number"
+                      min="1"
+                      max="10000"
+                      value={proved.entry['file_transfer.max_size_mb']}
+                      on:input={(e) => setProvedRule('file_transfer.max_size_mb', e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
+                      placeholder="No limit"
+                    />
+                  {:else}
+                    <span class="value">{proved.entry['file_transfer.max_size_mb'] || 'No limit'} {proved.entry['file_transfer.max_size_mb'] ? 'MB' : ''}</span>
+                  {/if}
+                </div>
+                <div class="setting-item">
+                  <span><strong>Allowed File Types:</strong></span>
+                  {#if editMode && editedRules}
+                    <textarea
+                      class="edit-textarea"
+                      rows="3"
+                      placeholder="Enter MIME types (one per line, e.g., image/*, application/pdf) or * for all"
+                      value={Array.isArray(proved.entry['file_transfer.allowed_mime_types']) ? proved.entry['file_transfer.allowed_mime_types'].join('\n') : '*'}
+                      on:input={(e) => {
+                        const types = e.currentTarget.value.split('\n').map((t) => t.trim()).filter((t) => t.length > 0);
+                        setProvedRule('file_transfer.allowed_mime_types', types.length > 0 ? types : ['*']);
+                      }}
+                    ></textarea>
+                  {:else}
+                    <div class="tags">
+                      {#each (Array.isArray(proved.entry['file_transfer.allowed_mime_types']) ? proved.entry['file_transfer.allowed_mime_types'] : ['*']) as mimeType}
+                        <span class="tag">{mimeType}</span>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            </div>
+
             {#if displayRules?.file_transfer}
               <!-- Group Permissions Section -->
               <h4>Group Permissions</h4>
@@ -1812,7 +1881,7 @@
 
             {#if !editMode}
               <div class="info-box">
-                <strong>Info:</strong> File transfer permissions control who can send you files and what types/sizes are allowed. Supports per-node and per-group settings with MIME type wildcards (e.g., "image/*", "application/pdf"). Use Edit mode to modify permissions.
+                <strong>Info:</strong> File transfer permissions control who can send you files and what types/sizes are allowed. The first that names the sender decides: its node entry, then its first group with an entry, then the direct-connection entry; anyone else is asked on their first offer, and "Always allow" there adds a node entry. MIME type wildcards are supported (e.g., "image/*", "application/pdf"). Use Edit mode to modify permissions.
               </div>
             {/if}
           </div>

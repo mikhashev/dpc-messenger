@@ -58,7 +58,10 @@ def _manager(tmp_path, rules):
     )
 
 
-DENY_ALL = {"file_transfer": {"nodes": {}, "groups": {}}}
+# A sender no rule names is asked rather than refused since 2026-10-25 (see
+# test_a_peer_on_a_direct_connection_may_send_files_and_a_stranger_is_asked.py),
+# so the refusing barrier is reached through a deny entry.
+DENY_PEER = {"file_transfer": {"nodes": {PEER: {"file_transfer.allow": "deny"}}, "groups": {}}}
 ALLOW_PEER = {
     "file_transfer": {
         "nodes": {PEER: {"file_transfer.allow": "allow", "file_transfer.max_size_mb": 1}}
@@ -72,16 +75,16 @@ ALLOW_PEER = {
 @pytest.mark.asyncio
 async def test_the_permission_answer_is_a_pair_and_says_no(tmp_path):
     """Guards the shape the caller depends on: truthiness is not the answer."""
-    manager = _manager(tmp_path, DENY_ALL)
+    manager = _manager(tmp_path, DENY_PEER)
     allowed, error = await manager._check_file_transfer_permission(PEER, "x.txt", 10, "text/plain")
     assert allowed is False
     assert error
 
 
 @pytest.mark.asyncio
-async def test_an_unlisted_peer_is_refused(tmp_path):
+async def test_a_peer_its_node_entry_denies_is_refused(tmp_path):
     sent = []
-    handler = _offer_handler(tmp_path, DENY_ALL, sent)
+    handler = _offer_handler(tmp_path, DENY_PEER, sent)
 
     await handler.handle(PEER, _offer(filename="x.txt"))
 
