@@ -478,7 +478,10 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
 - [x] **Sweep, with pid reuse.** An entry whose pid is alive with a different start time
   is left alone; with the same start time, it is killed and closed `orphan_swept`.
   (Registry tests `TestTheStartupSweep`: the same-start-time and the different-start-time
-  cases, with a real child.)
+  cases, with a real child.) On POSIX a killed child is a zombie until its parent reaps it
+  and psutil still gives its creation time, so the probe reads a zombie as gone; without
+  that the same-start-time case left the entry open on Linux (CI on `4ea0560f`).
+  (`TestAZombieIsGone`.)
 - [x] **Never its own pid,** and never an ancestor's.
   (`test_never_its_own_pid_and_never_an_ancestors`,
   `test_the_stop_never_aims_at_the_backends_own_pid`.)
