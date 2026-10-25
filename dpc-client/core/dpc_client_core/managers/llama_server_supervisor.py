@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from .. import process_registry as _procreg
 from .llama_server_fetcher import DPC_HOME, ensure_binary, find_cuda_backend, install_root
 
 logger = logging.getLogger(__name__)
@@ -735,6 +736,14 @@ class LlamaServerSupervisor:
     # its own engine's included. Two llama-server aliases are left to the
     # admission arithmetic, as before the check existed.
     EXCLUSIVE_ON_THE_CARD = False
+    # The process registry's launcher word for this engine (ADR-046 point 3).
+    PROCESS_LAUNCHER = "llamacpp_server"
+    # A stop DPC asks for outside its own shutdown and outside a failed start is a
+    # person's action in the UI (the stop button, a settings save that retires the
+    # child). `idle_unload` and `engine_switch` have no path of their own in the
+    # code: no child is stopped for being idle, and a switch to the other engine
+    # reaches here as the same stop button.
+    DEFAULT_STOP = "ui_stop"
 
     @classmethod
     def merge_config(cls, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -747,6 +756,9 @@ class LlamaServerSupervisor:
         self.port: Optional[int] = None
         self.props: Optional[Dict[str, Any]] = None
         self._proc: Optional[asyncio.subprocess.Process] = None
+        # Why the next stop is being asked for, set by the path that asks and
+        # consumed by `_stop_child` (the process registry's stop word).
+        self._stop_why: Optional[str] = None
         self._log_path = DPC_HOME / "logs" / f"llama-server-{alias}.log"
         self._log_fh = None
         self._draining = False
@@ -1168,6 +1180,8 @@ class LlamaServerSupervisor:
                 f"{self.ENGINE}[{self.alias}]: a child (pid {getattr(live, 'pid', None)}) "
                 f"is still running on :{self.port}; refusing to start a second over it"
             )
+        if live is not None:
+            self._end_child(live)  # it died on its own and nobody looked until now
         # Again per rung: a failed rung's stop released the card, and another
         # engine may have taken it since.
         self._claim_card()
@@ -1207,6 +1221,7 @@ class LlamaServerSupervisor:
         loop has already registered; one still in flight passes."""
         if self._proc is proc and proc.returncode is None:
             return
+        self._end_child(proc)
         state = (
             f"exited with {proc.returncode}" if proc.returncode is not None
             else "is no longer this supervisor's child"
@@ -1223,10 +1238,10 @@ class LlamaServerSupervisor:
         """Stop `proc`, the child an unfinished start spawned, and nothing else."""
         if proc is None or self._proc is not proc:
             return
-        await self._stop_shielded()
+        await self._stop_shielded("failed_start")
 
     @on_the_owner_loop
-    async def _stop_shielded(self) -> None:
+    async def _stop_shielded(self, why: Optional[str] = None) -> None:
         """`stop()` as its own task under a shield: a second cancellation that
         arrives while the child is asked to stop leaves the stop running, and the
         next start waits for it (`_await_abandoned_stop`). A stop already in
@@ -1235,12 +1250,14 @@ class LlamaServerSupervisor:
         Forwarded by itself: the task is made on the owner loop whoever calls."""
         task = self._abandoned_stop
         if task is None or task.done():
-            task = self._abandoned_stop = asyncio.ensure_future(self._stop_logged())
+            task = self._abandoned_stop = asyncio.ensure_future(self._stop_logged(why))
         await asyncio.shield(task)
 
-    async def _stop_logged(self) -> None:
+    async def _stop_logged(self, why: Optional[str] = None) -> None:
         # Never raises: an error here would replace the start's own exception,
         # a cancellation included, in the handler that called it.
+        if why is not None:
+            self._stop_why = why
         try:
             await self.stop()
         except Exception as exc:
@@ -1279,18 +1296,71 @@ class LlamaServerSupervisor:
             await self._await_abandoned_stop()
 
     async def _spawn(self, cmd: List[str], env: Dict[str, str]) -> asyncio.subprocess.Process:
-        return await asyncio.create_subprocess_exec(
+        self._refuse_while_the_backend_stops()
+        proc = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
             stdout=self._log_fh,
             stderr=asyncio.subprocess.STDOUT,
             creationflags=_CREATION_NEW_PROCESS_GROUP,
         )
+        self._register_child(proc, cmd)
+        return proc
+
+    # --- the process registry (ADR-046) ---------------------------------------
+
+    def _refuse_while_the_backend_stops(self) -> None:
+        """No child is born once the backend's stop has begun (point 7, step 1)."""
+        try:
+            _procreg.get_registry().check_open()
+        except _procreg.ProcessRegistryClosed as e:
+            raise LlamaServerError(f"{self.ENGINE}[{self.alias}]: {e}") from None
+
+    def _register_child(self, proc: Any, cmd: List[str]) -> None:
+        """Record the child as a subsystem process. A stand-in with no integer pid
+        (a test's fake) has nothing to record."""
+        pid = getattr(proc, "pid", None)
+        if not isinstance(pid, int):
+            return
+        try:
+            _procreg.get_registry().register(
+                pid,
+                launcher=self.PROCESS_LAUNCHER,
+                launcher_kind="subsystem",
+                command=cmd,
+                log=logger,
+                detail=f"alias {self.alias}, port {self.port}",
+            )
+        except _procreg.ProcessRegistryClosed as e:
+            # The stop began between the check and the spawn: the child exists and
+            # nothing would end it.
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise LlamaServerError(f"{self.ENGINE}[{self.alias}]: {e}") from None
+
+    def _note_stop(self, proc: Any) -> None:
+        """Announce to the registry the stop about to be sent to `proc`, with the
+        word the path that asked gave (else `DEFAULT_STOP`)."""
+        why, self._stop_why = self._stop_why or self.DEFAULT_STOP, None
+        pid = getattr(proc, "pid", None)
+        if isinstance(pid, int):
+            _procreg.get_registry().note_stop_sent(pid, "stopped", why)
+
+    def _end_child(self, proc: Any) -> None:
+        """Record that `proc` has ended, with the code the loop read. A child still
+        running is not an end."""
+        pid = getattr(proc, "pid", None)
+        code = getattr(proc, "returncode", None)
+        if isinstance(pid, int) and code is not None:
+            _procreg.get_registry().end(pid, code)
 
     async def _wait_healthy(self) -> None:
         deadline = time.monotonic() + float(self.config["start_timeout_s"])
         while time.monotonic() < deadline:
             if self._proc and self._proc.returncode is not None:
+                self._end_child(self._proc)
                 raise LlamaServerError(
                     f"{self.ENGINE}[{self.alias}] exited with {self._proc.returncode} before "
                     f"becoming healthy",
@@ -1584,8 +1654,12 @@ class LlamaServerSupervisor:
         proc, self._proc = self._proc, None
         self.props = None
         if proc is None or proc.returncode is not None:
+            self._stop_why = None
+            if proc is not None:
+                self._end_child(proc)  # it was already dead: an exit, not a stop
             self._close_log()
             return
+        self._note_stop(proc)
         try:
             try:
                 proc.send_signal(signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT)
@@ -1605,6 +1679,7 @@ class LlamaServerSupervisor:
             await proc.wait()
         finally:
             self._close_log()
+            self._end_child(proc)
             if self._proc is not proc:
                 logger.info("%s[%s] stopped (rc=%s)", self.ENGINE, self.alias, proc.returncode)
 

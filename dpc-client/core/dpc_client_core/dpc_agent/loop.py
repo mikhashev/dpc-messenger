@@ -36,6 +36,7 @@ from .tool_ledger import record_attempt, sweep_unfinished
 from dpc_protocol.protocol import PeerRefused
 
 from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading
+from ..process_registry import SpawnOrigin, spawn_origin
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
     ContextLimitGuard,
@@ -976,6 +977,18 @@ def _execute_single_tool(
     }
 
 
+def _execute_single_tool_for(origin: SpawnOrigin, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """`_execute_single_tool` with `SPAWN_ORIGIN` set for the duration (ADR-046 point 3).
+
+    Runs in the pool thread and sets the variable there: a `_DaemonToolPool`
+    thread does not inherit the dispatcher's context, so a variable set before
+    `run_in_executor` would not arrive, and every process the tool starts would
+    be a lost attribution. The previous value is restored, so a worker carries
+    nothing from one call to the next."""
+    with spawn_origin(origin):
+        return _execute_single_tool(*args, **kwargs)
+
+
 async def _execute_with_timeout(
     tools: "ToolRegistry",
     tc: Dict[str, Any],
@@ -985,14 +998,23 @@ async def _execute_with_timeout(
     round_number: int = 0,
     session_id: str = "",
     ctx: "Optional[ToolContext]" = None,
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     """Execute a tool call with a hard timeout using shared executor.
 
     Uses asyncio.run_in_executor to avoid blocking the event loop,
     allowing other async operations (like handling other chats) to proceed.
+
+    `agent_id` names who asked; absent, it is the agent folder `logs_dir` sits in.
     """
     fn_name = tc["function"]["name"]
     tool_call_id = tc["id"]
+    origin = SpawnOrigin(
+        agent_id=agent_id or logs_dir.parent.name,
+        conversation_id=session_id,
+        tool=fn_name,
+        round=round_number,
+    )
 
     try:
         attempt_args = json.loads(tc["function"]["arguments"] or "{}")
@@ -1025,8 +1047,8 @@ async def _execute_with_timeout(
         result = await asyncio.wait_for(
             loop.run_in_executor(
                 executor,
-                lambda: _execute_single_tool(
-                    tools, tc, logs_dir, task_id, round_number, session_id, ctx=ctx,
+                lambda: _execute_single_tool_for(
+                    origin, tools, tc, logs_dir, task_id, round_number, session_id, ctx=ctx,
                 ),
             ),
             timeout=timeout_sec
@@ -1471,6 +1493,7 @@ async def run_llm_loop(
                 round_number=round_idx,
                 session_id=conversation_id or "",
                 ctx=_loop_ctx,
+                agent_id=_divergence_agent,
             )
 
             truncated_result = _truncate_tool_result(exec_result["result"])

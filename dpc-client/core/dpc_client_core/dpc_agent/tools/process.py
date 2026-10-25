@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -182,6 +182,7 @@ def _watch_memory(
     ceiling_mb: int,
     verdict: dict,
     stop: Optional[threading.Event] = None,
+    note_stop: Optional[Callable[[], None]] = None,
 ) -> None:
     """Kill the tree if it grows past the ceiling. Runs on a daemon thread.
 
@@ -206,6 +207,8 @@ def _watch_memory(
                 "the command tree of pid %s reached %d MB, over the %d MB ceiling — killing it",
                 process.pid, round(used), ceiling_mb,
             )
+            if note_stop is not None:
+                note_stop()  # before the kill: the registry must not read it as a crash
             # The real verdict: a partial kill must not be reported as a full one.
             verdict["killed"] = _kill_process_tree(process)
             return
@@ -320,7 +323,15 @@ def _kill_process_tree(process: "subprocess.Popen") -> str:
         strays = _descendants(pid)
         killed_group = False
         try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            group = os.getpgid(pid)
+            if group == os.getpgrp():
+                # A child that never got a group of its own (a caller's own
+                # popen_kwargs, an engine started without a session) shares the
+                # backend's: killpg would end the backend and the launcher
+                # above it. Only the child and what can be walked from it.
+                os.kill(pid, signal.SIGKILL)
+            else:
+                os.killpg(group, signal.SIGKILL)
             killed_group = True
         except Exception as exc:
             log.warning("killpg on pid %s failed: %s", pid, exc)
@@ -352,6 +363,46 @@ def _kill_process_tree(process: "subprocess.Popen") -> str:
         return "only the command itself could be killed; a descendant may survive"
     except Exception:
         return "the command could not be killed"
+
+
+class _PidHandle:
+    """Just enough of a `Popen` for `_kill_process_tree`, for a process this
+    interpreter holds no `Popen` of: a pid read from the process registry."""
+
+    def __init__(self, pid: int):
+        self.pid = pid
+
+    def kill(self) -> None:
+        try:
+            import psutil
+
+            psutil.Process(self.pid).kill()
+        except ImportError:
+            import signal
+
+            os.kill(self.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+
+
+def kill_pid_tree(pid: int) -> str:
+    """Kill `pid` and everything it started, by pid alone (ADR-046 point 6).
+
+    The caller has already established that `pid` is the process it means (the
+    registry compares creation times) and that it is neither the backend nor an
+    ancestor of it. Returns `_kill_process_tree`'s sentence."""
+    return _kill_process_tree(_PidHandle(pid))
+
+
+def _registry():
+    """The process registry, or None where the module is loaded on its own.
+
+    Imported here, not at the top, because some harnesses load this file by path
+    as a stand-alone module (the job test does), where a relative import fails;
+    they have the package on `sys.path`, so the absolute import works."""
+    try:
+        from dpc_client_core import process_registry
+    except ImportError:
+        return None
+    return process_registry.get_registry()
 
 
 _DRAIN_AFTER_KILL_SECONDS = 5
@@ -488,6 +539,9 @@ class SupervisedRun:
     # 0 = the ceiling was off; None = not set (built outside run_supervised).
     ceiling_mb: Optional[int] = None
     killed: str = ""
+    # How the process registry recorded the end (ADR-046 point 4); empty when
+    # the run was not registered.
+    exit_reason: str = ""
 
     @property
     def ok(self) -> bool:
@@ -537,6 +591,11 @@ def run_supervised(
         # (ENXIO), and a pager whose stdout is a pipe pages nothing anyway.
         kwargs.setdefault("start_new_session", True)
 
+    registry = _registry()
+    if registry is not None:
+        # Before the child exists: a spawn the backend's stop has refused must
+        # not be born (ADR-046 point 7, step 1).
+        registry.check_open()
     process = subprocess.Popen(
         cmd,
         shell=shell,
@@ -552,10 +611,31 @@ def run_supervised(
         stdin=subprocess.DEVNULL,
         **kwargs,
     )
-    log.info(
-        "spawned pid %s for %s (timeout %ss, ceiling %s MB): %.120s",
-        process.pid, launcher, timeout, ceiling or "off", log_as or _command_text(cmd),
-    )
+    detail = f"timeout {timeout}s, ceiling {ceiling or 'off'} MB"
+    if registry is not None:
+        try:
+            registry.register(
+                process.pid,
+                launcher=launcher,
+                launcher_kind="tool",
+                command=log_as or _command_text(cmd),
+                handle=process,
+                log=log,
+                detail=detail,
+            )
+        except Exception:
+            # Closed in the instant between the check and here, or a malformed
+            # entry: either way the child exists and nobody would end it.
+            _kill_process_tree(process)
+            raise
+    else:
+        log.info(
+            "spawned pid %s for %s (%s): %.120s",
+            process.pid, launcher, detail, log_as or _command_text(cmd),
+        )
+
+    def _note_stop(reason: str) -> Callable[[], None]:
+        return lambda: registry.note_stop_sent(process.pid, reason) if registry is not None else None
 
     verdict: dict = {}
     watch_thread: Optional[threading.Thread] = None
@@ -563,7 +643,7 @@ def run_supervised(
     if ceiling and ceiling > 0:
         watch_thread = threading.Thread(
             target=_watch_memory,
-            args=(process, ceiling, verdict, watch_stop),
+            args=(process, ceiling, verdict, watch_stop, _note_stop("memory_ceiling")),
             name=f"dpc-memory-watch-{process.pid}",
             daemon=True,
         )
@@ -575,6 +655,7 @@ def run_supervised(
         run.returncode = process.returncode
     except subprocess.TimeoutExpired:
         run.timed_out = True
+        _note_stop("timeout")()  # before the kill: a SIGKILL is not a crash
         run.killed = _kill_process_tree(process)
         run.stdout, run.stderr = _drain_after_kill(process)
         run.returncode = process.returncode
@@ -600,4 +681,22 @@ def run_supervised(
         run.exceeded_mb = verdict["exceeded_mb"]
         if not run.killed:
             run.killed = verdict.get("killed") or "the command and its descendants were killed"
+    if registry is not None:
+        # Last, with the stop (if any) already announced: the word comes from
+        # what was sent, and a code nobody sent is read for a death. A kill
+        # whose pipes never closed may leave the code unread; the stop that was
+        # announced still names the end.
+        code = process.returncode
+        if code is None:
+            try:
+                code = process.poll()
+            except Exception:
+                code = None
+        try:
+            ended = registry.end(process.pid, code)
+        except Exception as exc:  # the registry must never take a finished command down
+            log.warning("process registry: could not record the end of pid %s: %s", process.pid, exc)
+            ended = None
+        if ended is not None:
+            run.exit_reason = ended.exit_reason or ""
     return run

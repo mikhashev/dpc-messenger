@@ -260,6 +260,7 @@ from dpc_client_core.__version__ import __version__
 from dpc_client_core import ai_chats, single_instance
 from dpc_client_core.console_guard import start_console_guard
 from dpc_client_core.job_object import enter_kill_on_close_job
+from dpc_client_core.process_registry import start_persistent as start_process_registry
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +460,11 @@ async def main():
     # Logging does not exist yet, so the outcome is written right after it does.
     job_outcome = enter_kill_on_close_job()
 
+    # Then the process registry: read what the last run left and kill what of it
+    # still runs, before this run's first spawn (ADR-046 point 6). Logging does
+    # not exist yet either, so the sweep's lines are written below, like the job's.
+    sweep_outcome = start_process_registry()
+
     # GPU status check (ADR-012)
     dependency_setup()
 
@@ -467,6 +473,7 @@ async def main():
     # Setup logging infrastructure before service starts
     setup_logging(service.settings)
     job_outcome.log()
+    sweep_outcome.log()
 
     # Right after logging, so its lines reach the file: a console left in raw
     # mode by a killed child swallows Ctrl+C, and the guard puts it back.

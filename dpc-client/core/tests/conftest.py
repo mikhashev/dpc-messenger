@@ -48,6 +48,20 @@ def _node_ledger_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_process_registry():
+    """The process registry is module state (ADR-046). A test that begins the
+    backend's stop would make every later spawn refuse, and open entries of one
+    test's children would be read as the next one's. Each test starts with an
+    empty in-memory registry; none touches `~/.dpc/process_registry.json`, which
+    only `start_persistent()` (run_service) ever writes."""
+    from dpc_client_core import process_registry
+
+    process_registry.reset_registry()
+    yield
+    process_registry.reset_registry()
+
+
+@pytest.fixture(autouse=True)
 def _no_card_claims_cross_tests():
     """The card-holder registry is module state (ADR-044 point 4). A test whose
     fake launch returns without a child leaves its claim behind, and the next

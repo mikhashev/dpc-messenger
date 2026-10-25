@@ -1247,6 +1247,12 @@ class CoreService:
         self._is_running = False
         logger.info("Shutting down components")
 
+        # ADR-046 point 7, step 1: the process registry refuses new entries from
+        # here, so nothing is born after the stop below; every later stop reads
+        # `backend_stop` whoever signals.
+        from .process_registry import get_registry
+        get_registry().begin_shutdown()
+
         # Tools run on a pool the interpreter joins at exit, and a tool waiting for its
         # turn on an index writer would hold that join. Nothing queued now is worth
         # waiting for — the next start rebuilds whatever this one drops.
@@ -1266,6 +1272,14 @@ class CoreService:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks.clear()
+
+        # Step 2: command children (an agent's tools) are killed hard and early,
+        # before anything slower can hold the stop. Engines follow through their
+        # supervisors (LLMManager.shutdown), browsers below.
+        try:
+            await asyncio.to_thread(get_registry().stop_commands)
+        except Exception as e:
+            logger.error("Could not stop the command children: %s", e, exc_info=True)
 
         # Save all group chat histories to disk (v0.20.0)
         saved_count = 0
@@ -1377,6 +1391,12 @@ class CoreService:
                             pass
         except Exception as e:
             logger.error("Camoufox shutdown sweep failed: %s", e, exc_info=True)
+
+        # Steps 5-6: no entry may still be open; one log line per process.
+        try:
+            await asyncio.to_thread(get_registry().finish_shutdown)
+        except Exception as e:
+            logger.error("Process registry verification failed: %s", e, exc_info=True)
 
         # Shutdown core components
         await self.p2p_manager.shutdown_all()

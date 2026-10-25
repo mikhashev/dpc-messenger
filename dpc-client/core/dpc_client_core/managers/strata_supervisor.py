@@ -797,6 +797,7 @@ class StrataSupervisor(LlamaServerSupervisor):
     ENGINE = "strata"
     # Strata takes most of the card, so no other alias shares it (ADR-044 point 4).
     EXCLUSIVE_ON_THE_CARD = True
+    PROCESS_LAUNCHER = "strata"
 
     def on_the_card(self) -> bool:
         return True
@@ -1142,7 +1143,8 @@ class StrataSupervisor(LlamaServerSupervisor):
         return env
 
     async def _spawn(self, cmd: List[str], env: Dict[str, str]) -> asyncio.subprocess.Process:
-        return await asyncio.create_subprocess_exec(
+        self._refuse_while_the_backend_stops()
+        proc = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
             cwd=str(self.install_dir()),
@@ -1150,6 +1152,8 @@ class StrataSupervisor(LlamaServerSupervisor):
             stderr=asyncio.subprocess.STDOUT,
             creationflags=_base._CREATION_NEW_PROCESS_GROUP,
         )
+        self._register_child(proc, cmd)
+        return proc
 
     def _sample_free_commit(self) -> Optional[Dict[str, Any]]:
         reading = read_free_commit()
@@ -1232,6 +1236,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             if proc is not None and proc.returncode is None and self.props:
                 return self.props
             if proc is not None and proc.returncode is not None:
+                self._end_child(proc)
                 if self.props:
                     await self._fail_closed(
                         f"the launcher exited on its own with {proc.returncode}", body=None, stop=True,
@@ -1532,6 +1537,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             if proc is None:
                 return
             if proc.returncode is not None:
+                self._end_child(proc)
                 await self._fail_closed(f"the launcher exited on its own with {proc.returncode}")
                 return
             self._sample_free_commit()
@@ -1606,7 +1612,12 @@ class StrataSupervisor(LlamaServerSupervisor):
                 self._watch_task = None
             # Shielded, as an interrupted start's stop is: a caller cancelled here
             # (an agent killed mid-call) must not leave the launcher running.
-            await self._stop_shielded()
+            #
+            # `failed_start` is exact for a refused start (no engine version, the
+            # smoke) and the nearest word for an engine that died after it was up
+            # (the watcher, a 503): the closed list has no word for "stopped
+            # because the engine died". Candidates for the owner: `engine_died`.
+            await self._stop_shielded("failed_start")
 
     def reset_failure(self) -> Optional[Dict[str, Any]]:
         """Clear a recorded engine death so the next call may start the launcher.

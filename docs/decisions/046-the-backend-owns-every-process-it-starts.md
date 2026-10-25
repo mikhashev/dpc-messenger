@@ -230,8 +230,10 @@ kernel.
      engine), `failed_start` (an unfinished start cleared away), `browser_closed` (the
      browser closed on purpose). The word says that DPC did it; `stop_reason` says why.
      Mike's call, 2026-10-25, on the proposal of Ark and CC.
-   - `crashed` — ended by a signal or by an NTSTATUS-class code (a code in `0xC0000000`
-     and up) that nobody sent. The rule is **who sent, not which number:** the word is set
+   - `crashed` — ended by a signal or by an NTSTATUS error code (`0xC0000000` up to, not
+     including, `0xE0000000`: the customer bit marks codes a program chose, so `exit(-1)`,
+     `0xFFFFFFFF`, stays an ordinary exit) that nobody sent. The rule is **who sent, not
+     which number:** the word is set
      if and only if the registry sent this process no stop, and the number or the signal
      only confirms it. A commit-limit death is this (`0xC000012D`, STATUS_COMMITMENT_LIMIT,
      recalled and not measured here). `0xC000013A` (STATUS_CONTROL_C_EXIT) is not: it is
@@ -497,10 +499,11 @@ the table rests on `rg` and the reading, not on the graph. Not counted: `webbrow
 |------|--------|--------|
 | This record and the amendments to ADR-040, ADR-044, ADR-036 | Written 2026-10-25 | — |
 | Job in `run_service.py`, with its tests (`job_object.py`); the Hub login opens its URL through `explorer.exe`, outside the job | Done 2026-10-25 | `2ebdb0a3` |
-| Registry, contextvar, exit reasons, sampler, persistence | Pending | — |
+| Registry (`process_registry.py`): entries with parent and `launcher_kind`, `SPAWN_ORIGIN` set in the pool thread, the eight exit reasons, persistence (newest 200, none older than 7 days, open entries kept); `run_supervised` and both supervisors register and end their children | Done 2026-10-25 | the commit that adds `process_registry.py` |
+| Startup sweep | Done 2026-10-25 | the same commit |
+| Shutdown order in `service.shutdown` | Done 2026-10-25 | the same commit |
+| Resource sampler (peaks, `last_output_at`) | Pending | — |
 | Spawn sites to the module; structural test | Pending | — |
-| Startup sweep | Pending | — |
-| Shutdown order in `service.shutdown` | Pending | — |
 | Local API command; agent tools | Pending | — |
 | UI: AGENTS row and Agent Models Configuration (own card) | Pending | — |
 

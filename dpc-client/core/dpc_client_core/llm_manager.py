@@ -1153,6 +1153,10 @@ class LLMManager:
         during application shutdown.
         """
         logger.info("Shutting down LLMManager...")
+        # Every stop below is the backend's own stop whoever signals (ADR-046
+        # point 4, precedence). Idempotent: the service has normally said so already.
+        from .process_registry import get_registry
+        get_registry().begin_shutdown()
         for alias, provider in self.providers.items():
             if hasattr(provider, 'close'):
                 try:

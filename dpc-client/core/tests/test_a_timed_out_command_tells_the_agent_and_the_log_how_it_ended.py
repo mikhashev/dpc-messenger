@@ -26,6 +26,7 @@ from dpc_client_core.dpc_agent.tools.process import (
     SupervisedRun, output_tail, pager_prompt_at_end, run_supervised,
 )
 from dpc_client_core.dpc_agent.tools.registry import ToolContext
+from dpc_client_core.process_registry import SpawnOrigin, spawn_origin
 
 TURN, CALL = "20261024T175851Z-abcdef12", "r7-0"
 WINDOWS_MORE_TAIL = "65531\n65532\n65533\n-- More  -- "
@@ -78,7 +79,10 @@ def test_the_log_names_the_command_not_its_wrapper(caplog):
 
 def test_a_run_that_ends_in_time_writes_no_warning(caplog):
     caplog.set_level(logging.WARNING, logger=process_mod.__name__)
-    run_supervised([sys.executable, "-c", "print(1)"], launcher="run_shell", timeout=30, ceiling_mb=0)
+    # As a tool call runs it: the dispatcher has set the spawn origin, so the
+    # process registry has no lost attribution to warn about (ADR-046 point 3).
+    with spawn_origin(SpawnOrigin(agent_id="agent_test", conversation_id="conv", tool="run_shell", round=1)):
+        run_supervised([sys.executable, "-c", "print(1)"], launcher="run_shell", timeout=30, ceiling_mb=0)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
