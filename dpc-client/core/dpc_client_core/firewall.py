@@ -1776,7 +1776,9 @@ class ContextFirewall:
                     "auto_accept_threshold_mb": 25,
                     "allowed_sources": ["clipboard", "file", "camera"],
                     "max_size_mb": 100,
-                    "save_screenshots_to_disk": False
+                    # On by default: with false the chat showed no preview of a
+                    # screenshot (Mike's call, 2026-10-25); an explicit false stays.
+                    "save_screenshots_to_disk": True
                 }
             }
 

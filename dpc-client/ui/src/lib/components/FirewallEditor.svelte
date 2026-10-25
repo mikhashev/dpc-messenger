@@ -1922,7 +1922,7 @@
                     <strong>Save Screenshots to Disk</strong>
                   </label>
                 </div>
-                <p class="help-text-small">When disabled (default), screenshots are sent/received but not permanently saved. Only thumbnails are kept for display.</p>
+                <p class="help-text-small">Enabled by default. When disabled, screenshots are sent and received but not kept on disk, and the chat may show no preview of them.</p>
               </div>
             {:else}
               <p class="empty">Image transfer settings not configured.</p>
@@ -1930,7 +1930,7 @@
 
             {#if !editMode}
               <div class="info-box" style="margin-top: 1.5rem;">
-                <strong>Info:</strong> Image transfer settings control screenshot/image sharing behavior in P2P chats. Auto-accept threshold determines which images are displayed inline vs. requiring user approval. When "Save Screenshots to Disk" is disabled, images are transmitted but not stored permanently (privacy-conscious default).
+                <strong>Info:</strong> Image transfer settings control screenshot/image sharing behavior in P2P chats. Auto-accept threshold determines which images are displayed inline vs. requiring user approval. When "Save Screenshots to Disk" is disabled, images are transmitted but not stored permanently.
               </div>
             {/if}
           </div>
