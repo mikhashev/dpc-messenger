@@ -13,8 +13,44 @@ tool call, `subsystem` for an engine or the browser), the spawn origin (`agent_i
 `conversation_id`, `tool`, `round`, read from the `SPAWN_ORIGIN` context variable
 the tool dispatcher sets), the command (bounded), when it started and ended, the
 `exit_reason`, the stop field (`STOP_FIELD`, `stop_kind`) when the reason is `stopped`,
-and the raw `exit_code` and `signal`. The resource peaks and `last_output_at` are
-fields that exist and stay `None` until the sampler is written.
+and the raw `exit_code` and `signal`; then the resource peaks and `last_output_at`.
+
+**The resource sampler** (`ResourceSampler`, started by `start_resource_sampler()`,
+which `run_service.py` calls once; tests start one on demand; stopped by
+`finish_shutdown()`). One daemon thread, every `SAMPLE_INTERVAL_S` (2 s), over
+the open entries, each only while `probe_identity` says the pid is still the
+recorded process. It walks the tree (the child and `psutil` `children(recursive=True)`,
+the walk the memory ceiling makes) and keeps peaks, never a series:
+
+- `peak_rss_mb`: the peak of the tree's summed RSS, never below the child's own
+  lifetime peak where the OS keeps one (Windows `peak_wset`, Linux `VmHWM`).
+- `peak_commit_mb`: the same with commit (Windows `private`, the child's own
+  `peak_pagefile`). None on POSIX: it has no cheap equivalent (`vms` counts every
+  reservation; `_process_memory_mb` in `process.py` says why).
+- `cpu_seconds`, `io_read_bytes`, `io_write_bytes`: per process by (pid, creation
+  time), the last value seen, summed over every process ever seen in the tree, so a
+  total does not fall when a child exits. IO is None on macOS (psutil has none).
+- `peak_vram_mib`: engines only (`ENGINES`), summed over the tree. Windows: the PDH
+  counter `\\GPU Process Memory(*)\\Dedicated Usage` through ctypes, a commitment
+  that can exceed what the card holds; Linux: NVML through ctypes when it loads;
+  macOS: None. The sampler never spawns a process (no `nvidia-smi`).
+- `last_output_at`: for a `run_supervised` child, when its readers last got bytes
+  (`note_output`); for an engine, the newest mtime of the log files it was
+  registered with (`log_paths`), from its start on.
+
+A command shorter than the interval (most of what agents run) wakes the sampler
+when it registers and is sampled at `EARLY_SAMPLES_S` before it joins the tick;
+on Windows `end()` also reads the child's own lifetime figures through its `Popen`
+handle, which still holds the exited process. So a 0.2 s command gets RSS, commit,
+CPU and IO on Windows (the commit and the child's own peak whatever the timing);
+RSS, CPU and IO on Linux and RSS and CPU on macOS, from whichever early sample
+found it alive (a command that ends inside the first few milliseconds can get
+nothing there). A failing reading leaves its field None and is logged once per
+kind of failure; the thread holds the registry lock only to copy and to write.
+The figures reach the state file with the spawn and end writes, and when an open
+entry's peak rose by `PEAK_WRITE_RISE` (25 %) and `PEAK_WRITE_MIN_MB` (64 MB;
+`PEAK_WRITE_MIN_VRAM_MIB`, 256 MiB, for VRAM) over what the file holds, at most
+once per `PEAK_WRITE_MIN_INTERVAL_S` (10 s).
 
 **Spawn origin of a subsystem.** An engine started inside an agent's tool call
 carries that call's origin (`register` reads the context variable at the moment of
@@ -83,14 +119,15 @@ import contextvars
 import json
 import logging
 import os
+import re
 import signal as _signal
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +173,28 @@ LOCK_STALE_S = 10.0
 LOCK_SLEEP_S = 0.01
 # psutil's creation time is a float of the OS clock; two reads of one process agree.
 START_TIME_TOLERANCE_S = 1.0
+
+# --- the resource sampler (ADR-046 point 3, "Resources are peaks, sampled") ---
+SAMPLE_INTERVAL_S = 2.0
+# Extra samples of a new entry, in seconds after its registration, before it joins
+# the regular tick: most agent commands end well inside one interval.
+EARLY_SAMPLES_S = (0.0, 0.1, 0.3, 0.7)
+# The state file is rewritten by the sampler when an open entry's peak has risen
+# by this fraction over the value last written, and by at least the floor, at
+# most once per `PEAK_WRITE_MIN_INTERVAL_S`.
+PEAK_WRITE_RISE = 0.25
+PEAK_WRITE_MIN_MB = 64.0
+PEAK_WRITE_MIN_VRAM_MIB = 256.0
+PEAK_WRITE_MIN_INTERVAL_S = 10.0
+# The subsystems whose VRAM is read: the two local engines (provider types).
+ENGINES = ("strata", "llamacpp_server")
+_MB = 1024 * 1024
+# The peaks whose rise rewrites the state file, each with its floor.
+_PEAK_FLOORS = (
+    ("peak_rss_mb", PEAK_WRITE_MIN_MB),
+    ("peak_commit_mb", PEAK_WRITE_MIN_MB),
+    ("peak_vram_mib", PEAK_WRITE_MIN_VRAM_MIB),
+)
 
 
 class ProcessRegistryClosed(RuntimeError):
@@ -249,7 +308,8 @@ class ProcessEntry:
     stop_kind: Optional[str] = None
     exit_code: Optional[int] = None
     signal: Optional[str] = None
-    # Present, and None until the sampler exists (a later card).
+    # Filled by the resource sampler where it runs (the backend; see the module
+    # docstring for what each platform gives); None where nothing was read.
     peak_rss_mb: Optional[float] = None
     peak_commit_mb: Optional[float] = None
     peak_vram_mib: Optional[float] = None
@@ -289,6 +349,16 @@ class _Live:
     stop_sent: Optional[Tuple[str, Optional[str]]] = None
     # Whether the backend's orderly stop had already begun when `stop_sent` was announced.
     stop_sent_while_stopping: bool = False
+    # The files an engine writes its output to; their newest mtime is `last_output_at`.
+    log_paths: Tuple[Path, ...] = ()
+    # When (the sampler's monotonic clock) the early samples of this entry are due.
+    early_due: List[float] = field(default_factory=list)
+    # Every process ever seen in the tree, by (pid, creation time): its last
+    # (cpu seconds, io read bytes, io write bytes). Summed, so a child that exits
+    # does not take its share out of the totals.
+    seen: Dict[Tuple[int, Optional[float]], Tuple[Optional[float], Optional[int], Optional[int]]] = field(default_factory=dict)
+    # The peaks as the state file last had them (the base of the sampler's write).
+    written: Dict[str, Optional[float]] = field(default_factory=dict)
 
 
 # --- one place to find a process by its identity ---------------------------------
@@ -510,6 +580,8 @@ class ProcessRegistry:
         self._backend_start_time: Optional[float] = None
         self._last_write_error: Optional[str] = None
         self.load_notes: List[Tuple[int, str]] = []
+        # The resource sampler, when one was started (the backend; tests on demand).
+        self._sampler: Optional["ResourceSampler"] = None
 
     # -- state --------------------------------------------------------------------
 
@@ -600,6 +672,7 @@ class ProcessRegistry:
             if last is not None:
                 raise last
             self._last_write_error = None
+            self._note_written_locked()
         except OSError as exc:
             # Said once per distinct failure: it repeats on every spawn.
             if str(exc) != self._last_write_error:
@@ -607,6 +680,14 @@ class ProcessRegistry:
                 logger.warning("process registry: could not write %s (%s); the list is kept in memory", self.path, exc)
             with contextlib.suppress(OSError):
                 tmp.unlink()
+
+    def _note_written_locked(self) -> None:
+        """The peaks of every open entry are now on disk: the base the sampler's
+        next write is measured against."""
+        for pid, entry in self._open.items():
+            live = self._live.get(pid)
+            if live is not None:
+                live.written = {name: getattr(entry, name) for name, _ in _PEAK_FLOORS}
 
     def _prune_locked(self) -> None:
         finished = [e for e in self._entries if not e.is_open]
@@ -698,6 +779,7 @@ class ProcessRegistry:
         detail: str = "",
         parent_pid: Optional[int] = None,
         parent_start_time: Optional[float] = None,
+        log_paths: Sequence[Any] = (),
     ) -> ProcessEntry:
         """Record a child at its birth and log the start line.
 
@@ -706,7 +788,9 @@ class ProcessRegistry:
         start and end lines go through (the launcher's own, so a test or an
         operator filtering on it still sees them). The origin is read from
         `SPAWN_ORIGIN` when not given; a `tool` child without one is a lost
-        attribution and is logged at WARNING."""
+        attribution and is logged at WARNING. `log_paths` are the files the
+        child writes its output to (an engine's log); the sampler reads their
+        newest modification time as `last_output_at`. Not persisted either."""
         if launcher_kind not in LAUNCHER_KINDS:
             raise ValueError(f"{launcher_kind!r} is not a launcher kind ({', '.join(LAUNCHER_KINDS)})")
         if not launcher:
@@ -743,8 +827,13 @@ class ProcessRegistry:
             )
             self._entries.append(entry)
             self._open[pid] = entry
-            self._live[pid] = _Live(handle=handle, log=out)
+            live = self._live[pid] = _Live(handle=handle, log=out, log_paths=tuple(Path(p) for p in log_paths))
+            sampler = self._sampler
+            if sampler is not None:
+                live.early_due = sampler.early_schedule()
             self._persist_locked()
+        if sampler is not None:
+            sampler.wake()  # the first sample now, not at the next tick
         out.info("%s", describe_start(entry, detail))
         if launcher_kind == "tool" and origin is None:
             out.warning(
@@ -783,9 +872,16 @@ class ProcessRegistry:
         Without `reason` the word is derived: the stop that was announced (kept as
         announced if it was announced before the backend's stop began, `backend_stop`
         if after), else `crashed` for an abnormal code, else `exited`. A second `end` for the
-        same process changes nothing but an `exit_code` the first lacked."""
+        same process changes nothing but an `exit_code` the first lacked.
+
+        With a sampler running, the child's own lifetime figures are read once
+        more first, while its `Popen` still holds the process object (Windows):
+        a command shorter than the sampler's interval gets its peaks from that."""
         if reason is not None:
             _check_reasons(reason, stop)
+        sampler = self._sampler
+        if sampler is not None:
+            sampler.read_at_end(pid)
         with self._lock:
             entry = self._open.get(pid)
             if entry is None:
@@ -842,6 +938,36 @@ class ProcessRegistry:
             out = (live.log if live is not None and live.log is not None else logger)
             out.log(logging.WARNING if reason == "crashed" else logging.INFO, "%s", describe_end(entry))
         return entry
+
+    def note_output(self, pid: int) -> None:
+        """`pid` wrote to its stdout or stderr just now (`run_supervised`'s readers).
+
+        Kept in memory only: the next write of the state file (a spawn, an end,
+        the sampler's) carries it, so a chatty command costs no disk."""
+        at = _iso(self._clock())
+        with self._lock:
+            entry = self._open.get(pid)
+            if entry is not None:
+                entry.last_output_at = at
+
+    # -- the resource sampler ---------------------------------------------------------
+
+    def start_sampler(self, **options: Any) -> "ResourceSampler":
+        """Start the resource sampler over this registry (once; a second call returns
+        the running one). `options` go to `ResourceSampler` (tests inject readers)."""
+        with self._lock:
+            if self._sampler is None:
+                self._sampler = ResourceSampler(self, **options)
+            sampler = self._sampler
+        sampler.start()
+        return sampler
+
+    def stop_sampler(self) -> None:
+        """Stop the sampler, if one runs. Harmless when none was ever started."""
+        with self._lock:
+            sampler, self._sampler = self._sampler, None
+        if sampler is not None:
+            sampler.stop()
 
     # -- reading ------------------------------------------------------------------
 
@@ -1006,7 +1132,9 @@ class ProcessRegistry:
         An entry still open names a process nobody ended. If it is gone it is
         closed `backend_stop` with no exit code; if it is alive (and is the process
         recorded) it is killed, the failure is logged at ERROR, and it is closed
-        the same way. The job is the backstop behind this, not a substitute."""
+        the same way. The job is the backstop behind this, not a substitute.
+        The resource sampler stops first: nothing it could read now is wanted."""
+        self.stop_sampler()
         if kill is None:
             kill = _kill_pid_tree
         shielded = own_and_ancestor_pids()
@@ -1054,6 +1182,610 @@ def _kill_pid_tree(pid: int) -> str:
     return _process.kill_pid_tree(pid)
 
 
+# --- the resource sampler (ADR-046 point 3) ---------------------------------------------
+
+@dataclass
+class ProcessSample:
+    """One process of a tree at one moment; None where a figure was not read."""
+
+    pid: int
+    create_time: Optional[float]
+    rss_mb: Optional[float] = None
+    commit_mb: Optional[float] = None
+    cpu_seconds: Optional[float] = None
+    io_read_bytes: Optional[int] = None
+    io_write_bytes: Optional[int] = None
+
+
+@dataclass
+class TreeSample:
+    """A child and its descendants at one moment, plus the OS's lifetime peaks of
+    the child itself where the OS keeps them (the tree's peak is never below them)."""
+
+    root_create_time: Optional[float]
+    processes: List[ProcessSample]
+    root_peak_rss_mb: Optional[float] = None
+    root_peak_commit_mb: Optional[float] = None
+
+
+def _key_time(create_time: Optional[float]) -> Optional[float]:
+    return None if create_time is None else round(create_time, 3)
+
+
+def _higher(old: Optional[float], new: Optional[float]) -> Optional[float]:
+    if new is None:
+        return old
+    return new if old is None or new > old else old
+
+
+def _vm_hwm_mb(pid: int) -> Optional[float]:
+    """Linux: the process's lifetime peak RSS (`VmHWM` in `/proc/<pid>/status`)."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) / 1024.0  # kB
+    except FileNotFoundError:
+        return None
+    return None
+
+
+# "Dedicated Usage" is what the driver has committed to the process in the card's
+# dedicated memory: a commitment, which can exceed what the card holds at that
+# moment, so these figures are never summed into a card total. Instances are
+# named `pid_<N>_luid_..._phys_<k>`, one per adapter.
+_PDH_GPU_COUNTER = r"\GPU Process Memory(*)\Dedicated Usage"
+_PDH_MORE_DATA = 0x800007D2
+_PDH_NO_DATA = 0x800007D5
+# The counter object or the counter does not exist here (no WDDM GPU counters).
+_PDH_ABSENT = (0xC0000BB8, 0xC0000BB9, 0x800007D0, 0xC0000BC4)
+_PDH_FMT_LARGE = 0x00000400
+_PDH_INSTANCE_PID = re.compile(r"^pid_(\d+)_")
+
+
+def read_vram_windows() -> Optional[Dict[int, float]]:
+    """MiB of dedicated GPU memory per pid, from the PDH counter, through ctypes on
+    `pdh.dll` (no subprocess, no dependency). None where the counter does not
+    exist; raises OSError on any other failure (the sampler says it once)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _Value(ctypes.Union):
+        _fields_ = [("longValue", ctypes.c_long), ("doubleValue", ctypes.c_double),
+                    ("largeValue", ctypes.c_longlong), ("AnsiStringValue", ctypes.c_char_p),
+                    ("WideStringValue", ctypes.c_wchar_p)]
+
+    class _CounterValue(ctypes.Structure):
+        _fields_ = [("CStatus", wintypes.DWORD), ("value", _Value)]
+
+    class _Item(ctypes.Structure):
+        _fields_ = [("szName", ctypes.c_wchar_p), ("FmtValue", _CounterValue)]
+
+    pdh = ctypes.WinDLL("pdh.dll")
+    query, counter = ctypes.c_void_p(), ctypes.c_void_p()
+    status = pdh.PdhOpenQueryW(None, None, ctypes.byref(query)) & 0xFFFFFFFF
+    if status:
+        raise OSError(f"PdhOpenQueryW returned 0x{status:08X}")
+    try:
+        status = pdh.PdhAddEnglishCounterW(query, _PDH_GPU_COUNTER, None, ctypes.byref(counter)) & 0xFFFFFFFF
+        if status in _PDH_ABSENT:
+            return None
+        if status:
+            raise OSError(f"PdhAddEnglishCounterW returned 0x{status:08X}")
+        status = pdh.PdhCollectQueryData(query) & 0xFFFFFFFF
+        if status == _PDH_NO_DATA:
+            return {}
+        if status:
+            raise OSError(f"PdhCollectQueryData returned 0x{status:08X}")
+        size, count = wintypes.DWORD(0), wintypes.DWORD(0)
+        status = pdh.PdhGetFormattedCounterArrayW(counter, _PDH_FMT_LARGE, ctypes.byref(size), ctypes.byref(count), None) & 0xFFFFFFFF
+        if status in (0, _PDH_NO_DATA) and size.value == 0:
+            return {}
+        if status != _PDH_MORE_DATA:
+            raise OSError(f"PdhGetFormattedCounterArrayW returned 0x{status:08X}")
+        buffer = (ctypes.c_byte * size.value)()
+        items = ctypes.cast(buffer, ctypes.POINTER(_Item))
+        status = pdh.PdhGetFormattedCounterArrayW(counter, _PDH_FMT_LARGE, ctypes.byref(size), ctypes.byref(count), items) & 0xFFFFFFFF
+        if status:
+            raise OSError(f"PdhGetFormattedCounterArrayW returned 0x{status:08X}")
+        per_pid: Dict[int, float] = {}
+        for i in range(count.value):
+            item = items[i]
+            if item.FmtValue.CStatus not in (0, 1):  # PDH_CSTATUS_VALID_DATA, _NEW_DATA
+                continue
+            match = _PDH_INSTANCE_PID.match(item.szName or "")
+            if match:
+                pid = int(match.group(1))
+                per_pid[pid] = per_pid.get(pid, 0.0) + item.FmtValue.value.largeValue / _MB
+        return per_pid
+    finally:
+        pdh.PdhCloseQuery(query)
+
+
+_NVML_SUCCESS = 0
+_NVML_ERROR_INSUFFICIENT_SIZE = 7
+_NVML_VALUE_NOT_AVAILABLE = 0xFFFFFFFFFFFFFFFF
+_nvml_libraries: Dict[str, Any] = {}
+
+
+def _nvml(library: str) -> Any:
+    """The initialised NVML library, or None where it does not load or start
+    (no NVIDIA driver). Tried once per name."""
+    if library in _nvml_libraries:
+        return _nvml_libraries[library]
+    lib = None
+    try:
+        import ctypes
+
+        candidate = ctypes.CDLL(library)
+        init = getattr(candidate, "nvmlInit_v2", None) or candidate.nvmlInit
+        if init() == _NVML_SUCCESS:
+            lib = candidate
+    except (OSError, AttributeError):
+        lib = None
+    _nvml_libraries[library] = lib
+    return lib
+
+
+def read_vram_nvml(library: str = "libnvidia-ml.so.1") -> Optional[Dict[int, float]]:
+    """Linux: MiB of GPU memory per pid for the compute processes NVML lists, through
+    ctypes (no `nvidia-smi`). None when the library is absent or does not start."""
+    import ctypes
+
+    lib = _nvml(library)
+    if lib is None:
+        return None
+
+    class _InfoV2(ctypes.Structure):  # nvmlProcessInfo_t of the _v2 and _v3 calls
+        _fields_ = [("pid", ctypes.c_uint), ("usedGpuMemory", ctypes.c_ulonglong),
+                    ("gpuInstanceId", ctypes.c_uint), ("computeInstanceId", ctypes.c_uint)]
+
+    class _InfoV1(ctypes.Structure):
+        _fields_ = [("pid", ctypes.c_uint), ("usedGpuMemory", ctypes.c_ulonglong)]
+
+    for name, info in (("nvmlDeviceGetComputeRunningProcesses_v3", _InfoV2),
+                       ("nvmlDeviceGetComputeRunningProcesses_v2", _InfoV2),
+                       ("nvmlDeviceGetComputeRunningProcesses", _InfoV1)):
+        listing = getattr(lib, name, None)
+        if listing is not None:
+            break
+    else:
+        raise OSError("NVML has no nvmlDeviceGetComputeRunningProcesses")
+    count = ctypes.c_uint(0)
+    get_count = getattr(lib, "nvmlDeviceGetCount_v2", None) or lib.nvmlDeviceGetCount
+    status = get_count(ctypes.byref(count))
+    if status != _NVML_SUCCESS:
+        raise OSError(f"nvmlDeviceGetCount returned {status}")
+    get_handle = getattr(lib, "nvmlDeviceGetHandleByIndex_v2", None) or lib.nvmlDeviceGetHandleByIndex
+    per_pid: Dict[int, float] = {}
+    for index in range(count.value):
+        device = ctypes.c_void_p()
+        status = get_handle(ctypes.c_uint(index), ctypes.byref(device))
+        if status != _NVML_SUCCESS:
+            raise OSError(f"nvmlDeviceGetHandleByIndex({index}) returned {status}")
+        wanted = ctypes.c_uint(0)
+        status = listing(device, ctypes.byref(wanted), None)
+        if status == _NVML_SUCCESS or wanted.value == 0:
+            continue
+        if status != _NVML_ERROR_INSUFFICIENT_SIZE:
+            raise OSError(f"{name} returned {status}")
+        rows = (info * (wanted.value + 8))()
+        have = ctypes.c_uint(len(rows))
+        status = listing(device, ctypes.byref(have), rows)
+        if status != _NVML_SUCCESS:
+            raise OSError(f"{name} returned {status}")
+        for row in rows[: have.value]:
+            if row.usedGpuMemory != _NVML_VALUE_NOT_AVAILABLE:
+                per_pid[int(row.pid)] = per_pid.get(int(row.pid), 0.0) + row.usedGpuMemory / _MB
+    return per_pid
+
+
+def _default_vram_reader(platform: str) -> Callable[[], Optional[Dict[int, float]]]:
+    if platform == "win32":
+        return read_vram_windows
+    if platform.startswith("linux"):
+        return read_vram_nvml
+    return lambda: None  # macOS: no per-process VRAM reading
+
+
+def read_exited_root_windows(handle: Any) -> Optional[TreeSample]:
+    """The lifetime figures of a child through its `Popen`'s process handle, which
+    keeps the process object readable after the child has exited (Windows only):
+    peak working set, peak commit (`PeakPagefileUsage`), CPU and IO. Descendants
+    that have already exited are not in it; nothing else can name them now."""
+    import ctypes
+    from ctypes import wintypes
+
+    raw = getattr(handle, "_handle", None)
+    if raw is None:
+        return None
+
+    class _Memory(ctypes.Structure):  # PROCESS_MEMORY_COUNTERS_EX
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t)]
+
+    class _Io(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    process = wintypes.HANDLE(int(raw))
+    memory = _Memory()
+    memory.cb = ctypes.sizeof(memory)
+    get_memory = kernel32.K32GetProcessMemoryInfo
+    get_memory.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Memory), wintypes.DWORD]
+    if not get_memory(process, ctypes.byref(memory), memory.cb):
+        raise ctypes.WinError(ctypes.get_last_error())
+    times = [wintypes.FILETIME() for _ in range(4)]
+    cpu: Optional[float] = None
+    if kernel32.GetProcessTimes(process, *(ctypes.byref(t) for t in times)):
+        def _seconds(ft: Any) -> float:
+            return ((ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 1e7
+        cpu = _seconds(times[2]) + _seconds(times[3])  # kernel + user
+    io = _Io()
+    read_bytes = write_bytes = None
+    if kernel32.GetProcessIoCounters(process, ctypes.byref(io)):
+        read_bytes, write_bytes = int(io.ReadTransferCount), int(io.WriteTransferCount)
+    return TreeSample(
+        root_create_time=None,
+        processes=[ProcessSample(pid=-1, create_time=None, cpu_seconds=cpu,
+                                 io_read_bytes=read_bytes, io_write_bytes=write_bytes)],
+        root_peak_rss_mb=memory.PeakWorkingSetSize / _MB,
+        root_peak_commit_mb=memory.PeakPagefileUsage / _MB,
+    )
+
+
+class ResourceSampler:
+    """One daemon thread over the registry's open entries: what each field gets,
+    per platform, is in the module docstring.
+
+    It never spawns a process, never raises into the backend (a failed reading
+    leaves its field None and is said once per kind of failure), never samples a
+    pid unless `probe_identity` says it is still the recorded process, and never
+    holds the registry lock while it walks: it copies what it needs, samples, and
+    writes the results after checking each entry is still the same open entry."""
+
+    def __init__(
+        self,
+        registry: ProcessRegistry,
+        *,
+        interval_s: float = SAMPLE_INTERVAL_S,
+        early_samples_s: Sequence[float] = EARLY_SAMPLES_S,
+        probe: Callable[[int, Optional[float]], str] = probe_identity,
+        read_tree: Optional[Callable[[int], Optional[TreeSample]]] = None,
+        read_vram: Optional[Callable[[], Optional[Dict[int, float]]]] = None,
+        read_mtime: Optional[Callable[[Path], Optional[float]]] = None,
+        read_exited_root: Optional[Callable[[Any], Optional[TreeSample]]] = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        platform: Optional[str] = None,
+    ):
+        self._registry = registry
+        self.interval_s = interval_s
+        self._early = tuple(early_samples_s)
+        self._probe = probe
+        self._platform = platform if platform is not None else sys.platform
+        self._read_tree = read_tree or self._read_tree_psutil
+        self._read_vram = read_vram or _default_vram_reader(self._platform)
+        self._read_mtime = read_mtime or self._mtime_of
+        if read_exited_root is not None:
+            self._read_exited_root = read_exited_root
+        elif self._platform == "win32":
+            self._read_exited_root = read_exited_root_windows
+        else:
+            self._read_exited_root = lambda handle: None
+        self._monotonic = monotonic
+        self._wake = threading.Event()
+        self._stopped = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._warned: set = set()
+        self._last_write: Optional[float] = None
+        self._psutil_checked = False
+
+    # -- the thread ---------------------------------------------------------------
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="dpc-process-sampler", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stopped.set()
+        self._wake.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def wake(self) -> None:
+        self._wake.set()
+
+    def early_schedule(self) -> List[float]:
+        now = self._monotonic()
+        return [now + offset for offset in self._early]
+
+    def _run(self) -> None:
+        next_full = self._monotonic()
+        while not self._stopped.is_set():
+            now = self._monotonic()
+            try:
+                if now >= next_full:
+                    self.tick()
+                    next_full = now + self.interval_s
+                else:
+                    due = self._due_early(now)
+                    if due:
+                        self.tick(due)
+            except Exception as exc:  # the thread outlives any one bad tick
+                self._failed("tick", exc)
+            self._drop_early_due(now)  # done, or failed: either way not due again
+            wait = min(next_full, self._next_early()) - self._monotonic()
+            self._wake.wait(max(0.0, wait))
+            self._wake.clear()
+
+    def _due_early(self, now: float) -> List[int]:
+        with self._registry._lock:
+            return [pid for pid, live in self._registry._live.items()
+                    if live.early_due and live.early_due[0] <= now]
+
+    def _drop_early_due(self, now: float) -> None:
+        with self._registry._lock:
+            for live in self._registry._live.values():
+                if live.early_due and live.early_due[0] <= now:
+                    live.early_due = [due for due in live.early_due if due > now]
+
+    def _next_early(self) -> float:
+        with self._registry._lock:
+            dues = [live.early_due[0] for live in self._registry._live.values() if live.early_due]
+        return min(dues) if dues else float("inf")
+
+    # -- one tick -------------------------------------------------------------------
+
+    def tick(self, pids: Optional[Iterable[int]] = None) -> None:
+        """Sample the open entries (or only `pids`) once. Never raises."""
+        registry = self._registry
+        only = set(pids) if pids is not None else None
+        with registry._lock:
+            targets = [
+                (entry, registry._live[pid].log_paths)
+                for pid, entry in registry._open.items()
+                if pid in registry._live and (only is None or pid in only)
+            ]
+        if not targets:
+            return
+        self._check_psutil()
+        vram: Optional[Dict[int, float]] = None
+        if any(_is_engine(entry) for entry, _ in targets):
+            vram = self._safely("vram", self._read_vram)
+        results = []
+        for entry, log_paths in targets:
+            tree = None
+            if self._identity_holds(entry.pid, entry.start_time):
+                tree = self._safely("tree", lambda: self._read_tree(entry.pid))
+                if tree is not None and not _same_start(tree.root_create_time, entry.start_time):
+                    tree = None  # the pid changed hands between the probe and the walk
+            vram_mib = None
+            if tree is not None and vram is not None and _is_engine(entry):
+                vram_mib = sum(vram.get(p.pid, 0.0) for p in tree.processes)
+            mtime = self._safely("log_mtime", lambda: self._newest_mtime(log_paths)) if log_paths else None
+            results.append((entry, tree, vram_mib, mtime))
+        with registry._lock:
+            for entry, tree, vram_mib, mtime in results:
+                live = registry._live.get(entry.pid)
+                if registry._open.get(entry.pid) is not entry or live is None:
+                    continue  # ended (or replaced) while it was being read
+                self._apply_locked(entry, live, tree, vram_mib, mtime)
+            self._write_if_risen_locked(self._monotonic())
+
+    def _identity_holds(self, pid: int, start_time: Optional[float]) -> bool:
+        """The recorded process and only it: never a stranger that reused the pid."""
+        return self._probe(pid, start_time) == "same"
+
+    def read_at_end(self, pid: int) -> None:
+        """Before `end()` closes `pid`: its own lifetime figures through the handle
+        the registry holds (Windows), applied to the entry. Never raises."""
+        registry = self._registry
+        with registry._lock:
+            entry = registry._open.get(pid)
+            live = registry._live.get(pid)
+            handle = live.handle if live is not None else None
+        if entry is None or handle is None:
+            return
+        tree = self._safely("end_reading", lambda: self._read_exited_root(handle))
+        if tree is None:
+            return
+        for sample in tree.processes:  # the root, keyed as the walk keys it
+            sample.pid, sample.create_time = entry.pid, entry.start_time
+        with registry._lock:
+            if registry._open.get(pid) is entry and registry._live.get(pid) is live:
+                self._apply_locked(entry, live, tree, None, None)
+
+    def _apply_locked(
+        self,
+        entry: ProcessEntry,
+        live: _Live,
+        tree: Optional[TreeSample],
+        vram_mib: Optional[float],
+        mtime: Optional[float],
+    ) -> None:
+        if tree is not None:
+            rss = [p.rss_mb for p in tree.processes if p.rss_mb is not None]
+            if rss or tree.root_peak_rss_mb is not None:
+                value = max(sum(rss), tree.root_peak_rss_mb or 0.0)
+                entry.peak_rss_mb = _higher(entry.peak_rss_mb, round(value, 1))
+            commit = [p.commit_mb for p in tree.processes if p.commit_mb is not None]
+            if commit or tree.root_peak_commit_mb is not None:
+                value = max(sum(commit), tree.root_peak_commit_mb or 0.0)
+                entry.peak_commit_mb = _higher(entry.peak_commit_mb, round(value, 1))
+            for p in tree.processes:
+                key = (p.pid, _key_time(p.create_time))
+                old_cpu, old_read, old_write = live.seen.get(key, (None, None, None))
+                live.seen[key] = (_higher(old_cpu, p.cpu_seconds),
+                                  _higher(old_read, p.io_read_bytes),
+                                  _higher(old_write, p.io_write_bytes))
+            cpu = [v[0] for v in live.seen.values() if v[0] is not None]
+            if cpu:
+                entry.cpu_seconds = round(sum(cpu), 3)
+            reads = [v[1] for v in live.seen.values() if v[1] is not None]
+            if reads:
+                entry.io_read_bytes = int(sum(reads))
+            writes = [v[2] for v in live.seen.values() if v[2] is not None]
+            if writes:
+                entry.io_write_bytes = int(sum(writes))
+        if vram_mib is not None:
+            entry.peak_vram_mib = _higher(entry.peak_vram_mib, round(vram_mib, 1))
+        if mtime is not None:
+            began = _epoch(entry.started_at)
+            # A log reopened for append keeps the last run's mtime until the engine writes.
+            if began is None or mtime >= began:
+                at = _iso(mtime)
+                if entry.last_output_at is None or at > entry.last_output_at:
+                    entry.last_output_at = at
+
+    def _write_if_risen_locked(self, now: float) -> None:
+        """Rewrite the state file when a peak rose enough, at most once per
+        `PEAK_WRITE_MIN_INTERVAL_S`; a rise inside the throttle is written by the
+        first tick after it, since the base stays what the file holds."""
+        registry = self._registry
+        if registry.path is None:
+            return
+        if self._last_write is not None and now - self._last_write < PEAK_WRITE_MIN_INTERVAL_S:
+            return
+        for pid, entry in registry._open.items():
+            live = registry._live.get(pid)
+            if live is not None and _peak_rose(entry, live.written):
+                registry._persist_locked()
+                self._last_write = now
+                return
+
+    # -- the default readers ---------------------------------------------------------
+
+    def _check_psutil(self) -> None:
+        if self._psutil_checked:
+            return
+        self._psutil_checked = True
+        try:
+            import psutil  # noqa: F401
+        except ImportError as exc:
+            self._failed("psutil", exc, "psutil is not installed, so no process is sampled")
+
+    def _read_tree_psutil(self, pid: int) -> Optional[TreeSample]:
+        try:
+            import psutil
+        except ImportError:
+            return None
+        try:
+            root = psutil.Process(pid)
+            processes = [root] + root.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return None
+        samples: List[ProcessSample] = []
+        root_create_time = root_peak_rss = root_peak_commit = None
+        for index, proc in enumerate(processes):
+            try:
+                with proc.oneshot():
+                    sample = ProcessSample(pid=proc.pid, create_time=proc.create_time())
+                    info = self._read_one(proc, "memory", proc.memory_info)
+                    if info is not None:
+                        sample.rss_mb = info.rss / _MB
+                        private = getattr(info, "private", None)  # Windows only
+                        sample.commit_mb = private / _MB if private is not None else None
+                        if index == 0:
+                            peak = getattr(info, "peak_wset", None)
+                            root_peak_rss = peak / _MB if peak is not None else None
+                            peak = getattr(info, "peak_pagefile", None)
+                            root_peak_commit = peak / _MB if peak is not None else None
+                    times = self._read_one(proc, "cpu", proc.cpu_times)
+                    if times is not None:
+                        sample.cpu_seconds = times.user + times.system
+                    if hasattr(proc, "io_counters"):  # absent on macOS
+                        io = self._read_one(proc, "io", proc.io_counters)
+                        if io is not None:
+                            sample.io_read_bytes, sample.io_write_bytes = int(io.read_bytes), int(io.write_bytes)
+            except psutil.NoSuchProcess:
+                continue  # it ended between the listing and the reading; not an error
+            if index == 0:
+                root_create_time = sample.create_time
+            samples.append(sample)
+        if root_create_time is None:
+            return None
+        if self._platform.startswith("linux"):
+            root_peak_rss = self._safely("root_peak", lambda: _vm_hwm_mb(pid))
+        return TreeSample(root_create_time, samples, root_peak_rss, root_peak_commit)
+
+    def _read_one(self, proc: Any, kind: str, read: Callable[[], Any]) -> Any:
+        """One psutil reading; a process that ended propagates, anything else is
+        said once and gives None."""
+        import psutil
+
+        try:
+            return read()
+        except psutil.NoSuchProcess:
+            raise
+        except Exception as exc:
+            self._failed(kind, exc)
+            return None
+
+    def _newest_mtime(self, paths: Sequence[Path]) -> Optional[float]:
+        times = [t for t in (self._read_mtime(p) for p in paths) if t is not None]
+        return max(times) if times else None
+
+    @staticmethod
+    def _mtime_of(path: Path) -> Optional[float]:
+        try:
+            return os.stat(path).st_mtime
+        except FileNotFoundError:
+            return None
+
+    # -- failures, said once -----------------------------------------------------------
+
+    def _safely(self, kind: str, read: Callable[[], Any]) -> Any:
+        try:
+            return read()
+        except Exception as exc:
+            self._failed(kind, exc)
+            return None
+
+    def _failed(self, kind: str, exc: BaseException, message: str = "") -> None:
+        key = (kind, type(exc).__name__)
+        if key in self._warned:
+            return
+        self._warned.add(key)
+        logger.warning(
+            "process registry: the resource sampler could not read %s (%s: %s)%s; "
+            "the field stays None where this fails, and this is said once",
+            kind, type(exc).__name__, exc, f": {message}" if message else "",
+        )
+
+
+def _same_start(create_time: Optional[float], start_time: Optional[float]) -> bool:
+    return (create_time is not None and start_time is not None
+            and abs(create_time - start_time) <= START_TIME_TOLERANCE_S)
+
+
+def _is_engine(entry: ProcessEntry) -> bool:
+    return entry.launcher_kind == "subsystem" and entry.launcher in ENGINES
+
+
+def _peak_rose(entry: ProcessEntry, written: Dict[str, Optional[float]]) -> bool:
+    for name, floor in _PEAK_FLOORS:
+        new = getattr(entry, name)
+        if new is None:
+            continue
+        old = written.get(name) or 0.0
+        if new - old >= floor and new >= old * (1.0 + PEAK_WRITE_RISE):
+            return True
+    return False
+
+
 # --- the one registry of this process ------------------------------------------------
 
 _registry = ProcessRegistry()
@@ -1098,3 +1830,16 @@ def start_persistent(path: Optional[Path] = None) -> SweepOutcome:
         outcome = SweepOutcome()
         outcome.add(logging.WARNING, f"process registry: could not start the persisted list ({type(exc).__name__}: {exc}); it is kept in memory")
         return outcome
+
+
+def start_resource_sampler() -> Optional[ResourceSampler]:
+    """Start the resource sampler over this process's registry. Called once by
+    `run_service.py`, after logging exists so that the sampler's one-time warnings
+    reach the log file; `start_persistent()` stays a load and a sweep that starts
+    no thread. Stopped by `finish_shutdown()`. Never raises."""
+    try:
+        return get_registry().start_sampler()
+    except Exception as exc:
+        logger.warning("process registry: could not start the resource sampler (%s: %s); "
+                       "no peaks will be recorded", type(exc).__name__, exc)
+        return None

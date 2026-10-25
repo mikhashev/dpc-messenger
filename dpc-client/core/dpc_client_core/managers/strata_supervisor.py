@@ -1155,6 +1155,13 @@ class StrataSupervisor(LlamaServerSupervisor):
         self._register_child(proc, cmd)
         return proc
 
+    def _output_log_paths(self) -> List[Path]:
+        """The launcher's stdout and the engine's own log: the newer of the two is
+        when the Strata tree last wrote."""
+        return super()._output_log_paths() + [
+            p for p in (getattr(self, "_engine_log_path", None),) if p is not None
+        ]
+
     def _sample_free_commit(self) -> Optional[Dict[str, Any]]:
         reading = read_free_commit()
         if reading is not None:

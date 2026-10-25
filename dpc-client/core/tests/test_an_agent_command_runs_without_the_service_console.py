@@ -17,6 +17,7 @@ by injection on every platform; the console itself only on Windows.
 from __future__ import annotations
 
 import ctypes
+import io
 import subprocess
 import sys
 
@@ -39,9 +40,11 @@ def popen(monkeypatch):
             seen.append({"cmd": cmd, **kwargs})
             self.pid = -1
             self.returncode = 0
+            # run_supervised reads the pipes as they arrive (ADR-046 point 3).
+            self.stdout, self.stderr = io.BytesIO(b"ok"), io.BytesIO(b"")
 
-        def communicate(self, timeout=None):
-            return ("ok", "")
+        def wait(self, timeout=None):
+            return 0
 
         def poll(self):
             return 0

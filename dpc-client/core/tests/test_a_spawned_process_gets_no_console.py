@@ -18,6 +18,7 @@ one they made before, not a shorter one.
 """
 
 import ast
+import io
 import pathlib
 import subprocess
 
@@ -92,9 +93,11 @@ class TestGitAsksItsQuestionsOfNobody:
                 captured.update(kwargs)
                 self.pid = -1
                 self.returncode = 0
+                # run_supervised reads the pipes as they arrive (ADR-046 point 3).
+                self.stdout, self.stderr = io.BytesIO(b"ok"), io.BytesIO(b"")
 
-            def communicate(self, timeout=None):
-                return ("ok", "")
+            def wait(self, timeout=None):
+                return 0
 
             def poll(self):
                 return 0

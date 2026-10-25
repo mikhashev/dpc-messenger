@@ -17,8 +17,10 @@ session: "DPC Project group chat, 2026-10-25 — card THE-BACKEND-KEEPS-NO-LIST-
 
 > **Accepted, 2026-10-25 (Mike's call). Implemented: point 1, the job (`2ebdb0a3`); points
 > 3, 4, 6 and 7 in the registry core (`4ea0560f`: registry, sweep, shutdown order,
-> `run_supervised` and both supervisors) with the review fixes of the same day (below).
-> Pending: the sampler, the spawn sites moved to the module with the structural test
+> `run_supervised` and both supervisors) with the review fixes of the same day (`91a75a2e`);
+> the resource sampler and `last_output_at` of point 3 (Implementation Status). Pending:
+> the descendants the sampler sees entered with their parent fields,
+> the spawn sites moved to the module with the structural test
 > (point 5), the local API command and the agent tools (point 8), and the UI.** The
 > sequence Mike set is this record and the amendments to ADR-040, ADR-044
 > and ADR-036 first, then the code. Mike's own calls in the thread were four: an agent
@@ -535,6 +537,39 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
   failed append is logged once and raises nothing; a torn last line and a stale lock are
   survived. (Registry tests `TestTheStateFileAndTheDailyHistory`; the in-memory registry
   writes nothing.)
+- [x] **Resource peaks.** Tests in
+  `dpc-client/core/tests/test_the_sampler_records_what_each_child_used.py`. With injected
+  readers: the tree's peak is the sum and never below the child's own peak, commit stays
+  None where the OS gives none, CPU and IO do not fall when a child exits, VRAM is read
+  for an engine over its tree and never for a command (`TestThePeaks`); a pid whose probe
+  says another process, or whose walk found a different creation time, is not sampled,
+  and the same live child recorded with a wrong creation time is not either
+  (`TestOnlyTheRecordedProcessIsSampled`); a failing reader and a missing psutil leave
+  None after one WARNING (`TestFailuresAreSaidOnce`); a new entry is sampled at once and
+  gets its early samples, and the thread stops at `finish_shutdown`
+  (`TestTheThread`); the state file is rewritten on a rise of a quarter and not on a
+  small one, never twice inside the throttle (`TestThePeaksReachTheFileWhenTheyRiseEnough`).
+  Real children: a child holding 150 MB for 3 s has `peak_rss_mb` of at least 100, with
+  `peak_commit_mb` on Windows and None on POSIX
+  (`test_a_child_that_holds_150_mb_for_three_seconds_has_a_peak_of_at_least_100`); a
+  0.2 s command gets RSS, commit, CPU and IO on Windows, RSS, CPU and IO on Linux, RSS and
+  CPU on macOS (`test_a_command_shorter_than_the_interval_still_gets_a_reading`); the PDH
+  reader returns a mapping on Windows, the NVML reader None where its library is absent.
+  Run 2026-10-25 on Windows only; the Linux arms (`VmHWM`, no commit, NVML absent) wait for
+  CI on the ref; macOS is not covered by CI and was not run. NVML with a real NVIDIA card on
+  Linux was never run.
+- [x] **`last_output_at`.** A child that prints, sleeps 2.5 s and prints again has
+  `last_output_at` after the second print and its text unchanged
+  (`test_the_time_of_the_last_output_is_after_the_second_print_and_the_text_is_unchanged`);
+  output with CRLF, a lone CR, invalid UTF-8 and a character split across two reads comes
+  back exactly as text mode gave it
+  (`test_output_with_crlf_a_lone_cr_and_invalid_bytes_comes_back_as_text_mode_gave_it`);
+  the timeout with a grandchild holding the pipe and a kill that misses still returns
+  within its bound (`test_the_timeout_returns_within_its_bound_when_a_grandchild_holds_the_pipe`);
+  an engine's is its log's mtime from its start on, Strata's the newer of its two logs
+  (`test_an_engines_last_output_is_its_logs_mtime_from_its_start_on`,
+  `test_a_strata_entry_reads_the_newer_of_the_launchers_and_the_engines_log`). Run
+  2026-10-25 on Windows; Linux waits for CI; macOS uncovered.
 - [ ] **Parent fields.** A descendant the backend did not start (the `ping` under a
   `cmd /c`) is entered with `parent_pid` and `parent_start_time`, the tree from the
   backend down to it can be rebuilt from the entries alone, and a parent whose start time
@@ -564,8 +599,8 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
 - New module for the registry (name proposed, see New words) — entries, persistence,
   sweep, sampler, the contextvar.
 - `dpc-client/core/dpc_client_core/managers/llama_server_supervisor.py`,
-  `managers/strata_supervisor.py` — register at `_spawn`, report the end; version probes
-  through the helper.
+  `managers/strata_supervisor.py` — register at `_spawn`, report the end; the
+  llama-server supervisor's two `nvidia-smi` memory queries through the helper.
 - `dpc_agent/utils.py` (9 sites), `device_context_collector.py` (9), `service.py` (1,
   `ip addr`), `run_service.py` (1, `nvidia-smi`) — to the helper.
 - `dpc_agent/tools/comfyui.py` — **another developer's;** named, not planned.
@@ -585,7 +620,7 @@ confirmed by reading each hit:
 | `device_context_collector.py` | 9 `subprocess.run` |
 | `dpc_agent/utils.py` | 9 `subprocess.run` (git) |
 | `dpc_agent/tools/process.py` | 2 `subprocess.run` (`taskkill`, `ps`: the kill itself) and 1 `subprocess.Popen` (inside `run_supervised`) |
-| `managers/llama_server_supervisor.py` | 2 `subprocess.run` (version probes) and 1 `create_subprocess_exec` |
+| `managers/llama_server_supervisor.py` | 2 `subprocess.run` (`nvidia-smi` memory queries, free and total) and 1 `create_subprocess_exec` |
 | `managers/strata_supervisor.py` | 1 `create_subprocess_exec` |
 | `dpc_agent/tools/comfyui.py` | 1 `subprocess.run` (ffmpeg; another developer's) |
 | `service.py` | 1 `subprocess.run` (`ip addr show`, Linux) |
@@ -594,7 +629,8 @@ confirmed by reading each hit:
 
 So 25 sites lie outside `process.py`: two are the supervisors' `_spawn`, which stay on
 the allow-list, and 23 move to the module. Ark's count was 22 `subprocess.run` and two
-supervisors; it is the same list minus the two `llama-server` version probes and
+supervisors; it is the same list minus the llama-server supervisor's two `nvidia-smi`
+memory queries and
 `run_supervised`'s own `Popen`. `run_supervised` has four callers (`shell.py` 1, `git.py`
 2, `document.py` 1, by `rg`). Orbit (`run_sql`) could confirm only the callers of
 `run_supervised`: it resolves no edge to `subprocess.run`, and its per-file counts for the
@@ -611,8 +647,9 @@ the table rests on `rg` and the reading, not on the graph. Not counted: `webbrow
 | Registry (`process_registry.py`): entries with parent and `launcher_kind`, `SPAWN_ORIGIN` set in the pool thread, the eight exit reasons, persistence; `run_supervised` and both supervisors register and end their children | Done 2026-10-25 | `4ea0560f` |
 | Startup sweep | Done 2026-10-25 | `4ea0560f` |
 | Shutdown order in `service.shutdown` | Done 2026-10-25 | `4ea0560f` |
-| Review fixes: `stop_kind` (old key read), `engine_died`, `engine_switch` removed, precedence for stops announced after the stop began, fsync before the swap, the state file plus daily JSONL history, the asymmetry of a foreign kill written down; tests in `tests/test_the_process_registry_records_how_every_child_ends.py` | Done 2026-10-25 (written; not committed when this row was written) | the commit that carries this row |
-| Resource sampler (peaks, `last_output_at`) | Pending | — |
+| Review fixes: `stop_kind` (old key read), `engine_died`, `engine_switch` removed, precedence for stops announced after the stop began, fsync before the swap, the state file plus daily JSONL history, the asymmetry of a foreign kill written down; tests in `tests/test_the_process_registry_records_how_every_child_ends.py` | Done 2026-10-25 | `91a75a2e` |
+| Resource sampler (peaks, `last_output_at`): `ResourceSampler` in `process_registry.py`, one daemon thread every 2 s started by `start_resource_sampler()` from `run_service.py` after logging, stopped by `finish_shutdown()`; per open entry, only while `probe_identity` says "same", the tree's peak RSS and commit (never below the child's own OS peak), CPU and IO summed by (pid, creation time), VRAM for the engines (PDH on Windows, NVML on Linux, none on macOS); a new entry wakes it and gets early samples at 0, 0.1, 0.3 and 0.7 s, and on Windows `end()` reads the child's own lifetime figures through its `Popen` handle; the state file is rewritten when a peak rises by 25 % and 64 MB (256 MiB for VRAM), at most once per 10 s. `run_supervised` reads its pipes as they arrive (text decoded once at the end as text mode gave it) and notes `last_output_at`; an engine's is its log files' newest mtime (`log_paths` from both supervisors; Strata names the launcher's and the engine's log). Tests in `tests/test_the_sampler_records_what_each_child_used.py` | Done 2026-10-26 | the commit that carries this row |
+| Descendants entered by the sampler (parent fields) | Pending | — |
 | Spawn sites to the module; structural test | Pending | — |
 | Local API command; agent tools | Pending | — |
 | UI: AGENTS row and Agent Models Configuration (own card) | Pending | — |

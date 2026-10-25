@@ -1330,6 +1330,7 @@ class LlamaServerSupervisor:
                 command=cmd,
                 log=logger,
                 detail=f"alias {self.alias}, port {self.port}",
+                log_paths=self._output_log_paths(),
             )
         except _procreg.ProcessRegistryClosed as e:
             # The stop began between the check and the spawn: the child exists and
@@ -1339,6 +1340,11 @@ class LlamaServerSupervisor:
             except Exception:
                 pass
             raise LlamaServerError(f"{self.ENGINE}[{self.alias}]: {e}") from None
+
+    def _output_log_paths(self) -> List[Path]:
+        """The files the child writes its output to; their newest mtime is its
+        `last_output_at` in the registry."""
+        return [p for p in (getattr(self, "_log_path", None),) if p is not None]
 
     def _note_stop(self, proc: Any) -> None:
         """Announce to the registry the stop about to be sent to `proc`, with the

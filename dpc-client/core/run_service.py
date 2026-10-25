@@ -261,6 +261,7 @@ from dpc_client_core import ai_chats, single_instance
 from dpc_client_core.console_guard import start_console_guard
 from dpc_client_core.job_object import enter_kill_on_close_job
 from dpc_client_core.process_registry import start_persistent as start_process_registry
+from dpc_client_core.process_registry import start_resource_sampler
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +475,8 @@ async def main():
     setup_logging(service.settings)
     job_outcome.log()
     sweep_outcome.log()
+    # After logging, so its one-time warnings reach the file (ADR-046 point 3).
+    start_resource_sampler()
 
     # Right after logging, so its lines reach the file: a console left in raw
     # mode by a killed child swallows Ctrl+C, and the guard puts it back.

@@ -406,18 +406,92 @@ def _registry():
 
 
 _DRAIN_AFTER_KILL_SECONDS = 5
+_READ_CHUNK_BYTES = 65536
 
 
-def _drain_after_kill(process: "subprocess.Popen") -> tuple:
+def _decode_output(chunks: Sequence[bytes]) -> str:
+    """The text `Popen(text=True, encoding="utf-8", errors="replace")` gave: one
+    decode of all the bytes (a character split across two reads stays whole),
+    then universal newlines, as `subprocess` translates them."""
+    text = b"".join(chunks).decode("utf-8", "replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class _OutputReader:
+    """Both pipes of a child, read as the bytes arrive, so the time of the last
+    output is known (ADR-046 point 3, `last_output_at`). One daemon thread per
+    pipe; a thread a surviving grandchild keeps blocked is abandoned, as the
+    reader threads of `communicate()` were."""
+
+    def __init__(self, process: "subprocess.Popen", on_output: Callable[[], None]):
+        self._chunks: dict = {"stdout": [], "stderr": []}
+        self._on_output = on_output
+        self._threads = [
+            threading.Thread(
+                target=self._collect, args=(getattr(process, name), self._chunks[name]),
+                name=f"dpc-output-{process.pid}-{name}", daemon=True,
+            )
+            for name in ("stdout", "stderr")
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def _collect(self, stream: Any, sink: list) -> None:
+        if stream is None:
+            return
+        read = getattr(stream, "read1", None) or stream.read
+        try:
+            while True:
+                chunk = read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                sink.append(chunk)
+                try:
+                    self._on_output()
+                except Exception:
+                    pass  # the registry must never cost the output
+        except (OSError, ValueError):
+            pass  # the pipe was closed under the read
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def wait(self, deadline: float) -> bool:
+        """Both pipes at their end before `deadline` (monotonic)."""
+        for thread in self._threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        return not any(thread.is_alive() for thread in self._threads)
+
+    def text(self) -> tuple:
+        return _decode_output(self._chunks["stdout"]), _decode_output(self._chunks["stderr"])
+
+
+def _wait_for_output(process: "subprocess.Popen", output: _OutputReader, timeout: float) -> None:
+    """What `communicate(timeout=…)` waited for: both pipes at their end and the
+    process gone, inside one bound. Raises `subprocess.TimeoutExpired` past it."""
+    deadline = time.monotonic() + timeout
+    if not output.wait(deadline):
+        raise subprocess.TimeoutExpired(getattr(process, "args", None), timeout)
+    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+
+
+def _drain_after_kill(process: "subprocess.Popen", output: Optional[_OutputReader] = None) -> tuple:
     """Collect whatever output exists, and never wait on it for ever.
 
     After a successful tree kill every handle-holder is gone and EOF arrives at
     once. After a partial one it does not, and this is the exact place the old
     code waited for it with no bound. A few seconds is enough to pick up what a
     dead process already wrote; past that the output is not worth a hung agent.
+    With `output` (the readers `run_supervised` started) the same bound holds over
+    them; without it, over `communicate()`.
     """
     try:
-        return process.communicate(timeout=_DRAIN_AFTER_KILL_SECONDS)
+        if output is None:
+            return process.communicate(timeout=_DRAIN_AFTER_KILL_SECONDS)
+        _wait_for_output(process, output, _DRAIN_AFTER_KILL_SECONDS)
+        return output.text()
     except subprocess.TimeoutExpired:
         log.warning(
             "pipes still open %ss after killing pid %s — a descendant escaped the kill; "
@@ -571,6 +645,12 @@ def run_supervised(
     once the process is gone, which is exactly the position this machine was in
     on 2026-08-26, so every process started here announces who asked for it.
     `log_as` is the command the log names when `cmd` is a wrapper around it.
+
+    The pipes are read as the bytes arrive, not with one `communicate()`, so the
+    registry learns when the child last wrote (`last_output_at`); the text is
+    decoded once at the end, exactly as `text=True, encoding="utf-8",
+    errors="replace"` gave it. The bound is the same: the pipes' end and the
+    process's inside `timeout`, then the bounded drain after a kill.
     """
     ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
     if ceiling is None:
@@ -599,11 +679,9 @@ def run_supervised(
     process = subprocess.Popen(
         cmd,
         shell=shell,
+        # Bytes: `_OutputReader` decodes them once, as text mode would have.
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         cwd=cwd,
         env=env,
         # Nobody is sitting at this process; a prompt would be asked of the
@@ -649,15 +727,21 @@ def run_supervised(
         )
         watch_thread.start()
 
+    def _noted() -> None:
+        if registry is not None:
+            registry.note_output(process.pid)
+
+    output = _OutputReader(process, _noted)
     run = SupervisedRun(ceiling_mb=ceiling)
     try:
-        run.stdout, run.stderr = process.communicate(timeout=timeout)
+        _wait_for_output(process, output, timeout)
+        run.stdout, run.stderr = output.text()
         run.returncode = process.returncode
     except subprocess.TimeoutExpired:
         run.timed_out = True
         _note_stop("timeout")()  # before the kill: a SIGKILL is not a crash
         run.killed = _kill_process_tree(process)
-        run.stdout, run.stderr = _drain_after_kill(process)
+        run.stdout, run.stderr = _drain_after_kill(process, output)
         run.returncode = process.returncode
         # The ceiling kill always said so here; the timeout kill did not, and
         # three agent commands that left the console raw were visible only in
