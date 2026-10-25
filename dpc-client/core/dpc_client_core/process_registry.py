@@ -303,14 +303,26 @@ def create_time_of(pid: int) -> Optional[float]:
         return None
 
 
+def _is_zombie(pid: int) -> bool:
+    """A POSIX process that has died and waits for its parent to reap it."""
+    try:
+        import psutil
+
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except Exception:
+        return False
+
+
 def probe_identity(pid: int, start_time: Optional[float]) -> str:
     """Is the process an entry recorded still that process?
 
     "same" - alive with the recorded creation time; "other" - the pid is alive
     but belongs to a later process; "gone"; "unverifiable" - alive and the entry
-    has no creation time to compare, so nothing says it is ours."""
+    has no creation time to compare, so nothing says it is ours. A zombie is
+    gone: it has died and keeps only its creation time until its parent reaps
+    it, which on Linux is what a killed child of this very process looks like."""
     now = create_time_of(pid)
-    if now is None:
+    if now is None or _is_zombie(pid):
         return "gone"
     if start_time is None:
         return "unverifiable"

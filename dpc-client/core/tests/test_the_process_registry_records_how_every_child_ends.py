@@ -1017,6 +1017,50 @@ class TestTheStartupSweep:
         assert "sweep_outcome.log()" in source, "the sweep's lines are written once logging exists"
 
 
+class TestAZombieIsGone:
+    """On POSIX a killed child stays a zombie until its parent reaps it, and psutil
+    still gives its creation time. CI on Linux saw the sweep leave such an entry
+    open, because the probe kept answering "same" after the kill."""
+
+    def test_a_zombie_with_the_recorded_start_time_is_gone_and_the_sweep_closes_it(self, tmp_path, monkeypatch):
+        import psutil
+
+        killed = set()
+
+        class Process:  # what psutil reports for a pid that was killed and not yet reaped
+            def __init__(self, pid):
+                self.pid = pid
+
+            def create_time(self):
+                return 1_700_000_000.0
+
+            def status(self):
+                return psutil.STATUS_ZOMBIE if self.pid in killed else psutil.STATUS_SLEEPING
+
+        monkeypatch.setattr(psutil, "Process", Process)
+        assert pr.probe_identity(7_700_002, 1_700_000_000.0) == "same"
+        path = _file_with_an_open_entry(tmp_path, 7_700_002, 1_700_000_000.0)
+        registry = ProcessRegistry(path)
+        registry.load()
+        outcome = registry.sweep_orphans(kill=lambda p: killed.add(p) or "killed", protected=lambda: {os.getpid()})
+        assert pr.probe_identity(7_700_002, 1_700_000_000.0) == "gone"
+        (entry,) = registry.entries()
+        assert entry.exit_reason == "orphan_swept"
+        assert outcome.killed and not outcome.closed
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="a Windows process leaves no zombie")
+    def test_a_real_child_killed_and_not_reaped_is_gone(self, started):
+        child = subprocess.Popen(SLEEP)
+        started.append(child)
+        start = pr.create_time_of(child.pid)
+        os.kill(child.pid, signal.SIGKILL)
+        deadline = time.monotonic() + 5.0
+        while pr.probe_identity(child.pid, start) == "same" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pr.probe_identity(child.pid, start) == "gone"
+        assert child.poll() is not None
+
+
 # =========================================================================== shutdown
 
 class TestTheOrderlyStop:
