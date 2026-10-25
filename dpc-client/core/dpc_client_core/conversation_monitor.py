@@ -3759,9 +3759,25 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return _local_node_id_from_disk()
 
     def find_file_record(self, sender_node_id: str, filename: str,
-                         size_bytes: Optional[int], file_hash: Optional[str]
+                         size_bytes: Optional[int], file_hash: Optional[str],
+                         message_id: Optional[str] = None,
                          ) -> Optional[Dict[str, Any]]:
-        """The record already holding this file from this sender, if any."""
+        """The record already holding this file from this sender, if any.
+
+        With `message_id` (a group file's, from its offer), only the record of
+        that id holding this file, whoever it names: in a star the file comes
+        from the relay, and the record is the author's own, signed by them. A
+        record of the same bytes under another id is another message — the
+        same file sent twice — and is left alone.
+        """
+        if message_id:
+            for record in self.message_history:
+                if record.get("id") != message_id:
+                    continue
+                if any(attachment_matches(att, filename, size_bytes, file_hash)
+                       for att in record.get("attachments") or ()):
+                    return record
+            return None
         for record in self.message_history:
             if record.get("sender_node_id") != sender_node_id:
                 continue
@@ -3791,7 +3807,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         sender = arriving.get("sender_node_id")
         for i, record in enumerate(self.message_history):
-            if record.get("sender_node_id") != sender or not self._is_local_file_note(record):
+            # Same author, or same id: a note for a file that came through a
+            # relay names the relay, and carries the author's message_id.
+            same_id = bool(arriving.get("id")) and record.get("id") == arriving.get("id")
+            if record.get("sender_node_id") != sender and not same_id:
+                continue
+            if not self._is_local_file_note(record):
                 continue
             if not any(
                 attachment_matches(mine, theirs.get("filename"), theirs.get("size_bytes"),

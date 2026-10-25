@@ -115,6 +115,8 @@ On connect, nodes reconcile group history so all members converge.
 
 ### File Transfer / Voice / Screenshots / Voice Transcription
 - `FILE_OFFER` carries `group_id`; each member accepts independently.
+- A group file also carries its author's `sender_node_id` and `message_id`, the `GROUP_TEXT` words, and every relay copies them unchanged. A member that receives a group file offers it on to the members it is connected to, except the hop it came from and the author, for the star topology; a member already holding that `message_id` (received, receiving, or its own) answers `FILE_CANCEL` `already_received`, which the relaying member takes as quiet success. A full mesh therefore ends with one copy and one record per member. An offer without the fields (an older peer) is judged by `group_id` + `hash`. See [specs/dptp_v1.md §3.11](../specs/dptp_v1.md#file_offer).
+- A relayed file is credited by its author's signed record, never by the offer's unsigned `sender_node_id`: the receiver completes that record when history sync has brought it, and otherwise writes its note under the hop, keyed by the author's `message_id`, so the record replaces the note when it arrives. A relaying member writes no "Sent" record for a relay.
 - Voice (WAV via Rust backend) and screenshots (Ctrl+V → `send_group_image()`) fan out as file transfers; auto-transcribe works for group voice.
 - The first member to transcribe shares the result with all via `VOICE_TRANSCRIPTION` fan-out.
 

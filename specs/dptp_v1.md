@@ -1277,6 +1277,34 @@ Offers a file to the peer for transfer.
   - If present, indicates this file was sent in a group chat context
   - Receiver stores file in group's conversation folder (`~/.dpc/conversations/{group_id}/files/`)
   - If absent, file is stored in sender's peer folder (P2P transfer)
+- `message_id` (string, optional, with `group_id`): the author's id for this group file —
+  the id of the author's own record of it, the same word and the same role as on
+  `GROUP_TEXT`. Every relay copies it unchanged. At most 128 characters; anything else
+  is read as absent.
+- `sender_node_id` (string, optional, with `message_id`): the node that wrote the group
+  file, copied unchanged by every relay. The offer travels over a hop that may be a
+  relay, so this is the author's name as claimed, unsigned: it decides whether a member
+  takes the copy and where a relay may go, and never whom the file is credited to.
+
+**Group file relay and its identity.** A member that receives a group file offers it on
+to every member it is connected to except itself, the hop it came from and the author
+(`sender_node_id`), because in a star topology the other members cannot reach the
+author. The pair `group_id` + `message_id` is the file's identity across hops. A member
+answers FILE_CANCEL `already_received` to an offer whose identity it has already
+received, is receiving now, or sent itself, and to an offer that names it as the author;
+it relays each identity once. An offer with no `message_id` — from a peer that predates
+the field, or passed on by one — is judged by `group_id` + `hash` instead, which costs
+one thing: such a peer sending the same bytes to the group twice in one session has the
+second copy refused as `already_received`. A member that sees an identity first can
+make the others refuse later copies of it, so a member could suppress another's file by
+claiming its `message_id` ahead of it; the copy it delivers instead is still credited to
+that member, the socket it came over, so the harm is a missing file, never a forged one.
+
+**Crediting a relayed file.** The receiver completes the author's own signed record of
+the file when history sync has brought it (found by `message_id`), so the file shows
+under its author. Until then the receiver's note of the file names the hop it arrived
+from, keyed by the author's `message_id`, and the author's record takes the note's place
+when it arrives. A relaying member adds no record of its own when its relay completes.
 
 **Response:** FILE_ACCEPT (if accepted) or FILE_CANCEL (if rejected)
 
@@ -1390,7 +1418,8 @@ Cancels an in-progress or pending file transfer.
 **Fields:**
 - `transfer_id` (string, required): Transfer identifier
 - `denial_reason` (string, optional): With `firewall_denied`, the receiver's firewall
-  sentence saying why the offer was refused. The sender's reader keeps at most the
+  sentence saying why the offer was refused; with `user_rejected` of an offer that was
+  put to the user, the sentence saying so. The sender's reader keeps at most the
   first 300 characters (`file_cancel_handler.py`). A sender that does not know the
   field ignores it.
 - `reason` (string, required): Cancellation reason. The set below is what senders in
@@ -1400,6 +1429,13 @@ Cancels an in-progress or pending file transfer.
   rejected size is folded into `firewall_denied` instead) and omitted two the code does
   send.
   - `user_cancelled` - User manually cancelled (`cancel_transfer`'s default)
+  - `user_rejected` - The receiving user declined the offer in its accept dialog,
+    including an offer from a peer no rule names that was put to them
+    (`ChatPanel.svelte`; see `awaiting_permission` in the glossary)
+  - `already_received` - The receiver already has this group file under the same
+    identity (see *Group file relay and its identity* under FILE_OFFER): received,
+    receiving, or sent by itself. Not a failure: the sender frees the upload and shows
+    nothing. An older sender takes it as any other cancel
   - `firewall_denied` - Receiver's firewall rejected the offer, including a transfer
     over the receiver's size limit (`file_offer_handler.py`)
   - `hash_mismatch` - SHA256 verification failed
@@ -2697,6 +2733,13 @@ DPTP is designed to be extensible. New commands can be added by:
   on completion; after 30 s with no chunk the receiver re-asks up to 64
   missing indices, and after 3 rounds with no new chunk it cancels with
   `missing_chunks`.
+- **§3.11 FILE_OFFER** — optional `message_id` and `sender_node_id` on a group
+  file, the author's identity carried unchanged by every relay; FILE_CANCEL
+  reason `already_received` refuses a copy a member already has, so a full mesh
+  no longer relays one file for as long as everyone is online (Mike's word,
+  2026-10-25). A relay never goes back to the author. An older peer sends
+  neither field and is judged by `group_id` + `hash`. `user_rejected`, sent
+  since the accept dialog existed, is now listed.
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — `provider_unavailable` no longer
   covers the host owner's parked conversations: a Strata host sends a peer's
   call with checkpointing off, so the call parks nothing and is served beside

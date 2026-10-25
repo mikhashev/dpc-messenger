@@ -77,6 +77,11 @@ class FileOfferHandler(MessageHandler):
         image_metadata = payload.get("image_metadata")
         voice_metadata = payload.get("voice_metadata")
         group_id = payload.get("group_id")  # v0.19.0+: Group file transfers
+        # A group file's identity, kept by every relay. Unsigned: it decides
+        # whether this node takes the copy, never who the file is credited to.
+        from ..managers.file_transfer_manager import offer_identity_field
+        message_id = offer_identity_field(payload.get("message_id")) if group_id else None
+        author_node_id = offer_identity_field(payload.get("sender_node_id")) if message_id else None
 
         # Detect transfer type
         is_image = mime_type and mime_type.startswith("image/") and image_metadata
@@ -89,21 +94,7 @@ class FileOfferHandler(MessageHandler):
         else:
             self.logger.info(f"FILE_OFFER from {sender_node_id}: {filename} ({size_bytes} bytes)")
 
-        # Deduplicate: Check for existing pending transfer
         file_transfer_manager = self.service.file_transfer_manager
-        for existing_transfer_id, existing_transfer in file_transfer_manager.active_transfers.items():
-            if (existing_transfer.node_id == sender_node_id and
-                existing_transfer.filename == filename and
-                existing_transfer.size_bytes == size_bytes and
-                existing_transfer.direction == "download" and
-                existing_transfer.status.value == "pending"):
-                transfer_type = 'IMAGE' if is_image else 'VOICE' if is_voice else 'FILE'
-                self.logger.warning(
-                    f"Ignoring duplicate {transfer_type}_OFFER from {sender_node_id} "
-                    f"for {filename} (already have pending transfer {existing_transfer_id}, "
-                    f"new offer is {transfer_id})"
-                )
-                return None
 
         # Check firewall permission. The outcome is a word compared by value —
         # testing a tuple for truth is how every allow-list, size cap and MIME
@@ -135,6 +126,39 @@ class FileOfferHandler(MessageHandler):
                 "payload": cancel_payload
             })
             return None
+
+        # A group file this node already has comes back on every relay of a
+        # full mesh. Refused out loud, so the relaying node frees its upload:
+        # an offer nobody answers holds one of its upload slots for good.
+        # After the firewall, never before: a peer it refuses must not learn
+        # from the answer whether this node holds a file. Before the dialog,
+        # so a relay of a held file asks nobody "allow files from X?".
+        if group_id and file_transfer_manager.holds_group_file(
+                group_id, message_id, author_node_id, hash_value):
+            from ..managers.file_transfer_manager import ALREADY_RECEIVED_REASON
+            self.logger.info(
+                f"Group file {filename} from {sender_node_id} is already here "
+                f"(message {message_id or 'by hash'}); offer {transfer_id} refused"
+            )
+            await file_transfer_manager._send_file_cancel(
+                sender_node_id, transfer_id, ALREADY_RECEIVED_REASON
+            )
+            return None
+
+        # Deduplicate: Check for existing pending transfer
+        for existing_transfer_id, existing_transfer in file_transfer_manager.active_transfers.items():
+            if (existing_transfer.node_id == sender_node_id and
+                existing_transfer.filename == filename and
+                existing_transfer.size_bytes == size_bytes and
+                existing_transfer.direction == "download" and
+                existing_transfer.status.value == "pending"):
+                transfer_type = 'IMAGE' if is_image else 'VOICE' if is_voice else 'FILE'
+                self.logger.warning(
+                    f"Ignoring duplicate {transfer_type}_OFFER from {sender_node_id} "
+                    f"for {filename} (already have pending transfer {existing_transfer_id}, "
+                    f"new offer is {transfer_id})"
+                )
+                return None
 
         # Get sender name for UI display
         sender_name = self.service.peer_metadata.get(sender_node_id, {}).get("name") or sender_node_id
@@ -234,6 +258,8 @@ class FileOfferHandler(MessageHandler):
             image_metadata=image_metadata,  # Store image metadata for chat display (v0.12.0+)
             voice_metadata=voice_metadata,  # Store voice metadata for chat display (v0.13.0+)
             group_id=group_id,             # Group ID for group file transfers (v0.19.0+)
+            sender_node_id=author_node_id,
+            message_id=message_id,
             awaiting_permission=awaiting_permission,
         )
         file_transfer_manager.active_transfers[transfer_id] = transfer

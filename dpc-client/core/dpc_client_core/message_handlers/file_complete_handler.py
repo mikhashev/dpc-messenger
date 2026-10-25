@@ -62,11 +62,17 @@ class FileCompleteHandler(MessageHandler):
         # For sender (upload): Show "You sent file X" now that transfer succeeded
         # For receiver (download): Already handled in file_transfer_manager._finalize_download()
 
-        if transfer.direction == "upload":
+        if transfer.direction == "upload" and transfer.group_relay:
+            # A group file this node passed on for its author: the author's
+            # message, not ours. It already has its record here, from the receive.
+            self.logger.debug(f"Relay of group file {transfer.filename} delivered to {sender_node_id}")
+        elif transfer.direction == "upload":
             # Sender side: Broadcast "You sent file X" message now that receiver accepted and completed
             import hashlib
             import time
-            message_id = hashlib.sha256(
+            # A group file carries the id it was offered under, so the record
+            # here and every member's copy of it share one id.
+            message_id = transfer.message_id or hashlib.sha256(
                 f"{self.service.p2p_manager.node_id}:file-send:{transfer_id}:{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
 
@@ -144,6 +150,7 @@ class FileCompleteHandler(MessageHandler):
                             "user", message_content, [attachment],
                             timestamp=datetime.now(timezone.utc).isoformat(),
                             sender_node_id=self.service.p2p_manager.node_id,
+                            message_id=message_id,
                         )
                         self.logger.debug(f"Added sent {file_type} to conversation history: {transfer.filename}")
                 else:

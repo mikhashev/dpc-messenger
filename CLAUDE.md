@@ -618,7 +618,7 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
 {"command": "FILE_ACCEPT", "payload": {"transfer_id": "..."}}
 {"command": "FILE_CHUNK", "payload": {"transfer_id": "...", "chunk_index": 0, "total_chunks": 10, "data": "base64..."}}
 {"command": "FILE_COMPLETE", "payload": {"transfer_id": "...", "hash": "sha256:..."}}
-{"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|firewall_denied|hash_mismatch|chunk_verification_failed|missing_chunks|send_error|receive_error", "denial_reason": "optional, with firewall_denied"}}
+{"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|user_rejected|already_received|firewall_denied|hash_mismatch|chunk_verification_failed|missing_chunks|send_error|receive_error", "denial_reason": "optional, with firewall_denied or user_rejected"}}
 
 # Voice Messages (v0.13.0) - Reuses FILE_OFFER with voice_metadata
 {"command": "FILE_OFFER", "payload": {"transfer_id": "...", "filename": "voice_2026-01-04_12-34-56.webm", "size_bytes": 245000, "hash": "sha256:...", "mime_type": "audio/webm", "voice_metadata": {"duration_seconds": 30.5, "sample_rate": 48000, "channels": 1, "codec": "opus", "recorded_at": "2026-01-04T12:34:56Z"}}}

@@ -7114,6 +7114,15 @@ class CoreService:
             connected_peers = self.p2p_coordinator.get_connected_peers()
             transfer_ids = []
             fingerprint = None  # (file hash, chunk hashes), computed for the first member only
+            # One id for the whole fan-out: every member's copy, and every
+            # relay of it, is this one message. The clock keeps a second send
+            # of the same file a second message.
+            import hashlib
+            import time
+            message_id = hashlib.sha256(
+                f"{self.p2p_manager.node_id}:group-file-send:{group_id}:{path.name}:"
+                f"{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
 
             for node_id in group.members:
                 if node_id == self.p2p_manager.node_id:
@@ -7130,7 +7139,8 @@ class CoreService:
                         file_path=path,
                         group_id=group_id,
                         file_hash=fingerprint[0],
-                        chunk_hashes=fingerprint[1]
+                        chunk_hashes=fingerprint[1],
+                        message_id=message_id,
                     )
                     transfer_ids.append(tid)
                 except Exception as e:
@@ -7289,8 +7299,13 @@ class CoreService:
             keeps_file = saves_screenshots_to_disk(self.firewall)
             if keeps_file:
                 attachment["file_path"] = str(file_path)
+            # Every member's copy and every relay of it carry this id, and a member
+            # refuses an id it already holds: the on-disk name and the clock keep
+            # a second paste under the same name a second message.
+            import time
             image_msg_id = hashlib.sha256(
-                f"{self.p2p_manager.node_id}:group-image-send:{group_id}:{filename}".encode()
+                f"{self.p2p_manager.node_id}:group-image-send:{group_id}:{file_path.name}:"
+                f"{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
             # Keyed on the on-disk name: that is what FileCompleteHandler sees as
             # transfer.filename, and it may carry a "_N" suffix `filename` lacks.
@@ -7346,7 +7361,8 @@ class CoreService:
                             image_metadata=image_metadata,
                             group_id=group_id,
                             file_hash=fingerprint[0],
-                            chunk_hashes=fingerprint[1]
+                            chunk_hashes=fingerprint[1],
+                            message_id=image_msg_id,
                         )
                         transfer_ids.append(tid)
                     except Exception as e:
@@ -7508,17 +7524,21 @@ class CoreService:
                 "voice_metadata": voice_metadata,
             }
             ui_dedup_key = group_file_ui_key(group_id, final_filename)
+            # The id the record, the broadcast and every member's copy share.
+            # The record used to take an id of its own, so the bubble and the
+            # stored message were two messages to anything joining them by id.
+            message_id = hashlib.sha256(
+                f"{self.p2p_manager.node_id}:group-voice-send:{group_id}:{final_filename}".encode()
+            ).hexdigest()[:16]
             if ui_dedup_key not in self._processed_message_ids:
                 self._processed_message_ids.add(ui_dedup_key)
-                message_id = hashlib.sha256(
-                    f"{self.p2p_manager.node_id}:group-voice-send:{group_id}:{final_filename}".encode()
-                ).hexdigest()[:16]
                 msg_index = None
                 if _group_monitor:
                     _group_monitor.add_message(
                         "user",
                         f"Sent voice message: {final_filename} ({size_mb} MB)",
                         [attachment],
+                        message_id=message_id,
                     )
                     msg_index = _group_monitor.get_last_msg_index()
                 await self.local_api.broadcast_event("group_file_received", {
@@ -7546,7 +7566,8 @@ class CoreService:
                         node_id=node_id,
                         file_path=file_path,
                         voice_metadata=voice_metadata,
-                        group_id=group_id
+                        group_id=group_id,
+                        message_id=message_id,
                     )
                     transfer_ids.append(tid)
                 except Exception as e:

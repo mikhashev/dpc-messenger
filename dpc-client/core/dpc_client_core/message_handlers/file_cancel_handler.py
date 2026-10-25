@@ -2,6 +2,7 @@
 
 from typing import Dict, Any, Optional
 from . import MessageHandler
+from ..managers.file_transfer_manager import ALREADY_RECEIVED_REASON
 
 
 class FileCancelHandler(MessageHandler):
@@ -31,6 +32,7 @@ class FileCancelHandler(MessageHandler):
         - hash_mismatch: File hash verification failed
         - timeout: Transfer timed out
         - send_error: Error occurred during sending
+        - already_received: the peer already has this group file; not shown
 
         Flow:
         1. Mark transfer as cancelled
@@ -54,6 +56,11 @@ class FileCancelHandler(MessageHandler):
 
         # Delegate to FileTransferManager (this will delete the transfer)
         await file_transfer_manager.handle_file_cancel(sender_node_id, payload)
+
+        if reason == ALREADY_RECEIVED_REASON:
+            # The peer has the file: nothing failed, so nothing is shown. The
+            # offer never reached FILE_ACCEPT, so the UI holds no entry for it.
+            return None
 
         # Broadcast cancellation event to UI
         event = {

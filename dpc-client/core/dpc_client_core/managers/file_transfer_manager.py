@@ -86,6 +86,12 @@ RECEIVE_STALL_ROUNDS = 3
 # FILE_CANCEL reason for a receive that cannot be written to the local disk
 # (disk full, permission). No word in DPTP §3.11 covered it: this one is new.
 RECEIVE_ERROR_REASON = "receive_error"
+# FILE_CANCEL reason for a group file offer this node already has under the
+# same identity: received, still receiving, or sent it itself. The sender takes
+# it as a quiet success. Mike's word, 2026-10-25.
+ALREADY_RECEIVED_REASON = "already_received"
+# An identity field read off a peer's offer becomes a record id here: bounded.
+_MAX_IDENTITY_CHARS = 128
 
 # The receiver's answer to an offer. Explicit entries win in this order: the
 # node entry, then the sender's first group that has an entry (allow or deny
@@ -184,6 +190,30 @@ def group_file_ui_key(group_id: str, filename: str) -> str:
     return f"group_file_ui:{group_id}:{filename}"
 
 
+def group_file_keys(group_id: str, message_id: Optional[str],
+                    file_hash: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """The identity of one group file, as `(by message_id, by hash)`.
+
+    A group file keeps the author's `message_id` across every relay, as a
+    GROUP_TEXT does; it is how a member knows a copy it is offered is one it
+    already has. An offer from a peer that predates the field carries none, and
+    then the group and the file's hash stand in. That fallback costs one thing:
+    such a peer sending the same bytes to the group twice in one session gets
+    its second copy refused here as `already_received`.
+    """
+    by_id = f"group_file:{group_id}:{message_id}" if message_id else None
+    by_hash = (f"group_file_hash:{group_id}:{file_hash}"
+               if file_hash and file_hash != "none" else None)
+    return by_id, by_hash
+
+
+def offer_identity_field(value: Any) -> Optional[str]:
+    """A peer's `message_id` / `sender_node_id`, or None when it is not a usable one."""
+    if isinstance(value, str) and value and len(value) <= _MAX_IDENTITY_CHARS:
+        return value
+    return None
+
+
 def saves_screenshots_to_disk(firewall) -> bool:
     """The owner's `image_transfer.save_screenshots_to_disk`; true when unset.
 
@@ -244,6 +274,14 @@ class FileTransfer:
     image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.) v0.12.0+
     voice_metadata: Optional[dict] = None  # Voice metadata (duration, sample_rate, codec) v0.13.0+
     group_id: Optional[str] = None  # Group ID for group file transfers (v0.19.0+)
+    # A group file's identity, the GROUP_TEXT words: the member who wrote it and
+    # its id there. Every relay carries both unchanged. On a download they are
+    # the offer's claim, unsigned, and never decide who the file is credited to.
+    sender_node_id: Optional[str] = None
+    message_id: Optional[str] = None
+    # An upload that passes on a group file this node received, never on the wire:
+    # its completion is nobody's message here.
+    group_relay: bool = False
     # A download whose sender no rule names (FILE_TRANSFER_ASK), until the user
     # answers "allow files from X?"; a decline meanwhile tells the sender why.
     awaiting_permission: bool = False
@@ -375,6 +413,10 @@ class FileTransferManager:
         # Files an upload is reading or a fan-out is about to offer: path -> holders.
         # A screenshot that is not kept is deleted only when nothing holds it.
         self._files_in_use: Dict[Path, int] = {}
+        # Group files this node sent or received, by `group_file_keys`, in the
+        # order seen (a dict, so the oldest half can go). Memory only: after a
+        # restart a copy may be taken again, and its record still lands once.
+        self._group_files_held: Dict[str, None] = {}
 
         # Configuration (from settings)
         self.chunk_size = int(settings.get("file_transfer", "chunk_size", "65536"))  # 64KB
@@ -562,7 +604,10 @@ class FileTransferManager:
         voice_metadata: Optional[Dict[str, Any]] = None,
         group_id: Optional[str] = None,
         file_hash: Optional[str] = None,
-        chunk_hashes: Optional[List[str]] = None
+        chunk_hashes: Optional[List[str]] = None,
+        message_id: Optional[str] = None,
+        sender_node_id: Optional[str] = None,
+        group_relay: bool = False,
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -586,6 +631,10 @@ class FileTransferManager:
             file_hash, chunk_hashes: Optional precomputed pair from `compute_file_fingerprint`.
                 A fan-out to N members hashes the file once and passes the pair to each call;
                 both must be given, otherwise the file is hashed here.
+            message_id, sender_node_id: A group file's identity (see `group_file_keys`).
+                The author passes its own message_id and leaves sender_node_id to
+                default to itself; a relay passes both as it received them.
+            group_relay: This upload passes on a group file received from someone else.
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -651,10 +700,17 @@ class FileTransferManager:
             chunk_hashes=chunk_hashes,  # v0.11.1: Store for retry requests
             image_metadata=image_metadata,  # Store image metadata for screenshots (v0.12.0+)
             voice_metadata=voice_metadata,  # Store voice metadata for voice messages (v0.13.0+)
-            group_id=group_id              # Group ID for group file transfers (v0.19.0+)
+            group_id=group_id,             # Group ID for group file transfers (v0.19.0+)
+            group_relay=group_relay,
         )
+        if group_id and message_id:
+            transfer.message_id = message_id
+            transfer.sender_node_id = sender_node_id or self.p2p_manager.node_id
         transfer.save_to_disk = self._saves_to_disk(transfer)
         self.active_transfers[transfer_id] = transfer
+        if group_id:
+            # Before the offer leaves: a copy relayed back here is then refused.
+            self._remember_group_file(group_id, transfer.message_id, file_hash)
 
         # Send FILE_OFFER (with optional image_metadata for v0.12.0+ or voice_metadata for v0.13.0+)
         payload = {
@@ -678,6 +734,9 @@ class FileTransferManager:
         # Add group_id if provided (v0.19.0+: Group file transfers)
         if group_id:
             payload["group_id"] = group_id
+            if transfer.message_id:
+                payload["message_id"] = transfer.message_id
+                payload["sender_node_id"] = transfer.sender_node_id
 
         await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_OFFER",
@@ -686,6 +745,53 @@ class FileTransferManager:
 
         logger.info(f"File transfer initiated: {file_path.name} ({file_size} bytes) to {node_id}")
         return transfer_id
+
+    _MAX_GROUP_FILES_HELD = 10000
+
+    def _remember_group_file(self, group_id: str, message_id: Optional[str],
+                             file_hash: Optional[str]) -> None:
+        """Note that this node has this group file, under both of its keys.
+
+        Both, so a copy that lost its `message_id` on the way (an older relay)
+        is still known by its hash.
+        """
+        for key in group_file_keys(group_id, message_id, file_hash):
+            if key:
+                self._group_files_held[key] = None
+        if len(self._group_files_held) > self._MAX_GROUP_FILES_HELD:
+            for key in list(self._group_files_held)[:self._MAX_GROUP_FILES_HELD // 2]:
+                del self._group_files_held[key]
+
+    @staticmethod
+    def _offer_key(group_id: str, message_id: Optional[str], file_hash: Optional[str]) -> Optional[str]:
+        """The key an offer is judged by: its message_id when it has one, else its hash.
+
+        Not both: a member who sends the same bytes again sends a new message,
+        and a hash match must not swallow it.
+        """
+        by_id, by_hash = group_file_keys(group_id, message_id, file_hash)
+        return by_id or by_hash
+
+    def holds_group_file(self, group_id: str, message_id: Optional[str],
+                         sender_node_id: Optional[str], file_hash: Optional[str]) -> bool:
+        """Whether a group file offer is one this node already has.
+
+        True when this node wrote it, sent or received it under the same key,
+        or is receiving it now. A false claim in the offer can only make this
+        node refuse a copy, never credit one: the claim is unsigned.
+        """
+        if sender_node_id and sender_node_id == self.p2p_manager.node_id:
+            return True
+        key = self._offer_key(group_id, message_id, file_hash)
+        if not key:
+            return False
+        if key in self._group_files_held:
+            return True
+        for t in self.active_transfers.values():
+            if (t.direction == "download" and t.group_id == group_id
+                    and key in group_file_keys(t.group_id, t.message_id, t.hash)):
+                return True
+        return False
 
     async def handle_file_accept(self, node_id: str, transfer_id: str):
         """
@@ -1169,6 +1275,10 @@ class FileTransferManager:
             transfer.status = TransferStatus.COMPLETED
             logger.info(f"Screenshot received but not saved to disk (save_screenshots_to_disk=false): {transfer.filename}")
 
+        if transfer.group_id:
+            # From here a copy of this file offered again is `already_received`.
+            self._remember_group_file(transfer.group_id, transfer.message_id, transfer.hash)
+
         # Send FILE_COMPLETE
         await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_COMPLETE",
@@ -1181,7 +1291,10 @@ class FileTransferManager:
         # Broadcast to UI as chat message (receiver side)
         if self.local_api:
             import time
-            message_id = hashlib.sha256(
+            # A group file that carries its author's message_id is noted under
+            # it: when the author's signed record of it arrives, the merge
+            # finds this note by that id and puts the record in its place.
+            message_id = transfer.message_id or hashlib.sha256(
                 f"{node_id}:file-received:{transfer.transfer_id}:{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
 
@@ -1199,7 +1312,12 @@ class FileTransferManager:
             )
             finder = getattr(conversation_monitor, "find_file_record", None)
             if transfer.group_id and callable(finder):
-                existing_record = finder(node_id, transfer.filename, transfer.size_bytes, transfer.hash)
+                # By the offer's message_id first: in a star the file arrives
+                # from the relay, not its author, and only the id finds the
+                # author's record. The record found is signed by whoever it
+                # names, so the offer's unsigned claim credits nobody.
+                existing_record = finder(node_id, transfer.filename, transfer.size_bytes,
+                                         transfer.hash, message_id=transfer.message_id)
                 if existing_record:
                     message_id = existing_record["id"]
 
@@ -1319,7 +1437,8 @@ class FileTransferManager:
 
         # Auto-transcribe voice messages if enabled (v0.13.2+ recipient-side)
         if is_voice and transfer.voice_metadata and save_to_disk:
-            import asyncio
+            # The module's asyncio: an `import asyncio` here made the name local
+            # to the whole method, and the relay below raised on every file.
             asyncio.create_task(
                 self.service._maybe_transcribe_voice_message(
                     transfer_id=transfer.transfer_id,
@@ -1331,42 +1450,56 @@ class FileTransferManager:
                 )
             )
 
-        # Relay group file to connected members that couldn't reach the original sender (star topology)
+        # Relay a group file to the members its author may not reach (star
+        # topology). Once per file: the key, not the transfer, decides, because
+        # every relay is a new transfer and keying on that relayed one file
+        # around a full mesh for as long as everyone stayed online.
         if (transfer.group_id and save_to_disk and file_path and file_path.exists()
                 and self.service and hasattr(self.service, 'group_manager')):
-            relay_key = f"relay:{transfer.transfer_id}"
-            if relay_key not in self.service._processed_message_ids:
-                self.service._processed_message_ids.add(relay_key)
+            file_key = self._offer_key(transfer.group_id, transfer.message_id, transfer.hash)
+            relay_key = f"relay:{file_key or transfer.transfer_id}"
+            if relay_key not in self._group_files_held:
+                self._group_files_held[relay_key] = None
                 group = self.service.group_manager.get_group(transfer.group_id)
                 if group:
+                    kind = "voice" if is_voice else "image" if is_image else "file"
                     for member_id in group.members:
                         if member_id == self.p2p_manager.node_id:
                             continue
-                        if member_id == node_id:  # skip original sender
+                        if member_id == node_id:  # the hop it came from
+                            continue
+                        if member_id == transfer.sender_node_id:  # its author
                             continue
                         if member_id in self.p2p_manager.peers:
-                            try:
-                                import asyncio
-                                asyncio.create_task(self.send_file(
-                                    node_id=member_id,
-                                    file_path=file_path,
-                                    group_id=transfer.group_id,
-                                    image_metadata=transfer.image_metadata,
-                                    voice_metadata=transfer.voice_metadata,
-                                ))
-                                logger.info(
-                                    "Relayed group %s %s to %s",
-                                    "voice" if is_voice else "image" if is_image else "file",
-                                    transfer.filename, member_id[:20]
-                                )
-                            except Exception as e:
-                                logger.error(
-                                    "Failed to relay group file to %s: %s", member_id[:20], e
-                                )
+                            asyncio.create_task(self._relay_group_file(member_id, file_path, transfer, kind))
 
         # Cleanup: leaving the table releases the receive (the file is already renamed)
         self.active_transfers.pop(transfer.transfer_id, None)
         logger.debug(f"Cleaned up completed download transfer: {transfer.transfer_id}")
+
+    async def _relay_group_file(self, member_id: str, file_path: Path,
+                                received: FileTransfer, kind: str) -> None:
+        """Offer a received group file to one member, under the identity it came with.
+
+        Runs as its own task, so a refusal here (the upload cap, a dropped
+        peer) is logged here: raised, it surfaced only as "Task exception was
+        never retrieved".
+        """
+        try:
+            await self.send_file(
+                node_id=member_id,
+                file_path=file_path,
+                group_id=received.group_id,
+                image_metadata=received.image_metadata,
+                voice_metadata=received.voice_metadata,
+                message_id=received.message_id,
+                sender_node_id=received.sender_node_id,
+                group_relay=True,
+            )
+            logger.info("Relayed group %s %s to %s", kind, received.filename, member_id[:20])
+        except Exception as e:  # noqa: BLE001 - one member's failure ends only its relay
+            logger.warning("Could not relay group %s %s to %s: %s",
+                           kind, received.filename, member_id[:20], e)
 
     async def handle_file_complete(self, node_id: str, payload: dict):
         """
@@ -1514,7 +1647,11 @@ class FileTransferManager:
         transfer = self.active_transfers.get(transfer_id)
         if transfer:
             transfer.status = TransferStatus.CANCELLED
-            logger.info(f"Transfer cancelled by peer: {transfer_id} (reason: {reason})")
+            if reason == ALREADY_RECEIVED_REASON:
+                # Not a failure: the peer has this file already.
+                logger.info(f"Peer already has {transfer.filename}, offer withdrawn: {transfer_id}")
+            else:
+                logger.info(f"Transfer cancelled by peer: {transfer_id} (reason: {reason})")
             del self.active_transfers[transfer_id]
 
     async def _check_file_transfer_permission(
