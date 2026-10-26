@@ -31,11 +31,11 @@ measured both from git and found the number had no source.
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 proposed · ADR-046 accepted | 201 | 36 |
 | **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 proposed · ADR-046 accepted | 283 | 70 |
 | **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 230 | 51 |
-| **reach** | ADR-035 accepted · ADR-043 proposed | 41 | 10 |
+| **reach** | ADR-035 accepted · ADR-043 proposed | 42 | 10 |
 
 **Observation debt: 217 under an axis + 19 in entries that carry none = 236.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
-Not yet placed: 130 of 1031 board entries carry no axis, and a guessed one would report coverage this does not have.
+Not yet placed: 130 of 1032 board entries carry no axis, and a guessed one would report coverage this does not have.
 
 Rendered from `docs/decisions/*.md` front matter and `backlog.md`. Nothing here is written by hand; correct it at the source and re-run `uv run python tools/backlog/build.py --roadmap`.
 
