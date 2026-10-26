@@ -10,6 +10,8 @@ import uuid
 import websockets
 import socket
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
 
@@ -373,29 +375,18 @@ class CoreService:
         except Exception as e:
             logger.warning("Failed to add instructions.json reference: %s", e)
 
-        # Auto-collect device context on startup (if enabled)
+        # Device context (if enabled): what the last collection left serves from
+        # here on. start() refreshes it in the background, because every probe is
+        # a child of its own and the whole collection took seconds the start used
+        # to wait for; until the refresh lands, readers get the previous file, and
+        # None on a first run.
         self.device_context = None
+        self._device_context_stop = threading.Event()
         if self.settings.get_auto_collect_device_info():
             try:
-                from .device_context_collector import DeviceContextCollector
-                device_collector = DeviceContextCollector(settings=self.settings)
-
-                # Generate/update device_context.json
-                device_file = device_collector.collect_and_save()
-                logger.info("Device context saved to %s", device_file.name)
-
-                # Update personal.json with reference to device_context.json
-                context = self.pcm_core.load_context()
-                context = device_collector.update_personal_context_reference(context)
-                self.pcm_core.save_context(context)
-
-                # Load device context for AI use
-                with open(device_file, 'r', encoding='utf-8') as f:
-                    self.device_context = json.load(f)
-                logger.info("Device context loaded and referenced in personal.json")
+                self.device_context = self._device_context_collector().read_saved()
             except Exception as e:
-                logger.warning("Failed to collect device context: %s", e)
-                # Continue service startup even if collection fails
+                logger.warning("Previous device context unreadable, none until the refresh lands: %s", e)
 
         # Set display name from personal context (for P2P handshakes)
         try:
@@ -930,6 +921,56 @@ class CoreService:
         except Exception as exc:
             logger.debug("Tokenizer warm-up skipped: %s", exc)
 
+    def _device_context_collector(self):
+        from .device_context_collector import DeviceContextCollector
+        return DeviceContextCollector(settings=self.settings, stop_event=self._device_context_stop)
+
+    def _start_device_context_refresh(self) -> None:
+        """Collect the device context in the background, tracked like every other
+        start task, so the shutdown cancels it with them. One per start, and a
+        process starts once (`_is_running`), so two never overlap."""
+        if not self.settings.get_auto_collect_device_info():
+            return
+        task = asyncio.create_task(self._refresh_device_context())
+        task.set_name("device_context_refresh")
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _refresh_device_context(self) -> None:
+        """Collect on a worker thread, then, back on the loop, replace
+        `self.device_context` and the personal.json reference. The reference is
+        written here rather than on the thread so that it cannot interleave with
+        the loop's own saves of personal.json."""
+        collector = self._device_context_collector()
+        began = time.monotonic()
+        collected = await asyncio.to_thread(self._collect_device_context, collector)
+        if collected is None:
+            return
+        self.device_context = collected
+        try:
+            context = self.pcm_core.load_context()
+            context = collector.update_personal_context_reference(context)
+            self.pcm_core.save_context(context)
+        except Exception as e:
+            logger.warning("Device context refreshed, but its reference in personal.json was not updated: %s", e)
+        logger.info("Device context refreshed in the background in %.1f s", time.monotonic() - began)
+
+    @staticmethod
+    def _collect_device_context(collector) -> Optional[Dict[str, Any]]:
+        """The worker thread's half. Never raises: a failure, including a stop
+        that refused the probes, is one WARNING and None, and both
+        device_context.json and `self.device_context` keep the previous
+        collection."""
+        try:
+            collector.collect_and_save()
+            collected = collector.read_saved()
+            if collected is None:
+                raise FileNotFoundError(f"{collector.device_file.name} is missing after the write")
+            return collected
+        except Exception as e:
+            logger.warning("Device context refresh failed, the previous collection stays: %s", e)
+            return None
+
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
@@ -939,6 +980,9 @@ class CoreService:
         logger.info("D-PC Messenger v%s initializing...", __version__)
 
         self._shutdown_event = asyncio.Event()
+
+        # First, so that it lands as early as it can; nothing below waits for it.
+        self._start_device_context_refresh()
 
         # Local engines (llama-server, Strata) live on this loop; a start reached
         # from an agent tool's per-call loop is forwarded here.
@@ -1246,6 +1290,12 @@ class CoreService:
         """Performs a clean shutdown of all components."""
         self._is_running = False
         logger.info("Shutting down components")
+
+        # A device-context refresh still running skips its remaining probes and
+        # writes nothing; its task is cancelled with the others below.
+        device_context_stop = getattr(self, "_device_context_stop", None)
+        if device_context_stop is not None:
+            device_context_stop.set()
 
         # ADR-046 point 7, step 1: the process registry refuses new entries from
         # here, so nothing is born after the stop below; every later stop reads

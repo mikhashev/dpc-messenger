@@ -46,21 +46,63 @@ class DeviceContextCollector:
     SCHEMA_VERSION = "1.1"
     COLLECTOR_VERSION = "1.0"
 
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, stop_event=None):
         self.settings = settings
         self.device_file = DPC_HOME_DIR / "device_context.json"
+        # The backend's stop, when the collection runs beside a live backend:
+        # once set, the probes left are skipped and nothing is written.
+        self._stop_event = stop_event
+        self._stopped = False
+
+    def _probe(self, cmd, **kwargs):
+        """`_device_probe`, refused once the backend's stop began. Every probe
+        site swallows its exceptions, so the refusal is also remembered here:
+        a collection that lost its probes to the stop must not be saved."""
+        from .process_registry import ProcessRegistryClosed
+
+        if self._stop_event is not None and self._stop_event.is_set():
+            self._stopped = True
+            raise ProcessRegistryClosed("the backend is stopping; it starts no new process")
+        try:
+            return _device_probe(cmd, **kwargs)
+        except ProcessRegistryClosed:
+            self._stopped = True
+            raise
+
+    def read_saved(self) -> Optional[Dict[str, Any]]:
+        """device_context.json as the last collection left it; None when there
+        is none yet. Raises when the file is there but is not a JSON object."""
+        try:
+            with open(self.device_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return None
+        if not isinstance(data, dict):
+            raise ValueError(f"{self.device_file.name} holds a {type(data).__name__}, not an object")
+        return data
 
     def collect_and_save(self) -> Path:
         """Collect device info and save to device_context.json.
 
+        The file is replaced in one step (a temp file and `os.replace`), so a
+        reader sees the previous collection or this one, never half of it.
+        Raises `ProcessRegistryClosed`, and writes nothing, when the backend's
+        stop began while the probes ran.
+
         Returns:
             Path to device_context.json file
         """
+        from .conversation_monitor import atomic_write_text
+        from .process_registry import ProcessRegistryClosed
+
         device_context = self._generate_device_context()
 
-        # Write to file
-        with open(self.device_file, 'w', encoding='utf-8') as f:
-            json.dump(device_context, f, indent=2, ensure_ascii=False)
+        if self._stopped or (self._stop_event is not None and self._stop_event.is_set()):
+            raise ProcessRegistryClosed(
+                "the backend is stopping; device_context.json keeps the previous collection"
+            )
+
+        atomic_write_text(self.device_file, json.dumps(device_context, indent=2, ensure_ascii=False))
 
         return self.device_file
 
@@ -340,7 +382,7 @@ class DeviceContextCollector:
 
         try:
             # Query GPU info: name, memory.total, driver_version
-            result = _device_probe(
+            result = self._probe(
                 ['nvidia-smi', '--query-gpu=name,memory.total,driver_version',
                  '--format=csv,noheader,nounits'],
                 text=True,
@@ -385,7 +427,7 @@ class DeviceContextCollector:
             return None
 
         try:
-            result = _device_probe(
+            result = self._probe(
                 ['nvcc', '--version'],
                 text=True,
                 timeout=2
@@ -405,7 +447,7 @@ class DeviceContextCollector:
             return None
 
         try:
-            result = _device_probe(
+            result = self._probe(
                 ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
                 text=True,
                 timeout=2
@@ -423,7 +465,7 @@ class DeviceContextCollector:
             return None
 
         try:
-            result = _device_probe(
+            result = self._probe(
                 ['rocm-smi', '--showproductname'],
                 text=True,
                 timeout=5
@@ -467,7 +509,7 @@ class DeviceContextCollector:
             return None
 
         try:
-            result = _device_probe(
+            result = self._probe(
                 ['lspci'],
                 text=True,
                 timeout=5
@@ -541,7 +583,7 @@ class DeviceContextCollector:
             # Check /sys/block for rotational flag
             try:
                 # This is a simplified check - would need to map mount point to device
-                result = _device_probe(
+                result = self._probe(
                     ['lsblk', '-d', '-o', 'name,rota'],
                     text=True,
                     timeout=2
@@ -557,7 +599,7 @@ class DeviceContextCollector:
         elif system == "Darwin":
             # macOS - check if APFS (usually SSD)
             try:
-                result = _device_probe(
+                result = self._probe(
                     ['diskutil', 'info', '/'],
                     text=True,
                     timeout=2
@@ -608,7 +650,7 @@ class DeviceContextCollector:
         for tool_name, version_cmd in check_list:
             if shutil.which(tool_name):
                 try:
-                    result = _device_probe(
+                    result = self._probe(
                         version_cmd,
                         text=True,
                         timeout=2
@@ -681,7 +723,7 @@ class DeviceContextCollector:
             return []
 
         try:
-            result = _device_probe(
+            result = self._probe(
                 ['ollama', 'list'],
                 text=True,
                 timeout=5

@@ -881,7 +881,7 @@ The client automatically collects device and system information on startup and s
 **Storage Architecture:**
 - **device_context.json**: Structured JSON file (`~/.dpc/device_context.json`) with hardware/software details
 - **personal.json**: Contains reference to device_context.json in metadata.external_contexts
-- **Auto-updates**: Refreshes on every client startup (detects driver updates, new tools, etc.)
+- **Auto-updates**: Refreshes on every client startup (detects driver updates, new tools, etc.), in the background: the start does not wait for it, and until it lands readers get the previous `device_context.json` (none on a first run). The file is replaced atomically; a failed or stop-overtaken collection writes nothing
 
 **What's collected:**
 

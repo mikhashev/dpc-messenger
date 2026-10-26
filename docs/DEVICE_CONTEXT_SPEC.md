@@ -28,6 +28,10 @@ Device context enables:
 **On Windows:** `C:\Users\<username>\.dpc\device_context.json`
 **On Linux/Mac:** `/home/<username>/.dpc/device_context.json`
 
+## When It Is Refreshed
+
+Every client start collects the device context again, in the background, so the start does not wait for the probes. Until the new collection lands, everything that reads the device context (the AI prompt, peers' `REQUEST_DEVICE_CONTEXT`, the agent's `get_dpc_context`) gets the previous `device_context.json`; on a first run there is none until the first collection lands. The file is replaced in one step (a temp file and `os.replace`), so a reader never sees half of it. A collection that fails, or that the backend's stop overtakes, writes nothing and leaves the previous file in place.
+
 ---
 
 ## Schema Structure
