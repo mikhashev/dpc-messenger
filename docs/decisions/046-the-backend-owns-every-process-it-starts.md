@@ -489,9 +489,12 @@ holds on Windows only.
    entries: a registry row whose pid is the backend's is a defect and is skipped and logged.
 
 8. **Visibility, and what an agent may do.**
-   - A **local API command** lists the live and the recent processes (proposed name
-     `list_processes`, after `list_providers`, `list_ai_chats`). It is the one source for
-     the UI and for the agent's tool.
+   - A **local API command**, `list_processes` (after `list_providers`, `list_ai_chats`),
+     lists the live and the recent processes. It is the one source for the UI and for the
+     agent's tool. Its answer is `{"status", "processes", "backend_pid",
+     "backend_start_time", "free_commit"}`: the entries as persisted, each live one with
+     `commit_mb` read at the request; the daily history added for `since`/`until`; and
+     the system part `free_commit` (the GLOSSARY rows **free commit** and **commit_mb**).
    - **An agent sees, and may kill, only its own.** Two agent tools, `list_my_processes`
      (after `list_my_tools`, `list_my_skills`) and `kill_my_process(pid)`. The kill checks
      that the `pid` is a registry entry whose spawn origin names this agent, **never** a
@@ -836,7 +839,7 @@ files.**
 | Descendants entered by the sampler (parent fields) | Pending | — |
 | Spawn sites to the module; structural test: `run_probe` in `process.py` (`run_supervised` with `launcher_kind: subsystem` and bytes), `device_probe` and `git_helper` in `SUBSYSTEMS`, a `device_probe` let through during the stop (point 7); 22 sites moved, the allow-list of four (point 5); tests in `tests/test_every_spawn_goes_through_the_process_module.py` and `tests/test_a_short_probe_is_in_the_registry_and_answers_as_subprocess_run_did.py` | Done 2026-10-26 | `067ca25d` |
 | Review fixes of the move: the structural test walks every script under `dpc-client/core` (`probe_rename_orphan.py` allow-listed), an entry's `due` is an ISO date or `None` and fails once passed (`comfyui`: `None`), the `explorer.exe` entry's reason; a device probe let through the stop only with `while_stopping` (Strata's release check alone passes it); git given `GIT_STOP_GRACE_S` (10 s, one budget) at steps 2 and 5 with the `index.lock` WARNING; `SupervisedRun.stdout`/`stderr` typed `str` or `bytes`; tests in the two files above and `tests/test_the_process_registry_records_how_every_child_ends.py` | Done 2026-10-26 | the commit that carries this row |
-| Local API command; agent tools | Pending | — |
+| Local API command `list_processes` (`ProcessRegistry.list_processes`: the kept entries, the daily history for `since`/`until`, `commit_mb` read at the request on Windows; `free_commit` by `commit_memory.read_free_commit_or_physical`, physical memory by psutil and commit null off Windows); agent tools `list_my_processes` and `kill_my_process` (`ProcessRegistry.cancel_by_agent`, the orderly stop's announce-kill-end path with `cancelled_by_agent`); `FreeCommitReading` and `freeCommitLine` in the UI take a reading with no commit; tests in `tests/test_the_local_api_answers_which_processes_run_now.py` and `tests/test_an_agent_sees_and_ends_only_its_own_processes.py` | Done 2026-10-27 | the commit that carries this row |
 | UI: AGENTS row and Agent Models Configuration (own card) | Pending | — |
 
 ## Open Questions
@@ -891,8 +894,8 @@ files.**
 Every name this record introduces. Each is built from words the project already has and
 is **accepted (Mike's call, 2026-10-25);** the rows are in `docs/GLOSSARY.md`, section
 "Processes the backend starts"; the names are in code since `4ea0560f` (the registry core),
-except the sampler's fields' values, the API command and the agent tools, which are
-pending. `rg --no-ignore` over the repository (this record excluded) on 2026-10-25, before the code,
+the sampler's fields' values since `3d380706`, and the API command and the agent tools
+since the commit of their Implementation Status row. `rg --no-ignore` over the repository (this record excluded) on 2026-10-25, before the code,
 found no hit for any compound name below, and one for `last_output_at`, on the board card
 that proposes it; the same search for `parent_pid`, `parent_start_time` and `launcher_kind`
 found hits only on the board card. The plain words in the exit-reason list (`exited`,
@@ -911,6 +914,7 @@ and is not used for the registry.
 | **launcher** values `strata`, `llamacpp_server`, `browser`, `device_probe`, `git_helper`; **`launcher_kind`** `tool` or `subsystem` | `launcher` already exists in `run_supervised` (`run_shell`, `git_tool(sandbox)`, `read_document`); `strata` and `llamacpp_server` are provider types | The first two are existing words; the last three are new labels. `launcher_kind` is new. |
 | **resource peaks:** `peak_rss_mb`, `peak_commit_mb`, `peak_vram_mib`, `cpu_seconds`, `io_read_bytes`, `io_write_bytes`; **`last_output_at`** | `exceeded_mb`, `ceiling_mb`; `--min-free-vram-mib`; psutil's names | Units follow the neighbours: megabytes for process memory, MiB for VRAM. |
 | **local API command `list_processes`;** agent tools **`list_my_processes`**, **`kill_my_process`** | `list_providers`, `list_ai_chats`; `list_my_tools`, `list_my_skills` | Ark named the two tools; `list_processes` is CC's. |
+| **`commit_mb`** on a live entry; the answer's **`backend_pid`**, **`backend_start_time`** and **`free_commit`**, with `source` `psutil` off Windows | `peak_commit_mb`; the state file's envelope; `commit_memory.read_free_commit`'s keys | Put by CC, reviewed by Ark and Zcode; Mike's go, 2026-10-26. |
 | **the backend's job** (a phrase, not an identifier) | "kill-on-close job object" of ADR-044 | The OS object is a Job Object; this is how the records refer to the backend's. |
 | **orphan sweep** (a phrase for point 6) | `orphan_swept` | Not a function name yet. |
 

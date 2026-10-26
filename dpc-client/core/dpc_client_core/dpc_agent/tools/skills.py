@@ -142,6 +142,85 @@ def _list_my_skills(ctx: "ToolContext") -> str:
     return "\n".join(lines)
 
 
+def _seconds_between(start: Optional[str], end: Optional[str]) -> Optional[float]:
+    """Seconds from one registry ISO time to another (now when `end` is None)."""
+    from datetime import datetime, timezone
+
+    try:
+        began = datetime.fromisoformat(start) if start else None
+        ended = datetime.fromisoformat(end) if end else datetime.now(timezone.utc)
+    except ValueError:
+        return None
+    return None if began is None else max(0.0, (ended - began).total_seconds())
+
+
+def _process_line(row: Dict[str, Any], ceiling_mb: int) -> str:
+    """One registry entry as `list_my_processes` prints it."""
+    took = _seconds_between(row.get("started_at"), row.get("ended_at"))
+    took_text = "?" if took is None else f"{took:.1f} s"
+    if row.get("ended_at") is None:
+        state = f"RUNNING for {took_text}"
+    else:
+        reason = row.get("exit_reason") or "?"
+        if row.get("stop_kind"):
+            reason += f"/{row['stop_kind']}"
+        state = f"ended {reason} (exit_code {row.get('exit_code')}) after {took_text}"
+    who = row.get("launcher") or "?"
+    if row.get("launcher_kind") == "subsystem":
+        who += " subsystem, owned by the backend (your call woke it; kill_my_process refuses it)"
+    used = []
+    if row.get("ended_at") is None:
+        commit = row.get("commit_mb")
+        ceiling = f" (ceiling {ceiling_mb} MB)" if ceiling_mb else " (ceiling off)"
+        used.append(f"commit now {'unmeasured' if commit is None else f'{commit} MB'}{ceiling}")
+    for key, label, unit in (("peak_rss_mb", "peak RSS", "MB"), ("peak_commit_mb", "peak commit", "MB"),
+                             ("peak_vram_mib", "peak VRAM", "MiB"), ("cpu_seconds", "CPU", "s"),
+                             ("io_read_bytes", "read", "B"), ("io_write_bytes", "written", "B")):
+        if row.get(key) is not None:
+            used.append(f"{label} {row[key]} {unit}")
+    if row.get("last_output_at"):
+        used.append(f"last output {row['last_output_at']}")
+    return (f"- pid {row.get('pid')} [{who}] {state}: {row.get('command') or ''!r}\n"
+            f"  chat {row.get('conversation_id') or '-'}, tool {row.get('tool') or '-'} round "
+            f"{row.get('round')}, started {row.get('started_at')}; {', '.join(used) or 'no resources read'}")
+
+
+def _list_my_processes(ctx: "ToolContext") -> str:
+    """This agent's own entries in the process registry, live first (ADR-046 point 8)."""
+    from ...process_registry import get_registry
+    from .process import _CEILING_KEY, _MEMORY_CEILING_MB, _read_memory_ceiling
+
+    own_id = ctx.agent_root.name
+    ceiling_mb = _MEMORY_CEILING_MB if _MEMORY_CEILING_MB is not None else _read_memory_ceiling()
+    rows = [r for r in get_registry().list_processes() if r.get("agent_id") == own_id]
+    live = [r for r in rows if r.get("ended_at") is None]
+    # Newest end first, compared as times (seconds since the end), never as ISO strings.
+    ended = sorted((r for r in rows if r.get("ended_at") is not None),
+                   key=lambda r: _seconds_between(r.get("ended_at"), None) or 0.0)
+    ceiling = (f"{ceiling_mb} MB per command tree ({_CEILING_KEY}); a tree over it is killed, memory_ceiling"
+               if ceiling_mb else f"off ({_CEILING_KEY} = 0)")
+    lines = [f"Agent {own_id} — your processes: {len(live)} running, {len(ended)} ended recently. "
+             f"Memory ceiling: {ceiling}."]
+    if not rows:
+        lines.append("No process started by your tools is in the registry.")
+    lines.extend(_process_line(r, ceiling_mb) for r in live + ended)
+    return "\n".join(lines)
+
+
+def _kill_my_process(ctx: "ToolContext", pid: Any) -> str:
+    """End one of this agent's own running processes; the registry decides whose it is."""
+    from ...process_registry import get_registry
+
+    own_id = ctx.agent_root.name
+    if isinstance(pid, str) and pid.strip().isdigit():
+        pid = int(pid.strip())
+    entry, said = get_registry().cancel_by_agent(pid, own_id)
+    if entry is None:
+        return f"⚠️ Refused: {said}. kill_my_process ends only a running process your own tools started (see list_my_processes)."
+    return (f"pid {entry.pid} ({entry.launcher}: {entry.command!r}) ended {entry.exit_reason}, "
+            f"exit_code {entry.exit_code}: {said}")
+
+
 def _import_skill_from_agent(ctx: "ToolContext", agent_id: str, skill_name: str) -> str:
     """Copy a shareable skill from another local agent into this agent's skill store."""
     # Firewall check (per-agent profile if available)
@@ -275,6 +354,44 @@ def get_tools() -> "List[ToolEntry]":
             is_core=True,
             timeout_sec=5,
             default_enabled=True,
+        ),
+        ToolEntry(
+            name="list_my_processes",
+            schema={
+                "name": "list_my_processes",
+                "description": (
+                    "List the processes your own tools started, running ones first: pid, command, "
+                    "chat, when it started and for how long, what it used, how it ended, and the "
+                    "memory ceiling beside your live usage. Shows only your own processes."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+            handler=_list_my_processes,
+            is_core=True,
+            timeout_sec=10,
+            default_enabled=True,
+        ),
+        ToolEntry(
+            name="kill_my_process",
+            schema={
+                "name": "kill_my_process",
+                "description": (
+                    "End one of your own running processes and everything it started. Only a pid "
+                    "that list_my_processes shows as running and started by your tools is killed; "
+                    "any other pid is refused with the reason."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pid": {"type": "integer", "description": "The pid, as list_my_processes shows it"},
+                    },
+                    "required": ["pid"],
+                },
+            },
+            handler=_kill_my_process,
+            is_core=False,  # opt-in: it ends a process
+            timeout_sec=20,
+            default_enabled=False,
         ),
         ToolEntry(
             name="list_local_agents",

@@ -124,6 +124,11 @@ entries are never dropped. 200 would cut the graph to hours, and a whole-file
 rewrite of thousands of entries on every spawn and end is too heavy, so the long
 history is the daily files, which are append-only.
 
+**Who reads it** (point 8). `ProcessRegistry.list_processes` is the one listing
+behind the local API command of that name and the agent tool `list_my_processes`;
+`cancel_by_agent` is the only door `kill_my_process` has, and it checks the
+spawn origin itself, never a pid's owner as a model states it.
+
 Imports nothing beyond the standard library (psutil lazily) so that
 `run_service.py` can use it before anything else exists. The tree kills it needs
 come from `dpc_agent/tools/process.py`, imported only when a kill is due.
@@ -450,6 +455,23 @@ def _epoch(iso: Optional[str]) -> Optional[float]:
         return datetime.fromisoformat(iso).timestamp() if iso else None
     except (TypeError, ValueError):
         return None
+
+
+def _parse_bound(value: Any) -> datetime:
+    """A `since`/`until` bound: ISO 8601, a naive time read as UTC; ValueError
+    naming the value otherwise, so a malformed bound reaches the API as a refusal."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"expected an ISO-8601 datetime string, got {value!r}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{value!r} is not an ISO-8601 datetime") from None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _identity_key(entry: "ProcessEntry") -> Tuple[int, Optional[float], Optional[str]]:
+    """One process across the state file and the history: pid, creation time, start."""
+    return entry.pid, _key_time(entry.start_time), entry.started_at
 
 
 def _is_later(epoch: float, iso: Optional[str]) -> bool:
@@ -1049,6 +1071,141 @@ class ProcessRegistry:
             live = self._live.get(pid)
             return live.handle if live is not None else None
 
+    # -- what runs now (point 8) ----------------------------------------------------
+
+    def list_processes(
+        self,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        *,
+        read_tree: Optional[Callable[[int], Optional[TreeSample]]] = None,
+        probe: Callable[[int, Optional[float]], str] = probe_identity,
+    ) -> List[Dict[str, Any]]:
+        """Every entry kept (the state file's set), as persisted plus `commit_mb`;
+        with `since`/`until` (ISO, inclusive) the history's finished entries in
+        that window are added first, minus those already kept. A malformed bound
+        raises ValueError. Walks psutil: call it off the event loop.
+
+        `commit_mb` is read now and never stored: an open entry's tree commit by
+        the sampler's walk (Windows only), None elsewhere and on a finished entry."""
+        since_dt = _parse_bound(since) if since is not None else None
+        until_dt = _parse_bound(until) if until is not None else None
+        kept = self.entries()
+        extra: List[ProcessEntry] = []
+        if since_dt is not None or until_dt is not None:
+            held = {_identity_key(e) for e in kept}
+            extra = [e for e in self._read_history(since_dt, until_dt) if _identity_key(e) not in held]
+        rows = []
+        for entry in extra + kept:
+            row = entry.to_dict()
+            row["commit_mb"] = self._commit_now(entry, read_tree, probe) if entry.is_open else None
+            rows.append(row)
+        return rows
+
+    def _read_history(self, since: Optional[datetime], until: Optional[datetime]) -> List[ProcessEntry]:
+        """The daily files' entries that ended inside the window, in the order of
+        their end; a line that is not an entry (a torn one) is skipped."""
+        if self.history_dir is None:
+            return []
+        if until is None:
+            until = datetime.fromtimestamp(self._clock(), timezone.utc)
+        first_day = since.astimezone(timezone.utc).date() if since is not None else None
+        last_day = until.astimezone(timezone.utc).date()
+        found: List[ProcessEntry] = []
+        try:
+            paths = sorted(self.history_dir.glob("????-??-??.jsonl"))
+        except OSError as exc:
+            logger.warning("process registry: could not list %s (%s)", self.history_dir, exc)
+            return []
+        for path in paths:
+            try:
+                day = date.fromisoformat(path.stem)
+            except ValueError:
+                continue
+            if (first_day is not None and day < first_day) or day > last_day:
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                logger.warning("process registry: could not read %s (%s)", path, exc)
+                continue
+            for line in lines:
+                try:
+                    entry = ProcessEntry.from_dict(json.loads(line))
+                except (ValueError, TypeError):
+                    continue
+                ended = _epoch(entry.ended_at)
+                if ended is None or (since is not None and ended < since.timestamp()) or ended > until.timestamp():
+                    continue
+                found.append(entry)
+        found.sort(key=lambda e: _epoch(e.ended_at) or 0.0)
+        return found
+
+    def _commit_now(
+        self,
+        entry: ProcessEntry,
+        read_tree: Optional[Callable[[int], Optional[TreeSample]]],
+        probe: Callable[[int, Optional[float]], str],
+    ) -> Optional[float]:
+        """The tree's commit at this moment in MB, summed as the sampler sums it,
+        while the pid is still the recorded process."""
+        if not _is_windows(self._platform):
+            return None  # POSIX has no `private`; the module docstring says why
+        if read_tree is None:
+            walker = self._sampler or ResourceSampler(self, platform=self._platform, read_vram=lambda: None)
+            read_tree = walker._read_tree
+        try:
+            if probe(entry.pid, entry.start_time) != "same":
+                return None
+            tree = read_tree(entry.pid)
+        except Exception as exc:
+            logger.debug("process registry: commit of pid %s unread (%s: %s)", entry.pid, type(exc).__name__, exc)
+            return None
+        if tree is None or not _same_start(tree.root_create_time, entry.start_time):
+            return None
+        commit = [p.commit_mb for p in tree.processes if p.commit_mb is not None]
+        return round(sum(commit), 1) if commit else None
+
+    # -- an agent ends its own (point 8) ---------------------------------------------
+
+    def cancel_by_agent(
+        self,
+        pid: Any,
+        agent_id: str,
+        *,
+        kill_tree: Optional[Callable[[Any], str]] = None,
+        probe: Callable[[int, Optional[float]], str] = probe_identity,
+        wait_s: float = 2.0,
+    ) -> Tuple[Optional[ProcessEntry], str]:
+        """`kill_my_process`'s door: kill `pid`'s tree and end it `cancelled_by_agent`
+        only when it is an open entry a tool started for `agent_id`. Anything else
+        is refused with the reason and nothing is signalled; a subsystem is refused
+        even when this agent's call woke it, because its owner is the backend.
+        Returns (the entry as ended, the kill's verdict) or (None, the refusal)."""
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            return None, f"{pid!r} is not a pid"
+        if pid in own_and_ancestor_pids():
+            return None, f"pid {pid} is the backend's own process or one of its ancestors; it is never a target"
+        with self._lock:
+            entry = self._open.get(pid)
+            closed = self._last_closed.get(pid)
+        if entry is None:
+            if closed is not None and agent_id and closed.agent_id == agent_id:
+                return None, f"pid {pid} already ended ({closed.exit_reason})"
+            return None, f"pid {pid} is not a running process in the process registry"
+        if entry.launcher_kind != "tool":
+            return None, (f"pid {pid} is the {entry.launcher} subsystem's; its owner is the backend, "
+                          "not the agent whose call woke it")
+        if not agent_id or entry.agent_id != agent_id:
+            return None, f"pid {pid} was not started by this agent"
+        if probe(pid, entry.start_time) != "same":
+            return None, f"pid {pid} no longer belongs to the process the registry recorded"
+        ended: List[ProcessEntry] = []
+        verdict = self._kill_command(entry, kill_tree or _kill_tree_of, wait_s, ended, reason="cancelled_by_agent")
+        if verdict is None:
+            return None, f"pid {pid} ended before the kill"
+        return (ended[0] if ended else entry), verdict
+
     # -- the startup sweep (point 6) ------------------------------------------------
 
     def sweep_orphans(
@@ -1170,24 +1327,26 @@ class ProcessRegistry:
 
     def _kill_command(
         self, entry: ProcessEntry, kill_tree: Callable[[Any], str], wait_s: float, ended: List[ProcessEntry],
-    ) -> bool:
-        """Announce, kill, end `backend_stop`; False when it had already ended."""
+        reason: str = "backend_stop",
+    ) -> Optional[str]:
+        """Announce, kill, end with `reason`; returns the kill's verdict, None when
+        it had already ended. The orderly stop's and `cancel_by_agent`'s one path."""
         with self._lock:
             if self._open.get(entry.pid) is not entry:
-                return False
+                return None
         handle = self.handle_of(entry.pid)
-        self.note_stop_sent(entry.pid, "backend_stop")
+        self.note_stop_sent(entry.pid, reason)
         try:
             verdict = kill_tree(handle if handle is not None else entry.pid)
         except Exception as exc:
             verdict = f"the kill failed ({type(exc).__name__}: {exc})"
             logger.warning("process registry: could not kill pid %s (%s): %s", entry.pid, entry.launcher, exc)
         returncode = self._returncode_of(handle, wait_s)
-        done = self.end(entry.pid, returncode, reason="backend_stop")
+        done = self.end(entry.pid, returncode, reason=reason)
         logger.debug("process registry: stopped pid %s (%s): %s", entry.pid, entry.launcher, verdict)
         if done is not None:
             ended.append(done)
-        return True
+        return verdict
 
     # -- git at the stop: time to finish, then the kill -----------------------------
 

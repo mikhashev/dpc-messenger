@@ -108,6 +108,19 @@ describe('status formatting', () => {
     expect(freeCommitLine(null)).toBe('free commit (GlobalMemoryStatusEx): not measured on this OS');
     expect(freeCommitLine(undefined)).toContain('not read yet');
   });
+
+  it('keeps the GlobalMemoryStatusEx line when the source is named', () => {
+    expect(freeCommitLine({ avail_page_file_mib: 3686, total_page_file_mib: 108236,
+      avail_phys_mib: 11305, total_phys_mib: 63168, source: 'GlobalMemoryStatusEx' }))
+      .toBe('free commit (GlobalMemoryStatusEx ullAvailPageFile) 3,686 of 108,236 MiB; '
+        + 'free physical (ullAvailPhys) 11,305 of 63,168 MiB');
+  });
+
+  it('off Windows prints physical memory only, names its source and says commit is not measured', () => {
+    expect(freeCommitLine({ avail_page_file_mib: null, total_page_file_mib: null,
+      avail_phys_mib: 11305, total_phys_mib: 63168, source: 'psutil' }))
+      .toBe('free physical (psutil) 11,305 of 63,168 MiB; free commit not measured on this OS');
+  });
 });
 
 describe('the cache admission fields', () => {

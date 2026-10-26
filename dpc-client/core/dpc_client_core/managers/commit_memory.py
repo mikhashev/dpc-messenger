@@ -12,6 +12,12 @@ each is named by its field so a reader knows which number is which.
 
 Windows only, by the ADR's scope: on any other OS the reader returns None and
 the text says "not measured on this OS". It never raises.
+
+`read_free_commit_or_physical` is the reading `list_processes` answers with
+(ADR-046 point 8): the same on Windows; elsewhere physical memory by psutil
+under the same keys, the two commit fields None and `source` naming psutil.
+Commit is not read off Windows (decided with the names, 2026-10-26: null on
+Linux and macOS). The Strata callers keep `read_free_commit`.
 """
 
 import ctypes
@@ -22,6 +28,8 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 SOURCE = "GlobalMemoryStatusEx"
+# Off Windows, `read_free_commit_or_physical` reads physical memory only, through psutil.
+PHYSICAL_SOURCE = "psutil"
 NOT_MEASURED = f"free commit and free physical memory not measured on this OS ({SOURCE} is Windows only)"
 UNREAD = f"free commit and free physical memory unread ({SOURCE} failed)"
 
@@ -69,6 +77,28 @@ def read_free_commit() -> Optional[Dict[str, Any]]:
         }
     except Exception as e:  # a reading is advisory; it never fails the caller
         logger.debug("%s unreadable: %s", SOURCE, e)
+        return None
+
+
+def read_free_commit_or_physical() -> Optional[Dict[str, Any]]:
+    """`read_free_commit` on Windows; elsewhere `avail_phys_mib` / `total_phys_mib`
+    from `psutil.virtual_memory()` with both commit fields None, or None when
+    psutil cannot be read. Never raises."""
+    if sys.platform == "win32":
+        return read_free_commit()
+    try:
+        import psutil
+
+        memory = psutil.virtual_memory()
+        return {
+            "avail_page_file_mib": None,
+            "total_page_file_mib": None,
+            "avail_phys_mib": int(memory.available) >> 20,
+            "total_phys_mib": int(memory.total) >> 20,
+            "source": PHYSICAL_SOURCE,
+        }
+    except Exception as e:  # a reading is advisory; it never fails the caller
+        logger.debug("%s unreadable: %s", PHYSICAL_SOURCE, e)
         return None
 
 

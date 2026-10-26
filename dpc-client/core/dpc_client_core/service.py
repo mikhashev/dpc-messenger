@@ -10228,6 +10228,33 @@ class CoreService:
             logger.error("local_engine_status failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e) or type(e).__name__}
 
+    async def list_processes(self, since: str = None, until: str = None) -> Dict[str, Any]:
+        """What runs now and what ended recently (ADR-046 point 8): the process
+        registry's kept entries with `commit_mb` read at this request, the daily
+        history's in `since`/`until` (optional ISO bounds) added, the backend's
+        own pid and start time, and `free_commit` as `read_free_commit_or_physical`
+        reads it. The psutil walk runs off the event loop."""
+        import os
+        from dpc_client_core import process_registry
+        from dpc_client_core.managers.commit_memory import read_free_commit_or_physical
+
+        def read() -> Dict[str, Any]:
+            registry = process_registry.get_registry()
+            return {
+                "processes": registry.list_processes(since, until),
+                "backend_pid": os.getpid(),
+                "backend_start_time": process_registry.create_time_of(os.getpid()),
+                "free_commit": read_free_commit_or_physical(),
+            }
+
+        try:
+            return {"status": "success", **(await asyncio.to_thread(read))}
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:
+            logger.error("list_processes failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e) or type(e).__name__}
+
     @slow_command
     async def stop_local_engine(self, alias: str = "") -> Dict[str, Any]:
         """Stop a local engine's child by hand to free the card (ADR-044 point 4).
