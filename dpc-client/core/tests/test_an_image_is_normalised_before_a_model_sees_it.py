@@ -334,15 +334,21 @@ def test_query_messages_normalises_the_images_in_the_turns(tmp_path):
     assert meta["image_notes"]
 
 
-def test_the_agents_two_direct_paths_normalise_too():
+def test_the_agents_direct_path_normalises_the_picture_in_its_turn():
+    """The agent's image turn reaches `generate_with_tools` with the picture in
+    its user turn, an `image_url` part made into an `image` block, downscaled."""
     provider = _Seeing(limit=40_000)
     provider.alias = "seer"
     adapter = DpcLlmAdapter(SimpleNamespace(token_count_manager=None, providers={}), provider_alias="seer")
-    asyncio.run(adapter._chat_with_native_vision(
-        provider, [{"role": "user", "content": "look"}],
-        [{"base64": _big_b64(), "mime_type": "image/jpeg"}]))
+    turn = {"role": "user", "content": [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_big_b64()}"}}]}
+    asyncio.run(adapter._chat_native_tools(
+        provider, [turn], [{"name": "t", "description": "", "parameters": {}}], with_images=True))
     import base64 as b64
-    w, h = _opened(b64.b64decode(provider.vision_images[0][0]["base64"])).size
+    image = provider.tool_messages[0][0]["content"][1]
+    assert image["type"] == "image"
+    w, h = _opened(b64.b64decode(image["source"]["data"])).size
     assert w * h <= 40_000
     assert adapter_module.normalise_turn_images is normalise_turn_images
 

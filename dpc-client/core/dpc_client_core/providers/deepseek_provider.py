@@ -109,8 +109,16 @@ class DeepSeekProvider(AIProvider):
         self._cot_cache: Dict[str, str] = {}
 
     def supports_vision(self) -> bool:
-        """DeepSeek V4 text/reasoning models are not multimodal."""
-        return False
+        """True for the Flash model, by any of its names; Pro stays text-only.
+
+        The vendor's vision guide (api-docs.deepseek.com/guides/vision, read
+        2026-10-26) names `deepseek-flash` as the model that accepts images,
+        and its quick start serves the legacy `deepseek-v4-flash` and
+        `deepseek-v4-flash-vision-exp` from that same model; Pro is not named
+        for images. A live call that day read "DPC 47" off a PNG through
+        `deepseek-v4-flash`. Pro answers no until it has been tested (Mike's
+        call, 2026-10-26)."""
+        return "flash" in str(self.model or "").lower()
 
     def supports_thinking(self) -> bool:
         return True
@@ -682,9 +690,24 @@ class DeepSeekProvider(AIProvider):
             ) from e
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
-        """OpenAI-format vision. DeepSeek V4 text models are not multimodal — kept
-        for interface completeness; supports_vision() returns False so the manager
-        will not route vision here."""
+        """OpenAI-format vision: one user message, the prompt and then each image
+        as an `image_url` data URL. The vendor takes images in user messages
+        only — one in a system or assistant message is a 400 — as JPEG, PNG,
+        GIF or WebP, at most 1024 tokens each (api-docs.deepseek.com/guides/vision,
+        read 2026-10-26).
+
+        Thinking and effort go on the wire as on the text paths, and the call
+        leaves its usage and the rung it ran on in `get_last_usage()`: written
+        when no model of this vendor could see, this path sent neither and
+        recorded nothing. A model that cannot see is refused here, before the
+        call, rather than sent the picture to fail or be ignored."""
+        if not self.supports_vision():
+            raise ValueError(
+                f"DeepSeek provider '{self.alias}' (model: {self.model}) has no vision path"
+            )
+        self._last_thinking = None
+        self._last_usage = None
+        effort = kwargs.get("reasoning_effort")
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in images:
             mime_type = img.get("mime_type", "image/png")
@@ -696,13 +719,25 @@ class DeepSeekProvider(AIProvider):
             })
 
         async def _call():
-            resp = await self.client.chat.completions.create(
-                model=self.model,
-                max_tokens=kwargs.get("max_tokens", self.max_tokens),
-                messages=[{"role": "user", "content": content}],
-                temperature=self._effective_temperature(kwargs.get("temperature")),
+            extra_body = self._build_extra_body(effort)
+            params: Dict[str, Any] = {
+                "model": self.model,
+                "max_tokens": kwargs.get("max_tokens") or self.max_tokens,
+                "messages": [{"role": "user", "content": content}],
+                "extra_body": extra_body,
+                **self._sampling_params(kwargs.get("temperature"), reasoning_effort=effort),
+            }
+            resp = await self.client.chat.completions.create(**params)
+            msg = resp.choices[0].message
+            self._last_thinking = getattr(msg, "reasoning_content", None)
+            self._record_usage(
+                getattr(resp, "usage", None),
+                path="vision",
+                conversation_id=kwargs.get("conversation_id"),
+                effort=self._effort_label(effort, extra_body),
+                served_effort=self._served_effort(extra_body),
             )
-            return resp.choices[0].message.content or ""
+            return msg.content or ""
 
         try:
             return await _call()

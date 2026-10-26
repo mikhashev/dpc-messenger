@@ -187,13 +187,17 @@ async def test_a_peer_that_advertised_nothing_is_not_sent_the_picture():
 
 @pytest.mark.asyncio
 async def test_an_unpinned_agent_still_looks_with_its_own_provider():
+    """A provider that sees but has no tools path describes the picture itself,
+    and the turn goes on as text with the description in it."""
     adapter, sent, queries, local = _build(compute_host="")
 
     msg, _ = await adapter.chat(_picture_turn())
 
     assert sent == {}
-    assert [img["base64"] for img in local.vision_calls[0]["images"]] == [PIXEL]
-    assert msg["content"] == "a local look at the picture"
+    assert [q["provider_alias"] for q in queries] == ["cloud_default"]
+    assert [img["base64"] for img in queries[0]["images"]] == [PIXEL]
+    assert "a local description" in local.text_calls[0]
+    assert msg["content"] == "a local answer"
 
 
 # --- what crosses the wire is bytes, never a path of this machine -----------

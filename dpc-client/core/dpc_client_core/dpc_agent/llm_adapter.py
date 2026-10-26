@@ -40,7 +40,7 @@ from ..node_ledger import (
     usage_row,
 )
 from ..providers.base import image_pixel_limit_of
-from ..utils.image_utils import normalise_flat_images, normalise_turn_images
+from ..utils.image_utils import normalise_turn_images
 from .pricing import COST_FIELDS, get_billing_model, price_call, usd_figure
 
 if TYPE_CHECKING:
@@ -384,6 +384,26 @@ class DpcLlmAdapter:
             return provider.supports_vision()
         return False
 
+    @staticmethod
+    def _agent_provider_serves_images_with_tools(
+        provider: Any, tools: Optional[List[Dict[str, Any]]], withhold_tools: bool,
+    ) -> bool:
+        """Whether this call's native tools path will run on `provider` and carry
+        image blocks in its turns — the local counterpart of the peer menu row's
+        `serves_images_with_tools`.
+
+        Asked of `entry_point_for`, the predicate the gateway and `query_messages`
+        ask, so the agent cannot believe in a path they refuse. The rest is the
+        native branch's own condition in `_chat`: tools on the call, and with
+        `tool_choice="none"` a provider that takes the word.
+        """
+        from ..llm_manager import entry_point_for
+
+        if not tools or (withhold_tools and not takes_tool_choice(provider)):
+            return False
+        _, method = entry_point_for(provider, tools=True, streaming=False, images=True)
+        return method is not None
+
     def _remote_provider_alias(self, dpc_agent_provider: Any) -> Optional[str]:
         """The alias the peer will be asked to run — the per-agent pin, else the global row."""
         if self._compute_host:
@@ -454,13 +474,16 @@ class DpcLlmAdapter:
         return prepared
 
     @staticmethod
-    def _turns_for_peer_tools(
+    def _turns_with_image_blocks(
         turns: List[Dict[str, Any]], *, with_images: bool,
     ) -> List[Dict[str, Any]]:
-        """Anthropic turns for a native tools request to a peer: each `image_url`
-        part of a user turn becomes the `image` block the host's tools path reads,
-        or is left out when no picture is to travel — on the text branch the
-        flattened prompt carries none either. Copies; the loop's turns are reused."""
+        """Anthropic turns for a native tools request, local or to a peer: each
+        `image_url` part of a user turn becomes the `image` block a tools path
+        reads, or is left out when no picture is to travel — on the text branch
+        the flattened prompt carries none either. The shared converter
+        (`providers.base.anthropic_to_openai_messages`) reads `image` blocks and
+        nothing else, so an `image_url` part left in place was dropped there in
+        silence. Copies; the loop's turns are reused."""
         out: List[Dict[str, Any]] = []
         for turn in turns:
             content = turn.get("content")
@@ -705,6 +728,7 @@ class DpcLlmAdapter:
         # Check if user message contains images (vision query)
         user_images = self._extract_images_from_messages(messages)
         peer_images: List[Dict[str, Any]] = []
+        images_in_turns = False
         if user_images:
             log.debug(f"Vision query with {len(user_images)} images")
 
@@ -720,32 +744,27 @@ class DpcLlmAdapter:
                     )
 
             if not peer_images:
-                # Two-tier vision handling:
-                # 1. If agent's provider supports vision → use native vision support
-                # 2. If not → pre-analyze with vision model, inject description
-                if self._agent_provider_supports_vision():
-                    log.info("Agent provider supports vision - using native vision")
-                    # Get the agent's provider for native vision call
-                    alias = self._get_agent_provider_alias()
-                    if not alias:
-                        raise RuntimeError("No AI provider configured in DPC Messenger")
-                    provider = self._llm_manager.providers[alias]
-                    self._note_call(route="local", alias=alias)
-                    # Use native vision support (passes images directly to provider)
-                    return await self._chat_with_native_vision(
-                        provider, messages, user_images, routed_tools, on_stream_chunk, conversation_id
-                    )
+                # The image is part of the agent's normal turn, never a call of
+                # its own (Mike's call, 2026-10-26): in its user turn where the
+                # native tools path carries image blocks, else described into it
+                # as text — by the agent's own provider when that one can see.
+                local_alias = None if effective_peer_id else self._get_agent_provider_alias()
+                local_provider = self._llm_manager.providers.get(local_alias) if local_alias else None
+                sees = local_provider is not None and self._agent_provider_supports_vision()
+                if sees and self._agent_provider_serves_images_with_tools(
+                    local_provider, tools, withhold_tools
+                ):
+                    log.info("Agent provider '%s' takes images beside tools - the image rides in the turn",
+                             local_alias)
+                    images_in_turns = True
                 else:
-                    log.info("Agent provider does not support vision - pre-analyzing image")
-                    # Get user's text message for context
-                    user_text = self._extract_user_text(messages)
-                    # Pre-analyze the image with a vision model
-                    description, failure_reason = await self._pre_analyze_image_for_agent(
-                        user_images, user_text
-                    )
-                    # Inject description into messages as text context
-                    messages = self._inject_image_description_into_messages(
-                        messages, description, failure_reason
+                    if sees:
+                        log.info("Agent provider '%s' cannot take images beside tools on this call - "
+                                 "describing the image with it", local_alias)
+                    else:
+                        log.info("Agent provider does not support vision - pre-analyzing image")
+                    messages = await self._describe_images_into_messages(
+                        messages, user_images, local_alias if sees else None
                     )
                     # Continue with normal text-based agent flow
 
@@ -807,12 +826,16 @@ class DpcLlmAdapter:
             try:
                 return await self._chat_native_tools(
                     provider, messages, tools, on_stream_chunk, conversation_id, reasoning_effort,
-                    tool_choice=tool_choice,
+                    tool_choice=tool_choice, with_images=images_in_turns,
                 )
             except Exception as e:
                 log.warning(
                     "Native tool calling failed (%s), falling back to text injection path", e
                 )
+                if images_in_turns:
+                    # The prompt below renders text alone: the picture would be
+                    # gone without a word, so it is described into the turn first.
+                    messages = await self._describe_images_into_messages(messages, user_images, alias)
         tools = routed_tools
 
         # Local inference - text-only path (or pre-analyzed image description)
@@ -913,137 +936,6 @@ class DpcLlmAdapter:
             log.error(f"DPC LLM error: {e}")
             raise
 
-    async def _chat_with_native_vision(
-        self,
-        provider: Any,
-        messages: List[Dict[str, Any]],
-        images: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
-        conversation_id: Optional[str] = None,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """
-        Handle vision queries using the agent provider's native vision support.
-
-        This is used when the agent's provider supports vision (Anthropic Claude 3+,
-        Z.AI GLM-V models). Images are passed directly without pre-analysis.
-
-        Args:
-            provider: The vision-capable provider instance
-            messages: List of message dicts with role/content
-            images: List of image dicts with base64 and mime_type keys
-            tools: Optional list of tool schemas
-            on_stream_chunk: Optional streaming callback
-            conversation_id: Optional conversation ID
-
-        Returns:
-            (response_message, usage_dict) tuple in Ouroboros format
-        """
-        # Vision: only the current user message text, not full conversation history
-        prompt = self._extract_user_text(messages)
-
-        try:
-            image_sizes = [len(img.get("base64", "")) for img in images]
-            log.info(
-                f"Vision request to '{provider.alias}': prompt={len(prompt)} chars, "
-                f"images={len(images)} ({image_sizes} base64 chars)"
-            )
-
-            images, image_notes = await normalise_flat_images(images, image_pixel_limit_of(provider))
-            for image_note in image_notes:
-                log.info("Image for '%s': %s", provider.alias, image_note)
-            response = await provider.generate_with_vision(
-                prompt=prompt,
-                images=images,
-            )
-            log.info(f"Vision response from '{provider.alias}': {len(response)} chars")
-
-            # Detect silent vision failure: some Anthropic-compatible endpoints (e.g. Z.AI)
-            # accept base64 images, convert them to CDN URLs internally, but the underlying
-            # model receives the JSON URL reference as text and cannot process it visually.
-            # In that case the model explicitly says it cannot see the image.
-            _vision_failure_phrases = [
-                "cannot see image",
-                "can't see image",
-                "don't see an actual image",
-                "don't see any image",
-                "don't see the image",
-                "didn't see any image",
-                "no actual image",
-                "no image embedded",
-                "no image attached",
-                "no image in the message",
-                "json objects",
-                "json format",
-                "image as json",
-                "passed as json",
-                "image as a url",
-                "provided as a url",
-                "image was provided as",
-                "no tool for image",
-                "cannot analyze image",
-                "cannot directly analyze",
-                "no image analysis",
-            ]
-            response_lower = response.lower()
-            if any(phrase in response_lower for phrase in _vision_failure_phrases):
-                log.warning(
-                    f"Native vision for provider '{provider.alias}' appears to have failed "
-                    f"(model cannot process the image). Falling back to pre-analysis."
-                )
-                user_text = self._extract_user_text(messages)
-                description, failure_reason = await self._pre_analyze_image_for_agent(
-                    images, user_text
-                )
-                messages = self._inject_image_description_into_messages(
-                    messages, description, failure_reason
-                )
-                # Re-build prompt with injected description and continue as text-only
-                prompt = self._messages_to_prompt(messages)
-                if tools:
-                    tool_descriptions = self._format_tools_for_prompt(tools)
-                    prompt = f"{tool_descriptions}\n\n{prompt}"
-                response = await provider.generate_response(prompt)
-
-            # Build response message in Ouroboros format
-            response_msg: Dict[str, Any] = {
-                "role": "assistant",
-                "content": response,
-            }
-
-            # Parse for tool calls if tools were provided
-            if tools:
-                log.debug(f"Parsing tool calls from vision response (len={len(response)})")
-                tool_calls = self._parse_tool_calls(response)
-                if tool_calls:
-                    response_msg["tool_calls"] = tool_calls
-                    log.info(f"Found {len(tool_calls)} tool call(s) in vision response")
-
-            # Count tokens
-            model_name = self.default_model()
-            if self._token_counter:
-                prompt_tokens = self._token_counter.count_tokens(prompt, model_name)
-                completion_tokens = self._token_counter.count_tokens(response, model_name)
-            else:
-                prompt_tokens = len(prompt) // 4
-                completion_tokens = len(response) // 4
-
-            usage: Dict[str, Any] = {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-                # Counted over the visible text; the thinking, if any, was already apart from it.
-                "output_includes_thinking": "excludes",
-            }
-            self._price_usage(usage, provider, model_name)
-
-            self._note_call(counts_source="ours")
-            return response_msg, usage
-
-        except Exception as e:
-            log.error(f"Native vision query error: {e}")
-            raise
-
     async def _chat_native_tools(
         self,
         provider: Any,
@@ -1053,6 +945,7 @@ class DpcLlmAdapter:
         conversation_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         tool_choice: Optional[str] = None,
+        with_images: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Native Anthropic SDK tool calling path.
@@ -1062,8 +955,12 @@ class DpcLlmAdapter:
         Ouroboros format. Tool calls are returned as structured data — the model
         cannot hallucinate [TOOL RESULT]/[USER] sections because the API cleanly
         separates tool_use blocks from text content.
+
+        `with_images`: the user turns' pictures travel as `image` blocks;
+        without it they are left out, as the converter left them before.
         """
         system, anthropic_messages = self._convert_messages_to_anthropic(messages)
+        anthropic_messages = self._turns_with_image_blocks(anthropic_messages, with_images=with_images)
         anthropic_tools = self._convert_tools_to_anthropic(tools)
 
         log.debug(
@@ -1379,7 +1276,7 @@ class DpcLlmAdapter:
                 system, turns = self._convert_messages_to_anthropic(messages)
                 # Beside tools the pictures ride in their turns, never on the
                 # flat field, which a host refuses beside tools (DPTP §3.4).
-                wire_turns = self._turns_for_peer_tools(turns, with_images=bool(peer_images))
+                wire_turns = self._turns_with_image_blocks(turns, with_images=bool(peer_images))
                 native_ask = dict(
                     ask,
                     # From the turns and system alone, as the gateway renders
@@ -1601,10 +1498,24 @@ class DpcLlmAdapter:
                     return "\n".join(text_parts)
         return ""
 
+    async def _describe_images_into_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        images: List[Dict[str, Any]],
+        provider_alias: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """The messages with the images' description (or the failure) in the
+        last user turn, for a turn that cannot carry the pictures themselves."""
+        description, failure_reason = await self._pre_analyze_image_for_agent(
+            images, self._extract_user_text(messages), provider_alias=provider_alias,
+        )
+        return self._inject_image_description_into_messages(messages, description, failure_reason)
+
     async def _pre_analyze_image_for_agent(
         self,
         images: List[Dict[str, Any]],
         user_message: str,
+        provider_alias: Optional[str] = None,
     ) -> Tuple[Optional[str], Optional[str]]:
         """
         Pre-analyze images using a vision model.
@@ -1619,6 +1530,7 @@ class DpcLlmAdapter:
         Args:
             images: List of image dicts with base64 and mime_type keys
             user_message: The user's text message (for context)
+            provider_alias: Who looks; None auto-selects the vision provider
 
         Returns:
             (description, None) on success, (None, reason) on failure.
@@ -1634,12 +1546,13 @@ class DpcLlmAdapter:
                 "- Any other relevant details for understanding the image"
             )
 
-            log.info(f"Pre-analyzing {len(images)} image(s) for non-vision agent provider")
+            log.info(f"Pre-analyzing {len(images)} image(s) with "
+                     f"{provider_alias or 'the auto-selected vision provider'}")
 
-            # Use LLMManager.query() with images - auto-selects vision provider
+            # LLMManager.query() with images; no alias auto-selects the vision provider
             response_metadata = await self._llm_manager.query(
                 prompt=analysis_prompt,
-                provider_alias=None,  # Auto-select vision provider
+                provider_alias=provider_alias,
                 images=images,
                 return_metadata=True,
             )

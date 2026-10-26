@@ -1522,9 +1522,9 @@ Send a voice message and it will be transcribed and processed\\.
         Handle incoming photo message from Telegram.
 
         Downloads the highest-resolution photo, encodes it as base64, and passes
-        it to the agent via process_message(). The agent's llm_adapter will use
-        native vision if the configured provider supports it, or pre-analyze the
-        image with an auto-selected vision model and inject the description as text.
+        it to the agent via process_message(). The agent's llm_adapter puts the
+        image in the turn's tools call where its provider serves images beside
+        tools, or injects a description of it as text (`DpcLlmAdapter._chat`).
         """
         chat_id = str(update.effective_chat.id)
 

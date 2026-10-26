@@ -121,9 +121,9 @@ def test_a_new_call_to_a_provider_that_is_not_on_the_list_is_seen():
 def test_a_listed_function_that_stops_handing_the_image_over_is_seen():
     sources = package_sources()
     sources["dpc_agent/llm_adapter.py"] = sources["dpc_agent/llm_adapter.py"].replace(
-        "provider.generate_with_vision(", "provider.generate_response(")
+        "await provider.generate_with_tools(", "await provider.generate_response(")
     assert declared() - scan(sources) == {
-        ("provider_call", "dpc_agent/llm_adapter.py", "DpcLlmAdapter._chat_with_native_vision")}
+        ("provider_call", "dpc_agent/llm_adapter.py", "DpcLlmAdapter._chat_native_tools")}
 
 
 NORMALISERS = {"normalise_flat_images", "normalise_turn_images"}

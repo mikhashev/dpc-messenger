@@ -29,7 +29,7 @@ def test_default_base_url_and_registration_shape():
     p = _make()
     assert DEEPSEEK_DEFAULT_BASE_URL == "https://api.deepseek.com"
     assert p.supports_thinking() is True
-    assert p.supports_vision() is False  # DeepSeek V4 text models are not multimodal
+    assert p.supports_vision() is True  # Flash reads images; Pro does not (see the vision test file)
     assert str(p.client.base_url).rstrip("/") == DEEPSEEK_DEFAULT_BASE_URL
 
 
@@ -809,9 +809,9 @@ def test_a_text_only_conversation_converts_exactly_as_it_did_before_images_were_
 
 @pytest.mark.asyncio
 async def test_deepseek_refuses_an_image_by_name_rather_than_answering_as_if_none_were_sent():
-    """V4 is text-only. The copy this replaced dropped the block and sent the
-    question on, and the answer came back about a picture nobody showed it."""
-    p = _make()
+    """Pro is text-only until tested. The copy this replaced dropped the block and
+    sent the question on, and the answer came back about a picture nobody showed it."""
+    p = _make({"model": "deepseek-v4-pro"})
     p.client.chat.completions.create = AsyncMock()
 
     with pytest.raises(ValueError) as refused:

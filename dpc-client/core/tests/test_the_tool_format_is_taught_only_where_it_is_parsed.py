@@ -82,7 +82,9 @@ class TestTheFormatIsPresentWhereItIsParsed:
         """
         builds = len(re.findall(r"self\._messages_to_prompt\(", ADAPTER_SRC))
         injects = len(re.findall(r"self\._format_tools_for_prompt\(", ADAPTER_SRC))
-        assert builds == 3, f"the text paths changed: {builds} — recheck the pairing"
+        # Two since the native-vision call went (2026-10-26): the local text path
+        # and the peer's text branch.
+        assert builds == 2, f"the text paths changed: {builds} — recheck the pairing"
         assert injects == builds, (
             f"{builds} text prompts built, {injects} tool injections — a text path "
             "without its injection is a provider left with no way to call a tool"
