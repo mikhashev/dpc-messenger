@@ -434,7 +434,7 @@ def _started_through_the_real_launch(sup, monkeypatch, metrics, props=None, smok
     one per call in order. Returns the spawned procs; the smoke's requests land
     in `sup.smoke_posts`."""
     monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
-    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: 30000)
+    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda while_stopping=False: 30000)
     spawned = []
     sup.smoke_posts = []
 
@@ -525,7 +525,7 @@ class TestStopChecksTheCard:
     async def test_vram_that_does_not_come_back_is_reported(self, tmp_path, home, monkeypatch, caplog):
         sup = _sup(_install(tmp_path))
         sup._proc, sup._vram_free_before = _FakeProc(), 30000
-        monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: 1500)
+        monkeypatch.setattr(base_mod, "_free_vram_mib", lambda while_stopping=False: 1500)
         with caplog.at_level(logging.ERROR, logger=mod.__name__):
             await sup.stop()
         assert sup.vram_released is False
@@ -536,7 +536,7 @@ class TestStopChecksTheCard:
     async def test_vram_that_comes_back_is_released(self, tmp_path, home, monkeypatch):
         sup = _sup(_install(tmp_path))
         sup._proc, sup._vram_free_before = _FakeProc(), 30000
-        monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: 29500)
+        monkeypatch.setattr(base_mod, "_free_vram_mib", lambda while_stopping=False: 29500)
         await sup.stop()
         assert sup.vram_released is True
 

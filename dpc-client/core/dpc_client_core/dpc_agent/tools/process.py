@@ -28,7 +28,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, Union
 
 log = logging.getLogger(__name__)
 
@@ -660,11 +660,16 @@ def timeout_details(
 
 @dataclass
 class SupervisedRun:
-    """What happened, in the terms a caller has to report to an agent."""
+    """What happened, in the terms a caller has to report to an agent.
+
+    `stdout` and `stderr` are text (UTF-8, `errors="replace"`, newlines
+    translated) for every run, except one started with `output_bytes`, which
+    `run_probe` does: there they are the bytes as the child wrote them, and
+    `run_probe` decodes them itself. Built outside `run_supervised`, both are ""."""
 
     returncode: Optional[int] = None
-    stdout: str = ""
-    stderr: str = ""
+    stdout: Union[str, bytes] = ""
+    stderr: Union[str, bytes] = ""
     timed_out: bool = False
     exceeded_mb: Optional[int] = None
     # The ceiling this run was held to, so a report names the one applied.
@@ -693,6 +698,7 @@ def run_supervised(
     log_as: Optional[str] = None,
     launcher_kind: str = "tool",
     output_bytes: bool = False,
+    while_stopping: bool = False,
 ) -> SupervisedRun:
     """Spawn, watch, and never wait unbounded on anything.
 
@@ -716,6 +722,7 @@ def run_supervised(
     `launcher_kind` is `tool` for an agent's tool and `subsystem` for a spawn no
     tool made (`run_probe`'s). With `output_bytes` the run's `stdout` and
     `stderr` are the bytes as written, for a caller that decodes them itself.
+    `while_stopping` is the registry's `check_open` argument (`run_probe`'s).
     """
     ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
     if ceiling is None:
@@ -740,7 +747,7 @@ def run_supervised(
     if registry is not None:
         # Before the child exists: a spawn the backend's stop has refused must
         # not be born (ADR-046 point 7, step 1).
-        registry.check_open(launcher, launcher_kind)
+        registry.check_open(launcher, launcher_kind, while_stopping=while_stopping)
     process = subprocess.Popen(
         cmd,
         shell=shell,
@@ -765,6 +772,8 @@ def run_supervised(
                 handle=process,
                 log=log,
                 detail=detail,
+                cwd=cwd,
+                while_stopping=while_stopping,
             )
         except Exception:
             # Closed in the instant between the check and here, or a malformed
@@ -886,6 +895,7 @@ def run_probe(
     encoding: Optional[str] = None,
     errors: Optional[str] = None,
     check: bool = False,
+    while_stopping: bool = False,
 ) -> "subprocess.CompletedProcess":
     """`subprocess.run(cmd, capture_output=True, …)` for a short command, through
     `run_supervised` and so in the registry (ADR-046 point 5): the same return,
@@ -899,14 +909,15 @@ def run_probe(
     the spawn (`FileNotFoundError` for a missing binary), `TimeoutExpired` once
     the timeout killed the tree (output decoded with `replace`, so the timeout
     is what the caller sees), `CalledProcessError` with `check`, and
-    `ProcessRegistryClosed` for a `git_helper` once the stop began; a
-    `device_probe` is let through (point 7).
+    `ProcessRegistryClosed` once the backend's stop began, unless the caller
+    passes `while_stopping` for a `device_probe`: only the stop's own VRAM
+    release check does (point 7).
     """
     if launcher not in PROBE_LAUNCHERS:
         raise ValueError(f"{launcher!r} is not a probe launcher ({', '.join(PROBE_LAUNCHERS)})")
     run = run_supervised(
         list(cmd), launcher=launcher, launcher_kind="subsystem", timeout=timeout,
-        cwd=cwd, env=env, output_bytes=True,
+        cwd=cwd, env=env, output_bytes=True, while_stopping=while_stopping,
     )
     as_text = text or encoding is not None or errors is not None
     if run.timed_out:

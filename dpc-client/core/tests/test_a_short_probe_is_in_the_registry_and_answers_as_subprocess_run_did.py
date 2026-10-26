@@ -6,8 +6,9 @@ to `run_probe` in `dpc_agent/tools/process.py`. The sites kept their code: each
 reads a `CompletedProcess` and catches the exceptions it caught before, so what
 is asserted is that the helper gives the same return and raises the same
 exceptions, that it registers the child as a subsystem, and point 7's rule: once
-the backend's stop began a git helper is refused, a device probe is not, because
-the stop itself reads the card through one after Strata's engine is gone.
+the backend's stop began every probe is refused but a device probe whose caller
+passes `while_stopping`, which only the stop's own reading of the card does
+(Strata's VRAM release check after its engine is gone).
 
 Real children (`sys.executable`) where the point is a real exit; the registry is
 the empty in-memory one `conftest.py` gives every test.
@@ -91,8 +92,10 @@ class TestTheSameAnswerAsSubprocessRun:
     def test_a_timeout_raises_timeout_expired_after_the_tree_is_killed(self):
         start = time.monotonic()
         with pytest.raises(subprocess.TimeoutExpired) as caught:
+            # 5 s, not 1: a loaded machine can take over a second to start the
+            # interpreter, and then nothing is printed before the timeout.
             run_probe(_py("import sys, time; print('before', flush=True); time.sleep(600)"),
-                      launcher="device_probe", text=True, timeout=1)
+                      launcher="device_probe", text=True, timeout=5)
         assert time.monotonic() - start < 20
         assert "before" in (caught.value.output or "")
         assert _only_entry().exit_reason == "timeout"
@@ -154,12 +157,43 @@ class TestDuringTheStop:
             run_probe(_py("pass"), launcher="git_helper", timeout=30)
         assert born == [] and pr.get_registry().entries() == []
 
-    def test_a_device_probe_runs_and_is_registered(self):
+    def test_a_device_probe_its_caller_lets_through_runs_and_is_registered(self):
         pr.get_registry().begin_shutdown()
-        got = run_probe(_py("print(7)"), launcher="device_probe", text=True, timeout=30)
+        got = run_probe(_py("print(7)"), launcher="device_probe", text=True, timeout=30, while_stopping=True)
         assert got.stdout == "7\n"
         entry = _only_entry()
         assert (entry.launcher, entry.exit_reason) == ("device_probe", "exited")
+
+    def test_a_device_probe_without_the_argument_is_refused_and_no_child_is_born(self, monkeypatch):
+        """Its launcher's name lets nothing through: an engine start's VRAM
+        reading or a peer request's that races the stop is refused like any spawn."""
+        pr.get_registry().begin_shutdown()
+        born = []
+        monkeypatch.setattr(process_mod.subprocess, "Popen", lambda *a, **k: born.append(a))
+        with pytest.raises(ProcessRegistryClosed):
+            run_probe(_py("pass"), launcher="device_probe", timeout=30)
+        assert born == [] and pr.get_registry().entries() == []
+
+    def test_the_card_reading_of_a_start_or_a_peer_request_is_refused_during_the_stop(self, monkeypatch):
+        """`_free_vram_mib()` as an engine start and the peer start refusal call
+        it, with no argument, and `_total_vram_mib`, which the stop never reads."""
+        from dpc_client_core.managers import llama_server_supervisor as base
+
+        born = []
+        monkeypatch.setattr(base.shutil, "which", lambda name: name)
+        monkeypatch.setattr(process_mod.subprocess, "Popen", lambda *a, **k: born.append(a))
+        pr.get_registry().begin_shutdown()
+        for read in (base._free_vram_mib, base._total_vram_mib):
+            with pytest.raises(ProcessRegistryClosed):
+                read()
+        assert born == [] and pr.get_registry().entries() == []
+
+    def test_the_argument_is_not_carried_to_another_launcher(self):
+        registry = pr.get_registry()
+        registry.begin_shutdown()
+        for launcher, kind in (("git_helper", "subsystem"), ("strata", "subsystem"), ("device_probe", "tool")):
+            with pytest.raises(ProcessRegistryClosed):
+                registry.check_open(launcher, kind, while_stopping=True)
 
     def test_a_tools_command_is_still_refused(self):
         pr.get_registry().begin_shutdown()

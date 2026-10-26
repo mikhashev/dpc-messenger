@@ -65,7 +65,7 @@ def _clean_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(base_mod, "DPC_HOME", tmp_path / "dpc-home")
     # No test reads the real card: unreadable unless a test says otherwise,
     # which refuses a peer's start.
-    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: None)
+    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: None)
     monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
     _ACTIVE_SUPERVISORS.clear()
     base_mod._CARD_CLAIMS.clear()
@@ -220,7 +220,7 @@ ENOUGH = CARD_MIB - 400  # the desktop's share is well under the reserve
 
 
 def _card(monkeypatch, free, total=CARD_MIB):
-    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: free)
+    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: free)
     monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: total)
 
 

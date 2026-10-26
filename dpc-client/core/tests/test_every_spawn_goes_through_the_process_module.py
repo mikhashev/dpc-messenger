@@ -1,25 +1,32 @@
-"""Every process the backend starts is started by `dpc_agent/tools/process.py`.
+"""Every spawn written under `dpc-client/core` is in `dpc_agent/tools/process.py`, or on a written list.
 
 ADR-046 point 5. `run_supervised` and `run_probe` put a child in the process
 registry, give it a console and a session of its own, a closed stdin, the
 memory ceiling and bounded waits. A spawn written anywhere else gets none of
 that and is in no list, which is how the incidents the ADR names happened.
 
-This walks every `.py` under `dpc_client_core` and `run_service.py` with `ast`
-and fails on a spawn call outside `process.py` that the allow-list below does
-not name. Import aliases are resolved (`import subprocess as sp`,
-`from subprocess import run`, `from asyncio import create_subprocess_exec`).
-A spawn function stored in a variable and called through it is not seen.
+This walks every `.py` under `dpc-client/core` with `ast` - the package and
+every script beside it (`run_service.py`, the probes and bridges at the top),
+a file not yet committed included - and fails on a spawn call outside
+`process.py` that the allow-list below does not name. Not walked: `tests/`,
+virtual environments (`.venv`, or any directory holding a `pyvenv.cfg`),
+`__pycache__`, hidden directories (`.pytest_cache`) and build output (`build`,
+`dist`, `*.egg-info`, `htmlcov`). Import aliases are resolved (`import
+subprocess as sp`, `from subprocess import run`, `from asyncio import
+create_subprocess_exec`). A spawn function stored in a variable and called
+through it is not seen.
 
 An AST search that finds nothing passes for every program, so the tests first
 prove the walk sees calls at all: it finds every allow-listed site and the
-module's own spawns, and it flags planted calls in source strings. An
-allow-list entry that matches no call fails too, so the list cannot rot.
+module's own spawns, it flags planted calls in source strings and a planted
+file at the top of `dpc-client/core`. An allow-list entry that matches no call
+fails too, and so does one whose `due` has passed, so the list cannot rot.
 """
 
 from __future__ import annotations
 
 import ast
+import datetime
 import pathlib
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -41,8 +48,10 @@ _SPAWN_PREFIXES = ("os.spawn", "os.exec", "os.posix_spawn")
 # `loop.subprocess_exec(...)`: the receiver is any event loop, so any receiver.
 _LOOP_METHODS = {"subprocess_exec", "subprocess_shell"}
 
-# (file, enclosing function) -> why it may spawn by itself, or who owns the change.
-ALLOWED: Dict[Tuple[str, str], Dict[str, str]] = {
+# (file, enclosing function) -> why it may spawn by itself (`reason`), or who owns
+# the change (`owner`) and by when (`due`: an ISO date, after which the test fails,
+# or None when no date was agreed with the owner).
+ALLOWED: Dict[Tuple[str, str], Dict[str, Optional[str]]] = {
     ("dpc_client_core/managers/llama_server_supervisor.py", "LlamaServerSupervisor._spawn"): {
         "reason": "the engine streams to a log file and is stopped with CTRL_BREAK, which "
                   "run_supervised does not do; it registers its child at _spawn and reports "
@@ -53,14 +62,33 @@ ALLOWED: Dict[Tuple[str, str], Dict[str, str]] = {
                   "registered at _spawn (ADR-046 point 5)",
     },
     ("dpc_client_core/job_object.py", "_launch_explorer"): {
-        "reason": "the one spawn whose purpose is to hand a URL to the shell outside the "
-                  "backend's job; the registry has no launcher word for it",
+        "reason": "a hand-off whose purpose is to leave the backend's kill-on-close job: "
+                  "explorer.exe passes the URL to the running shell and exits at once, and "
+                  "the browser the shell starts is outside the job; registering the "
+                  "launcher would enter in the backend's list, as the backend's own, a "
+                  "process opened on purpose for the user to keep, which the job does not hold",
     },
     ("dpc_client_core/dpc_agent/tools/comfyui.py", "comfyui_convert"): {
         "owner": "the developer of the ComfyUI tools",
-        "due": "to be agreed with them (ADR-046 point 5)",
+        "due": None,  # no date was agreed with the owner (ADR-046 point 5)
+    },
+    ("probe_rename_orphan.py", "alive"): {
+        "reason": "a one-off repair probe run by hand, not the backend: tasklist asks the "
+                  "OS whether the llama-server it started survived the shutdown sweep; the "
+                  "backend's registry has nothing to say about it",
+    },
+    ("probe_rename_orphan.py", "llama_pids"): {
+        "reason": "the same hand-run probe: tasklist lists the llama-server pids before "
+                  "and after its run",
+    },
+    ("probe_rename_orphan.py", "main"): {
+        "reason": "the same hand-run probe: two taskkill calls end the child it started "
+                  "itself and any it left behind",
     },
 }
+
+# Directories the walk does not enter, besides hidden ones and virtual environments.
+_NOT_SOURCE = {"tests", "__pycache__", "build", "dist", "node_modules", "htmlcov"}
 
 
 @dataclass(frozen=True)
@@ -149,9 +177,49 @@ def stale_entries(sites: Iterable[Site], allowed=ALLOWED) -> List[Tuple[str, str
     return [key for key in allowed if key not in seen]
 
 
-def _the_tree() -> Dict[str, str]:
-    files = sorted(PACKAGE.rglob("*.py")) + [CORE / "run_service.py"]
-    return {p.relative_to(CORE).as_posix(): p.read_text(encoding="utf-8") for p in files}
+def entry_problems(allowed, today: datetime.date) -> List[Tuple[Tuple[str, str], str]]:
+    """Entries that break the rule: a `reason`, or an `owner` with a `due` that is
+    an ISO date not yet passed, or None, written on purpose (no date agreed)."""
+    problems = []
+    for key, entry in allowed.items():
+        if entry.get("reason"):
+            continue
+        if not entry.get("owner") or "due" not in entry:
+            problems.append((key, "neither a reason nor an owner with a due"))
+            continue
+        due = entry["due"]
+        if due is None:
+            continue
+        try:
+            date = datetime.date.fromisoformat(due)
+        except (TypeError, ValueError):
+            problems.append((key, f"due {due!r} is neither an ISO date nor None"))
+            continue
+        if date < today:
+            problems.append((key, f"due {due} has passed: agree the change with {entry['owner']}"))
+    return problems
+
+
+def _is_source_dir(directory: pathlib.Path) -> bool:
+    name = directory.name
+    return not (name.startswith(".") or name in _NOT_SOURCE or name.endswith(".egg-info")
+                or (directory / "pyvenv.cfg").exists())
+
+
+def _source_files(root: pathlib.Path) -> List[pathlib.Path]:
+    """Every `.py` under `root` outside the directories that are not source."""
+    found: List[pathlib.Path] = []
+    for entry in sorted(root.iterdir()):
+        if entry.is_dir():
+            if _is_source_dir(entry):
+                found.extend(_source_files(entry))
+        elif entry.suffix == ".py":
+            found.append(entry)
+    return found
+
+
+def _the_tree(root: pathlib.Path = CORE) -> Dict[str, str]:
+    return {p.relative_to(root).as_posix(): p.read_text(encoding="utf-8") for p in _source_files(root)}
 
 
 @pytest.fixture(scope="module")
@@ -161,8 +229,8 @@ def tree_sites() -> List[Site]:
 
 class TestTheWalkSeesCalls:
     def test_it_finds_every_allow_listed_site(self, tree_sites):
-        """The positive control on the real tree: four places spawn by themselves
-        today, and the walk names each of them."""
+        """The positive control on the real tree: every allow-listed place
+        spawns by itself today, and the walk names each of them."""
         found = {(s.path, s.function) for s in tree_sites}
         assert set(ALLOWED) <= found, sorted(set(ALLOWED) - found)
 
@@ -172,8 +240,23 @@ class TestTheWalkSeesCalls:
         assert {("run_supervised", "subprocess.Popen"), ("_kill_process_tree", "subprocess.run"),
                 ("_parent_map_from_ps", "subprocess.run")} <= own, own
 
-    def test_it_reads_run_service_beside_the_package(self):
-        assert "run_service.py" in _the_tree()
+    def test_it_reads_the_scripts_beside_the_package(self):
+        tree = _the_tree()
+        assert {"run_service.py", "probe_rename_orphan.py", THE_MODULE} <= set(tree)
+        assert not any(p.startswith(("tests/", ".venv/")) or "__pycache__" in p for p in tree)
+
+    def test_a_spawn_planted_in_a_new_file_at_the_top_is_flagged(self, tmp_path):
+        """The walk itself, not only the AST: a new script beside `run_service.py`
+        is read and its spawn is a violation; the same file under `tests/`,
+        `__pycache__`, `.venv` or a venv with another name is not read."""
+        planted = "import subprocess\nsubprocess.run(['x'])\n"
+        (tmp_path / "a_new_probe.py").write_text(planted, encoding="utf-8")
+        for skipped in ("tests", "__pycache__", ".venv", "some_env"):
+            (tmp_path / skipped).mkdir()
+            (tmp_path / skipped / "planted.py").write_text(planted, encoding="utf-8")
+        (tmp_path / "some_env" / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
+        found = violations(spawn_sites(_the_tree(tmp_path)))
+        assert [(s.path, s.call) for s in found] == [("a_new_probe.py", "subprocess.run")]
 
     @pytest.mark.parametrize("source, call", [
         ("import subprocess\nsubprocess.run(['x'])\n", "subprocess.run"),
@@ -239,6 +322,18 @@ class TestTheRule:
         allowed[("dpc_client_core/service.py", "CoreService._get_local_ips")] = {"reason": "moved"}
         assert stale_entries(tree_sites, allowed) == [("dpc_client_core/service.py", "CoreService._get_local_ips")]
 
-    def test_every_entry_gives_a_reason_or_an_owner_and_a_due_date(self):
-        for key, entry in ALLOWED.items():
-            assert entry.get("reason") or (entry.get("owner") and entry.get("due")), key
+    def test_every_entry_gives_a_reason_or_an_owner_and_a_due_that_has_not_passed(self):
+        assert entry_problems(ALLOWED, datetime.date.today()) == []
+
+    def test_a_passed_due_a_due_in_words_and_an_entry_with_neither_are_reported(self):
+        allowed = {
+            ("a.py", "passed"): {"owner": "them", "due": "2026-10-25"},
+            ("a.py", "today"): {"owner": "them", "due": "2026-10-26"},
+            ("a.py", "words"): {"owner": "them", "due": "to be agreed with them"},
+            ("a.py", "no_due_key"): {"owner": "them"},
+            ("a.py", "no_date"): {"owner": "them", "due": None},
+            ("a.py", "reason"): {"reason": "why"},
+            ("a.py", "empty"): {},
+        }
+        assert [key for key, _ in entry_problems(allowed, datetime.date(2026, 10, 26))] == [
+            ("a.py", "passed"), ("a.py", "words"), ("a.py", "no_due_key"), ("a.py", "empty")]

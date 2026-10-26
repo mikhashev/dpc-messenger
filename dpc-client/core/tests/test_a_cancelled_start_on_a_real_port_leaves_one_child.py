@@ -103,7 +103,7 @@ class _Rig:
         monkeypatch.setattr(base_mod, "DPC_HOME", tmp_path / "dpc-home")
         monkeypatch.setattr(base_mod, "ensure_binary", lambda config: Path(sys.executable))
         monkeypatch.setattr(base_mod, "find_cuda_backend", lambda path: None)
-        monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: None)
+        monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: None)
         monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
         script = tmp_path / "child.py"
         script.write_text(CHILD, encoding="utf-8")

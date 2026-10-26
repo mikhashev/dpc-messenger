@@ -370,21 +370,32 @@ holds on Windows only.
      recorded: the locale's encoding when the site names none, strict unless it names
      `errors`; every moved site kept `text=True` with no encoding, or bytes. **Moved, 22
      sites:** `device_context_collector.py` 9, `dpc_agent/utils.py` 9 (`run_cmd` and
-     `get_git_info` among them, which have no caller by `rg` and Orbit), the llama-server
+     `get_git_info` among them, which have no production caller by `rg` and Orbit;
+     `tests/test_a_short_probe_is_in_the_registry_and_answers_as_subprocess_run_did.py`
+     exercises them, and both are kept), the llama-server
      supervisor's two `nvidia-smi` memory queries, `service.py`'s `ip addr` (Linux) and
      `run_service.py`'s `nvidia-smi`. **The structural test** walks every `.py` under
-     `dpc_client_core` and `run_service.py`, resolves import aliases, and fails on
+     `dpc-client/core` (the package, `run_service.py` and every other script beside it,
+     an uncommitted one included; not `tests/`, a virtual environment, `__pycache__`,
+     hidden directories or build output), resolves import aliases, and fails on
      `subprocess.run`/`Popen`/`call`/`check_call`/`check_output`/`getoutput`/`getstatusoutput`,
      `asyncio.create_subprocess_exec`/`_shell` (also as `loop.subprocess_exec`/`_shell`),
      `os.system`, `os.popen`, `os.spawn*`, `os.exec*`, `os.posix_spawn*` and
      `os.startfile` outside `process.py`. **The allow-list, keyed by file and enclosing
      function:** `LlamaServerSupervisor._spawn` and `StrataSupervisor._spawn` (a log file
-     and CTRL_BREAK; they register their child); `job_object._launch_explorer` (the one
-     spawn whose purpose is to hand a URL to the shell outside the job, added after the
-     count of 2026-10-25; routing it through the registry would need a launcher word the
-     vocabulary does not have); `comfyui.comfyui_convert`, owner "the developer of the
-     ComfyUI tools", due "to be agreed with them". A spawn stored in a variable and called
-     through it is not seen by the walk.
+     and CTRL_BREAK; they register their child); `job_object._launch_explorer` (added after
+     the count of 2026-10-25: a hand-off whose purpose is to leave the backend's
+     kill-on-close job. `explorer.exe <url>` passes the URL to the running shell and exits
+     at once, and the browser the shell starts is outside the job; registering the
+     launcher would enter in the backend's list, as the backend's own, a process opened on
+     purpose for the user to keep, which the job does not hold); `comfyui.comfyui_convert`,
+     owner "the developer of the ComfyUI tools", owner only, no date agreed (`due: None`);
+     and `probe_rename_orphan.py`'s `alive`, `llama_pids` and `main` (four calls, two of
+     them `taskkill`: a one-off repair probe run by hand, not the backend, so the
+     registry has nothing to say about it). An entry gives a `reason`, or an `owner` and a
+     `due` that is an ISO date, after which the test fails, or `None`, written on purpose
+     when no date was agreed. A spawn stored in a variable and called through it is not
+     seen by the walk.
    - **What a registered probe costs, measured 2026-10-26 on the owner's Windows machine**
      (median of 30, a temporary `DPC_HOME`). One `git rev-parse`: 171 ms through
      `subprocess.run`, 324 ms through `run_probe` with the in-memory registry, 340 ms with
@@ -419,30 +430,45 @@ holds on Windows only.
 7. **Shutdown order.** The job is the backstop, not the mechanism.
    1. **Stop accepting spawns:** the registry refuses new entries (a tool thread in the
       middle of a call gets an error it can report), so nothing is born after the sweep
-      below. **One exception, a `device_probe`** (2026-10-26): the
-      stop itself runs one, Strata's check that the card was released after its engine
-      stopped (`_verify_vram_released` reads free VRAM through `_free_vram_mib` once a
-      second up to `vram_release_timeout_s`, ADR-044 point 2), and a refusal there would
-      not fail loudly: the probe's caller reads it as an unreadable card, waits out the
-      whole timeout and records `vram_released: None` where the card was in fact free. A
-      device probe only reads the machine, is bounded by its own timeout (10 s at most
-      today) and is registered like any other, so it is let through and ends `exited` or
-      `timeout` as usual. Everything else is refused as before, a `git_helper` included:
-      a git helper runs inside an agent's tool call, and the stop runs none of them; a
-      refused auto-commit logs its WARNING and leaves the change for the next commit's
-      `git add -A`. Probes are not command children, so step 2 does not kill one that is
-      already running (a `git commit` killed mid-write would leave `index.lock` behind);
-      it ends inside its own timeout, and step 5 ends one still open. Besides Strata's
-      check, the probes that can run during the stop are those that race it: a Strata or
-      llama-server start's VRAM reading (the engine spawn that would follow is refused at
-      `_spawn`), a peer request's reading of a stopped Strata, and `ip addr` on Linux from
-      a `get_status`; the collector and `run_service`'s `nvidia-smi` run at start only.
+      below. **One exception, the stop's own reading of the card** (2026-10-26): the
+      stop runs one device probe itself, Strata's check that the card was released after
+      its engine stopped (`_verify_vram_released` reads free VRAM through `_free_vram_mib`
+      once a second up to `vram_release_timeout_s`, ADR-044 point 2), and a refusal there
+      would not fail loudly: the probe's caller reads it as an unreadable card, waits out
+      the whole timeout and records `vram_released: None` where the card was in fact free.
+      So that call, and only it, says so: `_free_vram_mib(while_stopping=True)`, carried
+      through `run_probe` and `run_supervised` to `check_open`, which lets a
+      `device_probe` subsystem through only with that argument; the launcher's name alone
+      lets nothing through. A device probe only reads the machine, is bounded by its own
+      timeout (10 s at most today) and is registered like any other, so the one let
+      through ends `exited` or `timeout` as usual. Everything else is refused as before:
+      a `git_helper` (the stop runs none; a refused auto-commit logs its WARNING and leaves
+      the change for the next commit's `git add -A`), and the device probes that race the
+      stop with no argument, which raise `ProcessRegistryClosed` like any refused spawn: a
+      Strata or llama-server start's VRAM reading (the engine spawn that would follow is
+      refused at `_spawn` anyway), a peer request's reading of a stopped Strata, and
+      `ip addr` on Linux from a `get_status`; the collector and `run_service`'s
+      `nvidia-smi` run at start only. A git already running when the stop begins is
+      given time to end, steps 2 and 5.
    2. **Command children are killed hard and early,** right after the background tasks
       are cancelled and before the group histories are saved. There is no soft signal for
       them on Windows: a `CREATE_NO_WINDOW` child has a console of its own and no process
       group of ours, `GenerateConsoleCtrlEvent` reaches only processes sharing the
       sender's console, and it has no window to close. They are one-off processes, and
-      the aim is to leave none, not to say goodbye. Reason `backend_stop`.
+      the aim is to leave none, not to say goodbye. Reason `backend_stop`. **Git goes
+      last and gets time first** (Mike's call, 2026-10-26): a git killed in the middle
+      of a commit leaves `.git/index.lock`, and every later git command in that
+      repository fails until a person deletes it. For an agent's auto-commit
+      (`git_helper`) that silently breaks all its later auto-commits; for an agent's
+      `git_tool` working in the owner's own repository it blocks the owner's commits. So
+      the other command children are killed at once, then the `git_tool(...)` children
+      get up to `GIT_STOP_GRACE_S` (10 s, `process_registry.py`) to end on their own,
+      which they record as `exited`, and those still running are killed as the others
+      were, still `backend_stop`, with a WARNING that a `.git/index.lock` may be left in
+      the repository of the directory the child ran in (the registry keeps it in memory,
+      from `run_supervised`'s `cwd`; a message says so when it is not known) and must be
+      removed by hand if git then refuses. The 10 s is one budget for the whole stop,
+      counted from the first wait for a git, not 10 s each.
    3. **Engines are stopped softly by their supervisors,** as ADR-040 and ADR-044 say:
       CTRL_BREAK (SIGINT elsewhere) with their grace period, then a kill. Their own stop
       stays first and is not replaced by the job. An engine ended here is `backend_stop`,
@@ -451,7 +477,12 @@ holds on Windows only.
       the same thread, because a hard kill in the middle of a write truncates the file.
    4. **Browsers** close as today, force-killed after 5 s.
    5. **Verify:** for every entry still open, the `pid` is gone, and for the engines the
-      card's VRAM is released (ADR-044 point 2 already does this for Strata).
+      card's VRAM is released (ADR-044 point 2 already does this for Strata). An entry
+      still running is killed and logged at ERROR, but a git (`git_helper`, or a
+      `git_tool(...)` step 2 did not reach): probes are not command children, so step 2
+      never touched a `git_helper`, and a git still running here is not a defect. It
+      gets what is left of the same budget as step 2, so a stop that spent it there kills
+      it at once, and is then killed with the same WARNING about `.git/index.lock`.
    6. **One log line per process** with its exit reason.
    7. **Then the job closes** when the process exits, ending anything missed.
    The backend never kills its own pid, which is checked against the registry's own
@@ -582,6 +613,9 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
   `test_it_finds_every_allow_listed_site`, `test_it_finds_the_modules_own_spawns`,
   `test_a_planted_spawn_outside_the_module_is_flagged` over fourteen planted forms, the
   aliased `sp.Popen` and a bare `run` imported from `subprocess` among them,
+  `test_a_spawn_planted_in_a_new_file_at_the_top_is_flagged` (a new script beside
+  `run_service.py` is read; the same under `tests/`, `__pycache__` or a venv is not),
+  `test_a_passed_due_a_due_in_words_and_an_entry_with_neither_are_reported`,
   `test_the_same_spawn_inside_the_module_is_not`, `test_what_is_not_a_spawn_is_not_flagged`,
   `test_no_spawn_outside_the_process_module_but_the_allow_list`,
   `test_every_allow_list_entry_still_matches_a_call`, `test_a_stale_entry_is_reported`.)
@@ -590,10 +624,20 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
   rule: `dpc-client/core/tests/test_a_short_probe_is_in_the_registry_and_answers_as_subprocess_run_did.py`
   (the same return and exceptions as `subprocess.run`, the locale decoding, the entry,
   the origin inside a tool call; during the stop a `git_helper` refused with no child
-  born and a `device_probe` let through, and
+  born, a `device_probe` let through only with `while_stopping`
+  (`test_a_device_probe_without_the_argument_is_refused_and_no_child_is_born`,
+  `test_the_card_reading_of_a_start_or_a_peer_request_is_refused_during_the_stop`), and
   `test_strata_reads_the_card_released_after_its_engine_stops`, which reads `None`
-  instead of `True` with the exception removed). Run 2026-10-26 on Windows only, not
-  committed; Linux waits for CI.
+  instead of `True` with the exception removed). Run 2026-10-26 on Windows; Linux waits
+  for CI.
+- [x] **Git gets time to finish at the stop** (point 7, steps 2 and 5): a git child that
+  ends inside the grace is not killed and ends `exited`; one that outlives it is killed,
+  `backend_stop`, and the WARNING names `index.lock` and its directory; two slow git
+  tools in step 2 cost the grace once, and a git helper at step 5 finds it spent; a
+  command that is not git is still killed at once.
+  (`TestGitGetsTimeToFinishAtTheStop` in
+  `dpc-client/core/tests/test_the_process_registry_records_how_every_child_ends.py`.)
+  Run 2026-10-26 on Windows only.
 - [ ] **`kill_my_process`** refuses a pid that is not in the registry, another agent's
   pid and the backend's pid, and ends its own as `cancelled_by_agent`.
 - [ ] **Exit reasons** are one of the eight words on every path that ends a process, a
@@ -630,8 +674,9 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
   platform: on Windows a `taskkill /T /F` from outside the registry leaves code 1 and reads
   `exited` (`test_on_windows_a_foreign_taskkill_leaves_code_1_and_reads_exited`, run); on
   POSIX a foreign SIGKILL reads `crashed` with `signal` `SIGKILL`
-  (`test_on_posix_a_foreign_sigkill_reads_crashed_with_the_signal_by_name`, written and not
-  yet run: it waits for CI or the Linux node). `0xC000012D` (a commit-limit death) is
+  (`test_on_posix_a_foreign_sigkill_reads_crashed_with_the_signal_by_name`, passed on CI,
+  ubuntu, run 40272540455 on `90e1f139`: read from the skip count, two more than on
+  `4ea0560f`, exactly the two new Windows-only tests). `0xC000012D` (a commit-limit death) is
   named as an example of `crashed` from recall; it is not measured here.
 - [x] **Storage.** The state file is fsynced before the swap; every finished entry is
   appended as one line to the daily file of its end's UTC date, and the state file keeps
@@ -771,6 +816,11 @@ first count), so 29 calls:
 | `dpc_agent/tools/comfyui.py` | 1 `subprocess.run` (ffmpeg, allow-listed with its owner) |
 | **Total** | **7 in 5 files**; 22 moved to `run_probe` |
 
+The walk was widened the same day, after review, to every script under `dpc-client/core`
+(point 5); the one script beside `run_service.py` that spawns is `probe_rename_orphan.py`,
+4 `subprocess.run` (`tasklist` twice, `taskkill` twice), allow-listed: **11 calls in 6
+files.**
+
 ## Implementation Status
 
 | Task | Status | Commit |
@@ -784,7 +834,8 @@ first count), so 29 calls:
 | Resource sampler (peaks, `last_output_at`): `ResourceSampler` in `process_registry.py`, one daemon thread every 2 s started by `start_resource_sampler()` from `run_service.py` after logging, stopped by `finish_shutdown()`; per open entry, only while `probe_identity` says "same", the tree's peak RSS and commit (never below the child's own OS peak), CPU and IO summed by (pid, creation time), VRAM for the engines (PDH on Windows, NVML on Linux, none on macOS); a new entry wakes it and gets early samples at 0, 0.1, 0.3 and 0.7 s, and on Windows `end()` reads the child's own lifetime figures through its `Popen` handle; the state file is rewritten when a peak rises by 25 % and 64 MB (256 MiB for VRAM), at most once per 10 s. `run_supervised` reads its pipes as they arrive (text decoded once at the end as text mode gave it) and notes `last_output_at`; an engine's is its log files' newest mtime (`log_paths` from both supervisors; Strata names the launcher's and the engine's log). Tests in `tests/test_the_sampler_records_what_each_child_used.py` | Done 2026-10-26 | `3d380706` |
 | Review fixes of the sampler and the readers: an abandoned drain returns the text read so far and stops its readers (they keep nothing more, leave at the next chunk and close their own end of the pipe); the output note throttled to once per 100 ms (`_OUTPUT_NOTE_MIN_INTERVAL_S`) with the exact time of the last bytes given before `end`, and `note_output` never moves the time back; `last_output_at` compared as a time, not an ISO string; the lower bound on descendants' CPU and IO, the launcher shim, the meaning of `null`, the start of the daily history and the measured cost of the state-file write written down | Done 2026-10-26 | `c5966027` |
 | Descendants entered by the sampler (parent fields) | Pending | — |
-| Spawn sites to the module; structural test: `run_probe` in `process.py` (`run_supervised` with `launcher_kind: subsystem` and bytes), `device_probe` and `git_helper` in `SUBSYSTEMS`, a `device_probe` let through during the stop (point 7); 22 sites moved, the allow-list of four (point 5); tests in `tests/test_every_spawn_goes_through_the_process_module.py` and `tests/test_a_short_probe_is_in_the_registry_and_answers_as_subprocess_run_did.py` | Done 2026-10-26 | the commit that carries this row |
+| Spawn sites to the module; structural test: `run_probe` in `process.py` (`run_supervised` with `launcher_kind: subsystem` and bytes), `device_probe` and `git_helper` in `SUBSYSTEMS`, a `device_probe` let through during the stop (point 7); 22 sites moved, the allow-list of four (point 5); tests in `tests/test_every_spawn_goes_through_the_process_module.py` and `tests/test_a_short_probe_is_in_the_registry_and_answers_as_subprocess_run_did.py` | Done 2026-10-26 | `067ca25d` |
+| Review fixes of the move: the structural test walks every script under `dpc-client/core` (`probe_rename_orphan.py` allow-listed), an entry's `due` is an ISO date or `None` and fails once passed (`comfyui`: `None`), the `explorer.exe` entry's reason; a device probe let through the stop only with `while_stopping` (Strata's release check alone passes it); git given `GIT_STOP_GRACE_S` (10 s, one budget) at steps 2 and 5 with the `index.lock` WARNING; `SupervisedRun.stdout`/`stderr` typed `str` or `bytes`; tests in the two files above and `tests/test_the_process_registry_records_how_every_child_ends.py` | Done 2026-10-26 | the commit that carries this row |
 | Local API command; agent tools | Pending | — |
 | UI: AGENTS row and Agent Models Configuration (own card) | Pending | — |
 

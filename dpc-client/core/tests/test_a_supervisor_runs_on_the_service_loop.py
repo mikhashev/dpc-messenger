@@ -165,7 +165,7 @@ def _strata(tmp_path, monkeypatch, healthy=None):
 
 def _llama(monkeypatch):
     monkeypatch.setattr(base_mod, "ensure_binary", lambda config: Path("C:/bin/llama-server.exe"))
-    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: None)
+    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: None)
     monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
     sup = LlamaServerSupervisor("local_qwen38", {"gguf_path": "D:/m.gguf", "start_timeout_s": 30.0})
     spawned = []

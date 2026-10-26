@@ -38,7 +38,7 @@ def card(tmp_path, monkeypatch):
     monkeypatch.setattr(base_mod, "ensure_binary", lambda config: Path("llama-server.exe"))
     monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
     # Constant, so a Strata stop finds the card released at once.
-    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: 30000)
+    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: 30000)
     _ACTIVE_SUPERVISORS.clear()
     yield
     _ACTIVE_SUPERVISORS.clear()
@@ -148,7 +148,7 @@ class TestTheRefusal:
         # With Strata loaded the card is nearly full, and the ladder's own
         # refusal would blame the model's size; the check runs before it.
         await _strata(tmp_path).ensure_running()
-        monkeypatch.setattr(base_mod, "_free_vram_mib", lambda: 2000)
+        monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: 2000)
         monkeypatch.setattr(base_mod, "_gguf_mib", lambda path: 15000)
         llama = LlamaServerSupervisor("qwen27", {"gguf_path": GGUF})
         _fake_child(llama)

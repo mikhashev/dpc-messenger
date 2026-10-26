@@ -138,7 +138,7 @@ def test_two_llama_server_children_are_a_vram_question_not_a_card_holder_one():
 
 def test_the_loop_eval_refuses_a_strata_run_beside_the_llama_server_child(monkeypatch):
     monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: LLAMA_ON_CARD)
-    monkeypatch.setattr(R, "_free_vram_mib", lambda: 30000)
+    monkeypatch.setattr(R, "_free_vram_mib", lambda **_: 30000)
     with pytest.raises(SystemExit) as refused:
         R._check_vram_or_refuse({"type": "strata", "alias": "flash"})
     assert "llama-server.exe (pid 32848)" in str(refused.value)
@@ -146,9 +146,9 @@ def test_the_loop_eval_refuses_a_strata_run_beside_the_llama_server_child(monkey
 
 def test_the_loop_eval_checks_the_card_for_a_strata_run(monkeypatch):
     monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: [])
-    monkeypatch.setattr(R, "_free_vram_mib", lambda: 30000)
+    monkeypatch.setattr(R, "_free_vram_mib", lambda **_: 30000)
     assert R._check_vram_or_refuse({"type": "strata", "alias": "flash"})["free_vram_mib"] == 30000
-    monkeypatch.setattr(R, "_free_vram_mib", lambda: 9000)
+    monkeypatch.setattr(R, "_free_vram_mib", lambda **_: 9000)
     with pytest.raises(SystemExit, match="two 27B children"):
         R._check_vram_or_refuse({"type": "llamacpp_server", "alias": "q"})
 
@@ -233,7 +233,7 @@ def test_the_27b_vram_reading_is_unchanged():
 
 def test_the_loop_eval_runs_strata_on_a_short_card_and_says_why(monkeypatch, capsys):
     monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: [])
-    monkeypatch.setattr(R, "_free_vram_mib", lambda: 3000)
+    monkeypatch.setattr(R, "_free_vram_mib", lambda **_: 3000)
     assert R._check_vram_or_refuse({"type": "strata", "alias": "flash"})["free_vram_mib"] == 3000
     out = capsys.readouterr().out
     assert "WARN VRAM: 3000 MiB free" in out and "no minimum is measured" in out
@@ -271,7 +271,7 @@ def test_an_nvidia_smi_that_does_not_answer_is_unavailable_not_an_empty_card(cap
     assert held[0][1].startswith("card holder check unavailable: OSError: device busy")
 
     monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: found)
-    monkeypatch.setattr(R, "_free_vram_mib", lambda: 30000)
+    monkeypatch.setattr(R, "_free_vram_mib", lambda **_: 30000)
     R._check_vram_or_refuse({"type": "llamacpp_server", "alias": "q"})
     assert "card holder check unavailable: OSError: device busy" in capsys.readouterr().out
 
@@ -308,7 +308,7 @@ def test_the_strata_warning_names_the_tell_and_the_lever():
 def test_an_unread_card_is_stamped_unknown_never_an_empty_list(monkeypatch):
     found = local_engine.engines_on_the_card(run=_broken_nvidia_smi)
     monkeypatch.setattr(local_engine, "engines_on_the_card", lambda: found)
-    monkeypatch.setattr(R, "_free_vram_mib", lambda: 30000)
+    monkeypatch.setattr(R, "_free_vram_mib", lambda **_: 30000)
     stamp = R._check_vram_or_refuse({"type": "llamacpp_server", "alias": "q"})
     assert stamp["card_holders"] == "unknown"
     assert stamp["card_holders_unread"] == "card holder check unavailable: OSError: device busy"

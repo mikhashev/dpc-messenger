@@ -1809,7 +1809,8 @@ class StrataSupervisor(LlamaServerSupervisor):
         after: Optional[int] = None
         while True:
             try:
-                after = await asyncio.to_thread(_base._free_vram_mib)
+                # The stop's own reading of the card: let through the backend's stop.
+                after = await asyncio.to_thread(_base._free_vram_mib, while_stopping=True)
             except Exception:
                 after = None
             if after is not None and after >= before - tolerance:

@@ -376,22 +376,26 @@ _OOM_MARKERS = ("out of memory", "failed to allocate", "cuda error")
 
 def _device_probe(cmd: List[str], **kwargs: Any) -> "subprocess.CompletedProcess":
     """`subprocess.run(cmd, capture_output=True, **kwargs)`, registered as a
-    `device_probe` (ADR-046 point 5); let through during the backend's stop,
-    which reads the card through it after the engine is gone (point 7)."""
+    `device_probe` (ADR-046 point 5); refused during the backend's stop unless
+    `while_stopping` is passed (point 7)."""
     from ..dpc_agent.tools.process import run_probe
 
     return run_probe(cmd, launcher="device_probe", **kwargs)
 
 
-def _free_vram_mib() -> Optional[int]:
+def _free_vram_mib(while_stopping: bool = False) -> Optional[int]:
     """Free VRAM of the first NVIDIA GPU in MiB, or None when there is no
-    signal. The same nvidia-smi the device-context collector already uses."""
+    signal. The same nvidia-smi the device-context collector already uses.
+
+    `while_stopping` lets the query run during the backend's stop; only
+    Strata's VRAM release check passes it, the stop's own reading of the card
+    (ADR-046 point 7). Any other caller is refused then (`ProcessRegistryClosed`)."""
     if not shutil.which("nvidia-smi"):
         return None
     try:
         out = _device_probe(
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-            text=True, timeout=10,
+            text=True, timeout=10, while_stopping=while_stopping,
         )
         return int(out.stdout.strip().splitlines()[0])
     except (OSError, ValueError, subprocess.SubprocessError):

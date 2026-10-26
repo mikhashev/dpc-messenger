@@ -501,8 +501,24 @@ def _gateway_lists_and_ledger(tmp_path):
     return firewall, ledger
 
 
+class _FrozenClock(datetime):
+    """`datetime` with `now()` fixed: the gateway reads the clock inside
+    `guest_vendor_quota`, where no `now=` reaches it."""
+
+    at = datetime(2026, 9, 29, 23, 0, tzinfo=timezone.utc)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.at if tz is None else cls.at.astimezone(tz)
+
+
 @pytest.mark.asyncio
-async def test_the_gateway_refuses_429_with_retry_after_on_daily_capacity_exhausted(tmp_path):
+async def test_the_gateway_refuses_429_with_retry_after_on_daily_capacity_exhausted(tmp_path, monkeypatch):
+    import dpc_client_core.guest_vendor_quota as quota_module
+
+    # One clock for the refusal and the expectation: two reads of the wall clock
+    # a UTC midnight apart differ by a day.
+    monkeypatch.setattr(quota_module, "datetime", _FrozenClock)
     firewall, ledger = _gateway_lists_and_ledger(tmp_path)
     core = SimpleNamespace(
         firewall=firewall,
@@ -519,7 +535,7 @@ async def test_the_gateway_refuses_429_with_retry_after_on_daily_capacity_exhaus
 
     assert exc_info.value.status == 429
     assert exc_info.value.code == "insufficient_quota"
-    assert exc_info.value.retry_after_sec == pytest.approx(seconds_to_utc_midnight(datetime.now(timezone.utc)), abs=5)
+    assert exc_info.value.retry_after_sec == seconds_to_utc_midnight(_FrozenClock.at) == 3600
 
 
 # --- P3: retry_after_sec is recomputed from resets_at, not the vendor's own

@@ -1212,3 +1212,122 @@ class TestTheOrderlyStop:
         aimed = []
         registry.stop_commands(kill_tree=lambda target: aimed.append(target) or "recorded")
         assert aimed == []
+
+
+# ======================================================= git gets time to finish at the stop
+
+def _git_like(sleep_s):
+    """A child that stands in for git: the launcher, not the binary, makes it one."""
+    return [sys.executable, "-c", f"import time; time.sleep({sleep_s})"]
+
+
+class _InThread:
+    """Run a command the way its tool or helper does, in a thread of its own."""
+
+    def __init__(self, target):
+        self.result = {}
+        self.thread = threading.Thread(target=self._run, args=(target,), daemon=True)
+        self.thread.start()
+
+    def _run(self, target):
+        with pr.spawn_origin(SpawnOrigin(agent_id="a", conversation_id="c", tool="git", round=1)):
+            self.result["run"] = target()
+
+    def join(self):
+        self.thread.join(timeout=30)
+        assert not self.thread.is_alive(), "the thread running the command did not come back"
+        return self.result.get("run")
+
+
+def _git_tool(sleep_s, cwd, launcher="git_tool(sandbox)"):
+    return _InThread(lambda: run_supervised(
+        _git_like(sleep_s), launcher=launcher, cwd=str(cwd), timeout=120, ceiling_mb=0))
+
+
+def _git_helper(sleep_s, cwd):
+    return _InThread(lambda: process_mod.run_probe(_git_like(sleep_s), launcher="git_helper", cwd=str(cwd), timeout=120))
+
+
+def _open_by_launcher(registry, count, seconds=20.0):
+    assert _wait(lambda: len(registry.open_entries()) >= count, seconds), "the children were never registered"
+    return registry.open_entries()
+
+
+class TestGitGetsTimeToFinishAtTheStop:
+    """ADR-046 point 7, steps 2 and 5: a git killed in the middle of a commit leaves
+    `.git/index.lock`, and every later git command in that repository fails until a
+    person removes it. Git is given `GIT_STOP_GRACE_S`, one budget for the stop."""
+
+    def test_a_git_tool_that_ends_inside_the_grace_is_not_killed_and_ends_exited(self, registry, tmp_path):
+        running = _git_tool(1.5, tmp_path)
+        (entry,) = _open_by_launcher(registry, 1)
+        registry.begin_shutdown()
+        start = time.monotonic()
+        killed = registry.stop_commands()
+        took = time.monotonic() - start
+        run = running.join()
+        (done,) = registry.entries()
+        assert killed == [] and run.exit_reason == "exited"
+        assert (done.launcher, done.exit_reason, done.exit_code) == ("git_tool(sandbox)", "exited", 0)
+        assert took < pr.GIT_STOP_GRACE_S, "the stop waited out the whole grace for a git that had ended"
+
+    def test_a_git_helper_that_outlives_the_grace_is_killed_and_the_warning_names_index_lock(
+            self, registry, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(pr, "GIT_STOP_GRACE_S", 1.0)
+        running = _git_helper(600, tmp_path)
+        (entry,) = _open_by_launcher(registry, 1)
+        registry.begin_shutdown()
+        with caplog.at_level(logging.WARNING, logger=pr.logger.name):
+            registry.finish_shutdown()
+        running.join()
+        assert pr.probe_identity(entry.pid, entry.start_time) == "gone"
+        (done,) = registry.entries()
+        assert (done.launcher, done.exit_reason) == ("git_helper", "backend_stop")
+        (warning,) = [r.getMessage() for r in caplog.records
+                      if r.levelno == logging.WARNING and "index.lock" in r.getMessage()]
+        assert f"pid {entry.pid} (git_helper)" in warning and str(tmp_path) in warning
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR], "a git still running is not a defect"
+
+    def test_the_grace_is_one_budget_for_the_whole_stop(self, registry, tmp_path, monkeypatch, caplog):
+        """Two slow git tools in step 2 cost the grace once, not twice, and a git
+        helper still running at step 5 finds it spent and is killed at once."""
+        grace = 3.0
+        monkeypatch.setattr(pr, "GIT_STOP_GRACE_S", grace)
+        tools = [_git_tool(600, tmp_path), _git_tool(600, tmp_path, launcher="git_tool(external)")]
+        helper = _git_helper(600, tmp_path)
+        _open_by_launcher(registry, 3)
+        registry.begin_shutdown()
+        with caplog.at_level(logging.WARNING, logger=pr.logger.name):
+            start = time.monotonic()
+            killed = registry.stop_commands()
+            step_2 = time.monotonic() - start
+            start = time.monotonic()
+            registry.finish_shutdown()
+            step_5 = time.monotonic() - start
+        for running in tools + [helper]:
+            running.join()
+        assert sorted(e.launcher for e in killed) == ["git_tool(external)", "git_tool(sandbox)"]
+        assert grace <= step_2 < 2 * grace, f"step 2 took {step_2:.1f}s for two git tools"
+        assert step_5 < grace / 2, f"step 5 took {step_5:.1f}s: the helper got a grace of its own"
+        assert {e.exit_reason for e in registry.entries()} == {"backend_stop"}
+        assert len([m for m in caplog.messages if "index.lock" in m]) == 3
+
+    def test_a_command_that_is_not_git_is_still_killed_at_once(self, registry, tmp_path, monkeypatch):
+        grace = 3.0
+        monkeypatch.setattr(pr, "GIT_STOP_GRACE_S", grace)
+        shell = _InThread(lambda: run_supervised(SLEEP, launcher="run_shell", timeout=120, ceiling_mb=0))
+        git = _git_tool(600, tmp_path)
+        _open_by_launcher(registry, 2)
+        launchers = {e.pid: e.launcher for e in registry.open_entries()}
+        registry.begin_shutdown()
+        killed_at = {}
+        start = time.monotonic()
+
+        def kill_tree(target):
+            killed_at[launchers[target.pid]] = time.monotonic() - start
+            return pr._kill_tree_of(target)
+
+        registry.stop_commands(kill_tree=kill_tree)
+        shell.join(), git.join()
+        assert killed_at["run_shell"] < 1.0, killed_at
+        assert killed_at["git_tool(sandbox)"] >= grace, killed_at

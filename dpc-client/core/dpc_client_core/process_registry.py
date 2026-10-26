@@ -174,10 +174,16 @@ STOP_VALUES = ("idle_unload", "ui_stop", "engine_died", "failed_start", "browser
 LAUNCHER_KINDS = ("tool", "subsystem")
 # A subsystem's launcher is one of these words; a tool's is the tool's name.
 SUBSYSTEMS = ("strata", "llamacpp_server", "browser", "device_probe", "git_helper")
-# What the backend's stop still lets be born (ADR-046 point 7): a device probe
-# only reads the machine, is bounded by its own timeout and is registered like
-# any other, and the stop itself runs one (Strata's VRAM check after its engine).
+# What the backend's stop still lets be born (ADR-046 point 7), and only when its
+# caller says so (`while_stopping`): the stop itself runs one device probe,
+# Strata's VRAM check after its engine. A device probe only reads the machine, is
+# bounded by its own timeout and is registered like any other.
 _BORN_WHILE_STOPPING = ("device_probe",)
+# Git is given time to end on its own at the stop before it is killed (ADR-046
+# point 7, steps 2 and 5): one killed in the middle of a commit leaves
+# `.git/index.lock`, and every later git command in that repository fails until a
+# person removes it. One budget for every git process of the stop together.
+GIT_STOP_GRACE_S = 10.0
 
 # Reasons a sender other than the backend's own stop can give; announced after the
 # orderly stop began, they read `backend_stop` (the precedence rule).
@@ -372,6 +378,9 @@ class _Live:
     stop_sent_while_stopping: bool = False
     # The files an engine writes its output to; their newest mtime is `last_output_at`.
     log_paths: Tuple[Path, ...] = ()
+    # The directory the child was started in, when the launcher gave it: where a
+    # git killed at the stop may have left `.git/index.lock`.
+    cwd: Optional[str] = None
     # When (the sampler's monotonic clock) the early samples of this entry are due.
     early_due: List[float] = field(default_factory=list)
     # Every process ever seen in the tree, by (pid, creation time): its last
@@ -611,6 +620,9 @@ class ProcessRegistry:
         self.load_notes: List[Tuple[int, str]] = []
         # The resource sampler, when one was started (the backend; tests on demand).
         self._sampler: Optional["ResourceSampler"] = None
+        # When (monotonic) the stop's time for git runs out; set by the first
+        # wait for one, so that every git of the stop shares `GIT_STOP_GRACE_S`.
+        self._git_grace_deadline: Optional[float] = None
 
     # -- state --------------------------------------------------------------------
 
@@ -618,14 +630,21 @@ class ProcessRegistry:
     def stopping(self) -> bool:
         return self._stopping
 
-    def check_open(self, launcher: Optional[str] = None, launcher_kind: Optional[str] = None) -> None:
+    def check_open(
+        self,
+        launcher: Optional[str] = None,
+        launcher_kind: Optional[str] = None,
+        *,
+        while_stopping: bool = False,
+    ) -> None:
         """Raise `ProcessRegistryClosed` when the backend is stopping. Called
         before a spawn, so that nothing is born after the stop began, except a
-        `device_probe` subsystem: the stop runs those itself, and a refusal there
-        would read as an unreadable card instead of a released one."""
+        `device_probe` subsystem whose caller passes `while_stopping`: the stop's
+        own VRAM release check, where a refusal would read as an unreadable card
+        instead of a released one. The launcher's name alone lets nothing through."""
         if not self._stopping:
             return
-        if launcher_kind == "subsystem" and launcher in _BORN_WHILE_STOPPING:
+        if while_stopping and launcher_kind == "subsystem" and launcher in _BORN_WHILE_STOPPING:
             return
         raise ProcessRegistryClosed("the backend is stopping; it starts no new process")
 
@@ -637,7 +656,7 @@ class ProcessRegistry:
             self._stopping = True
         if first:
             logger.info("process registry: the backend is stopping; no new process will be "
-                        "registered but a device probe")
+                        "registered but the stop's own VRAM release check")
         return first
 
     # -- the file -----------------------------------------------------------------
@@ -815,6 +834,8 @@ class ProcessRegistry:
         parent_pid: Optional[int] = None,
         parent_start_time: Optional[float] = None,
         log_paths: Sequence[Any] = (),
+        cwd: Optional[str] = None,
+        while_stopping: bool = False,
     ) -> ProcessEntry:
         """Record a child at its birth and log the start line.
 
@@ -825,7 +846,9 @@ class ProcessRegistry:
         `SPAWN_ORIGIN` when not given; a `tool` child without one is a lost
         attribution and is logged at WARNING. `log_paths` are the files the
         child writes its output to (an engine's log); the sampler reads their
-        newest modification time as `last_output_at`. Not persisted either."""
+        newest modification time as `last_output_at`. Not persisted either; nor
+        is `cwd`, the directory the child runs in, which the stop names when it
+        kills a git (`.git/index.lock`). `while_stopping` is `check_open`'s."""
         if launcher_kind not in LAUNCHER_KINDS:
             raise ValueError(f"{launcher_kind!r} is not a launcher kind ({', '.join(LAUNCHER_KINDS)})")
         if not launcher:
@@ -837,7 +860,7 @@ class ProcessRegistry:
         out = log or logger
         origin = origin if origin is not None else SPAWN_ORIGIN.get()
         with self._lock:
-            self.check_open(launcher, launcher_kind)
+            self.check_open(launcher, launcher_kind, while_stopping=while_stopping)
             stale = self._open.get(pid)
             if stale is not None:
                 # The pid was reused, so the earlier child ended without anyone seeing it.
@@ -862,7 +885,10 @@ class ProcessRegistry:
             )
             self._entries.append(entry)
             self._open[pid] = entry
-            live = self._live[pid] = _Live(handle=handle, log=out, log_paths=tuple(Path(p) for p in log_paths))
+            live = self._live[pid] = _Live(
+                handle=handle, log=out, log_paths=tuple(Path(p) for p in log_paths),
+                cwd=None if cwd is None else str(cwd),
+            )
             sampler = self._sampler
             if sampler is not None:
                 live.early_due = sampler.early_schedule()
@@ -1117,11 +1143,14 @@ class ProcessRegistry:
         sees it die a moment later, reads the same reason. A child the backend holds
         a `Popen` for is killed through it (process group and walkable descendants
         on POSIX, `taskkill /T` on Windows); the backend's own pid and its
-        ancestors are skipped and logged."""
+        ancestors are skipped and logged. A git child goes last: it first gets
+        what is left of the stop's `GIT_STOP_GRACE_S` to end on its own.
+        Returns the entries this call killed."""
         if kill_tree is None:
             kill_tree = _kill_tree_of
         ended: List[ProcessEntry] = []
         shielded = own_and_ancestor_pids()
+        commands: List[ProcessEntry] = []
         for entry in self.open_entries("tool"):
             if entry.pid in shielded:
                 logger.error(
@@ -1129,19 +1158,94 @@ class ProcessRegistry:
                     entry.pid, entry.launcher,
                 )
                 continue
-            handle = self.handle_of(entry.pid)
-            self.note_stop_sent(entry.pid, "backend_stop")
-            try:
-                verdict = kill_tree(handle if handle is not None else entry.pid)
-            except Exception as exc:
-                verdict = f"the kill failed ({type(exc).__name__}: {exc})"
-                logger.warning("process registry: could not kill pid %s (%s): %s", entry.pid, entry.launcher, exc)
-            returncode = self._returncode_of(handle, wait_s)
-            done = self.end(entry.pid, returncode, reason="backend_stop")
-            logger.debug("process registry: stopped pid %s (%s): %s", entry.pid, entry.launcher, verdict)
-            if done is not None:
-                ended.append(done)
+            commands.append(entry)
+        for entry in commands:
+            if not _is_git(entry):
+                self._kill_command(entry, kill_tree, wait_s, ended)
+        for entry in self._wait_for_git([e for e in commands if _is_git(e)], probe_identity):
+            cwd = self._cwd_of(entry.pid)
+            if self._kill_command(entry, kill_tree, wait_s, ended):
+                self._warn_of_index_lock(entry, cwd)
         return ended
+
+    def _kill_command(
+        self, entry: ProcessEntry, kill_tree: Callable[[Any], str], wait_s: float, ended: List[ProcessEntry],
+    ) -> bool:
+        """Announce, kill, end `backend_stop`; False when it had already ended."""
+        with self._lock:
+            if self._open.get(entry.pid) is not entry:
+                return False
+        handle = self.handle_of(entry.pid)
+        self.note_stop_sent(entry.pid, "backend_stop")
+        try:
+            verdict = kill_tree(handle if handle is not None else entry.pid)
+        except Exception as exc:
+            verdict = f"the kill failed ({type(exc).__name__}: {exc})"
+            logger.warning("process registry: could not kill pid %s (%s): %s", entry.pid, entry.launcher, exc)
+        returncode = self._returncode_of(handle, wait_s)
+        done = self.end(entry.pid, returncode, reason="backend_stop")
+        logger.debug("process registry: stopped pid %s (%s): %s", entry.pid, entry.launcher, verdict)
+        if done is not None:
+            ended.append(done)
+        return True
+
+    # -- git at the stop: time to finish, then the kill -----------------------------
+
+    def _cwd_of(self, pid: int) -> Optional[str]:
+        with self._lock:
+            live = self._live.get(pid)
+            return live.cwd if live is not None else None
+
+    def _wait_for_git(
+        self, entries: Sequence[ProcessEntry], probe: Callable[[int, Optional[float]], str],
+    ) -> List[ProcessEntry]:
+        """Wait for `entries` to end on their own until the stop's one deadline
+        for git (set by the first wait, shared by the later ones); return those
+        still running then."""
+        waiting = list(entries)
+        if not waiting:
+            return []
+        with self._lock:
+            if self._git_grace_deadline is None:
+                self._git_grace_deadline = time.monotonic() + GIT_STOP_GRACE_S
+            deadline = self._git_grace_deadline
+        while True:
+            waiting = [e for e in waiting if not self._ended_by_itself(e, probe)]
+            if not waiting or time.monotonic() >= deadline:
+                return waiting
+            time.sleep(0.05)
+
+    def _ended_by_itself(self, entry: ProcessEntry, probe: Callable[[int, Optional[float]], str]) -> bool:
+        """True once the process is gone with nobody stopping it. A code its
+        `Popen` gives is recorded as the end (the word derived, `exited` as a
+        rule); without a handle the entry is left open for the caller to close."""
+        with self._lock:
+            if self._open.get(entry.pid) is not entry:
+                return True
+            live = self._live.get(entry.pid)
+            handle = live.handle if live is not None else None
+        poll = getattr(handle, "poll", None)
+        if poll is None:
+            return probe(entry.pid, entry.start_time) != "same"
+        try:
+            code = poll()
+        except Exception:
+            return False
+        if code is None:
+            return False
+        self.end(entry.pid, code)
+        return True
+
+    @staticmethod
+    def _warn_of_index_lock(entry: ProcessEntry, cwd: Optional[str]) -> None:
+        where = (f"the repository of {cwd}" if cwd else
+                 "its repository (the registry does not know the directory it ran in)")
+        logger.warning(
+            "process registry: pid %s (%s) was still running when the stop's %.0f s for git "
+            "ran out, and was killed: a .git/index.lock may be left behind in %s; if git then "
+            "refuses to run there, remove that file by hand: %s",
+            entry.pid, entry.launcher, GIT_STOP_GRACE_S, where, entry.command,
+        )
 
     @staticmethod
     def _returncode_of(handle: Any, wait_s: float) -> Optional[int]:
@@ -1171,25 +1275,50 @@ class ProcessRegistry:
         closed `backend_stop` with no exit code; if it is alive (and is the process
         recorded) it is killed, the failure is logged at ERROR, and it is closed
         the same way. The job is the backstop behind this, not a substitute.
+        A git still running (a `git_helper` or a `git_tool(...)`) is not a defect
+        and is not killed at once: it gets what is left of the stop's
+        `GIT_STOP_GRACE_S` to end on its own, and is killed after it with a
+        WARNING about `.git/index.lock` instead of the ERROR.
         The resource sampler stops first: nothing it could read now is wanted."""
         self.stop_sampler()
         if kill is None:
             kill = _kill_pid_tree
         shielded = own_and_ancestor_pids()
+        git: List[ProcessEntry] = []
         for entry in self.open_entries():
             if entry.pid in shielded:
                 logger.error("process registry: pid %s (%s) names the backend or an ancestor; skipped", entry.pid, entry.launcher)
                 continue
             state = probe(entry.pid, entry.start_time)
+            if state == "same" and _is_git(entry):
+                git.append(entry)
+                continue
             if state == "same":
                 logger.error(
                     "process registry: pid %s (%s) is still running after the stop; killing it",
                     entry.pid, entry.launcher,
                 )
+                # Before the kill, as for git below: a thread waiting on it may record the end first.
+                self.note_stop_sent(entry.pid, "backend_stop")
                 try:
                     kill(entry.pid)
                 except Exception as exc:
                     logger.error("process registry: could not kill pid %s: %s", entry.pid, exc)
+            self.end(entry.pid, None, reason="backend_stop")
+        running = {e.pid for e in self._wait_for_git(git, probe)}
+        for entry in git:
+            with self._lock:
+                if self._open.get(entry.pid) is not entry:
+                    continue
+            if entry.pid in running and probe(entry.pid, entry.start_time) == "same":
+                cwd = self._cwd_of(entry.pid)
+                # Before the kill: the thread waiting on it may record the end first.
+                self.note_stop_sent(entry.pid, "backend_stop")
+                try:
+                    kill(entry.pid)
+                except Exception as exc:
+                    logger.error("process registry: could not kill pid %s: %s", entry.pid, exc)
+                self._warn_of_index_lock(entry, cwd)
             self.end(entry.pid, None, reason="backend_stop")
         with self._lock:
             done = list(self._ended_in_the_stop)
@@ -1203,6 +1332,11 @@ class ProcessRegistry:
         if not done:
             logger.info("backend stop: no process was running")
         return done
+
+
+def _is_git(entry: ProcessEntry) -> bool:
+    """A git process: the agent sandbox's `git_helper`, or the `git_tool` tool in either mode."""
+    return entry.launcher == "git_helper" or entry.launcher.startswith("git_tool")
 
 
 def _kill_tree_of(target: Any) -> str:

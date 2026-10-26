@@ -106,7 +106,7 @@ class TestTheKvLadder:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
-        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 31200)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 31200)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([
             LlamaServerError("died", ["0.12.019 E CUDA error: out of memory"]),
@@ -127,7 +127,7 @@ class TestTheKvLadder:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
-        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 31200)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 31200)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([
             LlamaServerError("died", ["exited with 3 before becoming healthy"]),
@@ -143,7 +143,7 @@ class TestTheKvLadder:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
-        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 31200)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 31200)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([{"total_slots": 4}])
         sup._read_fit_memo = lambda: {sup._fit_key(): {"type": "q8_0", "free_mib": 28000}}
@@ -160,7 +160,7 @@ class TestTheKvLadder:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
-        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 20000)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 20000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 10000)
         sup, attempts = self._sup_with_launch([
@@ -192,7 +192,7 @@ class TestTheKvLadder:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
-        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 8000)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 8000)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 17000)
         sup, attempts = self._sup_with_launch([])
 
@@ -566,7 +566,7 @@ class TestTheAdmissionArithmetic:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
-        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 26000)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 26000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 16031)
         monkeypatch.setattr(mod, "_gguf_attention_kv_dims", lambda path: (17, 1024))
@@ -590,7 +590,7 @@ class TestTheAdmissionArithmetic:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
-        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 30000)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 30000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 16031)
         monkeypatch.setattr(mod, "_gguf_attention_kv_dims", lambda path: (17, 1024))
@@ -609,7 +609,7 @@ class TestTheAdmissionArithmetic:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
-        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 26000)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 26000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 20000)
         monkeypatch.setattr(mod, "_gguf_attention_kv_dims", lambda path: (17, 1024))
@@ -626,7 +626,7 @@ class TestTheAdmissionArithmetic:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
-        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 30000)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 30000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 16031)
         monkeypatch.setattr(mod, "_gguf_attention_kv_dims", lambda path: (17, 1024))
