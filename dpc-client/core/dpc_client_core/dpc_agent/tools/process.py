@@ -17,11 +17,13 @@ it, and no amount of logging inside this repository would name that one.
 from __future__ import annotations
 
 import configparser
+import locale
 import logging
 import os
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -422,10 +424,14 @@ def _decode_output(chunks: Sequence[bytes]) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _join_bytes(chunks: Sequence[bytes]) -> bytes:
+    return b"".join(chunks)
+
+
 class _OutputReader:
     """Both pipes of a child, read as the bytes arrive, so the time of the last
     output is known (ADR-046 point 3, `last_output_at`). One daemon thread per
-    pipe.
+    pipe. `decode` makes `text()`: UTF-8 text, or the bytes for `run_probe`.
 
     After `abandon` a reader keeps nothing it reads, leaves at the next chunk and
     closes its own end of the pipe, so a descendant that escaped the kill and keeps
@@ -434,7 +440,13 @@ class _OutputReader:
     buffered reader another thread is blocked in can wait on that reader's lock.
     """
 
-    def __init__(self, process: "subprocess.Popen", on_output: Callable[[float], None]):
+    def __init__(
+        self,
+        process: "subprocess.Popen",
+        on_output: Callable[[float], None],
+        decode: Callable[[Sequence[bytes]], Any] = _decode_output,
+    ):
+        self._decode = decode
         self._chunks: dict = {"stdout": [], "stderr": []}
         # Each pipe's last chunk, wall clock, written only by its own reader.
         self._last_chunk_at: dict = {"stdout": None, "stderr": None}
@@ -496,8 +508,8 @@ class _OutputReader:
 
     def text(self) -> tuple:
         # Copies: after `abandon` a reader may still be between its check and its append.
-        return (_decode_output(list(self._chunks["stdout"])),
-                _decode_output(list(self._chunks["stderr"])))
+        return (self._decode(list(self._chunks["stdout"])),
+                self._decode(list(self._chunks["stderr"])))
 
 
 def _wait_for_output(process: "subprocess.Popen", output: _OutputReader, timeout: float) -> None:
@@ -679,6 +691,8 @@ def run_supervised(
     ceiling_mb: Optional[int] = None,
     popen_kwargs: Optional[dict] = None,
     log_as: Optional[str] = None,
+    launcher_kind: str = "tool",
+    output_bytes: bool = False,
 ) -> SupervisedRun:
     """Spawn, watch, and never wait unbounded on anything.
 
@@ -698,6 +712,10 @@ def run_supervised(
     errors="replace"` gave it. The bound is the same: the pipes' end and the
     process's inside `timeout`, then the bounded drain after a kill; a drain
     that gives up returns what was read by then and stops the readers.
+
+    `launcher_kind` is `tool` for an agent's tool and `subsystem` for a spawn no
+    tool made (`run_probe`'s). With `output_bytes` the run's `stdout` and
+    `stderr` are the bytes as written, for a caller that decodes them itself.
     """
     ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
     if ceiling is None:
@@ -722,7 +740,7 @@ def run_supervised(
     if registry is not None:
         # Before the child exists: a spawn the backend's stop has refused must
         # not be born (ADR-046 point 7, step 1).
-        registry.check_open()
+        registry.check_open(launcher, launcher_kind)
     process = subprocess.Popen(
         cmd,
         shell=shell,
@@ -742,7 +760,7 @@ def run_supervised(
             registry.register(
                 process.pid,
                 launcher=launcher,
-                launcher_kind="tool",
+                launcher_kind=launcher_kind,
                 command=log_as or _command_text(cmd),
                 handle=process,
                 log=log,
@@ -778,7 +796,7 @@ def run_supervised(
         if registry is not None:
             registry.note_output(process.pid, at)
 
-    output = _OutputReader(process, _noted)
+    output = _OutputReader(process, _noted, _join_bytes if output_bytes else _decode_output)
     run = SupervisedRun(ceiling_mb=ceiling)
     try:
         _wait_for_output(process, output, timeout)
@@ -793,7 +811,8 @@ def run_supervised(
         # The ceiling kill always said so here; the timeout kill did not, and
         # three agent commands that left the console raw were visible only in
         # the agents' tools.jsonl.
-        prompt = pager_prompt_at_end(run.stdout) or pager_prompt_at_end(run.stderr)
+        prompt = None if output_bytes else (
+            pager_prompt_at_end(run.stdout) or pager_prompt_at_end(run.stderr))
         log.warning(
             "the command tree of pid %s for %s ran past its %ss timeout - %s; "
             "%d chars of stdout and %d of stderr captured%s: %.200s",
@@ -835,3 +854,71 @@ def run_supervised(
         if ended is not None:
             run.exit_reason = ended.exit_reason or ""
     return run
+
+
+# The subsystems a short probe runs as (ADR-046 point 3).
+PROBE_LAUNCHERS = ("device_probe", "git_helper")
+
+
+def _text_mode_encoding() -> str:
+    """The encoding `Popen(text=True)` picks when given none: UTF-8 in UTF-8
+    mode, else the locale's (a localized Windows tool's code page, not UTF-8)."""
+    if sys.flags.utf8_mode:
+        return "utf-8"
+    getencoding = getattr(locale, "getencoding", None)  # 3.11+
+    return getencoding() if getencoding is not None else locale.getpreferredencoding(False)
+
+
+def _decode_as_text_mode(data: bytes, encoding: Optional[str], errors: Optional[str]) -> str:
+    """What `subprocess.run(text=True, encoding=…, errors=…)` returned for these bytes."""
+    text = data.decode(encoding or _text_mode_encoding(), errors or "strict")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def run_probe(
+    cmd: Sequence[str],
+    *,
+    launcher: str,
+    timeout: float,
+    cwd: Optional[str] = None,
+    env: Optional[dict] = None,
+    text: bool = False,
+    encoding: Optional[str] = None,
+    errors: Optional[str] = None,
+    check: bool = False,
+) -> "subprocess.CompletedProcess":
+    """`subprocess.run(cmd, capture_output=True, …)` for a short command, through
+    `run_supervised` and so in the registry (ADR-046 point 5): the same return,
+    the same exceptions, and the console, session, ceiling and bounded waits
+    every child gets. `launcher` is `device_probe` or `git_helper`, entered as
+    `launcher_kind: subsystem`; inside a tool call it keeps that call's origin.
+
+    Output is bytes, or text when `text`, `encoding` or `errors` is given,
+    decoded as text mode decodes (the locale's encoding when none is named,
+    strict without `errors`) after the end is recorded. Raises `OSError` from
+    the spawn (`FileNotFoundError` for a missing binary), `TimeoutExpired` once
+    the timeout killed the tree (output decoded with `replace`, so the timeout
+    is what the caller sees), `CalledProcessError` with `check`, and
+    `ProcessRegistryClosed` for a `git_helper` once the stop began; a
+    `device_probe` is let through (point 7).
+    """
+    if launcher not in PROBE_LAUNCHERS:
+        raise ValueError(f"{launcher!r} is not a probe launcher ({', '.join(PROBE_LAUNCHERS)})")
+    run = run_supervised(
+        list(cmd), launcher=launcher, launcher_kind="subsystem", timeout=timeout,
+        cwd=cwd, env=env, output_bytes=True,
+    )
+    as_text = text or encoding is not None or errors is not None
+    if run.timed_out:
+        if as_text:
+            out, err = (_decode_as_text_mode(b, encoding, "replace") for b in (run.stdout, run.stderr))
+        else:
+            out, err = run.stdout, run.stderr
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
+    out, err = run.stdout, run.stderr
+    if as_text:
+        out, err = _decode_as_text_mode(out, encoding, errors), _decode_as_text_mode(err, encoding, errors)
+    done = subprocess.CompletedProcess(cmd, run.returncode, out, err)
+    if check:
+        done.check_returncode()
+    return done

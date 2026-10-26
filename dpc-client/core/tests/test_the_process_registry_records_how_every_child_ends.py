@@ -110,9 +110,12 @@ class TestTheEntry:
         assert entry.agent_id is None and entry.parent_pid == os.getpid()
         assert caplog.messages[0].startswith(f"spawned pid 7000003 for strata (subsystem; parent pid {os.getpid()}")
         with pytest.raises(ValueError):
-            registry.register(7_000_004, launcher="device_probe", launcher_kind="subsystem", command="x")
+            registry.register(7_000_004, launcher="made_up", launcher_kind="subsystem", command="x")
         with pytest.raises(ValueError):
             registry.register(7_000_005, launcher="x", launcher_kind="daemon", command="x")
+        # Produced since `run_probe` (ADR-046 point 5), so in the list.
+        for pid, probe in ((7_000_008, "device_probe"), (7_000_009, "git_helper")):
+            assert registry.register(pid, launcher=probe, launcher_kind="subsystem", command="x").launcher == probe
 
     def test_the_backends_own_pid_is_not_one_of_its_children(self, registry):
         with pytest.raises(ValueError):

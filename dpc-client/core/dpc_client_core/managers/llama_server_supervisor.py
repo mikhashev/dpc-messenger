@@ -374,15 +374,24 @@ _DESKTOP_RESERVE_MIB = 2048
 _OOM_MARKERS = ("out of memory", "failed to allocate", "cuda error")
 
 
+def _device_probe(cmd: List[str], **kwargs: Any) -> "subprocess.CompletedProcess":
+    """`subprocess.run(cmd, capture_output=True, **kwargs)`, registered as a
+    `device_probe` (ADR-046 point 5); let through during the backend's stop,
+    which reads the card through it after the engine is gone (point 7)."""
+    from ..dpc_agent.tools.process import run_probe
+
+    return run_probe(cmd, launcher="device_probe", **kwargs)
+
+
 def _free_vram_mib() -> Optional[int]:
     """Free VRAM of the first NVIDIA GPU in MiB, or None when there is no
     signal. The same nvidia-smi the device-context collector already uses."""
     if not shutil.which("nvidia-smi"):
         return None
     try:
-        out = subprocess.run(
+        out = _device_probe(
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
+            text=True, timeout=10,
         )
         return int(out.stdout.strip().splitlines()[0])
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -398,9 +407,9 @@ def _total_vram_mib() -> Optional[int]:
     if not shutil.which("nvidia-smi"):
         return None
     try:
-        out = subprocess.run(
+        out = _device_probe(
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
+            text=True, timeout=10,
         )
         return int(out.stdout.strip().splitlines()[0])
     except (OSError, ValueError, subprocess.SubprocessError):

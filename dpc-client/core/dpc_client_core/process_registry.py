@@ -9,7 +9,7 @@ that the next start can find the children of a run that died without cleaning up
 **What is recorded.** For each child: `pid` and `start_time` (psutil's creation
 time; pids are reused, the pair identifies a process), its parent (the backend,
 with its own creation time), the `launcher` and its kind (`tool` for an agent's
-tool call, `subsystem` for an engine or the browser), the spawn origin (`agent_id`,
+tool call, `subsystem` for an engine, the browser or a short probe), the spawn origin (`agent_id`,
 `conversation_id`, `tool`, `round`, read from the `SPAWN_ORIGIN` context variable
 the tool dispatcher sets), the command (bounded), when it started and ended, the
 `exit_reason`, the stop field (`STOP_FIELD`, `stop_kind`) when the reason is `stopped`,
@@ -173,7 +173,11 @@ _OLD_STOP_FIELD = "stop_reason"  # read from an older file, never written
 STOP_VALUES = ("idle_unload", "ui_stop", "engine_died", "failed_start", "browser_closed")
 LAUNCHER_KINDS = ("tool", "subsystem")
 # A subsystem's launcher is one of these words; a tool's is the tool's name.
-SUBSYSTEMS = ("strata", "llamacpp_server", "browser")
+SUBSYSTEMS = ("strata", "llamacpp_server", "browser", "device_probe", "git_helper")
+# What the backend's stop still lets be born (ADR-046 point 7): a device probe
+# only reads the machine, is bounded by its own timeout and is registered like
+# any other, and the stop itself runs one (Strata's VRAM check after its engine).
+_BORN_WHILE_STOPPING = ("device_probe",)
 
 # Reasons a sender other than the backend's own stop can give; announced after the
 # orderly stop began, they read `backend_stop` (the precedence rule).
@@ -614,11 +618,16 @@ class ProcessRegistry:
     def stopping(self) -> bool:
         return self._stopping
 
-    def check_open(self) -> None:
+    def check_open(self, launcher: Optional[str] = None, launcher_kind: Optional[str] = None) -> None:
         """Raise `ProcessRegistryClosed` when the backend is stopping. Called
-        before a spawn, so that nothing is born after the stop began."""
-        if self._stopping:
-            raise ProcessRegistryClosed("the backend is stopping; it starts no new process")
+        before a spawn, so that nothing is born after the stop began, except a
+        `device_probe` subsystem: the stop runs those itself, and a refusal there
+        would read as an unreadable card instead of a released one."""
+        if not self._stopping:
+            return
+        if launcher_kind == "subsystem" and launcher in _BORN_WHILE_STOPPING:
+            return
+        raise ProcessRegistryClosed("the backend is stopping; it starts no new process")
 
     def begin_shutdown(self) -> bool:
         """Refuse new entries from now on and turn every later stop into
@@ -627,7 +636,8 @@ class ProcessRegistry:
             first = not self._stopping
             self._stopping = True
         if first:
-            logger.info("process registry: the backend is stopping; no new process will be registered")
+            logger.info("process registry: the backend is stopping; no new process will be "
+                        "registered but a device probe")
         return first
 
     # -- the file -----------------------------------------------------------------
@@ -827,7 +837,7 @@ class ProcessRegistry:
         out = log or logger
         origin = origin if origin is not None else SPAWN_ORIGIN.get()
         with self._lock:
-            self.check_open()
+            self.check_open(launcher, launcher_kind)
             stale = self._open.get(pid)
             if stale is not None:
                 # The pid was reused, so the earlier child ended without anyone seeing it.

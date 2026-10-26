@@ -417,9 +417,11 @@ def dependency_setup():
         if torch.cuda.is_available():
             return
         try:
-            result = subprocess.run(
+            from dpc_client_core.dpc_agent.tools.process import run_probe
+
+            result = run_probe(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                capture_output=True, text=True, timeout=5
+                launcher="device_probe", text=True, timeout=5
             )
             if result.returncode == 0:
                 gpu_name = result.stdout.strip()

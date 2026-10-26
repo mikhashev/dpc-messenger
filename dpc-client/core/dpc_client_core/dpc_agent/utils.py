@@ -7,7 +7,8 @@ Key changes:
 - Removed Google Drive / Colab references
 - No OpenRouter pricing functions (DPC handles pricing separately)
 
-This module has zero dependencies on other dpc_agent modules.
+This module imports no other dpc_agent module at load time; the git helpers
+reach `tools/process.py` when they run.
 """
 
 from __future__ import annotations
@@ -19,11 +20,18 @@ import logging
 import os
 import pathlib
 import re
-import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
+
+
+def _git_helper(cmd: List[str], **kwargs: Any):
+    """`subprocess.run(cmd, capture_output=True, **kwargs)`, registered as a
+    `git_helper` (ADR-046 point 5). Imported at the call: `tools` imports this module."""
+    from .tools.process import run_probe
+
+    return run_probe(cmd, launcher="git_helper", **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +135,7 @@ def init_agent_git_repo(agent_id: str) -> None:
     no_hooks_dir.mkdir(exist_ok=True)
 
     try:
-        subprocess.run(["git", "init"], cwd=str(root), capture_output=True, timeout=30, check=False)
+        _git_helper(["git", "init"], cwd=str(root), timeout=30, check=False)
 
         # Disable hooks, set a stable local identity
         for cmd in [
@@ -135,7 +143,7 @@ def init_agent_git_repo(agent_id: str) -> None:
             ["git", "config", "user.name", agent_id],
             ["git", "config", "user.email", f"{agent_id}@dpc-local"],
         ]:
-            subprocess.run(cmd, cwd=str(root), capture_output=True, timeout=10, check=False)
+            _git_helper(cmd, cwd=str(root), timeout=10, check=False)
 
         # Write .gitignore
         gitignore_path = root / ".gitignore"
@@ -143,10 +151,10 @@ def init_agent_git_repo(agent_id: str) -> None:
             gitignore_path.write_text(_AGENT_GITIGNORE, encoding="utf-8")
 
         # Initial commit capturing all bootstrapped files
-        subprocess.run(["git", "add", "-A"], cwd=str(root), capture_output=True, timeout=30, check=False)
-        subprocess.run(
+        _git_helper(["git", "add", "-A"], cwd=str(root), timeout=30, check=False)
+        _git_helper(
             ["git", "commit", "-m", "chore: initial agent state"],
-            cwd=str(root), capture_output=True, timeout=30, check=False,
+            cwd=str(root), timeout=30, check=False,
         )
 
         log.info(f"Initialized git repo for agent {agent_id}")
@@ -170,13 +178,13 @@ def auto_commit_agent_change(agent_root: pathlib.Path, message: str) -> None:
         return
 
     try:
-        subprocess.run(
+        _git_helper(
             ["git", "add", "-A"],
-            cwd=str(agent_root), capture_output=True, timeout=30, check=False,
+            cwd=str(agent_root), timeout=30, check=False,
         )
-        result = subprocess.run(
+        result = _git_helper(
             ["git", "commit", "-m", message],
-            cwd=str(agent_root), capture_output=True, text=True, timeout=30, check=False,
+            cwd=str(agent_root), text=True, timeout=30, check=False,
         )
         combined = (result.stdout or "") + (result.stderr or "")
         if result.returncode != 0 and "nothing to commit" not in combined.lower():
@@ -1040,10 +1048,9 @@ def run_cmd(cmd: List[str], cwd: Optional[pathlib.Path] = None, timeout: int = 3
 
     Raises RuntimeError if command fails.
     """
-    res = subprocess.run(
+    res = _git_helper(
         cmd,
         cwd=str(cwd) if cwd else None,
-        capture_output=True,
         text=True,
         timeout=timeout
     )
@@ -1067,10 +1074,9 @@ def get_git_info(repo_dir: pathlib.Path) -> tuple[str, str]:
     branch = ""
     sha = ""
     try:
-        r = subprocess.run(
+        r = _git_helper(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=str(repo_dir),
-            capture_output=True,
             text=True,
             timeout=2,
         )
@@ -1080,10 +1086,9 @@ def get_git_info(repo_dir: pathlib.Path) -> tuple[str, str]:
         log.debug("Failed to get git branch", exc_info=True)
 
     try:
-        r = subprocess.run(
+        r = _git_helper(
             ["git", "rev-parse", "HEAD"],
             cwd=str(repo_dir),
-            capture_output=True,
             text=True,
             timeout=2,
         )

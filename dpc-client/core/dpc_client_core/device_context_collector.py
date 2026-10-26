@@ -10,7 +10,6 @@ import platform
 import sys
 import os
 import shutil
-import subprocess
 import re
 import json
 from typing import Dict, List, Optional, Any
@@ -30,6 +29,15 @@ from dpc_protocol.pcm_core import (
     KnowledgeEntry,
     KnowledgeSource,
 )
+
+
+def _device_probe(cmd, **kwargs):
+    """`subprocess.run(cmd, capture_output=True, **kwargs)`, registered as a
+    `device_probe` (ADR-046 point 5). Imported at the call: the tools package
+    loads the whole agent package with it."""
+    from .dpc_agent.tools.process import run_probe
+
+    return run_probe(cmd, launcher="device_probe", **kwargs)
 
 
 class DeviceContextCollector:
@@ -332,10 +340,9 @@ class DeviceContextCollector:
 
         try:
             # Query GPU info: name, memory.total, driver_version
-            result = subprocess.run(
+            result = _device_probe(
                 ['nvidia-smi', '--query-gpu=name,memory.total,driver_version',
                  '--format=csv,noheader,nounits'],
-                capture_output=True,
                 text=True,
                 timeout=5
             )
@@ -378,9 +385,8 @@ class DeviceContextCollector:
             return None
 
         try:
-            result = subprocess.run(
+            result = _device_probe(
                 ['nvcc', '--version'],
-                capture_output=True,
                 text=True,
                 timeout=2
             )
@@ -399,9 +405,8 @@ class DeviceContextCollector:
             return None
 
         try:
-            result = subprocess.run(
+            result = _device_probe(
                 ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
-                capture_output=True,
                 text=True,
                 timeout=2
             )
@@ -418,9 +423,8 @@ class DeviceContextCollector:
             return None
 
         try:
-            result = subprocess.run(
+            result = _device_probe(
                 ['rocm-smi', '--showproductname'],
-                capture_output=True,
                 text=True,
                 timeout=5
             )
@@ -463,9 +467,8 @@ class DeviceContextCollector:
             return None
 
         try:
-            result = subprocess.run(
+            result = _device_probe(
                 ['lspci'],
-                capture_output=True,
                 text=True,
                 timeout=5
             )
@@ -538,9 +541,8 @@ class DeviceContextCollector:
             # Check /sys/block for rotational flag
             try:
                 # This is a simplified check - would need to map mount point to device
-                result = subprocess.run(
+                result = _device_probe(
                     ['lsblk', '-d', '-o', 'name,rota'],
-                    capture_output=True,
                     text=True,
                     timeout=2
                 )
@@ -555,9 +557,8 @@ class DeviceContextCollector:
         elif system == "Darwin":
             # macOS - check if APFS (usually SSD)
             try:
-                result = subprocess.run(
+                result = _device_probe(
                     ['diskutil', 'info', '/'],
-                    capture_output=True,
                     text=True,
                     timeout=2
                 )
@@ -607,9 +608,8 @@ class DeviceContextCollector:
         for tool_name, version_cmd in check_list:
             if shutil.which(tool_name):
                 try:
-                    result = subprocess.run(
+                    result = _device_probe(
                         version_cmd,
-                        capture_output=True,
                         text=True,
                         timeout=2
                     )
@@ -681,9 +681,8 @@ class DeviceContextCollector:
             return []
 
         try:
-            result = subprocess.run(
+            result = _device_probe(
                 ['ollama', 'list'],
-                capture_output=True,
                 text=True,
                 timeout=5
             )

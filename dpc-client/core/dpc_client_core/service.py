@@ -2202,9 +2202,9 @@ class CoreService:
         # Method 3: Platform-specific (Linux/Unix only - finds all interfaces)
         if sys.platform.startswith('linux'):
             try:
-                import subprocess
+                from .dpc_agent.tools.process import run_probe
                 # Use 'ip addr' command on Linux
-                result = subprocess.run(['ip', 'addr', 'show'], capture_output=True, text=True, timeout=2)
+                result = run_probe(['ip', 'addr', 'show'], launcher="device_probe", text=True, timeout=2)
                 if result.returncode == 0:
                     import re
                     # Look for inet addresses (IPv4)
