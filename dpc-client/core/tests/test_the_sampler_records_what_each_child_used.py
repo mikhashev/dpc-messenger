@@ -404,7 +404,8 @@ def test_output_with_crlf_a_lone_cr_and_invalid_bytes_comes_back_as_text_mode_ga
 def test_the_timeout_returns_within_its_bound_when_a_grandchild_holds_the_pipe(tmp_path, monkeypatch):
     """The child starts a grandchild that inherits stdout and sleeps, and the tree
     kill is made to miss it: the pipes never reach their end, and the call still
-    returns within the timeout plus the bounded drain."""
+    returns within the timeout plus the bounded drain, with what the child printed
+    before the timeout."""
     marker = tmp_path / "grandchild.pid"
     body = textwrap.dedent(f"""
         import subprocess, sys, time
@@ -421,7 +422,7 @@ def test_the_timeout_returns_within_its_bound_when_a_grandchild_holds_the_pipe(t
         elapsed = time.monotonic() - started
         assert run.timed_out and run.killed == "the kill was made to miss"
         assert elapsed < 3 + process_mod._DRAIN_AFTER_KILL_SECONDS + 5, f"{elapsed:.1f} s"
-        assert (run.stdout, run.stderr) == ("", ""), "an abandoned drain reports nothing, as before"
+        assert (run.stdout, run.stderr) == ("started\n", ""), "an abandoned drain returns what was read"
         assert _entry_of(pr.get_registry(), "test(held)").exit_reason == "timeout"
     finally:
         # The processes this test started, the grandchild first while it surely lives.
@@ -430,6 +431,193 @@ def test_the_timeout_returns_within_its_bound_when_a_grandchild_holds_the_pipe(t
         for pid in pids:
             # Not `kill_pid_tree`: it would call the patched miss above and kill nothing.
             real_kill_tree(process_mod._PidHandle(pid))
+
+
+def _record_readers(monkeypatch) -> list:
+    """Every `_OutputReader` `run_supervised` makes, kept for the test to look into."""
+    made = []
+
+    class Recorded(process_mod._OutputReader):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    monkeypatch.setattr(process_mod, "_OutputReader", Recorded)
+    return made
+
+
+def _held_bytes(reader) -> int:
+    return sum(len(chunk) for chunks in list(reader._chunks.values()) for chunk in list(chunks))
+
+
+# A grandchild that inherits both pipes and writes to them until it is killed,
+# carrying on past a closed pipe; it ends itself after 60 s if nothing kills it.
+ESCAPED_WRITER = textwrap.dedent("""
+    import os, time
+    end = time.time() + 60
+    while time.time() < end:
+        for fd in (1, 2):
+            try:
+                os.write(fd, b"y" * 4096)
+            except OSError:
+                pass
+        time.sleep(0.01)
+""")
+
+
+def test_an_abandoned_drain_stops_readers_that_an_escaped_writer_keeps_busy(tmp_path, monkeypatch, caplog):
+    """The kill misses a grandchild that keeps writing: the call returns within its
+    bound with what was printed before the timeout, and then its readers end and
+    the bytes they hold stop growing, instead of reading for the backend's life."""
+    marker = tmp_path / "grandchild.pid"
+    body = textwrap.dedent(f"""
+        import subprocess, sys, time
+        print("before the timeout", flush=True)
+        g = subprocess.Popen([sys.executable, "-c", {ESCAPED_WRITER!r}])
+        open({str(marker)!r}, "w").write(str(g.pid))
+        time.sleep(60)
+    """)
+    readers = _record_readers(monkeypatch)
+    real_kill_tree = process_mod._kill_process_tree
+    monkeypatch.setattr(process_mod, "_kill_process_tree", lambda process: "the kill was made to miss")
+    started = time.monotonic()
+    try:
+        with caplog.at_level(logging.WARNING, logger=process_mod.__name__):
+            run = run_supervised([sys.executable, "-c", body], launcher="test(escaped)", timeout=2, ceiling_mb=0)
+        elapsed = time.monotonic() - started
+        assert run.timed_out and elapsed < 2 + process_mod._DRAIN_AFTER_KILL_SECONDS + 5, f"{elapsed:.1f} s"
+        assert run.stdout.startswith("before the timeout\n"), run.stdout[:200]
+        assert "read so far" in caplog.text and "stopping the readers" in caplog.text
+        (reader,) = readers
+        at_return = _held_bytes(reader)
+        assert _wait(lambda: not any(t.is_alive() for t in reader._threads), 5.0), \
+            "a reader still reads for a call that is over"
+        held = _held_bytes(reader)
+        assert held <= at_return + 2 * process_mod._READ_CHUNK_BYTES, (at_return, held)
+        assert marker.exists() and pr.probe_identity(int(marker.read_text()), None) != "gone", \
+            "the control: the writer is still alive, so the end is the readers' own"
+        time.sleep(0.5)
+        assert _held_bytes(reader) == held, "the bytes held still grow"
+    finally:
+        pids = [int(marker.read_text())] if marker.exists() else []
+        pids += [e.pid for e in pr.get_registry().entries() if e.launcher == "test(escaped)"]
+        for pid in pids:
+            real_kill_tree(process_mod._PidHandle(pid))
+
+
+# A child that writes about a thousand small chunks in one second.
+CHATTY = textwrap.dedent("""
+    import os, sys, time
+    end = time.time() + 1.0
+    last = None
+    while time.time() < end:
+        os.write(1, b"z" * 1024)
+        last = time.time()
+        time.sleep(0.001)
+    open(sys.argv[1], "w").write(repr(last))
+""")
+
+
+def _count_notes(monkeypatch) -> list:
+    registry = pr.get_registry()
+    notes = []
+    real = registry.note_output
+
+    def counted(pid, at=None):
+        notes.append(at)
+        real(pid, at)
+
+    monkeypatch.setattr(registry, "note_output", counted)
+    return notes
+
+
+def test_a_chatty_command_is_noted_about_ten_times_a_second_and_ends_at_its_last_bytes(tmp_path, monkeypatch):
+    marker = tmp_path / "last_write"
+    readers = _record_readers(monkeypatch)
+    notes = _count_notes(monkeypatch)
+    started = time.monotonic()
+    run = run_supervised([sys.executable, "-c", CHATTY, str(marker)], launcher="test(chatty)",
+                         timeout=30, ceiling_mb=0)
+    duration = time.monotonic() - started
+    assert run.returncode == 0, run.stderr
+    chunks = len(readers[0]._chunks["stdout"])
+    bound = duration / process_mod._OUTPUT_NOTE_MIN_INTERVAL_S + 2
+    assert chunks >= 3 * bound, f"the control: {chunks} chunks are too few to test a throttle of {bound:.0f}"
+    assert len(notes) <= bound, f"{len(notes)} notes for {chunks} chunks in {duration:.2f} s"
+    last_write = float(marker.read_text())
+    at = pr._epoch(_entry_of(pr.get_registry(), "test(chatty)").last_output_at)
+    assert abs(at - last_write) < 0.2, f"last_output_at is {at - last_write:+.3f} s from the last write"
+
+
+def test_the_end_carries_the_time_of_the_last_bytes_and_not_of_the_last_note(tmp_path, monkeypatch):
+    """With the throttle wider than the run, only the first chunk is noted while it
+    runs: the time of the second is the one given to the registry before the end."""
+    monkeypatch.setattr(process_mod, "_OUTPUT_NOTE_MIN_INTERVAL_S", 60.0)
+    marker = tmp_path / "last_write"
+    body = textwrap.dedent("""
+        import os, sys, time
+        os.write(1, b"first\\n")
+        time.sleep(0.6)
+        os.write(1, b"last\\n")
+        open(sys.argv[1], "w").write(repr(time.time()))
+        time.sleep(0.2)
+    """)
+    notes = _count_notes(monkeypatch)
+    run = run_supervised([sys.executable, "-c", body, str(marker)], launcher="test(last)",
+                         timeout=30, ceiling_mb=0)
+    assert run.stdout == "first\nlast\n"
+    assert len(notes) == 2, f"the first chunk and the end, not {len(notes)}"
+    after_write = float(marker.read_text())
+    at = pr._epoch(_entry_of(pr.get_registry(), "test(last)").last_output_at)
+    # The reader's time follows the write and precedes the child's own clock read
+    # after it by a little; ISO milliseconds truncate.
+    assert after_write - 0.05 <= at <= after_write + 0.2, f"{at - after_write:+.3f} s"
+
+
+# ------------------------------------------------------------ times compared as times
+
+class TestTimesAreComparedAsTimes:
+    T0 = pr._epoch("2026-10-26T05:00:00+00:00")
+
+    def _engine(self, stored):
+        registry = _fake_registry(clock=lambda: self.T0 - 60)
+        entry = registry.register(7_100_301, launcher="llamacpp_server", launcher_kind="subsystem",
+                                  command="llama-server", log_paths=[Path("engine.log")])
+        entry.last_output_at = stored
+        return registry, entry
+
+    @pytest.mark.parametrize("stored, later", [
+        # 05:00:00.5 UTC spelled at +07:00: as a string "12:..." sorts after "05:...".
+        ("2026-10-26T12:00:00.500+07:00", 1.0),
+        # No milliseconds and a Z: "Z" sorts after the "." of a later value.
+        ("2026-10-26T05:00:00Z", 0.1),
+    ])
+    def test_a_later_mtime_replaces_a_stored_value_whose_string_sorts_after_it(self, stored, later):
+        registry, entry = self._engine(stored)
+        mtime = pr._epoch(stored) + later
+        assert pr._iso(mtime) < stored, "the case: the strings order the other way"
+        pr.ResourceSampler(registry, probe=lambda pid, start: "gone", read_vram=lambda: None,
+                           read_mtime=lambda path: mtime).tick()
+        assert entry.last_output_at == pr._iso(mtime)
+
+    def test_an_earlier_mtime_does_not_replace_a_stored_value_whose_string_sorts_before_it(self):
+        stored = "2026-10-25T22:00:01.000-07:00"  # 05:00:01 UTC
+        registry, entry = self._engine(stored)
+        mtime = pr._epoch(stored) - 0.5
+        assert pr._iso(mtime) > stored, "the case: the strings order the other way"
+        pr.ResourceSampler(registry, probe=lambda pid, start: "gone", read_vram=lambda: None,
+                           read_mtime=lambda path: mtime).tick()
+        assert entry.last_output_at == stored
+
+    def test_a_note_earlier_than_the_held_time_does_not_move_it_back(self):
+        registry = _fake_registry()
+        entry = _tool(registry)
+        stored = "2026-10-25T22:00:01.000-07:00"
+        entry.last_output_at = stored
+        registry.note_output(entry.pid, pr._epoch(stored) - 0.5)
+        assert entry.last_output_at == stored
+        registry.note_output(entry.pid, pr._epoch(stored) + 0.5)
+        assert pr._epoch(entry.last_output_at) == pytest.approx(pr._epoch(stored) + 0.5, abs=1e-3)
 
 
 # ------------------------------------------------------------ engines: the log file's mtime

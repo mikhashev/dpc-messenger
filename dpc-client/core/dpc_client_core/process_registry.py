@@ -30,13 +30,20 @@ the walk the memory ceiling makes) and keeps peaks, never a series:
 - `cpu_seconds`, `io_read_bytes`, `io_write_bytes`: per process by (pid, creation
   time), the last value seen, summed over every process ever seen in the tree, so a
   total does not fall when a child exits. IO is None on macOS (psutil has none).
+  For descendants these are a lower bound: one that exits between two samples loses
+  what it used since the last sample that saw it, at most one interval's worth. On
+  Windows the root's own figures are exact (read through its handle at the end).
 - `peak_vram_mib`: engines only (`ENGINES`), summed over the tree. Windows: the PDH
   counter `\\GPU Process Memory(*)\\Dedicated Usage` through ctypes, a commitment
   that can exceed what the card holds; Linux: NVML through ctypes when it loads;
   macOS: None. The sampler never spawns a process (no `nvidia-smi`).
 - `last_output_at`: for a `run_supervised` child, when its readers last got bytes
-  (`note_output`); for an engine, the newest mtime of the log files it was
-  registered with (`log_paths`), from its start on.
+  (`note_output`, at most every 0.1 s while it writes, `_OUTPUT_NOTE_MIN_INTERVAL_S`
+  in `process.py`, then the exact time of the
+  last bytes once more before `end`); for an engine, the newest mtime of the log
+  files it was registered with (`log_paths`), from its start on. Times are compared
+  as times, never as ISO strings. None means no output was seen; a failed reading of
+  a log's mtime is logged once as a WARNING and leaves the field as it was.
 
 A command shorter than the interval (most of what agents run) wakes the sampler
 when it registers and is sampled at `EARLY_SAMPLES_S` before it joins the tick;
@@ -45,7 +52,10 @@ handle, which still holds the exited process. So a 0.2 s command gets RSS, commi
 CPU and IO on Windows (the commit and the child's own peak whatever the timing);
 RSS, CPU and IO on Linux and RSS and CPU on macOS, from whichever early sample
 found it alive (a command that ends inside the first few milliseconds can get
-nothing there). A failing reading leaves its field None and is logged once per
+nothing there). The Windows end reading sees the root process only: when the root
+is a launcher shim (a venv's `python.exe`, which starts the real interpreter as its
+child), a command that ends before the early samples find the child shows only the
+shim's few megabytes. A failing reading leaves its field None and is logged once per
 kind of failure; the thread holds the registry lock only to copy and to write.
 The figures reach the state file with the spawn and end writes, and when an open
 entry's peak rose by `PEAK_WRITE_RISE` (25 %) and `PEAK_WRITE_MIN_MB` (64 MB;
@@ -99,7 +109,14 @@ both written only by a persistent registry:
   Appended as the node ledger appends (a `.lock` sibling, `O_APPEND`, a torn last
   line healed by the next append); files whose date is more than `HISTORY_DAYS` (7)
   days old are removed at start. A failed append is logged once and never takes a
-  spawn or an end down.
+  spawn or an end down. The history begins with the first start of this code
+  (2026-10-26 12:08 +07); the entries of 2026-10-25 exist only in the state file,
+  without resources, and are not backfilled.
+
+The state-file write runs under the registry lock. Measured 2026-10-26 on the
+owner's Windows machine with a full file (200 finished entries, 156 KB): `register`
+median 4.0 ms (p90 4.3), `end` median 8.5 ms (p90 9.1), the JSONL append included;
+the sampler adds one such write at most every `PEAK_WRITE_MIN_INTERVAL_S`.
 
 **How many finished entries are kept in the state file** (ADR Q7): the newest
 `KEEP_FINISHED_MAX` (200), and none older than `KEEP_FINISHED_DAYS` (7). Open
@@ -420,6 +437,14 @@ def _epoch(iso: Optional[str]) -> Optional[float]:
         return datetime.fromisoformat(iso).timestamp() if iso else None
     except (TypeError, ValueError):
         return None
+
+
+def _is_later(epoch: float, iso: Optional[str]) -> bool:
+    """`epoch` is after the time `iso` holds, compared as times: two ISO strings
+    order by their characters, which a different offset or precision breaks.
+    A held value that is not a time is replaced."""
+    held = _epoch(iso)
+    return held is None or epoch > held
 
 
 def _ends_mid_line(path: Path) -> bool:
@@ -939,16 +964,19 @@ class ProcessRegistry:
             out.log(logging.WARNING if reason == "crashed" else logging.INFO, "%s", describe_end(entry))
         return entry
 
-    def note_output(self, pid: int) -> None:
-        """`pid` wrote to its stdout or stderr just now (`run_supervised`'s readers).
+    def note_output(self, pid: int, at: Optional[float] = None) -> None:
+        """`pid` wrote to its stdout or stderr at `at` (epoch seconds; now when
+        not given) - `run_supervised`'s readers, throttled, then once more with
+        the exact time of the last bytes before the end. A time earlier than the
+        one held does not move it back.
 
         Kept in memory only: the next write of the state file (a spawn, an end,
         the sampler's) carries it, so a chatty command costs no disk."""
-        at = _iso(self._clock())
+        when = self._clock() if at is None else at
         with self._lock:
             entry = self._open.get(pid)
-            if entry is not None:
-                entry.last_output_at = at
+            if entry is not None and _is_later(when, entry.last_output_at):
+                entry.last_output_at = _iso(when)
 
     # -- the resource sampler ---------------------------------------------------------
 
@@ -1645,10 +1673,8 @@ class ResourceSampler:
         if mtime is not None:
             began = _epoch(entry.started_at)
             # A log reopened for append keeps the last run's mtime until the engine writes.
-            if began is None or mtime >= began:
-                at = _iso(mtime)
-                if entry.last_output_at is None or at > entry.last_output_at:
-                    entry.last_output_at = at
+            if (began is None or mtime >= began) and _is_later(mtime, entry.last_output_at):
+                entry.last_output_at = _iso(mtime)
 
     def _write_if_risen_locked(self, now: float) -> None:
         """Rewrite the state file when a peak rose enough, at most once per

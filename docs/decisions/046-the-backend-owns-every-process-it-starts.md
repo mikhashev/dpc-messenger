@@ -228,11 +228,27 @@ holds on Windows only.
      stored; a series is read by nobody and grows. Commit is shown beside RSS because
      ADR-044 documents a death by commit with RAM to spare. The sampler reuses
      `_tree_memory_mb` and the `_watch_memory` poll's tree walk (`process.py`), and psutil,
-     which is already a dependency.
+     which is already a dependency. What a figure is worth: `cpu_seconds` and the IO of
+     descendants are a lower bound, because a descendant that exits between two samples
+     loses at most one interval of its last figures; on Windows the root's own figures are
+     exact, read through its handle at the end. That end reading sees the root process
+     only, so when a command's root is a launcher shim (a venv's `python.exe`, which starts
+     the real interpreter as its child), a command shorter than the first samples can show
+     only the shim's few megabytes.
    - **`last_output_at`** is when a child last wrote. `run_supervised` today reads output
      with one `communicate(timeout=…)`, which hides it, so this field means reading the
      streams incrementally; for an engine it is the modification time of its log file.
      It is what makes a stuck `| more` visible in a glance instead of an afternoon in logs.
+     The readers tell the registry at most once per 100 ms while a child writes, and give
+     it the exact time of the last bytes once more before the end, so the field is the
+     time of the last bytes and not of the last note; times are compared as times, never
+     as ISO strings. `last_output_at: null` means no output was seen; a failed reading
+     is logged once as a WARNING and leaves the field as it was. When a timeout's kill
+     misses a descendant that holds the pipes, the bounded drain gives up, returns the
+     text the readers already hold, and stops them: from then on a reader keeps nothing,
+     leaves at its next chunk and closes its own end of the pipe, so a descendant that
+     keeps writing does not grow the backend; a reader blocked on a silent pipe stays
+     blocked without growing.
    - **Persisted in two places,** both written only by the persistent registry
      (`start_persistent()`, which `run_service.py` calls once; the in-memory default and the
      tests never touch the home). The state file `<DPC_HOME>/process_registry.json` holds the
@@ -248,7 +264,9 @@ holds on Windows only.
      graph of point 8 reads the daily files: 200 entries would cut it to hours, and
      rewriting thousands of entries on every spawn and every end is too heavy. A line holds
      the entry as it was at its end; an `exit_code` that only a later report supplies is not
-     appended again.
+     appended again. The daily history begins with the first start of this code
+     (2026-10-26 12:08 +07); the entries of 2026-10-25 exist only in the state file,
+     without resources, and are not backfilled.
    - **A log line at both ends,** one at the start and one at the end that carries the exit
      reason; the start line `spawned pid N …` exists and gains the origin.
 
@@ -453,7 +471,11 @@ holds on Windows only.
   future self-restart of the backend, where the new process must outlive the old one,
   would need `BREAKAWAY_OK` for that one launch. The sampler thread and the registry file
   are new moving parts. `run_supervised` reads output incrementally instead of with one
-  `communicate`.
+  `communicate`. The state file is rewritten under the registry lock; measured
+  2026-10-26 on the owner's Windows machine with a full file (200 finished entries,
+  156 KB), `register` takes a median 4.0 ms (p90 4.3) and `end` a median 8.5 ms (p90
+  9.1), the JSONL append included; the sampler adds one such write at most every 10 s.
+  CPU and IO of descendants are a lower bound (point 3).
 - **Neutral:** the memory ceiling stays a poll (`process.py` says why). The POSIX arm of
   the breakaway question stays unmeasured until the Linux node runs it.
 - **Not decided here, on purpose:** file permissions from peers (the `proved_connection`
@@ -557,7 +579,8 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
   reader returns a mapping on Windows, the NVML reader None where its library is absent.
   Run 2026-10-25 on Windows only; the Linux arms (`VmHWM`, no commit, NVML absent) wait for
   CI on the ref; macOS is not covered by CI and was not run. NVML with a real NVIDIA card on
-  Linux was never run.
+  Linux was never run. Not tested, and written down in point 3 instead: the lower bound on
+  descendants' CPU and IO, and the launcher shim the Windows end reading sees alone.
 - [x] **`last_output_at`.** A child that prints, sleeps 2.5 s and prints again has
   `last_output_at` after the second print and its text unchanged
   (`test_the_time_of_the_last_output_is_after_the_second_print_and_the_text_is_unchanged`);
@@ -565,11 +588,26 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
   back exactly as text mode gave it
   (`test_output_with_crlf_a_lone_cr_and_invalid_bytes_comes_back_as_text_mode_gave_it`);
   the timeout with a grandchild holding the pipe and a kill that misses still returns
-  within its bound (`test_the_timeout_returns_within_its_bound_when_a_grandchild_holds_the_pipe`);
+  within its bound and returns what the child printed before the timeout
+  (`test_the_timeout_returns_within_its_bound_when_a_grandchild_holds_the_pipe`);
   an engine's is its log's mtime from its start on, Strata's the newer of its two logs
   (`test_an_engines_last_output_is_its_logs_mtime_from_its_start_on`,
   `test_a_strata_entry_reads_the_newer_of_the_launchers_and_the_engines_log`). Run
-  2026-10-25 on Windows; Linux waits for CI; macOS uncovered.
+  2026-10-25 on Windows; Linux waits for CI; macOS uncovered. The review fixes of
+  2026-10-26: a descendant that escaped the kill and keeps writing to both pipes does not
+  keep the readers alive, the call returns within its bound with the text read before
+  the timeout, and the bytes held stop growing while the writer still lives
+  (`test_an_abandoned_drain_stops_readers_that_an_escaped_writer_keeps_busy`); a child
+  writing about a thousand chunks a second is noted at most duration / 0.1 s + 2 times
+  and ends with `last_output_at` within 0.2 s of its last write
+  (`test_a_chatty_command_is_noted_about_ten_times_a_second_and_ends_at_its_last_bytes`);
+  with the throttle wider than the run the end still carries the time of the last bytes
+  (`test_the_end_carries_the_time_of_the_last_bytes_and_not_of_the_last_note`); an mtime
+  and a stored value whose ISO strings order the other way from their times (another
+  offset, no milliseconds, a `Z`) are ordered by time, and a note earlier than the held
+  time does not move it back (`TestTimesAreComparedAsTimes`). Each was falsified (the
+  stop flag, the returned text, the throttle, the final note, the numeric comparison)
+  and went red. Run 2026-10-26 on Windows only.
 - [ ] **Parent fields.** A descendant the backend did not start (the `ping` under a
   `cmd /c`) is entered with `parent_pid` and `parent_start_time`, the tree from the
   backend down to it can be rebuilt from the entries alone, and a parent whose start time
@@ -648,7 +686,8 @@ the table rests on `rg` and the reading, not on the graph. Not counted: `webbrow
 | Startup sweep | Done 2026-10-25 | `4ea0560f` |
 | Shutdown order in `service.shutdown` | Done 2026-10-25 | `4ea0560f` |
 | Review fixes: `stop_kind` (old key read), `engine_died`, `engine_switch` removed, precedence for stops announced after the stop began, fsync before the swap, the state file plus daily JSONL history, the asymmetry of a foreign kill written down; tests in `tests/test_the_process_registry_records_how_every_child_ends.py` | Done 2026-10-25 | `91a75a2e` |
-| Resource sampler (peaks, `last_output_at`): `ResourceSampler` in `process_registry.py`, one daemon thread every 2 s started by `start_resource_sampler()` from `run_service.py` after logging, stopped by `finish_shutdown()`; per open entry, only while `probe_identity` says "same", the tree's peak RSS and commit (never below the child's own OS peak), CPU and IO summed by (pid, creation time), VRAM for the engines (PDH on Windows, NVML on Linux, none on macOS); a new entry wakes it and gets early samples at 0, 0.1, 0.3 and 0.7 s, and on Windows `end()` reads the child's own lifetime figures through its `Popen` handle; the state file is rewritten when a peak rises by 25 % and 64 MB (256 MiB for VRAM), at most once per 10 s. `run_supervised` reads its pipes as they arrive (text decoded once at the end as text mode gave it) and notes `last_output_at`; an engine's is its log files' newest mtime (`log_paths` from both supervisors; Strata names the launcher's and the engine's log). Tests in `tests/test_the_sampler_records_what_each_child_used.py` | Done 2026-10-26 | the commit that carries this row |
+| Resource sampler (peaks, `last_output_at`): `ResourceSampler` in `process_registry.py`, one daemon thread every 2 s started by `start_resource_sampler()` from `run_service.py` after logging, stopped by `finish_shutdown()`; per open entry, only while `probe_identity` says "same", the tree's peak RSS and commit (never below the child's own OS peak), CPU and IO summed by (pid, creation time), VRAM for the engines (PDH on Windows, NVML on Linux, none on macOS); a new entry wakes it and gets early samples at 0, 0.1, 0.3 and 0.7 s, and on Windows `end()` reads the child's own lifetime figures through its `Popen` handle; the state file is rewritten when a peak rises by 25 % and 64 MB (256 MiB for VRAM), at most once per 10 s. `run_supervised` reads its pipes as they arrive (text decoded once at the end as text mode gave it) and notes `last_output_at`; an engine's is its log files' newest mtime (`log_paths` from both supervisors; Strata names the launcher's and the engine's log). Tests in `tests/test_the_sampler_records_what_each_child_used.py` | Done 2026-10-26 | `3d380706` |
+| Review fixes of the sampler and the readers: an abandoned drain returns the text read so far and stops its readers (they keep nothing more, leave at the next chunk and close their own end of the pipe); the output note throttled to once per 100 ms (`_OUTPUT_NOTE_MIN_INTERVAL_S`) with the exact time of the last bytes given before `end`, and `note_output` never moves the time back; `last_output_at` compared as a time, not an ISO string; the lower bound on descendants' CPU and IO, the launcher shim, the meaning of `null`, the start of the daily history and the measured cost of the state-file write written down | Done 2026-10-26 | the commit that carries this row |
 | Descendants entered by the sampler (parent fields) | Pending | — |
 | Spawn sites to the module; structural test | Pending | — |
 | Local API command; agent tools | Pending | — |

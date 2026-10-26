@@ -407,6 +407,11 @@ def _registry():
 
 _DRAIN_AFTER_KILL_SECONDS = 5
 _READ_CHUNK_BYTES = 65536
+# The registry hears of output at most this often: a chatty command reads a
+# 64 KiB chunk far more often than anyone needs `last_output_at` to move, and
+# each note takes the registry lock. The exact time of the last chunk is kept
+# by the reader and given to the registry once more before the end.
+_OUTPUT_NOTE_MIN_INTERVAL_S = 0.1
 
 
 def _decode_output(chunks: Sequence[bytes]) -> str:
@@ -420,15 +425,25 @@ def _decode_output(chunks: Sequence[bytes]) -> str:
 class _OutputReader:
     """Both pipes of a child, read as the bytes arrive, so the time of the last
     output is known (ADR-046 point 3, `last_output_at`). One daemon thread per
-    pipe; a thread a surviving grandchild keeps blocked is abandoned, as the
-    reader threads of `communicate()` were."""
+    pipe.
 
-    def __init__(self, process: "subprocess.Popen", on_output: Callable[[], None]):
+    After `abandon` a reader keeps nothing it reads, leaves at the next chunk and
+    closes its own end of the pipe, so a descendant that escaped the kill and keeps
+    writing does not grow the backend. One blocked on a silent pipe stays blocked,
+    holding what it had. Only the reading thread closes its stream: closing a
+    buffered reader another thread is blocked in can wait on that reader's lock.
+    """
+
+    def __init__(self, process: "subprocess.Popen", on_output: Callable[[float], None]):
         self._chunks: dict = {"stdout": [], "stderr": []}
+        # Each pipe's last chunk, wall clock, written only by its own reader.
+        self._last_chunk_at: dict = {"stdout": None, "stderr": None}
+        self._noted_at = float("-inf")  # monotonic; shared, a race costs one extra note
+        self._abandoned = False
         self._on_output = on_output
         self._threads = [
             threading.Thread(
-                target=self._collect, args=(getattr(process, name), self._chunks[name]),
+                target=self._collect, args=(getattr(process, name), name),
                 name=f"dpc-output-{process.pid}-{name}", daemon=True,
             )
             for name in ("stdout", "stderr")
@@ -436,20 +451,25 @@ class _OutputReader:
         for thread in self._threads:
             thread.start()
 
-    def _collect(self, stream: Any, sink: list) -> None:
+    def _collect(self, stream: Any, name: str) -> None:
         if stream is None:
             return
+        sink = self._chunks[name]
         read = getattr(stream, "read1", None) or stream.read
         try:
-            while True:
+            while not self._abandoned:
                 chunk = read(_READ_CHUNK_BYTES)
-                if not chunk:
+                if not chunk or self._abandoned:
                     break
                 sink.append(chunk)
-                try:
-                    self._on_output()
-                except Exception:
-                    pass  # the registry must never cost the output
+                self._last_chunk_at[name] = at = time.time()
+                now = time.monotonic()
+                if now - self._noted_at >= _OUTPUT_NOTE_MIN_INTERVAL_S:
+                    self._noted_at = now
+                    try:
+                        self._on_output(at)
+                    except Exception:
+                        pass  # the registry must never cost the output
         except (OSError, ValueError):
             pass  # the pipe was closed under the read
         finally:
@@ -458,6 +478,16 @@ class _OutputReader:
             except Exception:
                 pass
 
+    @property
+    def last_output_at(self) -> Optional[float]:
+        """When either pipe last gave bytes (epoch seconds), or None."""
+        times = [t for t in self._last_chunk_at.values() if t is not None]
+        return max(times) if times else None
+
+    def abandon(self) -> None:
+        """The call is over: keep nothing more, and leave at the next chunk."""
+        self._abandoned = True
+
     def wait(self, deadline: float) -> bool:
         """Both pipes at their end before `deadline` (monotonic)."""
         for thread in self._threads:
@@ -465,7 +495,9 @@ class _OutputReader:
         return not any(thread.is_alive() for thread in self._threads)
 
     def text(self) -> tuple:
-        return _decode_output(self._chunks["stdout"]), _decode_output(self._chunks["stderr"])
+        # Copies: after `abandon` a reader may still be between its check and its append.
+        return (_decode_output(list(self._chunks["stdout"])),
+                _decode_output(list(self._chunks["stderr"])))
 
 
 def _wait_for_output(process: "subprocess.Popen", output: _OutputReader, timeout: float) -> None:
@@ -485,7 +517,8 @@ def _drain_after_kill(process: "subprocess.Popen", output: Optional[_OutputReade
     code waited for it with no bound. A few seconds is enough to pick up what a
     dead process already wrote; past that the output is not worth a hung agent.
     With `output` (the readers `run_supervised` started) the same bound holds over
-    them; without it, over `communicate()`.
+    them, and a drain that gives up returns what they had read and stops them;
+    without it, over `communicate()`, and a drain that gives up returns nothing.
     """
     try:
         if output is None:
@@ -493,15 +526,28 @@ def _drain_after_kill(process: "subprocess.Popen", output: Optional[_OutputReade
         _wait_for_output(process, output, _DRAIN_AFTER_KILL_SECONDS)
         return output.text()
     except subprocess.TimeoutExpired:
+        if output is None:
+            log.warning(
+                "pipes still open %ss after killing pid %s — a descendant escaped the kill; "
+                "abandoning the output rather than waiting",
+                _DRAIN_AFTER_KILL_SECONDS, process.pid,
+            )
+            return ("", "")
+        output.abandon()
+        stdout, stderr = output.text()
         log.warning(
             "pipes still open %ss after killing pid %s — a descendant escaped the kill; "
-            "abandoning the output rather than waiting",
-            _DRAIN_AFTER_KILL_SECONDS, process.pid,
+            "returning the %d chars of stdout and %d of stderr read so far and "
+            "stopping the readers rather than waiting",
+            _DRAIN_AFTER_KILL_SECONDS, process.pid, len(stdout), len(stderr),
         )
-        return ("", "")
+        return stdout, stderr
     except Exception as exc:
         log.warning("draining pid %s after kill failed: %s", process.pid, exc)
-        return ("", "")
+        if output is None:
+            return ("", "")
+        output.abandon()
+        return output.text()
 
 
 # `subprocess.CREATE_NO_WINDOW` exists only on Windows; the value is spelled
@@ -650,7 +696,8 @@ def run_supervised(
     registry learns when the child last wrote (`last_output_at`); the text is
     decoded once at the end, exactly as `text=True, encoding="utf-8",
     errors="replace"` gave it. The bound is the same: the pipes' end and the
-    process's inside `timeout`, then the bounded drain after a kill.
+    process's inside `timeout`, then the bounded drain after a kill; a drain
+    that gives up returns what was read by then and stops the readers.
     """
     ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
     if ceiling is None:
@@ -727,9 +774,9 @@ def run_supervised(
         )
         watch_thread.start()
 
-    def _noted() -> None:
+    def _noted(at: float) -> None:
         if registry is not None:
-            registry.note_output(process.pid)
+            registry.note_output(process.pid, at)
 
     output = _OutputReader(process, _noted)
     run = SupervisedRun(ceiling_mb=ceiling)
@@ -777,6 +824,10 @@ def run_supervised(
             except Exception:
                 code = None
         try:
+            last = output.last_output_at
+            if last is not None:
+                # The notes were throttled; the entry ends with the last bytes' time.
+                registry.note_output(process.pid, last)
             ended = registry.end(process.pid, code)
         except Exception as exc:  # the registry must never take a finished command down
             log.warning("process registry: could not record the end of pid %s: %s", process.pid, exc)
