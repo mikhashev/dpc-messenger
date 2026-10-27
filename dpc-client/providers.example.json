@@ -270,19 +270,6 @@
       "_vision": "All Gemini models support image input natively"
     },
 
-    "github_models": {
-      "_comment": "GitHub Models - Free access to GPT-4o, Llama, Phi, Mistral using GitHub token",
-      "alias": "github_gpt4o",
-      "type": "github_models",
-      "model": "gpt-4o",
-      "api_key_env": "GITHUB_TOKEN",
-      "context_window": 128000,
-      "_setup": "Create GitHub PAT with 'models:read' permission at https://github.com/settings/tokens — set: export GITHUB_TOKEN='ghp_...'",
-      "_endpoint": "https://models.inference.ai.azure.com (automatically configured)",
-      "_rate_limits": "Free: 15 RPM / 150 RPD (low-complexity), 10 RPM / 50 RPD (high-complexity)",
-      "_available_models": ["gpt-4o", "gpt-4o-mini", "llama-3.3-70b", "phi-4", "mistral-large-2407", "mistral-nemo"]
-    },
-
     "gigachat": {
       "_comment": "GigaChat by Sberbank - 1M free tokens, 128K context, strong Russian language support",
       "alias": "gigachat_pro",
@@ -330,7 +317,7 @@
     "_comment": "Reference guide for provider configuration fields",
     "common_fields": {
       "alias": "User-friendly name for the provider (must be unique)",
-      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'llamacpp_server', 'local_whisper', 'dpc_agent', 'gemini', 'github_models', or 'gigachat'",
+      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'llamacpp_server', 'local_whisper', 'dpc_agent', 'gemini', or 'gigachat'",
       "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7', 'openai/whisper-large-v3')",
       "context_window": "Optional: Override default context window size in tokens",
       "temperature": "Optional: Model creativity/randomness (0.0-2.0). Leave it out unless you have chosen a value: on Ollama the model's own default applies, on DeepSeek the API's 1.0 does -- and DeepSeek ignores the field entirely while thinking is enabled (measured 2026-08-15)"
@@ -387,10 +374,6 @@
     },
     "gemini_fields": {
       "api_key_env": "Environment variable containing Google AI Studio API key (default: GEMINI_API_KEY)"
-    },
-    "github_models_fields": {
-      "api_key_env": "Environment variable containing GitHub PAT with models:read permission (default: GITHUB_TOKEN)",
-      "_note": "Endpoint https://models.inference.ai.azure.com is always used automatically"
     },
     "gigachat_fields": {
       "api_key_env": "Environment variable containing GigaChat authorization key (default: GIGACHAT_CREDENTIALS)",

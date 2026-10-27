@@ -24,7 +24,7 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'neuraldeep' | 'llamacpp_server' | 'strata' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'neuraldeep' | 'llamacpp_server' | 'strata' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'gigachat';
 
   type Provider = {
     alias: string;
@@ -1173,9 +1173,6 @@
     } else if (newProvider.type === 'gemini') {
       provider.api_key_env = 'GEMINI_API_KEY';
       provider.context_window = 1000000;
-    } else if (newProvider.type === 'github_models') {
-      provider.api_key_env = 'GITHUB_TOKEN';
-      provider.context_window = 128000;
     } else if (newProvider.type === 'gigachat') {
       provider.api_key_env = 'GIGACHAT_CREDENTIALS';
       provider.scope = 'GIGACHAT_API_PERS';
@@ -1540,7 +1537,9 @@
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
                         <option value="gemini">Google Gemini</option>
-                        <option value="github_models">GitHub Models</option>
+                        {#if (editedConfig.providers[i].type as string) === 'github_models'}
+                          <option value="github_models" disabled>GitHub Models (retired 2026-07-30; remove this alias)</option>
+                        {/if}
                         <option value="gigachat">GigaChat (Sberbank)</option>
                       </select>
                     </div>
@@ -3426,7 +3425,6 @@
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
                 <option value="gemini">Google Gemini</option>
-                <option value="github_models">GitHub Models</option>
                 <option value="gigachat">GigaChat (Sberbank)</option>
               </select>
             </div>
@@ -3448,7 +3446,6 @@
                     newProvider.type === 'deepseek' ? 'deepseek-v4-flash' :
                     newProvider.type === 'neuraldeep' ? 'qwen3.8-27b' :
                     newProvider.type === 'gemini' ? 'gemini-2.0-flash' :
-                    newProvider.type === 'github_models' ? 'gpt-4o' :
                     newProvider.type === 'gigachat' ? 'GigaChat-2-Pro' :
                     'claude-3-5-sonnet-20240620'
                   }
@@ -3506,7 +3503,7 @@
               </div>
             {/if}
 
-            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'deepseek' || newProvider.type === 'neuraldeep' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
+            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'deepseek' || newProvider.type === 'neuraldeep' || newProvider.type === 'gemini' || newProvider.type === 'gigachat'}
               <div class="form-group">
                 <label for="new-api-key-env">API Key Environment Variable</label>
                 <input
@@ -3519,7 +3516,6 @@
                     newProvider.type === 'neuraldeep' ? 'NEURALDEEP_API_KEY' :
                     newProvider.type === 'anthropic' ? 'ANTHROPIC_API_KEY' :
                     newProvider.type === 'gemini' ? 'GEMINI_API_KEY' :
-                    newProvider.type === 'github_models' ? 'GITHUB_TOKEN' :
                     'GIGACHAT_CREDENTIALS'
                   }
                   autocomplete="off"
@@ -3683,10 +3679,6 @@
                 <p>API key env var: GEMINI_API_KEY</p>
                 <p>Get a free key at Google AI Studio (aistudio.google.com)</p>
                 <p>All Gemini models support vision natively (1M token context)</p>
-              {:else if newProvider.type === 'github_models'}
-                <p>API key env var: GITHUB_TOKEN (needs models:read permission)</p>
-                <p>Endpoint: https://models.inference.ai.azure.com (auto-configured)</p>
-                <p>Free tier: 15 RPM / 150 RPD for low-complexity models</p>
               {:else if newProvider.type === 'gigachat'}
                 <p>API key env var: GIGACHAT_CREDENTIALS (from developers.sber.ru/studio)</p>
                 <p>Scope defaults to GIGACHAT_API_PERS (personal/free tier)</p>

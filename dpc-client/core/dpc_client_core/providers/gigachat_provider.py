@@ -12,7 +12,7 @@ class GigaChatProvider(AIProvider):
     """
     GigaChat provider by Sberbank using the official gigachat SDK.
 
-    Supports GigaChat-2-Pro, GigaChat-2-Max (vision), GigaChat-2-Lite.
+    Supports GigaChat-2-Pro, GigaChat-2-Max, GigaChat-2-Lite (text only here).
     All models have 128K context window.
 
     SSL Certificate: Sberbank requires the Russian НУЦ Минцифры CA cert.
@@ -77,7 +77,10 @@ class GigaChatProvider(AIProvider):
         return {}
 
     def supports_vision(self) -> bool:
-        return "Max" in self.model  # Only GigaChat-2-Max supports vision
+        # False until generate_with_vision exists here: Max may see images, but
+        # this adapter has no path that sends one, and callers (llm_manager.query,
+        # the agent's image routing) route a picture to whatever says yes.
+        return False
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
         try:

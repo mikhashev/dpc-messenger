@@ -1,9 +1,7 @@
 # dpc_client_core/providers/github_models_provider.py
 
-import os
-import asyncio
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 from .base import AIProvider
 
@@ -12,73 +10,40 @@ logger = logging.getLogger(__name__)
 
 class GitHubModelsProvider(AIProvider):
     """
-    GitHub Models provider using the azure-ai-inference SDK.
+    A retired provider kept for one release so that an existing alias of type
+    `github_models` loads instead of taking the backend down with it.
 
-    Provides access to GPT-4o, Llama, Phi, Mistral and other models
-    hosted at https://models.inference.ai.azure.com using a GitHub
-    Personal Access Token (models:read permission required).
+    GitHub retired GitHub Models, the inference API included, on 2026-07-30
+    (https://docs.github.com/en/github-models). The type is no longer offered
+    in the provider editor and the class makes no request: it does not even
+    need the `azure-ai-inference` SDK or a token any more. Each call raises
+    `RETIRED_MESSAGE`, so the user finds out what to do at the moment the alias
+    is used. Construction does not raise because `LLMManager` loads providers
+    in one pass and a failure there is not isolated to the alias: a
+    `RuntimeError` aborts the loading of every provider after it.
 
-    Free tier: 15 RPM / 150 RPD (low-complexity models),
-               10 RPM / 50 RPD (high-complexity models).
-
-    Auth: GITHUB_TOKEN environment variable.
-
-    The output count convention stays `unknown`: the product page
-    (https://docs.github.com/en/github-models/use-github-models/prototyping-with-ai-models)
-    documents no usage object at all — it now says GitHub Models was retired on
-    2026-07-30 and points at other services — so OpenAI's convention cannot be
-    borrowed for it on the strength of a shared request shape.
+    The output count convention stays `unknown`: the page above documents no
+    usage object, and no call is made.
     """
 
-    ENDPOINT = "https://models.inference.ai.azure.com"
-    VISION_MODELS = ["gpt-4o", "llama-3.2-11b-vision"]
+    RETIRED_MESSAGE = (
+        "GitHub Models was retired by GitHub on 2026-07-30 (including the inference "
+        "API), so provider alias '{alias}' of type github_models can no longer answer. "
+        "Remove this alias from the provider settings and use another provider."
+    )
 
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
-        try:
-            from azure.ai.inference import ChatCompletionsClient
-            from azure.core.credentials import AzureKeyCredential
-            self._UserMessage = None  # lazy import in methods
-        except ImportError:
-            raise RuntimeError(
-                f"GitHubModelsProvider '{alias}': Install azure-ai-inference — "
-                "run: poetry add azure-ai-inference"
-            )
-        token = config.get("api_key")
-        if not token:
-            token = os.getenv(config.get("api_key_env", "GITHUB_TOKEN"))
-        if not token:
-            raise ValueError(
-                f"GitHubModelsProvider '{alias}': No token found. "
-                "Set GITHUB_TOKEN or specify api_key_env in config."
-            )
-        self.client = ChatCompletionsClient(
-            endpoint=self.ENDPOINT,
-            credential=AzureKeyCredential(token),
-        )
-        logger.info(
-            f"GitHubModelsProvider '{alias}': Initialized with model '{self.model}' "
-            f"at {self.ENDPOINT}"
-        )
+        logger.warning("%s", self._retired())
+
+    def _retired(self) -> str:
+        return self.RETIRED_MESSAGE.format(alias=self.alias)
 
     def supports_vision(self) -> bool:
-        return any(m in self.model for m in self.VISION_MODELS)
+        return False
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
-        from azure.ai.inference.models import UserMessage
-        loop = asyncio.get_event_loop()
-        try:
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.client.complete(
-                    messages=[UserMessage(prompt)],
-                    model=self.model,
-                    temperature=self.temperature,
-                )
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            raise RuntimeError(f"GitHubModelsProvider '{self.alias}' failed: {e}") from e
+        raise RuntimeError(self._retired())
 
     async def generate_response_stream(
         self,
@@ -87,38 +52,7 @@ class GitHubModelsProvider(AIProvider):
         conversation_id: str = None,
         reasoning_effort: str = None,
     ) -> str:
-        # Accepted so every provider answers the same call, and not forwarded:
-        # whether this API has an equivalent has not been checked. Named rather
-        # than swallowed by **kwargs, so the next reader sees it is a decision.
-        from azure.ai.inference.models import UserMessage
-
-        def _stream():
-            result = []
-            with self.client.complete(
-                messages=[UserMessage(prompt)],
-                model=self.model,
-                temperature=self.temperature,
-                stream=True,
-            ) as stream:
-                for update in stream:
-                    if update.choices and update.choices[0].delta:
-                        result.append(update.choices[0].delta.content or "")
-            return result
-
-        loop = asyncio.get_event_loop()
-        try:
-            chunks = await loop.run_in_executor(None, _stream)
-            full_text = ""
-            for text in chunks:
-                full_text += text
-                if on_chunk and text:
-                    await on_chunk(text, conversation_id)
-            return full_text
-        except Exception as e:
-            raise RuntimeError(
-                f"GitHubModelsProvider '{self.alias}' streaming failed: {e}"
-            ) from e
+        raise RuntimeError(self._retired())
 
     async def close(self) -> None:
-        self.client.close()
-        logger.debug(f"GitHubModelsProvider '{self.alias}': Client closed")
+        pass  # holds no client

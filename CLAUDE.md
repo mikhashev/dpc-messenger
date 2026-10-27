@@ -522,7 +522,8 @@ Rollback: remove the keys + restart; FAISS state at
   - `providers/llamacpp_server_provider.py` (provider type `llamacpp_server`) - DPC-owned `llama-server` child, supervised by `managers/llama_server_supervisor.py` (ADR-040)
   - `providers/strata_provider.py` (provider type `strata`) - Strata launcher as a second supervised local child, `managers/strata_supervisor.py`; one local engine holds the card at a time (ADR-044)
   - `providers/ollama_provider.py`, `openai_provider.py`, `anthropic_provider.py`, `zai_provider.py`
-  - `providers/gemini_provider.py`, `gigachat_provider.py`, `github_models_provider.py`
+  - `providers/gemini_provider.py`, `gigachat_provider.py`
+  - `providers/github_models_provider.py` - retired stub (GitHub Models ended 2026-07-30): an old alias loads and each call says so; no longer offered in the editor
   - `providers/whisper_provider.py` - local Whisper transcription
   - `providers/remote_peer_provider.py` - remote inference over P2P
   - `providers/dpc_agent_provider.py` - agent-to-agent inference
@@ -1470,7 +1471,7 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 - **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-5.3, etc.) over the prepaid pay-per-token platform API (`zai` provider type, `zai_provider.py`). One provider, one endpoint — the `zai_coding` type is gone, see below
 - **Gemini**: Google Gemini models via `gemini_provider.py`
 - **GigaChat**: Sber GigaChat models via `gigachat_provider.py`
-- **GitHub Models**: GitHub-hosted models via `github_models_provider.py`
+- **GitHub Models**: retired by GitHub on 2026-07-30; `github_models_provider.py` stays one release so an old alias loads and fails each call with that message. Not offered in the editor
 - **Remote Peer**: Offload inference to a connected peer via `remote_peer_provider.py`
 - **Whisper**: Local transcription-only provider via `whisper_provider.py`
 
