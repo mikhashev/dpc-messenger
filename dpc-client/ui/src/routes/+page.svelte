@@ -4,6 +4,7 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { providerToRemember } from '$lib/utils/rememberedProvider';
+  import { DEFAULT_AI_CHAT_NAME, DEFAULT_CHAT_INSTRUCTION_SET } from '$lib/utils/aiChatStore';
   import { voteStatusAppliesTo } from '$lib/utils/voteStatusIdentity';
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
@@ -123,15 +124,15 @@
   // Store provider selection per chat (chatId -> provider alias)
   const chatProviders = writable<Map<string, string>>(new Map());
   // The reasoning level for a chat that has no agent to store one. An agent
-  // keeps its level in its own config and that path works; Local AI Chat is an
-  // entry in `aiChats` with no agent behind it, so its selector used to write to
+  // keeps its level in its own config and that path works; AI Chat (`local_ai`) is
+  // an entry in `aiChats` with no agent behind it, so its selector used to write to
   // `updateAgentConfig("local_ai")` and be answered «Agent not found» inside an
   // envelope that says OK. Same shape as `chatProviders` above, on purpose.
   const chatEfforts = writable<Map<string, string>>(new Map());
 
   // Store AI chat metadata (chatId -> {name: string, provider: string, instruction_set_name?: string})
   const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string, profile_name?: string, llm_provider?: string, compute_host?: string}>>(
-    new Map([['local_ai', {name: 'Local AI Chat', provider: '', instruction_set_name: 'general'}]])
+    new Map([['local_ai', {name: DEFAULT_AI_CHAT_NAME, provider: '', instruction_set_name: DEFAULT_CHAT_INSTRUCTION_SET}]])
   );
 
   // Track which chat each AI command belongs to (commandId -> chatId).
@@ -455,7 +456,7 @@
   // `else` branch — silently returning the user to `default_provider`, which on
   // this machine is a paid alias at max effort. Reproduced from the log: three
   // queries on a local free model, a detour into another chat, and the very next
-  // query back in Local AI Chat routed to `deepseek_flash` at `effort=max` for
+  // query back in the default AI Chat routed to `deepseek_flash` at `effort=max` for
   // «какое сегодня число?». The reverse direction would be harmless; this one is
   // billed.
   //

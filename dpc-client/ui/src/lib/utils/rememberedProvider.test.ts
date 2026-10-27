@@ -5,7 +5,7 @@
  *
  * Reproduced from the log rather than from a repro request: three queries on
  * `muse-glimmer:latest` (local, free), a detour into another chat, and the very
- * next query back in Local AI Chat routed to `deepseek_flash` — `default_provider`
+ * next query back in the default AI Chat routed to `deepseek_flash` — `default_provider`
  * — at `effort=max`, 487 reasoning tokens for «какое сегодня число?». The silent
  * switch has a direction, and it is towards money.
  */

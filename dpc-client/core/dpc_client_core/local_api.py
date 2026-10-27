@@ -695,7 +695,7 @@ class LocalApiServer:
             return
         # The third dispatch branch: a handler decorated @sends_own_response builds its
         # own envelope, so the two sites above never see it. execute_ai_query is here,
-        # and that is the Local AI Chat path the next two records are built on.
+        # and that is the default AI Chat path the next two records are built on.
         _log_error_under_ok(command, payload, status)
         response = {"id": command_id, "command": command, "status": status, "payload": payload}
         message = json.dumps(response)

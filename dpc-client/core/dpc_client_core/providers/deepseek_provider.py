@@ -438,7 +438,7 @@ class DeepSeekProvider(AIProvider):
         async def _call():
             # The caller's effort, not the alias ceiling. This read used to be
             # missing: `_build_extra_body()` took no argument here while the tools
-            # path passed one, so sleep, knowledge extraction and Local AI Chat
+            # path passed one, so sleep, knowledge extraction and the default AI Chat
             # could only ever run at the alias default — max on both DeepSeek
             # aliases at the time it was measured. The label at the bottom of this
             # function always read the caller's wish correctly, which is why the

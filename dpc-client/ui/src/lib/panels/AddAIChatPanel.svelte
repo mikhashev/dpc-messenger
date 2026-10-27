@@ -19,6 +19,7 @@
   } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
   import { resolveNewChatTarget, defaultAgentLlmAlias } from '$lib/utils/newChatTarget';
+  import { DEFAULT_CHAT_INSTRUCTION_SET } from '$lib/utils/aiChatStore';
 
   // ---------------------------------------------------------------------------
   // Types
@@ -65,7 +66,7 @@
   let showAddAIChatDialog = $state(false);
   let isAgentMode = $state(false);
   let selectedProviderForNewChat = $state('');
-  let selectedInstructionSetForNewChat = $state('general');
+  let selectedInstructionSetForNewChat = $state(DEFAULT_CHAT_INSTRUCTION_SET);
   let selectedProfileForNewAgent = $state('default');
   let newAgentName = $state('');
   let selectedAgentLLMProvider = $state('');
@@ -96,7 +97,7 @@
 
     isAgentMode = false;
     selectedProviderForNewChat = $availableProviders.default_provider;
-    selectedInstructionSetForNewChat = availableInstructionSets?.default || 'general';
+    selectedInstructionSetForNewChat = DEFAULT_CHAT_INSTRUCTION_SET;
     selectedProfileForNewAgent = 'default';
     showAddAIChatDialog = true;
   }
@@ -120,7 +121,7 @@
 
     isAgentMode = true;
     selectedProviderForNewChat = 'dpc_agent';
-    selectedInstructionSetForNewChat = availableInstructionSets?.default || 'general';
+    selectedInstructionSetForNewChat = DEFAULT_CHAT_INSTRUCTION_SET;
     selectedProfileForNewAgent = 'default';
     // The host survives a finished dialog; a peer's model is not the local one.
     if (selectedDialogComputeHost !== 'local') onHostChange(selectedDialogComputeHost);
@@ -256,7 +257,7 @@
 
   export async function handleDeleteAIChat(chatId: string, _ask?: any) {
     if (chatId === 'local_ai') {
-      await confirmAsync('Cannot delete the default Local AI chat.', { kind: 'info' });
+      await confirmAsync('Cannot delete the default AI Chat.', { kind: 'info' });
       return;
     }
 
@@ -458,7 +459,7 @@
 
       {#if !isAgentMode}
         <div class="dialog-provider-selector">
-          <label for="new-chat-provider">Chat Type:</label>
+          <label for="new-chat-provider">Model:</label>
           <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
             {#each providersOfHost(selectedDialogComputeHost) as provider}
               <option value={provider.alias}>
@@ -474,7 +475,7 @@
             {#if selectedProviderForNewChat === 'dpc_agent'}
               Agents are autonomous AI assistants with tool access (file system, web search, etc.)
             {:else}
-              Standard AI chat using the selected provider
+              Standard AI chat with the selected model
             {/if}
           </p>
         </div>

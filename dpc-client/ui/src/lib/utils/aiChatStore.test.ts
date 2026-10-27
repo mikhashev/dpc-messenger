@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import pageSrc from '../../routes/+page.svelte?raw';
+import chatPanelSrc from '../panels/ChatPanel.svelte?raw';
+import addChatSrc from '../panels/AddAIChatPanel.svelte?raw';
 import {
     LEGACY_AI_CHATS_KEY,
     LEGACY_AI_CHAT_HISTORIES_KEY,
@@ -12,6 +15,10 @@ import {
     answersFreshInstall,
     eraseLegacyChatStore,
     FINAL_IMPORT_STATUSES,
+    DEFAULT_AI_CHAT_NAME,
+    DEFAULT_CHAT_INSTRUCTION_SET,
+    NO_INSTRUCTION_SET,
+    chatInstructionSet,
 } from './aiChatStore';
 
 function storage(items: Record<string, string>) {
@@ -203,5 +210,33 @@ describe('a fresh install (~/.dpc did not exist at the backend start)', () => {
             removeItem: () => { throw new Error('denied'); },
         };
         expect(eraseLegacyChatStore(refusing)).toEqual([]);
+    });
+});
+
+describe('the default chat and a new AI chat start with no instruction set', () => {
+    it('is named AI Chat, and a record without a name is too', () => {
+        expect(DEFAULT_AI_CHAT_NAME).toBe('AI Chat');
+        expect(sidebarEntry({ conversation_id: 'ai_chat_1', provider: 'qwen' })![1].name).toBe('AI Chat');
+    });
+
+    it('sends "none", the value the backend answers with an empty system instruction', () => {
+        expect(NO_INSTRUCTION_SET).toBe('none');
+        expect(DEFAULT_CHAT_INSTRUCTION_SET).toBe('none');
+        expect(chatInstructionSet(undefined)).toBe('none');
+        expect(chatInstructionSet({})).toBe('none');
+        expect(chatInstructionSet({ instruction_set_name: '' })).toBe('none');
+    });
+
+    it('keeps a set the person picked', () => {
+        expect(chatInstructionSet({ instruction_set_name: 'general' })).toBe('general');
+        expect(chatInstructionSet({ instruction_set_name: 'coder' })).toBe('coder');
+    });
+
+    it('is read from the constants by the three places that seed or send it, not from a literal', () => {
+        const page = pageSrc;
+        expect(page).toContain("name: DEFAULT_AI_CHAT_NAME, provider: '', instruction_set_name: DEFAULT_CHAT_INSTRUCTION_SET");
+        expect(page).not.toContain('Local AI Chat');
+        expect(chatPanelSrc).not.toMatch(/instruction_set_name\s*\|\|\s*'general'/);
+        expect(addChatSrc).not.toMatch(/availableInstructionSets\?\.default\s*\|\|/);
     });
 });

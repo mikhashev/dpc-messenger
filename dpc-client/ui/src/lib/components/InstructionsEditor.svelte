@@ -79,7 +79,7 @@
   let wizardLocalProviders = $state<Array<any>>([]);  // Cached local providers
   let isGenerating = $state<boolean>(false);
 
-  // Merged providers (local + remote based on selected host) - matches Local AI chat pattern
+  // Merged providers (local + remote based on selected host) - matches AI Chat pattern
   let wizardMergedProviders = $derived.by(() => {
     const local = wizardLocalProviders.map((p: any) => ({
       ...p,
@@ -371,7 +371,7 @@
     }
   }
 
-  // Helper function to parse provider selection (matches Local AI chat pattern)
+  // Helper function to parse provider selection (matches AI Chat pattern)
   function parseProviderSelection(uniqueId: string): { source: 'local' | 'remote', alias: string, nodeId?: string } {
     if (!uniqueId) return { source: 'local', alias: '' };
 
@@ -1019,7 +1019,7 @@
 
       <div class="wizard-dialog-body">
         {#if !isGenerating}
-          <!-- AI Host & Model Selection (matches Local AI chat pattern) -->
+          <!-- AI Host & Model Selection (matches AI Chat pattern) -->
           <div class="wizard-model-selection">
             <!-- AI Host Dropdown -->
             <label for="wizard-host">

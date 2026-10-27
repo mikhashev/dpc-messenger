@@ -1,4 +1,4 @@
-"""Local AI Chat renders a Reasoning control that reached nothing.
+"""The default AI Chat renders a Reasoning control that reached nothing.
 
 Two independent halves, measured through the running service on 2026-08-15:
 the value was written to `updateAgentConfig("local_ai")`, which answers «Agent

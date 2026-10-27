@@ -33,6 +33,24 @@ export type AIChatMeta = {
     compute_host?: string;
 };
 
+/** The default chat's sidebar name. It is never stored: the backend keeps no `local_ai` record. */
+export const DEFAULT_AI_CHAT_NAME = 'AI Chat';
+
+/**
+ * The value of `instruction_set_name` that sends no instruction set
+ * (PromptManager._build_system_instruction answers "" for it). An unset value is
+ * not the same: the backend turns a missing one into the global default set.
+ */
+export const NO_INSTRUCTION_SET = 'none';
+
+/** What the default chat and a new AI chat start with; the person may pick a set. */
+export const DEFAULT_CHAT_INSTRUCTION_SET = NO_INSTRUCTION_SET;
+
+/** The instruction set a chat sends, so that an unset one is sent as "none" and not left to the backend's default. */
+export function chatInstructionSet(meta: Pick<AIChatMeta, 'instruction_set_name'> | undefined | null): string {
+    return meta?.instruction_set_name || DEFAULT_CHAT_INSTRUCTION_SET;
+}
+
 type StoredObject = Record<string, any>;
 
 export interface LegacyChatStore {
@@ -262,7 +280,7 @@ export function sidebarEntry(chat: any): [string, AIChatMeta] | null {
             instruction_set_name: 'general',
         }];
     }
-    const meta: AIChatMeta = { name: chat.name || 'AI Chat', provider: chat.provider ?? '' };
+    const meta: AIChatMeta = { name: chat.name || DEFAULT_AI_CHAT_NAME, provider: chat.provider ?? '' };
     for (const key of ['instruction_set_name', 'profile_name', 'llm_provider', 'compute_host'] as const) {
         if (typeof chat[key] === 'string' && chat[key]) meta[key] = chat[key];
     }

@@ -297,7 +297,7 @@ async def test_a_command_that_succeeded_says_nothing(caplog):
 async def test_a_handler_that_answers_for_itself_is_covered_too(caplog):
     """The third dispatch branch: @sends_own_response builds its own envelope.
 
-    execute_ai_query is one of the two, and it is the Local AI Chat path, so
+    execute_ai_query is one of the two, and it is the default AI Chat path, so
     leaving it out would mean the next two records are accepted on a path where
     an error under OK is still silent.
     """

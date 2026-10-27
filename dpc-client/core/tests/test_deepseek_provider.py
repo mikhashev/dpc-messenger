@@ -680,7 +680,7 @@ async def test_a_retried_stream_delivers_each_token_exactly_once(monkeypatch):
 @pytest.mark.asyncio
 async def test_the_plain_path_sends_the_callers_effort_and_not_the_alias_ceiling():
     """`_build_extra_body()` was called with no argument here while the tools path
-    passed one, so sleep, knowledge extraction and Local AI Chat could only ever
+    passed one, so sleep, knowledge extraction and the default AI Chat could only ever
     run at the alias default — max on both live aliases when it was measured, over
     118 plain calls. The label was read from the same body and was therefore
     honest, which is why nothing looked wrong."""

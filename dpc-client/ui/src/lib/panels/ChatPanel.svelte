@@ -45,6 +45,7 @@
   import { untrack } from 'svelte';
   import { confirmAsync } from '$lib/utils/dialog';
   import { appendToChatDraft, switchChatDraft } from '$lib/utils/chatDraftInputs';
+  import { chatInstructionSet } from '$lib/utils/aiChatStore';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
 
   type AIChatMeta = {
@@ -252,7 +253,7 @@
     })
   ));
 
-  let selectedInstructionSet = $derived($aiChats.get(activeChatId)?.instruction_set_name || 'general');
+  let selectedInstructionSet = $derived(chatInstructionSet($aiChats.get(activeChatId)));
 
   // ---------------------------------------------------------------------------
   // Effects
@@ -733,7 +734,7 @@
       include_context: includePersonalContext,
       conversation_id: backendConvId,
       ai_scope: selectedAIScope || null,
-      instruction_set_name: chatMeta?.instruction_set_name || 'general',
+      instruction_set_name: chatInstructionSet(chatMeta),
     };
     if (selectedPeerContexts.size > 0) payload.context_ids = Array.from(selectedPeerContexts);
 
