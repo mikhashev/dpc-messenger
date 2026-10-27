@@ -4,7 +4,6 @@
 <script lang="ts">
   import { providerAccounts, getProviderBalances, sendCommand } from '$lib/coreService';
   import {
-    cachedPeerLine,
     cachedPeerLines,
     cachedPeerName,
     cachedPeerSeen,
@@ -1162,20 +1161,6 @@
                 {#if cachedPeerSeen(peer)}<span class="cached-peer-seen">seen {cachedPeerSeen(peer)}</span>{/if}
                 <code class="cached-peer-id">{peer.node_id}</code>
               </div>
-              <div class="cached-peer-buttons">
-                <button
-                  type="button"
-                  class="copy-btn-icon"
-                  onclick={() => copyCachedPeer('Node ID', peer.node_id)}
-                  title="Copy the node ID"
-                >📋 ID</button>
-                <button
-                  type="button"
-                  class="copy-btn-icon"
-                  onclick={() => copyCachedPeer('Name and node ID', cachedPeerLine(peer))}
-                  title="Copy the name and the node ID"
-                >📋 Name + ID</button>
-              </div>
             </div>
           {/each}
           <div class="dialog-actions">
@@ -2005,12 +1990,6 @@
     word-break: break-all;
     user-select: text;
     -webkit-user-select: text;
-  }
-
-  .cached-peer-buttons {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
   }
 
   /* DPC URI Styles - Redesigned for better UX */
