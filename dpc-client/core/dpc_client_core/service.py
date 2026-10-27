@@ -10371,6 +10371,21 @@ class CoreService:
         if state.get("status") == "sleeping":
             return {"status": "already_sleeping", "state": state}
 
+        # Sleep consolidates the memory a turn reads, on the same provider, so it
+        # does not start beside a turn in any chat — the 1:1 history above only
+        # knows this chat. A chat waiting at the agent's gate counts too: it would
+        # start its turn the moment sleep began. The message names the running
+        # turn's chat, else the first one in line.
+        from dpc_client_core.dpc_agent.run_gate import agent_turn_snapshot
+        snapshot = agent_turn_snapshot(agent_id)
+        busy = snapshot.get("turn") or (snapshot.get("waiting") or [None])[0]
+        if busy is not None:
+            chat = (busy.get("conversation_title") or busy.get("conversation_id")
+                    or "another chat")
+            return {"status": "error",
+                    "message": f"{self._get_agent_display_name(agent_id)} is busy in {chat}"
+                               " — start sleep after the turn ends"}
+
         # Read per-agent sleep LLM override
         agent_config = load_agent_config(agent_id)
         sleep_provider = agent_config.get("sleep_provider_alias") or None

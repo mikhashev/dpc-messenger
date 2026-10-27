@@ -261,8 +261,17 @@
     return filtered;
   });
 
-  function handleToggleSleep() {
-    sendCommand('toggle_sleep', { agent_id: activeChatId });
+  async function handleToggleSleep() {
+    // A refusal (the agent is in a turn) comes back as a response, not an event;
+    // without this the button press would do nothing and say nothing.
+    const result: any = await sendCommand('toggle_sleep', { agent_id: activeChatId });
+    const refusal = result?.status === 'error' ? result.message : '';
+    if (refusal) {
+      agentToastMessage = refusal;
+      agentToastType = 'warning';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 5000);
+    }
   }
 
   async function handleGroupSleep() {
