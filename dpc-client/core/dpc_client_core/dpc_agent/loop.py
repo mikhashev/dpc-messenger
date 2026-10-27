@@ -1216,9 +1216,12 @@ async def _finalize_after_guard_stop(
     Two exceptions: after ContextLimitGuard the call is skipped, and a
     user stop during the call cancels it.
 
-    Every return marks the trace's `turn_end`: `guard`, the finalised answer
-    included, since the guard is what ended the turn; a user stop on the way
-    out is `stopped` (or `killed`).
+    The trace's `turn_end` is marked where no answer comes back: `guard` for
+    the stop message or fallback text that stands in for one, `stopped` (or
+    `killed`) for a user stop on the way out. A finalised answer is an ordinary
+    answer and leaves `turn_end` unset; that a guard ended the loop and the
+    model then answered is kept as `llm_trace["guard_answered"] = True`, in
+    memory only, for whoever reads the trace after the turn.
     """
     mw = hooks.last_triggered
     stop_msg = mw.stop_message() if mw is not None else None
@@ -1315,8 +1318,9 @@ async def _finalize_after_guard_stop(
             final_msg.get("content") or "", llm_trace, unrun, keep=keep_unexecuted,
         )
         if answer:
-            # Written under "stop and answer": the turn was still ended by the guard.
-            llm_trace["turn_end"] = "guard"
+            # Written under "stop and answer", but written: the person gets an
+            # answer, so the record is an ordinary one (no turn_end).
+            llm_trace["guard_answered"] = True
             return answer, accumulated_usage, llm_trace
     except Exception:
         log.warning("Failed to get final response after guard stop", exc_info=True)

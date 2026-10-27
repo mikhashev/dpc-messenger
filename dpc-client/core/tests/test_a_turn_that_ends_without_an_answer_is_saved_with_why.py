@@ -195,23 +195,31 @@ class _FinalLlm:
 
 
 @pytest.mark.asyncio
-async def test_a_guard_stop_is_guard_whichever_way_it_ends():
+async def test_a_guard_stop_is_guard_only_when_no_answer_comes_back():
     at_edge = ContextLimitGuard()
     at_edge._seen_ratio = 1.02
     text, _u, trace = await _finalize_after_guard_stop(
         _stopped_by(at_edge), [], _FinalLlm(), None, "c", {}, {},
         fallback_reason="stopped", stop_event=asyncio.Event())
     assert text.startswith("[CONTEXT_LIMIT]") and trace["turn_end"] == "guard"
-
-    text, _u, trace = await _finalize_after_guard_stop(
-        _stopped_by(ResearchLimitGuard()), [], _FinalLlm(), None, "c", {}, {},
-        fallback_reason="stopped", stop_event=asyncio.Event())
-    assert text == "final answer" and trace["turn_end"] == "guard"
+    assert "guard_answered" not in trace
 
     text, _u, trace = await _finalize_after_guard_stop(
         _stopped_by(ResearchLimitGuard()), [], _FinalLlm(fail=True), None, "c", {}, {},
         fallback_reason="⚠️ Agent loop stopped by guard.", stop_event=asyncio.Event())
     assert "[RESEARCH_LIMIT]" in text and trace["turn_end"] == "guard"
+    assert "guard_answered" not in trace
+
+
+@pytest.mark.asyncio
+async def test_an_answer_written_after_a_guard_stop_is_an_ordinary_answer():
+    text, _u, trace = await _finalize_after_guard_stop(
+        _stopped_by(ResearchLimitGuard()), [], _FinalLlm(), None, "c", {}, {},
+        fallback_reason="stopped", stop_event=asyncio.Event())
+
+    assert text == "final answer"
+    assert "turn_end" not in trace
+    assert trace["guard_answered"] is True
 
 
 @pytest.mark.asyncio
@@ -251,6 +259,30 @@ async def test_a_full_context_refusal_is_a_guard_and_drops_the_previous_turns_st
     assert text.startswith("⚠️ Context window full")
     assert agent._last_trace == {"turn_end": "guard"}
     assert agent._last_usage == {}
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_raises_leaves_nothing_of_the_previous_one_on_the_agent(
+    tmp_path, monkeypatch,
+):
+    def _boom(**kw):
+        raise RuntimeError("the prompt could not be built")
+
+    monkeypatch.setattr(agent_mod, "build_llm_messages", _boom)
+    agent = DpcAgent.__new__(DpcAgent)
+    agent.agent_root = tmp_path
+    agent.memory = agent.skill_store = agent._firewall = agent._embedding_provider = None
+    agent._get_allowed_tools = lambda **kw: set()
+    agent._runtime_billing_model = lambda: None
+    agent._provider_facts = lambda: {}
+    agent._last_usage = {"total_tokens": 500, "thinking": "last turn's thinking"}
+    agent._last_trace = {"accumulated_tool_calls": [{"tool": "read_file"}]}
+
+    with pytest.raises(RuntimeError):
+        await agent.process("hi", CID)
+
+    assert agent._last_usage == {}
+    assert agent._last_trace == {}
 
 
 # --- what lands in history.json --------------------------------------------------------
@@ -341,12 +373,14 @@ CASES = [
     ("[ROUND_LIMIT] Task exceeded MAX_ROUNDS (200).", {"turn_end": "guard"}, "guard"),
     (NOT_DONE, {}, None),
     ("A normal answer.", {}, None),
+    ("The guard stopped the research; this is what I found.", {"guard_answered": True}, None),
 ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("text, trace, expected", CASES,
-                         ids=["stopped", "killed", "failed", "refused", "guard", "not-done", "answer"])
+                         ids=["stopped", "killed", "failed", "refused", "guard", "not-done", "answer",
+                              "guard-answered"])
 async def test_the_turn_is_saved_and_says_why(tmp_path, signing_identity, text, trace, expected):
     monitor = _monitor(tmp_path)
     manager = _manager(_FakeAgent(text, trace), monitor)
@@ -407,6 +441,59 @@ def test_a_value_outside_the_closed_set_is_refused(tmp_path):
     with pytest.raises(ValueError):
         _monitor(tmp_path).add_message(role="assistant", content="x", turn_end="cancelled")
     assert TURN_END_VALUES == {"stopped", "killed", "failed", "refused", "guard"}
+
+
+class _RaisingAgent(_FakeAgent):
+    """Carries the previous turn's numbers and raises before writing this turn's."""
+
+    def __init__(self, error):
+        super().__init__("unused", {})
+        self.error = error
+        self._last_usage = {"total_tokens": 500, "thinking": "previous turn"}
+        self._last_trace = {"turn_end": "failed",
+                            "accumulated_tool_calls": [{"tool": "old"}]}
+
+    async def process(self, **kwargs):
+        self.calls += 1
+        raise self.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError("boom"), asyncio.CancelledError()],
+                         ids=["raised", "cancelled"])
+async def test_a_turn_that_does_not_finish_adds_nothing_to_the_quota_and_saves_no_old_trace(
+    tmp_path, signing_identity, error,
+):
+    monitor = _monitor(tmp_path)
+    agent = _RaisingAgent(error)
+    manager = _manager(agent, monitor, config={"quota_tokens_per_day": 100_000})
+
+    with pytest.raises(type(error)):
+        await manager._process_message_guarded("hello", CID)
+
+    assert manager._daily_tokens_used == 0
+    assert agent._last_usage == {} and agent._last_trace == {}
+    assert [m["role"] for m in _on_disk(tmp_path)] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_written_after_a_guard_stop_is_saved_as_an_answer_and_learned_from(
+    tmp_path, signing_identity,
+):
+    from dpc_client_core.dpc_agent.sleep_pipeline import _format_archive_messages
+
+    monitor = _monitor(tmp_path)
+    answer = "The guard stopped the research; this is what I found."
+    await _manager(_FakeAgent(answer, {"guard_answered": True}), monitor
+                   )._process_message_guarded("hello", CID)
+
+    raw = (tmp_path / CID / "history.json").read_text(encoding="utf-8")
+    user, rec = _on_disk(tmp_path)
+    assert "turn_end" not in rec and "guard_answered" not in raw
+    assert [m.text for m in monitor.message_buffer] == ["hello", answer]
+    assert [m.text for m in monitor.full_conversation] == ["hello", answer]
+    assert _format_archive_messages({"messages": [user, rec]}).splitlines() == [
+        "[User]: hello", "[Ark]: " + answer]
 
 
 # --- knowledge sees only the conversation ---------------------------------------------

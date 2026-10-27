@@ -1169,6 +1169,12 @@ class DpcAgentManager:
                 self._interrupt_events[conversation_id] = interrupt_ev
                 kill_ev = asyncio.Event()
                 self._kill_events[conversation_id] = kill_ev
+                # The `finally` below and the record after it read these from the
+                # agent. process() clears them as it starts; this covers a turn
+                # that never reaches that line, so the previous turn's tokens are
+                # not added to the quota twice nor its trace saved on this record.
+                agent._last_usage = {}
+                agent._last_trace = {}
                 response = await agent.process(
                     message=message,
                     conversation_id=conversation_id,

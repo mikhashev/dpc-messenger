@@ -362,6 +362,13 @@ class DpcAgent:
         Returns:
             Agent's response text
         """
+        # A turn starts with nothing of the last one. These are written at the
+        # turn's end, and a turn that raises or is cancelled before it never
+        # writes them: the caller would read the previous turn's tokens (added
+        # to the daily quota a second time) and its trace (saved on this record).
+        self._last_usage = {}
+        self._last_trace = {}
+
         task = {
             "id": conversation_id,
             "type": "chat",
