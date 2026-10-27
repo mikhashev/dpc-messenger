@@ -19,14 +19,18 @@
   import { agentTurns, agentsList } from '$lib/services/agents';
   import {
     PROCESS_POLL_MS,
+    COMMAND_CUT_NOTE,
     SYSTEM_OPEN_BY_DEFAULT,
     buildAgentMap,
     buttonSummary,
     pickSelected,
     plural,
+    toggleExpanded,
     turnsKey,
+    type MapProcessDetail,
     type ProcessListing,
   } from '$lib/utils/agentMap';
+  import { copyText } from '$lib/utils/clipboard';
   import { freeCommitLine } from '$lib/utils/strataFields';
   import {
     HEADER_HEIGHT,
@@ -47,6 +51,38 @@
   let systemOpen = $state(SYSTEM_OPEN_BY_DEFAULT);
   let selectedId = $state<string | null>(null);
   let inFlight = false;
+
+  // Expanded rows, by the entry's pid + start time (or the system item's key), so a
+  // poll that rebuilds the rows leaves them open. Picking another agent closes them.
+  let expanded = $state<Set<string>>(new Set());
+  let copyNote = $state<{ key: string; text: string } | null>(null);
+
+  function toggleRow(key: string) {
+    expanded = toggleExpanded(expanded, key);
+  }
+
+  // A press that ends a text selection in the row is the selecting, not a toggle.
+  function rowClick(key: string) {
+    if (window.getSelection()?.toString()) return;
+    toggleRow(key);
+  }
+
+  function rowKeydown(e: KeyboardEvent, key: string) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    toggleRow(key);
+  }
+
+  function selectAgent(id: string) {
+    if (id !== selected?.agent_id) expanded = new Set();
+    copyNote = null;
+    selectedId = id;
+  }
+
+  async function copyCommand(d: MapProcessDetail) {
+    const ok = await copyText(d.command);
+    copyNote = { key: d.key, text: ok ? 'Copied.' : 'Could not copy; select the text and copy it by hand.' };
+  }
 
   // The window: its box, whether it is only the header bar, and the gesture under the pointer.
   let rect = $state<WindowRect>({ x: 0, y: 0, width: 0, height: 0 });
@@ -186,6 +222,25 @@
   }
 </script>
 
+{#snippet commandDetail(d: MapProcessDetail)}
+  <div class="cmd-block">
+    <div class="cmd-bar">
+      <span class="section-label">COMMAND</span>
+      <button type="button" class="copy-button" onclick={() => copyCommand(d)}>Copy</button>
+      {#if copyNote?.key === d.key}<span class="muted tiny" role="status">{copyNote.text}</span>{/if}
+    </div>
+    <pre class="cmd-full">{d.command}</pre>
+    {#if d.commandCut}<span class="muted tiny">{COMMAND_CUT_NOTE}</span>{/if}
+    {#if d.fields.length}
+      <dl class="fields">
+        {#each d.fields as f (f.label)}
+          <dt>{f.label}</dt><dd>{f.value}</dd>
+        {/each}
+      </dl>
+    {/if}
+  </div>
+{/snippet}
+
 <svelte:window onkeydown={handleKeydown} onresize={refit} />
 
 {#if open}
@@ -260,7 +315,7 @@
                   type="button"
                   class="agent-card"
                   class:selected={selected?.agent_id === a.agent_id}
-                  onclick={() => (selectedId = a.agent_id)}
+                  onclick={() => selectAgent(a.agent_id)}
                 >
                   <span class="card-top">
                     <span class="dot {a.dot}"></span>
@@ -293,8 +348,29 @@
                   <div class="twig">
                     <div class="twig-line short"></div>
                     <div class="system-item">
-                      <span class="system-name"><span class="dot {s.alive ? 'working' : 'idle'}"></span>{s.name}</span>
-                      <span class="muted tiny">{s.line}</span>
+                      <div
+                        class="expander"
+                        role="button"
+                        tabindex="0"
+                        aria-expanded={expanded.has(s.key)}
+                        title="Show the full command"
+                        onclick={() => rowClick(s.key)}
+                        onkeydown={(e) => rowKeydown(e, s.key)}
+                      >
+                        <span class="system-name">
+                          <span class="chevron" aria-hidden="true">{expanded.has(s.key) ? '▾' : '▸'}</span>
+                          <span class="dot {s.alive ? 'working' : 'idle'}"></span>{s.name}
+                        </span>
+                        <span class="muted tiny">{s.line}</span>
+                      </div>
+                      {#if expanded.has(s.key)}
+                        <div class="system-details">
+                          {#each s.details as d (d.key)}
+                            {#if s.details.length > 1}<span class="muted tiny">{d.title}</span>{/if}
+                            {@render commandDetail(d)}
+                          {/each}
+                        </div>
+                      {/if}
                     </div>
                   </div>
                 {/each}
@@ -349,19 +425,33 @@
                 <div class="table-scroll">
                   <div class="proc-table">
                     <div class="proc-row proc-head">
-                      <span></span><span>pid</span><span>command</span><span>chat</span><span>started</span><span>for</span><span>RSS</span><span>commit</span><span>state</span>
+                      <span></span><span></span><span>pid</span><span>command</span><span>chat</span><span>started</span><span>for</span><span>RSS</span><span>commit</span><span>state</span>
                     </div>
-                    {#each selected.processes as p (p.pid + p.started)}
-                      <div class="proc-row">
-                        <span class="dot {p.alive ? 'working' : 'idle'}"></span>
-                        <span>{p.pid}</span>
-                        <span class="cmd" title={p.command}>{p.command}</span>
-                        <span>{p.chat}</span>
-                        <span>{p.started}</span>
-                        <span>{p.duration}</span>
-                        <span>{p.rss}</span>
-                        <span>{p.commit}</span>
-                        <span class="end {p.endTone}">{p.end}</span>
+                    {#each selected.processes as p (p.key)}
+                      <div class="proc-item">
+                        <div
+                          class="proc-row expander"
+                          role="button"
+                          tabindex="0"
+                          aria-expanded={expanded.has(p.key)}
+                          title="Show the full command"
+                          onclick={() => rowClick(p.key)}
+                          onkeydown={(e) => rowKeydown(e, p.key)}
+                        >
+                          <span class="chevron" aria-hidden="true">{expanded.has(p.key) ? '▾' : '▸'}</span>
+                          <span class="dot {p.alive ? 'working' : 'idle'}"></span>
+                          <span>{p.pid}</span>
+                          <span class="cmd">{p.command}</span>
+                          <span>{p.chat}</span>
+                          <span>{p.started}</span>
+                          <span>{p.duration}</span>
+                          <span>{p.rss}</span>
+                          <span>{p.commit}</span>
+                          <span class="end {p.endTone}">{p.end}</span>
+                        </div>
+                        {#if expanded.has(p.key)}
+                          <div class="proc-detail">{@render commandDetail(p.detail)}</div>
+                        {/if}
                       </div>
                     {/each}
                   </div>
@@ -661,10 +751,11 @@
   .wait-reason { margin-left: auto; }
 
   .table-scroll { overflow-x: auto; }
-  .proc-table { min-width: 860px; display: flex; flex-direction: column; gap: 4px; }
+  .proc-table { min-width: 880px; display: flex; flex-direction: column; gap: 4px; }
+  .proc-item { display: flex; flex-direction: column; }
   .proc-row {
     display: grid;
-    grid-template-columns: 14px 64px minmax(220px, 2fr) 120px 76px 72px 76px 84px 110px;
+    grid-template-columns: 10px 14px 64px minmax(220px, 2fr) 120px 76px 72px 76px 84px 110px;
     gap: 10px;
     align-items: center;
     padding: 8px 10px;
@@ -682,6 +773,53 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .expander { cursor: pointer; }
+  .expander:hover { background: #292e36; }
+  .expander:focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; }
+  .chevron { color: var(--text-secondary, #a9b0bb); font-size: 12px; }
+  .proc-detail, .system-details {
+    margin: 2px 0 4px 24px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #1a1d22;
+    border: 1px solid var(--border-color, #2c3036);
+  }
+  .system-details { margin: 6px 0 0; max-height: 360px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .cmd-block { display: flex; flex-direction: column; gap: 8px; }
+  .cmd-bar { display: flex; align-items: center; gap: 10px; }
+  .copy-button {
+    padding: 2px 10px;
+    border: 1px solid #3a3f47;
+    border-radius: 6px;
+    background: #22262c;
+    color: #c9d1d9;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .copy-button:hover { background: #2c3036; color: #ffffff; }
+  .cmd-full {
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: #12141a;
+    font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    font-size: 13px;
+    color: var(--text-primary, #e8eaed);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+    cursor: text;
+  }
+  .fields {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 2px 14px;
+    margin: 0;
+    font-size: 12px;
+  }
+  .fields dt { color: var(--text-secondary, #a9b0bb); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
+  .fields dd { margin: 0; color: #c9d1d9; overflow-wrap: anywhere; user-select: text; }
   .end.alive { color: #3fb950; }
   .end.ended { color: var(--text-secondary, #a9b0bb); }
   .end.warn { color: #f0c674; }

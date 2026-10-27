@@ -10,15 +10,21 @@ import {
     agentStatusLine,
     buildAgentMap,
     buttonSummary,
+    COMMAND_CUT_NOTE,
+    COMMAND_MAX_CHARS,
     chatNamer,
     clockTime,
     conversationTitle,
     endLabel,
     finishedListCut,
+    formatBytes,
     formatMb,
     formatRun,
     isAgentProcess,
     pickSelected,
+    processDetail,
+    processKey,
+    toggleExpanded,
     turnsKey,
     type MapAgentRow,
     type ProcessEntry,
@@ -219,7 +225,7 @@ describe('the system branch', () => {
             sys({ pid: 5512, launcher: 'browser', agent_id: 'agent_ark', started_at: iso(2460), peak_rss_mb: 812,
                   commit_mb: 1126 }),
         ]));
-        expect(map.system).toEqual([
+        expect(map.system.map(({ key, details, ...item }) => item)).toEqual([
             { name: 'Strata launcher · pid 49120', alive: true,
               line: 'alive · 2 h 1 min · RSS 31.3 GB · commit 66.0 GB · VRAM 31.9 GiB' },
             { name: 'Browser · pid 5512', alive: true, line: 'alive · 41 min 0 s · RSS 812 MB · commit 1.1 GB' },
@@ -453,5 +459,110 @@ describe('the line under an agent in the sidebar', () => {
         const out = agentStatusLine(state, NOW);
         expect(out.dot).toBe('idle');
         expect(out.line).toMatch(/^Unconfirmed · DPC Project · /);
+    });
+});
+
+describe('an expanded process', () => {
+    const names = (id: string | null) => (id === 'group-a' ? 'DPC Project' : id ?? '');
+    const labels = (d: { fields: { label: string }[] }) => d.fields.map(f => f.label);
+    const value = (d: { fields: { label: string; value: string }[] }, label: string) =>
+        d.fields.find(f => f.label === label)?.value;
+    const CMD = 'dir /s /b "C:\\Users\\mikha\\Documents\\dpc-messenger\\co"';
+
+    it('carries the command whole and shows only the fields the entry has', () => {
+        const d = processDetail(proc({ command: CMD }), names);
+        expect(d.command).toBe(CMD);
+        expect(d.title).toBe('pid 100 · alive');
+        // null exit_reason, stop_kind, exit_code, signal, peak_vram_mib and ended_at are left out, not dashed.
+        expect(labels(d)).toEqual([
+            'launcher', 'launcher_kind', 'tool', 'round', 'agent_id', 'conversation_id', 'parent_pid', 'started_at',
+            'peak_rss_mb', 'peak_commit_mb',
+        ]);
+        expect(value(d, 'conversation_id')).toBe('DPC Project (group-a)');
+        expect(value(d, 'peak_rss_mb')).toBe('512 MB');
+    });
+
+    it('says how it ended, with an exit code of 0 and a signal', () => {
+        const done = processDetail(proc({ ended_at: iso(5), exit_reason: 'exited', exit_code: 0 }), names);
+        expect(value(done, 'exit_reason')).toBe('exited');
+        expect(value(done, 'exit_code')).toBe('0');
+        expect(done.title).toBe('pid 100 · exited 0');
+        const killed = processDetail(proc({ ended_at: iso(5), exit_reason: 'stopped', stop_kind: 'cancelled_by_agent', signal: 'SIGKILL' }), names);
+        expect(value(killed, 'stop_kind')).toBe('cancelled_by_agent');
+        expect(value(killed, 'signal')).toBe('SIGKILL');
+        expect(labels(killed)).not.toContain('exit_code');
+    });
+
+    it('spells the fields a newer backend adds', () => {
+        const d = processDetail(proc({ cpu_seconds: 12.34, io_read_bytes: 3 * 1024 * 1024, io_write_bytes: 900,
+                                       last_output_at: iso(2), peak_vram_mib: 2048 }), names);
+        expect(value(d, 'cpu_seconds')).toBe('12 s');
+        expect(value(d, 'io_read_bytes')).toBe('3.0 MB');
+        expect(value(d, 'io_write_bytes')).toBe('900 B');
+        expect(value(d, 'last_output_at')).toBe(iso(2));
+        expect(value(d, 'peak_vram_mib')).toBe('2.0 GiB');
+        expect(formatBytes(null)).toBe('—');
+    });
+
+    it('names the chat only by its id when nothing resolves it', () => {
+        expect(value(processDetail(proc({ conversation_id: 'group-z' }), names), 'conversation_id')).toBe('group-z');
+        expect(labels(processDetail(proc({ conversation_id: null }), names))).not.toContain('conversation_id');
+    });
+
+    it('flags a command as long as the backend keeps, and only that', () => {
+        expect(COMMAND_MAX_CHARS).toBe(120);
+        expect(processDetail(proc({ command: 'x'.repeat(120) }), names).commandCut).toBe(true);
+        expect(processDetail(proc({ command: 'x'.repeat(119) }), names).commandCut).toBe(false);
+        expect(COMMAND_CUT_NOTE).toContain('120');
+        // No command: the launcher stands, and nothing is said to be cut.
+        const bare = processDetail(proc({ command: '' }), names);
+        expect(bare.command).toBe('run_shell');
+        expect(bare.commandCut).toBe(false);
+    });
+
+    it('keeps its key across polls, so an open row stays open', () => {
+        const ark = (l: ProcessEntry[]) => build({}, listing(l)).agents.find(a => a.name === 'Ark')!.processes[0];
+        expect(processKey(proc({ pid: 9, start_time: 1234.5 }))).toBe('9@1234.5');
+        expect(processKey(proc({ pid: 9, start_time: null, started_at: '2026-10-27T10:00:00Z' }))).toBe('9@2026-10-27T10:00:00Z');
+        const first = ark([proc({ pid: 9, start_time: 5 })]);
+        const later = ark([proc({ pid: 9, start_time: 5, commit_mb: 999, peak_rss_mb: 1 })]);
+        expect(later.key).toBe(first.key);
+        // A reused pid is another process.
+        expect(ark([proc({ pid: 9, start_time: 6 })]).key).not.toBe(first.key);
+        expect(first.detail.key).toBe(first.key);
+    });
+
+    it('toggles a key in a new set and leaves the old one alone', () => {
+        const none = new Set<string>();
+        const one = toggleExpanded(none, 'a');
+        expect([...one]).toEqual(['a']);
+        expect(none.size).toBe(0);
+        expect([...toggleExpanded(one, 'b')]).toEqual(['a', 'b']);
+        expect(toggleExpanded(one, 'a').size).toBe(0);
+    });
+
+    it('the agent row and the system items carry the same detail', () => {
+        const sub = { launcher_kind: 'subsystem' as const, agent_id: null, conversation_id: null, tool: null };
+        const map = build({}, listing([
+            proc({ pid: 9, command: 'pytest -q tests/test_a.py' }),
+            proc({ pid: 21, launcher: 'git_helper', ...sub, command: 'git status --porcelain',
+                   started_at: iso(50), ended_at: iso(49), exit_reason: 'exited', exit_code: 0 }),
+            proc({ pid: 49120, launcher: 'strata', ...sub, command: 'strata serve --port 8080' }),
+        ]));
+        expect(map.agents.find(a => a.name === 'Ark')!.processes[0].detail.command).toBe('pytest -q tests/test_a.py');
+        const live = map.system.find(s => s.name.startsWith('Strata'))!;
+        expect(live.details.map(d => d.command)).toEqual(['strata serve --port 8080']);
+        const ended = map.system.find(s => s.name.startsWith('Git'))!;
+        expect(ended.details.map(d => d.command)).toEqual(['git status --porcelain']);
+        expect(live.key).toContain('49120');
+        // The finished group's key does not move when another finished helper joins it.
+        const more = build({}, listing([
+            proc({ pid: 21, launcher: 'git_helper', ...sub, command: 'git status',
+                   ended_at: iso(49), exit_reason: 'exited', exit_code: 0 }),
+            proc({ pid: 22, launcher: 'git_helper', ...sub, command: 'git diff',
+                   ended_at: iso(40), exit_reason: 'exited', exit_code: 0 }),
+        ]));
+        expect(more.system[0].key).toBe(ended.key);
+        expect(more.system[0].details).toHaveLength(2);
     });
 });

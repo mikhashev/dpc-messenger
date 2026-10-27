@@ -58,6 +58,12 @@ export interface ProcessEntry {
     peak_commit_mb: number | null;
     peak_vram_mib: number | null;
     commit_mb: number | null;
+    // The rest of ProcessEntry's fields; `to_dict` always sends them, and an older
+    // backend may not, hence optional.
+    cpu_seconds?: number | null;
+    io_read_bytes?: number | null;
+    io_write_bytes?: number | null;
+    last_output_at?: string | null;
 }
 
 /** The `list_processes` answer, without its status. */
@@ -82,7 +88,28 @@ export interface MapWaitingChat {
     wait: string;
 }
 
+/** One labelled value of an expanded process: the label is the entry's own field name. */
+export interface DetailField {
+    label: string;
+    value: string;
+}
+
+/** What an expanded process shows: its full command as the backend holds it and
+ *  the entry's other fields that are set. */
+export interface MapProcessDetail {
+    /** Identifies the entry across polls: pid and start time. */
+    key: string;
+    title: string;
+    command: string;
+    /** True when the command is as long as the backend keeps, so it may have been cut there. */
+    commandCut: boolean;
+    fields: DetailField[];
+}
+
 export interface MapProcess {
+    /** Identifies the entry across polls (pid + start time); the expanded state hangs on it. */
+    key: string;
+    detail: MapProcessDetail;
     pid: number;
     command: string;
     chat: string;
@@ -111,9 +138,13 @@ export interface MapAgent {
 }
 
 export interface MapSystemItem {
+    /** Stable across polls: the launcher, and the pid and start time of a live process. */
+    key: string;
     name: string;
     line: string;
     alive: boolean;
+    /** The entries behind the line: the one live process, or each finished one of the launcher. */
+    details: MapProcessDetail[];
 }
 
 export interface MapMemoryBar {
@@ -192,6 +223,15 @@ export function formatMb(mb: number | null | undefined): string {
 export function formatMib(mib: number | null | undefined): string {
     if (typeof mib !== 'number' || !Number.isFinite(mib)) return '—';
     return mib < 1024 ? `${Math.round(mib)} MiB` : `${(mib / 1024).toFixed(1)} GiB`;
+}
+
+/** Bytes as `512 B`, `3.5 KB`, `12.0 MB`, `1.2 GB` (binary units, as the registry counts them). */
+export function formatBytes(bytes: number | null | undefined): string {
+    if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return '—';
+    if (bytes < 1024) return `${Math.round(bytes)} B`;
+    if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+    return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
 /** How an entry ended, as the closed exit-reason words say it; `alive` while open. */
@@ -371,9 +411,66 @@ function inAgentWindow(p: ProcessEntry, nowMs: number): boolean {
     return Number.isFinite(ended) && nowMs - ended <= AGENT_PROCESS_WINDOW_S * 1000;
 }
 
+/** How much of a command the backend keeps: mirrors `COMMAND_MAX_CHARS` in
+ *  `process_registry.py`, which also folds its whitespace into single spaces. */
+export const COMMAND_MAX_CHARS = 120;
+export const COMMAND_CUT_NOTE =
+    `The backend keeps the first ${COMMAND_MAX_CHARS} characters of a command (whitespace folded); this is all it has.`;
+
+/** The same process on every poll: pid plus start time, else the start moment. */
+export function processKey(p: ProcessEntry): string {
+    return `${p.pid}@${p.start_time ?? p.started_at ?? ''}`;
+}
+
+/** The entry's fields that are set, under their own names, in a fixed order. A field
+ *  the entry does not carry (null, empty or absent) is left out, not printed as a dash. */
+export function processDetail(p: ProcessEntry, chatOf: (id: string | null) => string): MapProcessDetail {
+    const chat = chatOf(p.conversation_id);
+    const rows: Array<[string, string | number | null | undefined]> = [
+        ['launcher', p.launcher],
+        ['launcher_kind', p.launcher_kind],
+        ['tool', p.tool],
+        ['round', p.round],
+        ['agent_id', p.agent_id],
+        ['conversation_id', p.conversation_id ? (chat && chat !== p.conversation_id ? `${chat} (${p.conversation_id})` : p.conversation_id) : null],
+        ['parent_pid', p.parent_pid],
+        ['started_at', p.started_at],
+        ['ended_at', p.ended_at],
+        ['exit_reason', p.exit_reason],
+        ['stop_kind', p.stop_kind],
+        ['exit_code', p.exit_code],
+        ['signal', p.signal],
+        ['peak_rss_mb', p.peak_rss_mb == null ? null : formatMb(p.peak_rss_mb)],
+        ['peak_commit_mb', p.peak_commit_mb == null ? null : formatMb(p.peak_commit_mb)],
+        ['peak_vram_mib', p.peak_vram_mib == null ? null : formatMib(p.peak_vram_mib)],
+        ['cpu_seconds', p.cpu_seconds == null ? null : formatRun(p.cpu_seconds)],
+        ['io_read_bytes', p.io_read_bytes == null ? null : formatBytes(p.io_read_bytes)],
+        ['io_write_bytes', p.io_write_bytes == null ? null : formatBytes(p.io_write_bytes)],
+        ['last_output_at', p.last_output_at],
+    ];
+    return {
+        key: processKey(p),
+        title: `pid ${p.pid} · ${endLabel(p)}`,
+        command: p.command || p.launcher,
+        commandCut: !!p.command && p.command.length >= COMMAND_MAX_CHARS,
+        fields: rows
+            .filter(([, v]) => v !== null && v !== undefined && v !== '')
+            .map(([label, v]) => ({ label, value: String(v) })),
+    };
+}
+
+/** The set of expanded keys after a click on `key`: a new set, so a `$state` sees it. */
+export function toggleExpanded(expanded: ReadonlySet<string>, key: string): Set<string> {
+    const next = new Set(expanded);
+    if (!next.delete(key)) next.add(key);
+    return next;
+}
+
 function processRow(p: ProcessEntry, chatOf: (id: string | null) => string, nowMs: number): MapProcess {
     const alive = !p.ended_at;
     return {
+        key: processKey(p),
+        detail: processDetail(p, chatOf),
         pid: p.pid,
         command: p.command || p.launcher,
         chat: chatOf(p.conversation_id),
@@ -410,7 +507,7 @@ function endsSummary(ended: ProcessEntry[]): string {
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([label, n]) => `${n} ${label}`).join(', ');
 }
 
-function systemItems(entries: ProcessEntry[], nowMs: number): MapSystemItem[] {
+function systemItems(entries: ProcessEntry[], chatOf: (id: string | null) => string, nowMs: number): MapSystemItem[] {
     const byLauncher = new Map<string, ProcessEntry[]>();
     for (const p of entries) {
         const list = byLauncher.get(p.launcher) ?? [];
@@ -428,16 +525,24 @@ function systemItems(entries: ProcessEntry[], nowMs: number): MapSystemItem[] {
             const commit = p.commit_mb ?? p.peak_commit_mb;
             if (commit != null) parts.push(`commit ${formatMb(commit)}`);
             if (p.peak_vram_mib != null) parts.push(`VRAM ${formatMib(p.peak_vram_mib)}`);
-            items.push({ name: `${label} · pid ${p.pid}`, line: parts.join(' · '), alive: true });
+            items.push({
+                key: `system:${launcher}:${processKey(p)}`,
+                name: `${label} · pid ${p.pid}`,
+                line: parts.join(' · '),
+                alive: true,
+                details: [processDetail(p, chatOf)],
+            });
         }
         const ended = list.filter(e => !!e.ended_at);
         if (ended.length) {
             const last = ended.reduce((a, b) => ((epochMs(b.ended_at) || 0) > (epochMs(a.ended_at) || 0) ? b : a));
             const total = ended.reduce((sum, p) => sum + runSeconds(p, nowMs), 0);
             items.push({
+                key: `system:${launcher}:ended`,
                 name: `${label} · ${ended.length}`,
                 line: `ended · last at ${clockTime(last.ended_at)} · ${endsSummary(ended)} · ${formatRun(total)} in all`,
                 alive: false,
+                details: ended.map(p => processDetail(p, chatOf)),
             });
         }
     }
@@ -558,7 +663,7 @@ export function buildAgentMap(input: {
         .map(x => x.a);
 
     const systemEntries = processes.filter(p => !isAgentProcess(p));
-    const system = systemItems(systemEntries, nowMs);
+    const system = systemItems(systemEntries, chatOf, nowMs);
     const systemAlive = systemEntries.filter(p => !p.ended_at).length;
     const vram = systemEntries.filter(p => !p.ended_at && p.peak_vram_mib != null)
         .reduce((sum, p) => sum + (p.peak_vram_mib ?? 0), 0);
