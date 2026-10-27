@@ -95,6 +95,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "list_processes",
     # The peer cache by name, for the sidebar's cached-peers list (never the address)
     "list_cached_peers",
+    "remove_cached_peer",
+    "clear_peer_cache",
     # Personal context & instructions
     "get_personal_context",
     "save_personal_context",

@@ -19,7 +19,7 @@ from dpc_client_core.service import CoreService
 
 
 def _service_over(cache: PeerCache) -> SimpleNamespace:
-    return SimpleNamespace(p2p_manager=SimpleNamespace(peer_cache=cache))
+    return SimpleNamespace(p2p_manager=SimpleNamespace(peer_cache=cache, peers={}))
 
 
 def _cache(tmp_path) -> PeerCache:
@@ -44,7 +44,7 @@ async def test_the_answer_holds_names_and_ids_and_no_address(tmp_path):
     answer = await CoreService.list_cached_peers(_service_over(_cache(tmp_path)))
 
     assert answer["status"] == "success"
-    assert all(set(row) == {"node_id", "display_name", "last_seen"} for row in answer["peers"])
+    assert all(set(row) == {"node_id", "display_name", "last_seen", "is_connected"} for row in answer["peers"])
     wire = json.dumps(answer)
     for address in ("203.0.113.7", "198.51.100.4", "2001:db8::5", "9001"):
         assert address not in wire, f"{address} left the node in a list meant for copying"
@@ -75,7 +75,7 @@ async def test_an_empty_cache_is_an_empty_list_not_an_error(tmp_path):
 async def test_a_cache_that_cannot_be_read_answers_with_an_error_and_no_rows():
     broken = SimpleNamespace(
         p2p_manager=SimpleNamespace(
-            peer_cache=SimpleNamespace(get_all_peers=lambda: 1 / 0)
+            peer_cache=SimpleNamespace(get_all_peers=lambda: 1 / 0), peers={}
         )
     )
 

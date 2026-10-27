@@ -4,6 +4,8 @@ import {
   cachedPeerLines,
   cachedPeerName,
   cachedPeerSeen,
+  cachedPeersRemovable,
+  cachedPeersRemoveAllQuestion,
 } from './cachedPeers';
 
 describe('cachedPeers', () => {
@@ -32,5 +34,23 @@ describe('cachedPeers', () => {
     expect(cachedPeerSeen({ node_id: 'x', last_seen: '2026-10-26T23:59:59+00:00' })).toBe('2026-10-26');
     expect(cachedPeerSeen({ node_id: 'x', last_seen: null })).toBe('');
     expect(cachedPeerSeen({ node_id: 'x', last_seen: 'not a date' })).toBe('');
+  });
+
+  it('remove-all counts only the peers that are not connected now', () => {
+    const rows = [
+      { node_id: 'a', is_connected: true },
+      { node_id: 'b', is_connected: false },
+      { node_id: 'c' },
+    ];
+    expect(cachedPeersRemovable(rows).map((r) => r.node_id)).toEqual(['b', 'c']);
+    expect(cachedPeersRemoveAllQuestion(rows)).toBe('Remove 2 peers? Connected peers stay.');
+  });
+
+  it('remove-all says "peer" for one, and asks nothing when nothing could be removed', () => {
+    expect(cachedPeersRemoveAllQuestion([{ node_id: 'a' }])).toBe(
+      'Remove 1 peer? Connected peers stay.',
+    );
+    expect(cachedPeersRemoveAllQuestion([{ node_id: 'a', is_connected: true }])).toBe('');
+    expect(cachedPeersRemoveAllQuestion([])).toBe('');
   });
 });

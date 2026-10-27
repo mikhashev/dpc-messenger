@@ -6182,7 +6182,8 @@ class CoreService:
 
         `get_status` carries only how many there are; this is the on-demand
         answer to "which". A row is `node_id`, `display_name` and `last_seen`
-        and nothing else: the cache also holds the address each peer was last
+        and `is_connected` (the word `get_status` uses in `peer_info`) and
+        nothing else: the cache also holds the address each peer was last
         reached on, and an address is not something a list meant for copying
         into a chat should ever carry. Newest first; a peer never seen sorts
         last.
@@ -6204,6 +6205,7 @@ class CoreService:
                         "node_id": p.node_id,
                         "display_name": p.display_name,
                         "last_seen": p.last_seen,
+                        "is_connected": p.node_id in self.p2p_manager.peers,
                     }
                     for p in peers
                 ],
@@ -6211,6 +6213,63 @@ class CoreService:
         except Exception as e:
             logger.error("Error listing cached peers: %s", e, exc_info=True)
             return {"status": "error", "message": str(e), "peers": []}
+
+    async def _push_status_after_cache_change(self) -> None:
+        """Tell the UI the cache changed: the same `status_update` push the rest
+        of the service uses, which carries `cached_peers_count`. A failed push
+        does not undo a removal that already happened."""
+        try:
+            await self.local_api.broadcast_event("status_update", await self.get_status())
+        except Exception as e:  # noqa: BLE001 — the cache is already changed
+            logger.error("Error pushing status after a peer cache change: %s", e, exc_info=True)
+
+    async def remove_cached_peer(self, node_id: str) -> Dict[str, Any]:
+        """Forget one peer in the peer cache (the sidebar's "Forget this peer").
+
+        Refused for a peer connected now: the connection would write it back
+        into the cache at once, so the removal would look like it did nothing.
+        Mike's go, 2026-10-27.
+        """
+        try:
+            if not isinstance(node_id, str) or not node_id:
+                return {"status": "error", "message": "node_id is required"}
+            cache = self.p2p_manager.peer_cache
+            cached = cache.get_peer(node_id)
+            if node_id in self.p2p_manager.peers:
+                name = (cached.display_name if cached else None) or node_id
+                return {
+                    "status": "error",
+                    "message": f"{name} is connected now; it would be cached again at once",
+                }
+            if not cache.remove_peer(node_id):
+                return {"status": "error", "message": f"{node_id} is not in the peer cache"}
+            await self._push_status_after_cache_change()
+            return {"status": "success", "removed": [node_id]}
+        except Exception as e:
+            logger.error("Error removing cached peer: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def clear_peer_cache(self) -> Dict[str, Any]:
+        """Forget every cached peer except those connected now (the sidebar's
+        "Remove all"). One `remove_peer` per peer rather than `PeerCache.clear`,
+        which would take the connected ones with it. Mike's go, 2026-10-27.
+        """
+        try:
+            cache = self.p2p_manager.peer_cache
+            connected = set(self.p2p_manager.peers)
+            removed: List[str] = []
+            kept_connected: List[str] = []
+            for peer in list(cache.get_all_peers()):
+                if peer.node_id in connected:
+                    kept_connected.append(peer.node_id)
+                elif cache.remove_peer(peer.node_id):
+                    removed.append(peer.node_id)
+            if removed:
+                await self._push_status_after_cache_change()
+            return {"status": "success", "removed": removed, "kept_connected": kept_connected}
+        except Exception as e:
+            logger.error("Error clearing the peer cache: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
 
     async def list_ai_chats(self) -> Dict[str, Any]:
         """The AI chats and Telegram chats this node holds, for the sidebar.

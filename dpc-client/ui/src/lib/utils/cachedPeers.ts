@@ -7,6 +7,23 @@ export interface CachedPeerRow {
   node_id: string;
   display_name?: string | null;
   last_seen?: string | null;
+  /** The word `get_status` uses in `peer_info`: a connection to this peer exists now. */
+  is_connected?: boolean;
+}
+
+/** The rows "Remove all" would remove: every one not connected now. */
+export function cachedPeersRemovable(rows: CachedPeerRow[]): CachedPeerRow[] {
+  return rows.filter((row) => !row.is_connected);
+}
+
+/**
+ * The question "Remove all" asks before it removes anything, or '' when there is
+ * nothing to remove (every row is connected, or the list is empty).
+ */
+export function cachedPeersRemoveAllQuestion(rows: CachedPeerRow[]): string {
+  const n = cachedPeersRemovable(rows).length;
+  if (n === 0) return '';
+  return `Remove ${n} ${n === 1 ? 'peer' : 'peers'}? Connected peers stay.`;
 }
 
 /** The name a row is shown under; a peer cached without one is said to be unnamed. */

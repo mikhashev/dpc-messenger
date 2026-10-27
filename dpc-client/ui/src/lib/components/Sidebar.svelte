@@ -7,6 +7,7 @@
     cachedPeerLines,
     cachedPeerName,
     cachedPeerSeen,
+    cachedPeersRemoveAllQuestion,
     type CachedPeerRow,
   } from '$lib/utils/cachedPeers';
   import { copyText } from '$lib/utils/clipboard';
@@ -442,10 +443,22 @@
   let cachedPeersError = $state('');
   let cachedPeersCopied = $state('');
 
+  // Forgetting a peer. "Remove all" asks inline first: a native confirm() does not
+  // block in Tauri's WebView2 (see utils/dialog.ts), so it would remove at once.
+  let cachedPeersConfirmingAll = $state(false);
+  let cachedPeersActionError = $state('');
+
   async function openCachedPeers() {
     showCachedPeers = true;
     cachedPeersError = '';
     cachedPeersCopied = '';
+    cachedPeersActionError = '';
+    cachedPeersConfirmingAll = false;
+    await loadCachedPeers();
+  }
+
+  async function loadCachedPeers() {
+    cachedPeersError = '';
     let result: any;
     try {
       result = await (sendCommand('list_cached_peers', {}) as Promise<any>);
@@ -462,6 +475,37 @@
       return;
     }
     cachedPeers = result.peers;
+  }
+
+  // Runs one of the two removal commands, says why it failed, and re-reads the list
+  // either way, so the dialog shows what the cache holds now.
+  async function removeFromCache(command: string, payload: Record<string, unknown>): Promise<any> {
+    cachedPeersActionError = '';
+    cachedPeersCopied = '';
+    let result: any = null;
+    try {
+      result = await (sendCommand(command, payload) as Promise<any>);
+      if (result?.status !== 'success') {
+        cachedPeersActionError = result?.message || 'The cache could not be changed.';
+      }
+    } catch (e) {
+      cachedPeersActionError = `The cache could not be changed: ${e instanceof Error ? e.message : e}`;
+    }
+    await loadCachedPeers();
+    return result;
+  }
+
+  async function forgetCachedPeer(peer: CachedPeerRow) {
+    await removeFromCache('remove_cached_peer', { node_id: peer.node_id });
+  }
+
+  async function forgetAllCachedPeers() {
+    cachedPeersConfirmingAll = false;
+    const result = await removeFromCache('clear_peer_cache', {});
+    if (result?.status === 'success') {
+      const n = Array.isArray(result.removed) ? result.removed.length : 0;
+      cachedPeersCopied = `Removed ${n} ${n === 1 ? 'peer' : 'peers'}.`;
+    }
   }
 
   async function copyCachedPeer(what: string, text: string) {
@@ -1161,16 +1205,50 @@
                 {#if cachedPeerSeen(peer)}<span class="cached-peer-seen">seen {cachedPeerSeen(peer)}</span>{/if}
                 <code class="cached-peer-id">{peer.node_id}</code>
               </div>
+              {#if peer.is_connected}
+                <span class="cached-peer-connected">connected</span>
+              {:else}
+                <button
+                  type="button"
+                  class="cached-peer-forget"
+                  title="Forget this peer"
+                  aria-label="Forget this peer"
+                  onclick={() => forgetCachedPeer(peer)}
+                >×</button>
+              {/if}
             </div>
           {/each}
-          <div class="dialog-actions">
-            <button
-              type="button"
-              class="dialog-btn dialog-btn-cancel"
-              onclick={() => copyCachedPeer('All peers', cachedPeerLines(cachedPeers))}
-            >Copy all</button>
-          </div>
+          {#if cachedPeersConfirmingAll}
+            <p class="dialog-info" role="alert">{cachedPeersRemoveAllQuestion(cachedPeers)}</p>
+            <div class="dialog-actions">
+              <button
+                type="button"
+                class="dialog-btn dialog-btn-unlink"
+                onclick={forgetAllCachedPeers}
+              >Confirm</button>
+              <button
+                type="button"
+                class="dialog-btn dialog-btn-cancel"
+                onclick={() => (cachedPeersConfirmingAll = false)}
+              >Cancel</button>
+            </div>
+          {:else}
+            <div class="dialog-actions">
+              <button
+                type="button"
+                class="dialog-btn dialog-btn-cancel"
+                onclick={() => copyCachedPeer('All peers', cachedPeerLines(cachedPeers))}
+              >Copy all</button>
+              <button
+                type="button"
+                class="dialog-btn dialog-btn-cancel"
+                disabled={cachedPeersRemoveAllQuestion(cachedPeers) === ''}
+                onclick={() => (cachedPeersConfirmingAll = true)}
+              >Remove all</button>
+            </div>
+          {/if}
         {/if}
+        {#if cachedPeersActionError}<p class="dialog-info small" role="alert">{cachedPeersActionError}</p>{/if}
         {#if cachedPeersCopied}<p class="dialog-info small" role="status">{cachedPeersCopied}</p>{/if}
       </div>
     </div>
@@ -1984,6 +2062,30 @@
     color: #888;
   }
 
+  .cached-peer-forget {
+    flex: none;
+    width: 1.75rem;
+    height: 1.75rem;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: #888;
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .cached-peer-forget:hover {
+    background: #fdecea;
+    color: #d32f2f;
+  }
+
+  .cached-peer-connected {
+    flex: none;
+    font-size: 0.75rem;
+    color: #888;
+  }
+
   .cached-peer-id {
     font-size: 0.8rem;
     color: #444;
@@ -2492,6 +2594,11 @@
 
   .dialog-btn-cancel:hover {
     background: #d0d0d0;
+  }
+
+  .dialog-btn-cancel:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .dialog-btn-confirm {
