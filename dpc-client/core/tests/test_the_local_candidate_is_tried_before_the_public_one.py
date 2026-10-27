@@ -14,7 +14,7 @@ from dpc_client_core.connection_strategies.ipv4_direct import IPv4DirectStrategy
 
 PEER = "dpc-node-" + "b" * 32
 LOCAL = "10.8.1.1:8888"
-EXTERNAL = "38.180.192.51:8888"
+EXTERNAL = "198.51.100.7:8888"
 
 
 def _endpoints(local=LOCAL, external=EXTERNAL):

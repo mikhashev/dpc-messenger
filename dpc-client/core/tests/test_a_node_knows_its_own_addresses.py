@@ -17,8 +17,8 @@ from dpc_client_core.dht.rpc import DHTRPCHandler
 
 ME = "dpc-node-" + "a" * 32
 PEER = "dpc-node-" + "b" * 32
-MINE_A = "38.180.192.51"
-MINE_B = "5.136.122.100"
+MINE_A = "198.51.100.7"
+MINE_B = "198.51.100.23"
 STRANGER = "203.0.113.9"
 
 
