@@ -158,11 +158,11 @@ class Settings:
             'remote_inference_timeout': '1200',
             # Inbound handshake (ADR-041 D8): a peer that completes TLS and never
             # sends HELLO fails no HELLO, so the rate limiter alone never sees it
-            'hello_timeout': '10',  # Seconds the listener waits for HELLO after its challenge
+            'hello_timeout': '10',  # Seconds the listener waits for the TLS handshake, and again for HELLO after its challenge
             'max_pending_hellos_per_ip': '8',  # Inbound connections one address may hold before HELLO_ACK
             # After the five fast reconnect attempts, a kept peer is retried from
             # 60s, doubling up to this ceiling, until it answers
-            'reconnect_slow_interval_max_seconds': '900'
+            'reconnect_slow_interval_max_seconds': '900'  # After five fast reconnect attempts to a peer we keep, retry from 60 s, doubling to this ceiling (±20 % jitter), until it answers, the user disconnects it or it leaves every shared group. Off when `[p2p] auto_connect_node_groups` is off
         }
 
         self._config['hole_punch'] = {
@@ -209,6 +209,19 @@ class Settings:
             'cold_fallback_provider': ''
         }
 
+        # Background models and where they run. Each keeps its own device key, so
+        # embeddings can sit on the CPU while Whisper ([local_transcription] device)
+        # takes the card. Written so a new user can see them; until 2026-10-27 only
+        # Whisper's was.
+        self._config['memory'] = {
+            'embedding_device': 'auto'  # Where the embedding model (indexing, Active Recall) runs for every agent: auto, cpu, cuda or mps. auto = an agent profile's memory.embedding_device, else cuda, then mps, then cpu; any other value overrides the profiles
+        }
+
+        self._config['knowledge_graph'] = {
+            'backend': 'sqlite',  # Agent graph store: sqlite or grafeo; an agent's own kg_backend in its config.json overrides it
+            'gliner_device': 'auto'  # Where the GLiNER entity model runs: auto, cpu or cuda. auto = an agent's own gliner_device in its config.json, else cuda when torch sees a card; any other value overrides the agents
+        }
+
         self._config['history'] = {
             # Off while history written before ADR-036 is still in circulation:
             # it carries no signature, and a third of what is on disk is that old.
@@ -217,15 +230,16 @@ class Settings:
 
         self._config['file_transfer'] = {
             'chunk_size': '65536',  # Chunk size in bytes (64KB)
+            'chunk_delay': '0.001',  # Pause between sent chunks in seconds (1 ms)
             'background_threshold_mb': '50',  # Background transfer threshold in MB
             'direct_tls_only_threshold_mb': '100',  # Direct TLS preference threshold in MB
             'max_concurrent_transfers': '3',  # Max concurrent file transfers
             'verify_hash': 'true',  # Verify file hash after transfer (SHA256)
             # Preparation timeout configuration (v0.11.2+)
-            'preparation_timeout_base': '60',  # Base timeout in seconds (for small files)
-            'preparation_timeout_per_gb': '40',  # Additional timeout per GB (40s/GB)
-            'preparation_progress_interval_mb': '100',  # Emit progress every N MB during SHA256
-            'preparation_progress_interval_chunks': '10000'  # Emit progress every N chunks during CRC32
+            'preparation_timeout_base': '60',  # **Inert: nothing reads it.** The UI's own wait is in `ui/src/lib/fileSendTimeout.ts` (60 s + 40 s per GB + 20 s margin)
+            'preparation_timeout_per_gb': '40',  # **Inert**, as above
+            'preparation_progress_interval_mb': '100',  # **Inert: nothing reads it.** Preparation progress is throttled by time, `PREPARATION_PROGRESS_MIN_INTERVAL_S` (0.5 s) in `file_transfer_manager.py`
+            'preparation_progress_interval_chunks': '10000'  # **Inert**, as above
         }
 
         self._config['conversations'] = {
@@ -242,7 +256,8 @@ class Settings:
             'mime_types': 'audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav',  # Supported audio formats (includes WAV for Tauri/Rust backend)
             'default_sample_rate': '48000',  # Default sample rate in Hz (48kHz for quality)
             'default_channels': '1',  # Default audio channels (1 = mono, 2 = stereo)
-            'default_codec': 'opus'  # Default audio codec (opus for web compatibility)
+            'default_codec': 'opus',  # Default audio codec (opus for web compatibility)
+            'auto_transcribe': 'true'  # Node-wide auto-transcribe switch; false lets Whisper be unloaded whatever a conversation's own setting says
         }
 
         self._config['voice_transcription'] = {
@@ -330,6 +345,37 @@ class Settings:
         }
         # NOTE: This section controls agent-Telegram chat linking behavior
         # Uses the main Telegram bot (from [telegram] section), not a separate bot
+
+        self._config['agent_chat'] = {
+            'cc_display_name': 'CC'  # The name Claude Code goes by in agent and group chats (mentions match it)
+        }
+
+        # Discord bot (off until enabled). The token is never pre-filled: name an
+        # environment variable in bot_token_env, or paste it into bot_token.
+        self._config['discord'] = {
+            'enabled': 'false',  # Enable the Discord bot integration
+            'bot_token_env': '',  # Name of an environment variable holding the bot token (read instead of bot_token when set)
+            'bot_token': '',  # Bot token, if not taken from bot_token_env
+            'guild_id': '',  # Discord server (guild) ID
+            'allowed_channel_ids': '[]',  # JSON array of channel IDs the bot answers in; empty = every channel
+            'ark_channel_id': '',  # Channel ID the agent posts its own messages to; empty = it posts nowhere
+            'agent_id': '',  # Agent that answers on Discord; empty = the first agent in ~/.dpc/agents/
+            'mirror_group_id': ''  # DPC group that mirrors Discord conversations; empty = no mirror
+        }
+
+        self._config['discord.guardrails'] = {
+            'rate_limit_per_user_max': '10',  # Messages one user may send per window
+            'rate_limit_per_user_window': '600',  # Per-user window in seconds
+            'rate_limit_global_max': '60',  # Messages all users together may send per window
+            'rate_limit_global_window': '3600',  # Global window in seconds
+            'response_delay_seconds': '3',  # Pause before the bot answers
+            'url_whitelist': ''  # Comma-separated domains whose links are kept in user text, others removed; empty = no filtering
+        }
+
+        self._config['discord.conversations'] = {
+            'ttl_minutes': '30',  # A user's conversation resets after this many idle minutes
+            'max_messages': '50'  # Messages kept per user conversation
+        }
 
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -577,7 +623,9 @@ class Settings:
         watches. "auto" is what every install had before this setting existed —
         cuda when torch sees a card, cpu otherwise. An unknown value falls back
         to "auto" rather than being obeyed: a typo must not decide what holds
-        VRAM.
+        VRAM. Any value but "auto" overrides an agent's own `gliner_device` in
+        its config.json; under "auto" that agent value still decides
+        (knowledge_graph._resolve_gliner_device).
         """
         value = self.get('knowledge_graph', 'gliner_device', 'auto').strip().lower()
         if value in ('auto', 'cpu', 'cuda'):
@@ -587,6 +635,25 @@ class Settings:
         logger.warning(
             "[knowledge_graph] gliner_device=%r is not a device this build knows "
             "(auto/cpu/cuda) — using auto", value,
+        )
+        return 'auto'
+
+    def get_embedding_device(self) -> str:
+        """Where the embedding model runs for this node: "auto" (default), "cpu", "cuda" or "mps".
+
+        The model is one per process, so its device is the node's, not an agent's.
+        Any value but "auto" overrides every agent profile's `memory.embedding_device`;
+        "auto" leaves the choice where it was before this key existed — the first
+        profile to ask, else cuda, then mps, then cpu. An unknown value falls back to
+        "auto", for the reason `get_gliner_device` gives.
+        """
+        value = self.get('memory', 'embedding_device', 'auto').strip().lower()
+        if value in ('auto', 'cpu', 'cuda', 'mps'):
+            return value
+        import logging
+        logging.getLogger(__name__).warning(
+            "[memory] embedding_device=%r is not a device this build knows "
+            "(auto/cpu/cuda/mps) — using auto", value,
         )
         return 'auto'
 

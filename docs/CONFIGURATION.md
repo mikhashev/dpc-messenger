@@ -722,9 +722,15 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **26 sections, 157 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **32 sections, 179 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
+
+#### `[agent_chat]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `cc_display_name` | `CC` | The name Claude Code goes by in agent and group chats (mentions match it) |
 
 #### `[agent_telegram]`
 
@@ -784,6 +790,37 @@ An empty default means the key is written blank and the feature stays off until 
 | `announce_interval` | `3600` | Re-announce interval (1 hour) |
 | `seed_nodes` | *(empty)* | Comma-separated list of seed nodes (ip:port) |
 
+#### `[discord]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Enable the Discord bot integration |
+| `bot_token_env` | *(empty)* | Name of an environment variable holding the bot token (read instead of bot_token when set) |
+| `bot_token` | *(empty)* | Bot token, if not taken from bot_token_env |
+| `guild_id` | *(empty)* | Discord server (guild) ID |
+| `allowed_channel_ids` | `[]` | JSON array of channel IDs the bot answers in; empty = every channel |
+| `ark_channel_id` | *(empty)* | Channel ID the agent posts its own messages to; empty = it posts nowhere |
+| `agent_id` | *(empty)* | Agent that answers on Discord; empty = the first agent in ~/.dpc/agents/ |
+| `mirror_group_id` | *(empty)* | DPC group that mirrors Discord conversations; empty = no mirror |
+
+#### `[discord.conversations]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `ttl_minutes` | `30` | A user's conversation resets after this many idle minutes |
+| `max_messages` | `50` | Messages kept per user conversation |
+
+#### `[discord.guardrails]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `rate_limit_per_user_max` | `10` | Messages one user may send per window |
+| `rate_limit_per_user_window` | `600` | Per-user window in seconds |
+| `rate_limit_global_max` | `60` | Messages all users together may send per window |
+| `rate_limit_global_window` | `3600` | Global window in seconds |
+| `response_delay_seconds` | `3` | Pause before the bot answers |
+| `url_whitelist` | *(empty)* | Comma-separated domains whose links are kept in user text, others removed; empty = no filtering |
+
 #### `[dpc_agent]`
 
 | Key | Default | Notes |
@@ -799,6 +836,7 @@ An empty default means the key is written blank and the feature stays off until 
 | Key | Default | Notes |
 |---|---|---|
 | `chunk_size` | `65536` | Chunk size in bytes (64KB) |
+| `chunk_delay` | `0.001` | Pause between sent chunks in seconds (1 ms) |
 | `background_threshold_mb` | `50` | Background transfer threshold in MB |
 | `direct_tls_only_threshold_mb` | `100` | Direct TLS preference threshold in MB |
 | `max_concurrent_transfers` | `3` | Max concurrent file transfers |
@@ -862,6 +900,13 @@ An empty default means the key is written blank and the feature stays off until 
 | `cultural_perspectives_enabled` | `false` | Include cultural perspective analysis in knowledge extraction |
 | `cold_fallback_provider` | *(empty)* |  |
 
+#### `[knowledge_graph]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `backend` | `sqlite` | Agent graph store: sqlite or grafeo; an agent's own kg_backend in its config.json overrides it |
+| `gliner_device` | `auto` | Where the GLiNER entity model runs: auto, cpu or cuda. auto = an agent's own gliner_device in its config.json, else cuda when torch sees a card; any other value overrides the agents |
+
 #### `[local_transcription]`
 
 | Key | Default | Notes |
@@ -899,6 +944,12 @@ An empty default means the key is written blank and the feature stays off until 
 | `anthropic` | `WARNING` |  |
 | `telegram.ext.Application` | `INFO` |  |
 | `openai` | `WARNING` |  |
+
+#### `[memory]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `embedding_device` | `auto` | Where the embedding model (indexing, Active Recall) runs for every agent: auto, cpu, cuda or mps. auto = an agent profile's memory.embedding_device, else cuda, then mps, then cpu; any other value overrides the profiles |
 
 #### `[oauth]`
 
@@ -993,6 +1044,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `default_sample_rate` | `48000` | Default sample rate in Hz (48kHz for quality) |
 | `default_channels` | `1` | Default audio channels (1 = mono, 2 = stereo) |
 | `default_codec` | `opus` | Default audio codec (opus for web compatibility) |
+| `auto_transcribe` | `true` | Node-wide auto-transcribe switch; false lets Whisper be unloaded whatever a conversation's own setting says |
 
 #### `[voice_transcription]`
 

@@ -312,6 +312,10 @@ class CoreService:
 
         # Load settings (supports environment variables and config file)
         self.settings = Settings(DPC_HOME_DIR)
+        # Before any agent builds the embedding model: its device belongs to the
+        # node ([memory] embedding_device), and the first build fixes it.
+        from .dpc_agent.memory import set_node_embedding_device
+        set_node_embedding_device(self.settings.get_embedding_device())
 
         # Initialize offline mode components
         self.token_cache = TokenCache(

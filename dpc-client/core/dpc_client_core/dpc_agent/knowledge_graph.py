@@ -1141,10 +1141,10 @@ def _agent_kg_backend_override(agent_root: Path) -> Optional[str]:
 def _agent_gliner_device_override(agent_root: Path) -> Optional[str]:
     """This agent's own choice of GLiNER device, or None for the global one.
 
-    Read exactly like the backend override next door, and for the same reason:
-    the setting is fleet-global, and one agent moving first is the only
-    migration a fleet-global switch cannot express. An unrecognised value is
-    ignored with a warning — a typo must not decide what holds VRAM.
+    Read exactly like the backend override next door. It decides only while the
+    node's `[knowledge_graph] gliner_device` is "auto" (`_resolve_gliner_device`).
+    An unrecognised value is ignored with a warning — a typo must not decide
+    what holds VRAM.
     """
     config_path = agent_root / "config.json"
     if not config_path.is_file():
@@ -1163,6 +1163,42 @@ def _agent_gliner_device_override(agent_root: Path) -> Optional[str]:
         )
         return None
     return value.strip().lower()
+
+
+#: (agent, value) pairs already told which source decided their GLiNER device,
+#: because a KnowledgeGraph is opened many times per agent and once is the point.
+_gliner_device_source_reported: set = set()
+
+
+def _resolve_gliner_device(node: str, agent: Optional[str], agent_name: str) -> str:
+    """The GLiNER device for one agent: the node's when config.ini names one.
+
+    `node` is `[knowledge_graph] gliner_device` ("auto", "cpu" or "cuda"); `agent`
+    is that agent's own config.json value or None. A named node value wins and an
+    agent asking for something else is warned once; under "auto" the agent's value
+    decides, as it did before the node setting came first, and that is logged once.
+    """
+    if agent == "auto":
+        agent = None
+    if node != "auto":
+        if agent is not None and agent != node and (agent_name, agent) not in _gliner_device_source_reported:
+            _gliner_device_source_reported.add((agent_name, agent))
+            log.warning(
+                "GLiNER: %s's config.json asks for gliner_device=%s — ignored, the "
+                "node setting in config.ini decides ([knowledge_graph] gliner_device = %s)",
+                agent_name, agent, node,
+            )
+        return node
+    if agent is None:
+        return "auto"
+    if (agent_name, agent) not in _gliner_device_source_reported:
+        _gliner_device_source_reported.add((agent_name, agent))
+        log.info(
+            "GLiNER: %s's config.json decides gliner_device=%s "
+            "([knowledge_graph] gliner_device = auto in config.ini)",
+            agent_name, agent,
+        )
+    return agent
 
 
 def _dpc_home_for(agent_root: Path) -> Path:
@@ -1201,14 +1237,18 @@ class KnowledgeGraph:
             backend = Settings(_dpc_home_for(agent_root)).get_kg_backend()
         backend = backend.strip().lower()
 
-        # Where GLiNER runs, resolved the same three levels down as the backend
-        # above: this agent's config.json, then the fleet setting, then auto.
-        # Held here rather than read per call — extract_entities_gliner runs in a
-        # worker thread and a config read per batch would be a file read per batch.
-        self._gliner_device = _agent_gliner_device_override(agent_root)
-        if self._gliner_device is None:
-            from dpc_client_core.settings import Settings
-            self._gliner_device = Settings(_dpc_home_for(agent_root)).get_gliner_device()
+        # Where GLiNER runs. Unlike the backend, the node setting comes first: the
+        # model is one per process, so a named [knowledge_graph] gliner_device
+        # decides for every agent, and this agent's config.json decides only under
+        # "auto" (_resolve_gliner_device). Held here rather than read per call —
+        # extract_entities_gliner runs in a worker thread and a config read per
+        # batch would be a file read per batch.
+        from dpc_client_core.settings import Settings
+        self._gliner_device = _resolve_gliner_device(
+            Settings(_dpc_home_for(agent_root)).get_gliner_device(),
+            _agent_gliner_device_override(agent_root),
+            Path(agent_root).name,
+        )
 
         if backend == "grafeo":
             db_path = agent_root / "knowledge_graph.grafeo"

@@ -35,6 +35,9 @@ class MemoryConfig:
     # work (indexing, Active Recall) whose latency nobody watches. The model is a
     # per-process singleton, so the first agent to build it decides for all of
     # them; a later disagreement is logged rather than silently honoured.
+    # The node's `[memory] embedding_device` in config.ini comes first: any value
+    # but "auto" there overrides this field for every agent (memory.py,
+    # _resolve_embedding_device), and this field decides only under "auto".
     embedding_device: Optional[str] = None
 
     @classmethod

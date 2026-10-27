@@ -366,6 +366,43 @@ KNOWN_EMBEDDING_DIMENSIONS = {"BAAI/bge-m3": 1024}
 _singleton_providers: Dict[str, "EmbeddingProvider"] = {}
 _singleton_lock = threading.Lock()
 
+#: The node's `[memory] embedding_device` from config.ini, handed over once by the
+#: service at start (`set_node_embedding_device`). None means "auto": the agent
+#: profile that asks first decides, as before the key existed. A process that
+#: never sets it (a script, a test) keeps that behaviour.
+_node_embedding_device: Optional[str] = None
+#: (model, profile device) pairs already told that config.ini overrode them.
+_overridden_devices_reported: set = set()
+
+
+def set_node_embedding_device(value: Optional[str]) -> None:
+    """Record the node-wide embedding device; "auto" or None leaves it to the profiles."""
+    global _node_embedding_device
+    v = value.strip().lower() if isinstance(value, str) else "auto"
+    _node_embedding_device = v if v in ("cpu", "cuda", "mps") else None
+
+
+def _resolve_embedding_device(model_name: str, requested: Optional[str]) -> Optional[str]:
+    """The device a request for `model_name` gets: the node's, when config.ini names one.
+
+    The model is one per process, so its device belongs to the node, not to an agent.
+    An explicit `[memory] embedding_device` wins over any profile value, and a profile
+    that said something else is told once rather than silently overruled.
+    """
+    if isinstance(requested, str) and requested.strip().lower() == "auto":
+        requested = None
+    node = _node_embedding_device
+    if node is None:
+        return requested
+    if requested is not None and requested != node and (model_name, requested) not in _overridden_devices_reported:
+        _overridden_devices_reported.add((model_name, requested))
+        log.warning(
+            "Embedding model %s: an agent profile asks for device %s — ignored, "
+            "the node setting in config.ini decides ([memory] embedding_device = %s)",
+            model_name, requested, node,
+        )
+    return node
+
 
 def get_embedding_provider(model_name: str = DEFAULT_EMBEDDING_MODEL, **kwargs) -> "EmbeddingProvider":
     """Return a singleton EmbeddingProvider per model_name to avoid duplicate GPU loads.
@@ -375,12 +412,27 @@ def get_embedding_provider(model_name: str = DEFAULT_EMBEDDING_MODEL, **kwargs) 
     where that silently matters — it decides where documents are cut — so a caller
     that states it is honoured on the shared instance rather than ignored. Queries and
     documents then pass through the same window, which is the only way their vectors
-    are comparable.
+    are comparable. The device is resolved against the node's config.ini first
+    (`_resolve_embedding_device`).
     """
     with _singleton_lock:
+        if "device" in kwargs or _node_embedding_device is not None:
+            kwargs["device"] = _resolve_embedding_device(model_name, kwargs.get("device"))
         if model_name not in _singleton_providers:
-            _singleton_providers[model_name] = EmbeddingProvider(model_name=model_name, **kwargs)
-            return _singleton_providers[model_name]
+            provider = EmbeddingProvider(model_name=model_name, **kwargs)
+            _singleton_providers[model_name] = provider
+            if _node_embedding_device is not None:
+                source = "[memory] embedding_device in config.ini"
+            elif kwargs.get("device") is not None:
+                source = ("the first agent profile to ask (memory.embedding_device; "
+                          "[memory] embedding_device = auto in config.ini)")
+            else:
+                source = "the automatic choice (cuda, then mps, then cpu)"
+            # The stated device, not `provider.device`: resolving "auto" imports
+            # torch, and the load line prints the resolved one anyway.
+            log.info("Embedding model %s will run on %s, decided by %s",
+                     model_name, kwargs.get("device") or "auto", source)
+            return provider
         provider = _singleton_providers[model_name]
         requested = kwargs.get("max_tokens")
         if requested is not None and int(requested) != provider.max_tokens:
