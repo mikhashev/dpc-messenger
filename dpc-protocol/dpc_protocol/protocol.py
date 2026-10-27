@@ -654,6 +654,16 @@ def create_group_text_message(
 # Stated in specs/dptp_v1.md §2 as well; move the two together.
 MAX_FRAME_BYTES = 64 * 1024 * 1024
 
+# The most a frame may declare before the far end has proved its key: the
+# direct-TLS reads of HELLO_CHALLENGE, HELLO and HELLO_ACK. MAX_FRAME_BYTES is
+# sized for a proved peer's history; a stranger's first frame needs none of
+# it. Measured 2026-10-27, framed, as p2p_manager builds them: HELLO 1 632
+# bytes (a 1 115-byte certificate PEM, a 2048-bit RSA-PSS signature, a
+# four-letter name; a 200-character name makes it 1 828), HELLO_CHALLENGE
+# 110, HELLO_ACK 122. Forty times the HELLO leaves room for a long display
+# name, which nothing bounds. Stated in specs/dptp_v1.md §2 beside the other.
+MAX_HELLO_FRAME_BYTES = 64 * 1024
+
 
 async def read_message(
     reader: asyncio.StreamReader, *, max_frame_bytes: int = MAX_FRAME_BYTES

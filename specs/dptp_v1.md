@@ -62,7 +62,7 @@ All DPTP messages follow a fixed binary framing format:
 
 - **Encoding**: UTF-8 JSON
 - **Structure**: Object with `command` or `status` field
-- **Maximum Size**: 67 108 864 bytes (64 MiB) per payload — `MAX_FRAME_BYTES` in `dpc_protocol/protocol.py` (v1.7). A header declaring more is refused before any of the payload is read: the receiver logs the declared length and the cap, and closes the connection. A sender refuses to frame a larger payload at all, raising at the origin rather than failing silently at the far end. The cap must clear a whole conversation history in one `CHAT_HISTORY_RESPONSE` (3 885 616 bytes at the largest measured) and a base64-encoded image at `vision.max_image_size_mb`; the measurements behind the number are kept beside the constant, and the two move together
+- **Maximum Size**: 67 108 864 bytes (64 MiB) per payload — `MAX_FRAME_BYTES` in `dpc_protocol/protocol.py` (v1.7). A header declaring more is refused before any of the payload is read: the receiver logs the declared length and the cap, and closes the connection. A sender refuses to frame a larger payload at all, raising at the origin rather than failing silently at the far end. The cap must clear a whole conversation history in one `CHAT_HISTORY_RESPONSE` (3 885 616 bytes at the largest measured) and a base64-encoded image at `vision.max_image_size_mb`; the measurements behind the number are kept beside the constant, and the two move together. Before the far end has proved its key the cap is 65 536 bytes (64 KiB) — `MAX_HELLO_FRAME_BYTES`, beside the other: the direct-TLS `HELLO_CHALLENGE`, `HELLO` and `HELLO_ACK` are read under it, and refused the same way. A `HELLO` measured 1 632 bytes framed; after `HELLO_ACK` the 64 MiB cap applies
 
 ### Example Wire Format
 
@@ -2671,7 +2671,7 @@ Agent-to-agent mentions inside one node have no bound of their own.
 ### Attack Mitigation
 
 - **Message Flooding**: Implementations should rate-limit incoming messages
-- **Resource Exhaustion**: Limit maximum payload size, enforce timeouts — §2 states the cap; the reference listener also bounds its wait for HELLO after the challenge (`[connection] hello_timeout`) and counts connections still before `HELLO_ACK` per address (`max_pending_hellos_per_ip`), since a peer that never finishes a HELLO never fails one
+- **Resource Exhaustion**: Limit maximum payload size, enforce timeouts — §2 states the cap; the reference listener also bounds its TLS handshake and its wait for HELLO after the challenge by one clock (`[connection] hello_timeout`) and counts connections still before `HELLO_ACK` per address (`max_pending_hellos_per_ip`), since a peer that never finishes a HELLO never fails one
 - **MITM Attacks**: Certificate pinning on first connection (TOFU - Trust On First Use)
 - **Gossip Attacks**:
   - Message replay prevention via vector clocks and message IDs
@@ -2743,6 +2743,11 @@ DPTP is designed to be extensible. New commands can be added by:
 ## 9. Changelog
 
 ### v1.10 (October 2026)
+- **§2 Payload Format** — a frame read before the far end has proved its key
+  (direct-TLS `HELLO_CHALLENGE`, `HELLO`, `HELLO_ACK`) is capped at 64 KiB,
+  `MAX_HELLO_FRAME_BYTES`, rather than 64 MiB; a `HELLO` measures 1 632 bytes.
+  The reference listener's TLS handshake is bounded by `hello_timeout` too.
+  No wire change: a peer whose handshake frames exceed 64 KiB is refused.
 - **§3.11 FILE_CANCEL** — optional `denial_reason` (the receiver's firewall
   sentence, read to 300 characters); reason `receive_error` for a receive that
   cannot be written to disk. Receiving is a behaviour change with no new

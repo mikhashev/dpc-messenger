@@ -758,7 +758,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `relay_timeout` | `20` |  |
 | `gossip_timeout` | `5` | How long to wait before falling back to gossip |
 | `remote_inference_timeout` | `1200` |  |
-| `hello_timeout` | `10` | Seconds the listener waits for HELLO after its challenge |
+| `hello_timeout` | `10` | Seconds the listener waits for the TLS handshake, and again for HELLO after its challenge |
 | `max_pending_hellos_per_ip` | `8` | Inbound connections one address may hold before HELLO_ACK |
 | `reconnect_slow_interval_max_seconds` | `900` | After five fast reconnect attempts to a peer we keep, retry from 60 s, doubling to this ceiling (±20 % jitter), until it answers, the user disconnects it or it leaves every shared group. Off when `[p2p] auto_connect_node_groups` is off |
 
@@ -1612,7 +1612,10 @@ gossip_timeout = 5         # Gossip fallback timeout
 - **Description:** Seconds the listener waits for `HELLO` after issuing its
   `HELLO_CHALLENGE`. A peer that completes TLS and then says nothing is hung up on
   when this expires, and the expiry counts as a failed HELLO for the per-address
-  rate limiter (10 failures in 300 s close that address silently)
+  rate limiter (10 failures in 300 s close that address silently). The same
+  number bounds the TLS handshake before it (`ssl_handshake_timeout`, asyncio's
+  own default being 60 s); a socket dropped there never reached the listener and
+  is not counted
 - **Default:** `10`
 - **Note:** ADR-041 D8. Raise it only for peers on very high-latency links; the
   dial side budgets `ipv4_timeout` / `ipv6_timeout` for the whole exchange, so

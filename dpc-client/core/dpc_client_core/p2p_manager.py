@@ -15,7 +15,9 @@ from cryptography.hazmat.primitives import serialization
 import websockets
 
 from dpc_protocol.crypto import DPC_HOME_DIR, generate_node_id, load_identity, generate_identity
-from dpc_protocol.protocol import read_message, write_message, create_hello_message
+from dpc_protocol.protocol import (
+    MAX_HELLO_FRAME_BYTES, read_message, write_message, create_hello_message,
+)
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
 
@@ -263,6 +265,16 @@ class P2PManager:
         ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ssl_context.load_cert_chain(certfile=self.cert_file, keyfile=self.key_file)
 
+        async def _listen(bind_host: str):
+            # One clock for "connected and not yet proved": the TLS handshake
+            # gets the hello_timeout the HELLO read gets, not asyncio's 60 s.
+            # A socket stuck here never reaches the handler, so it is bounded
+            # and still counted by neither D8 guard.
+            return await asyncio.start_server(
+                self._handle_direct_connection, bind_host, port,
+                ssl=ssl_context, ssl_handshake_timeout=self._hello_timeout,
+            )
+
         if host == "dual":
             # Windows requires separate IPv4 and IPv6 listeners
             # On Windows, binding to [::] only listens on IPv6 (doesn't accept IPv4-mapped addresses)
@@ -274,12 +286,8 @@ class P2PManager:
                 logger.info("Windows detected - creating separate IPv4 and IPv6 listeners")
 
                 try:
-                    server_v4 = await asyncio.start_server(
-                        self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
-                    )
-                    server_v6 = await asyncio.start_server(
-                        self._handle_direct_connection, "::", port, ssl=ssl_context
-                    )
+                    server_v4 = await _listen("0.0.0.0")
+                    server_v6 = await _listen("::")
 
                     self._server_task = asyncio.gather(
                         server_v4.serve_forever(),
@@ -297,12 +305,8 @@ class P2PManager:
                 logger.info("Linux/macOS detected - creating separate IPv4 and IPv6 listeners")
 
                 try:
-                    server_v4 = await asyncio.start_server(
-                        self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
-                    )
-                    server_v6 = await asyncio.start_server(
-                        self._handle_direct_connection, "::", port, ssl=ssl_context
-                    )
+                    server_v4 = await _listen("0.0.0.0")
+                    server_v6 = await _listen("::")
 
                     self._server_task = asyncio.gather(
                         server_v4.serve_forever(),
@@ -315,9 +319,7 @@ class P2PManager:
                     raise
         else:
             # Single-stack mode (IPv4 or IPv6 only)
-            server = await asyncio.start_server(
-                self._handle_direct_connection, host, port, ssl=ssl_context
-            )
+            server = await _listen(host)
             self._server_task = asyncio.create_task(server.serve_forever())
 
             # Format IPv6 addresses with brackets for clarity
@@ -585,8 +587,14 @@ class P2PManager:
 
             # Bounded, and the expiry lands in the except below as one more
             # failed HELLO; the dial side's _handshake_read has the same shape.
+            # The frame cap is the stranger's one until the identity check
+            # below passes: a header over it is refused before its body is read,
+            # and the None it returns is one more failed HELLO too.
             try:
-                hello_msg = await asyncio.wait_for(read_message(reader), timeout=self._hello_timeout)
+                hello_msg = await asyncio.wait_for(
+                    read_message(reader, max_frame_bytes=MAX_HELLO_FRAME_BYTES),
+                    timeout=self._hello_timeout,
+                )
             except asyncio.TimeoutError:
                 raise ConnectionError(
                     f"No HELLO within {self._hello_timeout}s of the challenge"
@@ -811,12 +819,16 @@ class P2PManager:
             )
 
             async def _handshake_read(expected: str) -> Optional[dict]:
-                """A read that cannot outlive the budget the caller paid for."""
+                """A read that cannot outlive the budget the caller paid for,
+                nor take a frame larger than a handshake needs."""
                 left = _budget_left()
                 try:
                     if left <= 0:
                         raise asyncio.TimeoutError
-                    return await asyncio.wait_for(read_message(reader), timeout=left)
+                    return await asyncio.wait_for(
+                        read_message(reader, max_frame_bytes=MAX_HELLO_FRAME_BYTES),
+                        timeout=left,
+                    )
                 except asyncio.TimeoutError:
                     writer.close()
                     await writer.wait_closed()
@@ -901,7 +913,9 @@ class P2PManager:
                     "nonce_signature": _b64.b64encode(nonce_signature).decode()
                 }
             }
-            await write_message(writer, hello)
+            # Loud here rather than a silent hang-up at a listener that reads
+            # HELLO under the same cap.
+            await write_message(writer, hello, max_frame_bytes=MAX_HELLO_FRAME_BYTES)
 
             response = await _handshake_read("HELLO_ACK")
             if not response or response.get("status") != "OK":
