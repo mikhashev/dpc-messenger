@@ -1,14 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import {
     AGENT_PROCESS_WINDOW_S,
+    FINISHED_CUT_NOTE,
+    LIST_PROCESSES_FINISHED_MAX,
     PROCESS_POLL_MS,
     SYSTEM_OPEN_BY_DEFAULT,
+    VRAM_NOTE,
+    VRAM_READING_TTL_S,
     agentStatusLine,
     buildAgentMap,
     buttonSummary,
+    chatNamer,
     clockTime,
     conversationTitle,
     endLabel,
+    finishedListCut,
     formatMb,
     formatRun,
     isAgentProcess,
@@ -266,10 +272,56 @@ describe('the header, the backend and memory', () => {
             .toEqual(['commit', 'physical']);
     });
 
-    it('the card alone still makes a bar, with the read-now note and no source name', () => {
+    it('the card alone still makes a bar; "Read now" is not said for it', () => {
         const map = build({}, listing([], { free_commit: null, vram_free_mib: 100, vram_total_mib: 200 }));
         expect(map.memoryBars.map(b => b.label)).toEqual(['Free VRAM 100 of 200 MiB']);
-        expect(map.memorySource).toBe('Read now');
+        expect(map.memorySource).toBe('');
+    });
+
+    it('the VRAM bar says its reading may be up to 30 s old; the host bars carry no note', () => {
+        const map = build({}, listing([], { vram_free_mib: 1234, vram_total_mib: 32607 }));
+        expect(VRAM_READING_TTL_S).toBe(30);
+        expect(VRAM_NOTE).toBe('read ≤30 s ago');
+        expect(map.memoryBars.map(b => [b.kind, b.note])).toEqual([
+            ['commit', ''], ['physical', ''], ['vram', 'read ≤30 s ago']]);
+        expect(map.memorySource).toBe('Read now · GlobalMemoryStatusEx');
+    });
+});
+
+describe('the 200 finished the backend returns', () => {
+    const finished = (n: number, endedAgo: (i: number) => number) =>
+        Array.from({ length: n }, (_, i) => proc({ pid: 1000 + i, started_at: iso(endedAgo(i) + 5),
+            ended_at: iso(endedAgo(i)), exit_reason: 'exited', exit_code: 0 }));
+
+    it('is cut when 200 finished are listed and the oldest is younger than the hour window', () => {
+        expect(LIST_PROCESSES_FINISHED_MAX).toBe(200);
+        const full = finished(200, i => 10 + i * 10);   // oldest ended 1 990 s ago
+        expect(finishedListCut(full, NOW)).toBe(true);
+        const map = build({}, listing(full));
+        expect(map.finishedCapped).toBe(true);
+        expect(map.finishedCapNote).toBe(FINISHED_CUT_NOTE);
+        expect(FINISHED_CUT_NOTE).toBe('Showing the latest 200 finished; older ones in the last hour are not listed.');
+        expect(map.summaryLine).toContain('finished: latest 200 only');
+    });
+
+    it('is not cut when the oldest finished is already past the window', () => {
+        const full = finished(200, i => AGENT_PROCESS_WINDOW_S + 10 + i);
+        expect(finishedListCut(full, NOW)).toBe(false);
+        expect(build({}, listing(full)).finishedCapNote).toBe('');
+    });
+
+    it('is not cut below 200, and open entries do not count toward the 200', () => {
+        expect(finishedListCut(finished(199, i => 10 + i), NOW)).toBe(false);
+        const open = Array.from({ length: 5 }, (_, i) => proc({ pid: 5000 + i }));
+        expect(finishedListCut([...finished(199, i => 10 + i), ...open], NOW)).toBe(false);
+        const map = build({}, listing([...finished(199, i => 10 + i), ...open]));
+        expect(map.finishedCapped).toBe(false);
+        expect(map.summaryLine).not.toContain('finished:');
+    });
+
+    it('judges the oldest by its end, whatever the order of the list', () => {
+        const full = finished(200, i => 10 + i * 10).reverse();
+        expect(finishedListCut(full, NOW)).toBe(true);
     });
 });
 
@@ -289,6 +341,37 @@ describe('chats by name', () => {
                              turn: turn({ conversation_id: 'group-b', conversation_title: 'Hardware (renamed)' }) }]);
         const map = build(st, listing([proc({ conversation_id: 'group-b' })]));
         expect(map.agents.find(a => a.name === 'Ark')!.processes[0].chat).toBe('Hardware (renamed)');
+    });
+});
+
+describe('the sidebar names a chat as the map does', () => {
+    const names = { groups: new Map([['group-b', { name: 'Hardware' }]]), agents: AGENTS,
+                    peers: [{ node_id: 'dpc-node-1', name: 'Linus' }] };
+    const empty = (id: string) => states([{ agent_id: 'agent_ark', ts: 't1', waiting: [],
+        turn: turn({ conversation_id: id, conversation_title: '' }) }], NOW - 48_000);
+
+    it('an empty title is resolved, not printed as the id', () => {
+        for (const [id, name] of [['group-b', 'Hardware'], ['agent_iris', 'Iris (1:1)'], ['dpc-node-1', 'Linus']]) {
+            const turns = empty(id);
+            const sidebar = agentStatusLine(turns['agent_ark'], NOW, chatNamer(turns, names));
+            const mapped = buildAgentMap({ agents: AGENTS, turns, listing: null, names, nowMs: NOW }).agents.find(a => a.agent_id === 'agent_ark')!;
+            expect(sidebar.line).toBe(`Working · ${name} · 2 min 14 s`);
+            expect(sidebar.line).toBe(mapped.stateLine);
+        }
+    });
+
+    it('a title the backend gave in any turn wins, and an unknown chat keeps its id', () => {
+        const turns = states([
+            { agent_id: 'agent_ark', ts: 't1', waiting: [], turn: turn({ conversation_id: 'group-b', conversation_title: '' }) },
+            { agent_id: 'agent_iris', ts: 't1', waiting: [], turn: turn({ conversation_id: 'group-b', conversation_title: 'Hardware (renamed)' }) },
+        ], NOW - 48_000);
+        expect(agentStatusLine(turns['agent_ark'], NOW, chatNamer(turns, names)).line).toBe('Working · Hardware (renamed) · 2 min 14 s');
+        const lost = empty('elsewhere');
+        expect(agentStatusLine(lost['agent_ark'], NOW, chatNamer(lost, names)).line).toBe('Working · elsewhere · 2 min 14 s');
+    });
+
+    it('without a namer the id stands, as before', () => {
+        expect(agentStatusLine(empty('group-b')['agent_ark'], NOW).line).toBe('Working · group-b · 2 min 14 s');
     });
 });
 

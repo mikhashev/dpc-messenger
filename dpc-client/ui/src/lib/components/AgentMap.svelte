@@ -235,11 +235,11 @@
           {#if map.memoryBars.length}
             {#each map.memoryBars as bar (bar.kind)}
               <div class="memory-bar">
-                <span>{bar.label}</span>
+                <span>{bar.label}{#if bar.note} <span class="bar-note">· {bar.note}</span>{/if}</span>
                 <div class="bar-track"><div class="bar-fill {bar.kind}" style="width: {Math.round(bar.fraction * 100)}%"></div></div>
               </div>
             {/each}
-            <span class="memory-source">{map.memorySource}</span>
+            {#if map.memorySource}<span class="memory-source">{map.memorySource}</span>{/if}
           {:else}
             <span class="muted">{freeCommitLine(listing.free_commit)}</span>
           {/if}
@@ -341,6 +341,9 @@
               <span class="section-label">PROCESSES</span>
               {#if listing && selected.processes.length === 0}
                 <span class="muted">This agent has started no process in the last hour.</span>
+              {/if}
+              {#if map.finishedCapNote}
+                <span class="muted small">{map.finishedCapNote}</span>
               {/if}
               {#if selected.processes.length > 0}
                 <div class="table-scroll">
@@ -501,6 +504,7 @@
   .bar-fill.physical { background: #d29922; }
   .bar-fill.vram { background: #a371f7; }
   .memory-source { font-size: 13px; color: var(--text-secondary, #a9b0bb); }
+  .bar-note { font-size: 12px; color: var(--text-secondary, #a9b0bb); opacity: 0.8; }
 
   .map-columns {
     display: flex;

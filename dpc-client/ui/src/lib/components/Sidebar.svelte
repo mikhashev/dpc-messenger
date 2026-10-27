@@ -6,7 +6,7 @@
   import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
   import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
   import { agentTurns } from '$lib/services/agents';
-  import { agentStatusLine, buttonSummary } from '$lib/utils/agentMap';
+  import { agentStatusLine, buttonSummary, chatNamer } from '$lib/utils/agentMap';
 
   // Account balance rows (one per DeepSeek/NeuralDeep/... account, 2026-09-28
   // — was a single hard-coded DeepSeek pill with no provider name). Level
@@ -434,6 +434,13 @@
 
   // The line under each agent reads the same turns; its durations need a clock,
   // which runs only while some agent has a turn.
+  // A chat is named as the map names it: the turn's own title, else the group's name,
+  // "<agent> (1:1)", the peer's name, the id.
+  const chatOf = $derived(chatNamer($agentTurns, {
+    groups: groupChats,
+    agents,
+    peers: nodeStatus?.peer_info ?? [],
+  }));
   let statusNow = $state(Date.now());
   const anyTurn = $derived(Object.values($agentTurns).some((s) => !!s.turn));
   $effect(() => {
@@ -754,7 +761,7 @@
         {#if agents && agents.length > 0}
           <li class="section-divider"><span>Agents</span></li>
           {#each agents as agent (agent.agent_id)}
-            {@const status = agentStatusLine($agentTurns[agent.agent_id], statusNow)}
+            {@const status = agentStatusLine($agentTurns[agent.agent_id], statusNow, chatOf)}
             <li class="peer-item">
               <button
                 type="button"

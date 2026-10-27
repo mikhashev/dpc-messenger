@@ -24,6 +24,14 @@ import type { FreeCommitReading } from './strataFields';
 export const PROCESS_POLL_MS = 5000;
 /** A finished process stays under its agent for this long after it ended. */
 export const AGENT_PROCESS_WINDOW_S = 3600;
+/** How many finished entries `list_processes` returns at most: mirrors
+ *  `KEEP_FINISHED_MAX` in the backend's `process_registry.py`. A full answer may
+ *  have cut finished entries that are still inside AGENT_PROCESS_WINDOW_S. */
+export const LIST_PROCESSES_FINISHED_MAX = 200;
+/** How long the backend reuses a VRAM reading: mirrors `_VRAM_READING_TTL_S` in
+ *  `managers/llama_server_supervisor.py`. The answer carries no read time, so
+ *  this is the most the card's bar can lag. */
+export const VRAM_READING_TTL_S = 30;
 /** The system branch opens collapsed. */
 export const SYSTEM_OPEN_BY_DEFAULT = false;
 
@@ -112,6 +120,8 @@ export interface MapMemoryBar {
     kind: 'commit' | 'physical' | 'vram';
     label: string;
     fraction: number;
+    /** A muted note beside the bar when its reading is not from this request. */
+    note: string;
 }
 
 export interface AgentMap {
@@ -122,6 +132,10 @@ export interface AgentMap {
     summaryLine: string;
     memoryBars: MapMemoryBar[];
     memorySource: string;
+    /** True when the answer is full of finished entries and the oldest is still inside the agent window. */
+    finishedCapped: boolean;
+    /** The words for that case; empty otherwise. */
+    finishedCapNote: string;
 }
 
 /** The row fields of `list_agents` the map reads. */
@@ -239,6 +253,15 @@ function titlesFromTurns(turns: AgentTurnStates): Map<string, string> {
     return titles;
 }
 
+/** One chat-naming function for every place that prints a chat: the title the
+ *  backend resolved in any turn or waiting item wins, then the local resolver
+ *  (`conversationTitle`). The map and the sidebar's state line both use it, so a
+ *  chat has one name on both. */
+export function chatNamer(turns: AgentTurnStates, names: ConversationNames): (id: string | null) => string {
+    const known = titlesFromTurns(turns);
+    return id => (id ? known.get(id) || conversationTitle(id, names) : '');
+}
+
 // --- the agent's state -----------------------------------------------------
 
 interface TurnWords {
@@ -295,10 +318,14 @@ function turnWords(state: AgentTurnState | undefined, chatOf: (id: string | null
 
 /** The line under an agent in the sidebar: the map's dot and state line for the
  *  agent's turn, and the waiting-chat count the map's chip prints. An agent with
- *  no turn is `Idle`. The chat is named by the turn's own title; no listing or
- *  name table is read. */
-export function agentStatusLine(state: AgentTurnState | undefined, nowMs: number): { dot: MapDot; line: string; waiting: string } {
-    const words = turnWords(state, id => id ?? '', nowMs);
+ *  no turn is `Idle`. The chat is named by the turn's own title, else by `chatOf`
+ *  (`chatNamer`, as the map does); without it the id stands. */
+export function agentStatusLine(
+    state: AgentTurnState | undefined,
+    nowMs: number,
+    chatOf: (id: string | null) => string = id => id ?? '',
+): { dot: MapDot; line: string; waiting: string } {
+    const words = turnWords(state, chatOf, nowMs);
     const count = state?.waiting.length ?? 0;
     return {
         dot: words.dot,
@@ -440,21 +467,42 @@ export function pickSelected(map: AgentMap, selectedId: string | null | undefine
     return map.agents[0]?.agent_id ?? null;
 }
 
+/** Free commit and physical memory are read at the request; the card's VRAM is a
+ *  reading the backend may have kept for up to VRAM_READING_TTL_S. */
+export const VRAM_NOTE = `read ≤${VRAM_READING_TTL_S} s ago`;
+
 function memory(listing: ProcessListing | null | undefined): { bars: MapMemoryBar[]; source: string } {
     const reading = listing?.free_commit;
     const n = (v: number) => v.toLocaleString('en-US');
-    const bar = (kind: MapMemoryBar['kind'], label: string, avail: number | null, total: number | null): MapMemoryBar[] =>
+    const bar = (kind: MapMemoryBar['kind'], label: string, avail: number | null, total: number | null, note = ''): MapMemoryBar[] =>
         typeof avail === 'number' && typeof total === 'number' && total > 0
-            ? [{ kind, label: `${label} ${n(avail)} of ${n(total)} MiB`, fraction: Math.min(1, Math.max(0, avail / total)) }]
+            ? [{ kind, label: `${label} ${n(avail)} of ${n(total)} MiB`, fraction: Math.min(1, Math.max(0, avail / total)), note }]
             : [];
-    const bars = [
+    const hostBars = [
         ...(reading ? bar('commit', 'Free commit', reading.avail_page_file_mib, reading.total_page_file_mib) : []),
         ...(reading ? bar('physical', 'Free physical', reading.avail_phys_mib, reading.total_phys_mib) : []),
-        ...bar('vram', 'Free VRAM', listing?.vram_free_mib ?? null, listing?.vram_total_mib ?? null),
     ];
-    if (!bars.length) return { bars, source: '' };
+    const bars = [
+        ...hostBars,
+        ...bar('vram', 'Free VRAM', listing?.vram_free_mib ?? null, listing?.vram_total_mib ?? null, VRAM_NOTE),
+    ];
+    // "Read now" speaks for the host bars only; the VRAM bar carries its own note.
+    if (!hostBars.length) return { bars, source: '' };
     return { bars, source: reading?.source ? `Read now · ${reading.source}` : 'Read now' };
 }
+
+/** The answer is full of finished entries (the backend keeps the newest
+ *  LIST_PROCESSES_FINISHED_MAX) and the oldest of them ended inside the agent
+ *  window: older finished processes of the last hour may be missing. */
+export function finishedListCut(processes: ProcessEntry[], nowMs: number): boolean {
+    const ended = processes.filter(p => !!p.ended_at);
+    if (ended.length < LIST_PROCESSES_FINISHED_MAX) return false;
+    const oldest = Math.min(...ended.map(p => epochMs(p.ended_at)).filter(Number.isFinite));
+    return Number.isFinite(oldest) && nowMs - oldest <= AGENT_PROCESS_WINDOW_S * 1000;
+}
+
+export const FINISHED_CUT_NOTE =
+    `Showing the latest ${LIST_PROCESSES_FINISHED_MAX} finished; older ones in the last hour are not listed.`;
 
 const DOT_RANK: Record<MapDot, number> = { working: 0, waiting: 1, idle: 2 };
 
@@ -466,9 +514,8 @@ export function buildAgentMap(input: {
     nowMs: number;
 }): AgentMap {
     const { turns, listing, nowMs } = input;
-    const known = titlesFromTurns(turns);
     const names: ConversationNames = { ...input.names, agents: input.names.agents ?? input.agents };
-    const chatOf = (id: string | null) => (id ? known.get(id) || conversationTitle(id, names) : '');
+    const chatOf = chatNamer(turns, names);
     const nameById = new Map(input.agents.map(a => [a.agent_id, a.name || a.agent_id]));
     const nameOf = (id: string) => nameById.get(id) || id;
 
@@ -520,6 +567,7 @@ export function buildAgentMap(input: {
         .join(' · ');
 
     const alive = processes.filter(p => !p.ended_at).length;
+    const capped = finishedListCut(processes, nowMs);
     const busy = ordered.filter(a => !!turns[a.agent_id]?.turn).length;
     const waiting = ordered.reduce((n, a) => n + a.waiting.length, 0);
     const backendStart = listing?.backend_start_time;
@@ -535,6 +583,7 @@ export function buildAgentMap(input: {
         `${busy} busy`,
         plural(waiting, 'chat waiting', 'chats waiting'),
         ...(listing ? [`${plural(alive, 'process', 'processes')} alive`] : []),
+        ...(capped ? [`finished: latest ${LIST_PROCESSES_FINISHED_MAX} only`] : []),
         'click an agent for details',
     ].join(' · ');
     const mem = memory(listing);
@@ -547,5 +596,7 @@ export function buildAgentMap(input: {
         summaryLine,
         memoryBars: mem.bars,
         memorySource: mem.source,
+        finishedCapped: capped,
+        finishedCapNote: capped ? FINISHED_CUT_NOTE : '',
     };
 }
