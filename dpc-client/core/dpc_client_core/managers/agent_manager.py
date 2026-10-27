@@ -20,6 +20,7 @@ import pathlib
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..dpc_agent.agent import DpcAgent, AgentConfig
+from ..dpc_agent.run_gate import RunGate, _RUN_GATES, get_run_gate, hold, turn_title  # noqa: F401
 from ..providers.base import ModelNotCachedError
 from ..dpc_agent.utils import get_agent_root, ensure_agent_dirs, utc_now_iso
 from ..dpc_agent.events import get_event_emitter, EventType
@@ -38,17 +39,10 @@ log = logging.getLogger(__name__)
 # is unique per agent: the manager builds a second DpcAgent per provider alias
 # over the same agent_root, and a second provider instance would build a second
 # manager. A gate on either would be two gates over one set of files.
-_RUN_GATES: Dict[str, asyncio.Lock] = {}
-
-
-def get_run_gate(agent_id: Optional[str]) -> asyncio.Lock:
-    """Return the run gate for an agent identity, creating it on first ask."""
-    key = agent_id or "__singleton__"
-    gate = _RUN_GATES.get(key)
-    if gate is None:
-        gate = asyncio.Lock()
-        _RUN_GATES[key] = gate
-    return gate
+#
+# The gate is a `RunGate`, a lock that keeps its waiters (ADR-046 point 8); it
+# and the registry `_RUN_GATES` live in `dpc_agent/run_gate.py`, where the
+# agent's turn and the chats waiting for it are read from.
 
 
 class DpcAgentManager:
@@ -979,9 +973,18 @@ class DpcAgentManager:
         reads them after `process` returns, so a second run finishing in that
         window writes its thinking and tool calls into the first one's history.
         Both doors into a run take this same gate — see `DpcAgent._execute_task`
-        for the other one.
+        for the other one. The chat registers at the gate before it waits.
         """
-        async with self._run_gate:
+        conversation_id = kwargs.get("conversation_id")
+        if conversation_id is None and len(args) > 1:
+            conversation_id = args[1]
+        entry = {
+            "conversation_id": conversation_id,
+            "conversation_title": turn_title(
+                getattr(self, "service", None), conversation_id, kwargs.get("chat_context"),
+            ),
+        }
+        async with hold(self._run_gate, entry):
             return await self._process_message_guarded(*args, **kwargs)
 
     async def _process_message_guarded(

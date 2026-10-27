@@ -28,6 +28,7 @@ import warnings
 from typing import List, NamedTuple, Optional, Tuple
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
+from ..run_gate import turn_waits_for
 # Moved to `process.py` on 2026-08-26 so they cover every spawn this service
 # makes, not only this file's. Imported under their old names on purpose: the
 # tests monkeypatch `shell._MEMORY_CEILING_MB`, and a module global is what they
@@ -2388,7 +2389,10 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
 
     # Wait for the user's decision only; the command runs below on this
     # thread, not in the approve handler (S197 timeout-race fix).
-    signaled = event.wait(timeout=APPROVAL_TTL_SECONDS)
+    # The agent's turn reads `approval` while this thread waits for the answer.
+    with turn_waits_for("approval", gate=getattr(agent_obj, "_run_gate", None),
+                        conversation_id=getattr(ctx, "conversation_id", None) or None):
+        signaled = event.wait(timeout=APPROVAL_TTL_SECONDS)
     entry = _pending_approvals.pop(request_id, None)
 
     if not signaled or entry is None:

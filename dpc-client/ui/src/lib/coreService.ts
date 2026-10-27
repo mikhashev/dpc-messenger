@@ -131,7 +131,7 @@ import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTran
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded } from './services/voice';
 import { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress } from './services/modelDownload';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
-import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
+import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns, onAgentTurnUpdated, onAgentActivity, forgetAgentTurns } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
@@ -146,7 +146,7 @@ export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTran
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded };
 export { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress };
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
-export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates };
+export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionFallback, tokenWarning, integrityWarnings, votingConversationId };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
@@ -274,6 +274,8 @@ export async function connectToCoreService() {
         // Set up event listeners (belt and suspenders)
         socket.addEventListener('open', () => {
             console.log("✅ WebSocket opened via event");
+            // Turn events sent while we were away are lost; list_agents seeds again.
+            forgetAgentTurns();
 
             // Send auth as the FIRST message — synchronously, no awaits.
             // Without this the backend closes us with code 1008 after a 5s timeout.
@@ -979,6 +981,11 @@ export async function connectToCoreService() {
                     if (_cid && _aid) {
                         agentLiveAgentIds.update((m) => (m[_cid] === _aid ? m : { ...m, [_cid]: _aid }));
                     }
+                    onAgentActivity(_aid || undefined, _cid || undefined);
+                }
+                else if (message.event === "agent_turn_updated") {
+                    // Full snapshot {agent_id, turn, waiting, ts}; turn null = idle.
+                    onAgentTurnUpdated(message.payload);
                 }
                 else if (message.event === "agent_progress_clear") {
                     // Signal to clear progress display (task completed/failed)
@@ -997,6 +1004,7 @@ export async function connectToCoreService() {
                     // Streaming text chunk from agent LLM response
                     // payload: {conversation_id, chunk, ts}
                     agentTextChunk.set(message.payload);
+                    if (message.payload?.conversation_id) onAgentActivity(undefined, message.payload.conversation_id);
                 }
                 else if (message.event === "agent_chat_message") {
                     // CC response injected into agent chat

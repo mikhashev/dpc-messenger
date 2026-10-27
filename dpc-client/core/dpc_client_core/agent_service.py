@@ -62,6 +62,26 @@ class AgentService:
         self.local_api = local_api
         self.firewall = firewall
         self.peer_metadata = peer_metadata
+        self._turn_broadcasts: set = set()
+        from .dpc_agent.run_gate import set_turn_listener
+        set_turn_listener(self._broadcast_agent_turn)
+
+    def _broadcast_agent_turn(self, snapshot: Dict[str, Any]) -> None:
+        """Send one agent's turn snapshot to the UI as `agent_turn_updated`.
+
+        Called on the event loop's thread by the run gate at every change; the
+        snapshot is taken at the change, so a send that lands late still says
+        what was true then, and `ts` lets the UI keep the newest."""
+        import asyncio
+        if self.local_api is None or not hasattr(self.local_api, "broadcast_event"):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self.local_api.broadcast_event("agent_turn_updated", snapshot))
+        self._turn_broadcasts.add(task)
+        task.add_done_callback(self._turn_broadcasts.discard)
 
     def get_state(self) -> Dict[str, Any]:
         """Runtime snapshot for debugging/introspection."""
@@ -215,6 +235,7 @@ class AgentService:
     async def list_agents(self) -> Dict[str, Any]:
         """List all registered DPC Agents."""
         from .dpc_agent.utils import AgentRegistry, load_agent_config
+        from .dpc_agent.run_gate import agent_turn_fields
 
         try:
             registry = AgentRegistry()
@@ -222,6 +243,10 @@ class AgentService:
 
             for agent in agents:
                 agent_id = agent.get("agent_id", "")
+                # The turn and the waiting chats as they are now; every later
+                # change arrives as `agent_turn_updated`.
+                agent.update(agent_turn_fields(agent_id) if agent_id
+                             else {"turn": None, "waiting": []})
                 if agent_id:
                     cfg = load_agent_config(agent_id) or {}
                     if cfg.get("name"):

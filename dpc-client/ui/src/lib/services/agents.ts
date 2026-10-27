@@ -8,6 +8,14 @@ import type {
     AgentProgressClearEvent,
     AgentTextChunkEvent,
 } from '$lib/types';
+import {
+    applyTurnSnapshot,
+    seedTurnsFromAgents,
+    noteAgentActivity,
+    noteConversationActivity,
+    type AgentTurnSnapshot,
+    type AgentTurnStates,
+} from '$lib/utils/agentTurnNotice';
 
 // Agent state
 export const agentsList = writable<AgentInfo[]>([]);
@@ -28,6 +36,27 @@ export const agentLiveTools = writable<Record<string, any[]>>({});
 // running agent even after a chat switch cleared the page-level id.
 export const agentLiveAgentIds = writable<Record<string, string>>({});
 export const agentTextChunk = writable<AgentTextChunkEvent | null>(null);
+
+// Each agent's turn and the chats waiting for it (ADR-046 point 8): seeded from
+// the `turn`/`waiting` of the list_agents rows, then replaced whole by every
+// `agent_turn_updated` event.
+export const agentTurns = writable<AgentTurnStates>({});
+agentsList.subscribe((list) => agentTurns.update((m) => seedTurnsFromAgents(m, list as any[], Date.now())));
+
+export function onAgentTurnUpdated(snap: AgentTurnSnapshot): void {
+    agentTurns.update((m) => applyTurnSnapshot(m, snap, Date.now()));
+}
+
+export function onAgentActivity(agentId?: string, conversationId?: string): void {
+    const now = Date.now();
+    if (agentId) agentTurns.update((m) => noteAgentActivity(m, agentId, now));
+    else if (conversationId) agentTurns.update((m) => noteConversationActivity(m, conversationId, now));
+}
+
+/** After a reconnect the events in between are lost: the next list_agents seeds again. */
+export function forgetAgentTurns(): void {
+    agentTurns.set({});
+}
 
 // CC agent chat message (injected by CC via send_cc_agent_response)
 export const agentChatMessage = writable<Record<string, any> | null>(null);

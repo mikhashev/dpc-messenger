@@ -302,7 +302,7 @@ class CoreService:
         # Per-group agent serialization lock — one agent runs in a given group at a time
         # so concurrent @mentions queue instead of racing (prevents one agent's progress
         # -clear wiping another's, and concurrent same-group LLM load).
-        self._group_agent_locks: Dict[str, asyncio.Lock] = {}
+        self._group_agent_locks: Dict[str, "RunGate"] = {}
         self._group_agent_context: Dict[str, Dict[str, tuple]] = {}
 
         # CC<->agent chain depth per agent conversation; a human message resets it.
@@ -6570,10 +6570,23 @@ class CoreService:
         """Run an agent in a group under the per-group lock — serializes agents so two
         @mentions in the same group queue (one at a time) instead of running in parallel.
         Prevents one agent's completion progress-clear wiping another's still-running
-        progress, and avoids concurrent same-group LLM load."""
+        progress, and avoids concurrent same-group LLM load. The lock is a room
+        `RunGate`: the agent registers before it waits, which is `room_busy`."""
+        from .dpc_agent.run_gate import RunGate, hold, turn_title
+
         if group_id not in self._group_agent_locks:
-            self._group_agent_locks[group_id] = asyncio.Lock()
-        async with self._group_agent_locks[group_id]:
+            self._group_agent_locks[group_id] = RunGate(room=group_id)
+        if not agent_id:
+            try:
+                agent_id = self._get_default_agent_id()
+            except Exception as e:
+                logger.warning("No default agent for the room lock in %s: %s", group_id, e)
+        entry = {
+            "agent_id": agent_id,
+            "conversation_id": group_id,
+            "conversation_title": turn_title(self, group_id),
+        }
+        async with hold(self._group_agent_locks[group_id], entry):
             await self._invoke_agent_in_group(group_id, text, sender_name, agent_id,
                                               trigger_message_id,
                                               mention_depth=mention_depth)

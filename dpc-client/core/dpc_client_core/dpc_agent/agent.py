@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from .llm_adapter import DpcLlmAdapter
+from .run_gate import RunGate, hold as hold_run_gate, turn_title
 from .tools.registry import ToolRegistry, ToolContext
 from .memory import Memory, generate_smart_index
 from .skill_store import SkillStore
@@ -178,7 +179,7 @@ class DpcAgent:
         # The queue is the second door into a run. It takes the manager's gate,
         # so a scheduled task cannot land in a conversation mid-chat; a bare
         # agent gets its own, which serialises nothing but keeps the code honest.
-        self._run_gate = run_gate if run_gate is not None else asyncio.Lock()
+        self._run_gate = run_gate if run_gate is not None else RunGate()
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components. The adapter writes a usage row per call and
@@ -1120,9 +1121,16 @@ class DpcAgent:
 
         This is the second door into a run. A check_back deliberately replies
         into the conversation it came from, so without the gate a scheduled task
-        lands its turn in the middle of a live chat.
+        lands its turn in the middle of a live chat. The task registers at the
+        gate under the chat it will answer in.
         """
-        async with self._run_gate:
+        data = getattr(task, "data", None) or {}
+        conversation_id = data.get("_reply_conversation_id") or getattr(task, "id", None)
+        entry = {
+            "conversation_id": conversation_id,
+            "conversation_title": turn_title(getattr(self, "_service", None), conversation_id),
+        }
+        async with hold_run_gate(self._run_gate, entry):
             return await self._execute_task_guarded(task)
 
     async def _execute_task_guarded(self, task: Task) -> str:

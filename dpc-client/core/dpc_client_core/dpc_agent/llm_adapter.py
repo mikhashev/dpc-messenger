@@ -42,6 +42,7 @@ from ..node_ledger import (
 from ..providers.base import image_pixel_limit_of
 from ..utils.image_utils import normalise_turn_images
 from .pricing import COST_FIELDS, get_billing_model, price_call, usd_figure
+from .run_gate import turn_waits_for
 
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
@@ -553,11 +554,17 @@ class DpcLlmAdapter:
         started_at = datetime.now(timezone.utc)
         clock = time.monotonic()
         self._last_call = {}
-        response_msg, usage = await self._chat(
-            messages, model=model, tools=tools, reasoning_effort=reasoning_effort,
-            max_tokens=max_tokens, on_stream_chunk=on_stream_chunk,
-            conversation_id=conversation_id, tool_choice=tool_choice,
-        )
+        # The agent's turn reads `model_call` until the call returns or raises.
+        try:
+            turn_alias = self._get_agent_provider_alias()
+        except Exception:
+            turn_alias = None
+        with turn_waits_for("model_call", provider_alias=turn_alias):
+            response_msg, usage = await self._chat(
+                messages, model=model, tools=tools, reasoning_effort=reasoning_effort,
+                max_tokens=max_tokens, on_stream_chunk=on_stream_chunk,
+                conversation_id=conversation_id, tool_choice=tool_choice,
+            )
         self._write_usage_row(
             usage, response_msg, started_at=started_at, duration_s=time.monotonic() - clock,
             task_id=task_id, conversation_id=conversation_id,

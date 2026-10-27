@@ -37,6 +37,7 @@ from dpc_protocol.protocol import PeerRefused
 
 from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading
 from ..process_registry import SpawnOrigin, spawn_origin
+from .run_gate import note_turn
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
     ContextLimitGuard,
@@ -1042,6 +1043,7 @@ async def _execute_with_timeout(
         ctx._event_loop = loop
 
     t0 = time.monotonic()
+    note_turn(tool=fn_name)
     try:
         # Use run_in_executor to avoid blocking the event loop
         result = await asyncio.wait_for(
@@ -1090,6 +1092,7 @@ async def _execute_with_timeout(
             "args_for_log": timeout_log["args"],
         }
     finally:
+        note_turn(tool=None)
         # Don't shutdown the shared executor - it will be reused
         # Force garbage collection after each tool execution to prevent memory accumulation
         gc.collect()
@@ -1562,6 +1565,7 @@ async def run_llm_loop(
         while True:
             round_idx += 1
             ctx.round_idx = round_idx
+            note_turn(round=round_idx)
 
             # User-initiated stop (L1 Interrupt API).
             if stop_event and stop_event.is_set():

@@ -504,13 +504,31 @@ holds on Windows only.
      explicitly (CLAUDE.md, "Adding a new agent tool"); `kill_my_process` is opt-in.
      Agents also see their own resource use against their ceiling before they reach it.
    - **On screen,** a card of its own (the UI card waits on the API command): activity in
-     the agent's row of the AGENTS list (working or idle, which chat, since when, thinking
-     or tool or command, live process count) and details in Agent Models Configuration,
+     the agent's row of the AGENTS list (working or idle, the **turn** and the chats
+     **waiting** for it, since when, thinking or tool or command, live process count) and
+     details in Agent Models Configuration,
      shaped like an agent map: the agent, its current and recent runs, their tool calls
      and the processes they started with pid, command, start, resources and how each
      ended. The system section lists Strata, `llamacpp_server` and the browser with RSS and
      VRAM, which are not visible in the UI today. Whether the detail view keeps only current
      work or also the last ten runs was put to Mike and is not decided here.
+   - **The turn and the waiting chats** *(amended 2026-10-27, Mike's go on the names, a
+     consensus of Ark, Zcode and CC).* "Which chat" became two things, because a chat
+     waiting behind another looked the same as a chat nobody answers. The agent's row
+     carries `turn` (its current run in one conversation, null when idle:
+     `conversation_id`, `conversation_title`, `started_at`, `round`, `provider_alias`,
+     `tool`, `wait_reason`) and `waiting` (the chats waiting for it, in arrival order: each
+     with `conversation_id`, `conversation_title`, `waiting_since`, `wait_reason`,
+     `held_by`). `wait_reason` is closed at four: on a turn `model_call` or `approval` or
+     null, on a waiting item `other_chat` (the agent is in another chat's turn) or
+     `room_busy` (the room's lock is held by another agent's turn); `held_by` is
+     `{conversation_id, wait_reason}` of the turn holding the lock, one level, with
+     `agent_id` for `room_busy`. Both locks, the agent's run gate and the room's, are a
+     `RunGate`: a lock with a registry of its waiters beside it, an entry put in before
+     the acquire and removed in a `finally`. `list_agents` returns `turn` and `waiting` on
+     each row, and every change is sent whole as `agent_turn_updated` `{agent_id, turn,
+     waiting, ts}`, with no separate clear event. The waiting chat shows one line saying
+     why; a turn with no event from its agent for 120 s is shown unconfirmed (Ark's rule).
    - **The graph.** The same card draws the tree of point 3: one branch per agent (its
      conversations, their tool calls, the processes those started and their children), and
      a separate system branch for Strata, `llamacpp_server` and the browser, each rooted at
@@ -840,6 +858,7 @@ files.**
 | Spawn sites to the module; structural test: `run_probe` in `process.py` (`run_supervised` with `launcher_kind: subsystem` and bytes), `device_probe` and `git_helper` in `SUBSYSTEMS`, a `device_probe` let through during the stop (point 7); 22 sites moved, the allow-list of four (point 5); tests in `tests/test_every_spawn_goes_through_the_process_module.py` and `tests/test_a_short_probe_is_in_the_registry_and_answers_as_subprocess_run_did.py` | Done 2026-10-26 | `067ca25d` |
 | Review fixes of the move: the structural test walks every script under `dpc-client/core` (`probe_rename_orphan.py` allow-listed), an entry's `due` is an ISO date or `None` and fails once passed (`comfyui`: `None`), the `explorer.exe` entry's reason; a device probe let through the stop only with `while_stopping` (Strata's release check alone passes it); git given `GIT_STOP_GRACE_S` (10 s, one budget) at steps 2 and 5 with the `index.lock` WARNING; `SupervisedRun.stdout`/`stderr` typed `str` or `bytes`; tests in the two files above and `tests/test_the_process_registry_records_how_every_child_ends.py` | Done 2026-10-26 | the commit that carries this row |
 | Local API command `list_processes` (`ProcessRegistry.list_processes`: the kept entries, the daily history for `since`/`until`, `commit_mb` read at the request on Windows; `free_commit` by `commit_memory.read_free_commit_or_physical`, physical memory by psutil and commit null off Windows); agent tools `list_my_processes` and `kill_my_process` (`ProcessRegistry.cancel_by_agent`, the orderly stop's announce-kill-end path with `cancelled_by_agent`); `FreeCommitReading` and `freeCommitLine` in the UI take a reading with no commit; tests in `tests/test_the_local_api_answers_which_processes_run_now.py` and `tests/test_an_agent_sees_and_ends_only_its_own_processes.py` | Done 2026-10-27 | the commit that carries this row |
+| The turn and the waiting chats (point 8, amended 2026-10-27): `RunGate` in `dpc_agent/run_gate.py` for the agent's run gate (both doors register the chat they answer in) and the room lock (`room_busy`); `model_call` around the adapter's call, `approval` around the run_shell and schedule_task waits (from the executor thread through `call_soon_threadsafe`), `round` and `tool` from the loop; `turn` and `waiting` on each `list_agents` row and `agent_turn_updated` at every change; the line in a waiting chat (`AgentTurnNotice.svelte`, `utils/agentTurnNotice.ts`) with the 120 s rule (`TURN_UNCONFIRMED_AFTER_S`); tests in `tests/test_a_waiting_chat_is_on_the_run_gate_until_it_runs.py`, `tests/test_the_turn_says_when_it_waits_for_the_model_or_an_approval.py` and `src/lib/utils/agentTurnNotice.test.ts` | Done 2026-10-27 | the commit that carries this row |
 | UI: AGENTS row and Agent Models Configuration (own card) | Pending | — |
 
 ## Open Questions
@@ -915,6 +934,7 @@ and is not used for the registry.
 | **resource peaks:** `peak_rss_mb`, `peak_commit_mb`, `peak_vram_mib`, `cpu_seconds`, `io_read_bytes`, `io_write_bytes`; **`last_output_at`** | `exceeded_mb`, `ceiling_mb`; `--min-free-vram-mib`; psutil's names | Units follow the neighbours: megabytes for process memory, MiB for VRAM. |
 | **local API command `list_processes`;** agent tools **`list_my_processes`**, **`kill_my_process`** | `list_providers`, `list_ai_chats`; `list_my_tools`, `list_my_skills` | Ark named the two tools; `list_processes` is CC's. |
 | **`commit_mb`** on a live entry; the answer's **`backend_pid`**, **`backend_start_time`** and **`free_commit`**, with `source` `psutil` off Windows | `peak_commit_mb`; the state file's envelope; `commit_memory.read_free_commit`'s keys | Put by CC, reviewed by Ark and Zcode; Mike's go, 2026-10-26. |
+| **`turn`**, **`round`**, **`waiting`**, **`waiting_since`**, **`wait_reason`** with `model_call`, `approval`, `other_chat`, `room_busy`; **`held_by`**; **`conversation_title`**; **run gate** (`RunGate`, module `dpc_agent/run_gate.py`); event **`agent_turn_updated`** | `round` and `conversation_id` of the spawn origin; `exit_reason` (a closed list); `chat_name` of the chat context, which `conversation_title` names in the glossary; `get_run_gate`; the `agent_*` events | Step 2 of point 8, Mike's go on the names Ark, Zcode and CC agreed. `activity` was refused (three meanings in code already), and so was `queue` (`TaskQueue`, the Telegram bridge's approvals). |
 | **the backend's job** (a phrase, not an identifier) | "kill-on-close job object" of ADR-044 | The OS object is a Job Object; this is how the records refer to the backend's. |
 | **orphan sweep** (a phrase for point 6) | `orphan_swept` | Not a function name yet. |
 

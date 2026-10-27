@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
+from ..run_gate import turn_waits_for
 from ..memory import _BACKFILL_SKIP
 from ..utils import auto_commit_agent_change, clip_text
 
@@ -1364,7 +1365,10 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
 
     log.info("check_back approval requested: %s (%s, %s)", request_id, task_type, when)
 
-    signaled = event.wait(timeout=_SCHEDULE_APPROVAL_TTL_SECONDS)
+    # The agent's turn reads `approval` while this thread waits for the answer.
+    with turn_waits_for("approval", gate=getattr(getattr(ctx, "_agent", None), "_run_gate", None),
+                        conversation_id=getattr(ctx, "conversation_id", None) or None):
+        signaled = event.wait(timeout=_SCHEDULE_APPROVAL_TTL_SECONDS)
     entry = _pending_schedule_approvals.pop(request_id, None)
     if not signaled or entry is None:
         log.info("check_back approval timed out (%ds): %s", _SCHEDULE_APPROVAL_TTL_SECONDS, request_id)
