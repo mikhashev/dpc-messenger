@@ -164,9 +164,10 @@ ADR-046, and a reader looking for "what is running and who started it" should fi
 together. None is on the wire, and none is on a screen yet, so the tokens are `rules`
 (and `code` where the word already exists in the source); the registry core is built
 (`4ea0560f`), the sampler (`3d380706`), the local API command `list_processes` and the agent
-tools `list_my_processes` and `kill_my_process` too; the screen is pending, and the row of
-each word says so where it matters. The agent's **turn** and the chats **waiting** for it are
-on screen already, as a line in the waiting chat.
+tools `list_my_processes` and `kill_my_process` too, and the screen, the Agent map. The
+agent's **turn** and the chats **waiting** for it are shown on the Agent map and as a state
+line under each agent in the sidebar; the open chat shows no line of its own (Mike's call,
+2026-10-27).
 
 | Term | Met in | Meaning | Defined in |
 |---|---|---|---|

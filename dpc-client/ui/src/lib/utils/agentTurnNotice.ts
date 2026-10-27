@@ -1,9 +1,9 @@
 // The agent's turn and the chats waiting for it (ADR-046 point 8), as the
 // `agent_turn_updated` event and the `list_agents` rows carry them, and the
-// one line a chat shows when an agent is busy elsewhere or waits for something.
+// words the Agent map and the sidebar's state line say them with.
 //
-// Pure: the store in services/agents.ts holds the state, the component reads
-// the clock. A notice is a line under the input, never a message in history.
+// Pure: the store in services/agents.ts holds the state, the components read
+// the clock.
 
 /** A turn with no event from its agent for this long is shown unconfirmed, not working. */
 export const TURN_UNCONFIRMED_AFTER_S = 120;
@@ -180,44 +180,4 @@ export function silencePhrase(state: AgentTurnState, nowMs: number): string {
 /** True when the turn is non-null and nothing has come from its agent for TURN_UNCONFIRMED_AFTER_S. */
 export function turnIsUnconfirmed(state: AgentTurnState, nowMs: number): boolean {
     return !!state.turn && nowMs - state.lastEventAt > TURN_UNCONFIRMED_AFTER_S * 1000;
-}
-
-/** The lines a chat shows for every agent that is in it or waits on its account. */
-export function turnNoticeLines(
-    chatId: string,
-    states: AgentTurnStates,
-    nameOf: (agentId: string) => string,
-    nowMs: number,
-): string[] {
-    const lines: string[] = [];
-    for (const s of Object.values(states)) {
-        const agent = nameOf(s.agent_id);
-        const turn = s.turn;
-        if (turn && turn.conversation_id === chatId) {
-            const phrase = turnWaitPhrase(turn.wait_reason);
-            if (turnIsUnconfirmed(s, nowMs)) {
-                lines.push(`${agent}'s turn here is unconfirmed: ${silencePhrase(s, nowMs)}`);
-            } else if (phrase) {
-                const what = turn.wait_reason === 'model_call' ? turn.provider_alias : turn.tool;
-                lines.push(`${agent} is ${phrase}${what ? ` (${what})` : ''} · ${formatWait((nowMs - s.waitSeenAt) / 1000)}`);
-            }
-            continue;
-        }
-        // Position in the agent's own queue: the chats behind its gate, oldest first.
-        const queue = s.waiting.filter(w => w.wait_reason === 'other_chat');
-        for (const w of s.waiting) {
-            if (w.conversation_id !== chatId) continue;
-            const approval = heldByApprovalSuffix(w);
-            if (w.wait_reason === 'other_chat') {
-                const heldId = w.held_by?.conversation_id ?? null;
-                const title = (turn && turn.conversation_id === heldId && turn.conversation_title) || heldId || 'another chat';
-                const place = ordinal(queue.indexOf(w) + 1);
-                lines.push(`${agent} is ${waitingReasonPhrase(w, nameOf)} (${title})${approval} · this chat is ${place} in line · ${since(w.waiting_since, nowMs)}`);
-            } else if (w.wait_reason === 'room_busy') {
-                lines.push(`${agent} waits: ${waitingReasonPhrase(w, nameOf)}${approval} · ${since(w.waiting_since, nowMs)}`);
-            }
-            break;
-        }
-    }
-    return lines;
 }

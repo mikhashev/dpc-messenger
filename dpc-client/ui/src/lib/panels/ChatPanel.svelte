@@ -10,7 +10,6 @@
   import VoiceRecorder from '$lib/components/VoiceRecorder.svelte';
   import TokenWarningBanner from '$lib/components/TokenWarningBanner.svelte';
   import ProviderRetryBanner from '$lib/components/ProviderRetryBanner.svelte';
-  import AgentTurnNotice from '$lib/components/AgentTurnNotice.svelte';
   import IntegrityWarningBanner from '$lib/components/IntegrityWarningBanner.svelte';
   import AgentTaskBoard from '$lib/components/AgentTaskBoard.svelte';
   import { votingConversationId, knowledgeVoteStatus } from '$lib/services/knowledge';
@@ -1212,10 +1211,6 @@
     <!-- A provider waiting out a backoff. Not per-chat: the wait belongs to the
          provider, and whoever is watching is the one sitting at the input. -->
     <ProviderRetryBanner />
-
-    <!-- Why an agent has not answered here yet: busy in another chat, another
-         agent in this room, or its turn here waits for the model or an approval. -->
-    <AgentTurnNotice chatId={activeChatId} />
 
     {#if $integrityWarnings && $integrityWarnings.count > 0 && !$integrityWarnings.dismissed}
       <IntegrityWarningBanner
