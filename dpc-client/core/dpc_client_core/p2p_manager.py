@@ -551,6 +551,7 @@ class P2PManager:
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
         peer_node_id = None
+        peer = None  # set once this connection holds an entry in self.peers
         peer_addr = writer.get_extra_info('peername')
         peer_addr_str = f"{peer_addr[0]}:{peer_addr[1]}" if peer_addr else "unknown"
         peer_ip = peer_addr[0] if peer_addr else "unknown"
@@ -647,7 +648,14 @@ class P2PManager:
             else:
                 peer.strategy_used = "ipv4_direct"  # Default fallback
 
+            # A reconnect of a node we still hold a session with: the new,
+            # identity-verified connection replaces the old one, which is closed
+            # here rather than left open with no entry pointing at it.
+            replaced = self.peers.get(peer_node_id)
             self.peers[peer_node_id] = peer
+            if replaced is not None and replaced is not peer:
+                logger.info("Connection with %s replaced by a new one", peer_node_id)
+                await replaced.close()
             await self._notify_peer_change()
             logger.info("Direct TLS connection established with %s", peer_node_id)
 
@@ -678,7 +686,10 @@ class P2PManager:
                 logger.error("Error handling direct connection from %s: %s", peer_addr_str, e, exc_info=True)
             else:
                 logger.warning("Rejected non-DPTP connection from %s: %s", peer_addr_str, e)
-            if peer_node_id and peer_node_id in self.peers:
+            # `peer_node_id` is the HELLO's unsigned claim until the identity
+            # check passes: only an entry this very connection registered is
+            # ours to close, never the live session of whoever the frame named.
+            if peer is not None and self.peers.get(peer_node_id) is peer:
                 await self.shutdown_peer_connection(peer_node_id)
             else:
                 try:
@@ -1274,11 +1285,13 @@ class P2PManager:
         except (asyncio.IncompleteReadError, ConnectionResetError, TimeoutError):
             pass
         finally:
-            # Clean up task tracking
-            self._peer_listener_tasks.pop(peer.node_id, None)
+            # Clean up task tracking — only our own entry: after a reconnect the
+            # slot holds the newer connection's listener
+            if self._peer_listener_tasks.get(peer.node_id) is asyncio.current_task():
+                self._peer_listener_tasks.pop(peer.node_id, None)
 
-            # Only trigger shutdown if not already shutting down
-            if peer.node_id in self.peers:
+            # Only trigger shutdown if this connection is still the one registered
+            if self.peers.get(peer.node_id) is peer:
                 logger.info("Connection with peer %s was lost", peer.node_id)
                 await self.shutdown_peer_connection(peer.node_id)
 
