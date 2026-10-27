@@ -27,15 +27,15 @@ measured both from git and found the number had no source.
 
 | axis | decisions | board entries | awaiting observation |
 |---|---|---|---|
-| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted | 212 | 64 |
+| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted | 212 | 65 |
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 proposed · ADR-046 accepted | 201 | 38 |
 | **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 proposed · ADR-046 accepted | 287 | 71 |
-| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 236 | 53 |
+| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 237 | 54 |
 | **reach** | ADR-035 accepted · ADR-043 proposed | 49 | 11 |
 
-**Observation debt: 224 under an axis + 19 in entries that carry none = 243.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
+**Observation debt: 226 under an axis + 19 in entries that carry none = 245.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
-Not yet placed: 130 of 1052 board entries carry no axis, and a guessed one would report coverage this does not have.
+Not yet placed: 130 of 1053 board entries carry no axis, and a guessed one would report coverage this does not have.
 
 Rendered from `docs/decisions/*.md` front matter and `backlog.md`. Nothing here is written by hand; correct it at the source and re-run `uv run python tools/backlog/build.py --roadmap`.
 
