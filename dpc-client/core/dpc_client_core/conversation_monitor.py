@@ -57,6 +57,14 @@ def atomic_write_text(path: Path, text: str) -> None:
 # the built-in scratch chat permanent is a separate decision.
 PERSISTED_BY_DEFAULT_PREFIXES = ("group-", "agent_", "discord-", "ai_")
 
+# Why an agent's turn ended without an answer, on the assistant record that
+# closes it (Mike's call, 2026-10-27). Closed: the loop sets one of these in the
+# branch that knows why it exits, and a record without the field is an answer.
+# Such a record stays in the history and is replayed, so the prompt never holds
+# two user turns in a row, but it is no material for knowledge or sleep. Outside
+# chain_hash and the signed preimage: the bytes of an answer stay what they were.
+TURN_END_VALUES = frozenset({"stopped", "killed", "failed", "refused", "guard"})
+
 
 def chain_hash_for(message: Dict[str, Any], prev_hash: str) -> str:
     """The local chain hash of a message, given its predecessor's.
@@ -2115,7 +2123,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     agent_owner: Optional[str] = None,
                     tool_calls: Optional[List[Dict[str, Any]]] = None,
                     signature_fields: Optional[Dict[str, Any]] = None,
-                    mention_depth: Optional[int] = None):
+                    mention_depth: Optional[int] = None,
+                    turn_end: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -2129,11 +2138,17 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_id: Optional unique message ID (auto-generated if not provided)
             thinking: Optional extended chain-of-thought from reasoning models (persisted to history.json)
             streaming_raw: Optional full streamed text output (persisted to history.json, for UI restore)
+            turn_end: One of TURN_END_VALUES when the turn ended without an answer;
+                absent on an answer
 
         Note: This also adds to message_buffer and full_conversation for knowledge extraction.
         thinking and streaming_raw are stored in history.json but excluded from knowledge extraction.
+        A record with turn_end is kept out of both buffers.
         """
         import uuid
+
+        if turn_end is not None and turn_end not in TURN_END_VALUES:
+            raise ValueError(f"turn_end must be one of {sorted(TURN_END_VALUES)}, got {turn_end!r}")
 
         # Generate unique message ID if not provided (v0.20.0)
         if not message_id:
@@ -2173,6 +2188,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["tool_calls"] = tool_calls
         if mention_depth:
             message_dict["mention_depth"] = mention_depth
+        if turn_end:
+            message_dict["turn_end"] = turn_end
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)
@@ -2227,6 +2244,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 message_dict["preimage_version"] = PREIMAGE_VERSION
 
         self.message_history.append(message_dict)
+
+        if turn_end:
+            # A stop, a failure or a refusal says nothing about the conversation.
+            return
 
         # Also add to knowledge extraction buffers (v0.13.2 fix for voice messages)
         # Map role to sender info (use different variable names to avoid shadowing)
@@ -3674,6 +3695,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             msg_id = msg.get("id", "")
             if msg_id and msg_id in existing_ids:
                 continue  # already present
+            if msg.get("turn_end"):
+                continue  # kept out of the buffers, as add_message does
             message_obj = Message(
                 message_id=msg_id or str(_uuid.uuid4()),
                 conversation_id=self.conversation_id,

@@ -8882,9 +8882,13 @@ class CoreService:
             # assistant response with the "#N" badge on first render.
             assistant_msg_index = 0
             user_msg_index = 0
+            # Read off the record, as the index is: the live bubble then says
+            # what a reload will say.
+            turn_end = None
             if monitor and monitor.message_history:
                 if monitor.message_history[-1].get("role") == "assistant":
                     assistant_msg_index = monitor.message_history[-1].get("msg_index", 0)
+                    turn_end = monitor.message_history[-1].get("turn_end")
                 if len(monitor.message_history) >= 2 and monitor.message_history[-2].get("role") == "user":
                     user_msg_index = monitor.message_history[-2].get("msg_index", 0)
 
@@ -8909,6 +8913,7 @@ class CoreService:
                     "user_msg_index": user_msg_index,
                     "assistant_msg_index": assistant_msg_index,
                     "context_breakdown": session_state.get("context_breakdown"),
+                    **({"turn_end": turn_end} if turn_end else {}),
                 }
             )
 
@@ -9144,12 +9149,14 @@ class CoreService:
                 # Extract thinking/streaming_raw from monitor history (reliable source)
                 thinking_text = None
                 streaming_raw = None
+                turn_end = None
                 monitor = agent_manager._agent_monitors.get(conversation_id)
                 if monitor and monitor.message_history:
                     last_msg = monitor.message_history[-1]
                     if last_msg.get("role") == "assistant":
                         thinking_text = last_msg.get("thinking")
                         streaming_raw = last_msg.get("streaming_raw")
+                        turn_end = last_msg.get("turn_end")
 
                 # Broadcast Ark's response to UI so it appears immediately
                 from dpc_client_core.dpc_agent.utils import utc_now_iso
@@ -9168,6 +9175,7 @@ class CoreService:
                     "msg_index": msg_index,
                     "thinking": thinking_text,
                     "streaming_raw": streaming_raw,
+                    **({"turn_end": turn_end} if turn_end else {}),
                 })
 
                 # Clear the streaming/progress indicator in the UI

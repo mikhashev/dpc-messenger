@@ -7,6 +7,7 @@
  */
 
 import { normalizeAttachments } from './telegramLiveMessage';
+import type { TurnEnd } from '$lib/types';
 
 export interface MappedMessage {
     id: string;
@@ -22,6 +23,7 @@ export interface MappedMessage {
     mentions?: any[];
     isAgent?: boolean;
     agentOwner?: string | null;
+    turnEnd?: TurnEnd;
 }
 
 export interface SenderIdentityOptions {
@@ -131,6 +133,15 @@ export function formatDedupeDrop(droppedCount: number, conflictCount: number): s
         : `${droppedCount} duplicate id(s)`;
 }
 
+const TURN_END_VALUES: readonly TurnEnd[] = ['stopped', 'killed', 'failed', 'refused', 'guard'];
+
+/** A record's `turn_end` when it is one of the closed values, else undefined —
+ *  an answer, or a value this UI does not know, renders as an answer. Shared by
+ *  the live response and the reload so the two render one record alike. */
+export function turnEndOf(value: unknown): TurnEnd | undefined {
+    return TURN_END_VALUES.includes(value as TurnEnd) ? (value as TurnEnd) : undefined;
+}
+
 export function mapBackendMessage(msg: any, opts: MapOptions = {}): MappedMessage {
     // An undated record borrows the time of the one before it. Deriving it from
     // the clock instead put it later than every real message in an old history,
@@ -161,5 +172,6 @@ export function mapBackendMessage(msg: any, opts: MapOptions = {}): MappedMessag
             ? resolved.isAgent
             : (msg.sender_type === 'agent' || !!msg.agent_owner || msg.is_agent || msg.role === 'assistant' || false),
         agentOwner: msg.agent_owner || null,
+        turnEnd: turnEndOf(msg.turn_end),
     };
 }

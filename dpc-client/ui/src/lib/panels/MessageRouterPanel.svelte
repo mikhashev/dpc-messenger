@@ -6,7 +6,7 @@
 
 <script lang="ts">
   import type { Writable } from 'svelte/store';
-  import { mapBackendMessage } from '$lib/utils/messageMapper';
+  import { mapBackendMessage, turnEndOf } from '$lib/utils/messageMapper';
   import { liveBubbleId } from '$lib/utils/liveMessageIdentity';
   import {
     p2pMessages,
@@ -335,6 +335,8 @@
         const thinkingContent = message.status === 'OK' ? message.payload.thinking : undefined;
         const thinkingTokenCount = message.status === 'OK' ? message.payload.thinking_tokens : undefined;
         const toolCallsData = message.status === 'OK' ? (message.payload.tool_calls || []) : [];
+        // The record's own mark, read the way a reload reads it (mapBackendMessage).
+        const turnEnd = message.status === 'OK' ? turnEndOf(message.payload.turn_end) : undefined;
 
         // Show toast notification for errors (helps remote users see host failures)
         if (message.status !== 'OK') {
@@ -399,6 +401,7 @@
                   thinkingTokens: thinkingTokenCount,
                   tool_calls: toolCallsData.length > 0 ? toolCallsData : undefined,
                   streamingRaw: capturedStreamingText || undefined,
+                  turnEnd,
                   commandId: undefined,
                 };
               }

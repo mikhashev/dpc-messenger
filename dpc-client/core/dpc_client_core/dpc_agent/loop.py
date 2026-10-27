@@ -1106,8 +1106,8 @@ def peer_refusal_notice(e: PeerRefused) -> str:
     """What the person reads when the host refused the agent's call.
 
     A notice, not an error: the host is up and answered, and the text says
-    whether waiting helps. `agent_manager` keeps it out of the history by
-    the trace's `peer_refused`, not by an error prefix."""
+    whether waiting helps. The history keeps it as the turn's record, marked
+    by the trace's `turn_end` "refused", not by an error prefix."""
     host = getattr(e, "host_name", "") or "the host"
     if isinstance(e, PeerStillLoading):
         return (
@@ -1146,6 +1146,12 @@ async def _chat_unless_killed(coro, kill_event: Optional[asyncio.Event]):
     raise CallKilled()
 
 
+def _user_stop_end(kill_event: Optional[asyncio.Event]) -> str:
+    """The `turn_end` of a turn the user stopped: a second press (the kill)
+    outranks the first."""
+    return "killed" if kill_event is not None and kill_event.is_set() else "stopped"
+
+
 def _calls_in(msg: Dict[str, Any], llm: Any) -> List[Dict[str, Any]]:
     """A reply's tool calls, native or written into the text in a shape the
     adapter parses."""
@@ -1181,6 +1187,7 @@ async def _finalize_after_guard_stop(
     observe_request: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
     execute_tool_calls: Optional[Callable[..., Awaitable[bool]]] = None,
     keep_unexecuted: Optional[Callable[[str], Optional[str]]] = None,
+    kill_event: Optional[asyncio.Event] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Shared "guard fired → graceful termination" sequence.
 
@@ -1208,6 +1215,10 @@ async def _finalize_after_guard_stop(
 
     Two exceptions: after ContextLimitGuard the call is skipped, and a
     user stop during the call cancels it.
+
+    Every return marks the trace's `turn_end`: `guard`, the finalised answer
+    included, since the guard is what ended the turn; a user stop on the way
+    out is `stopped` (or `killed`).
     """
     mw = hooks.last_triggered
     stop_msg = mw.stop_message() if mw is not None else None
@@ -1221,6 +1232,7 @@ async def _finalize_after_guard_stop(
             "Finalising call skipped after ContextLimitGuard: the prompt is at the "
             "edge of the window, the stop message is the final answer"
         )
+        llm_trace["turn_end"] = "guard"
         return stop_msg or fallback_reason, accumulated_usage, llm_trace
 
     user_stopped = (
@@ -1229,6 +1241,7 @@ async def _finalize_after_guard_stop(
     )
     if stop_event is not None and stop_event.is_set():
         llm_trace["stopped_by_user"] = True
+        llm_trace["turn_end"] = _user_stop_end(kill_event)
         return user_stopped, accumulated_usage, llm_trace
 
     async def _final_call(tools_sent, tool_choice=None):
@@ -1283,6 +1296,7 @@ async def _finalize_after_guard_stop(
                 if not await execute_tool_calls(messages, calls, reasoning):
                     log.info("Agent stopped by user during the finalising round's tool calls")
                     llm_trace["stopped_by_user"] = True
+                    llm_trace["turn_end"] = _user_stop_end(kill_event)
                     return user_stopped, accumulated_usage, llm_trace
             else:
                 log.info("Finalising call answered with tool calls; asking again with tool_choice=none")
@@ -1293,6 +1307,7 @@ async def _finalize_after_guard_stop(
         if final_msg is None:
             log.info("Agent stopped by user during the finalising call after a guard stop")
             llm_trace["stopped_by_user"] = True
+            llm_trace["turn_end"] = _user_stop_end(kill_event)
             return user_stopped, accumulated_usage, llm_trace
         # Calls still in this answer are not run: one round was the allowance.
         unrun = _calls_in(final_msg, llm) if tools else []
@@ -1300,9 +1315,12 @@ async def _finalize_after_guard_stop(
             final_msg.get("content") or "", llm_trace, unrun, keep=keep_unexecuted,
         )
         if answer:
+            # Written under "stop and answer": the turn was still ended by the guard.
+            llm_trace["turn_end"] = "guard"
             return answer, accumulated_usage, llm_trace
     except Exception:
         log.warning("Failed to get final response after guard stop", exc_info=True)
+    llm_trace["turn_end"] = "guard"
     return stop_msg or fallback_reason, accumulated_usage, llm_trace
 
 
@@ -1349,7 +1367,9 @@ async def run_llm_loop(
             beside the pair, never subtracted from it.
 
     Returns:
-        (final_text, accumulated_usage, llm_trace) tuple
+        (final_text, accumulated_usage, llm_trace) tuple. A turn that ends
+        without an answer carries `llm_trace["turn_end"]` (one of
+        `conversation_monitor.TURN_END_VALUES`), set in the branch that exits.
     """
     logs_dir = agent_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -1571,6 +1591,7 @@ async def run_llm_loop(
             if stop_event and stop_event.is_set():
                 log.info("Agent stopped by user after %d rounds", round_idx - 1)
                 llm_trace["stopped_by_user"] = True
+                llm_trace["turn_end"] = _user_stop_end(kill_event)
                 llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
                 return f"⚠️ Stopped by user after {round_idx - 1} rounds.", accumulated_usage, llm_trace
 
@@ -1595,6 +1616,7 @@ async def run_llm_loop(
                     observe_request=_observe_request,
                     execute_tool_calls=_dispatch_round,
                     keep_unexecuted=_keep_unexecuted,
+                    kill_event=kill_event,
                 )
 
             # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
@@ -1655,6 +1677,7 @@ async def run_llm_loop(
                 log.warning("Agent killed by user mid-call in round %d", round_idx)
                 llm_trace["stopped_by_user"] = True
                 llm_trace["killed_mid_call"] = True
+                llm_trace["turn_end"] = "killed"
                 llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
                 return (
                     f"⚠️ Stopped by user: killed mid-call in round {round_idx} "
@@ -1669,9 +1692,11 @@ async def run_llm_loop(
                 llm_trace["peer_refused"] = {
                     "code": e.code, "notice": notice,
                 }
+                llm_trace["turn_end"] = "refused"
                 return notice, accumulated_usage, llm_trace
             except Exception as e:
                 log.error(f"LLM error: {e}", exc_info=True)
+                llm_trace["turn_end"] = "failed"
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace
             finally:
                 CALL_PROGRESS.reset(_progress_token)
@@ -1679,6 +1704,7 @@ async def run_llm_loop(
 
             # Handle empty response
             if msg is None:
+                llm_trace["turn_end"] = "failed"
                 return "⚠️ No response from LLM", accumulated_usage, llm_trace
 
             tool_calls = msg.get("tool_calls") or []
@@ -1732,6 +1758,7 @@ async def run_llm_loop(
                     observe_request=_observe_request,
                     execute_tool_calls=_dispatch_round,
                     keep_unexecuted=_keep_unexecuted,
+                    kill_event=kill_event,
                 )
 
             # No tool calls — final response or empty-response retry
@@ -1772,6 +1799,7 @@ async def run_llm_loop(
                         "LLM returned empty response with zero usage — provider "
                         "dropped the request (likely context overflow). Skipping retries."
                     )
+                    llm_trace["turn_end"] = "failed"
                     return (
                         "⚠️ The provider dropped the request without processing it "
                         "(zero token usage) — the conversation has most likely "
@@ -1848,6 +1876,7 @@ async def run_llm_loop(
             if not await _dispatch_round(messages, tool_calls, round_reasoning):
                 log.info("Agent stopped by user mid-round %d (between tool calls)", round_idx)
                 llm_trace["stopped_by_user"] = True
+                llm_trace["turn_end"] = _user_stop_end(kill_event)
                 llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
                 return f"⚠️ Stopped by user after {round_idx} rounds.", accumulated_usage, llm_trace
 
@@ -1866,4 +1895,5 @@ async def run_llm_loop(
 
     except Exception as e:
         log.error(f"Loop error: {e}", exc_info=True)
+        llm_trace["turn_end"] = "failed"
         return f"⚠️ Loop error: {e}", accumulated_usage, llm_trace

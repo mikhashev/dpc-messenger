@@ -7,7 +7,7 @@
 <script lang="ts">
   import { type Writable, get } from 'svelte/store';
   import { untrack } from 'svelte';
-  import { mapBackendMessage, resolveSenderIdentity, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
+  import { mapBackendMessage, resolveSenderIdentity, dedupeMessagesById, formatDedupeDrop, turnEndOf } from '$lib/utils/messageMapper';
   import { nextStrip, clearedStrip } from '$lib/utils/speedStripOwner';
   import {
     historyUpdateApplies,
@@ -560,7 +560,7 @@
   // or Ark chain-triggered responses via _invoke_ark_in_agent_chat)
   $effect(() => {
     if ($agentChatMessage) {
-      const { conversation_id, message_id, content, sender_name, sender_node_id, timestamp, role, thinking, streaming_raw,
+      const { conversation_id, message_id, content, sender_name, sender_node_id, timestamp, role, thinking, streaming_raw, turn_end,
               msg_index, tokens_after_last_response, tokens_after_last_response_at, history_tokens, tokens_limit, context_breakdown: cb } = $agentChatMessage;
 
       untrack(() => {
@@ -580,6 +580,7 @@
             msg_index: msg_index || 0,
             thinking: thinking || undefined,
             streamingRaw: streaming_raw || undefined,
+            turnEnd: turnEndOf(turn_end),
           };
           newMap.set(conversation_id, [...existing, newMsg]);
           return newMap;

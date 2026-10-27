@@ -164,7 +164,7 @@
 <div class="chat-window" bind:this={chatWindowElement}>
   {#if displayMessages.length > 0}
     {#each displayMessages as msg, i (msg.id)}
-      <div id="msg-{i}" class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'} class:error={msg.isError}>
+      <div id="msg-{i}" class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'} class:error={msg.isError || msg.turnEnd === 'failed'} class:muted={!!msg.turnEnd && msg.turnEnd !== 'failed'}>
         <div class="message-header">
           <strong>
             {#if msg.sender === 'user'}
@@ -384,6 +384,15 @@
 
   .message.error :global(strong) {
     color: #c53030;
+  }
+
+  /* An agent turn that ended without an answer (stopped, killed, refused,
+     ended by a guard): kept in the history, drawn as a note rather than a reply.
+     As specific as the reply rule above, which would otherwise win. */
+  .message.muted:not(.user):not(.system) {
+    color: #777;
+    background: #f4f4f4;
+    border-style: dashed;
   }
 
   .message-header {

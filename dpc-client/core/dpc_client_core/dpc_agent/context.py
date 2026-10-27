@@ -535,6 +535,26 @@ def history_prefix(record: Dict[str, Any]) -> str:
     return f"[{' | '.join(p for p in prefix_parts if p)}] "
 
 
+# How much of a failed turn's notice goes back into the prompt.
+FAILED_TURN_REPLAY_CHARS = 200
+
+
+def history_body(record: Dict[str, Any]) -> str:
+    """The text a history record is replayed with — a function of the record
+    alone, so the same record renders the same bytes on every later turn.
+
+    A record whose turn ended with `turn_end` "failed" holds a provider's or the
+    loop's error, whose body can be a page of HTML or a traceback: only its
+    first line goes back, capped. Every other record is replayed whole, the
+    notice of a stopped, killed, refused or guard-ended turn included — it is
+    the assistant turn that keeps two user turns from standing in a row."""
+    content = record.get("content", "") or ""
+    if record.get("turn_end") == "failed":
+        lines = content.strip().splitlines()
+        return lines[0][:FAILED_TURN_REPLAY_CHARS] if lines else ""
+    return content
+
+
 def build_llm_messages(
     agent_root: pathlib.Path,
     memory: Memory,
@@ -818,7 +838,7 @@ def build_llm_messages(
                 role = hist_msg.get("role", "")
                 if role not in ("user", "assistant"):
                     continue
-            content = history_prefix(hist_msg) + content
+            content = history_prefix(hist_msg) + history_body(hist_msg)
             if role == "user":
                 tail = _annotations.get(str(hist_msg.get("id") or ""))
                 if tail:

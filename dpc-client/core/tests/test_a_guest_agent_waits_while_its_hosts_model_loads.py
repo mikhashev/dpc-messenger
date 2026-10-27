@@ -470,11 +470,14 @@ async def test_the_coordinator_logs_a_refusal_at_info_without_a_traceback(caplog
     assert all(r.exc_info is None for r in records)
 
 
-# --- the notice is not kept as the agent's answer -------------------------------------
+# --- the notice closes the turn in the history, marked refused ------------------------
+#
+# Until 2026-10-27 it was kept out of the history, which left the person's message
+# with nothing after it; now it is saved with turn_end "refused" (Mike's call).
 
 
 @pytest.mark.asyncio
-async def test_the_notice_is_not_saved_to_history(tmp_path):
+async def test_the_notice_is_saved_to_history_marked_refused(tmp_path):
     notice = "No answer this time: the model on Linus was still loading after 120 s."
 
     class FakeAgent:
@@ -482,7 +485,8 @@ async def test_the_notice_is_not_saved_to_history(tmp_path):
         _last_trace = {}
 
         async def process(self, **kwargs):
-            self._last_trace = {"peer_refused": {"code": "provider_loading", "notice": notice}}
+            self._last_trace = {"peer_refused": {"code": "provider_loading", "notice": notice},
+                                "turn_end": "refused"}
             return notice
 
     manager = am.DpcAgentManager.__new__(am.DpcAgentManager)
@@ -512,8 +516,10 @@ async def test_the_notice_is_not_saved_to_history(tmp_path):
     result = await manager._process_message_guarded("hello", "agent_001", include_context=False)
 
     assert result == notice
-    roles = [c.kwargs.get("role") for c in monitor.add_message.call_args_list]
-    assert "assistant" not in roles
+    saved = [c.kwargs for c in monitor.add_message.call_args_list
+             if c.kwargs.get("role") == "assistant"]
+    assert len(saved) == 1
+    assert saved[0]["content"] == notice and saved[0]["turn_end"] == "refused"
     toasts = [c for c in manager.service.local_api.broadcast_event.call_args_list
               if c.args and c.args[0] == "error_toast"]
     assert toasts == []

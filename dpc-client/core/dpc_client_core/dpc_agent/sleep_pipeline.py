@@ -470,6 +470,9 @@ def _format_archive_messages(archive: Dict[str, Any]) -> str:
     messages = archive.get("messages", [])
     parts = []
     for msg in messages:
+        if msg.get("turn_end"):
+            # A stop, a failure or a refusal: nothing the conversation said.
+            continue
         sender = msg.get("sender_name", msg.get("role", ""))
         content = msg.get("content", "")
         if content:

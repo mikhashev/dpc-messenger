@@ -24,7 +24,7 @@ from ..dpc_agent.run_gate import RunGate, _RUN_GATES, get_run_gate, hold, turn_t
 from ..providers.base import ModelNotCachedError
 from ..dpc_agent.utils import get_agent_root, ensure_agent_dirs, utc_now_iso
 from ..dpc_agent.events import get_event_emitter, EventType
-from ..conversation_monitor import ConversationMonitor
+from ..conversation_monitor import ConversationMonitor, TURN_END_VALUES
 
 if TYPE_CHECKING:
     from ..service import CoreService
@@ -1137,7 +1137,23 @@ class DpcAgentManager:
                     self._daily_tokens_used = 0
                     self._daily_tokens_date = today
                 if self._daily_tokens_used >= quota_limit:
-                    return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
+                    notice = f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
+                    # No run: what the agent holds is the previous turn's, and
+                    # the caller reads it as this one's. The quota is a budget
+                    # guard; its record closes the turn the message opened.
+                    agent._last_usage = {}
+                    agent._last_trace = {"turn_end": "guard"}
+                    if not is_group:
+                        monitor.add_message(
+                            role="assistant",
+                            content=notice,
+                            timestamp=utc_now_iso(),
+                            sender_node_id=conversation_id,
+                            sender_name=agent_display_name,
+                            turn_end="guard",
+                        )
+                        monitor.save_history()
+                    return notice
 
             reasoning_effort, effort_source = self._resolve_reasoning_effort(
                 conversation_id, reasoning_effort
@@ -1196,12 +1212,15 @@ class DpcAgentManager:
             _has_content = response and response.strip() != _THINKING_FALLBACK
             _has_extras = _thinking or _streaming_raw
 
-            # Skip saving agent errors to history — they pollute context for future requests.
-            # A host's refusal ends the turn with a notice that is no error and
-            # carries no prefix; the loop's trace names it, and it is kept out
-            # of the history for the same reason.
-            _peer_refused = (getattr(agent, '_last_trace', None) or {}).get("peer_refused")
-            _is_llm_error = bool(response and (response.startswith("⚠️") or _peer_refused))
+            # A turn that ended without an answer is saved too, marked with why:
+            # left out, the person's message stood with nothing after it and the
+            # next prompt held two user turns in a row. The loop names the reason
+            # in the branch that exits; the text is not read for it, so an answer
+            # that opens with a warning sign is an answer.
+            _turn_end = (getattr(agent, '_last_trace', None) or {}).get("turn_end")
+            if _turn_end is not None and _turn_end not in TURN_END_VALUES:
+                log.warning("Unknown turn_end %r from the loop; saved as an answer", _turn_end)
+                _turn_end = None
             _is_empty_after_retry = not response and not _has_extras
 
             if _is_empty_after_retry:
@@ -1211,7 +1230,7 @@ class DpcAgentManager:
                     "message": f"{agent_display_name} returned an empty response after retries. Try again.",
                     "duration": 5000,
                 })
-            elif (_has_content or _has_extras) and not _is_llm_error and not is_group:
+            elif (_has_content or _has_extras) and not is_group:
                 _trace = getattr(agent, '_last_trace', None) or {}
                 _tool_calls_for_msg = _trace.get("accumulated_tool_calls") or []
                 monitor.add_message(
@@ -1223,12 +1242,9 @@ class DpcAgentManager:
                     thinking=_thinking,
                     streaming_raw=_streaming_raw,
                     tool_calls=_tool_calls_for_msg if _tool_calls_for_msg else None,
+                    turn_end=_turn_end,
                 )
                 monitor.save_history()  # Save to disk immediately
-            elif _peer_refused:
-                log.info("Host refusal notice not saved to history: %s", response[:100])
-            elif _is_llm_error:
-                log.warning(f"LLM error not saved to history: {response[:100]}")
 
             # Store full context measurement from this request so next request's session_state
             # can expose it. One request stale, but accurate — context grows incrementally.

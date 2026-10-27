@@ -49,6 +49,10 @@ export type MessageAttachment = {
   };
 };
 
+/** Why an agent turn ended without an answer: the closed values of a history
+ *  record's `turn_end` (conversation_monitor.TURN_END_VALUES). Absent on an answer. */
+export type TurnEnd = 'stopped' | 'killed' | 'failed' | 'refused' | 'guard';
+
 export type Message = {
   id: string;
   sender: string;
@@ -63,6 +67,7 @@ export type Message = {
   mentions?: Mention[];        // @-mentions in group chat messages
   attachments?: MessageAttachment[];
   isError?: boolean;           // Error message styling (v0.19.2+)
+  turnEnd?: TurnEnd;           // Why an agent turn ended without an answer (history `turn_end`)
   pending?: boolean;           // Optimistic bubble awaiting server confirmation (group image send)
   describing?: boolean;        // Optimistic "Describing… (VL)" indicator while backend runs vision
   isAgent?: boolean;           // Agent message in group chat (v0.25.0+)

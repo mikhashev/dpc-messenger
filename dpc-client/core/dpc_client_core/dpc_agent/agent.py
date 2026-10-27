@@ -503,6 +503,11 @@ class DpcAgent:
                 "Context window overflow blocked: %d / %d tokens (%.0f%%)",
                 _estimated, _ctx_window, _pct,
             )
+            # No model call, so nothing of the previous turn may stand as this
+            # one's: its thinking and tool calls would be saved on this record.
+            # The refusal is the context guard's, a turn ended by a guard.
+            self._last_usage = {}
+            self._last_trace = {"turn_end": "guard"}
             return (
                 f"⚠️ Context window full ({_estimated:,} / {_ctx_window:,} tokens, "
                 f"{_pct:.0f}%). End session to continue."
