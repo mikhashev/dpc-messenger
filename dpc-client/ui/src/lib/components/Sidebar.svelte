@@ -5,6 +5,8 @@
   import { providerAccounts, getProviderBalances } from '$lib/coreService';
   import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
   import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
+  import { agentTurns } from '$lib/services/agents';
+  import { buttonSummary } from '$lib/utils/agentMap';
 
   // Account balance rows (one per DeepSeek/NeuralDeep/... account, 2026-09-28
   // — was a single hard-coded DeepSeek pill with no provider name). Level
@@ -348,6 +350,7 @@
     onOpenFirewallEditor,
     onOpenProvidersEditor,
     onOpenAgentBoard,
+    onOpenAgentMap,
     onConnectPeer,
     onResetUnreadCount,
     onGetPeerDisplayName,
@@ -384,6 +387,7 @@
     onOpenFirewallEditor: () => void;
     onOpenProvidersEditor: () => void;
     onOpenAgentBoard?: () => void;
+    onOpenAgentMap?: () => void;
     onConnectPeer: () => void;
     onResetUnreadCount: (peerId: string) => void;
     onGetPeerDisplayName: (peerId: string) => string;
@@ -423,6 +427,10 @@
   const linkingAgent = $derived(agents.find(a => a.agent_id === linkingAgentId));
   const linkingConfigured = $derived(isTelegramConfigured(linkingAgent));
   const linkingEnabled = $derived(!!linkingAgent?.telegram_enabled);
+
+  // The AGENTS MAP button's counts come from the live turns; the process count
+  // needs list_processes, which only the open map reads.
+  const agentMapSummary = $derived(buttonSummary($agentTurns));
 </script>
 
 <div class="sidebar">
@@ -723,6 +731,13 @@
           {/if}
         </div>
       </div>
+      {#if onOpenAgentMap}
+        <button type="button" class="btn-agent-map" onclick={onOpenAgentMap} title="What each agent is doing and the processes it started">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="5" r="2.5"></circle><circle cx="19" cy="12" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M7.5 12 H16.5 M12 12 V5 H16.5 M12 12 V19 H16.5"></path></svg>
+          <span class="agent-map-label">AGENTS MAP</span>
+          {#if agentMapSummary}<span class="agent-map-summary">{agentMapSummary}</span>{/if}
+        </button>
+      {/if}
       <ul>
         <!-- Agent List (Phase 4) -->
         {#if agents && agents.length > 0}
@@ -1553,6 +1568,39 @@
   .chat-buttons {
     display: flex;
     gap: 0.5rem;
+  }
+
+  .btn-agent-map {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 44px;
+    box-sizing: border-box;
+    margin-bottom: 0.5rem;
+    padding: 8px 12px;
+    border: 2px solid #111827;
+    border-radius: 10px;
+    background: transparent;
+    color: #111827;
+    cursor: pointer;
+  }
+
+  .btn-agent-map:hover {
+    color: #1d4ed8;
+    border-color: #1d4ed8;
+  }
+
+  .agent-map-label {
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+  }
+
+  .agent-map-summary {
+    margin-left: auto;
+    font-size: 13px;
+    color: #4b5563;
   }
 
   .btn-add-agent {

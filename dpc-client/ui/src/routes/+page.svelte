@@ -17,6 +17,7 @@
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
+  import AgentMap from "$lib/components/AgentMap.svelte";
   import ScheduleApprovalDialog from "$lib/components/ScheduleApprovalDialog.svelte";
   import ProviderSelector from "$lib/components/ProviderSelector.svelte";
   import Toast from "$lib/components/Toast.svelte";
@@ -165,6 +166,7 @@
   let showFirewallEditor = $state(false);
   let showProvidersEditor = $state(false);
   let showAgentBoard = $state(false);
+  let showAgentMap = $state(false);
   let showCommitDialog = $state(false);
   let commitVoteError = $state("");
   let extractingChats = $state(new Set<string>());
@@ -955,6 +957,7 @@
       onOpenFirewallEditor={openFirewallEditor}
       onOpenProvidersEditor={openProvidersEditor}
       onOpenAgentBoard={openAgentBoard}
+      onOpenAgentMap={() => showAgentMap = true}
       onConnectPeer={handleConnectPeer}
       onResetUnreadCount={resetUnreadCount}
       onGetPeerDisplayName={getPeerDisplayName}
@@ -1413,6 +1416,8 @@
   bind:open={showProvidersEditor}
   on:close={() => showProvidersEditor = false}
 />
+
+<AgentMap bind:open={showAgentMap} />
 
 <!-- Token Warning Toast (Phase 2) -->
 {#if showTokenWarning}

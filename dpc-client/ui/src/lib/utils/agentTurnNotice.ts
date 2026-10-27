@@ -142,9 +142,39 @@ export function ordinal(n: number): string {
     }
 }
 
-function since(iso: string | null | undefined, nowMs: number): string {
+/** How long since an ISO moment, as formatWait words; an unreadable moment reads 0 s. */
+export function since(iso: string | null | undefined, nowMs: number): string {
     const t = iso ? Date.parse(iso) : NaN;
     return formatWait(Number.isFinite(t) ? (nowMs - t) / 1000 : 0);
+}
+
+// The phrases the waiting chat's line and the Agent map share, so the two never
+// say the same state in two wordings.
+
+/** What a turn's wait_reason says: `waiting for the model`, `waiting for an approval`, or null. */
+export function turnWaitPhrase(reason: TurnWaitReason | null | undefined): string | null {
+    if (reason === 'model_call') return 'waiting for the model';
+    if (reason === 'approval') return 'waiting for an approval';
+    return null;
+}
+
+/** Why a waiting chat is not moving: `busy in another chat`, or who works in the room. */
+export function waitingReasonPhrase(w: WaitingChat, nameOf: (agentId: string) => string): string {
+    if (w.wait_reason === 'room_busy') {
+        const other = w.held_by?.agent_id ? nameOf(w.held_by.agent_id) : 'another agent';
+        return `${other} is working in this room`;
+    }
+    return 'busy in another chat';
+}
+
+/** Said after the reason when the turn holding the lock itself waits for an approval. */
+export function heldByApprovalSuffix(w: WaitingChat): string {
+    return w.held_by?.wait_reason === 'approval' ? ', which waits for an approval' : '';
+}
+
+/** The silence that makes a turn unconfirmed, in words. */
+export function silencePhrase(state: AgentTurnState, nowMs: number): string {
+    return `nothing from it for ${formatWait((nowMs - state.lastEventAt) / 1000)}`;
 }
 
 /** True when the turn is non-null and nothing has come from its agent for TURN_UNCONFIRMED_AFTER_S. */
@@ -164,14 +194,12 @@ export function turnNoticeLines(
         const agent = nameOf(s.agent_id);
         const turn = s.turn;
         if (turn && turn.conversation_id === chatId) {
+            const phrase = turnWaitPhrase(turn.wait_reason);
             if (turnIsUnconfirmed(s, nowMs)) {
-                lines.push(`${agent}'s turn here is unconfirmed: nothing from it for ${formatWait((nowMs - s.lastEventAt) / 1000)}`);
-            } else if (turn.wait_reason === 'model_call') {
-                const alias = turn.provider_alias ? ` (${turn.provider_alias})` : '';
-                lines.push(`${agent} is waiting for the model${alias} · ${formatWait((nowMs - s.waitSeenAt) / 1000)}`);
-            } else if (turn.wait_reason === 'approval') {
-                const tool = turn.tool ? ` (${turn.tool})` : '';
-                lines.push(`${agent} is waiting for an approval${tool} · ${formatWait((nowMs - s.waitSeenAt) / 1000)}`);
+                lines.push(`${agent}'s turn here is unconfirmed: ${silencePhrase(s, nowMs)}`);
+            } else if (phrase) {
+                const what = turn.wait_reason === 'model_call' ? turn.provider_alias : turn.tool;
+                lines.push(`${agent} is ${phrase}${what ? ` (${what})` : ''} · ${formatWait((nowMs - s.waitSeenAt) / 1000)}`);
             }
             continue;
         }
@@ -179,15 +207,14 @@ export function turnNoticeLines(
         const queue = s.waiting.filter(w => w.wait_reason === 'other_chat');
         for (const w of s.waiting) {
             if (w.conversation_id !== chatId) continue;
-            const approval = w.held_by?.wait_reason === 'approval' ? ', which waits for an approval' : '';
+            const approval = heldByApprovalSuffix(w);
             if (w.wait_reason === 'other_chat') {
                 const heldId = w.held_by?.conversation_id ?? null;
                 const title = (turn && turn.conversation_id === heldId && turn.conversation_title) || heldId || 'another chat';
                 const place = ordinal(queue.indexOf(w) + 1);
-                lines.push(`${agent} is busy in another chat (${title})${approval} · this chat is ${place} in line · ${since(w.waiting_since, nowMs)}`);
+                lines.push(`${agent} is ${waitingReasonPhrase(w, nameOf)} (${title})${approval} · this chat is ${place} in line · ${since(w.waiting_since, nowMs)}`);
             } else if (w.wait_reason === 'room_busy') {
-                const other = w.held_by?.agent_id ? nameOf(w.held_by.agent_id) : 'another agent';
-                lines.push(`${agent} waits: ${other} is working in this room${approval} · ${since(w.waiting_since, nowMs)}`);
+                lines.push(`${agent} waits: ${waitingReasonPhrase(w, nameOf)}${approval} · ${since(w.waiting_since, nowMs)}`);
             }
             break;
         }
