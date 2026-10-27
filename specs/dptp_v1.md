@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.10
+# DPTP Specification: D-PC Transfer Protocol v1.11
 
-**Version:** 1.10
+**Version:** 1.11
 **Status:** Draft / PoC
 **Date:** October 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -62,7 +62,7 @@ All DPTP messages follow a fixed binary framing format:
 
 - **Encoding**: UTF-8 JSON
 - **Structure**: Object with `command` or `status` field
-- **Maximum Size**: 67 108 864 bytes (64 MiB) per payload — `MAX_FRAME_BYTES` in `dpc_protocol/protocol.py` (v1.7). A header declaring more is refused before any of the payload is read: the receiver logs the declared length and the cap, and closes the connection. A sender refuses to frame a larger payload at all, raising at the origin rather than failing silently at the far end. The cap must clear a whole conversation history in one `CHAT_HISTORY_RESPONSE` (3 885 616 bytes at the largest measured) and a base64-encoded image at `vision.max_image_size_mb`; the measurements behind the number are kept beside the constant, and the two move together. Before the far end has proved its key the cap is 65 536 bytes (64 KiB) — `MAX_HELLO_FRAME_BYTES`, beside the other: the direct-TLS `HELLO_CHALLENGE`, `HELLO` and `HELLO_ACK` are read under it, and refused the same way. A `HELLO` measured 1 632 bytes framed; after `HELLO_ACK` the 64 MiB cap applies
+- **Maximum Size**: 67 108 864 bytes (64 MiB) per payload — `MAX_FRAME_BYTES` in `dpc_protocol/protocol.py` (v1.7). A header declaring more is refused before any of the payload is read: the receiver logs the declared length and the cap, and closes the connection. A sender refuses to frame a larger payload at all, raising at the origin rather than failing silently at the far end. The cap must clear a whole conversation history in one `CHAT_HISTORY_RESPONSE` (3 885 616 bytes at the largest measured) and a base64-encoded image at `vision.max_image_size_mb`; the measurements behind the number are kept beside the constant, and the two move together. Before the far end has proved its key the cap is 65 536 bytes (64 KiB) — `MAX_HELLO_FRAME_BYTES`, beside the other: the direct-TLS `HELLO_CHALLENGE`, `HELLO` and `HELLO_ACK` are read under it, and refused the same way. A `HELLO` measured 1 675 bytes framed (v1.11); after `HELLO_ACK` the 64 MiB cap applies
 
 ### Example Wire Format
 
@@ -86,8 +86,12 @@ Identifies the remote peer. What is sent, and how it is answered, differs by tie
 
 - **Direct TLS** (IPv4/IPv6, `p2p_manager.py`): the listener sends **HELLO_CHALLENGE**
   first; the dialling side answers with an authenticated HELLO that proves it holds the
-  private key behind the `node_id` it claims; the listener answers **HELLO_ACK**. The
-  connection is not used for anything else before this three-message exchange completes.
+  private key behind the `node_id` it claims, for this listener; the listener answers
+  **HELLO_ACK**. Only the dialler sends HELLO here. The connection is not used for
+  anything else before this three-message exchange completes. TLS proves the listener to
+  the dialler (its certificate's CN and key hash are checked against the dialled
+  `node_id`); the dialler presents no TLS client certificate, so the HELLO signature is
+  its only proof.
 - **Hub WebRTC**: identity is already established through Hub signalling before the data
   channel opens, so HELLO here is a lighter, unauthenticated, post-connection message
   carrying only `node_id` and `name` — a display-name exchange, read by the router's
@@ -102,13 +106,36 @@ Identifies the remote peer. What is sent, and how it is answered, differs by tie
 {
   "command": "HELLO_CHALLENGE",
   "payload": {
-    "nonce": "base64-encoded 32 random bytes"
+    "nonce": "base64-encoded 32 random bytes",
+    "hello_preimage_version": "dptp-hello-v1"
   }
 }
 ```
-- `nonce` (string, required): Base64-encoded 32-byte random challenge. The dialling side
-  signs it (RSA-PSS, SHA-256, MGF1) with the private key behind its claimed `node_id` and
-  returns the signature in HELLO's `nonce_signature`.
+- `nonce` (string, required): Base64-encoded random challenge of exactly 32 bytes
+  (`HELLO_NONCE_BYTES`, `p2p_manager.py`). A dialler refuses a challenge whose nonce is
+  not valid base64 or does not decode to exactly 32 bytes, and sends no HELLO.
+- `hello_preimage_version` (string, required, v1.11): `dptp-hello-v1`
+  (`HELLO_PREIMAGE_VERSION`), the preimage the dialler is to sign. A dialler refuses a
+  challenge without it ("peer may be running an outdated version") and signs nothing.
+
+**The HELLO preimage** (`dpc_protocol/message_signing.py`, `hello_preimage`), in the §4.1
+encoding — length-prefixed UTF-8 fields in this fixed order:
+
+| # | Field |
+|---|---|
+| 1 | `dptp-hello-v1` (constant `HELLO_PREIMAGE_VERSION`) |
+| 2 | the challenge `nonce`, base64 (standard alphabet, padded, as on the wire) |
+| 3 | the listener's `node_id`: for the dialler, the id it dialled and the TLS certificate proved; for the listener, its own |
+| 4 | the dialler's `node_id`, the one HELLO claims |
+
+`hello_content_hash = SHA256(preimage)` as lowercase hex, and `hello_signature` is
+`RSA-PSS(SHA256, MGF1-SHA256, MAX_LENGTH salt)` over that hex string's ASCII bytes,
+base64-encoded — the same signing call as §4.1 (`CommitSigner.sign_commit`). The dialler
+never signs the nonce itself: the nonce is the listener's choice, and the key that signs
+HELLO also signs messages, votes, gossip and knowledge commits. The version tag keeps a
+HELLO hash from equalling any of theirs, and the two node ids keep a signature made for
+one listener from verifying at another, so a node the dialler reached cannot pass a third
+node's nonce through and present the dialler's HELLO there.
 
 **Format (direct TLS — answering a HELLO_CHALLENGE):**
 ```json
@@ -118,7 +145,8 @@ Identifies the remote peer. What is sent, and how it is answered, differs by tie
     "node_id": "dpc-node-[32 hex characters]",
     "name": "Alice",
     "cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
-    "nonce_signature": "base64-encoded RSA-PSS signature over the challenge nonce"
+    "hello_preimage_version": "dptp-hello-v1",
+    "hello_signature": "base64-encoded RSA-PSS signature over hello_content_hash"
   }
 }
 ```
@@ -138,15 +166,22 @@ Identifies the remote peer. What is sent, and how it is answered, differs by tie
 - `node_id` (string, required): Cryptographic node identifier (format: `dpc-node-[32 hex characters]`)
 - `name` (string, optional): Human-readable display name
 - `cert_pem` (string, required on direct TLS): PEM-encoded X.509 certificate for `node_id`.
-  A direct-TLS HELLO lacking it is rejected — "sent HELLO without cert_pem or
-  nonce_signature — rejecting (peer may be running an outdated version)"
-  (`p2p_manager.py`, `_handle_direct_connection`)
-- `nonce_signature` (string, required on direct TLS): Base64-encoded RSA-PSS(SHA-256)
-  signature over the `nonce` from HELLO_CHALLENGE, made with the private key behind
-  `cert_pem`. The listener's `_verify_hello_identity` checks three things before
-  accepting the connection: the certificate's CN matches `node_id`; the certificate's
-  public key hashes to `node_id` (`generate_node_id`); the signature verifies against the
-  certificate's public key. Any failure closes the connection.
+- `hello_preimage_version` (string, required on direct TLS, v1.11): `dptp-hello-v1`.
+- `hello_signature` (string, required on direct TLS, v1.11): the signature over
+  `hello_content_hash` described above, made with the private key behind `cert_pem`.
+  Replaces v1.10's `nonce_signature`, which is no longer sent or read.
+
+A direct-TLS HELLO lacking `cert_pem`, `hello_signature` or `hello_preimage_version`
+`dptp-hello-v1` is rejected — "sent HELLO without cert_pem, hello_signature or
+hello_preimage_version 'dptp-hello-v1' — rejecting (peer may be running an outdated
+version)" (`p2p_manager.py`, `_handle_direct_connection`). A HELLO carrying only the
+v1.10 `nonce_signature` is refused the same way: there is no fallback in either
+direction, because a fallback to the raw-nonce signature hands the relay back. The
+listener's `_verify_hello_identity` then checks three things before accepting the
+connection: the certificate's CN matches `node_id`; the certificate's public key hashes
+to `node_id` (`generate_node_id`); `hello_signature` verifies against the certificate's
+public key over the HELLO preimage rebuilt with the listener's own `node_id` as field 3
+and the claimed `node_id` as field 4. Any failure closes the connection.
 
 **HELLO_ACK** (direct TLS only — top-level frame, no `payload` wrapper):
 ```json
@@ -2741,6 +2776,24 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.11 (October 2026)
+- **§3.1 HELLO** — the direct-TLS HELLO signature covers a domain-separated preimage,
+  `dptp-hello-v1`, over the challenge nonce, the listener's `node_id` and the dialler's
+  `node_id`, instead of the bare nonce. HELLO_CHALLENGE gains `hello_preimage_version`
+  and its nonce must be exactly 32 bytes; HELLO's `nonce_signature` is replaced by
+  `hello_preimage_version` + `hello_signature`. Two defects closed. The old signature
+  named nobody, so a node the dialler reached could dial a third node, pass that node's
+  nonce through and present the dialler's HELLO there, holding the dialler's identity on
+  the third node for the rest of the connection. And the dialler signed whatever bytes
+  the listener sent, of any length, with the key and the RSA-PSS parameters of §4.1 —
+  so a listener could send a content hash as the nonce and get the dialler's valid
+  signature over a group message, vote, gossip origin or knowledge commit. **Hard cut,
+  not backward compatible by design:** a v1.11 listener refuses a v1.10 HELLO and a v1.11
+  dialler refuses a v1.10 challenge, each naming an outdated version; a fallback to the
+  raw-nonce signature in either direction would restore the relay. Direct TLS between a
+  v1.10 and a v1.11 node does not complete until both update; the Hub WebRTC HELLO is
+  unchanged.
 
 ### v1.10 (October 2026)
 - **§2 Payload Format** — a frame read before the far end has proved its key

@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from dpc_protocol.crypto import generate_node_id
+from dpc_protocol.message_signing import HELLO_PREIMAGE_VERSION
 from dpc_protocol.protocol import read_message, write_message
 from dpc_client_core.p2p_manager import P2PManager
 from dpc_client_core.peer_cache import PeerCache
@@ -83,7 +84,10 @@ async def _peer_listening_on_a_free_port(tmp_path: Path):
             nonce = os.urandom(32)
             await write_message(writer, {
                 "command": "HELLO_CHALLENGE",
-                "payload": {"nonce": base64.b64encode(nonce).decode()},
+                "payload": {
+                    "nonce": base64.b64encode(nonce).decode(),
+                    "hello_preimage_version": HELLO_PREIMAGE_VERSION,
+                },
             })
             await read_message(reader)  # HELLO
             await write_message(writer, {

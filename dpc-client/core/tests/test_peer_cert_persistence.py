@@ -1,7 +1,7 @@
 """A verified peer certificate must outlive the handshake that verified it.
 
 `_verify_hello_identity` runs the strongest check in the project — CN, key
-fingerprint, nonce proof — and then the cert went out of scope. With nothing
+fingerprint, HELLO signature — and then the cert went out of scope. With nothing
 in ~/.dpc/peers/, `verify_signature` answers None ("cannot verify") for every
 peer forever, so every message a peer ever signs is unverifiable.
 """

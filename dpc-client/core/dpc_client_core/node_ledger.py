@@ -233,8 +233,9 @@ def usage_row(
     knows the connection this call travelled over. True means the far end's
     key was proved on that connection, and that is two different checks:
     inbound, `P2PManager._verify_hello_identity` required the certificate's CN
-    to be the claimed node_id, its public key to hash to that node_id, and an
-    RSA-PSS signature over a nonce this node chose to verify under it;
+    to be the claimed node_id, its public key to hash to that node_id, and a
+    signature over the HELLO preimage (a nonce this node chose, this node's id
+    and the claimed one) to verify under it;
     outbound, `_validate_peer_certificate` required the same CN and the same
     key hash, TLS having already made the far end prove it holds the private
     half. False means a tier that runs neither — the name is then the Hub's

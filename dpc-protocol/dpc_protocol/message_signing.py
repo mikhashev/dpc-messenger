@@ -38,6 +38,7 @@ bound. v1 and v2 records keep verifying under their own field sets.
 See specs/dptp_v1.md §4.1.
 """
 
+import base64
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -60,6 +61,9 @@ __all__ = [
     "GOSSIP_PREIMAGE_VERSION",
     "gossip_preimage",
     "gossip_content_hash",
+    "HELLO_PREIMAGE_VERSION",
+    "hello_preimage",
+    "hello_content_hash",
 ]
 
 
@@ -304,3 +308,33 @@ def gossip_preimage(
 def gossip_content_hash(**fields: Any) -> str:
     """SHA256 of the canonical gossip preimage, hex — the value that gets signed."""
     return hashlib.sha256(gossip_preimage(**fields)).hexdigest()
+
+
+HELLO_PREIMAGE_VERSION = "dptp-hello-v1"
+
+
+def hello_preimage(
+    *,
+    nonce: bytes,
+    listener_node_id: Optional[str],
+    dialer_node_id: Optional[str],
+) -> bytes:
+    """The exact bytes a direct-TLS HELLO signature covers.
+
+    Both node ids are inside, so a signature made for one listener does not
+    verify at another, and the own tag keeps a HELLO hash from ever equalling a
+    message, vote or gossip hash signed with the same key. The nonce is in the
+    base64 spelling the wire carries.
+    """
+    fields = [
+        HELLO_PREIMAGE_VERSION,
+        base64.b64encode(nonce).decode("ascii"),
+        listener_node_id or "",
+        dialer_node_id or "",
+    ]
+    return _length_prefixed(fields)
+
+
+def hello_content_hash(**fields: Any) -> str:
+    """SHA256 of the canonical HELLO preimage, hex — the value that gets signed."""
+    return hashlib.sha256(hello_preimage(**fields)).hexdigest()

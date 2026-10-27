@@ -349,7 +349,8 @@ def test_the_handshake_cap_clears_a_real_hello_by_a_wide_margin():
             "node_id": node_id,
             "name": "x" * 200,
             "cert_pem": cert_pem,
-            "nonce_signature": base64.b64encode(os.urandom(256)).decode(),
+            "hello_preimage_version": "dptp-hello-v1",
+            "hello_signature": base64.b64encode(os.urandom(256)).decode(),
         },
     }
     framed = 10 + len(json.dumps(hello).encode())

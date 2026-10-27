@@ -26,10 +26,12 @@ from pathlib import Path
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from dpc_protocol.commit_integrity import CommitSigner
 from dpc_protocol.crypto import generate_node_id
+from dpc_protocol.message_signing import HELLO_PREIMAGE_VERSION, hello_content_hash
 from dpc_protocol.protocol import read_message, write_message
 from dpc_client_core.p2p_manager import P2PManager
 from dpc_client_core.peer_cache import PeerCache
@@ -57,13 +59,18 @@ class _Identity:
         )
         self.cert_pem = self.cert.public_bytes(serialization.Encoding.PEM).decode()
 
-    def sign(self, nonce: bytes) -> str:
-        sig = self.key.sign(
-            nonce,
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-            hashes.SHA256(),
+    def sign_hello(self, nonce: bytes, *, listener_node_id: str, dialer_node_id: str) -> str:
+        """The HELLO signature as connect_directly makes it."""
+        hello_hash = hello_content_hash(
+            nonce=nonce, listener_node_id=listener_node_id, dialer_node_id=dialer_node_id
         )
-        return base64.b64encode(sig).decode()
+        return CommitSigner(self.node_id, self.key).sign_commit(hello_hash)
+
+
+def _listener_id(writer) -> str:
+    """The node id the listener's TLS certificate proves, as the dialler reads it."""
+    der = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
+    return generate_node_id(x509.load_der_x509_certificate(der).public_key())
 
 
 def _manager(tmp_path: Path) -> P2PManager:
@@ -128,7 +135,12 @@ async def _hello(port: int, *, claims: str, cert_pem: str, signer: _Identity, si
             "node_id": claims,
             "name": "tester",
             "cert_pem": cert_pem,
-            "nonce_signature": signer.sign(nonce if sign_nonce else b"not the nonce"),
+            "hello_preimage_version": HELLO_PREIMAGE_VERSION,
+            "hello_signature": signer.sign_hello(
+                nonce if sign_nonce else b"not the nonce",
+                listener_node_id=_listener_id(writer),
+                dialer_node_id=claims,
+            ),
         },
     })
     try:

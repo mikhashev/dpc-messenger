@@ -18,6 +18,8 @@ from dpc_protocol.crypto import DPC_HOME_DIR, generate_node_id, load_identity, g
 from dpc_protocol.protocol import (
     MAX_HELLO_FRAME_BYTES, read_message, write_message, create_hello_message,
 )
+from dpc_protocol.commit_integrity import CommitSigner
+from dpc_protocol.message_signing import HELLO_PREIMAGE_VERSION, hello_content_hash
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
 
@@ -35,6 +37,9 @@ logger = logging.getLogger(__name__)
 # The connection types on which the peer's key has been proved (ADR-041 D2):
 # `_verify_hello_identity` inbound, `_validate_peer_certificate` outbound.
 PROVED_CONNECTION_TYPES = ("direct_tls",)
+
+# The HELLO_CHALLENGE nonce, exactly: the dialler signs no other length.
+HELLO_NONCE_BYTES = 32
 
 
 def peer_proof(peers: Any, peer_id: str) -> tuple[Optional[bool], Optional[str]]:
@@ -574,14 +579,16 @@ class P2PManager:
             logger.info("Received a direct TLS connection attempt from %s", peer_addr_str)
             await asyncio.sleep(0.01)
 
-            # Issue a challenge nonce so the client can prove private-key ownership.
-            # The client signs this nonce and returns it alongside their certificate
-            # in the HELLO payload, preventing HELLO spoofing attacks.
+            # The dialler proves its key by signing the HELLO preimage over this
+            # nonce and both node ids (`hello_preimage`), never the nonce itself.
             import os as _os, base64 as _b64
-            nonce = _os.urandom(32)
+            nonce = _os.urandom(HELLO_NONCE_BYTES)
             challenge = {
                 "command": "HELLO_CHALLENGE",
-                "payload": {"nonce": _b64.b64encode(nonce).decode()}
+                "payload": {
+                    "nonce": _b64.b64encode(nonce).decode(),
+                    "hello_preimage_version": HELLO_PREIMAGE_VERSION,
+                }
             }
             await write_message(writer, challenge)
 
@@ -606,18 +613,24 @@ class P2PManager:
             peer_node_id = payload.get("node_id")
             peer_name = payload.get("name")
             cert_pem = payload.get("cert_pem")
-            nonce_signature_b64 = payload.get("nonce_signature")
+            hello_signature_b64 = payload.get("hello_signature")
 
             if not peer_node_id:
                 raise ValueError("Peer did not provide a node_id.")
 
             # Verify the peer owns the private key for their claimed node_id.
-            if not cert_pem or not nonce_signature_b64:
+            # No fallback to a raw-nonce signature: that is the relay this replaced.
+            if (
+                not cert_pem
+                or not hello_signature_b64
+                or payload.get("hello_preimage_version") != HELLO_PREIMAGE_VERSION
+            ):
                 raise ConnectionError(
-                    f"Peer {peer_node_id} sent HELLO without cert_pem or nonce_signature "
+                    f"Peer {peer_node_id} sent HELLO without cert_pem, hello_signature or "
+                    f"hello_preimage_version {HELLO_PREIMAGE_VERSION!r} "
                     f"— rejecting (peer may be running an outdated version)"
                 )
-            if not self._verify_hello_identity(peer_node_id, cert_pem, nonce, nonce_signature_b64):
+            if not self._verify_hello_identity(peer_node_id, cert_pem, nonce, hello_signature_b64):
                 raise ConnectionError(
                     f"HELLO identity verification failed for claimed node_id={peer_node_id} "
                     f"— connection rejected"
@@ -897,8 +910,36 @@ class P2PManager:
                 await writer.wait_closed()
                 raise ConnectionError(error_msg)
 
-            nonce = _b64.b64decode(challenge_msg["payload"]["nonce"])
-            nonce_signature = self._sign_challenge_nonce(nonce)
+            # The nonce is the listener's choice, so it is checked before it goes
+            # anywhere near the key — and even then only into hello_preimage.
+            challenge_payload = challenge_msg.get("payload")
+            if not isinstance(challenge_payload, dict):
+                challenge_payload = {}
+            refusal = None
+            nonce = None
+            if challenge_payload.get("hello_preimage_version") != HELLO_PREIMAGE_VERSION:
+                refusal = (
+                    f"HELLO_CHALLENGE from {target_node_id} without hello_preimage_version "
+                    f"{HELLO_PREIMAGE_VERSION!r} — rejecting (peer may be running an outdated version)"
+                )
+            else:
+                try:
+                    nonce = _b64.b64decode(challenge_payload.get("nonce") or "", validate=True)
+                except (ValueError, TypeError):
+                    nonce = None
+                if nonce is None or len(nonce) != HELLO_NONCE_BYTES:
+                    refusal = (
+                        f"HELLO_CHALLENGE from {target_node_id} carries a nonce that is not "
+                        f"{HELLO_NONCE_BYTES} bytes of base64 — rejecting"
+                    )
+            if refusal:
+                logger.error(refusal)
+                writer.close()
+                await writer.wait_closed()
+                raise ConnectionError(refusal)
+
+            # target_node_id is the listener id the TLS certificate check above proved.
+            hello_signature = self._sign_hello(nonce=nonce, listener_node_id=target_node_id)
 
             # Read own certificate PEM to include in HELLO
             with open(self.cert_file, 'r') as _cf:
@@ -910,7 +951,8 @@ class P2PManager:
                     "node_id": self.node_id,
                     "name": self.display_name,
                     "cert_pem": own_cert_pem,
-                    "nonce_signature": _b64.b64encode(nonce_signature).decode()
+                    "hello_preimage_version": HELLO_PREIMAGE_VERSION,
+                    "hello_signature": hello_signature,
                 }
             }
             # Loud here rather than a silent hang-up at a listener that reads
@@ -1137,41 +1179,25 @@ class P2PManager:
             logger.error("Certificate validation error: %s", e)
             return False
 
-    def _sign_challenge_nonce(self, nonce: bytes) -> bytes:
+    def _sign_hello(self, *, nonce: bytes, listener_node_id: str) -> str:
+        """This node's base64 HELLO signature: CommitSigner over hello_content_hash.
+
+        The one signing path every other signature here takes, separated from
+        them by the preimage's own tag. Never the handed-in nonce itself.
         """
-        Sign a server-issued nonce with this node's RSA private key.
-
-        Used during HELLO handshake so the server can verify the connecting
-        client actually controls the private key for their claimed node_id.
-
-        Args:
-            nonce: 32 random bytes issued by the server as a challenge
-
-        Returns:
-            RSA-PSS signature over the nonce (SHA-256)
-        """
-        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
-        from cryptography.hazmat.primitives import hashes as crypto_hashes
-        from cryptography.hazmat.primitives import serialization as crypto_ser
-
         with open(self.key_file, 'rb') as f:
-            private_key = crypto_ser.load_pem_private_key(f.read(), password=None)
-
-        return private_key.sign(
-            nonce,
-            asym_padding.PSS(
-                mgf=asym_padding.MGF1(crypto_hashes.SHA256()),
-                salt_length=asym_padding.PSS.MAX_LENGTH
-            ),
-            crypto_hashes.SHA256()
+            private_key = serialization.load_pem_private_key(f.read(), password=None)
+        hello_hash = hello_content_hash(
+            nonce=nonce, listener_node_id=listener_node_id, dialer_node_id=self.node_id
         )
+        return CommitSigner(self.node_id, private_key).sign_commit(hello_hash)
 
     def _verify_hello_identity(
         self,
         peer_node_id: str,
         cert_pem: str,
         nonce: bytes,
-        nonce_signature_b64: str
+        hello_signature_b64: str
     ) -> bool:
         """
         Verify that the connecting peer owns the private key for their claimed node_id.
@@ -1179,25 +1205,18 @@ class P2PManager:
         Three checks must all pass:
         1. cert CN == claimed node_id (cert is for this identity)
         2. generate_node_id(cert.public_key()) == node_id (public key binds to node_id)
-        3. RSA-PSS.verify(nonce, signature, cert.public_key()) (key ownership proof)
+        3. hello_signature verifies under cert.public_key() over
+           hello_content_hash(nonce, this node's id, the claimed node_id)
 
         Check 2 prevents an attacker from forging a cert with CN == victim node_id.
-        Check 3 prevents an attacker who holds only the victim's public cert from
-        impersonating them (they must also control the matching private key).
-
-        Args:
-            peer_node_id: node_id claimed in HELLO payload
-            cert_pem: PEM-encoded X.509 certificate included in HELLO payload
-            nonce: 32-byte random nonce sent in HELLO_CHALLENGE
-            nonce_signature_b64: Base64-encoded RSA-PSS signature over nonce
+        Check 3 prevents impersonation with the victim's public cert alone, and,
+        the listener id being this node's own, a relay of a signature the victim
+        made for another listener.
 
         Returns:
             True if all checks pass, False otherwise
         """
-        import base64
         from cryptography import x509 as _x509
-        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
-        from cryptography.hazmat.primitives import hashes as crypto_hashes
 
         try:
             # Parse the certificate
@@ -1226,18 +1245,18 @@ class P2PManager:
                 )
                 return False
 
-            # Check 3: verify signature over nonce (proof of private key ownership)
-            sig = base64.b64decode(nonce_signature_b64)
-            cert.public_key().verify(
-                sig,
-                nonce,
-                asym_padding.PSS(
-                    mgf=asym_padding.MGF1(crypto_hashes.SHA256()),
-                    salt_length=asym_padding.PSS.MAX_LENGTH
-                ),
-                crypto_hashes.SHA256()
+            # Check 3: the HELLO preimage, rebuilt with this node as the listener
+            expected = hello_content_hash(
+                nonce=nonce, listener_node_id=self.node_id, dialer_node_id=peer_node_id
             )
-            # verify() raises on failure; reaching here means success
+            if not CommitSigner.verify_with_public_key(
+                cert.public_key(), expected, hello_signature_b64
+            ):
+                logger.warning(
+                    "HELLO identity check 3 failed for %s: hello_signature does not verify "
+                    "over the HELLO preimage naming this listener", peer_node_id
+                )
+                return False
             logger.debug("HELLO identity verified for %s (all 3 checks passed)", peer_node_id)
             return True
 

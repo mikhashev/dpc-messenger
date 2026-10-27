@@ -31,10 +31,12 @@ from pathlib import Path
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from dpc_protocol.commit_integrity import CommitSigner
 from dpc_protocol.crypto import generate_node_id
+from dpc_protocol.message_signing import HELLO_PREIMAGE_VERSION, hello_content_hash
 from dpc_protocol.protocol import read_message, write_message
 from dpc_client_core.p2p_manager import P2PManager
 from dpc_client_core.peer_cache import PeerCache
@@ -75,13 +77,12 @@ class _Identity:
         )
         return cert_file, key_file
 
-    def sign(self, nonce: bytes) -> str:
-        sig = self.key.sign(
-            nonce,
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-            hashes.SHA256(),
+    def sign_hello(self, nonce: bytes, *, listener_node_id: str) -> str:
+        """The HELLO signature as connect_directly makes it."""
+        hello_hash = hello_content_hash(
+            nonce=nonce, listener_node_id=listener_node_id, dialer_node_id=self.node_id
         )
-        return base64.b64encode(sig).decode()
+        return CommitSigner(self.node_id, self.key).sign_commit(hello_hash)
 
 
 def _manager(tmp_path: Path) -> tuple[P2PManager, _Identity]:
@@ -157,7 +158,10 @@ class _Remote:
         try:
             await write_message(writer, {
                 "command": "HELLO_CHALLENGE",
-                "payload": {"nonce": base64.b64encode(b"n" * 32).decode()},
+                "payload": {
+                    "nonce": base64.b64encode(b"n" * 32).decode(),
+                    "hello_preimage_version": HELLO_PREIMAGE_VERSION,
+                },
             })
             await read_message(reader)  # the dialler's HELLO
             await write_message(writer, {
@@ -318,7 +322,7 @@ async def test_a_replacement_runs_no_loss_cleanup_and_the_peer_stays_addressable
         await _finish(manager, remote)
 
 
-async def _dial_in(port: int, who: _Identity):
+async def _dial_in(port: int, who: _Identity, listener_node_id: str):
     """Dial the manager's listener as `who` and complete an honest HELLO."""
     ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
     ctx.check_hostname = False
@@ -330,7 +334,8 @@ async def _dial_in(port: int, who: _Identity):
         "command": "HELLO",
         "payload": {
             "node_id": who.node_id, "name": "tester",
-            "cert_pem": who.cert_pem, "nonce_signature": who.sign(nonce),
+            "cert_pem": who.cert_pem, "hello_preimage_version": HELLO_PREIMAGE_VERSION,
+            "hello_signature": who.sign_hello(nonce, listener_node_id=listener_node_id),
         },
     })
     answer = await asyncio.wait_for(read_message(reader), timeout=5)
@@ -349,10 +354,10 @@ async def test_an_inbound_replacement_runs_no_loss_cleanup_either(tmp_path):
     who = _Identity()
     first = second = None
     try:
-        first = await _dial_in(port, who)
+        first = await _dial_in(port, who, manager.node_id)
         await _until(lambda: who.node_id in manager.peers)
         old = manager.peers[who.node_id]
-        second = await _dial_in(port, who)
+        second = await _dial_in(port, who, manager.node_id)
         await _until(lambda: manager.peers.get(who.node_id) is not old)
         assert await asyncio.wait_for(_next(first[0]), timeout=5) is None
         await asyncio.sleep(0.1)

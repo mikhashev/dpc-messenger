@@ -1,7 +1,7 @@
 """Dialling out, a Common Name is a claim and the public key is the proof.
 
 Inbound, `_verify_hello_identity` runs three checks — CN, key fingerprint, and
-a signature over a fresh nonce. Outbound, `_validate_peer_certificate` compared
+a signature over the HELLO preimage. Outbound, `_validate_peer_certificate` compared
 the CN and stopped, so whoever controlled the address a node dialled could
 terminate TLS with a self-signed certificate carrying the expected CN and be
 that peer for the rest of the session. Every instrument keyed on
