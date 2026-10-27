@@ -18,12 +18,21 @@ the text says "not measured on this OS". It never raises.
 under the same keys, the two commit fields None and `source` naming psutil.
 Commit is not read off Windows (decided with the names, 2026-10-26: null on
 Linux and macOS). The Strata callers keep `read_free_commit`.
+
+`read_vram_mib` is the card's side of the same answer: the first NVIDIA GPU's free and
+total VRAM by nvidia-smi, cached 30 s. It lives here, with the other system-wide
+readings `list_processes` answers with, because it belongs to no engine; the two
+single-figure reads under it stay in `llama_server_supervisor`, where engine admission
+and Strata's release check use them. Per-process VRAM is another figure from another
+reader (PDH, in the registry's sampler).
 """
 
 import ctypes
 import logging
 import sys
-from typing import Any, Dict, Optional
+import threading
+import time
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -112,3 +121,36 @@ def describe_free_commit(reading: Optional[Dict[str, Any]]) -> str:
         f"ullAvailPhys {reading['avail_phys_mib']} of ullTotalPhys "
         f"{reading['total_phys_mib']} MiB ({reading.get('source', SOURCE)})"
     )
+
+
+# `list_processes` answers the Agent map's 5-second poll with the card's VRAM
+# (ADR-046 point 8). Each nvidia-smi read is a registered `device_probe` entry,
+# so the answer reuses a reading for this long; the total is the card's and is
+# kept for the backend's life once read.
+_VRAM_READING_TTL_S = 30.0
+_vram_reading: Dict[str, Any] = {"at": None, "free": None, "total": None}
+_vram_reading_lock = threading.Lock()
+
+
+def read_vram_mib(now: Optional[float] = None) -> Tuple[Optional[int], Optional[int]]:
+    """`(free, total)` VRAM of the first NVIDIA GPU in MiB, either None without
+    a signal. Reads through `_free_vram_mib` / `_total_vram_mib` of
+    `llama_server_supervisor` at most once per `_VRAM_READING_TTL_S`; blocking, so
+    callers run it off the event loop. A probe refused during the backend's stop
+    answers `(None, None)` and is not cached."""
+    # Imported here, not at the top: the supervisor module is heavy and no other reader in this file needs it.
+    from . import llama_server_supervisor as engine
+
+    when = time.monotonic() if now is None else now
+    with _vram_reading_lock:
+        at = _vram_reading["at"]
+        if at is not None and 0 <= when - at < _VRAM_READING_TTL_S:
+            return _vram_reading["free"], _vram_reading["total"]
+        try:
+            free = engine._free_vram_mib()
+            total = _vram_reading["total"] if _vram_reading["total"] is not None else engine._total_vram_mib()
+        except Exception as e:  # a reading is advisory: the registry closed, a probe failed
+            logger.debug("VRAM reading unavailable: %s", e)
+            return None, None
+        _vram_reading.update(at=when, free=free, total=total)
+        return free, total

@@ -375,7 +375,11 @@
     margin-right: auto;
   }
 
-  .message.error {
+  /* The second selector is as specific as the reply rule above
+     (`.message:not(.user):not(.system)`), which an error bubble would
+     otherwise lose to and be drawn white like an answer. */
+  .message.error,
+  .message.error:not(.user):not(.system) {
     background: #fff5f5;
     border: 1px solid #fc8181;
     border-left: 4px solid #e53e3e;

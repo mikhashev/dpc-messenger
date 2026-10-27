@@ -10259,8 +10259,7 @@ class CoreService:
         walk and the nvidia-smi reads run off the event loop."""
         import os
         from dpc_client_core import process_registry
-        from dpc_client_core.managers.commit_memory import read_free_commit_or_physical
-        from dpc_client_core.managers.llama_server_supervisor import read_vram_mib
+        from dpc_client_core.managers.commit_memory import read_free_commit_or_physical, read_vram_mib
 
         def read() -> Dict[str, Any]:
             registry = process_registry.get_registry()

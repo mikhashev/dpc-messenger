@@ -23,7 +23,6 @@ import pytest
 
 from dpc_client_core import process_registry as pr
 from dpc_client_core.managers import commit_memory as cm
-from dpc_client_core.managers import llama_server_supervisor as lss
 from dpc_client_core.process_registry import ProcessRegistry, ProcessSample, SpawnOrigin, TreeSample
 
 START = 1_000.0  # the creation time every fake process of these tests has
@@ -81,7 +80,7 @@ class TestTheCommand:
         reading = {"avail_page_file_mib": 1, "total_page_file_mib": 2, "avail_phys_mib": 3,
                    "total_phys_mib": 4, "source": cm.SOURCE}
         monkeypatch.setattr(cm, "read_free_commit_or_physical", lambda: dict(reading))
-        monkeypatch.setattr(lss, "read_vram_mib", lambda: (11, 22))
+        monkeypatch.setattr(cm, "read_vram_mib", lambda: (11, 22))
         registry = pr.get_registry()
         _tool(registry, 7_960_001)
         registry.register(7_960_002, launcher="strata", launcher_kind="subsystem", command="launcher")
@@ -126,7 +125,7 @@ class TestTheCommand:
             raise RuntimeError("the list could not be read")
 
         monkeypatch.setattr(pr.ProcessRegistry, "list_processes", broken)
-        monkeypatch.setattr(lss, "read_vram_mib", lambda: (None, None))
+        monkeypatch.setattr(cm, "read_vram_mib", lambda: (None, None))
         out = await CoreService.list_processes(SimpleNamespace())
         assert out == {"status": "error", "message": "the list could not be read"}
 
@@ -308,6 +307,6 @@ class TestFreeCommit:
         reading = {"avail_page_file_mib": None, "total_page_file_mib": None, "avail_phys_mib": 1,
                    "total_phys_mib": 2, "source": "psutil"}
         monkeypatch.setattr(cm, "read_free_commit_or_physical", lambda: dict(reading))
-        monkeypatch.setattr(lss, "read_vram_mib", lambda: (None, None))
+        monkeypatch.setattr(cm, "read_vram_mib", lambda: (None, None))
         out = await CoreService.list_processes(SimpleNamespace())
         assert out["status"] == "success" and out["free_commit"] == reading
