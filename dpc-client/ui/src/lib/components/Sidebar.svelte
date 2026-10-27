@@ -2,7 +2,14 @@
 <!-- Displays connection status, node info, peer list, chat list, and action buttons -->
 
 <script lang="ts">
-  import { providerAccounts, getProviderBalances } from '$lib/coreService';
+  import { providerAccounts, getProviderBalances, sendCommand } from '$lib/coreService';
+  import {
+    cachedPeerLine,
+    cachedPeerLines,
+    cachedPeerName,
+    cachedPeerSeen,
+    type CachedPeerRow,
+  } from '$lib/utils/cachedPeers';
   import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
   import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
   import { agentTurns } from '$lib/services/agents';
@@ -428,6 +435,56 @@
   const linkingConfigured = $derived(isTelegramConfigured(linkingAgent));
   const linkingEnabled = $derived(!!linkingAgent?.telegram_enabled);
 
+  // The "N cached peers" line opens a list of them to copy names and node ids from.
+  // The status carries only the count, so the list is read when it is opened.
+  let showCachedPeers = $state(false);
+  let cachedPeers = $state<CachedPeerRow[]>([]);
+  let cachedPeersError = $state('');
+  let cachedPeersCopied = $state('');
+
+  async function openCachedPeers() {
+    showCachedPeers = true;
+    cachedPeersError = '';
+    cachedPeersCopied = '';
+    const result = await (sendCommand('list_cached_peers', {}) as Promise<any>);
+    if (result?.status !== 'success' || !Array.isArray(result.peers)) {
+      cachedPeers = [];
+      cachedPeersError = result?.message || 'The cached peers could not be read.';
+      return;
+    }
+    cachedPeers = result.peers;
+  }
+
+  // navigator.clipboard.writeText is what the rest of the app uses; it needs a secure
+  // context and a user gesture, which the Tauri webviews on all three systems give a
+  // button click. The textarea + execCommand path is the fallback for a webview that
+  // refuses the first; if both refuse, the rows are selectable text.
+  async function copyText(text: string): Promise<boolean> {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      try {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand('copy');
+        area.remove();
+        return ok;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  async function copyCachedPeer(what: string, text: string) {
+    const ok = await copyText(text);
+    cachedPeersCopied = ok ? `${what} copied.` : `Could not copy ${what}; select the text and copy it by hand.`;
+  }
+
   // The AGENTS MAP button's counts come from the live turns; the process count
   // needs list_processes, which only the open map reads.
   const agentMapSummary = $derived(buttonSummary($agentTurns));
@@ -719,7 +776,12 @@
               {/each}
             </ul>
             {#if nodeStatus.cached_peers_count && nodeStatus.cached_peers_count > 0}
-              <p class="cached-info">💾 {nodeStatus.cached_peers_count} cached peer(s)</p>
+              <button
+                type="button"
+                class="cached-info cached-info-btn"
+                onclick={openCachedPeers}
+                title="Show the cached peers: names and node ids, to copy"
+              >💾 {nodeStatus.cached_peers_count} cached peer(s)</button>
             {/if}
           </div>
         </details>
@@ -1083,6 +1145,64 @@
         <button type="button" class="btn-save" onclick={saveModelConfig} disabled={modelConfigSaving}>
           {modelConfigSaving ? 'Saving...' : 'Save'}
         </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showCachedPeers}
+  <div class="telegram-link-dialog-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && (showCachedPeers = false)}>
+    <div class="telegram-link-dialog cached-peers-dialog" role="dialog" aria-modal="true" aria-labelledby="cached-peers-title">
+      <div class="dialog-header">
+        <h3 id="cached-peers-title">Cached peers ({cachedPeers.length})</h3>
+        <button
+          type="button"
+          class="dialog-close-btn"
+          onclick={() => (showCachedPeers = false)}
+          aria-label="Close dialog"
+        >
+          ×
+        </button>
+      </div>
+      <div class="dialog-content">
+        {#if cachedPeersError}
+          <p class="dialog-info">{cachedPeersError}</p>
+        {:else if cachedPeers.length === 0}
+          <p class="dialog-info">No cached peers.</p>
+        {:else}
+          <p class="dialog-info small">Newest first. Addresses are not shown.</p>
+          {#each cachedPeers as peer (peer.node_id)}
+            <div class="cached-peer-row">
+              <div class="cached-peer-text">
+                <span class="cached-peer-name">{cachedPeerName(peer)}</span>
+                {#if cachedPeerSeen(peer)}<span class="cached-peer-seen">seen {cachedPeerSeen(peer)}</span>{/if}
+                <code class="cached-peer-id">{peer.node_id}</code>
+              </div>
+              <div class="cached-peer-buttons">
+                <button
+                  type="button"
+                  class="copy-btn-icon"
+                  onclick={() => copyCachedPeer('Node ID', peer.node_id)}
+                  title="Copy the node ID"
+                >📋 ID</button>
+                <button
+                  type="button"
+                  class="copy-btn-icon"
+                  onclick={() => copyCachedPeer('Name and node ID', cachedPeerLine(peer))}
+                  title="Copy the name and the node ID"
+                >📋 Name + ID</button>
+              </div>
+            </div>
+          {/each}
+          <div class="dialog-actions">
+            <button
+              type="button"
+              class="dialog-btn dialog-btn-cancel"
+              onclick={() => copyCachedPeer('All peers', cachedPeerLines(cachedPeers))}
+            >Copy all</button>
+          </div>
+        {/if}
+        {#if cachedPeersCopied}<p class="dialog-info small" role="status">{cachedPeersCopied}</p>{/if}
       </div>
     </div>
   </div>
@@ -1846,6 +1966,67 @@
     background: #f0f0f0;
     border-radius: 4px;
     text-align: center;
+  }
+
+  /* The count is a button that opens the list; it keeps the line's look. */
+  .cached-info-btn {
+    display: block;
+    width: 100%;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .cached-info-btn:hover {
+    background: #e4e4e4;
+    color: #333;
+  }
+
+  .cached-peers-dialog {
+    max-width: 560px;
+  }
+
+  .cached-peer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid #eee;
+  }
+
+  /* Selectable on purpose: the buttons are the easy way, a hand-made selection the fallback. */
+  .cached-peer-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .cached-peer-name {
+    font-weight: 600;
+    color: #333;
+  }
+
+  .cached-peer-seen {
+    font-size: 0.75rem;
+    color: #888;
+  }
+
+  .cached-peer-id {
+    font-size: 0.8rem;
+    color: #444;
+    word-break: break-all;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .cached-peer-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
   }
 
   /* DPC URI Styles - Redesigned for better UX */

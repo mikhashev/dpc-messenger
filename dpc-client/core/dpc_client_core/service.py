@@ -6173,6 +6173,41 @@ class CoreService:
             return {}
         return links if isinstance(links, dict) else {}
 
+    async def list_cached_peers(self) -> Dict[str, Any]:
+        """The peers in the peer cache, named, for the sidebar's "cached peers" list.
+
+        `get_status` carries only how many there are; this is the on-demand
+        answer to "which". A row is `node_id`, `display_name` and `last_seen`
+        and nothing else: the cache also holds the address each peer was last
+        reached on, and an address is not something a list meant for copying
+        into a chat should ever carry. Newest first; a peer never seen sorts
+        last.
+        """
+        try:
+            def seen_at(peer) -> float:
+                try:
+                    return datetime.fromisoformat(peer.last_seen).timestamp()
+                except (TypeError, ValueError):
+                    return float("-inf")
+
+            peers = sorted(
+                self.p2p_manager.peer_cache.get_all_peers(), key=seen_at, reverse=True
+            )
+            return {
+                "status": "success",
+                "peers": [
+                    {
+                        "node_id": p.node_id,
+                        "display_name": p.display_name,
+                        "last_seen": p.last_seen,
+                    }
+                    for p in peers
+                ],
+            }
+        except Exception as e:
+            logger.error("Error listing cached peers: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e), "peers": []}
+
     async def list_ai_chats(self) -> Dict[str, Any]:
         """The AI chats and Telegram chats this node holds, for the sidebar.
 
