@@ -29,6 +29,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -418,6 +419,36 @@ def _total_vram_mib() -> Optional[int]:
         return int(out.stdout.strip().splitlines()[0])
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+# `list_processes` answers the Agent map's 5-second poll with the card's VRAM
+# (ADR-046 point 8). Each nvidia-smi read is a registered `device_probe` entry,
+# so the answer reuses a reading for this long; the total is the card's and is
+# kept for the backend's life once read.
+_VRAM_READING_TTL_S = 30.0
+_vram_reading: Dict[str, Any] = {"at": None, "free": None, "total": None}
+_vram_reading_lock = threading.Lock()
+
+
+def read_vram_mib(now: Optional[float] = None) -> Tuple[Optional[int], Optional[int]]:
+    """`(free, total)` VRAM of the first NVIDIA GPU in MiB, either None without
+    a signal. Reads through `_free_vram_mib` / `_total_vram_mib` at most once per
+    `_VRAM_READING_TTL_S`; blocking, so callers run it off the event loop. A
+    probe refused during the backend's stop answers `(None, None)` and is not
+    cached."""
+    when = time.monotonic() if now is None else now
+    with _vram_reading_lock:
+        at = _vram_reading["at"]
+        if at is not None and 0 <= when - at < _VRAM_READING_TTL_S:
+            return _vram_reading["free"], _vram_reading["total"]
+        try:
+            free = _free_vram_mib()
+            total = _vram_reading["total"] if _vram_reading["total"] is not None else _total_vram_mib()
+        except Exception as e:  # a reading is advisory: the registry closed, a probe failed
+            logger.debug("VRAM reading unavailable: %s", e)
+            return None, None
+        _vram_reading.update(at=when, free=free, total=total)
+        return free, total
 
 
 _GGUF_VALUE_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}

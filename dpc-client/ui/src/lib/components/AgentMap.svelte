@@ -4,8 +4,13 @@
   chats waiting for it, the processes it started), and the backend's own
   system branch (engines, the browser, probes, git helpers), collapsed by
   default. Processes have no push event, so the open map reads list_processes
-  on open, every PROCESS_POLL_MS and on each agent_turn_updated; a closed map
-  reads nothing. Every line is built in utils/agentMap.ts.
+  on open, every PROCESS_POLL_MS and on each agent_turn_updated; a closed or
+  minimised map reads nothing, and restoring it reads at once. Every line is
+  built in utils/agentMap.ts.
+
+  A window the viewer can drag by its header, resize by the corner handle and
+  minimise to the header bar; its box and the minimised flag are remembered in
+  localStorage (utils/windowGeometry.ts), and the map works without it.
 -->
 
 <script lang="ts">
@@ -16,12 +21,23 @@
     PROCESS_POLL_MS,
     SYSTEM_OPEN_BY_DEFAULT,
     buildAgentMap,
+    buttonSummary,
     pickSelected,
     plural,
     turnsKey,
     type ProcessListing,
   } from '$lib/utils/agentMap';
   import { freeCommitLine } from '$lib/utils/strataFields';
+  import {
+    HEADER_HEIGHT,
+    clampRect,
+    isClick,
+    loadWindowState,
+    moveRect,
+    resizeRect,
+    saveWindowState,
+    type WindowRect,
+  } from '$lib/utils/windowGeometry';
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
 
@@ -31,6 +47,22 @@
   let systemOpen = $state(SYSTEM_OPEN_BY_DEFAULT);
   let selectedId = $state<string | null>(null);
   let inFlight = false;
+
+  // The window: its box, whether it is only the header bar, and the gesture under the pointer.
+  let rect = $state<WindowRect>({ x: 0, y: 0, width: 0, height: 0 });
+  let minimised = $state(false);
+  let gesture: { kind: 'move' | 'resize'; px: number; py: number; start: WindowRect } | null = null;
+  let dragged = false;
+
+  const viewport = () => ({ width: window.innerWidth, height: window.innerHeight });
+  function storage(): Storage | null {
+    try {
+      return window.localStorage;
+    } catch {
+      return null;
+    }
+  }
+  const remember = () => saveWindowState(storage(), { rect, minimised });
 
   async function refresh() {
     if (inFlight) return;
@@ -43,6 +75,8 @@
           backend_pid: r.backend_pid ?? null,
           backend_start_time: r.backend_start_time ?? null,
           free_commit: r.free_commit ?? null,
+          vram_free_mib: r.vram_free_mib ?? null,
+          vram_total_mib: r.vram_total_mib ?? null,
         };
         error = '';
       } else if (r && typeof r === 'object') {
@@ -55,9 +89,22 @@
     }
   }
 
-  // Open: read now, then on the interval, with a clock for the durations. Closed: nothing runs.
+  // Each opening takes the remembered box, fitted to the viewport as it is now,
+  // and opens expanded: a press on AGENTS MAP asks to see the map, not its bar.
   $effect(() => {
     if (!open) return;
+    untrack(() => {
+      const w = loadWindowState(storage(), viewport());
+      rect = clampRect(w.rect, viewport(), false);
+      minimised = false;
+    });
+  });
+
+  // Reading: open and not minimised. Read now, then on the interval, with a clock
+  // for the durations. Closed or minimised: nothing runs.
+  let active = $derived(open && !minimised);
+  $effect(() => {
+    if (!active) return;
     untrack(refresh);
     now = Date.now();
     const poll = setInterval(refresh, PROCESS_POLL_MS);
@@ -73,7 +120,7 @@
   let lastKey = '';
   $effect(() => {
     const k = key;
-    if (!open) return;
+    if (!active) return;
     if (lastKey && k !== lastKey) untrack(refresh);
     lastKey = k;
   });
@@ -91,23 +138,93 @@
     open = false;
   }
 
+  function toggleMinimised() {
+    minimised = !minimised;
+    rect = clampRect(rect, viewport(), minimised);
+    remember();
+  }
+
+  function beginGesture(e: PointerEvent, kind: 'move' | 'resize') {
+    if (e.button !== 0) return;
+    if (kind === 'move' && (e.target as HTMLElement).closest('button')) return;
+    gesture = { kind, px: e.clientX, py: e.clientY, start: { ...rect } };
+    dragged = false;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+
+  function moveGesture(e: PointerEvent) {
+    if (!gesture) return;
+    const dx = e.clientX - gesture.px;
+    const dy = e.clientY - gesture.py;
+    if (!isClick(dx, dy)) dragged = true;
+    rect = gesture.kind === 'move'
+      ? moveRect(gesture.start, dx, dy, viewport(), minimised)
+      : resizeRect(gesture.start, dx, dy, viewport());
+  }
+
+  function endGesture(e: PointerEvent) {
+    if (!gesture) return;
+    const kind = gesture.kind;
+    gesture = null;
+    const el = e.currentTarget as HTMLElement;
+    if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
+    // A press on the minimised bar that did not drag is a click: restore.
+    if (kind === 'move' && minimised && !dragged) {
+      toggleMinimised();
+      return;
+    }
+    remember();
+  }
+
+  function refit() {
+    if (open) rect = clampRect(rect, viewport(), minimised);
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (open && e.key === 'Escape') close();
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onresize={refit} />
 
 {#if open}
-  <div class="agent-map" role="dialog" aria-modal="true" aria-labelledby="agent-map-title">
-    <div class="map-body">
-      <div class="map-head">
-        <div class="map-title">
-          <h1 id="agent-map-title">Agent map</h1>
-          <p class="muted">{map.summaryLine}</p>
-        </div>
-        <button type="button" class="map-close" onclick={close} aria-label="Close the agent map">×</button>
+  {#if !minimised}<div class="agent-map-backdrop" role="presentation"></div>{/if}
+  <div
+    class="agent-map"
+    class:minimised
+    role="dialog"
+    aria-modal={!minimised}
+    aria-labelledby="agent-map-title"
+    style="left: {rect.x}px; top: {rect.y}px; width: {rect.width}px; height: {minimised ? HEADER_HEIGHT : rect.height}px"
+  >
+    <div
+      class="map-head"
+      role="presentation"
+      title={minimised ? 'Click to restore, drag to move' : 'Drag to move'}
+      onpointerdown={(e) => beginGesture(e, 'move')}
+      onpointermove={moveGesture}
+      onpointerup={endGesture}
+      onpointercancel={endGesture}
+    >
+      <div class="map-title">
+        <h1 id="agent-map-title">Agent map</h1>
+        <p class="muted">{minimised ? buttonSummary($agentTurns) : map.summaryLine}</p>
       </div>
+      <div class="map-buttons">
+        <button
+          type="button"
+          class="map-button"
+          onclick={toggleMinimised}
+          aria-label={minimised ? 'Restore the agent map' : 'Minimise the agent map'}
+          title={minimised ? 'Restore' : 'Minimise'}
+        >{minimised ? '▢' : '–'}</button>
+        <button type="button" class="map-button" onclick={close} aria-label="Close the agent map" title="Close">×</button>
+      </div>
+    </div>
+
+    {#if !minimised}
+    <div class="map-body">
 
       {#if error}
         <div class="map-error" role="alert">{error}</div>
@@ -252,44 +369,73 @@
         {/if}
       </div>
     </div>
+    <div
+      class="resize-handle"
+      role="presentation"
+      title="Drag to resize"
+      onpointerdown={(e) => beginGesture(e, 'resize')}
+      onpointermove={moveGesture}
+      onpointerup={endGesture}
+      onpointercancel={endGesture}
+    ></div>
+    {/if}
   </div>
 {/if}
 
 <style>
-  .agent-map {
+  .agent-map-backdrop {
     position: fixed;
     inset: 0;
+    z-index: 999;
+    background: rgba(0, 0, 0, 0.5);
+  }
+
+  .agent-map {
+    position: fixed;
     z-index: 1000;
-    overflow-y: auto;
     box-sizing: border-box;
-    padding: 28px 24px 40px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     background: var(--bg-primary, #15171a);
     color: var(--text-primary, #e8eaed);
+    border: 1px solid var(--border-color, #2c3036);
+    border-radius: 10px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   }
 
-  .map-body {
-    max-width: 1320px;
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-  }
-
   .map-head {
+    flex: 0 0 auto;
+    box-sizing: border-box;
+    height: 56px;
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
-    gap: 16px;
+    gap: 12px;
+    padding: 0 8px 0 16px;
+    border-bottom: 1px solid var(--border-color, #2c3036);
+    cursor: move;
+    user-select: none;
+    touch-action: none;
+  }
+  .agent-map.minimised .map-head { border-bottom: 0; cursor: pointer; }
+
+  .map-title { display: flex; align-items: baseline; gap: 14px; min-width: 0; }
+  .map-title h1 { margin: 0; font-size: 18px; font-weight: 600; white-space: nowrap; }
+  .map-title p {
+    margin: 0;
+    font-size: 13px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .map-title { display: flex; flex-direction: column; gap: 6px; }
-  .map-title h1 { margin: 0; font-size: 26px; font-weight: 600; }
-  .map-title p { margin: 0; font-size: 15px; }
-
-  .map-close {
-    width: 44px;
-    height: 44px;
+  .map-buttons { display: flex; gap: 2px; flex: 0 0 auto; }
+  .map-button {
+    width: 40px;
+    height: 40px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -297,10 +443,33 @@
     border-radius: 8px;
     background: transparent;
     color: #c9d1d9;
-    font-size: 26px;
+    font-size: 22px;
     cursor: pointer;
   }
-  .map-close:hover { color: #ffffff; background: var(--bg-hover, #22262c); }
+  .map-button:hover { color: #ffffff; background: var(--bg-hover, #22262c); }
+
+  .map-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 16px 20px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .resize-handle {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 18px;
+    height: 18px;
+    cursor: nwse-resize;
+    touch-action: none;
+    background: linear-gradient(135deg, transparent 0 50%, #6e7681 50% 56%, transparent 56% 70%, #6e7681 70% 76%, transparent 76%);
+    border-bottom-right-radius: 10px;
+  }
 
   .muted { color: var(--text-secondary, #a9b0bb); }
   .small { font-size: 13px; }
@@ -330,6 +499,7 @@
   .bar-track { height: 6px; background: #2c3036; border-radius: 3px; }
   .bar-fill { height: 6px; background: #58a6ff; border-radius: 3px; }
   .bar-fill.physical { background: #d29922; }
+  .bar-fill.vram { background: #a371f7; }
   .memory-source { font-size: 13px; color: var(--text-secondary, #a9b0bb); }
 
   .map-columns {

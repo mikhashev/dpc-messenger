@@ -4,7 +4,8 @@ What is asserted: the command's shape through the real local API dispatch; the
 kept entries, open and finished, as the state file holds them; the daily history
 read for `since`/`until`; `commit_mb` read at the request for a live entry (a fake
 psutil, so no real process is walked) and None for a finished one and off
-Windows; `free_commit` on Windows and elsewhere.
+Windows; `free_commit` on Windows and elsewhere. The card's VRAM fields are
+asserted in test_the_agent_map_reads_the_cards_vram_at_most_every_30_seconds.py.
 
 Nothing here touches `~/.dpc`: the default registry is in memory and the
 persisted ones live in `tmp_path`. No process is started.
@@ -22,6 +23,7 @@ import pytest
 
 from dpc_client_core import process_registry as pr
 from dpc_client_core.managers import commit_memory as cm
+from dpc_client_core.managers import llama_server_supervisor as lss
 from dpc_client_core.process_registry import ProcessRegistry, ProcessSample, SpawnOrigin, TreeSample
 
 START = 1_000.0  # the creation time every fake process of these tests has
@@ -79,6 +81,7 @@ class TestTheCommand:
         reading = {"avail_page_file_mib": 1, "total_page_file_mib": 2, "avail_phys_mib": 3,
                    "total_phys_mib": 4, "source": cm.SOURCE}
         monkeypatch.setattr(cm, "read_free_commit_or_physical", lambda: dict(reading))
+        monkeypatch.setattr(lss, "read_vram_mib", lambda: (11, 22))
         registry = pr.get_registry()
         _tool(registry, 7_960_001)
         registry.register(7_960_002, launcher="strata", launcher_kind="subsystem", command="launcher")
@@ -97,10 +100,12 @@ class TestTheCommand:
         await server._handler(ws)
 
         ok = next(m for m in ws.sent if m.get("id") == "ok")["payload"]
-        assert set(ok) == {"status", "processes", "backend_pid", "backend_start_time", "free_commit"}
+        assert set(ok) == {"status", "processes", "backend_pid", "backend_start_time", "free_commit",
+                          "vram_free_mib", "vram_total_mib"}
         assert ok["status"] == "success" and ok["backend_pid"] == os.getpid()
         assert ok["backend_start_time"] == pr.create_time_of(os.getpid())
         assert ok["free_commit"] == reading
+        assert (ok["vram_free_mib"], ok["vram_total_mib"]) == (11, 22)
         by_pid = {row["pid"]: row for row in ok["processes"]}
         assert set(by_pid) == {7_960_001, 7_960_002}
         live, ended = by_pid[7_960_001], by_pid[7_960_002]
@@ -121,6 +126,7 @@ class TestTheCommand:
             raise RuntimeError("the list could not be read")
 
         monkeypatch.setattr(pr.ProcessRegistry, "list_processes", broken)
+        monkeypatch.setattr(lss, "read_vram_mib", lambda: (None, None))
         out = await CoreService.list_processes(SimpleNamespace())
         assert out == {"status": "error", "message": "the list could not be read"}
 
@@ -302,5 +308,6 @@ class TestFreeCommit:
         reading = {"avail_page_file_mib": None, "total_page_file_mib": None, "avail_phys_mib": 1,
                    "total_phys_mib": 2, "source": "psutil"}
         monkeypatch.setattr(cm, "read_free_commit_or_physical", lambda: dict(reading))
+        monkeypatch.setattr(lss, "read_vram_mib", lambda: (None, None))
         out = await CoreService.list_processes(SimpleNamespace())
         assert out["status"] == "success" and out["free_commit"] == reading

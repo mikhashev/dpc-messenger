@@ -58,6 +58,9 @@ export interface ProcessListing {
     backend_pid: number | null;
     backend_start_time: number | null;
     free_commit: FreeCommitReading | null;
+    /** The card's VRAM in MiB (nvidia-smi); null without an NVIDIA signal. */
+    vram_free_mib: number | null;
+    vram_total_mib: number | null;
 }
 
 /** working (green), waiting for the model or an approval (amber), idle or ended (grey). */
@@ -106,7 +109,7 @@ export interface MapSystemItem {
 }
 
 export interface MapMemoryBar {
-    kind: 'commit' | 'physical';
+    kind: 'commit' | 'physical' | 'vram';
     label: string;
     fraction: number;
 }
@@ -290,6 +293,20 @@ function turnWords(state: AgentTurnState | undefined, chatOf: (id: string | null
     };
 }
 
+/** The line under an agent in the sidebar: the map's dot and state line for the
+ *  agent's turn, and the waiting-chat count the map's chip prints. An agent with
+ *  no turn is `Idle`. The chat is named by the turn's own title; no listing or
+ *  name table is read. */
+export function agentStatusLine(state: AgentTurnState | undefined, nowMs: number): { dot: MapDot; line: string; waiting: string } {
+    const words = turnWords(state, id => id ?? '', nowMs);
+    const count = state?.waiting.length ?? 0;
+    return {
+        dot: words.dot,
+        line: words.stateLine,
+        waiting: count > 0 ? plural(count, 'chat waiting', 'chats waiting') : '',
+    };
+}
+
 function waitingChats(state: AgentTurnState | undefined, chatOf: (id: string | null) => string,
                       nameOf: (id: string) => string, nowMs: number): MapWaitingChat[] {
     if (!state) return [];
@@ -423,20 +440,20 @@ export function pickSelected(map: AgentMap, selectedId: string | null | undefine
     return map.agents[0]?.agent_id ?? null;
 }
 
-function memory(reading: FreeCommitReading | null | undefined): { bars: MapMemoryBar[]; source: string } {
-    if (!reading) return { bars: [], source: '' };
+function memory(listing: ProcessListing | null | undefined): { bars: MapMemoryBar[]; source: string } {
+    const reading = listing?.free_commit;
     const n = (v: number) => v.toLocaleString('en-US');
     const bar = (kind: MapMemoryBar['kind'], label: string, avail: number | null, total: number | null): MapMemoryBar[] =>
         typeof avail === 'number' && typeof total === 'number' && total > 0
             ? [{ kind, label: `${label} ${n(avail)} of ${n(total)} MiB`, fraction: Math.min(1, Math.max(0, avail / total)) }]
             : [];
-    return {
-        bars: [
-            ...bar('commit', 'Free commit', reading.avail_page_file_mib, reading.total_page_file_mib),
-            ...bar('physical', 'Free physical', reading.avail_phys_mib, reading.total_phys_mib),
-        ],
-        source: reading.source ? `Read now · ${reading.source}` : 'Read now',
-    };
+    const bars = [
+        ...(reading ? bar('commit', 'Free commit', reading.avail_page_file_mib, reading.total_page_file_mib) : []),
+        ...(reading ? bar('physical', 'Free physical', reading.avail_phys_mib, reading.total_phys_mib) : []),
+        ...bar('vram', 'Free VRAM', listing?.vram_free_mib ?? null, listing?.vram_total_mib ?? null),
+    ];
+    if (!bars.length) return { bars, source: '' };
+    return { bars, source: reading?.source ? `Read now · ${reading.source}` : 'Read now' };
 }
 
 const DOT_RANK: Record<MapDot, number> = { working: 0, waiting: 1, idle: 2 };
@@ -520,7 +537,7 @@ export function buildAgentMap(input: {
         ...(listing ? [`${plural(alive, 'process', 'processes')} alive`] : []),
         'click an agent for details',
     ].join(' · ');
-    const mem = memory(listing?.free_commit);
+    const mem = memory(listing);
 
     return {
         agents: ordered,

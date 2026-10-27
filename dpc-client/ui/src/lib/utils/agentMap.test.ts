@@ -3,6 +3,7 @@ import {
     AGENT_PROCESS_WINDOW_S,
     PROCESS_POLL_MS,
     SYSTEM_OPEN_BY_DEFAULT,
+    agentStatusLine,
     buildAgentMap,
     buttonSummary,
     clockTime,
@@ -56,6 +57,7 @@ function listing(processes: ProcessEntry[], over: Partial<ProcessListing> = {}):
             avail_page_file_mib: 41210, total_page_file_mib: 108236,
             avail_phys_mib: 11305, total_phys_mib: 63168, source: 'GlobalMemoryStatusEx',
         },
+        vram_free_mib: null, vram_total_mib: null,
         ...over,
     };
 }
@@ -252,6 +254,23 @@ describe('the header, the backend and memory', () => {
         expect(posix.memorySource).toBe('Read now · psutil');
         expect(build({}, listing([], { free_commit: null })).memoryBars).toEqual([]);
     });
+
+    it('free VRAM is a third bar when the card was read, and absent when it was not', () => {
+        const withCard = build({}, listing([], { vram_free_mib: 1234, vram_total_mib: 32607 })).memoryBars;
+        expect(withCard.map(b => b.label)).toEqual([
+            'Free commit 41,210 of 108,236 MiB', 'Free physical 11,305 of 63,168 MiB', 'Free VRAM 1,234 of 32,607 MiB']);
+        expect(withCard[2]).toMatchObject({ kind: 'vram' });
+        expect(withCard[2].fraction).toBeCloseTo(1234 / 32607);
+        expect(build({}, listing([])).memoryBars.map(b => b.kind)).toEqual(['commit', 'physical']);
+        expect(build({}, listing([], { vram_free_mib: 5, vram_total_mib: null })).memoryBars.map(b => b.kind))
+            .toEqual(['commit', 'physical']);
+    });
+
+    it('the card alone still makes a bar, with the read-now note and no source name', () => {
+        const map = build({}, listing([], { free_commit: null, vram_free_mib: 100, vram_total_mib: 200 }));
+        expect(map.memoryBars.map(b => b.label)).toEqual(['Free VRAM 100 of 200 MiB']);
+        expect(map.memorySource).toBe('Read now');
+    });
 });
 
 describe('chats by name', () => {
@@ -311,5 +330,45 @@ describe('words', () => {
         expect(formatRun(30)).toBe('30 s');
         expect(formatMb(null)).toBe('—');
         expect(formatMb(1126)).toBe('1.1 GB');
+    });
+});
+
+describe('the line under an agent in the sidebar', () => {
+    const line = (snap: any) => agentStatusLine(states([snap], NOW - 48_000)['agent_ark'], NOW);
+
+    it('says the map words for the same turn', () => {
+        const snap = { agent_id: 'agent_ark', ts: 't1', turn: turn({ tool: 'run_shell' }), waiting: [] };
+        const map = build(states([snap], NOW - 48_000));
+        const ark = map.agents.find(a => a.agent_id === 'agent_ark')!;
+        expect(line(snap)).toEqual({ dot: ark.dot, line: ark.stateLine, waiting: '' });
+        expect(line(snap).line).toBe('Running run_shell · DPC Project · 2 min 14 s');
+    });
+
+    it('waiting for the model or an approval is amber with the wait time', () => {
+        const wait = (r: any) => line({ agent_id: 'agent_ark', ts: 't1', turn: turn({ wait_reason: r }), waiting: [] });
+        expect(wait('model_call')).toMatchObject({ dot: 'waiting', line: 'Waiting for the model · DPC Project · 48 s' });
+        expect(wait('approval').dot).toBe('waiting');
+        expect(wait('approval').line).toMatch(/^Waiting for an approval · DPC Project · /);
+    });
+
+    it('counts the chats waiting beside the state', () => {
+        const waiting = [
+            { conversation_id: 'c1', conversation_title: 'x', waiting_since: iso(5), wait_reason: 'other_chat', held_by: null },
+            { conversation_id: 'c2', conversation_title: 'y', waiting_since: iso(9), wait_reason: 'other_chat', held_by: null },
+        ];
+        expect(line({ agent_id: 'agent_ark', ts: 't1', turn: turn(), waiting }).waiting).toBe('2 chats waiting');
+        expect(line({ agent_id: 'agent_ark', ts: 't1', turn: null, waiting: [waiting[0]] }).waiting).toBe('1 chat waiting');
+    });
+
+    it('an agent with no turn, or none known, is idle', () => {
+        expect(line({ agent_id: 'agent_ark', ts: 't1', turn: null, waiting: [] })).toEqual({ dot: 'idle', line: 'Idle', waiting: '' });
+        expect(agentStatusLine(undefined, NOW)).toEqual({ dot: 'idle', line: 'Idle', waiting: '' });
+    });
+
+    it('a turn silent past the limit is unconfirmed, grey', () => {
+        const state = states([{ agent_id: 'agent_ark', ts: 't1', turn: turn(), waiting: [] }], NOW - 300_000)['agent_ark'];
+        const out = agentStatusLine(state, NOW);
+        expect(out.dot).toBe('idle');
+        expect(out.line).toMatch(/^Unconfirmed · DPC Project · /);
     });
 });

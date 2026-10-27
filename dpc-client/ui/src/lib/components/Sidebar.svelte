@@ -6,7 +6,7 @@
   import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
   import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
   import { agentTurns } from '$lib/services/agents';
-  import { buttonSummary } from '$lib/utils/agentMap';
+  import { agentStatusLine, buttonSummary } from '$lib/utils/agentMap';
 
   // Account balance rows (one per DeepSeek/NeuralDeep/... account, 2026-09-28
   // — was a single hard-coded DeepSeek pill with no provider name). Level
@@ -431,6 +431,17 @@
   // The AGENTS MAP button's counts come from the live turns; the process count
   // needs list_processes, which only the open map reads.
   const agentMapSummary = $derived(buttonSummary($agentTurns));
+
+  // The line under each agent reads the same turns; its durations need a clock,
+  // which runs only while some agent has a turn.
+  let statusNow = $state(Date.now());
+  const anyTurn = $derived(Object.values($agentTurns).some((s) => !!s.turn));
+  $effect(() => {
+    if (!anyTurn) return;
+    statusNow = Date.now();
+    const tick = setInterval(() => (statusNow = Date.now()), 1000);
+    return () => clearInterval(tick);
+  });
 </script>
 
 <div class="sidebar">
@@ -743,6 +754,7 @@
         {#if agents && agents.length > 0}
           <li class="section-divider"><span>Agents</span></li>
           {#each agents as agent (agent.agent_id)}
+            {@const status = agentStatusLine($agentTurns[agent.agent_id], statusNow)}
             <li class="peer-item">
               <button
                 type="button"
@@ -791,6 +803,11 @@
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleLinkTelegram(agent.agent_id); } }}
                   >{agent.telegram_enabled ? '✓ 📱' : '⏸ 📱'}</span>
                 {/if}
+                <span class="agent-status">
+                  <span class="status-dot {status.dot}"></span>
+                  <span class="status-line">{status.line}</span>
+                  {#if status.waiting}<span class="status-chip">{status.waiting}</span>{/if}
+                </span>
               </button>
               <div class="agent-actions">
                 {#if !isTelegramConfigured(agent) && onLinkAgentTelegram}
@@ -1709,9 +1726,35 @@
   /* Agent button styles (Phase 4) */
   .agent-button {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
     width: 100%;
+  }
+
+  /* The state line under the name: a dot, the map's words, the waiting-chat count. */
+  .agent-button .agent-status {
+    flex: 0 0 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    margin-top: -0.25rem;
+    font-size: 0.75rem;
+    font-weight: normal;
+    color: #4b5563;
+  }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; background: #9ca3af; }
+  .status-dot.working { background: #16a34a; }
+  .status-dot.waiting { background: #d97706; }
+  .status-dot.idle { background: #9ca3af; }
+  .status-line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status-chip {
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: #fef3c7;
+    color: #92400e;
   }
 
   .agent-button .agent-name {
