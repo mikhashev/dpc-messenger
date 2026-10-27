@@ -949,6 +949,10 @@ class P2PManager:
             else:
                 peer.strategy_used = "ipv4_direct"  # Default fallback
 
+            # A dial to a node we still hold a session with: the new, identity-verified
+            # connection replaces the old one, which is closed below rather than left
+            # open with no entry pointing at it.
+            replaced = self.peers.get(target_node_id)
             self.peers[target_node_id] = peer
             logger.info("Direct connection established with %s", target_node_id)
 
@@ -958,6 +962,12 @@ class P2PManager:
             # in self.peers and the listener is running, so request-response patterns work.
             task = asyncio.create_task(self._listen_to_peer(peer))
             self._peer_listener_tasks[target_node_id] = task
+
+            # Closed only now, with the new session registered and listening: the old
+            # listener ends on its own and, finding another entry, takes nothing down.
+            if replaced is not None and replaced is not peer:
+                logger.info("Connection with %s replaced by a new one", target_node_id)
+                await replaced.close()
 
             # Persist successful endpoint to peer cache
             self.peer_cache.add_or_update_peer(
