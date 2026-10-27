@@ -6571,8 +6571,9 @@ class CoreService:
         @mentions in the same group queue (one at a time) instead of running in parallel.
         Prevents one agent's completion progress-clear wiping another's still-running
         progress, and avoids concurrent same-group LLM load. The lock is a room
-        `RunGate`: the agent registers before it waits, which is `room_busy`."""
-        from .dpc_agent.run_gate import RunGate, hold, turn_title
+        `RunGate`: the agent registers before it waits, which is `room_busy`, and
+        a Stop pressed in the group while it waits takes it out of line."""
+        from .dpc_agent.run_gate import RunGate, StoppedWhileWaiting, hold, turn_title
 
         if group_id not in self._group_agent_locks:
             self._group_agent_locks[group_id] = RunGate(room=group_id)
@@ -6586,10 +6587,13 @@ class CoreService:
             "conversation_id": group_id,
             "conversation_title": turn_title(self, group_id),
         }
-        async with hold(self._group_agent_locks[group_id], entry):
-            await self._invoke_agent_in_group(group_id, text, sender_name, agent_id,
-                                              trigger_message_id,
-                                              mention_depth=mention_depth)
+        try:
+            async with hold(self._group_agent_locks[group_id], entry, stoppable=True):
+                await self._invoke_agent_in_group(group_id, text, sender_name, agent_id,
+                                                  trigger_message_id,
+                                                  mention_depth=mention_depth)
+        except StoppedWhileWaiting:
+            logger.info("Agent %s was stopped while waiting for the room in %s", agent_id, group_id)
 
     async def _invoke_agent_in_group(
         self, group_id: str, text: str, sender_name: str, agent_id: str = None,
@@ -10205,6 +10209,13 @@ class CoreService:
                     "interrupt_agent: request named %r, which runs no loop in %s; stopped %s instead",
                     agent_id, conversation_id, stopped,
                 )
+            if not stopped:
+                # Nothing runs here: what Stop can still stop is a message
+                # waiting at a run gate (the agent's or the room's), which
+                # leaves the line without running. A second press, the kill,
+                # does the same; there is no model call to cancel.
+                from .dpc_agent.run_gate import stop_waiting
+                stopped = stop_waiting(conversation_id)
             logger.info("interrupt_agent result: conversation_id=%s, stopped=%s", conversation_id, stopped)
             if not stopped:
                 return {"status": "no_active_loop"}

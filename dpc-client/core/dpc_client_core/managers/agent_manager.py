@@ -20,7 +20,7 @@ import pathlib
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..dpc_agent.agent import DpcAgent, AgentConfig
-from ..dpc_agent.run_gate import RunGate, _RUN_GATES, get_run_gate, hold, turn_title  # noqa: F401
+from ..dpc_agent.run_gate import RunGate, StoppedWhileWaiting, _RUN_GATES, get_run_gate, hold, turn_title  # noqa: F401
 from ..providers.base import ModelNotCachedError
 from ..dpc_agent.utils import get_agent_root, ensure_agent_dirs, utc_now_iso
 from ..dpc_agent.events import get_event_emitter, EventType
@@ -973,7 +973,8 @@ class DpcAgentManager:
         reads them after `process` returns, so a second run finishing in that
         window writes its thinking and tool calls into the first one's history.
         Both doors into a run take this same gate — see `DpcAgent._execute_task`
-        for the other one. The chat registers at the gate before it waits.
+        for the other one. The chat registers at the gate before it waits, and
+        a Stop pressed in it while it waits takes it out of line.
         """
         conversation_id = kwargs.get("conversation_id")
         if conversation_id is None and len(args) > 1:
@@ -984,8 +985,53 @@ class DpcAgentManager:
                 getattr(self, "service", None), conversation_id, kwargs.get("chat_context"),
             ),
         }
-        async with hold(self._run_gate, entry):
-            return await self._process_message_guarded(*args, **kwargs)
+        try:
+            async with hold(self._run_gate, entry, stoppable=True):
+                return await self._process_message_guarded(*args, **kwargs)
+        except StoppedWhileWaiting:
+            import inspect
+            bound = inspect.signature(self._process_message_guarded).bind(*args, **kwargs)
+            bound.apply_defaults()
+            return self._close_turn_stopped_while_waiting(**bound.arguments)
+
+    def _close_turn_stopped_while_waiting(
+        self, message: str, conversation_id: str,
+        attachments: Optional[List[Dict[str, Any]]] = None,
+        sender_name: str = "User", _skip_history: bool = False, **_unused: Any,
+    ) -> str:
+        """The record of a message the person stopped before its run started.
+
+        The quota branch's shape: the message opened a turn, and a record with
+        its reason closes it, so the history never holds two of the person's
+        messages in a row. The reason is `stopped`, the person's Stop. Nothing ran, so
+        no TASK_STARTED, progress or TASK_COMPLETED was emitted for it, and the
+        agent's per-run fields are not touched: a run in another chat holds
+        them. A group gets no record and nothing is posted (ADR-031 §3: the
+        service is the group's writer; an empty answer posts nothing).
+        """
+        if conversation_id.startswith("group-"):
+            return ""
+        notice = "⚠️ Stopped by user while waiting for its turn."
+        monitor = self._get_or_create_agent_monitor(conversation_id)
+        if not _skip_history:
+            monitor.add_message(
+                role="user",
+                content=message,
+                attachments=attachments,
+                timestamp=utc_now_iso(),
+                sender_node_id=getattr(self.service.p2p_manager, "node_id", "local-user"),
+                sender_name=sender_name,
+            )
+        monitor.add_message(
+            role="assistant",
+            content=notice,
+            timestamp=utc_now_iso(),
+            sender_node_id=conversation_id,
+            sender_name=self._agent_display_name or self.agent_id or "DPC Agent",
+            turn_end="stopped",
+        )
+        monitor.save_history()
+        return notice
 
     async def _process_message_guarded(
         self,
@@ -1153,6 +1199,9 @@ class DpcAgentManager:
                             turn_end="guard",
                         )
                         monitor.save_history()
+                    # The thinking line went up above; the turn ends the way
+                    # any other does, or it stays on with no TASK_COMPLETED.
+                    await self._complete_turn(emitter, task_id, conversation_id, notice)
                     return notice
 
             reasoning_effort, effort_source = self._resolve_reasoning_effort(
@@ -1315,18 +1364,7 @@ class DpcAgentManager:
                 except Exception as e:
                     log.debug("update_group_agent_context failed: %s", e)
 
-            # Emit TASK_COMPLETED event
-            await emitter.emit(EventType.TASK_COMPLETED, {
-                "task_id": task_id,
-                "task_type": "chat",
-                "conversation_id": conversation_id,
-                "response_length": len(response),
-                "result": response[:200] if len(response) > 200 else response,
-            })
-
-            # Clear progress indicator
-            self._emit_progress_clear(conversation_id)
-
+            await self._complete_turn(emitter, task_id, conversation_id, response)
             return response
 
         except Exception as e:
@@ -1340,6 +1378,17 @@ class DpcAgentManager:
             # Clear progress indicator on failure too
             self._emit_progress_clear(conversation_id)
             raise
+
+    async def _complete_turn(self, emitter, task_id: str, conversation_id: str, response: str) -> None:
+        """How a chat turn that answered ends: TASK_COMPLETED, then the progress line cleared."""
+        await emitter.emit(EventType.TASK_COMPLETED, {
+            "task_id": task_id,
+            "task_type": "chat",
+            "conversation_id": conversation_id,
+            "response_length": len(response),
+            "result": response[:200] if len(response) > 200 else response,
+        })
+        self._emit_progress_clear(conversation_id)
 
     def _get_or_create_agent_monitor(self, conversation_id: str) -> ConversationMonitor:
         """

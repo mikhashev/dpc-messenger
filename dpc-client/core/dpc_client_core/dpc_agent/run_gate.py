@@ -8,7 +8,9 @@ surface, `DpcAgentManager.process_message`; a queued task,
 not show its queue, so a chat waiting behind another chat looked exactly like a
 chat nobody was answering. A `RunGate` is that lock with a registry beside it:
 an entry is put in before the acquire and taken out in a `finally` after it, so
-a waiter that is cancelled or times out leaves no trace.
+a waiter that is cancelled or times out leaves no trace. A person's Stop in a
+chat that waits takes its message out of line the same way (`stop_waiting`),
+and the run it waited for never starts.
 
 What the screen reads is the agent's snapshot, `agent_turn_snapshot`:
 
@@ -71,6 +73,10 @@ _HELD: contextvars.ContextVar[Optional[Tuple["RunGate", Dict[str, Any]]]] = cont
 _listener: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
+class StoppedWhileWaiting(Exception):
+    """A person's Stop took this waiter out of line: its run never started."""
+
+
 class RunGate:
     """One run at a time, and a list of who waits for it.
 
@@ -103,29 +109,45 @@ class RunGate:
         return list(self._waiters)
 
     @contextlib.asynccontextmanager
-    async def hold(self, entry: Dict[str, Any]):
+    async def hold(self, entry: Dict[str, Any], stoppable: bool = False):
         """Wait for the gate with `entry` registered, then hold it.
 
         `entry` names the waiter: `conversation_id` and `conversation_title`,
         and on a room gate also `agent_id`. Removed from the waiters in a
         `finally`, whether the acquire succeeded, was cancelled or timed out.
+
+        A `stoppable` waiter is one a person's Stop in its chat may take out of
+        line (`stop_waiting`): the hold then raises `StoppedWhileWaiting` and
+        its body never runs.
         """
         self._bind_loop()
         entry = dict(entry)
         entry.setdefault("waiting_since", utc_now_iso())
         entry["_arrival"] = next(_ARRIVAL)
+        if stoppable:
+            entry["_task"] = asyncio.current_task()
         self._waiters.append(entry)
         waited = self._lock.locked()
         if waited:
             self._changed(entry)
         acquired = False
+        stopped = False
         try:
-            await self._lock.acquire()
-            acquired = True
+            try:
+                await self._lock.acquire()
+                acquired = True
+            except asyncio.CancelledError:
+                # The Stop cancelled this task to wake it; that cancel is taken
+                # back here. One from anyone else is still pending and goes on.
+                if not entry.get("_stopped") or entry["_task"].uncancel() > 0:
+                    raise
+                stopped = True
         finally:
             self._waiters = [w for w in self._waiters if w is not entry]
             if not acquired and waited:
                 self._changed(entry)
+        if stopped:
+            raise StoppedWhileWaiting(entry.get("conversation_id"))
         token = None
         try:
             if self.room is None:
@@ -159,6 +181,22 @@ class RunGate:
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         cm = self._anonymous.pop()
         return bool(await cm.__aexit__(exc_type, exc, tb))
+
+    def stop_waiting(self, conversation_id: str) -> List[Dict[str, Any]]:
+        """Take the stoppable waiters of one chat out of line; returns them.
+
+        Each one's task is woken with a cancel its `hold` takes back, so the
+        entry leaves the list in the same `finally` as any other waiter."""
+        stopped = []
+        for w in list(self._waiters):
+            task = w.get("_task")
+            if (task is None or w.get("_stopped") or task.done()
+                    or (w.get("conversation_id") or self.room) != conversation_id):
+                continue
+            w["_stopped"] = True
+            task.cancel()
+            stopped.append(w)
+        return stopped
 
     # -- the turn ----------------------------------------------------------
 
@@ -261,18 +299,44 @@ def turn_title(service: Any, conversation_id: Optional[str],
 
 
 @contextlib.asynccontextmanager
-async def hold(gate: Any, entry: Dict[str, Any]):
+async def hold(gate: Any, entry: Dict[str, Any], stoppable: bool = False):
     """`gate.hold(entry)` for a `RunGate`; a plain lock is simply taken.
 
     The plain lock is what a test double hands an agent built without the
     manager; it serialises the same way and registers nothing.
     """
     if isinstance(gate, RunGate):
-        async with gate.hold(entry):
+        async with gate.hold(entry, stoppable=stoppable):
             yield gate
     else:
         async with gate:
             yield gate
+
+
+def stop_waiting(conversation_id: str) -> List[str]:
+    """Stop pressed in a chat that waits: every gate lets its waiters for it go.
+
+    Both kinds of gate: an agent's (`other_chat`) and a room's (`room_busy`).
+    Only the waiters registered as stoppable go — a person's message, not a
+    queued task. Returns the agent ids of the waiters taken out of line
+    (`""` for the singleton agent), each once, in arrival order.
+    """
+    if not conversation_id:
+        return []
+    stopped: List[Tuple[int, str]] = []
+    for gate in list(_ALL_GATES):
+        for w in gate.stop_waiting(conversation_id):
+            agent_id = gate.agent_id if gate.room is None else w.get("agent_id")
+            stopped.append((w["_arrival"], agent_id or ""))
+    stopped.sort()
+    seen: List[str] = []
+    for _, agent_id in stopped:
+        if agent_id not in seen:
+            seen.append(agent_id)
+    if seen:
+        log.info("Stop took %d waiting turn(s) out of line in %s: %s",
+                 len(stopped), conversation_id, seen)
+    return seen
 
 
 # -- what the screen reads -------------------------------------------------
