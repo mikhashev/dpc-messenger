@@ -83,3 +83,10 @@ async def test_a_cache_that_cannot_be_read_answers_with_an_error_and_no_rows():
 
     assert answer["status"] == "error"
     assert answer["peers"] == []
+
+
+def test_the_ui_may_call_it():
+    # The sidebar sends it through the local API, which rejects anything not
+    # on its allowlist; the method alone was not enough (2026-10-27).
+    from dpc_client_core.local_api import ALLOWED_COMMANDS
+    assert "list_cached_peers" in ALLOWED_COMMANDS

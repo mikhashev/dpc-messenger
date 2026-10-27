@@ -447,7 +447,16 @@
     showCachedPeers = true;
     cachedPeersError = '';
     cachedPeersCopied = '';
-    const result = await (sendCommand('list_cached_peers', {}) as Promise<any>);
+    let result: any;
+    try {
+      result = await (sendCommand('list_cached_peers', {}) as Promise<any>);
+    } catch (e) {
+      // A refused command rejects rather than answering, and would otherwise
+      // leave the list saying there are no peers.
+      cachedPeers = [];
+      cachedPeersError = `The cached peers could not be read: ${e instanceof Error ? e.message : e}`;
+      return;
+    }
     if (result?.status !== 'success' || !Array.isArray(result.peers)) {
       cachedPeers = [];
       cachedPeersError = result?.message || 'The cached peers could not be read.';

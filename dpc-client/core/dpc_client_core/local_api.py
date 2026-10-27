@@ -93,6 +93,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "strata_reset_failure",
     # The process registry (ADR-046 point 8): what runs now, who started it
     "list_processes",
+    # The peer cache by name, for the sidebar's cached-peers list (never the address)
+    "list_cached_peers",
     # Personal context & instructions
     "get_personal_context",
     "save_personal_context",
