@@ -212,7 +212,8 @@ agent-chat bridge but reads from group history files and sends via
 
 | Command | What it does |
 |---------|--------------|
-| `uv run python cc_group_chat_bridge.py --list` | List available group chats. |
+| `uv run python cc_group_chat_bridge.py --list` | List available group chats. With `--chat-context`, each group's block follows its line. |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --chat-context` | Print the group's `chat_context` block — the one an embedded agent woken there is given ([GROUP_CHAT.md](../GROUP_CHAT.md#group-metadata-injection)) — as one `[CHAT_CONTEXT]` line, asked from the backend with `get_group_chat_context`, then the history. |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --last 10` | Dump the last 10 messages from a group. |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send "text"` | Post a response to the group under this bridge's tag. |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
@@ -266,8 +267,10 @@ every minute, `--listen` authenticates on the local WebSocket (the same
 `cc_group_mention` event whose `group_id` is this group and whose `agent_tag`
 is one of the names resolved above (`--as` applies). The backend emits the
 event on both the local send path and the peer path with
-`{group_id, text, sender_name, sender_node_id, agent_tag, mention_depth}`
-(`mention_depth` is the depth the bridge's reply carries, specs/dptp_v1.md §4.3). `--once` returns 0
+`{group_id, text, sender_name, sender_node_id, agent_tag, mention_depth, chat_context}`
+(`mention_depth` is the depth the bridge's reply carries, specs/dptp_v1.md §4.3; `chat_context`
+is the group block an embedded agent gets, printed as a `[CHAT_CONTEXT]` line after the
+`[MENTION]` line, or inside the object under `--json`). `--once` returns 0
 after the first match, so `--listen --once --json` is "block until mentioned"
 for a script; without `--once` it runs until Ctrl-C (exit 0, `[LISTEN] stopped`
 on stderr) and reconnects with 1s→30s backoff when the backend restarts. Status

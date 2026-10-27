@@ -13,6 +13,12 @@ Usage:
     python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "hi"  # pick a tag
     python cc_group_chat_bridge.py --group GROUP_ID --listen [--once] [--json]  # push, no cron
     python cc_group_chat_bridge.py --group GROUP_ID --send "hi" --mention-depth 1  # answer at depth
+    python cc_group_chat_bridge.py --group GROUP_ID --chat-context  # the group block, then history
+    python cc_group_chat_bridge.py --list --chat-context    # every group with its block
+
+The group block (chat_context) is what an embedded agent woken in the group gets:
+name, topic, participants and the rest of the group's metadata. A [MENTION] line is
+followed by a [CHAT_CONTEXT] line carrying it; --chat-context asks the backend for it.
 
 A [MENTION] line or a history line marked [--mention-depth N] is answered at
 depth N, so the count two bridges pass each other is not reset to 0 at every
@@ -128,12 +134,16 @@ def _get_ws_url() -> str:
     return f"ws://127.0.0.1:{port}"
 
 
-def list_groups() -> list:
-    """List available group chats from ~/.dpc/conversations/."""
+def list_groups(with_chat_context: bool = False) -> list:
+    """List available group chats from ~/.dpc/conversations/.
+
+    with_chat_context adds each group's block from the backend under
+    "chat_context" (None when the backend has none for it or is not reached).
+    """
     conversations_dir = DPC_HOME / "conversations"
     if not conversations_dir.exists():
         return []
-    groups = []
+    groups, canonical_ids = [], []
     for d in sorted(conversations_dir.iterdir()):
         if d.is_dir() and (d / "metadata.json").exists():
             try:
@@ -144,8 +154,14 @@ def list_groups() -> list:
                     "name": meta.get("name", d.name),
                     "members": len(meta.get("members", [])),
                 })
+                canonical_ids.append(meta.get("group_id", d.name))
             except Exception:
                 groups.append({"group_id": d.name, "name": d.name, "members": 0})
+                canonical_ids.append(d.name)
+    if with_chat_context and groups:
+        contexts = fetch_chat_contexts(canonical_ids)
+        for g, gid in zip(groups, canonical_ids):
+            g["chat_context"] = contexts.get(gid)
     return groups
 
 
@@ -550,6 +566,56 @@ async def send_group_message(group_id: str, text: str, name: str = None,
         return {"status": "error", "message": str(e)}
 
 
+async def _backend_commands(commands: list) -> list:
+    """Run local API commands over one authenticated connection; a reply or None per command."""
+    import websockets
+    auth_token = (DPC_HOME / ".ws_token").read_text(encoding="utf-8").strip()
+    replies = []
+    async with websockets.connect(_get_ws_url()) as ws:
+        await ws.send(json.dumps({"id": "group-bridge-auth", "command": "auth", "token": auth_token}))
+        auth_result = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        if auth_result.get("status") != "OK":
+            raise RuntimeError(f"auth rejected: {auth_result}")
+        loop = asyncio.get_running_loop()
+        for command in commands:
+            await ws.send(json.dumps(command))
+            try:
+                replies.append(await _await_reply(ws, command["id"], loop.time() + 10))
+            except asyncio.TimeoutError:
+                replies.append(None)
+    return replies
+
+
+def _chat_context_command(group_id: str) -> dict:
+    """The get_group_chat_context command: the block the backend builds for an agent."""
+    import uuid
+    return {"id": str(uuid.uuid4())[:8], "command": "get_group_chat_context",
+            "payload": {"group_id": group_id}}
+
+
+def fetch_chat_contexts(group_ids: list) -> dict:
+    """{group_id: its chat_context block or None}; {} with a stderr line when the
+    backend is not reached. The block is built by the backend only, never from
+    metadata.json here, so the bridge shows what an embedded agent is given."""
+    commands = [_chat_context_command(gid) for gid in group_ids]
+    try:
+        replies = asyncio.run(_backend_commands(commands))
+    except Exception as e:
+        print(f"[WARN] no chat_context: backend not reached ({str(e) or type(e).__name__})",
+              file=sys.stderr)
+        return {}
+    contexts = {}
+    for gid, reply in zip(group_ids, replies):
+        inner = reply.get("payload") if isinstance(reply, dict) else None
+        contexts[gid] = inner.get("chat_context") if isinstance(inner, dict) else None
+    return contexts
+
+
+def _format_chat_context(ctx) -> str:
+    """One line carrying the group block as JSON, "" when there is none."""
+    return f"[CHAT_CONTEXT] {json.dumps(ctx, ensure_ascii=False)}" if ctx else ""
+
+
 def _canonical_group_id(group_id: str) -> str:
     """The canonical group_id from metadata.json, silently; `group_id` when unreadable.
 
@@ -655,6 +721,8 @@ async def listen_for_mentions(group_id: str, names: list, all_tags: bool = False
                         continue
                     print(json.dumps(payload, ensure_ascii=False) if as_json
                           else _format_mention(payload), flush=True)
+                    if not as_json and payload.get("chat_context"):
+                        print(_format_chat_context(payload["chat_context"]), flush=True)
                     # --all-tags prints other tags' mentions too; only ours leave a hint.
                     tag = str(payload.get("agent_tag") or "")
                     if tag.lower() in names_lower:
@@ -729,6 +797,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="With --listen: one JSON object per line instead of [MENTION]")
     parser.add_argument("--once", action="store_true",
                         help="With --listen: exit 0 after the first matching mention")
+    parser.add_argument("--chat-context", action="store_true", dest="chat_context",
+                        help="Ask the backend for the group block an embedded agent is given "
+                             "(name, topic, participants, the rest of the metadata): with "
+                             "--group, one [CHAT_CONTEXT] line before the history; with "
+                             "--list, one per group. A [MENTION] line carries it already")
     return parser
 
 
@@ -750,13 +823,15 @@ def main(argv=None):
     args = _build_parser().parse_args(argv)
 
     if args.list:
-        groups = list_groups()
+        groups = list_groups(with_chat_context=args.chat_context)
         if not groups:
             print("No groups found.")
         else:
             print(f"Found {len(groups)} group(s):\n")
             for g in groups:
                 print(f"  {g['group_id']} — {g['name']} ({g['members']} members)")
+                if g.get("chat_context"):
+                    print(f"    {_format_chat_context(g['chat_context'])}")
         sys.exit(0)
 
     if not args.group:
@@ -785,11 +860,14 @@ def main(argv=None):
         sys.exit(_send_and_consume(args.group, text, name, args.mention_depth))
 
     messages = read_history(args.group, last_n=args.last)
+    canonical = _canonical_group_id(args.group)
+    if args.chat_context:
+        line = _format_chat_context(fetch_chat_contexts([canonical]).get(canonical))
+        print(line or f"[CHAT_CONTEXT] none for {canonical}")
     print(f"[CC Group Bridge] {len(messages)} messages (last {args.last})\n")
 
     node_id = _get_node_id()
     names = _identity_names(args.group, args.as_name)
-    canonical = _canonical_group_id(args.group)
     if args.mentions:
         mentions = find_mentions(messages, names=names)
         print(_mentions_banner(names, len(mentions)))

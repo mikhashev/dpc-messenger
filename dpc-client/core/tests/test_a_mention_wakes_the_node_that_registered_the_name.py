@@ -237,6 +237,7 @@ class TestAnExternalTagIsNeverAnAgentFolder:
             _get_agent_display_name=lambda aid: {"agent_001": "Ubu"}.get(aid, aid),
             get_cc_display_name=lambda: "CC",
             _invoke_agent_in_group_serialized=_invoke,
+            _group_chat_context=lambda gid: None,
         )
         return svc, invoked, broadcast
 

@@ -212,6 +212,9 @@ def _build_runtime_section(
         task_info["chat_id"] = chat_ctx.get("chat_id", "")
         task_info["description"] = chat_ctx.get("description", "")
         task_info["participants"] = chat_ctx.get("participants", [])
+        # The rest of the group's block, as the builder made it (service._group_chat_context).
+        for key, value in chat_ctx.items():
+            task_info.setdefault(key, value)
     runtime_data = {
         "utc_now": utc_now_iso(),
         "agent_root": str(agent_root),
@@ -1136,6 +1139,7 @@ Your runtime `budget` says who runs and pays for your model calls:
 - `billing` and the `*_usd` fields appear only when your configuration sets a billing model
 
 In a group, `task.participants` names each agent's node: `[agent on this node]` is on the same node as you, `[agent on peer X]` runs on peer X's node; `external agent` is a session outside DPC posting through the bridge, on this node or on a peer.
+In a group, `task.chat_name` is the group's name and `task.description` its topic as its members wrote it, in full; `created_by` and `created_at` say who made the group and when, `session_started_at` is when the group last agreed to start over (absent: its history was never reset), `reasoning_effort` is the group's own setting for the model call (absent: none), `is_discord_bridge` marks a group mirrored from Discord, and `persist_history` / `live_history_boundary` say whether this node keeps the group's history and from which moment.
 
 ## Constraints
 

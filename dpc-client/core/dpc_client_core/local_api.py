@@ -177,6 +177,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "leave_group",
     "delete_group",
     "get_groups",
+    "get_group_chat_context",  # the external agent's bridge
     "update_group_topic",
     "set_group_reasoning_effort",
     # Knowledge

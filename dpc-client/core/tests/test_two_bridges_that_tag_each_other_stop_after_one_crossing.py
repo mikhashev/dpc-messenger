@@ -112,6 +112,9 @@ class _Node:
     def _get_or_create_conversation_monitor(self, _):
         return self.conversation_monitors[GROUP]
 
+    def _group_chat_context(self, group_id):
+        return None
+
     async def _broadcast_to_group(self, group_id, message):
         self.broadcast.append(message)
 

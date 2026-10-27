@@ -55,7 +55,7 @@ holds nothing but `deleted_registry.json`.
 | `GROUP_DELETED_STATUS` | Exchange deleted group IDs on connect (notify of deletions that happened while offline) |
 | `GROUP_SYNC` | Metadata reconciliation on connect — carries the full group dict (incl. `agents`/`agent_names`); version + content-hash tie-break |
 | `GROUP_HISTORY_REQUEST` / `GROUP_HISTORY_RESPONSE` | Chat-history reconciliation (hash-based, bidirectional); the request may narrow to `authors` or to individual `content_hashes` |
-| `cc_group_mention` *(local event)* | Broadcasts an `@CC` mention to the Claude Code CLI bridge, with the `mention_depth` the bridge's reply carries ([§4.3](../specs/dptp_v1.md#43-agent-mentions-across-nodes)) |
+| `cc_group_mention` *(local event)* | Broadcasts an `@CC` mention to the Claude Code CLI bridge, with the `mention_depth` the bridge's reply carries ([§4.3](../specs/dptp_v1.md#43-agent-mentions-across-nodes)) and the group's `chat_context` ([Group Metadata Injection](#group-metadata-injection)) |
 
 Files, voice, and screenshots use the existing `FILE_OFFER` with an optional `group_id` field; each member runs an independent transfer.
 
@@ -135,7 +135,9 @@ On connect, nodes reconcile group history so all members converge.
 - A per-group **Sleep** button triggers sleep consolidation; agents post **morning briefs** into the group chat. `_delete_group_briefs` removes the previous briefs when new ones arrive.
 
 ### Group Metadata Injection
-- Each agent invocation receives a `chat_context` describing the group: `chat_type: "group"`, `chat_name`, `chat_id`, `description` (topic), and a `participants` list with role labels (User / peer / agent).
+- Every agent woken in a group gets the same `chat_context` block on every turn, built by one function (`CoreService._group_chat_context`): an embedded agent on both wake paths — a mention sent from this node and a mention arriving from a peer — and an external agent in the `chat_context` key of its `cc_group_mention` event (the bridge prints it as a `[CHAT_CONTEXT]` line after the `[MENTION]` line; `--chat-context` asks for it through the `get_group_chat_context` command).
+- Always present: `chat_type: "group"`, `chat_name`, `chat_id`, `description` (the topic, whole) and `participants` (labels with role and node: User / peer / agent / external agent). Present when the group has a value: `created_by` (`name` and `node_id`), `created_at`, `session_started_at` (the session marker; absent means the history was never reset), `reasoning_effort` (the group's override), `is_discord_bridge`, and from this node's `settings.json` `persist_history` and `live_history_boundary`.
+- Not in the block: `version` (a sync counter), `session_reset_evidence` (the signed votes behind the marker) and the raw `members` / `agents` / `agent_names`, which `participants` renders. The topic goes into the prompt verbatim, to a cloud model too, so do not put in it what the group's agents may not send to their provider.
 
 ### Session Reset
 - "New Session" voting broadcasts to all members via `propose_new_session()`.

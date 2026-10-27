@@ -6646,6 +6646,7 @@ class CoreService:
                 "node in that group, so every node carrying this name answers. "
                 "Register it in Group Settings to address one machine.",
                 self.get_cc_display_name().lower(), group_id)
+        chat_context = self._group_chat_context(group_id) if woken else None
         for tag in sorted(woken):
             logger.info("Group @%s mention detected — broadcasting cc_group_mention in group %s",
                         tag, group_id)
@@ -6658,6 +6659,8 @@ class CoreService:
                 # Inherited, as by the embedded agents above: the bridge's
                 # reply carries it (specs/dptp_v1.md §4.3).
                 "mention_depth": mention_depth,
+                # The block an embedded agent woken here gets.
+                "chat_context": chat_context,
             })
 
     async def _invoke_agent_in_group_serialized(
@@ -6710,23 +6713,11 @@ class CoreService:
 
             prompt = f"[{sender_name}]: {text}"
 
-            chat_context = None
-            group_meta = self.group_manager.get_group(group_id)
-            if group_meta:
-                participants = self._group_participants(group_meta)
-                chat_context = {
-                    "chat_type": "group",
-                    "chat_name": group_meta.name,
-                    "chat_id": group_id,
-                    "description": group_meta.topic or "",
-                    "participants": participants,
-                }
-
             response = await manager.process_message(
                 message=prompt,
                 conversation_id=group_id,
                 sender_name=sender_name,
-                chat_context=chat_context,
+                chat_context=self._group_chat_context(group_id),
                 _skip_history=True,
                 trigger_message_id=trigger_message_id,
             )
@@ -6776,6 +6767,64 @@ class CoreService:
                 kind = "external agent" if str(aid).startswith("ext:") else "agent"
                 participants.append(f"{dname} [{kind} on {where}]")
         return participants
+
+    # The keys the runtime section always printed; always present in the group block.
+    _CHAT_CONTEXT_KEYS = ("chat_type", "chat_name", "chat_id", "description", "participants")
+
+    def _group_chat_context(self, group_id: str) -> Optional[Dict[str, Any]]:
+        """The group block every agent woken in a group gets: embedded agents on
+        both wake paths, external agents in `cc_group_mention`. One builder, so
+        the paths cannot drift (A-GROUP-TURN-WOKEN-BY-A-PEER-MESSAGE-...).
+
+        The `_CHAT_CONTEXT_KEYS` are always present; an added key is omitted
+        when it has no value. Left out: `version` (a sync counter), `session_reset_evidence` (the
+        signed votes behind the marker) and the raw `members` / `agents` /
+        `agent_names`, which `participants` already renders. None when the
+        group is unknown here or the block cannot be built; the wake goes on.
+        """
+        try:
+            group_meta = self.group_manager.get_group(group_id) if self.group_manager else None
+            if not group_meta:
+                return None
+            own = self.p2p_manager.node_id
+            creator = group_meta.created_by or ""
+            created_by = None
+            if creator:
+                name = (self.p2p_manager.get_display_name() or "User") if creator == own \
+                    else self._peer_name(creator)
+                created_by = {"name": name, "node_id": creator}
+            ctx = {
+                "chat_type": "group",
+                "chat_name": group_meta.name,
+                "chat_id": group_id,
+                "description": group_meta.topic or "",
+                "participants": self._group_participants(group_meta),
+                "created_by": created_by,
+                "created_at": group_meta.created_at or None,
+                "session_started_at": group_meta.session_started_at,
+                "reasoning_effort": group_meta.reasoning_effort,
+                "is_discord_bridge": bool(group_meta.is_discord_bridge),
+            }
+        except Exception as e:
+            logger.warning("No chat_context for group %s: %s", group_id, e)
+            return None
+        # This node's settings.json for the group; a wake goes on without them.
+        try:
+            monitor = (self.conversation_monitors.get(group_id)
+                       or self._get_or_create_conversation_monitor(group_id))
+            ctx["persist_history"] = bool(monitor.persist_history)
+            ctx["live_history_boundary"] = monitor.live_history_boundary
+        except Exception as e:
+            logger.debug("Group settings for %s not in its chat_context: %s", group_id, e)
+        # An added key with no value is left out rather than sent as null.
+        return {k: v for k, v in ctx.items() if v is not None or k in self._CHAT_CONTEXT_KEYS}
+
+    async def get_group_chat_context(self, group_id: str) -> Dict[str, Any]:
+        """The block `_group_chat_context` hands an agent, for an external agent's bridge."""
+        ctx = self._group_chat_context(group_id)
+        if ctx is None:
+            return {"status": "error", "message": f"Group {group_id} not found"}
+        return {"status": "success", "chat_context": ctx}
 
     def update_group_agent_context(self, group_id: str, agent_id: str,
                                    prompt_tokens: int, token_limit: int,

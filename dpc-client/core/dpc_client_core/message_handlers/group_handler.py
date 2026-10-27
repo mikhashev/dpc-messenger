@@ -480,6 +480,7 @@ class GroupTextHandler(MessageHandler):
                 "Register it in Group Settings to address one machine.",
                 cc_name, group_id)
 
+        chat_context = self._group_chat_context(group_id) if woken else None
         for tag in sorted(woken):
             # Broadcast event — the MCP server bridge subscribes and queues it.
             # `agent_tag` says which name was matched: with several external agents
@@ -496,7 +497,14 @@ class GroupTextHandler(MessageHandler):
                 "sender_node_id": sender_node_id,
                 "agent_tag": tag,
                 "mention_depth": reply_depth,
+                # The block the embedded agent above gets.
+                "chat_context": chat_context,
             })
+
+    def _group_chat_context(self, group_id: str) -> Optional[Dict[str, Any]]:
+        """The service's group block (service._group_chat_context); None when it has none."""
+        builder = getattr(self.service, "_group_chat_context", None)
+        return builder(group_id) if callable(builder) else None
 
     async def _invoke_agent(self, group_id: str, text: str, sender_name: str,
                             trigger_message_id: Optional[str] = None,
@@ -514,6 +522,7 @@ class GroupTextHandler(MessageHandler):
                 message=prompt,
                 conversation_id=group_id,
                 sender_name=sender_name,
+                chat_context=self._group_chat_context(group_id),
                 _skip_history=True,
                 trigger_message_id=trigger_message_id,
             )
