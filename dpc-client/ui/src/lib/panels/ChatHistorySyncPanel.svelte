@@ -9,7 +9,9 @@
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import { mergeBackfillWithLive } from '$lib/utils/liveMessageIdentity';
   import { isAIChatId, legacyImportPending } from '$lib/utils/aiChatStore';
+  import { HISTORY_PAGE_LIMIT, historyPagers, setPager, pageFacts, oldestRecordId, prependOlderPage } from '$lib/utils/historyPaging';
   import { onMount, untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import type { Message } from '$lib/types.js';
 
   // ---------------------------------------------------------------------------
@@ -63,6 +65,102 @@
   // ---------------------------------------------------------------------------
   const loadedHistory = new Set<string>();
 
+  // Backend records to chat messages, the same way for the first page and
+  // every older one.
+  function mapLoadedPage(records: any[], reqChatId: string): Message[] {
+    // See HistorySyncPanel: an undated record borrows the time of
+    // the one before it rather than the clock.
+    let previousTimestamp: number | undefined;
+    const loadedMessages: Message[] = records.map((msg: any, index: number) => {
+      if (index === 0) console.log(`[ChatHistory] DIAG first msg keys:`, Object.keys(msg), `tool_calls:`, msg.tool_calls?.length, `sender_type:`, msg.sender_type, `msg_index:`, msg.msg_index);
+      // In an AI chat the other side is the model: the bubble the live
+      // answer gets, named by the record's "AI (model)" when it has one.
+      const aiAnswer = isAIChatId(reqChatId) && msg.role === 'assistant';
+      const fallbackSender = aiAnswer ? 'ai' : (msg.sender_node_id || (msg.role === 'user' ? 'user' : reqChatId));
+      const fallbackName = aiAnswer ? (msg.sender_name || '') : (msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(reqChatId)));
+      const mapped = mapBackendMessage(msg, {
+        fallbackSender,
+        fallbackSenderName: fallbackName,
+        index,
+        totalCount: records.length,
+        previousTimestamp,
+      });
+      previousTimestamp = mapped.timestamp;
+      mapped.id = msg.message_id || `backend-${index}-${Date.now()}`;
+      const isLocalHuman = msg.sender_type === 'human' && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
+      if (isLocalHuman) {
+        mapped.sender = 'user';
+        mapped.senderName = 'You';
+      }
+      return mapped;
+    });
+    // The backend batch is not trusted to be clean: a repeated id
+    // reaches the keyed {#each ... (msg.id)} block and Svelte 5
+    // throws each_key_duplicate in production, with no boundary
+    // around this panel to catch it. mergeBackfillWithLive
+    // only checks membership against `loaded`'s ids — it does not
+    // collapse a duplicate already inside `loaded` itself.
+    const { kept, droppedCount, conflictCount } = dedupeMessagesById(loadedMessages);
+    if (droppedCount > 0) {
+      console.warn(`[ChatHistory] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in loaded history for ${reqChatId}`);
+    }
+    return kept;
+  }
+
+  /**
+   * The page before the oldest message on screen, put in front of it. The chat
+   * window calls this when the reader scrolls to the top; `beforeInsert` runs
+   * just before the messages land so the window can note what to keep in place.
+   * Resolves to how many messages were added. One request per chat at a time
+   * (the pager's lock); an error stops the pager for that chat.
+   */
+  export async function loadOlderPage(chatId: string, beforeInsert?: () => void): Promise<number> {
+    const pager = get(historyPagers).get(chatId);
+    if (!pager || !pager.hasOlder || pager.stopped || pager.loading) return 0;
+    const cursor = oldestRecordId(get(chatHistories).get(chatId) || []);
+    if (!cursor) {
+      setPager(chatId, { stopped: true });
+      return 0;
+    }
+    setPager(chatId, { loading: true });
+    try {
+      const result = await sendCommand('get_conversation_history', {
+        conversation_id: chatId, before_message_id: cursor, limit: HISTORY_PAGE_LIMIT,
+      });
+      if (result?.status !== 'success' || (result.conversation_id && result.conversation_id !== chatId)) {
+        console.warn(`[ChatHistory] Older page for ${chatId.slice(0,20)} refused, pager stopped: ${result?.message ?? result?.status}`);
+        setPager(chatId, { loading: false, stopped: true });
+        return 0;
+      }
+      const older = mapLoadedPage(result.messages || [], chatId);
+      let added = 0;
+      if (older.length > 0) {
+        beforeInsert?.();
+        chatHistories.update(map => {
+          const merged = prependOlderPage(map.get(chatId) || [], older);
+          added = merged.added;
+          if (!added) return map;
+          const newMap = new Map(map);
+          newMap.set(chatId, merged.merged);
+          return newMap;
+        });
+        older.forEach((m: any) => {
+          if (m.id && !m.id.startsWith('backend-')) processedMessageIds.add(m.id);
+        });
+      }
+      const facts = pageFacts(result);
+      // Nothing new and yet more to come would repeat the same cursor for ever.
+      const stuck = facts.hasOlder && added === 0;
+      setPager(chatId, { ...facts, loading: false, stopped: stuck });
+      console.log(`[ChatHistory] Older page for ${chatId.slice(0,20)}: +${added}, has_older=${facts.hasOlder}`);
+      return added;
+    } catch (e) {
+      console.error(`[ChatHistory] Older page for ${chatId.slice(0,20)} failed, pager stopped:`, e);
+      setPager(chatId, { loading: false, stopped: true });
+      return 0;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
   // AI chats included since 2026-10-19: their history.json in ~/.dpc is the
@@ -93,7 +191,7 @@
         // Load from backend (async IIFE to allow await in reactive statement)
         (async () => {
           try {
-            const result = await sendCommand('get_conversation_history', { conversation_id: reqChatId });
+            const result = await sendCommand('get_conversation_history', { conversation_id: reqChatId, limit: HISTORY_PAGE_LIMIT });
             // Counts, not the object: the whole history went into ui.log here, and
             // through the log relay back to the backend (see logger.ts).
             console.log(`[ChatHistory] Backend response: status=${result?.status}, messages=${result?.messages?.length ?? 0}`);
@@ -108,43 +206,7 @@
               // Convert backend format to frontend format (v0.15.3: use backend metadata)
               chatHistories.update(map => {
                 const newMap = new Map(map);
-                // See HistorySyncPanel: an undated record borrows the time of
-                // the one before it rather than the clock.
-                let previousTimestamp: number | undefined;
-                const loadedMessages: Message[] = result.messages.map((msg: any, index: number) => {
-                  if (index === 0) console.log(`[ChatHistory] DIAG first msg keys:`, Object.keys(msg), `tool_calls:`, msg.tool_calls?.length, `sender_type:`, msg.sender_type, `msg_index:`, msg.msg_index);
-                  // In an AI chat the other side is the model: the bubble the live
-                  // answer gets, named by the record's "AI (model)" when it has one.
-                  const aiAnswer = isAIChatId(reqChatId) && msg.role === 'assistant';
-                  const fallbackSender = aiAnswer ? 'ai' : (msg.sender_node_id || (msg.role === 'user' ? 'user' : reqChatId));
-                  const fallbackName = aiAnswer ? (msg.sender_name || '') : (msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(reqChatId)));
-                  const mapped = mapBackendMessage(msg, {
-                    fallbackSender,
-                    fallbackSenderName: fallbackName,
-                    index,
-                    totalCount: result.messages.length,
-                    previousTimestamp,
-                  });
-                  previousTimestamp = mapped.timestamp;
-                  mapped.id = msg.message_id || `backend-${index}-${Date.now()}`;
-                  const isLocalHuman = msg.sender_type === 'human' && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
-                  if (isLocalHuman) {
-                    mapped.sender = 'user';
-                    mapped.senderName = 'You';
-                  }
-                  return mapped;
-                });
-                // The backend batch is not trusted to be clean: a repeated id
-                // reaches the keyed {#each ... (msg.id)} block and Svelte 5
-                // throws each_key_duplicate in production, with no boundary
-                // around this panel to catch it. mergeBackfillWithLive below
-                // only checks membership against `loaded`'s ids — it does not
-                // collapse a duplicate already inside `loaded` itself.
-                const { kept: dedupedLoadedMessages, droppedCount: loadedDropped, conflictCount: loadedConflicts } =
-                  dedupeMessagesById(loadedMessages);
-                if (loadedDropped > 0) {
-                  console.warn(`[ChatHistory] Dropped ${formatDedupeDrop(loadedDropped, loadedConflicts)} in loaded history for ${reqChatId}`);
-                }
+                const dedupedLoadedMessages = mapLoadedPage(result.messages, reqChatId);
                 const agentMsgs = dedupedLoadedMessages.filter((m: any) => m.isAgent);
                 const withTools = dedupedLoadedMessages.filter((m: any) => m.tool_calls?.length > 0);
                 console.log(`[ChatHistory] DIAG mapped: total=${dedupedLoadedMessages.length}, agents=${agentMsgs.length}, withToolCalls=${withTools.length}, firstAgent:`, agentMsgs[0] ? {sender: agentMsgs[0].sender, isAgent: agentMsgs[0].isAgent, tool_calls_len: agentMsgs[0].tool_calls?.length, msg_index: agentMsgs[0].msg_index} : 'none');
@@ -165,6 +227,7 @@
                 return newMap;
               });
               loadedHistory.add(reqChatId);
+              setPager(reqChatId, { ...pageFacts(result), stopped: false, loading: false });
 
               // Update token counter with restored history token counts
               if (result.tokens_used !== undefined && result.token_limit !== undefined && result.token_limit > 0) {
@@ -203,6 +266,10 @@
                 return newMap;
               });
               loadedHistory.add(reqChatId);
+              // An empty live history right after a reset still has a boundary to show.
+              if (result.status === 'success') {
+                setPager(reqChatId, { ...pageFacts(result), stopped: false, loading: false });
+              }
 
               // Remove from loading AFTER chatHistories update completes
               loadingHistory.delete(reqChatId);
@@ -221,7 +288,8 @@
         loadingHistory.add(reqChatId);
         (async () => {
           try {
-            const result = await sendCommand('get_conversation_history', { conversation_id: reqChatId });
+            // Only the token fields are read, and they describe the whole chat.
+            const result = await sendCommand('get_conversation_history', { conversation_id: reqChatId, limit: 1 });
             if (result.tokens_used !== undefined && result.token_limit !== undefined && result.token_limit > 0) {
               onUpdateTokenUsage(reqChatId, {
                 used: result.tokens_used,

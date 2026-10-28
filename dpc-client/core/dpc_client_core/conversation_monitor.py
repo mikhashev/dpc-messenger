@@ -254,13 +254,23 @@ def live_history_boundary_of(conversation_id: str) -> Optional[str]:
     """This node's own boundary for a conversation, read from disk without a monitor."""
     base = Path.home() / ".dpc" / "conversations"
     try:
-        path = conversation_paths.resolve_store_dir(base, conversation_id) / "settings.json"
+        store_dir = conversation_paths.resolve_store_dir(base, conversation_id)
+    except (OSError, ValueError) as exc:
+        logger.debug("Could not read the boundary of %s: %s", conversation_id, exc)
+        return None
+    return live_history_boundary_in(store_dir)
+
+
+def live_history_boundary_in(store_dir: Path) -> Optional[str]:
+    """The boundary kept in a conversation folder's settings.json, if any."""
+    path = store_dir / "settings.json"
+    try:
         if not path.exists():
             return None
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError) as exc:
-        logger.debug("Could not read the boundary of %s: %s", conversation_id, exc)
+        logger.debug("Could not read the boundary in %s: %s", store_dir, exc)
         return None
     value = data.get(LIVE_HISTORY_BOUNDARY_KEY) if isinstance(data, dict) else None
     return value if parse_moment(value) is not None else None

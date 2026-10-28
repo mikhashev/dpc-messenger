@@ -9,6 +9,7 @@
   import { untrack } from 'svelte';
   import { consumeEvent } from '$lib/utils/consumeEvent';
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
+  import { HISTORY_PAGE_LIMIT, readerIsAtBottom } from '$lib/utils/historyPaging';
   import {
     historyRestored,
     groupHistorySynced,
@@ -61,6 +62,7 @@
   $effect(() => {
     if ($historyRestored) {
       console.log(`Restoring ${$historyRestored.message_count} messages to chat with ${$historyRestored.conversation_id}`);
+      const wasAtBottom = readerIsAtBottom(chatWindow);
 
       chatHistories.update(map => {
         const newMap = new Map(map);
@@ -114,9 +116,11 @@
         return newMap;
       });
 
-      setTimeout(() => {
-        if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
-      }, 100);
+      if (wasAtBottom) {
+        setTimeout(() => {
+          if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+        }, 100);
+      }
 
       onAgentToast(`✓ Chat history restored: ${$historyRestored.message_count} messages`, 'info');
     }
@@ -145,9 +149,11 @@
 
       (async () => {
         try {
-          const response = await sendCommand('get_conversation_history', { conversation_id: syncedGroupId });
+          // The newest page; messages already on screen and not in it are kept below.
+          const response = await sendCommand('get_conversation_history', { conversation_id: syncedGroupId, limit: HISTORY_PAGE_LIMIT });
           if (response.status === 'success' && response.messages?.length > 0) {
             console.log(`[GroupHistorySync] Loaded ${response.messages.length} messages from backend`);
+            const wasAtBottom = readerIsAtBottom(chatWindow);
 
             chatHistories.update(map => {
               const newMap = new Map(map);
@@ -193,9 +199,11 @@
             if (isActive) {
               onAgentToast(`✓ Group history synced: ${response.messages.length} messages`, 'info');
 
-              setTimeout(() => {
-                if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
-              }, 100);
+              if (wasAtBottom) {
+                setTimeout(() => {
+                  if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+                }, 100);
+              }
             }
           }
         } catch (err: any) {

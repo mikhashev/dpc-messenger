@@ -126,11 +126,14 @@ async def test_a_group_answer_with_megabytes_of_tool_output_stays_under_the_boun
     frame = json.dumps({"id": "x", "command": "get_conversation_history", "status": "OK", "payload": result})
     assert len(frame) < local_api.OUTGOING_MESSAGE_WARN_BYTES
     assert result["message_count"] == len(messages)
-    first = result["messages"][0]
-    assert first["content"] == "answer 0"
+    # The newest page (history_page.py): its first message is record N - len(page).
+    page = result["messages"]
+    first_index = len(messages) - len(page)
+    first = page[0]
+    assert first["content"] == f"answer {first_index}"
     assert len(first["tool_calls"]) == 8
     assert first["tool_calls"][0]["output"].startswith(WIDE * EXPANDED_MAX + "\n… ")
-    assert first["tool_calls"][0]["input"] == messages[0]["tool_calls"][0]["input"]
+    assert first["tool_calls"][0]["input"] == messages[first_index]["tool_calls"][0]["input"]
     assert (conv_dir / "history.json").read_bytes() == on_disk
 
 

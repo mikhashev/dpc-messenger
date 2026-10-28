@@ -13,6 +13,11 @@
   import type { Message, Mention } from '$lib/types.js';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { revealInFolder } from '$lib/utils/revealInFolder';
+  import { tick } from 'svelte';
+  import {
+    historyPagers, shouldLoadOlder, pickAnchorIndex, scrollTopKeepingAnchor,
+    readerIsAtBottom, boundaryLineText,
+  } from '$lib/utils/historyPaging';
 
   // "Show in folder" failures, by the path that failed (file gone, no file manager).
   let revealErrors = $state<Record<string, string>>({});
@@ -49,7 +54,9 @@
     agentStreamingText = "",  // v0.16.0+: Streaming text from agent
     peerDisplayNames = new Map<string, string>(),  // v0.19.1+: Map of node_id -> display name
     selfNodeId = "",  // v0.19.1+: Current user's node ID
-    selfName = ""  // v0.19.1+: Current user's display name
+    selfName = "",  // v0.19.1+: Current user's display name
+    // Loads the page before the oldest message (ChatHistorySyncPanel.loadOlderPage).
+    onLoadOlder = undefined,
   }: {
     messages: Message[];
     conversationId: string;
@@ -66,6 +73,7 @@
     peerDisplayNames?: Map<string, string>;
     selfNodeId?: string;
     selfName?: string;
+    onLoadOlder?: (chatId: string, beforeInsert: () => void) => Promise<number>;
   } = $props();
 
   // Last wall before the keyed {#each} below: the seven batch guards upstream
@@ -122,9 +130,110 @@
       .trim();
   });
 
-  // Auto-scroll when streaming text updates
+  // ---------------------------------------------------------------------------
+  // Older pages on scroll-up (historyPaging.ts). Plain lets, not state: the
+  // scroll handlers write them and nothing renders from them.
+  // ---------------------------------------------------------------------------
+  let pager = $derived($historyPagers.get(conversationId));
+  let boundaryLine = $derived(pager && !pager.hasOlder ? boundaryLineText(pager.boundary) : null);
+  let lastScrollTop = 0;
+  let userScrolled = false;   // the reader has touched this chat's scroll since it opened
+  let atBottom = true;        // as of the last scroll: live content may follow the reader
+  let loadingOlder = false;
+
   $effect(() => {
-    if (agentStreamingText && chatWindowElement) {
+    void conversationId;
+    lastScrollTop = 0;
+    userScrolled = false;
+    atBottom = true;
+  });
+
+  type Anchor = { node: Element; offset: number };
+
+  function topVisibleMessage(el: HTMLElement): Anchor | null {
+    const nodes = Array.from(el.querySelectorAll(':scope > .message'));
+    const top = el.getBoundingClientRect().top;
+    const i = pickAnchorIndex(nodes.map((n) => n.getBoundingClientRect()), top);
+    return i < 0 ? null : { node: nodes[i], offset: nodes[i].getBoundingClientRect().top - top };
+  }
+
+  // Put the anchor back where it was. By hand rather than CSS overflow-anchor,
+  // which WebKit (WKWebView, WebKitGTK) cannot be relied on for; measured, so a
+  // webview that did anchor by itself gets a correction of zero.
+  function keepAnchor(el: HTMLElement, anchor: Anchor) {
+    if (!anchor.node.isConnected) return;
+    const after = anchor.node.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    if (after === anchor.offset) return;
+    // `scroll-behavior: smooth` on the window would animate this jump.
+    const behavior = el.style.scrollBehavior;
+    el.style.scrollBehavior = 'auto';
+    el.scrollTop = scrollTopKeepingAnchor(el.scrollTop, anchor.offset, after);
+    el.style.scrollBehavior = behavior;
+    lastScrollTop = el.scrollTop;
+  }
+
+  async function loadOlder() {
+    const el = chatWindowElement;
+    if (loadingOlder || !onLoadOlder || !el) return;
+    loadingOlder = true;
+    const chatId = conversationId;
+    const noted: { anchor: Anchor | null } = { anchor: null };
+    try {
+      const added = await onLoadOlder(chatId, () => { noted.anchor = topVisibleMessage(el); });
+      const a = noted.anchor;
+      if (added > 0 && a && chatId === conversationId) {
+        await tick();
+        keepAnchor(el, a);
+        // Once more after layout settles (fonts, markdown blocks).
+        requestAnimationFrame(() => keepAnchor(el, a));
+      }
+    } finally {
+      loadingOlder = false;
+    }
+  }
+
+  function onScroll() {
+    const el = chatWindowElement;
+    if (!el) return;
+    const movedUp = el.scrollTop < lastScrollTop;
+    lastScrollTop = el.scrollTop;
+    atBottom = readerIsAtBottom(el);
+    if (shouldLoadOlder({ pager, scrollTop: el.scrollTop, movedUp, userScrolled })) loadOlder();
+  }
+
+  // A wheel up at the very top moves nothing, so no scroll event says so.
+  function onWheel(e: WheelEvent) {
+    userScrolled = true;
+    const el = chatWindowElement;
+    if (!el || e.deltaY >= 0) return;
+    if (shouldLoadOlder({ pager, scrollTop: el.scrollTop, movedUp: true, userScrolled })) loadOlder();
+  }
+
+  function onReaderInput() {
+    userScrolled = true;
+  }
+
+  // A drag on the scrollbar or a touch also counts. Listened to directly: the
+  // window is not a control, and a handler attribute would make it one to a11y.
+  $effect(() => {
+    const el = chatWindowElement;
+    if (!el) return;
+    el.addEventListener('pointerdown', onReaderInput, { passive: true });
+    el.addEventListener('touchstart', onReaderInput, { passive: true });
+    return () => {
+      el.removeEventListener('pointerdown', onReaderInput);
+      el.removeEventListener('touchstart', onReaderInput);
+    };
+  });
+
+  // Keys that scroll the focused window up; the window itself takes no keys.
+  function onWindowKey(e: KeyboardEvent) {
+    if (e.key === 'PageUp' || e.key === 'Home' || e.key === 'ArrowUp') userScrolled = true;
+  }
+
+  // Auto-scroll when streaming text updates — only for a reader at the bottom.
+  $effect(() => {
+    if (agentStreamingText && chatWindowElement && atBottom) {
       chatWindowElement.scrollTop = chatWindowElement.scrollHeight;
     }
   });
@@ -172,7 +281,17 @@
   }
 </script>
 
-<div class="chat-window" bind:this={chatWindowElement}>
+<svelte:window onkeydown={onWindowKey} />
+
+<div
+  class="chat-window"
+  bind:this={chatWindowElement}
+  onscroll={onScroll}
+  onwheel={onWheel}
+>
+  {#if boundaryLine}
+    <div class="history-boundary">{boundaryLine}</div>
+  {/if}
   {#if displayMessages.length > 0}
     {#each displayMessages as msg, i (msg.id)}
       <div id="msg-{i}" class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'} class:error={msg.isError || msg.turnEnd === 'failed'} class:muted={!!msg.turnEnd && msg.turnEnd !== 'failed'}>
@@ -352,6 +471,15 @@
     background: #f9f9f9;
     max-width: 100%; /* Constrain to parent width */
     scroll-behavior: smooth; /* Smooth scroll when [N] refs are clicked */
+  }
+
+  .history-boundary {
+    text-align: center;
+    color: #888;
+    font-size: 0.8rem;
+    margin: 0 0 1rem;
+    padding: 0.4rem 0;
+    border-bottom: 1px dashed #ddd;
   }
 
   .empty-chat {

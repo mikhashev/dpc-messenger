@@ -15,6 +15,7 @@
     mayDropLiveTextOnCompletion,
   } from '$lib/utils/liveTextHandover';
   import { showNotificationIfBackground } from '$lib/notificationService';
+  import { HISTORY_PAGE_LIMIT, olderThanPage, readerIsAtBottom } from '$lib/utils/historyPaging';
   import {
     agentProgress,
     agentProgressClear,
@@ -178,7 +179,8 @@
         for (const agent of agentsResult.agents) {
           const conv_id = agent.agent_id;
           try {
-            const histResult = await sendCommand('get_conversation_history', { conversation_id: conv_id });
+            // The newest page only; older ones load when the reader scrolls up.
+            const histResult = await sendCommand('get_conversation_history', { conversation_id: conv_id, limit: HISTORY_PAGE_LIMIT });
             if (histResult?.status === 'success' && histResult.messages?.length > 0) {
               chatHistories.update(map => {
                 const newMap = new Map(map);
@@ -477,13 +479,29 @@
         }
 
         let historyApplied = false;
+        const wasAtBottom = readerIsAtBottom(chatWindow);
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = map.get(conversation_id) || [];
 
-          // Defence-in-depth: never overwrite UI history with a shorter backend payload (B1 guard).
+          // B2 Fix 1: Use backend msg.id for stable IDs (prevents dedup collisions on same-timestamp msgs)
+          const mappedMessages = (messages || []).map((msg: any, index: number) => {
+            const { sender, senderName } = mapMessageSender(msg, conversation_id, getAgentName(conversation_id));
+            const stableId = msg.id || `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
+            const mapped = mapBackendMessage(msg, { fallbackSender: sender, fallbackSenderName: senderName });
+            mapped.id = stableId;
+            mapped.text = msg.content;
+            return mapped;
+          }) as Message[];
+
+          // The payload can be the newest page (get_conversation_history) rather
+          // than the whole history: what is older than it stays, and only the
+          // part it covers is compared below.
           const nonPendingExisting = existing.filter((m: any) => !m.commandId);
-          if (!historyUpdateApplies((messages || []).length, nonPendingExisting.length)) {
+          const olderKept = olderThanPage(nonPendingExisting, mappedMessages);
+
+          // Defence-in-depth: never overwrite UI history with a shorter backend payload (B1 guard).
+          if (!historyUpdateApplies((messages || []).length, nonPendingExisting.length - olderKept.length)) {
             // Logged because whether this fires at all was an open question on
             // AGENT-REPLY-VANISHES-UNTIL-YOU-LEAVE-THE-CHAT for two weeks, and one
             // line answers it the next time the symptom is reported.
@@ -498,16 +516,6 @@
 
           // Preserve any pending DPC execute_ai_query placeholders
           const pendingMsgs = existing.filter((m: any) => m.commandId);
-
-          // B2 Fix 1: Use backend msg.id for stable IDs (prevents dedup collisions on same-timestamp msgs)
-          const mappedMessages = (messages || []).map((msg: any, index: number) => {
-            const { sender, senderName } = mapMessageSender(msg, conversation_id, getAgentName(conversation_id));
-            const stableId = msg.id || `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
-            const mapped = mapBackendMessage(msg, { fallbackSender: sender, fallbackSenderName: senderName });
-            mapped.id = stableId;
-            mapped.text = msg.content;
-            return mapped;
-          }) as Message[];
 
           // Same guard as the get_conversation_history load paths: this batch
           // is a backend-pushed snapshot too, and a repeated id reaches the
@@ -532,7 +540,7 @@
           // Backend messages are authoritative for content; pending placeholders kept until resolved
           const backendIds = new Set(dedupedMappedMessages.map((m: any) => m.id));
           const keptPending = pendingMsgs.filter((m: any) => !backendIds.has(m.id));
-          const merged = [...dedupedMappedMessages, ...keptPending];
+          const merged = [...olderKept, ...dedupedMappedMessages, ...keptPending];
           merged.sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0));
 
           newMap.set(conversation_id, merged);
@@ -546,8 +554,9 @@
           clearAgentStreaming();
         }
 
-        // Scroll to bottom if this is the active chat (two rAF calls for layout accuracy)
-        if (isActiveChatConv(conversation_id)) {
+        // Scroll to bottom if this is the active chat and the reader was at the
+        // bottom (two rAF calls for layout accuracy); one scrolled up stays put.
+        if (isActiveChatConv(conversation_id) && wasAtBottom) {
           requestAnimationFrame(() => requestAnimationFrame(() => {
             if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
           }));
@@ -565,6 +574,7 @@
 
       untrack(() => {
         const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getAgentName(conversation_id));
+        const wasAtBottom = readerIsAtBottom(chatWindow);
 
         chatHistories.update(map => {
           const newMap = new Map(map);
@@ -607,8 +617,8 @@
           });
         }
 
-        // Scroll to bottom if active
-        if (isActiveChatConv(conversation_id)) {
+        // Scroll to bottom if active and the reader was at the bottom
+        if (isActiveChatConv(conversation_id) && wasAtBottom) {
           requestAnimationFrame(() => requestAnimationFrame(() => {
             if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
           }));

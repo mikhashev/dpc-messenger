@@ -70,9 +70,11 @@ from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .conversation_monitor import history_status_for as conversation_monitor_history_status_for
+from .conversation_monitor import live_history_boundary_in
 from . import conversation_paths
 from . import ai_chats
 from .tool_detail import clip_tool_calls
+from . import history_page
 from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
@@ -5827,23 +5829,42 @@ class CoreService:
         """Delegated to KnowledgeService."""
         return await self.knowledge_service.end_conversation_session(conversation_id, initiated_by)
 
+    def _history_page_refused(self, conversation_id: str, error: Exception) -> Dict[str, Any]:
+        """The answer a pager stops on: never the newest page in its place."""
+        logger.warning("History page for %s refused: %s", conversation_id, error)
+        return {
+            "status": "error",
+            "message": str(error),
+            "conversation_id": conversation_id,
+            "messages": [],
+            "message_count": 0,
+            "has_older": False,
+        }
+
     def _resolve_agent_token_limit(self, agent_id: str) -> int:
         """Delegates to AgentService."""
         if not self.agent_service:
             return 0
         return self.agent_service._resolve_agent_token_limit(agent_id)
 
-    async def get_conversation_history(self, conversation_id: str) -> Dict[str, Any]:
-        """Get conversation history from backend (for frontend sync after page refresh).
+    async def get_conversation_history(
+        self,
+        conversation_id: str,
+        before_message_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """One page of a conversation's live history (history_page.py).
 
-        UI Integration: Called when frontend reconnects or switches to chat with empty history.
-
-        Args:
-            conversation_id: The conversation/chat ID to get history for
-
-        Returns:
-            Dict with messages list
+        The newest page when `before_message_id` is None, else the page before
+        that record. `message_count` and the token fields describe the whole
+        live history, not the page.
         """
+        try:
+            cursor = history_page.checked_cursor(before_message_id)
+            page_limit = history_page.checked_limit(limit)
+        except history_page.HistoryPageError as e:
+            return self._history_page_refused(conversation_id, e)
+
         try:
             monitor = self.conversation_monitors.get(conversation_id)
 
@@ -5853,20 +5874,26 @@ class CoreService:
             # sleep pipeline). Multiple monitor instances exist (service.conversation_monitors
             # vs agent_manager._get_or_create_agent_monitor) — disk is the only consistent source.
             if conversation_id.startswith("agent_"):
-                history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                agent_dir = DPC_HOME_DIR / "conversations" / conversation_id
+                history_path = agent_dir / "history.json"
                 if history_path.exists():
                     try:
                         import json as _json
                         with open(history_path, encoding="utf-8") as f:
                             data = _json.load(f)
-                        messages = data.get("messages", [])
-                        for msg in messages:
-                            msg.setdefault("message_id", msg.get("id"))
-                            if "tool_calls" in msg:
-                                msg["tool_calls"] = clip_tool_calls(msg["tool_calls"])
-                        logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
+                        records = data.get("messages", [])
+
+                        def render_agent(msg):
+                            out = dict(msg)
+                            out.setdefault("message_id", out.get("id"))
+                            if "tool_calls" in out:
+                                out["tool_calls"] = clip_tool_calls(out["tool_calls"])
+                            return out
+
+                        messages, has_older = history_page.page_of(records, cursor, page_limit, render_agent)
+                        logger.info("Loaded %d of %d messages from disk for %s", len(messages), len(records), conversation_id)
                         token_stats = data.get("token_stats", {})
-                        history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                        history_tokens = sum(len(msg.get("content", "") or "") for msg in records) // 4
                         token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
                         tokens_after_last_response = token_stats.get("tokens_after_last_response", 0)
                         tokens_after_last_response_at = token_stats.get("tokens_after_last_response_at")
@@ -5874,13 +5901,17 @@ class CoreService:
                             "status": "success",
                             "conversation_id": conversation_id,
                             "messages": messages,
-                            "message_count": len(messages),
+                            "message_count": len(records),
+                            "has_older": has_older,
+                            "live_history_boundary": live_history_boundary_in(agent_dir),
                             "tokens_used": token_stats.get("current_token_count", history_tokens),
                             "token_limit": token_limit,
                             "history_tokens": history_tokens,
                             "tokens_after_last_response": tokens_after_last_response,
                             "tokens_after_last_response_at": tokens_after_last_response_at,
                         }
+                    except history_page.HistoryPageError:
+                        raise
                     except Exception as e:
                         logger.error("Failed to load agent history from disk: %s", e)
                 else:
@@ -5902,39 +5933,54 @@ class CoreService:
                         import json as _json
                         with open(conv_dir / "history.json", encoding="utf-8") as f:
                             data = _json.load(f)
-                        messages = data.get("messages", [])
-                        for msg in messages:
-                            msg.setdefault("sender_type", "human")
-                            msg.setdefault("agent_owner", None)
-                            msg.setdefault("message_id", msg.get("id"))
+                        records = data.get("messages", [])
+
+                        def render_group(msg):
+                            out = dict(msg)
+                            out.setdefault("sender_type", "human")
+                            out.setdefault("agent_owner", None)
+                            out.setdefault("message_id", out.get("id"))
                             # Megabytes of tool output the UI would hide (tool_detail.py).
-                            if "tool_calls" in msg:
-                                msg["tool_calls"] = clip_tool_calls(msg["tool_calls"])
-                        history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                            if "tool_calls" in out:
+                                out["tool_calls"] = clip_tool_calls(out["tool_calls"])
+                            return out
+
+                        messages, has_older = history_page.page_of(records, cursor, page_limit, render_group)
+                        history_tokens = sum(len(msg.get("content", "") or "") for msg in records) // 4
                         token_limit = 0
                         if hasattr(self, 'llm_manager') and self.llm_manager:
                             model = self.llm_manager.get_active_model_name()
                             token_limit = self.llm_manager.get_context_window(model) or 0
-                        logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
+                        logger.info("Loaded %d of %d messages from disk for %s (%s)", len(messages), len(records), conversation_id, conv_dir.name)
                         return {
                             "status": "success",
                             "conversation_id": conversation_id,
                             "messages": messages,
-                            "message_count": len(messages),
+                            "message_count": len(records),
+                            "has_older": has_older,
+                            "live_history_boundary": live_history_boundary_in(conv_dir),
                             "tokens_used": history_tokens,
                             "token_limit": token_limit,
                             "history_tokens": history_tokens,
                         }
+                    except history_page.HistoryPageError:
+                        raise
                     except Exception as e:
                         logger.error("Failed to load group history from disk: %s", e)
 
             if not monitor:
+                if cursor is not None:
+                    raise history_page.HistoryPageError(
+                        f"before_message_id {cursor!r} is not in the live history"
+                    )
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
                 return {
                     "status": "success",
                     "conversation_id": conversation_id,
                     "messages": [],
-                    "message_count": 0
+                    "message_count": 0,
+                    "has_older": False,
+                    "live_history_boundary": None,
                 }
 
             # Get message history (same format as export_history)
@@ -5943,8 +5989,7 @@ class CoreService:
             # Convert to frontend format (role, content, attachments)
             # v0.13.2+: Merge transcription data into voice attachments from _voice_transcriptions
             # v0.15.3+: Include timestamp and sender info for proper chat history display
-            messages = []
-            for msg in history:
+            def render_record(msg):
                 message_dict = {
                     "role": msg["role"],
                     "content": msg["content"],
@@ -5995,13 +6040,15 @@ class CoreService:
                         attachments.append(attachment_copy)
 
                     message_dict["attachments"] = attachments
-                messages.append(message_dict)
+                return message_dict
 
-            logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
+            messages, has_older = history_page.page_of(history, cursor, page_limit, render_record)
+            boundary = getattr(monitor, "live_history_boundary", None)
+            logger.info("Retrieved %d of %d messages from backend for %s", len(messages), len(history), conversation_id)
 
             token_usage = monitor.get_token_usage()
             # history_tokens: dialog-only (chars ÷ 4), same basis as the token counter
-            history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+            history_tokens = sum(len(msg.get("content", "") or "") for msg in history) // 4
             # tokens_after_last_response: full LLM context measured after the previous response.
             # For agent monitors, stored in _tokens_after_last_response (one request stale).
             # For local AI monitors, current_token_count = prompt_tokens (already the full context).
@@ -6027,7 +6074,9 @@ class CoreService:
                 "status": "success",
                 "conversation_id": conversation_id,
                 "messages": messages,
-                "message_count": len(messages),
+                "message_count": len(history),
+                "has_older": has_older,
+                "live_history_boundary": boundary if isinstance(boundary, str) else None,
                 "tokens_used": tokens_used,
                 "token_limit": token_limit,
                 "history_tokens": history_tokens,
@@ -6037,6 +6086,8 @@ class CoreService:
                 "context_agents": context_agents,
             }
 
+        except history_page.HistoryPageError as e:
+            return self._history_page_refused(conversation_id, e)
         except Exception as e:
             logger.error("Error getting conversation history: %s", e, exc_info=True)
             return {

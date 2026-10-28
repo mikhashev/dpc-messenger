@@ -109,7 +109,8 @@
           return newMap;
         });
 
-        if (wasNearBottom || activeChatId === msg.sender_node_id || msg.sender_node_id === "user") {
+        // Only a reader at the bottom is followed; one scrolled up stays put.
+        if (wasNearBottom || msg.sender_node_id === "user") {
           autoScroll();
         }
 
@@ -158,7 +159,7 @@
           return newMap;
         });
 
-        if (wasNearBottom || activeChatId === msg.group_id) {
+        if (wasNearBottom && activeChatId === msg.group_id) {
           autoScroll();
         }
 
@@ -245,7 +246,7 @@
           return newMap;
         });
 
-        if (wasNearBottom || activeChatId === msg.group_id) {
+        if (wasNearBottom && activeChatId === msg.group_id) {
           autoScroll();
         }
 
@@ -262,6 +263,7 @@
     if ($aiResponseWithImage) {
       const response = $aiResponseWithImage;
       onSetChatLoading(response.conversation_id, false);
+      const wasNearBottom = isNearBottom(chatWindow);
 
       chatHistories.update(h => {
         const newMap = new Map(h);
@@ -279,7 +281,7 @@
         return newMap;
       });
 
-      if (response.conversation_id === activeChatId) {
+      if (response.conversation_id === activeChatId && wasNearBottom) {
         autoScroll();
       }
       aiResponseWithImage.set(null);
@@ -302,6 +304,7 @@
 
         // Flush pending buffer and capture streaming text (AgentPanel owns buffer + state)
         const capturedStreamingText = getStreamingText();
+        const wasNearBottom = isNearBottom(chatWindow);
 
         // CC pending: @CC mention was broadcast to MCP bridge, response comes later
         // via agent_chat_message — just remove the "Thinking..." placeholder
@@ -458,7 +461,7 @@
           if (firstId) processedMessageIds.delete(firstId);
         }
 
-        if (chatId === activeChatId) {
+        if (chatId === activeChatId && wasNearBottom) {
           autoScroll();
         }
       }

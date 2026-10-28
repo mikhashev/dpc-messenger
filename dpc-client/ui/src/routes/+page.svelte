@@ -10,6 +10,7 @@
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from "$lib/utils/messageMapper";
+  import { HISTORY_PAGE_LIMIT, olderThanPage } from "$lib/utils/historyPaging";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -100,6 +101,8 @@
   let agentStreamingText = $state<string>('');
   // Component ref — used to call flushAndCapture() in the AI response handler
   let agentPanelComp: AgentPanel | null = $state(null);
+  // Component ref — loadOlderPage() when the reader scrolls a chat to the top
+  let chatHistorySyncComp: ChatHistorySyncPanel | null = $state(null);
 
   // Helper: clear streaming state — delegates to AgentPanel (kept for compatibility)
   function clearAgentStreaming() {
@@ -293,7 +296,7 @@
     const sleepMatchesActive = state && (state.agent_id === activeChatId || state.group_id === activeChatId);
     if (sleepMatchesActive) {
       if (state.status === 'awake') {
-        const cmd = sendCommand('get_conversation_history', { conversation_id: state.agent_id });
+        const cmd = sendCommand('get_conversation_history', { conversation_id: state.agent_id, limit: HISTORY_PAGE_LIMIT });
         if (cmd && typeof cmd === 'object' && 'then' in cmd) (cmd as Promise<any>).then((result: any) => {
           if (result?.status === 'success' && result.messages?.length > 0) {
             chatHistories.update(map => {
@@ -314,7 +317,9 @@
               if (droppedCount > 0) {
                 console.warn(`[AgentWake] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in reloaded history for ${state.agent_id}`);
               }
-              newMap.set(state.agent_id, dedupedMsgs);
+              // The newest page: older pages the reader scrolled through stay.
+              const olderKept = olderThanPage(newMap.get(state.agent_id) || [], dedupedMsgs);
+              newMap.set(state.agent_id, [...olderKept, ...dedupedMsgs]);
               return newMap;
             });
           }
@@ -417,7 +422,7 @@
     }
     if (activeChatId.startsWith('agent_') && $connectionStatus === 'connected') {
       // sendCommand returns `boolean | Promise<any>`; connected branch is always Promise.
-      (sendCommand('get_conversation_history', { conversation_id: activeChatId }) as Promise<any>).then((result: any) => {
+      (sendCommand('get_conversation_history', { conversation_id: activeChatId, limit: HISTORY_PAGE_LIMIT }) as Promise<any>).then((result: any) => {
         if (result?.status === 'success' && result.messages?.length > 0) {
           const agentName = $agentsList?.find((a: any) => a.agent_id === activeChatId)?.name || activeChatId;
           chatHistories.update(map => {
@@ -441,7 +446,8 @@
             if (droppedCount > 0) {
               console.warn(`[ActiveChat] Dropped ${formatDedupeDrop(droppedCount, conflictCount)} in reloaded history for ${activeChatId}`);
             }
-            newMap.set(activeChatId, dedupedMsgs);
+            // The newest page: older pages the reader scrolled through stay.
+            newMap.set(activeChatId, [...olderThanPage(localHistory, dedupedMsgs), ...dedupedMsgs]);
             return newMap;
           });
         }
@@ -1166,6 +1172,7 @@
         peerDisplayNames={peerDisplayNames}
         selfNodeId={$nodeStatus?.node_id || ''}
         selfName={$personalContext?.profile?.name || ''}
+        onLoadOlder={(chatId, beforeInsert) => chatHistorySyncComp?.loadOlderPage(chatId, beforeInsert) ?? Promise.resolve(0)}
       />
 
       <ChatPanel
@@ -1299,6 +1306,7 @@
 
 <!-- ChatHistorySyncPanel: loads history from backend when switching to peer/agent/group chat (Step 8) -->
 <ChatHistorySyncPanel
+  bind:this={chatHistorySyncComp}
   {activeChatId}
   {chatHistories}
   {loadingHistory}
