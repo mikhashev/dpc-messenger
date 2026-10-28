@@ -1,9 +1,11 @@
 # dpc-client/core/dpc_client_core/peer_cache.py
 
+import asyncio
+import ipaddress
 import json
 import logging
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Awaitable, Callable, Tuple
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, asdict
 
@@ -13,6 +15,119 @@ logger = logging.getLogger(__name__)
 # [p2p] listen_port default. It is what a peer we have never dialled is assumed
 # to be on, never what we overwrite a known endpoint with.
 DEFAULT_DIRECT_PORT = 8888
+
+# A ninth address evicts the one with the oldest last_seen.
+MAX_ADDRESSES = 8
+
+# Budget for one cached address when more follow it: a dead route costs the
+# next one at most this. The last address gets whatever budget is left.
+CACHED_ADDRESS_DIAL_TIMEOUT_S = 10.0
+
+# RFC 1918, IPv6 ULA and loopback, spelled out: ipaddress's is_private also
+# counts the RFC 5737 documentation ranges.
+_LOCAL_NETWORKS = tuple(
+    ipaddress.ip_network(n)
+    for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
+              "fc00::/7", "::1/128")
+)
+
+
+def normalise_ip(ip: str) -> str:
+    """One spelling per address: no brackets, no %zone, IPv4-mapped IPv6 as IPv4.
+
+    Brackets belong to the "[host]:port" form of a dpc:// URI, not to the stored
+    host; the zone is dropped as own_addresses and the DHT drop it. A host name
+    is kept, lower-cased.
+    """
+    host = (ip or "").strip()
+    if host.startswith("[") and "]" in host:
+        host = host[1:host.index("]")]
+    host = host.split("%", 1)[0]
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return host.lower()
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        return str(addr.ipv4_mapped)
+    return str(addr)
+
+
+def _seen_at(entry: Dict[str, Any]) -> float:
+    try:
+        return datetime.fromisoformat(entry.get("last_seen")).timestamp()
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def addresses_to_try(cached: Any, own_addresses: Any = None) -> List[Dict[str, Any]]:
+    """The cached addresses of a peer in the order to dial them.
+
+    Local-network addresses first, as ICE puts host candidates first (see
+    ipv4_direct.py), then the rest by most recent last_seen, then IPv4
+    link-local. IPv6 link-local is left out: without its zone it cannot be
+    dialled. An address that is also this node's own goes last, not nowhere:
+    behind a shared exit it reaches the peer too (connection_orchestrator.py).
+    """
+    entries = list(getattr(cached, "addresses", None) or [])
+    if not entries and getattr(cached, "last_direct_ip", None):
+        entries = [{
+            "ip": normalise_ip(cached.last_direct_ip),
+            "port": getattr(cached, "last_direct_port", None) or DEFAULT_DIRECT_PORT,
+            "last_seen": getattr(cached, "last_seen", None),
+            "direction": getattr(cached, "last_connection_direction", None),
+        }]
+
+    def rank(entry: Dict[str, Any]) -> Optional[int]:
+        try:
+            addr = ipaddress.ip_address(entry["ip"])
+        except (KeyError, TypeError, ValueError):
+            return 1
+        if any(addr in net for net in _LOCAL_NETWORKS):
+            return 0
+        if addr.is_link_local:
+            return None if addr.version == 6 else 2
+        return 1
+
+    ordered = []
+    for entry in entries:
+        r = rank(entry)
+        if r is None:
+            continue
+        own = bool(own_addresses is not None and own_addresses.contains(entry.get("ip")))
+        ordered.append(((own, r, -_seen_at(entry)), entry))
+    ordered.sort(key=lambda pair: pair[0])
+    return [entry for _, entry in ordered]
+
+
+async def dial_in_order(
+    dial: Callable[[str, int, float], Awaitable[Any]],
+    entries: List[Dict[str, Any]],
+    total_timeout: float,
+    per_address_timeout: float = CACHED_ADDRESS_DIAL_TIMEOUT_S,
+) -> Tuple[Any, Optional[Dict[str, Any]], Optional[BaseException]]:
+    """Dial each entry in turn and stop on the first that answers.
+
+    Every address but the last gets at most per_address_timeout, the last what
+    is left of total_timeout. Returns (connection, entry, None) on success,
+    (None, None, last_error) otherwise.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + total_timeout
+    last_error: Optional[BaseException] = None
+    for i, entry in enumerate(entries):
+        left = deadline - loop.time()
+        if left <= 0:
+            break
+        budget = left if i == len(entries) - 1 else min(per_address_timeout, left)
+        try:
+            connection = await asyncio.wait_for(
+                dial(entry["ip"], entry["port"], budget), timeout=budget
+            )
+            return connection, entry, None
+        except Exception as e:  # noqa: BLE001 — the next address may work
+            logger.debug("Cached address %s:%s failed: %s", entry.get("ip"), entry.get("port"), e)
+            last_error = e
+    return None, None, last_error
 
 
 @dataclass
@@ -31,10 +146,54 @@ class CachedPeer:
     # come back on its own, and dialling it is a guaranteed miss.
     last_connection_direction: Optional[str] = None
     metadata: Dict[str, Any] = None  # Additional peer metadata
+    # Every address a direct connection worked on, one entry per ip:
+    # {"ip", "port", "last_seen", "direction"}, the last two meaning what they
+    # mean above, per address. last_direct_ip/_port mirror the newest entry.
+    addresses: List[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
+        if self.addresses is None:
+            # A row written before the list existed: its one address is the list.
+            self.addresses = []
+            if self.last_direct_ip:
+                self.addresses.append({
+                    "ip": normalise_ip(self.last_direct_ip),
+                    "port": self.last_direct_port,
+                    "last_seen": self.last_seen,
+                    "direction": self.last_connection_direction,
+                })
+
+    def record_address(self, ip: str, port: Optional[int], direction: Optional[str]) -> None:
+        """Add the address a connection worked on, or refresh its entry.
+
+        Never replaces another entry. A port of None keeps the entry's port (an
+        inbound connection's source port is not the peer's listener); a new entry
+        with no port starts at DEFAULT_DIRECT_PORT. A direction of None keeps the
+        recorded one.
+        """
+        ip = normalise_ip(ip)
+        now = datetime.now(timezone.utc).isoformat()
+        entry = next((e for e in self.addresses if e.get("ip") == ip), None)
+        if entry is None:
+            entry = {
+                "ip": ip,
+                "port": port if port is not None else DEFAULT_DIRECT_PORT,
+                "last_seen": now,
+                "direction": direction,
+            }
+            self.addresses.append(entry)
+        else:
+            if port is not None:
+                entry["port"] = port
+            entry["last_seen"] = now
+            if direction:
+                entry["direction"] = direction
+        while len(self.addresses) > MAX_ADDRESSES:
+            self.addresses.remove(min(self.addresses, key=_seen_at))
+        self.last_direct_ip = entry["ip"]
+        self.last_direct_port = entry["port"]
 
     def is_recently_seen(self, hours: int = 24) -> bool:
         """Check if peer was seen recently."""
@@ -83,6 +242,11 @@ class PeerCache:
             self._peers = {}
 
             for peer_dict in peers_data:
+                peer_dict = dict(peer_dict)
+                metadata = dict(peer_dict.get("metadata") or {})
+                if "addresses" in metadata:
+                    peer_dict.setdefault("addresses", metadata.pop("addresses"))
+                    peer_dict["metadata"] = metadata
                 peer = CachedPeer(**peer_dict)
                 self._peers[peer.node_id] = peer
 
@@ -98,8 +262,14 @@ class PeerCache:
             # Ensure directory exists
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
 
-            # Convert peers to dict
-            peers_data = [asdict(peer) for peer in self._peers.values()]
+            # addresses is written inside metadata: an older build's
+            # CachedPeer(**row) refuses an unknown key, which drops every peer,
+            # and carries metadata through untouched.
+            peers_data = []
+            for peer in self._peers.values():
+                row = asdict(peer)
+                row["metadata"] = {**row["metadata"], "addresses": row.pop("addresses")}
+                peers_data.append(row)
 
             data = {
                 "version": "1.0",
@@ -132,7 +302,8 @@ class PeerCache:
         Args:
             node_id: Peer's node ID
             display_name: Peer's display name
-            direct_ip: Last known IP for Direct TLS
+            direct_ip: An IP a direct connection worked on: added to the
+                peer's addresses or its entry refreshed, never replacing others.
             direct_port: Direct TLS port. None means "I do not know it" and
                 leaves whatever is recorded alone; it used to default to 8888,
                 which made a caller that could not know indistinguishable from
@@ -157,9 +328,7 @@ class PeerCache:
             if display_name:
                 peer.display_name = display_name
             if direct_ip:
-                peer.last_direct_ip = direct_ip
-            if direct_port is not None:
-                peer.last_direct_port = direct_port
+                peer.record_address(direct_ip, direct_port, direction)
             peer.supports_webrtc = supports_webrtc
             peer.supports_direct = supports_direct
             if direction:
@@ -173,7 +342,6 @@ class PeerCache:
                 node_id=node_id,
                 display_name=display_name,
                 last_seen=datetime.now(timezone.utc).isoformat(),
-                last_direct_ip=direct_ip,
                 last_direct_port=(
                     direct_port if direct_port is not None else DEFAULT_DIRECT_PORT
                 ),
@@ -182,6 +350,8 @@ class PeerCache:
                 last_connection_direction=direction,
                 metadata=metadata or {}
             )
+            if direct_ip:
+                peer.record_address(direct_ip, direct_port, direction)
             self._peers[node_id] = peer
 
         self._save_cache()
@@ -221,7 +391,7 @@ class PeerCache:
         """Get peers that have Direct TLS connection info."""
         return [
             peer for peer in self._peers.values()
-            if peer.supports_direct and peer.last_direct_ip
+            if peer.supports_direct and (peer.addresses or peer.last_direct_ip)
         ]
 
     def remove_peer(self, node_id: str) -> bool:

@@ -27,7 +27,7 @@ from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
 from .dht import DHTManager, DHTConfig
-from .peer_cache import PeerCache
+from .peer_cache import PeerCache, addresses_to_try, dial_in_order
 from .own_addresses import OwnAddresses
 from pathlib import Path
 
@@ -474,32 +474,29 @@ class P2PManager:
 
         # Try 0: Peer cache (fastest - no DHT lookup needed)
         cached_peer = self.peer_cache.get_peer(target_node_id)
-        if cached_peer and cached_peer.last_direct_ip and cached_peer.is_recently_seen(hours=168):  # 7 days
+        candidates = (
+            addresses_to_try(cached_peer, getattr(self, "own_addresses", None))
+            if cached_peer and cached_peer.is_recently_seen(hours=168)  # 7 days
+            else []
+        )
+        if candidates:
             logger.info(
-                "Attempting cached connection to %s at %s:%d (last seen %s)",
-                target_node_id[:20], cached_peer.last_direct_ip,
-                cached_peer.last_direct_port, cached_peer.last_seen
+                "Attempting cached connection to %s over %d address(es) (last seen %s)",
+                target_node_id[:20], len(candidates), cached_peer.last_seen
             )
-            try:
-                await self.connect_directly(
-                    cached_peer.last_direct_ip,
-                    cached_peer.last_direct_port,
-                    target_node_id,
-                    timeout=5.0  # Quick timeout for cache attempt
-                )
+
+            async def _dial(ip, port, budget):
+                return await self.connect_directly(ip, port, target_node_id, timeout=budget)
+
+            # Quick, before the DHT is asked: 5 s an address, at most three.
+            connection, entry, error = await dial_in_order(
+                _dial, candidates,
+                total_timeout=5.0 * min(len(candidates), 3), per_address_timeout=5.0,
+            )
+            if connection is not None:
                 logger.info("Connected to %s via peer cache (no DHT lookup needed)", target_node_id[:20])
-                # Update cache with successful connection
-                self.peer_cache.add_or_update_peer(
-                    node_id=target_node_id,
-                    direct_ip=cached_peer.last_direct_ip,
-                    direct_port=cached_peer.last_direct_port,
-                    supports_direct=True,
-                    direction="out",
-                )
                 return True
-            except Exception as e:
-                logger.debug("Cached connection failed, falling back to DHT: %s", e)
-                # Don't return False yet, try DHT next
+            logger.debug("Cached connection failed, falling back to DHT: %s", error)
 
         # Try 1: DHT lookup
         dht_result = await self.find_peer_via_dht(target_node_id)
@@ -683,16 +680,19 @@ class P2PManager:
             # Update peer cache with incoming connection info
             peer_addr = writer.get_extra_info('peername')
             if peer_addr:
-                peer_ip, peer_port = peer_addr[0], peer_addr[1]
+                peer_ip = peer_addr[0]
+                # No port: the source port of an inbound connection is not the
+                # peer's listener. The cache keeps the port this address's entry
+                # already has, or starts a new entry at DEFAULT_DIRECT_PORT.
                 self.peer_cache.add_or_update_peer(
                     node_id=peer_node_id,
                     display_name=peer_name,
                     direct_ip=peer_ip,
-                    direct_port=8888,  # Default port (peer connects FROM random port but listens ON 8888)
+                    direct_port=None,
                     supports_direct=True,
                     direction="in",
                 )
-                logger.debug("Cached peer %s at %s:8888", peer_node_id[:20], peer_ip)
+                logger.debug("Cached inbound address of peer %s", peer_node_id[:20])
 
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())

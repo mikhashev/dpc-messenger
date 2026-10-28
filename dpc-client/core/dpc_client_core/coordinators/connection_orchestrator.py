@@ -26,6 +26,7 @@ from ..connection_strategies.hub_webrtc import HubWebRTCStrategy
 from ..connection_strategies.udp_hole_punch import UDPHolePunchStrategy
 from ..connection_strategies.volunteer_relay import VolunteerRelayStrategy
 from ..connection_strategies.gossip_store_forward import GossipStoreForwardStrategy
+from ..peer_cache import addresses_to_try, dial_in_order
 
 if TYPE_CHECKING:
     from ..p2p_manager import P2PManager
@@ -37,6 +38,9 @@ if TYPE_CHECKING:
     from ..managers.gossip_manager import GossipManager
 
 logger = logging.getLogger(__name__)
+
+# The tiers a dial over the cached addresses already covers.
+_DIRECT_TIERS = (IPv6DirectStrategy.name, IPv4DirectStrategy.name)
 
 
 class ConnectionFailedError(Exception):
@@ -152,6 +156,8 @@ class ConnectionOrchestrator:
         # Step 1: Query DHT for peer endpoints
         logger.debug("Querying DHT for peer endpoints")
         endpoints = await self.dht_manager.find_peer_full(node_id)
+        start_time = asyncio.get_running_loop().time()
+        tried_direct = False
 
         if not endpoints:
             logger.warning("Peer %s not found in DHT", node_id[:20])
@@ -167,23 +173,31 @@ class ConnectionOrchestrator:
             # through it. The dial settles it instead: reaching ourselves returns
             # our own node_id, and the HELLO_ACK comparison rejects that already.
             own = getattr(self.p2p_manager, "own_addresses", None)
-            if cached and cached.last_direct_ip and own and own.contains(cached.last_direct_ip):
-                logger.warning(
-                    "Cached endpoint for %s is also this node's own address %s — "
-                    "dialling anyway; a self-dial will be caught by the node id it answers with",
-                    node_id[:20], cached.last_direct_ip,
+            candidates = addresses_to_try(cached, own) if cached else []
+            for entry in candidates:
+                if own and own.contains(entry["ip"]):
+                    logger.warning(
+                        "Cached endpoint for %s is also this node's own address %s — "
+                        "dialling anyway; a self-dial will be caught by the node id it answers with",
+                        node_id[:20], entry["ip"],
+                    )
+            if candidates:
+                logger.info(
+                    "Using %d cached address(es) for %s (DHT empty)",
+                    len(candidates), node_id[:20],
                 )
-            if cached and cached.last_direct_ip:
+                connection = await self._dial_cached_addresses(node_id, candidates, timeout)
+                if connection is not None:
+                    return connection
+                # The direct tiers have now been tried on every cached address;
+                # the rest still need an endpoint, as they had before the list.
+                tried_direct = True
                 from ..models.peer_endpoint import PeerEndpoint, IPv4Info
-                local_addr = f"{cached.last_direct_ip}:{cached.last_direct_port}"
+                first = next((e for e in candidates if ":" not in e["ip"]), candidates[0])
                 endpoints = PeerEndpoint(
                     schema_version="1.0",
                     node_id=node_id,
-                    ipv4=IPv4Info(local=local_addr),
-                )
-                logger.info(
-                    "Using cached endpoint for %s at %s (DHT empty)",
-                    node_id[:20], local_addr
+                    ipv4=IPv4Info(local=f"{first['ip']}:{first['port']}"),
                 )
             else:
                 self.stats["failed_connections"] += 1
@@ -199,9 +213,10 @@ class ConnectionOrchestrator:
 
         # Step 2: Try strategies in priority order
         last_error = None
-        start_time = asyncio.get_running_loop().time()
 
         for strategy in self.strategies:
+            if tried_direct and strategy.name in _DIRECT_TIERS:
+                continue
             # Check timeout
             elapsed = asyncio.get_running_loop().time() - start_time
             remaining = timeout - elapsed
@@ -267,6 +282,24 @@ class ConnectionOrchestrator:
         raise ConnectionFailedError(
             f"All connection strategies failed for {node_id[:20]}: {last_error}"
         )
+
+    async def _dial_cached_addresses(self, node_id: str, candidates: list, timeout: float):
+        """Dial the peer's cached addresses in order; the connection, or None."""
+        async def _dial(ip, port, budget):
+            return await self.p2p_manager.connect_directly(ip, port, node_id, timeout=budget)
+
+        connection, entry, error = await dial_in_order(
+            _dial, candidates, total_timeout=min(timeout, IPv4DirectStrategy.timeout)
+        )
+        if connection is None:
+            logger.info("No cached address of %s answered: %s", node_id[:20], error)
+            return None
+        name = IPv6DirectStrategy.name if ":" in entry["ip"] else IPv4DirectStrategy.name
+        logger.info("Connected to %s via %s on a cached address", node_id[:20], name)
+        self.stats["successful_connections"] += 1
+        self.stats["strategy_usage"][name] = self.stats["strategy_usage"].get(name, 0) + 1
+        connection.strategy_used = name
+        return connection
 
     def get_stats(self) -> dict:
         """
