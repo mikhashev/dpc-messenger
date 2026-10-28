@@ -12,6 +12,7 @@ import socket
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
 
@@ -282,6 +283,64 @@ def external_agents_to_wake(allowed_agents, mention_names, cc_display_name,
     if cc and cc != sender and (mention_all or cc in mention_names):
         return {cc}, True
     return set(), False
+
+
+#: How long a finished scan of the local addresses is reused. `get_status` runs
+#: on every UI connect and after every connection event, and the interfaces
+#: behind it change on a Wi-Fi switch, not by the second: 30 s covers a burst of
+#: those calls and still shows a changed network within half a minute.
+LOCAL_IPS_TTL_S = 30.0
+
+#: The longest the own-host-name lookup may hold a scan. `getaddrinfo` takes no
+#: timeout of its own, and with a dead first DNS server it runs 30+ seconds;
+#: the scan has other ways to find the addresses (a UDP connect per family, and
+#: `ip addr` on Linux), so it gives up on this one instead of waiting for it.
+HOSTNAME_LOOKUP_DEADLINE_S = 3.0
+
+#: The scan's own single worker. The loop's default executor is shared with
+#: every `loop.getaddrinfo` (STUN discovery logs its timeouts, and each one
+#: leaves its thread busy until the resolver gives up), so a dead resolver could
+#: fill it and queue the status behind them. One worker also makes concurrent
+#: callers take turns, and the second finds the first one's cache.
+_LOCAL_IPS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="local-ips")
+
+_hostname_lookup_lock = threading.Lock()
+_hostname_lookup_pending = False
+
+
+def _bounded_hostname_lookup(hostname: str, deadline_s: float) -> list:
+    """`socket.getaddrinfo(hostname, None)`, abandoned after `deadline_s`.
+
+    The lookup runs in a daemon thread that is left to finish by itself. While
+    one is still pending no second is started, so a resolver that never answers
+    holds one thread, not one per call. Raises `TimeoutError` when it gives up
+    and re-raises whatever the lookup raised.
+    """
+    global _hostname_lookup_pending
+    with _hostname_lookup_lock:
+        if _hostname_lookup_pending:
+            raise TimeoutError("an earlier host-name lookup is still pending")
+        _hostname_lookup_pending = True
+    box: Dict[str, Any] = {}
+
+    def work() -> None:
+        global _hostname_lookup_pending
+        try:
+            box["result"] = socket.getaddrinfo(hostname, None)
+        except BaseException as exc:  # handed to the caller below
+            box["error"] = exc
+        finally:
+            with _hostname_lookup_lock:
+                _hostname_lookup_pending = False
+
+    worker = threading.Thread(target=work, name="local-ips-hostname", daemon=True)
+    worker.start()
+    worker.join(deadline_s)
+    if worker.is_alive():
+        raise TimeoutError(f"host-name lookup for {hostname!r} took over {deadline_s:g} s")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 class CoreService:
@@ -2181,7 +2240,27 @@ class CoreService:
             logger.warning("Invalid IPv4 address format: %s", ip_str)
             return False
 
+    # (monotonic time of the scan, its result); read and written only on the
+    # scan's worker, which is a single thread.
+    _local_ips_cache: Optional[Tuple[float, List[str]]] = None
+
     def _get_local_ips(self) -> List[str]:
+        """`_scan_local_ips`, reused for `LOCAL_IPS_TTL_S` after it found something.
+
+        Blocking (DNS, `ip addr`): from async code run it on `_LOCAL_IPS_EXECUTOR`
+        (as `get_status` does), never on the event loop. An empty result is not
+        kept: it usually means the network was not up yet, so the next call
+        looks again.
+        """
+        cached = self._local_ips_cache
+        if cached is not None and time.monotonic() - cached[0] < LOCAL_IPS_TTL_S:
+            return list(cached[1])
+        found = self._scan_local_ips()
+        if found:
+            self._local_ips_cache = (time.monotonic(), list(found))
+        return found
+
+    def _scan_local_ips(self) -> List[str]:
         """
         Get local network IP addresses (excluding loopback and link-local).
         Returns a list of IP addresses (IPv4 and IPv6) for constructing dpc:// URIs.
@@ -2223,35 +2302,31 @@ class CoreService:
             errors.append(f"Socket method (IPv6): {e}")
 
         # Method 2: Try hostname resolution (finds all interfaces)
-        # IPv4
+        # One lookup for both families (it asks the resolver once, not twice),
+        # sorted back into IPv4 then IPv6 so the list keeps its order.
         try:
-            hostname = socket.gethostname()
-            addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET)
-
-            for info in addr_info:
-                ip = info[4][0]
-                # Use new filtering method for loopback and link-local
-                if ip and self._is_usable_ipv4(ip) and ip not in local_ips:
-                    local_ips.append(ip)
-                    logger.debug("Found local IPv4 via hostname method: %s", ip)
-
+            addr_info = _bounded_hostname_lookup(socket.gethostname(), HOSTNAME_LOOKUP_DEADLINE_S)
         except Exception as e:
-            errors.append(f"Hostname method (IPv4): {e}")
+            errors.append(f"Hostname method: {e}")
+            addr_info = []
 
-        # IPv6
-        try:
-            hostname = socket.gethostname()
-            addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET6)
+        for info in addr_info:
+            ip = info[4][0]
+            if info[0] != socket.AF_INET:
+                continue
+            # Use new filtering method for loopback and link-local
+            if ip and self._is_usable_ipv4(ip) and ip not in local_ips:
+                local_ips.append(ip)
+                logger.debug("Found local IPv4 via hostname method: %s", ip)
 
-            for info in addr_info:
-                ip = info[4][0]
-                # Filter out link-local (fe80::), loopback (::1), and duplicates
-                if ip and not ip.startswith('fe80:') and ip != '::1' and ip not in local_ips:
-                    local_ips.append(ip)
-                    logger.debug("Found local IPv6 via hostname method: %s", ip)
-
-        except Exception as e:
-            errors.append(f"Hostname method (IPv6): {e}")
+        for info in addr_info:
+            ip = info[4][0]
+            if info[0] != socket.AF_INET6:
+                continue
+            # Filter out link-local (fe80::), loopback (::1), and duplicates
+            if ip and not ip.startswith('fe80:') and ip != '::1' and ip not in local_ips:
+                local_ips.append(ip)
+                logger.debug("Found local IPv6 via hostname method: %s", ip)
 
         # Method 3: Platform-specific (Linux/Unix only - finds all interfaces)
         if sys.platform.startswith('linux'):
@@ -2327,7 +2402,10 @@ class CoreService:
             active_model = None
 
         # Get local IPs and construct dpc:// URIs
-        local_ips = self._get_local_ips()
+        # Off the loop: the scan resolves the host name and runs `ip addr`.
+        local_ips = await asyncio.get_running_loop().run_in_executor(
+            _LOCAL_IPS_EXECUTOR, self._get_local_ips
+        )
         dpc_port = self.settings.get_p2p_listen_port()
         dpc_uris = []
 
