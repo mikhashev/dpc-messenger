@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { setLogSender, clearLogSender, log } from './logger';
+import { setLogSender, clearLogSender, log, clipForRelay, RELAY_MAX_CHARS } from './logger';
 
 function capture(): string[] {
     const seen: string[] = [];
@@ -32,6 +32,22 @@ describe('logger relay serialization', () => {
         const seen = capture();
         log.info('test', { a: 1 });
         expect(seen[0].trim()).toBe('{"a":1}');
+    });
+
+    it('relays the head of a huge logged object, not all of it', () => {
+        // A logged group history once went past the backend's 10 MiB read
+        // limit and the socket closed with 1009 in a reconnect loop.
+        const seen = capture();
+        const history = { messages: Array.from({ length: 200 }, () => ({ tool_calls: 'x'.repeat(60000) })) };
+        log.info('ChatHistory', 'Backend response:', history);
+        expect(seen).toHaveLength(1);
+        expect(seen[0].length).toBeLessThan(RELAY_MAX_CHARS + 100);
+        expect(seen[0]).toContain('more characters not relayed');
+        expect(seen[0].trimStart().startsWith('Backend response:')).toBe(true);
+    });
+
+    it('relays an ordinary line whole', () => {
+        expect(clipForRelay('short line')).toBe('short line');
     });
 });
 

@@ -34,6 +34,42 @@ _DEBUG_WS = os.environ.get("DPC_DEBUG_WS") == "1"
 WS_TOKEN_PATH = Path.home() / ".dpc" / ".ws_token"
 AUTH_TIMEOUT_SECONDS = 5.0
 
+# The largest message the server reads from the UI (websockets' max_size). A
+# larger one closes the socket with 1009 — on 2026-10-28 the UI echoed a whole
+# group history back through ui_log, past this limit, and reconnected in a loop.
+MAX_INCOMING_MESSAGE_BYTES = 10 * 1024 * 1024
+
+# What a message to the UI should stay under: well below the limit above, which
+# a UI echo of it would meet, and below what a webview is known to take. Not
+# enforced — a larger message is sent and logged with its name and size.
+OUTGOING_MESSAGE_WARN_BYTES = 4 * 1024 * 1024
+
+
+def _warn_if_oversized(label: str, message: str) -> None:
+    """Name a message to the UI that is past OUTGOING_MESSAGE_WARN_BYTES."""
+    # json.dumps escapes non-ASCII by default, so characters are bytes here.
+    size = len(message)
+    if size > OUTGOING_MESSAGE_WARN_BYTES:
+        logger.warning(
+            "Local API message '%s' is %d bytes, over the %d-byte bound",
+            label, size, OUTGOING_MESSAGE_WARN_BYTES,
+        )
+
+
+def _log_closed(e: Exception) -> None:
+    """Say why the UI socket closed when the reason is a message too big."""
+    # `sent` is 1009 when this server refused the message, `rcvd` when the UI did.
+    for side in ("sent", "rcvd"):
+        frame = getattr(e, side, None)
+        if frame is not None and getattr(frame, "code", None) == 1009:
+            logger.warning(
+                "UI connection closed with 1009 (%s): a message exceeded a size limit "
+                "(this server reads up to %d bytes): %s",
+                side, MAX_INCOMING_MESSAGE_BYTES, getattr(frame, "reason", ""),
+            )
+            return
+    logger.debug("UI client connection closed: %s", e)
+
 
 def sends_own_response(handler):
     """Dispatch as a task; the handler answers the client itself.
@@ -544,7 +580,9 @@ class LocalApiServer:
                 "payload": {"message": str(e)},
             }
         try:
-            await self._send_locked(websocket, json.dumps(response))
+            message = json.dumps(response)
+            _warn_if_oversized(command, message)
+            await self._send_locked(websocket, message)
             logger.debug("Response sent for '%s' (id=%s)", command, command_id)
         except Exception:
             logger.debug("Client gone before '%s' (id=%s) could answer", command, command_id)
@@ -605,7 +643,9 @@ class LocalApiServer:
                             result = await handler_method(**payload)
                             _log_error_under_ok(command, result)
                             response = {"id": command_id, "command": command, "status": "OK", "payload": result}
-                            await self._send_locked(websocket, json.dumps(response))
+                            message = json.dumps(response)
+                            _warn_if_oversized(command, message)
+                            await self._send_locked(websocket, message)
                             # Mike S141: pair every "Executing command" with a
                             # "Response sent" so the request → response chain
                             # is greppable. Past Bug A class (sendCommand
@@ -619,8 +659,8 @@ class LocalApiServer:
                     else:
                         raise ValueError(f"Unknown or non-async command: {command}")
 
-                except websockets.exceptions.ConnectionClosed:
-                    logger.debug("UI client connection closed normally")
+                except websockets.exceptions.ConnectionClosed as e:
+                    _log_closed(e)
                     break
                 except Exception as e:
                     logger.error("Error processing command: %s", e, exc_info=True)
@@ -634,8 +674,8 @@ class LocalApiServer:
                         await self._send_locked(websocket, json.dumps(error_response))
                     except:
                         pass
-        except websockets.exceptions.ConnectionClosed:
-            logger.debug("Connection closed during message processing")
+        except websockets.exceptions.ConnectionClosed as e:
+            _log_closed(e)
         except Exception as e:
             logger.error("Handler error: %s", e, exc_info=True)
         finally:
@@ -656,7 +696,7 @@ class LocalApiServer:
             ping_interval=20,      # Send ping every 20 seconds (default is 20)
             ping_timeout=60,       # Wait 60 seconds for pong (default is 20) - INCREASED
             close_timeout=10,      # Wait 10 seconds when closing (default is 10)
-            max_size=10 * 1024 * 1024,  # Max message size: 10MB
+            max_size=MAX_INCOMING_MESSAGE_BYTES,
         )
         logger.info("Local API Server is running")
 
@@ -679,6 +719,7 @@ class LocalApiServer:
         if not self._clients:
             return
         message = json.dumps({"event": event_name, "payload": payload})
+        _warn_if_oversized(event_name, message)
         self._debug_ws(f"broadcast {event_name}", message)
         # Send to all clients under per-client locks, but don't fail if one
         # client is disconnected. Locking is required because fire-and-forget
@@ -704,6 +745,7 @@ class LocalApiServer:
         _log_error_under_ok(command, payload, status)
         response = {"id": command_id, "command": command, "status": status, "payload": payload}
         message = json.dumps(response)
+        _warn_if_oversized(command, message)
         # Per-client locks (see broadcast_event for rationale).
         results = await asyncio.gather(
             *(self._send_locked(client, message) for client in self._clients),

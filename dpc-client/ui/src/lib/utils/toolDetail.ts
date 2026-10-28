@@ -16,9 +16,16 @@
 /** Characters kept in an expanded block before the tail is summarised. */
 export const EXPANDED_MAX = 4000;
 
+// The backend clips a tool output to this same cap before sending it
+// (dpc_client_core/tool_detail.py) and appends this same notice, so a clipped
+// output arrives already in the shape this function produces.
+const CLIPPED_TAIL = /\n… \d+ more characters \(full text in the agent log\)$/;
+
 export function clampDetail(text: string, maxLen: number = EXPANDED_MAX): string {
     if (!text) return '';
     if (text.length <= maxLen) return text;
+    const clipped = CLIPPED_TAIL.exec(text);
+    if (clipped && clipped.index <= maxLen) return text;
     const hidden = text.length - maxLen;
     return text.slice(0, maxLen) + `\n… ${hidden} more characters (full text in the agent log)`;
 }

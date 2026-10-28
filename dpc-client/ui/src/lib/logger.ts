@@ -37,12 +37,26 @@ const RELAY_MAX_PER_SECOND = 50;
 // transport. Sending these is what closes the loop.
 const NEVER_RELAY = ['Error parsing message'];
 
+// A third brake, on size. A logged object is stringified whole, and the relay
+// is a message to a backend that reads at most 10 MiB per message: on
+// 2026-10-28 a logged group history went past that, the backend closed the
+// socket with 1009, the UI reconnected, loaded the history and logged it again.
+// A ui.log line has no use for megabytes, so the relay keeps the head.
+export const RELAY_MAX_CHARS = 16000;
+
+export function clipForRelay(message: string): string {
+    if (message.length <= RELAY_MAX_CHARS) return message;
+    const hidden = message.length - RELAY_MAX_CHARS;
+    return message.slice(0, RELAY_MAX_CHARS) + ` … ${hidden} more characters not relayed`;
+}
+
 let _windowStartedAt = 0;
 let _windowCount = 0;
 let _suppressedSinceWindow = 0;
 
 function relay(level: LogLevel, context: string, message: string) {
     if (NEVER_RELAY.some((needle) => message.includes(needle))) return;
+    message = clipForRelay(message);
 
     if (_sendFn) {
         const now = Date.now();

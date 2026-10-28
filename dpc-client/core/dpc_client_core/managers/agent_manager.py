@@ -25,6 +25,7 @@ from ..providers.base import ModelNotCachedError
 from ..dpc_agent.utils import get_agent_root, ensure_agent_dirs, utc_now_iso
 from ..dpc_agent.events import get_event_emitter, EventType
 from ..conversation_monitor import ConversationMonitor, TURN_END_VALUES
+from ..tool_detail import clip_tool_calls
 
 if TYPE_CHECKING:
     from ..service import CoreService
@@ -1679,7 +1680,9 @@ class DpcAgentManager:
                     # Full per-round tool snapshot (set on tool completion) so the UI renders
                     # the authoritative list per-conversation instead of accumulating a lossy
                     # event stream — fixes dropped results + chat-switch gaps.
-                    "tool_calls": tool_calls,
+                    # Outputs clipped to what the tool row shows (tool_detail.py):
+                    # the snapshot is re-sent whole on every tool completion.
+                    "tool_calls": clip_tool_calls(tool_calls),
                     "agent_name": getattr(self, '_current_agent_display_name', ''),
                     "agent_id": self.agent_id or '',
                     "ts": utc_now_iso(),

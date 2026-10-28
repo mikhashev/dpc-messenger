@@ -94,7 +94,9 @@
         (async () => {
           try {
             const result = await sendCommand('get_conversation_history', { conversation_id: reqChatId });
-            console.log(`[ChatHistory] Backend response:`, result);
+            // Counts, not the object: the whole history went into ui.log here, and
+            // through the log relay back to the backend (see logger.ts).
+            console.log(`[ChatHistory] Backend response: status=${result?.status}, messages=${result?.messages?.length ?? 0}`);
             if (result.conversation_id && result.conversation_id !== reqChatId) {
               console.warn(`[ChatHistory] Discarding mismatched history: requested ${reqChatId.slice(0,20)}, got ${String(result.conversation_id).slice(0,20)}`);
               loadingHistory.delete(reqChatId);

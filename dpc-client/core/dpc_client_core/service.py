@@ -72,6 +72,7 @@ from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .conversation_monitor import history_status_for as conversation_monitor_history_status_for
 from . import conversation_paths
 from . import ai_chats
+from .tool_detail import clip_tool_calls
 from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
@@ -5861,6 +5862,8 @@ class CoreService:
                         messages = data.get("messages", [])
                         for msg in messages:
                             msg.setdefault("message_id", msg.get("id"))
+                            if "tool_calls" in msg:
+                                msg["tool_calls"] = clip_tool_calls(msg["tool_calls"])
                         logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
                         token_stats = data.get("token_stats", {})
                         history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
@@ -5904,6 +5907,9 @@ class CoreService:
                             msg.setdefault("sender_type", "human")
                             msg.setdefault("agent_owner", None)
                             msg.setdefault("message_id", msg.get("id"))
+                            # Megabytes of tool output the UI would hide (tool_detail.py).
+                            if "tool_calls" in msg:
+                                msg["tool_calls"] = clip_tool_calls(msg["tool_calls"])
                         history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
                         token_limit = 0
                         if hasattr(self, 'llm_manager') and self.llm_manager:
@@ -7086,7 +7092,8 @@ class CoreService:
             # The calls are the owner's: they go to this node's own UI and no
             # further. What a peer receives is their digest, which is what v2
             # signs, so it can verify the record without holding them (ADR-042).
-            "tool_calls": tool_calls or [],
+            # Clipped to what the UI's tool row shows (tool_detail.py).
+            "tool_calls": clip_tool_calls(tool_calls or []),
         }
         if mention_depth:
             # Inside the v3 preimage; absent means 0.
@@ -9138,7 +9145,7 @@ class CoreService:
                     "tokens_after_last_response_at": session_state.get("tokens_after_last_response_at"),
                     "thinking": thinking_text,
                     "thinking_tokens": thinking_tokens,
-                    "tool_calls": tool_calls_for_response if tool_calls_for_response else [],
+                    "tool_calls": clip_tool_calls(tool_calls_for_response) if tool_calls_for_response else [],
                     "user_msg_index": user_msg_index,
                     "assistant_msg_index": assistant_msg_index,
                     "context_breakdown": session_state.get("context_breakdown"),

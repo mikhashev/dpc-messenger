@@ -57,4 +57,12 @@ describe('clampDetail — a cap that says what it hid', () => {
     it('handles an empty output', () => {
         expect(clampDetail('')).toBe('');
     });
+
+    it('shows an output the backend already clipped exactly as it would have clipped it', () => {
+        // tool_detail.py sends the first EXPANDED_MAX characters and this notice.
+        const original = 'q'.repeat(EXPANDED_MAX + 9000);
+        const fromBackend = 'q'.repeat(EXPANDED_MAX) + '\n… 9000 more characters (full text in the agent log)';
+        expect(clampDetail(fromBackend)).toBe(clampDetail(original));
+        expect(clampDetail(fromBackend)).toContain('9000 more characters');
+    });
 });
