@@ -38,12 +38,9 @@ class FileChunkHandler(MessageHandler):
         if transfer:
             progress = (len(transfer.chunks_received) / transfer.total_chunks) * 100
 
-            # Log progress (every 10 chunks to avoid spam)
-            if chunk_index % 10 == 0:
-                self.logger.debug(f"FILE_CHUNK {chunk_index + 1}/{total_chunks} from {sender_node_id} ({progress:.1f}%)")
-
-            # Broadcast progress updates (every 5% to balance responsiveness vs spam)
+            # Log and broadcast progress every 5%: every 10 chunks was 12 700 lines for an 8 GB file
             if chunk_index % max(1, transfer.total_chunks // 20) == 0 or chunk_index == transfer.total_chunks - 1:
+                self.logger.debug(f"FILE_CHUNK {chunk_index + 1}/{total_chunks} from {sender_node_id} ({progress:.1f}%)")
                 await self.service.local_api.broadcast_event("file_transfer_progress", {
                     "transfer_id": transfer_id,
                     "filename": transfer.filename,
