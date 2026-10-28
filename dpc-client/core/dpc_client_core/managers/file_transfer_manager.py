@@ -1623,6 +1623,11 @@ class FileTransferManager:
                 "status": "completed"
             }
 
+            # A plain file keeps the path it was saved under, so the chat can
+            # show it in its folder. Image and voice take theirs below.
+            if not is_image and not is_voice and save_to_disk and file_path:
+                attachment["file_path"] = str(file_path)
+
             # Add image-specific fields
             if is_image:
                 # Only include file_path if file was actually saved to disk

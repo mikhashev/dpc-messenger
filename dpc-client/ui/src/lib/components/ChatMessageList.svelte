@@ -11,6 +11,17 @@
   import { agentLiveTools, agentLiveAgentIds } from '$lib/coreService';
   import { dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import type { Message, Mention } from '$lib/types.js';
+  import { revealItemInDir } from '@tauri-apps/plugin-opener';
+  import { revealInFolder } from '$lib/utils/revealInFolder';
+
+  // "Show in folder" failures, by the path that failed (file gone, no file manager).
+  let revealErrors = $state<Record<string, string>>({});
+
+  async function showInFolder(path: string) {
+    const failure = await revealInFolder(path, revealItemInDir);
+    const { [path]: _cleared, ...rest } = revealErrors;
+    revealErrors = failure ? { ...rest, [path]: failure } : rest;
+  }
 
   // Whose agent ran these calls. A tool call carries its input, its full
   // output and the round's reasoning — the owner's data (ADR-042). Records
@@ -279,7 +290,19 @@
                         • {attachment.status}
                       {/if}
                     </div>
+                    {#if attachment.file_path && revealErrors[attachment.file_path]}
+                      <div class="file-reveal-error">{revealErrors[attachment.file_path]}</div>
+                    {/if}
                   </div>
+                  {#if attachment.file_path}
+                    {@const savedPath = attachment.file_path}
+                    <button
+                      type="button"
+                      class="file-reveal-btn"
+                      title={savedPath}
+                      onclick={() => showInFolder(savedPath)}
+                    >Show in folder</button>
+                  {/if}
                 </div>
               {/if}
             {/each}
@@ -496,6 +519,27 @@
 
   .file-meta {
     color: #4a4a4a;
+    font-size: 12px;
+    margin-top: 4px;
+  }
+
+  .file-reveal-btn {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: #1a1a1a;
+    background: rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .file-reveal-btn:hover {
+    background: rgba(255, 255, 255, 0.8);
+  }
+
+  .file-reveal-error {
+    color: #b3261e;
     font-size: 12px;
     margin-top: 4px;
   }
