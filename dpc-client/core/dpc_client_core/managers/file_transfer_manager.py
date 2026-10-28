@@ -95,6 +95,11 @@ RECEIVE_ERROR_REASON = "receive_error"
 # same identity: received, still receiving, or sent it itself. The sender takes
 # it as a quiet success. Mike's word, 2026-10-25.
 ALREADY_RECEIVED_REASON = "already_received"
+# How long, and for how many ids, a receiver remembers a FILE_CANCEL it sent. A
+# sender that kept streaming (its loop had not seen the cancel yet) is answered
+# once more with the same reason per window, not once per chunk.
+CANCEL_MEMORY_S = 600.0
+CANCEL_MEMORY_MAX = 256
 # An identity field read off a peer's offer becomes a record id here: bounded.
 _MAX_IDENTITY_CHARS = 128
 
@@ -531,6 +536,8 @@ class FileTransferManager:
         # order seen (a dict, so the oldest half can go). Memory only: after a
         # restart a copy may be taken again, and its record still lands once.
         self._group_files_held: Dict[str, None] = {}
+        self._cancels_sent: Dict[str, tuple] = {}  # transfer_id -> (when, reason)
+        self._stray_chunk_ids: Dict[str, float] = {}  # transfer_id -> when first met
 
         # Configuration (from settings)
         self.chunk_size = int(settings.get("file_transfer", "chunk_size", "65536"))  # 64KB
@@ -961,6 +968,15 @@ class FileTransferManager:
         try:
             with self.using_file(transfer.file_path), open(transfer.file_path, 'rb') as f:
                 for chunk_index in range(transfer.total_chunks):
+                    # A cancel (the peer's, or ours) ends the send; the peer knows already
+                    if (self.active_transfers.get(transfer_id) is not transfer
+                            or transfer.status in (TransferStatus.CANCELLED, TransferStatus.FAILED)):
+                        logger.info(
+                            f"stopped sending {transfer.filename} at chunk "
+                            f"{chunk_index}/{transfer.total_chunks}: {transfer.status.value}"
+                        )
+                        break
+
                     # Read chunk
                     chunk_data = f.read(self.chunk_size)
                     chunk_base64 = base64.b64encode(chunk_data).decode('utf-8')
@@ -994,8 +1010,8 @@ class FileTransferManager:
 
                     # Configurable delay to control transfer speed (v0.11.1)
                     await asyncio.sleep(self.chunk_delay)
-
-            logger.info(f"All chunks sent for {transfer.filename}")
+                else:
+                    logger.info(f"All chunks sent for {transfer.filename}")
 
         except Exception as e:
             logger.error(f"Error sending chunks: {e}", exc_info=True)
@@ -1369,7 +1385,7 @@ class FileTransferManager:
 
         transfer = self.active_transfers.get(transfer_id)
         if not transfer or transfer.direction != "download":
-            logger.warning(f"FILE_CHUNK for unknown download: {transfer_id}")
+            await self._stray_chunk(node_id, transfer_id)
             return
         if transfer.finalizing:
             return
@@ -1449,6 +1465,32 @@ class FileTransferManager:
                 missing = self._missing_indices(transfer)
                 if missing:
                     await self._reask_missing(node_id, transfer, missing)
+
+    async def _stray_chunk(self, node_id: str, transfer_id: str) -> None:
+        """A FILE_CHUNK for a download we do not hold.
+
+        The first one per id and window is logged; when we cancelled the id
+        ourselves the sender is told again with the reason we sent. The rest
+        are dropped at DEBUG. An id we never sent a FILE_CANCEL for gets no
+        answer: no reason word in DPTP §3.11 says "unknown transfer".
+        """
+        now = _monotonic()
+        for memory, when_of in ((self._cancels_sent, lambda v: v[0]), (self._stray_chunk_ids, lambda v: v)):
+            for old in [k for k, v in memory.items() if now - when_of(v) > CANCEL_MEMORY_S]:
+                del memory[old]
+        if transfer_id in self._stray_chunk_ids:
+            logger.debug(f"FILE_CHUNK for unknown download dropped: {transfer_id}")
+            return
+        if len(self._stray_chunk_ids) >= CANCEL_MEMORY_MAX:
+            del self._stray_chunk_ids[next(iter(self._stray_chunk_ids))]
+        self._stray_chunk_ids[transfer_id] = now
+        sent = self._cancels_sent.get(transfer_id)
+        if sent is None:
+            logger.warning(f"FILE_CHUNK for unknown download: {transfer_id}")
+            return
+        reason = sent[1]
+        logger.warning(f"FILE_CHUNK for a download cancelled here ({reason}): {transfer_id}, telling the sender again")
+        await self._send_file_cancel(node_id, transfer_id, reason)
 
     async def _finalize_download(self, node_id: str, transfer: FileTransfer):
         """Finalize download: verify the hash of the file on disk, rename it into place."""
@@ -1799,6 +1841,9 @@ class FileTransferManager:
                                 denial_reason: Optional[str] = None):
         """Send FILE_CANCEL message to peer (gracefully handles disconnected peer)."""
         payload = {"transfer_id": transfer_id, "reason": reason}
+        self._cancels_sent[transfer_id] = (_monotonic(), reason)
+        if len(self._cancels_sent) > CANCEL_MEMORY_MAX:
+            del self._cancels_sent[next(iter(self._cancels_sent))]
         if denial_reason:
             payload["denial_reason"] = denial_reason
         try:
