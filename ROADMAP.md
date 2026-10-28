@@ -31,9 +31,9 @@ measured both from git and found the number had no source.
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 proposed · ADR-046 accepted | 201 | 39 |
 | **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 proposed · ADR-046 accepted | 293 | 76 |
 | **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 239 | 54 |
-| **reach** | ADR-035 accepted · ADR-043 proposed | 53 | 13 |
+| **reach** | ADR-035 accepted · ADR-043 proposed | 53 | 14 |
 
-**Observation debt: 234 under an axis + 19 in entries that carry none = 253.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
+**Observation debt: 235 under an axis + 19 in entries that carry none = 254.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
 Not yet placed: 130 of 1065 board entries carry no axis, and a guessed one would report coverage this does not have.
 
