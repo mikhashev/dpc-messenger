@@ -18,7 +18,7 @@ class FileChunkHandler(MessageHandler):
         Flow:
         1. Verify transfer exists and is active
         2. Write the chunk at its offset in the partial file (no bytes kept in memory)
-        3. Track progress
+        3. Track progress (the manager sends file_transfer_progress on a time cadence)
         4. When all chunks received → finalize download
 
         Args:
@@ -33,23 +33,11 @@ class FileChunkHandler(MessageHandler):
         file_transfer_manager = self.service.file_transfer_manager
         await file_transfer_manager.handle_file_chunk(sender_node_id, payload)
 
-        # Get transfer for progress calculation
+        # The log keeps a 5 % cadence: every 10 chunks was 12 700 lines for an 8 GB file
         transfer = file_transfer_manager.active_transfers.get(transfer_id)
-        if transfer:
-            progress = (len(transfer.chunks_received) / transfer.total_chunks) * 100
-
-            # Log and broadcast progress every 5%: every 10 chunks was 12 700 lines for an 8 GB file
+        if transfer and isinstance(chunk_index, int):
             if chunk_index % max(1, transfer.total_chunks // 20) == 0 or chunk_index == transfer.total_chunks - 1:
+                progress = (len(transfer.chunks_received) / transfer.total_chunks) * 100
                 self.logger.debug(f"FILE_CHUNK {chunk_index + 1}/{total_chunks} from {sender_node_id} ({progress:.1f}%)")
-                await self.service.local_api.broadcast_event("file_transfer_progress", {
-                    "transfer_id": transfer_id,
-                    "filename": transfer.filename,
-                    "node_id": sender_node_id,
-                    "direction": transfer.direction,
-                    "progress_percent": round(progress, 1),  # Match upload side field name
-                    "chunks_received": len(transfer.chunks_received),
-                    "total_chunks": transfer.total_chunks,
-                    "status": "transferring"
-                })
 
         return None

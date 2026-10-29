@@ -58,6 +58,7 @@ from enum import Enum
 
 from ..firewall import FILE_TRANSFER_PROVED_CONNECTION_DEFAULT, FILE_TRANSFER_PROVED_CONNECTION_KEY
 from ..p2p_manager import peer_proof
+from .transfer_speed import TransferSpeed
 
 if TYPE_CHECKING:
     from ..p2p_manager import P2PManager
@@ -331,6 +332,8 @@ class FileTransfer:
     # deadline (OFFER_ANSWER_DEADLINE_S), on an upload the sender's release
     # (UNANSWERED_UPLOAD_RELEASE_S). Stopped by the answer or by leaving the table.
     answer_timer: Any = field(default=None, repr=False, compare=False)  # asyncio.Task
+    # Bytes moved, speed and progress-event cadence; from the first chunk, either direction.
+    speed: Optional[TransferSpeed] = field(default=None, repr=False, compare=False)
 
 
 class _TransferTable(dict):
@@ -965,6 +968,7 @@ class FileTransferManager:
         # Send chunks. The file is held until it is closed: on Windows a
         # FILE_COMPLETE that arrives during the last chunk's pause could not
         # delete it, and the error took the sender's own message with it.
+        speed = transfer.speed = TransferSpeed(_monotonic())
         try:
             with self.using_file(transfer.file_path), open(transfer.file_path, 'rb') as f:
                 for chunk_index in range(transfer.total_chunks):
@@ -996,8 +1000,10 @@ class FileTransferManager:
                     if transfer.progress_callback:
                         transfer.progress_callback(transfer_id, chunk_index + 1, transfer.total_chunks)
 
-                    # Broadcast progress to UI (every 10 chunks to avoid spam)
-                    if self.local_api and (chunk_index % 10 == 0 or chunk_index == transfer.total_chunks - 1):
+                    # Progress to the UI on a time cadence (transfer_speed.py)
+                    now = _monotonic()
+                    speed.add(len(chunk_data), now)
+                    if self.local_api and speed.event_due(now, chunk_index == transfer.total_chunks - 1):
                         await self.local_api.broadcast_event("file_transfer_progress", {
                             "transfer_id": transfer_id,
                             "node_id": node_id,
@@ -1005,7 +1011,8 @@ class FileTransferManager:
                             "direction": "upload",
                             "chunks_sent": chunk_index + 1,
                             "total_chunks": transfer.total_chunks,
-                            "progress_percent": int(((chunk_index + 1) / transfer.total_chunks) * 100)
+                            "progress_percent": int(((chunk_index + 1) / transfer.total_chunks) * 100),
+                            **speed.fields(transfer.size_bytes),
                         })
 
                     # Configurable delay to control transfer speed (v0.11.1)
@@ -1452,8 +1459,16 @@ class FileTransferManager:
         if transfer.progress_callback:
             transfer.progress_callback(transfer_id, len(transfer.chunks_received), transfer.total_chunks)
 
+        # Decided before the progress event's await, so a chunk handled
+        # meanwhile in another task cannot make two tasks finalize.
+        complete = len(transfer.chunks_received) == transfer.total_chunks
+        # Before the finalize below: it takes the transfer out of the table
+        await self._report_receive_progress(node_id, transfer, len(chunk_data))
+        if self.active_transfers.get(transfer_id) is not transfer:
+            return  # cancelled while the event was on its way
+
         # Check if complete (all chunks received and verified)
-        if len(transfer.chunks_received) == transfer.total_chunks:
+        if complete:
             await self._finalize_download(node_id, transfer)
             return
 
@@ -1465,6 +1480,28 @@ class FileTransferManager:
                 missing = self._missing_indices(transfer)
                 if missing:
                     await self._reask_missing(node_id, transfer, missing)
+
+    async def _report_receive_progress(self, node_id: str, transfer: FileTransfer, nbytes: int) -> None:
+        """Count a written chunk; send `file_transfer_progress` when the time cadence says so."""
+        now = _monotonic()
+        if transfer.speed is None:
+            transfer.speed = TransferSpeed(now)
+        speed = transfer.speed
+        speed.add(nbytes, now)
+        received = len(transfer.chunks_received)
+        if not self.local_api or not speed.event_due(now, received == transfer.total_chunks):
+            return
+        await self.local_api.broadcast_event("file_transfer_progress", {
+            "transfer_id": transfer.transfer_id,
+            "filename": transfer.filename,
+            "node_id": node_id,
+            "direction": transfer.direction,
+            "progress_percent": round(received / transfer.total_chunks * 100, 1),  # the upload side's name
+            "chunks_received": received,
+            "total_chunks": transfer.total_chunks,
+            "status": "transferring",
+            **speed.fields(transfer.size_bytes),
+        })
 
     async def _stray_chunk(self, node_id: str, transfer_id: str) -> None:
         """A FILE_CHUNK for a download we do not hold.

@@ -5,6 +5,7 @@
   import Toast from './Toast.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
   import { alwaysAllowLabel, alwaysAllowLimits, offerQuestion, senderLabel } from '$lib/fileTransferPermission';
+  import { speedAndTimeLeft } from '$lib/utils/transferSpeed';
 
   // Props (Svelte 5 runes mode)
   let {
@@ -435,10 +436,11 @@
           </button>
         </div>
         {#if transfer.progress !== undefined}
+          {@const rate = speedAndTimeLeft(transfer)}
           <div class="progress-bar">
             <div class="progress-fill" style="width: {transfer.progress}%"></div>
           </div>
-          <span class="progress-text">{transfer.progress}%</span>
+          <span class="progress-text">{transfer.progress}%{rate ? ` · ${rate}` : ''}</span>
         {/if}
       </div>
     {/each}

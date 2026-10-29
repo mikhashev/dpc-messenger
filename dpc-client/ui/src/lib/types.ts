@@ -160,6 +160,8 @@ export interface FileTransfer {
     status: 'pending' | 'transferring' | 'complete' | 'cancelled' | 'error';
     size_bytes?: number;
     mime_type?: string;
+    bytes_per_second?: number;     // From file_transfer_progress: speed over the last 5 s
+    seconds_left?: number | null;  // From file_transfer_progress: null while the speed is not known
 }
 
 // --- Group Chat ---
@@ -358,6 +360,8 @@ export interface FileTransferProgressEvent {
     progress_percent: number;
     bytes_sent?: number;
     bytes_total?: number;
+    bytes_per_second?: number;
+    seconds_left?: number | null;
 }
 
 export interface FileTransferCompleteEvent {
