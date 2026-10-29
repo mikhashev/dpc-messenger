@@ -103,6 +103,7 @@ def test_unlink_still_clears_everything():
 
 def _service(agent, bridge):
     svc = TelegramService.__new__(TelegramService)
+    svc._telegram_link_locks = {}
     manager = SimpleNamespace(_telegram_bridge=bridge)
     svc.restarted = []
     provider = SimpleNamespace(_managers={AGENT: manager})

@@ -52,6 +52,11 @@ class HubClient:
         # Token persistence
         self.token_cache = token_cache
 
+        # Held for a whole login: the token is set only once the OAuth flow ends,
+        # so a second press would otherwise start a second flow and a second
+        # callback server on the same port.
+        self._login_lock = asyncio.Lock()
+
         # Try to load cached tokens on initialization
         if self.token_cache:
             self._load_cached_tokens()
@@ -153,6 +158,9 @@ class HubClient:
         """
         Initiates OAuth login flow and registers cryptographic identity.
 
+        One login at a time: a second call waits for the first, then finds the
+        token set and returns through the "Already authenticated" branch.
+
         Args:
             provider: OAuth provider to use ('google' or 'github')
 
@@ -163,6 +171,11 @@ class HubClient:
 
         Updated to include automatic node registration after OAuth.
         """
+        async with self._login_lock:
+            await self._login_flow(provider)
+
+    async def _login_flow(self, provider: str):
+        """The body of login(); the caller holds self._login_lock."""
         # Validate provider
         supported_providers = ["google", "github"]
         if provider not in supported_providers:

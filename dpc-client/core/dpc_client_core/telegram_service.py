@@ -69,6 +69,8 @@ class TelegramService:
         self.telegram_manager = None
         self.telegram_bridge = None
         self._telegram_task: Optional[asyncio.Task] = None
+        # One lock per agent id, made on first use (see _telegram_link_lock).
+        self._telegram_link_locks: Dict[str, asyncio.Lock] = {}
 
         telegram_config = settings.get_telegram_config()
         if telegram_config.get('enabled', False):
@@ -380,66 +382,67 @@ class TelegramService:
     ) -> Dict[str, Any]:
         """Link an agent to Telegram with full configuration."""
         try:
-            from .dpc_agent.utils import AgentRegistry
+            async with self._telegram_link_lock(agent_id):
+                from .dpc_agent.utils import AgentRegistry
 
-            registry = AgentRegistry()
-            agent = registry.get_agent(agent_id)
-            if not agent:
-                return {"status": "error", "message": f"Agent not found: {agent_id}"}
+                registry = AgentRegistry()
+                agent = registry.get_agent(agent_id)
+                if not agent:
+                    return {"status": "error", "message": f"Agent not found: {agent_id}"}
 
-            # Editing a paused link is not resuming it. Linking enables, and on
-            # this screen the same button also saves an edit, so the paused
-            # state is carried across the write and only Enable lifts it.
-            stays_paused = bool(
-                agent.get("telegram_linked_at") or agent.get("telegram_bot_token")
-            ) and not agent.get("telegram_enabled", False)
+                # Editing a paused link is not resuming it. Linking enables, and on
+                # this screen the same button also saves an edit, so the paused
+                # state is carried across the write and only Enable lifts it.
+                stays_paused = bool(
+                    agent.get("telegram_linked_at") or agent.get("telegram_bot_token")
+                ) and not agent.get("telegram_enabled", False)
 
-            try:
-                registry.link_agent_to_telegram(
-                    agent_id=agent_id,
-                    bot_token=bot_token,
-                    chat_ids=chat_ids,
-                    event_filter=event_filter,
-                    max_events_per_minute=max_events_per_minute,
-                    cooldown_seconds=cooldown_seconds,
-                    transcription_enabled=transcription_enabled,
-                    unified_conversation=unified_conversation,
-                )
-            except ValueError as e:
-                return {"status": "error", "message": str(e)}
+                try:
+                    registry.link_agent_to_telegram(
+                        agent_id=agent_id,
+                        bot_token=bot_token,
+                        chat_ids=chat_ids,
+                        event_filter=event_filter,
+                        max_events_per_minute=max_events_per_minute,
+                        cooldown_seconds=cooldown_seconds,
+                        transcription_enabled=transcription_enabled,
+                        unified_conversation=unified_conversation,
+                    )
+                except ValueError as e:
+                    return {"status": "error", "message": str(e)}
 
-            if stays_paused:
-                registry.set_agent_telegram_enabled(agent_id, False)
-                await self._stop_agent_telegram_bridge(agent_id)
+                if stays_paused:
+                    registry.set_agent_telegram_enabled(agent_id, False)
+                    await self._stop_agent_telegram_bridge(agent_id)
+                    return {
+                        "status": "success",
+                        "message": (
+                            f"Agent {agent_id} Telegram configuration updated; "
+                            f"the link stays disabled"
+                        ),
+                        "agent_id": agent_id,
+                        "chat_ids": chat_ids,
+                        "telegram_enabled": False,
+                    }
+
+                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                if dpc_agent_provider:
+                    if hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
+                        await self._restart_agent_telegram_bridge(agent_id)
+                    else:
+                        try:
+                            await dpc_agent_provider._ensure_manager(agent_id=agent_id)
+                            logger.info("Started agent manager and Telegram bridge for %s", agent_id)
+                        except Exception as e:
+                            logger.warning("Could not start agent manager for %s: %s", agent_id, e)
+
                 return {
                     "status": "success",
-                    "message": (
-                        f"Agent {agent_id} Telegram configuration updated; "
-                        f"the link stays disabled"
-                    ),
+                    "message": f"Agent {agent_id} linked to Telegram successfully",
                     "agent_id": agent_id,
                     "chat_ids": chat_ids,
-                    "telegram_enabled": False,
+                    "telegram_enabled": True,
                 }
-
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if dpc_agent_provider:
-                if hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
-                    await self._restart_agent_telegram_bridge(agent_id)
-                else:
-                    try:
-                        await dpc_agent_provider._ensure_manager(agent_id=agent_id)
-                        logger.info("Started agent manager and Telegram bridge for %s", agent_id)
-                    except Exception as e:
-                        logger.warning("Could not start agent manager for %s: %s", agent_id, e)
-
-            return {
-                "status": "success",
-                "message": f"Agent {agent_id} linked to Telegram successfully",
-                "agent_id": agent_id,
-                "chat_ids": chat_ids,
-                "telegram_enabled": True,
-            }
         except Exception as e:
             logger.error("Failed to link agent to Telegram: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
@@ -503,8 +506,30 @@ class TelegramService:
             logger.debug("_get_telegram_bridge_for_conversation: %s", e)
         return None
 
+    def _telegram_link_lock(self, agent_id: str) -> asyncio.Lock:
+        """The lock that serialises everything starting or stopping this agent's bridge.
+
+        UI commands that touch a link run as tasks and can overlap with themselves
+        (local_api.slow_command). A start builds the bridge and then awaits it, so
+        two overlapping starts would leave one bridge orphaned and polling, and two
+        pollers on one bot token make Telegram answer 409 Conflict. A start that
+        overlaps a stop could leave a bridge running for a link marked disabled.
+        asyncio.Lock wakes waiters in arrival order, so the last press wins.
+
+        Not re-entrant: a path that holds it must call only _restart_agent_telegram_bridge
+        and _stop_agent_telegram_bridge, which do not take it, never another path
+        that does.
+        """
+        lock = self._telegram_link_locks.get(agent_id)
+        if lock is None:
+            lock = self._telegram_link_locks[agent_id] = asyncio.Lock()
+        return lock
+
     async def _restart_agent_telegram_bridge(self, agent_id: str) -> None:
-        """Restart Telegram bridge for a running agent with new configuration."""
+        """Restart Telegram bridge for a running agent with new configuration.
+
+        The caller holds _telegram_link_lock(agent_id).
+        """
         dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
         if not dpc_agent_provider or not hasattr(dpc_agent_provider, '_managers'):
             return
@@ -527,7 +552,10 @@ class TelegramService:
             logger.error("Error restarting Telegram bridge for agent %s: %s", agent_id, e, exc_info=True)
 
     async def _stop_agent_telegram_bridge(self, agent_id: str) -> None:
-        """Stop this agent's running bridge, if it has one."""
+        """Stop this agent's running bridge, if it has one.
+
+        The caller holds _telegram_link_lock(agent_id).
+        """
         dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
         if not dpc_agent_provider or not hasattr(dpc_agent_provider, "_managers"):
             return
@@ -554,49 +582,50 @@ class TelegramService:
         effect on the next boot and the bot would keep answering until then.
         """
         try:
-            from .dpc_agent.utils import AgentRegistry
+            async with self._telegram_link_lock(agent_id):
+                from .dpc_agent.utils import AgentRegistry
 
-            registry = AgentRegistry()
-            if not registry.get_agent(agent_id):
-                return {"status": "error", "message": f"Agent not found: {agent_id}"}
+                registry = AgentRegistry()
+                if not registry.get_agent(agent_id):
+                    return {"status": "error", "message": f"Agent not found: {agent_id}"}
 
-            try:
-                registry.set_agent_telegram_enabled(agent_id, enabled)
-            except ValueError as e:
-                return {"status": "error", "message": str(e)}
+                try:
+                    registry.set_agent_telegram_enabled(agent_id, enabled)
+                except ValueError as e:
+                    return {"status": "error", "message": str(e)}
 
-            if not enabled:
-                await self._stop_agent_telegram_bridge(agent_id)
-            else:
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider:
-                    if (
-                        hasattr(dpc_agent_provider, "_managers")
-                        and agent_id in dpc_agent_provider._managers
-                    ):
-                        await self._restart_agent_telegram_bridge(agent_id)
-                    else:
-                        try:
-                            await dpc_agent_provider._ensure_manager(agent_id=agent_id)
-                        except Exception as e:
-                            logger.warning(
-                                "Could not start agent manager for %s: %s", agent_id, e
-                            )
+                if not enabled:
+                    await self._stop_agent_telegram_bridge(agent_id)
+                else:
+                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                    if dpc_agent_provider:
+                        if (
+                            hasattr(dpc_agent_provider, "_managers")
+                            and agent_id in dpc_agent_provider._managers
+                        ):
+                            await self._restart_agent_telegram_bridge(agent_id)
+                        else:
+                            try:
+                                await dpc_agent_provider._ensure_manager(agent_id=agent_id)
+                            except Exception as e:
+                                logger.warning(
+                                    "Could not start agent manager for %s: %s", agent_id, e
+                                )
 
-            logger.info(
-                "Telegram link for agent %s is now %s",
-                agent_id, "enabled" if enabled else "disabled (configuration kept)",
-            )
-            return {
-                "status": "success",
-                "agent_id": agent_id,
-                "telegram_enabled": bool(enabled),
-                "message": (
-                    f"Telegram link enabled for {agent_id}"
-                    if enabled
-                    else f"Telegram link disabled for {agent_id}; its configuration is kept"
-                ),
-            }
+                logger.info(
+                    "Telegram link for agent %s is now %s",
+                    agent_id, "enabled" if enabled else "disabled (configuration kept)",
+                )
+                return {
+                    "status": "success",
+                    "agent_id": agent_id,
+                    "telegram_enabled": bool(enabled),
+                    "message": (
+                        f"Telegram link enabled for {agent_id}"
+                        if enabled
+                        else f"Telegram link disabled for {agent_id}; its configuration is kept"
+                    ),
+                }
         except Exception as e:
             logger.error(
                 "Failed to change the Telegram link state for %s: %s", agent_id, e, exc_info=True
@@ -606,21 +635,22 @@ class TelegramService:
     async def unlink_agent_telegram(self, agent_id: str) -> Dict[str, Any]:
         """Unlink an agent from Telegram (removes all Telegram configuration)."""
         try:
-            from .dpc_agent.utils import AgentRegistry
+            async with self._telegram_link_lock(agent_id):
+                from .dpc_agent.utils import AgentRegistry
 
-            registry = AgentRegistry()
-            agent = registry.get_agent(agent_id)
-            if not agent:
-                return {"status": "error", "message": f"Agent not found: {agent_id}"}
+                registry = AgentRegistry()
+                agent = registry.get_agent(agent_id)
+                if not agent:
+                    return {"status": "error", "message": f"Agent not found: {agent_id}"}
 
-            registry.unlink_agent_from_telegram(agent_id)
+                registry.unlink_agent_from_telegram(agent_id)
 
-            await self._stop_agent_telegram_bridge(agent_id)
+                await self._stop_agent_telegram_bridge(agent_id)
 
-            return {
-                "status": "success",
-                "message": f"Agent {agent_id} unlinked from Telegram",
-            }
+                return {
+                    "status": "success",
+                    "message": f"Agent {agent_id} unlinked from Telegram",
+                }
         except Exception as e:
             logger.error("Failed to unlink agent from Telegram: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
@@ -640,7 +670,8 @@ class TelegramService:
                         and hasattr(dpc_agent_provider, '_managers')
                         and agent_id in dpc_agent_provider._managers
                     ):
-                        await self._restart_agent_telegram_bridge(agent_id)
+                        async with self._telegram_link_lock(agent_id):
+                            await self._restart_agent_telegram_bridge(agent_id)
 
             return result
         except Exception as e:

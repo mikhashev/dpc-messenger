@@ -87,7 +87,9 @@ def slow_command(handler):
     holds back every request behind it on the same socket. Mark a handler that
     waits on something outside this process — a model, a peer, a remote API.
     Marking changes ordering: this command may finish after commands sent later,
-    so do not mark one whose effect a following command depends on.
+    so do not mark one whose effect a following command depends on. It also lets
+    two of the same command overlap, so a handler that must not overlap with
+    itself takes its own lock.
     """
     handler.dpc_slow = True
     return handler
