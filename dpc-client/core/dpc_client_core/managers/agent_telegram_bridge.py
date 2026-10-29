@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 
 from ..dpc_agent.events import AgentEvent, EventType
+from ..dpc_agent.run_gate import RunGate, StoppedWhileWaiting, turn_title
 from ..telegram_format import send_rendered, strip_markdown
 from ..telegram_footer import build_footer, select_balance_for_alias
 
@@ -116,6 +117,47 @@ class RateLimitConfig:
     """Configuration for rate limiting."""
     max_events_per_minute: int = 20
     cooldown_seconds: float = 3.0  # Minimum time between same-type events
+
+
+# Messages a person sends in a row become one agent run, not one run each.
+# The run starts once the chat has been quiet this long since the last message:
+# a thought split over several short messages, or a forward of several, arrives
+# within a second or two, and every second here is added to the answer to a
+# single message too, so it stays short. Messages that arrive while the agent
+# is busy elsewhere are gathered until its run gate frees, however long that is.
+BURST_QUIET_SECONDS = 3.0
+# A stream that never goes quiet still starts this long after its first message.
+BURST_CEILING_SECONDS = 30.0
+
+
+@dataclass
+class _BurstItem:
+    """One incoming message, holding its place in the chat's order.
+
+    The slot is taken on arrival and filled when the message is ready: a voice
+    message is ready once transcribed, a photo once downloaded.
+    """
+    kind: str  # "text" | "voice" | "photo"
+    update: Any
+    context: Any
+    sender_name: str
+    arrived_at: float
+    burst: Optional["_ChatBurst"] = None
+    ready: bool = False
+    dropped: bool = False
+    text: str = ""
+    image_base64: Optional[str] = None
+    caption: str = ""
+    attachment: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class _ChatBurst:
+    """The messages of one chat waiting for their run, in arrival order."""
+    items: List[_BurstItem] = field(default_factory=list)
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+    worker: Optional[asyncio.Task] = None
+    running: bool = False  # inside the agent's run, past the gate
 
 
 class AgentTelegramBridge:
@@ -211,6 +253,9 @@ class AgentTelegramBridge:
 
         # Consecutive network error counter for log suppression
         self._network_error_count = 0
+
+        # Messages gathered per chat until their run starts (BURST_QUIET_SECONDS).
+        self._bursts: Dict[str, _ChatBurst] = {}
 
         log.info(f"AgentTelegramBridge initialized for {len(allowed_chat_ids)} chat(s), "
                 f"filter={len(self.event_filter)} event types, transcription={transcription_enabled}")
@@ -427,6 +472,20 @@ class AgentTelegramBridge:
         if self._retry_task is not None and not self._retry_task.done():
             self._retry_task.cancel()
         self._retry_task = None
+
+        # Gathered messages die with the bridge; a run already started is the
+        # agent's and ends on its own.
+        current = asyncio.current_task()
+        for burst in list(self._bursts.values()):
+            for item in burst.items:
+                item.dropped = True
+            burst.items.clear()
+            burst.changed.set()
+            worker = burst.worker
+            if (worker is not None and worker is not current and not worker.done()
+                    and not burst.running):
+                worker.cancel()
+        self._bursts.clear()
 
         # Stop the application and updater
         if self._application:
@@ -803,6 +862,8 @@ Send a voice message and it will be transcribed and processed\\.
         # holds that slot for the length of a run is what left a shell approval
         # unanswerable from the phone that raised it. Serialisation of the runs
         # themselves now lives on the agent's run gate, not on this queue.
+        # Messages sent in a row are gathered into one run (_run_bursts);
+        # commands and buttons above never enter that gathering.
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message, block=False))
         application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message, block=False))
         application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message, block=False))
@@ -1294,8 +1355,19 @@ Send a voice message and it will be transcribed and processed\\.
         if callable(reset):
             reset(conversation_id)
 
+    def _conversation_id_for(self, chat_id: str) -> str:
+        """The conversation a Telegram chat writes into."""
+        return self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+
+    @staticmethod
+    def _sender_name_of(update) -> str:
+        """Sender attribution for history (shown in DPC chat UI)."""
+        tg_user = update.effective_user
+        tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
+        return f"{tg_display_name} (Telegram)"
+
     async def _handle_message(self, update, context):
-        """Handle incoming text message."""
+        """Handle incoming text message: it joins the chat's burst."""
         chat_id = str(update.effective_chat.id)
         message_text = update.message.text
 
@@ -1311,22 +1383,16 @@ Send a voice message and it will be transcribed and processed\\.
 
         await self._show_chat_action(context, chat_id, "typing")
 
-        # Build sender attribution for history (shown in DPC chat UI)
-        tg_user = update.effective_user
-        tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
-        sender_name = f"{tg_display_name} (Telegram)"
+        sender_name = self._sender_name_of(update)
 
         log.info(f"Processing Telegram message from chat {chat_id} ({sender_name}): {message_text[:50]}...")
 
+        conversation_id = self._conversation_id_for(chat_id)
         try:
-            # Use agent_id as conversation_id when unified_conversation is enabled,
-            # so Telegram messages share history with the DPC chat UI.
-            conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
             self._start_new_cc_chain(conversation_id)
 
             # Pattern D: Check if message is @CC-only (no @Ark) — skip Ark processing,
             # save to history and broadcast cc_agent_mention for real CC to pick up
-            import re
             _tg_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', message_text or '', re.IGNORECASE)}
             if "cc" in _tg_mentions and "ark" not in _tg_mentions:
                 log.info(f"@CC-only Telegram message in {conversation_id} — skipping Ark, broadcasting for CC")
@@ -1353,73 +1419,28 @@ Send a voice message and it will be transcribed and processed\\.
                         if self._unified_conversation:
                             await self._broadcast_history_to_ui(conversation_id)
                 return  # Skip Ark's process_message
-
-            # B1a: Save user message to monitor and broadcast to UI BEFORE agent
-            # processing, so the message appears in DPC UI immediately (not after response).
-            # B1b: Prefix sender_name so Ark sees message source (Telegram vs DPC UI).
-            if self._agent_manager and self._unified_conversation:
-                monitor = self._agent_manager._get_or_create_agent_monitor(conversation_id)
-                from dpc_client_core.dpc_agent.utils import utc_now_iso
-                monitor.add_message(
-                    role="user",
-                    content=message_text,
-                    timestamp=utc_now_iso(),
-                    sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
-                    sender_name=sender_name,
-                    source="telegram",
-                )
-                monitor.save_history()
-                await self._broadcast_history_to_ui(conversation_id)
-                skip_history = True
-            else:
-                skip_history = False
-
-            # Call the message handler (agent_manager.process_message)
-            response = await self._message_handler(
-                message=message_text,
-                conversation_id=conversation_id,
-                include_context=True,
-                sender_name=sender_name,
-                telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
-                _skip_history=skip_history,
-            )
-
-            # Send response (Markdown rendered as Telegram HTML, split if needed)
-            try:
-                await self._reply_markdown(update, response, conversation_id=conversation_id)
-            finally:
-                # Always push updated history to DPC chat UI in unified_conversation mode
-                if self._unified_conversation and self._agent_manager:
-                    await self._broadcast_history_to_ui(conversation_id)
-
         except Exception as e:
-            error_str = str(e)
             log.error(f"Error processing Telegram message: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error processing message: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+            return
 
-            # Check for context limit errors
-            if "too large" in error_str.lower() or "context" in error_str.lower() and "token" in error_str.lower():
-                await update.message.reply_text(
-                    "⚠️ *Context Limit Reached*\n\n"
-                    "The conversation has reached its token limit\\.\n\n"
-                    "Use `/newsession` to start a fresh conversation\\.",
-                    parse_mode="MarkdownV2"
-                )
-            else:
-                await update.message.reply_text(f"❌ Error processing message: {escape_markdown(error_str[:200])}", parse_mode="MarkdownV2")
+        item, owner = self._reserve_burst_slot(chat_id, "text", update, context, sender_name)
+        self._fill_burst_slot(item, text=message_text)
+        if owner:
+            await self._run_bursts(chat_id)
 
     async def _handle_voice_message(self, update, context):
         """
         Handle incoming voice message from Telegram with transcription.
 
-        Downloads the voice file, transcribes it using Whisper, and processes
-        the transcribed text through the agent.
+        Downloads the voice file, transcribes it using Whisper, and puts the
+        transcribed text into the chat's burst at the place the voice arrived.
 
         Args:
             update: Telegram Update object
             context: Telegram Context object
         """
         chat_id = str(update.effective_chat.id)
-        voice = update.message.voice
 
         # Check authorization — silent drop
         if chat_id not in self.allowed_chat_ids:
@@ -1430,6 +1451,23 @@ Send a voice message and it will be transcribed and processed\\.
         if not self._message_handler:
             await update.message.reply_text("⚠️ Message handler not configured. Cannot process voice message.")
             return
+
+        item, owner = self._reserve_burst_slot(
+            chat_id, "voice", update, context, self._sender_name_of(update))
+        transcription_text = None
+        try:
+            transcription_text = await self._transcribe_voice(update, context, chat_id)
+        finally:
+            if transcription_text:
+                self._fill_burst_slot(item, text=transcription_text)
+            else:
+                self._drop_burst_slot(item)
+        if owner:
+            await self._run_bursts(chat_id)
+
+    async def _transcribe_voice(self, update, context, chat_id: str) -> Optional[str]:
+        """The voice message's transcript, or None after telling the sender why not."""
+        voice = update.message.voice
 
         # Get voice metadata
         duration = voice.duration
@@ -1455,12 +1493,12 @@ Send a voice message and it will be transcribed and processed\\.
             # Transcribe if enabled
             if not self.transcription_enabled:
                 await update.message.reply_text("⚠️ Voice transcription is disabled.")
-                return
+                return None
 
             service = getattr(self._agent_manager, 'service', None)
             if not service or not hasattr(service, 'transcribe_audio'):
                 await update.message.reply_text("⚠️ Transcription service not available.")
-                return
+                return None
 
             with open(voice_path, "rb") as f:
                 audio_base64 = base64.b64encode(f.read()).decode("utf-8")
@@ -1476,40 +1514,19 @@ Send a voice message and it will be transcribed and processed\\.
 
             if not transcription_text:
                 await update.message.reply_text("⚠️ No speech detected in voice message.")
-                return
+                return None
 
             await update.message.reply_text(
                 f"📝 *Transcription:*\n{escape_markdown(transcription_text)}",
                 parse_mode="MarkdownV2"
             )
-
-            # Process transcription through agent
             await self._show_chat_action(context, chat_id, "typing")
-
-            tg_user = update.effective_user
-            tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
-            sender_name = f"{tg_display_name} (Telegram)"
-
-            conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
-            self._start_new_cc_chain(conversation_id)
-
-            response = await self._message_handler(
-                message=transcription_text,
-                conversation_id=conversation_id,
-                include_context=True,
-                sender_name=sender_name,
-                telegram_chat_id=chat_id,
-            )
-
-            try:
-                await self._reply_markdown(update, response, conversation_id=conversation_id)
-            finally:
-                if self._unified_conversation and self._agent_manager:
-                    await self._broadcast_history_to_ui(conversation_id)
+            return transcription_text
 
         except Exception as e:
             log.error(f"Error processing voice message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing voice message: {str(e)[:200]}")
+            return None
         finally:
             if voice_path:
                 try:
@@ -1521,10 +1538,12 @@ Send a voice message and it will be transcribed and processed\\.
         """
         Handle incoming photo message from Telegram.
 
-        Downloads the highest-resolution photo, encodes it as base64, and passes
-        it to the agent via process_message(). The agent's llm_adapter puts the
-        image in the turn's tools call where its provider serves images beside
-        tools, or injects a description of it as text (`DpcLlmAdapter._chat`).
+        Downloads the highest-resolution photo, encodes it as base64, and puts
+        it into the chat's burst. A run carries one image (`process_message`
+        takes one `image_base64`), so a photo is its own run, after the text
+        gathered before it. The agent's llm_adapter puts the image in the
+        turn's tools call where its provider serves images beside tools, or
+        injects a description of it as text (`DpcLlmAdapter._chat`).
         """
         chat_id = str(update.effective_chat.id)
 
@@ -1544,49 +1563,315 @@ Send a voice message and it will be transcribed and processed\\.
         log.info(f"Processing photo from chat {chat_id} (file_id={photo.file_id}, caption={caption[:50]!r})")
         await self._show_chat_action(context, chat_id, "typing")
 
+        item, owner = self._reserve_burst_slot(
+            chat_id, "photo", update, context, self._sender_name_of(update))
         try:
             # Download photo from Telegram
             file = await self._bot.get_file(photo.file_id)
             photo_bytes = await file.download_as_bytearray()
             image_base64 = base64.b64encode(bytes(photo_bytes)).decode("utf-8")
 
-            # Build sender attribution
-            tg_user = update.effective_user
-            tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
-            sender_name = f"{tg_display_name} (Telegram)"
-
-            # Use caption as message text; fall back to a generic prompt
-            message_text = caption if caption else "Please analyze this image."
-
-            conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
-            self._start_new_cc_chain(conversation_id)
-
+            conversation_id = self._conversation_id_for(chat_id)
             attachment = self._keep_incoming_photo(
                 conversation_id, bytes(photo_bytes), update.message.message_id
             )
-
-            response = await self._message_handler(
-                message=message_text,
-                conversation_id=conversation_id,
-                include_context=True,
-                sender_name=sender_name,
-                telegram_chat_id=chat_id,
+            self._fill_burst_slot(
+                item,
+                # Use caption as message text; fall back to a generic prompt
+                text=caption if caption else "Please analyze this image.",
                 image_base64=image_base64,
-                image_mime="image/jpeg",
-                image_caption=caption or None,
-                attachments=[attachment] if attachment else None,
+                caption=caption,
+                attachment=attachment,
             )
-
-            # Send response
-            try:
-                await self._reply_markdown(update, response, conversation_id=conversation_id)
-            finally:
-                if self._unified_conversation and self._agent_manager:
-                    await self._broadcast_history_to_ui(conversation_id)
-
         except Exception as e:
+            self._drop_burst_slot(item)
             log.error(f"Error processing photo message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing photo: {str(e)[:200]}")
+        if owner:
+            await self._run_bursts(chat_id)
+
+    # -- a burst: messages sent in a row become one run ------------------------
+
+    def _reserve_burst_slot(self, chat_id: str, kind: str, update, context,
+                            sender_name: str) -> tuple:
+        """Take the message's place in its chat's order, on arrival.
+
+        Returns the slot and whether this handler owns the burst, that is,
+        opened it and so runs it (`_run_bursts`) once its own message is ready.
+        """
+        burst = self._bursts.get(chat_id)
+        owner = burst is None
+        if owner:
+            burst = self._bursts[chat_id] = _ChatBurst()
+        item = _BurstItem(kind=kind, update=update, context=context,
+                          sender_name=sender_name, arrived_at=time.monotonic(), burst=burst)
+        burst.items.append(item)
+        burst.changed.set()
+        return item, owner
+
+    @staticmethod
+    def _fill_burst_slot(item: _BurstItem, **fields: Any) -> None:
+        """The message is ready to go into a run; a dropped slot stays dropped."""
+        if item.dropped:
+            return
+        for key, value in fields.items():
+            setattr(item, key, value)
+        item.ready = True
+        if item.burst is not None:
+            item.burst.changed.set()
+
+    @staticmethod
+    def _drop_burst_slot(item: _BurstItem) -> None:
+        """The message will not reach the agent (no speech, failed download)."""
+        item.dropped = True
+        burst = item.burst
+        if burst is not None:
+            burst.items[:] = [i for i in burst.items if i is not item]
+            burst.changed.set()
+
+    async def _run_bursts(self, chat_id: str) -> None:
+        """Run the chat's burst until nothing is left in it.
+
+        Each round waits for the chat to go quiet, then starts one run with
+        everything gathered by the moment the run actually starts. What arrives
+        during the run is the next round's.
+        """
+        burst = self._bursts.get(chat_id)
+        if burst is None:
+            return
+        burst.worker = asyncio.current_task()
+        try:
+            while burst.items:
+                await self._wait_for_burst_quiet(burst)
+                if not burst.items:
+                    break
+                try:
+                    await self._start_burst_run(chat_id, burst)
+                except Exception as e:
+                    # Never seen; without this a fault before the drain would
+                    # spin the loop on the same messages.
+                    log.error("Telegram burst for chat %s failed, %d message(s) not delivered: %s",
+                              chat_id, len(burst.items), e, exc_info=True)
+                    break
+        finally:
+            if self._bursts.get(chat_id) is burst:
+                del self._bursts[chat_id]
+
+    @staticmethod
+    async def _wait_for_burst_quiet(burst: _ChatBurst) -> None:
+        """Until the burst may start: quiet and every message ready, or the ceiling.
+
+        The ceiling starts the run only once its first message is ready; a
+        voice message still being transcribed keeps its place at the front.
+        """
+        while burst.items:
+            now = time.monotonic()
+            items = burst.items
+            settled = all(i.ready for i in items)
+            quiet_at = items[-1].arrived_at + BURST_QUIET_SECONDS
+            ceiling_at = items[0].arrived_at + BURST_CEILING_SECONDS
+            if settled and now >= quiet_at:
+                return
+            if items[0].ready and now >= ceiling_at:
+                return
+            deadlines = [ceiling_at] if items[0].ready else []
+            if settled:
+                deadlines.append(quiet_at)
+            timeout = max(0.0, min(deadlines) - now) if deadlines else None
+            burst.changed.clear()
+            try:
+                await asyncio.wait_for(burst.changed.wait(), timeout)
+            except asyncio.TimeoutError:
+                pass
+
+    @staticmethod
+    def _take_burst_batch(burst: _ChatBurst) -> List[_BurstItem]:
+        """What one run carries, taken out of the burst at the run's start.
+
+        The ready messages from the front, in order, up to a photo or a message
+        still being prepared; a photo at the front goes alone.
+        """
+        items = burst.items
+        if not items or not items[0].ready:
+            return []
+        if items[0].kind == "photo":
+            batch = [items[0]]
+        else:
+            batch = []
+            for item in items:
+                if not item.ready or item.kind == "photo":
+                    break
+                batch.append(item)
+        del items[:len(batch)]
+        return batch
+
+    async def _start_burst_run(self, chat_id: str, burst: _ChatBurst) -> None:
+        """Wait at the agent's run gate, drain the burst once through, run.
+
+        The bridge takes the gate itself, registered and stoppable the way
+        `process_message` registers, so a chat gathering behind a busy agent
+        shows as waiting and a Stop in it drops what was gathered. The
+        `process_message` called inside passes through the gate this task holds.
+        """
+        conversation_id = self._conversation_id_for(chat_id)
+        gate = getattr(self._agent_manager, "_run_gate", None) if self._agent_manager else None
+        outcome = None
+        if isinstance(gate, RunGate):
+            entry = {
+                "conversation_id": conversation_id,
+                "conversation_title": turn_title(
+                    getattr(self._agent_manager, "service", None), conversation_id),
+            }
+            try:
+                async with gate.hold(entry, stoppable=True):
+                    batch = self._take_burst_batch(burst)
+                    if batch:
+                        outcome = await self._run_burst_batch(chat_id, conversation_id, batch, burst)
+            except StoppedWhileWaiting:
+                await self._close_stopped_burst(conversation_id, burst)
+                return
+        else:
+            batch = self._take_burst_batch(burst)
+            if batch:
+                outcome = await self._run_burst_batch(chat_id, conversation_id, batch, burst)
+        if outcome is not None:
+            await self._answer_burst(conversation_id, *outcome)
+
+    @staticmethod
+    def _burst_message(batch: List[_BurstItem]) -> str:
+        """The request one run carries: a single message as it was written,
+        several under a line that says how many, each its own paragraph."""
+        if len(batch) == 1:
+            return batch[0].text
+        senders = {i.sender_name for i in batch}
+        parts = [f"[{len(batch)} messages sent in a row]"]
+        for item in batch:
+            parts.append(f"{item.sender_name}: {item.text}" if len(senders) > 1 else item.text)
+        return "\n\n".join(parts)
+
+    async def _run_burst_batch(self, chat_id: str, conversation_id: str,
+                               batch: List[_BurstItem], burst: _ChatBurst) -> tuple:
+        """Hand one batch to the agent; returns (batch, response, error)."""
+        last = batch[-1]
+        await self._show_chat_action(last.context, chat_id, "typing")
+        burst.running = True
+        try:
+            self._start_new_cc_chain(conversation_id)
+            if batch[0].kind == "photo":
+                photo = batch[0]
+                kwargs = dict(
+                    message=photo.text,
+                    image_base64=photo.image_base64,
+                    image_mime="image/jpeg",
+                    image_caption=photo.caption or None,
+                    attachments=[photo.attachment] if photo.attachment else None,
+                )
+            else:
+                message = self._burst_message(batch)
+                # B1a: Save user message to monitor and broadcast to UI BEFORE agent
+                # processing, so the message appears in DPC UI immediately (not after response).
+                # B1b: Prefix sender_name so Ark sees message source (Telegram vs DPC UI).
+                if self._agent_manager and self._unified_conversation:
+                    monitor = self._agent_manager._get_or_create_agent_monitor(conversation_id)
+                    from dpc_client_core.dpc_agent.utils import utc_now_iso
+                    monitor.add_message(
+                        role="user",
+                        content=message,
+                        timestamp=utc_now_iso(),
+                        sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
+                        sender_name=last.sender_name,
+                        source="telegram",
+                    )
+                    monitor.save_history()
+                    await self._broadcast_history_to_ui(conversation_id)
+                    skip_history = True
+                else:
+                    skip_history = False
+                kwargs = dict(message=message, _skip_history=skip_history)
+
+            # Call the message handler (agent_manager.process_message)
+            response = await self._message_handler(
+                conversation_id=conversation_id,
+                include_context=True,
+                sender_name=last.sender_name,
+                telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
+                **kwargs,
+            )
+            return batch, response, None
+        except Exception as e:
+            return batch, None, e
+        finally:
+            burst.running = False
+
+    async def _answer_burst(self, conversation_id: str, batch: List[_BurstItem],
+                            response: Optional[str], error: Optional[Exception]) -> None:
+        """One answer per run, as a reply to the last message it carried."""
+        update = batch[-1].update
+        if error is None:
+            # Send response (Markdown rendered as Telegram HTML, split if needed)
+            try:
+                await self._reply_markdown(update, response, conversation_id=conversation_id)
+            except Exception as e:
+                log.error(f"Error sending Telegram reply: {e}", exc_info=True)
+            finally:
+                # Always push updated history to DPC chat UI in unified_conversation mode
+                if self._unified_conversation and self._agent_manager:
+                    await self._broadcast_history_to_ui(conversation_id)
+            return
+
+        error_str = str(error)
+        try:
+            if batch[0].kind == "photo":
+                log.error(f"Error processing photo message: {error}", exc_info=error)
+                await update.message.reply_text(f"❌ Error processing photo: {error_str[:200]}")
+                return
+            log.error(f"Error processing Telegram message: {error}", exc_info=error)
+            # Check for context limit errors
+            if "too large" in error_str.lower() or "context" in error_str.lower() and "token" in error_str.lower():
+                await update.message.reply_text(
+                    "⚠️ *Context Limit Reached*\n\n"
+                    "The conversation has reached its token limit\\.\n\n"
+                    "Use `/newsession` to start a fresh conversation\\.",
+                    parse_mode="MarkdownV2"
+                )
+            else:
+                await update.message.reply_text(f"❌ Error processing message: {escape_markdown(error_str[:200])}", parse_mode="MarkdownV2")
+        except Exception as e:
+            log.error(f"Error sending Telegram error reply: {e}", exc_info=True)
+
+    async def _close_stopped_burst(self, conversation_id: str, burst: _ChatBurst) -> None:
+        """A Stop reached the chat while its burst waited at the gate: drop it all.
+
+        What `process_message` does for one message stopped in line, for the
+        whole burst: one record of what was sent, closed as stopped, and the
+        same notice as the answer. Messages still being prepared are dropped
+        with the rest.
+        """
+        items = list(burst.items)
+        burst.items.clear()
+        for item in items:
+            item.dropped = True
+        ready = [i for i in items if i.ready]
+        log.info("Stop dropped %d gathered Telegram message(s) in %s", len(items), conversation_id)
+        if not ready:
+            return
+        closer = getattr(self._agent_manager, "_close_turn_stopped_while_waiting", None)
+        if not callable(closer):
+            return
+        attachments = [i.attachment for i in ready if i.kind == "photo" and i.attachment]
+        try:
+            notice = closer(
+                message=self._burst_message(ready),
+                conversation_id=conversation_id,
+                attachments=attachments or None,
+                sender_name=ready[-1].sender_name,
+            )
+            await self._reply_markdown(ready[-1].update, notice, conversation_id=conversation_id)
+        except Exception as e:
+            log.error(f"Error closing a stopped Telegram burst: {e}", exc_info=True)
+        finally:
+            if self._unified_conversation and self._agent_manager:
+                await self._broadcast_history_to_ui(conversation_id)
 
     def _keep_incoming_photo(
         self, conversation_id: str, photo_bytes: bytes, message_id: int

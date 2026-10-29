@@ -99,6 +99,17 @@ def service_with_ui(answer: str = "approve", **extra):
 
 
 @pytest.fixture(autouse=True)
+def _telegram_bursts_start_at_once(monkeypatch):
+    """The agent's Telegram bridge waits for a quiet chat before it starts a run
+    (BURST_QUIET_SECONDS). A test that sends one message would sit that wait
+    out; here the windows are zero, and the tests of the gathering set their own."""
+    from dpc_client_core.managers import agent_telegram_bridge
+
+    monkeypatch.setattr(agent_telegram_bridge, "BURST_QUIET_SECONDS", 0.0)
+    monkeypatch.setattr(agent_telegram_bridge, "BURST_CEILING_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def _camoufox_binary_counts_as_present(monkeypatch):
     """browser.py refuses to launch while the Camoufox browser binary is not
     on disk (2026-10-21). CI installs the package and never the binary, and a

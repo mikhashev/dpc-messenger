@@ -28,6 +28,11 @@ On a waiting item only `other_chat` (the agent is in another chat's turn) or
 names the turn that holds the lock, one level and no further: its
 `conversation_id` and `wait_reason`, and for `room_busy` also its `agent_id`.
 
+A task that already holds a gate passes through it again without waiting. The
+Telegram bridge takes the agent's gate itself before it knows what the run will
+carry, so the messages that arrive while it waits go into that run, and the
+`process_message` it then calls must not wait for its own caller.
+
 Every change is pushed whole through the listener (`set_turn_listener`), which
 the service turns into the `agent_turn_updated` event. All state lives on the
 event loop's thread; an approval waits on an executor thread, and its update is
@@ -96,6 +101,8 @@ class RunGate:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[int] = None
         self._anonymous: List[Any] = []
+        # The task inside the hold; only that task passes through a second hold.
+        self._holder_task: Optional[asyncio.Task] = None
         _ALL_GATES.add(self)
 
     # -- the lock ----------------------------------------------------------
@@ -119,7 +126,15 @@ class RunGate:
         A `stoppable` waiter is one a person's Stop in its chat may take out of
         line (`stop_waiting`): the hold then raises `StoppedWhileWaiting` and
         its body never runs.
+
+        The task already holding the gate passes straight through: no entry,
+        no wait, the turn stays the outer hold's. Another task, even one
+        created inside the run, still waits.
         """
+        task = asyncio.current_task()
+        if task is not None and self._holder_task is task:
+            yield self
+            return
         self._bind_loop()
         entry = dict(entry)
         entry.setdefault("waiting_since", utc_now_iso())
@@ -162,6 +177,7 @@ class RunGate:
                 }
                 token = _HELD.set((self, self.turn))
             self.holder = entry
+            self._holder_task = task
             self._changed(entry)
             yield self
         finally:
@@ -169,6 +185,7 @@ class RunGate:
                 _HELD.reset(token)
             self.turn = None
             self.holder = None
+            self._holder_task = None
             self._lock.release()
             self._changed(entry)
 
