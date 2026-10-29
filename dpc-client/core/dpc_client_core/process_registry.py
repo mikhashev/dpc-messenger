@@ -127,7 +127,9 @@ history is the daily files, which are append-only.
 **Who reads it** (point 8). `ProcessRegistry.list_processes` is the one listing
 behind the local API command of that name and the agent tool `list_my_processes`;
 `cancel_by_agent` is the only door `kill_my_process` has, and it checks the
-spawn origin itself, never a pid's owner as a model states it.
+spawn origin itself, never a pid's owner as a model states it. `stop_commands_of`
+is the user's Kill of a running tool call (`dpc_agent/loop.py`): it ends only the
+children whose spawn origin is that call.
 
 Imports nothing beyond the standard library (psutil lazily) so that
 `run_service.py` can use it before anything else exists. The tree kills it needs
@@ -1325,24 +1327,57 @@ class ProcessRegistry:
                 self._warn_of_index_lock(entry, cwd)
         return ended
 
+    def stop_commands_of(
+        self,
+        origin: SpawnOrigin,
+        *,
+        kill_tree: Optional[Callable[[Any], str]] = None,
+        wait_s: float = 2.0,
+    ) -> List[ProcessEntry]:
+        """Kill the command children of one tool call, `stopped` with `ui_stop`:
+        the user's Kill abandoned that call, and what it started goes with it.
+
+        A child is the call's when it is an open `tool` entry whose spawn origin
+        is exactly `origin` (agent, conversation, tool, round). A subsystem woken
+        by the call is not (its owner is the backend), nor a child whose origin
+        was lost, nor anything an earlier call left running. A git child is
+        killed too, and the `.git/index.lock` it may leave is named in the log.
+        Returns the entries this call killed."""
+        if not origin.agent_id:
+            return []
+        if kill_tree is None:
+            kill_tree = _kill_tree_of
+        shielded = own_and_ancestor_pids()
+        ended: List[ProcessEntry] = []
+        for entry in self.open_entries("tool"):
+            if (entry.agent_id, entry.conversation_id, entry.tool, entry.round) != (
+                origin.agent_id, origin.conversation_id, origin.tool, origin.round,
+            ) or entry.pid in shielded:
+                continue
+            cwd = self._cwd_of(entry.pid)
+            if self._kill_command(entry, kill_tree, wait_s, ended, reason="stopped", stop="ui_stop") and _is_git(entry):
+                self._warn_of_index_lock(entry, cwd)
+        return ended
+
     def _kill_command(
         self, entry: ProcessEntry, kill_tree: Callable[[Any], str], wait_s: float, ended: List[ProcessEntry],
-        reason: str = "backend_stop",
+        reason: str = "backend_stop", stop: Optional[str] = None,
     ) -> Optional[str]:
         """Announce, kill, end with `reason`; returns the kill's verdict, None when
-        it had already ended. The orderly stop's and `cancel_by_agent`'s one path."""
+        it had already ended. The orderly stop's, `cancel_by_agent`'s and
+        `stop_commands_of`'s one path."""
         with self._lock:
             if self._open.get(entry.pid) is not entry:
                 return None
         handle = self.handle_of(entry.pid)
-        self.note_stop_sent(entry.pid, reason)
+        self.note_stop_sent(entry.pid, reason, stop)
         try:
             verdict = kill_tree(handle if handle is not None else entry.pid)
         except Exception as exc:
             verdict = f"the kill failed ({type(exc).__name__}: {exc})"
             logger.warning("process registry: could not kill pid %s (%s): %s", entry.pid, entry.launcher, exc)
         returncode = self._returncode_of(handle, wait_s)
-        done = self.end(entry.pid, returncode, reason=reason)
+        done = self.end(entry.pid, returncode, reason=reason, stop=stop)
         logger.debug("process registry: stopped pid %s (%s): %s", entry.pid, entry.launcher, verdict)
         if done is not None:
             ended.append(done)

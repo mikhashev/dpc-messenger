@@ -36,7 +36,7 @@ from .tool_ledger import record_attempt, sweep_unfinished
 from dpc_protocol.protocol import PeerRefused
 
 from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading
-from ..process_registry import SpawnOrigin, spawn_origin
+from ..process_registry import SpawnOrigin, get_registry, spawn_origin
 from .run_gate import note_turn
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
@@ -1124,6 +1124,9 @@ async def _chat_unless_killed(coro, kill_event: Optional[asyncio.Event]):
     closes the HTTP connection, and llama-server frees the slot when the client
     disconnects. Because `llm.chat` is abandoned before it returns, the usage
     row it writes afterwards is never written. Plain asyncio, same on every OS.
+
+    The loop wraps a tool call in it too (`_dispatch_round`): there the
+    cancelled task is only the await of a pool thread, see `_end_killed_call`.
     """
     if kill_event is None:
         return await coro
@@ -1150,6 +1153,153 @@ def _user_stop_end(kill_event: Optional[asyncio.Event]) -> str:
     """The `turn_end` of a turn the user stopped: a second press (the kill)
     outranks the first."""
     return "killed" if kill_event is not None and kill_event.is_set() else "stopped"
+
+
+# Appended as user-side text, as a guard's stop message is, when the user's Stop
+# ends the work: the one call after it writes the answer of the stopped turn.
+USER_STOP_SUMMARY_REQUEST = (
+    "The user pressed Stop. Do not call any tools and do not continue the work. "
+    "Write a short summary for the user instead: what was asked, what you did and "
+    "found so far, where exactly you stopped, and what is left to do."
+)
+
+# The result a call gets when the Stop came before it ran, so that every tool
+# call in the history has its result and the summary call is a valid request.
+NOT_RUN_AFTER_STOP = "Not run: the user pressed Stop before this call."
+
+
+def _end_killed_call(origin: SpawnOrigin) -> None:
+    """After a Kill abandoned a tool call: end the processes that call started.
+
+    Every tool runs on a `_DaemonToolPool` thread (an async handler on a loop of
+    its own inside it, `ToolRegistry.execute`), and a thread cannot be cancelled:
+    the Kill abandons the await, and the thread runs on until the tool returns,
+    its result discarded (its own outcome row still lands in tools.jsonl). What
+    can be ended is its children, through the process registry (ADR-046), and
+    only those whose spawn origin is this call. The kill waits for the tree to go
+    (`_kill_command`), so it runs on a thread of its own and the loop does not."""
+
+    def _run() -> None:
+        try:
+            ended = get_registry().stop_commands_of(origin)
+        except Exception:
+            log.warning("Kill: ending the processes of %s failed", origin.tool, exc_info=True)
+            return
+        if ended:
+            log.info(
+                "Kill: ended %d process(es) started by %s in round %d: %s",
+                len(ended), origin.tool, origin.round, ", ".join(str(e.pid) for e in ended),
+            )
+
+    threading.Thread(target=_run, name="dpc_agent_kill", daemon=True).start()
+
+
+async def _one_finalising_call(
+    llm: DpcLlmAdapter,
+    messages: List[Dict[str, Any]],
+    tools_sent: Optional[List[Dict[str, Any]]],
+    accumulated_usage: Dict[str, Any],
+    *,
+    cancel_on: Optional[asyncio.Event],
+    tool_choice: Optional[str] = None,
+    on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+    conversation_id: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    task_id: str = "",
+    observe_request: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """One call that ends a turn; None when `cancel_on` fired first and the call
+    was cancelled. A guard's stop is cancelled by the user's Stop; the user's
+    Stop's own summary only by the Kill."""
+    seen = observe_request(messages, tools_sent, reasoning_effort) if observe_request else None
+    row_id = None
+    extra = {"tool_choice": tool_choice} if tool_choice else {}
+    try:
+        chat_task = asyncio.ensure_future(llm.chat(
+            messages,
+            tools=tools_sent,
+            on_stream_chunk=on_stream_chunk,
+            conversation_id=conversation_id,
+            reasoning_effort=reasoning_effort,
+            task_id=task_id or None,
+            **extra,
+        ))
+        if cancel_on is not None:
+            cancel_task = asyncio.ensure_future(cancel_on.wait())
+            try:
+                await asyncio.wait({chat_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                cancel_task.cancel()
+            if not chat_task.done():
+                chat_task.cancel()
+                return None
+        final_msg, final_usage = await chat_task
+        row_id = (final_usage or {}).get("request_id")
+        accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
+        return final_msg or {}
+    finally:
+        prompt_divergence.log_observation(seen, row_id)
+
+
+async def _finalize_after_user_stop(
+    messages: List[Dict[str, Any]],
+    llm: DpcLlmAdapter,
+    on_stream_chunk: Optional[Callable[[str, str], None]],
+    conversation_id: Optional[str],
+    accumulated_usage: Dict[str, Any],
+    llm_trace: Dict[str, Any],
+    stopped_text: str,
+    *,
+    task_id: str = "",
+    tools: Optional[List[Dict[str, Any]]] = None,
+    reasoning_effort: Optional[str] = None,
+    observe_request: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+    keep_unexecuted: Optional[Callable[[str], Optional[str]]] = None,
+    kill_event: Optional[asyncio.Event] = None,
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """The user's Stop: the work ends, and one more call writes where it stopped.
+
+    `USER_STOP_SUMMARY_REQUEST` is appended as user-side text and the call goes
+    out with the loop's own tools and `tool_choice="none"`, as a guard's retry
+    does, so the cached prefix holds and no tool runs. Its answer is the turn's
+    answer, `turn_end` "stopped": the turn did not finish what it was asked.
+    Only the Kill cancels that call (`turn_end` "killed", `stopped_text`). When
+    the call fails or comes back empty, `stopped_text` with the reason stands
+    in for it, `turn_end` "stopped"."""
+    llm_trace["stopped_by_user"] = True
+    if kill_event is not None and kill_event.is_set():
+        llm_trace["turn_end"] = "killed"
+        return stopped_text, accumulated_usage, llm_trace
+    messages.append({"role": "user", "content": USER_STOP_SUMMARY_REQUEST})
+    try:
+        final_msg = await _one_finalising_call(
+            llm, messages, tools or None, accumulated_usage,
+            cancel_on=kill_event, tool_choice="none",
+            on_stream_chunk=on_stream_chunk, conversation_id=conversation_id,
+            reasoning_effort=reasoning_effort, task_id=task_id,
+            observe_request=observe_request,
+        )
+    except Exception as e:
+        log.warning("The summary call after the user's stop failed", exc_info=True)
+        llm_trace["turn_end"] = "stopped"
+        return (
+            f"{stopped_text}\n\nNo summary: the call that writes it failed ({type(e).__name__}).",
+            accumulated_usage, llm_trace,
+        )
+    if final_msg is None:
+        log.info("Agent killed by user during the summary call after a stop")
+        llm_trace["turn_end"] = "killed"
+        return stopped_text, accumulated_usage, llm_trace
+    llm_trace["turn_end"] = "stopped"
+    # A provider that does not take tool_choice may still write a call: not run.
+    unrun = _calls_in(final_msg, llm) if tools else []
+    answer = _answer_without_unrun_calls(
+        final_msg.get("content") or "", llm_trace, unrun, keep=keep_unexecuted,
+    )
+    answer = _strip_history_markers(_strip_role_boundaries(answer)).strip()
+    if not answer:
+        return f"{stopped_text}\n\nNo summary: the model's answer was empty.", accumulated_usage, llm_trace
+    return answer, accumulated_usage, llm_trace
 
 
 def _calls_in(msg: Dict[str, Any], llm: Any) -> List[Dict[str, Any]]:
@@ -1214,7 +1364,9 @@ async def _finalize_after_guard_stop(
     research the guard stopped cannot resume.
 
     Two exceptions: after ContextLimitGuard the call is skipped, and a
-    user stop during the call cancels it.
+    user stop during the call cancels it (a Kill during its tool round ends
+    the turn `killed`). The user's own Stop, with no guard, is
+    `_finalize_after_user_stop`, whose call only the Kill cancels.
 
     The trace's `turn_end` is marked where no answer comes back: `guard` for
     the stop message or fallback text that stands in for one, `stopped` (or
@@ -1249,34 +1401,13 @@ async def _finalize_after_guard_stop(
 
     async def _final_call(tools_sent, tool_choice=None):
         """One finalising call; None when the user stopped it."""
-        seen = observe_request(messages, tools_sent, reasoning_effort) if observe_request else None
-        row_id = None
-        extra = {"tool_choice": tool_choice} if tool_choice else {}
-        try:
-            chat_task = asyncio.ensure_future(llm.chat(
-                messages,
-                tools=tools_sent,
-                on_stream_chunk=on_stream_chunk,
-                conversation_id=conversation_id,
-                reasoning_effort=reasoning_effort,
-                task_id=task_id or None,
-                **extra,
-            ))
-            if stop_event is not None:
-                stop_task = asyncio.ensure_future(stop_event.wait())
-                try:
-                    await asyncio.wait({chat_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
-                finally:
-                    stop_task.cancel()
-                if not chat_task.done():
-                    chat_task.cancel()
-                    return None
-            final_msg, final_usage = await chat_task
-            row_id = (final_usage or {}).get("request_id")
-            accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
-            return final_msg or {}
-        finally:
-            prompt_divergence.log_observation(seen, row_id)
+        return await _one_finalising_call(
+            llm, messages, tools_sent, accumulated_usage,
+            cancel_on=stop_event, tool_choice=tool_choice,
+            on_stream_chunk=on_stream_chunk, conversation_id=conversation_id,
+            reasoning_effort=reasoning_effort, task_id=task_id,
+            observe_request=observe_request,
+        )
 
     try:
         final_msg = await _final_call(tools or None)
@@ -1322,6 +1453,11 @@ async def _finalize_after_guard_stop(
             # answer, so the record is an ordinary one (no turn_end).
             llm_trace["guard_answered"] = True
             return answer, accumulated_usage, llm_trace
+    except CallKilled:
+        log.info("Agent killed by user during the finalising round's tool call")
+        llm_trace["stopped_by_user"] = True
+        llm_trace["turn_end"] = "killed"
+        return user_stopped, accumulated_usage, llm_trace
     except Exception:
         log.warning("Failed to get final response after guard stop", exc_info=True)
     llm_trace["turn_end"] = "guard"
@@ -1348,9 +1484,12 @@ async def run_llm_loop(
     """
     Core LLM-with-tools loop.
 
-    `kill_event` (second Stop press) abandons the model call that is in flight
-    instead of waiting for it: the call task is cancelled, the HTTP request
-    closes, and no usage row is written because `llm.chat` never returns.
+    `stop_event` (Stop) ends the work at the next round or between two tool
+    calls, and one more call, tools off, writes the summary of where it stopped
+    (`_finalize_after_user_stop`). `kill_event` (second Stop press) ends the
+    loop at once: a model call in flight is cancelled, the HTTP request closes,
+    and no usage row is written because `llm.chat` never returns; a tool call in
+    flight is abandoned and the processes it started are ended (`_end_killed_call`).
 
     Sends messages to LLM, executes tool calls, repeats until final response.
 
@@ -1492,11 +1631,15 @@ async def run_llm_loop(
     async def _dispatch_round(target, calls, round_reasoning) -> bool:
         """Run one round's calls through the registry and record each result
         in `target`, the trace and the live view; False when the user stopped
-        between calls. One function for the loop and for the round a guard's
-        finalising call asks for, so that round passes the same firewall,
-        approvals and ledger as every other."""
+        between calls (the calls not run get `NOT_RUN_AFTER_STOP` as their
+        result), CallKilled when the Kill came while a call ran. One function
+        for the loop and for the round a guard's finalising call asks for, so
+        that round passes the same firewall, approvals and ledger as every other."""
         for position, tc in enumerate(calls):
             if stop_event and stop_event.is_set():
+                for unrun in calls[position:]:
+                    target.append({"role": "tool", "tool_call_id": unrun.get("id"),
+                                   "content": NOT_RUN_AFTER_STOP})
                 return False
             tool_name = tc["function"]["name"]
             # Emit the tool's arguments (JSON) so the live row shows WHAT the agent is
@@ -1515,13 +1658,21 @@ async def run_llm_loop(
                 # keeps more than it returns (store_beside_call).
                 _loop_ctx.tool_output_turn = turn_id
                 _loop_ctx.tool_output_name = f"r{round_idx}-{position}"
-            exec_result = await _execute_with_timeout(
-                tools, tc, logs_dir, timeout, task_id,
-                round_number=round_idx,
-                session_id=conversation_id or "",
-                ctx=_loop_ctx,
-                agent_id=_divergence_agent,
-            )
+            try:
+                exec_result = await _chat_unless_killed(_execute_with_timeout(
+                    tools, tc, logs_dir, timeout, task_id,
+                    round_number=round_idx,
+                    session_id=conversation_id or "",
+                    ctx=_loop_ctx,
+                    agent_id=_divergence_agent,
+                ), kill_event)
+            except CallKilled:
+                # The origin `_execute_with_timeout` gave the call's spawns.
+                _end_killed_call(SpawnOrigin(
+                    agent_id=_divergence_agent, conversation_id=conversation_id or "",
+                    tool=tool_name, round=round_idx,
+                ))
+                raise
 
             truncated_result = _truncate_tool_result(exec_result["result"])
             safe_result = _sanitize_tool_result(truncated_result)
@@ -1595,9 +1746,21 @@ async def run_llm_loop(
             if stop_event and stop_event.is_set():
                 log.info("Agent stopped by user after %d rounds", round_idx - 1)
                 llm_trace["stopped_by_user"] = True
-                llm_trace["turn_end"] = _user_stop_end(kill_event)
                 llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
-                return f"⚠️ Stopped by user after {round_idx - 1} rounds.", accumulated_usage, llm_trace
+                stopped_text = f"⚠️ Stopped by user after {round_idx - 1} rounds."
+                if round_idx == 1:
+                    # Nothing was done yet, so there is nothing to summarise.
+                    llm_trace["turn_end"] = _user_stop_end(kill_event)
+                    return stopped_text, accumulated_usage, llm_trace
+                return await _finalize_after_user_stop(
+                    messages, llm, on_stream_chunk, conversation_id,
+                    accumulated_usage, llm_trace, stopped_text,
+                    task_id=task_id, tools=tool_schemas,
+                    reasoning_effort=reasoning_effort,
+                    observe_request=_observe_request,
+                    keep_unexecuted=_keep_unexecuted,
+                    kill_event=kill_event,
+                )
 
             # RoundLimitGuard + BudgetLimitGuard + ContextLimitGuard checkpoint.
             # The context pair is written here rather than after the call, because
@@ -1877,12 +2040,32 @@ async def run_llm_loop(
                 llm_trace["assistant_notes"].append(thinking.strip()[:320])
 
             # Execute tool calls
-            if not await _dispatch_round(messages, tool_calls, round_reasoning):
+            try:
+                dispatched = await _dispatch_round(messages, tool_calls, round_reasoning)
+            except CallKilled:
+                log.warning("Agent killed by user during a tool call in round %d", round_idx)
+                llm_trace["stopped_by_user"] = True
+                llm_trace["turn_end"] = "killed"
+                llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
+                return (
+                    f"⚠️ Stopped by user: killed during a tool call in round {round_idx} "
+                    f"(the tool's result was not waited for).",
+                    accumulated_usage, llm_trace,
+                )
+            if not dispatched:
                 log.info("Agent stopped by user mid-round %d (between tool calls)", round_idx)
                 llm_trace["stopped_by_user"] = True
-                llm_trace["turn_end"] = _user_stop_end(kill_event)
                 llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
-                return f"⚠️ Stopped by user after {round_idx} rounds.", accumulated_usage, llm_trace
+                return await _finalize_after_user_stop(
+                    messages, llm, on_stream_chunk, conversation_id,
+                    accumulated_usage, llm_trace,
+                    f"⚠️ Stopped by user after {round_idx} rounds.",
+                    task_id=task_id, tools=tool_schemas,
+                    reasoning_effort=reasoning_effort,
+                    observe_request=_observe_request,
+                    keep_unexecuted=_keep_unexecuted,
+                    kill_event=kill_event,
+                )
 
             # Snapshot this round's tool results so LoopGuard can tell a
             # genuinely-stuck poll (identical output) from a long-running one
