@@ -442,10 +442,12 @@ class TelegramBridge:
                                 monitor = agent_manager._agent_monitors.get(agent_id)
                                 tokens_used = monitor.current_token_count if monitor else 0
                                 token_limit = monitor.token_limit if monitor else 0
+                                # messages is the newest page; message_count stays the
+                                # whole live history's, as in the answer it came from.
                                 await self.service.local_api.broadcast_event("agent_history_updated", {
                                     "conversation_id": agent_id,
                                     "messages": messages,
-                                    "message_count": len(messages),
+                                    "message_count": history_result.get("message_count", len(messages)),
                                     "tokens_used": tokens_used,
                                     "token_limit": token_limit,
                                     "thinking": None,
