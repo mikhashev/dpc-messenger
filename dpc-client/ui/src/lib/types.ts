@@ -664,6 +664,8 @@ export interface KnowledgeCommitResultEvent {
 export interface AIResponseWithImageEvent {
     conversation_id: string;
     response: string;
+    /** An agent's name, as its stored answer carries it; absent for an AI chat. */
+    sender_name?: string;
     provider?: string;
     model?: string;
 }

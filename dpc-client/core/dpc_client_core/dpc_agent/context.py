@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from typing import Any
@@ -555,7 +556,60 @@ def history_body(record: Dict[str, Any]) -> str:
     if record.get("turn_end") == "failed":
         lines = content.strip().splitlines()
         return lines[0][:FAILED_TURN_REPLAY_CHARS] if lines else ""
+    markers = image_attachment_markers(record)
+    if markers:
+        return (content + "\n\n" if content else "") + "\n".join(markers)
     return content
+
+
+_MARKER_NAME_CHARS = 80
+_CONVERSATION_FILE = re.compile(r"conversations[\\/]([^\\/]+)[\\/]files[\\/](.+)$")
+
+
+def _marker_text(value: Any) -> str:
+    """A name from a record as one short, bracket-free run of text. A peer picks
+    the filename of a group image, and it is read by the model as part of the
+    prompt, so a newline or a closing bracket must not end the marker early."""
+    text = re.sub(r"[\x00-\x1f\x7f\[\]]", " ", str(value))
+    return " ".join(text.split())[:_MARKER_NAME_CHARS]
+
+
+def image_attachment_markers(record: Dict[str, Any]) -> List[str]:
+    """One line per image attached to a history record, for the model to read.
+
+    Only the picture's turn carries the picture (the vision input); every later
+    turn replays the record's text, which for "what is this?" says nothing of
+    an image. The marker names the file, its size in pixels when known, and where
+    it is kept, as a path under the DPC home — the folder above `agents/` in
+    the sandbox path the runtime section shows — so the agent can open it again
+    with describe_image without the machine's user name travelling in the prompt.
+    A record whose image was not kept on disk says so. The thumbnail and the
+    bytes never go in. A function of the record alone, like `history_body`.
+    """
+    out: List[str] = []
+    for att in record.get("attachments") or []:
+        if not isinstance(att, dict) or att.get("type") != "image":
+            continue
+        name = _marker_text(att.get("filename") or "image")
+        dims = att.get("dimensions")
+        size = ""
+        if isinstance(dims, dict) and dims.get("width") and dims.get("height"):
+            size = f", {_marker_text(dims['width'])}x{_marker_text(dims['height'])}"
+        file_path = att.get("file_path")
+        if not file_path:
+            out.append(f"[image: {name}{size}; not kept on disk, it was visible in that turn only]")
+            continue
+        found = _CONVERSATION_FILE.search(str(file_path))
+        if found:
+            where = "conversations/{}/files/{}".format(
+                _marker_text(found.group(1)),
+                "/".join(_marker_text(part) for part in re.split(r"[\\/]", found.group(2))))
+        else:
+            where = f"this chat's files folder, as {name}"
+        out.append(
+            f"[image: {name}{size}; kept at {where} under the DPC home "
+            "(the folder above agents/ in your sandbox path); describe_image opens it again]")
+    return out
 
 
 def build_llm_messages(
@@ -864,8 +918,10 @@ def build_llm_messages(
         # "[sender]: text" while the history keeps "text", so rendering the task
         # text here would differ from the same message rendered as history next
         # turn — found by Johnny running the shipped code, 2026-08-19.
+        # With its image markers: the record comes back as history next turn
+        # with them, and this turn would otherwise break the prefix on them.
         body = trigger_record.get("content")
-        body = body if isinstance(body, str) and body.strip() else None
+        body = history_body(trigger_record) if isinstance(body, str) and body.strip() else None
         if isinstance(user_content, str):
             user_content = history_prefix(trigger_record) + (body or user_content)
         elif isinstance(user_content, list):

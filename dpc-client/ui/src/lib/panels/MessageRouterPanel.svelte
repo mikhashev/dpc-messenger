@@ -7,6 +7,7 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { mapBackendMessage, turnEndOf } from '$lib/utils/messageMapper';
+  import { imageAnswerBubble } from '$lib/utils/imageAnswerBubble';
   import { liveBubbleId } from '$lib/utils/liveMessageIdentity';
   import {
     p2pMessages,
@@ -270,13 +271,7 @@
         const hist = newMap.get(response.conversation_id) || [];
         newMap.set(response.conversation_id, [
           ...hist,
-          {
-            id: crypto.randomUUID(),
-            sender: 'ai',
-            text: response.response,
-            timestamp: Date.now(),
-            model: response.model
-          }
+          imageAnswerBubble(response, crypto.randomUUID(), Date.now())
         ]);
         return newMap;
       });

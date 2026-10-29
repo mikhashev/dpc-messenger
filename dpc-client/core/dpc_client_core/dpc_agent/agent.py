@@ -404,6 +404,7 @@ class DpcAgent:
                         "timestamp": _rec.get("timestamp"),
                         "sender_name": _rec.get("sender_name"),
                         "content": _rec.get("content"),
+                        "attachments": _rec.get("attachments"),
                     }
                     break
         annotation_store = SentAnnotationStore(self.agent_root)

@@ -394,3 +394,53 @@ async def normalise_turn_images(
                 turn = {**turn, "content": fixed}
         out.append(turn)
     return out, notes
+
+
+# ---------------------------------------------------------------------------
+# Pasted screenshots kept in a conversation (group chats, 1:1 agent chats)
+# ---------------------------------------------------------------------------
+
+def screenshot_target(conversation_dir: Path, filename: str) -> Path:
+    """Where a pasted screenshot lands: `<conversation dir>/files/screenshots/`.
+
+    The folder is created. A name already taken there gets a `_N` suffix, so a
+    second paste under the same name is a second file rather than an overwrite.
+    """
+    directory = conversation_dir / "files" / "screenshots"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / filename
+    if target.exists():
+        stem, suffix = target.stem, target.suffix
+        counter = 1
+        while target.exists():
+            target = directory / f"{stem}_{counter}{suffix}"
+            counter += 1
+    return target
+
+
+def screenshot_attachment(
+    filename: str,
+    mime_type: str,
+    size_bytes: int,
+    thumbnail_base64: str,
+    dimensions: Dict[str, int],
+    file_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """The history record's attachment for a pasted screenshot.
+
+    `file_path` is given only when the owner keeps screenshots on disk
+    (`saves_screenshots_to_disk`); without it the record carries the thumbnail
+    and no path, because a path would outlive the file it names.
+    """
+    attachment: Dict[str, Any] = {
+        "type": "image",
+        "filename": filename,
+        "mime_type": mime_type,
+        "size_bytes": size_bytes,
+        "thumbnail": thumbnail_base64,
+        "dimensions": dict(dimensions),
+        "status": "completed",
+    }
+    if file_path is not None:
+        attachment["file_path"] = str(file_path)
+    return attachment

@@ -145,6 +145,7 @@ from .managers.file_transfer_manager import (
     FileTransferManager, MaxConcurrentTransfersExceeded, NotOfferedReport,
     group_file_ui_key, saves_screenshots_to_disk,
 )
+from .utils.image_utils import screenshot_attachment, screenshot_target
 from .voice_service import VoiceService
 from .knowledge_service import KnowledgeService
 from .telegram_service import TelegramService
@@ -7613,15 +7614,7 @@ class CoreService:
 
             # Save image once (use slug folder so path matches conversation monitor's directory)
             _group_monitor = self._get_or_create_conversation_monitor(group_id)
-            group_files_dir = _group_monitor._get_conversation_dir() / "files" / "screenshots"
-            group_files_dir.mkdir(parents=True, exist_ok=True)
-            file_path = group_files_dir / filename
-            if file_path.exists():
-                stem, suffix = file_path.stem, file_path.suffix
-                counter = 1
-                while file_path.exists():
-                    file_path = group_files_dir / f"{stem}_{counter}{suffix}"
-                    counter += 1
+            file_path = screenshot_target(_group_monitor._get_conversation_dir(), filename)
 
             with open(file_path, "wb") as f:
                 f.write(image_data)
@@ -7679,21 +7672,15 @@ class CoreService:
             # sender UI (mirrors send_group_voice_message). Record = attachment
             # (file reference) + full_text (caption + VL). Closes the group-image
             # history gap and gives agents a persistent, quotable image message.
-            attachment = {
-                "type": "image",
-                "filename": filename,
-                "mime_type": mime_type,
-                "size_bytes": len(image_data),
-                "thumbnail": thumbnail_base64,
-                "dimensions": {"width": width, "height": height},
-                "status": "completed",
-            }
             # With save_screenshots_to_disk off the file lives only until the
             # fan-out is done, so the record keeps the thumbnail and no path:
             # a path here outlived the file it named.
             keeps_file = saves_screenshots_to_disk(self.firewall)
-            if keeps_file:
-                attachment["file_path"] = str(file_path)
+            attachment = screenshot_attachment(
+                filename, mime_type, len(image_data), thumbnail_base64,
+                {"width": width, "height": height},
+                file_path if keeps_file else None,
+            )
             # Every member's copy and every relay of it carry this id, and a member
             # refuses an id it already holds: the on-disk name and the clock keep
             # a second paste under the same name a second message.
@@ -8425,6 +8412,18 @@ class CoreService:
                     # Route to DPC Agent for vision analysis
                     logger.info(f"Agent vision analysis: {filename}")
 
+                    # The picture travels to the model as image_base64; this is the
+                    # copy the person's message in the agent's history points at, so
+                    # it is still there when the chat is reopened. A group keeps its
+                    # own record (the agent's monitor is a read-only consumer there,
+                    # ADR-031 §3), so nothing is moved for it.
+                    attachments = None
+                    if not conversation_id.startswith("group-"):
+                        attachments = self._keep_agent_chat_image(
+                            agent_manager, conversation_id, tmp_path, filename,
+                            mime_type, size_bytes, dimensions,
+                        )
+
                     response = await agent_manager.process_message(
                         message=caption or "Analyze this screenshot",
                         conversation_id=conversation_id,
@@ -8432,6 +8431,7 @@ class CoreService:
                         image_base64=data,  # Raw base64 without data URL prefix
                         image_mime=mime_type,
                         image_caption=caption,
+                        attachments=attachments,
                     )
 
                     # Broadcast result
@@ -8439,6 +8439,10 @@ class CoreService:
                         "conversation_id": conversation_id,
                         "query": caption or "Analyze this screenshot",
                         "response": response,
+                        # The name the stored answer carries, so the live bubble and
+                        # the reloaded one are labelled alike.
+                        "sender_name": (getattr(agent_manager, "_agent_display_name", None)
+                                        or getattr(agent_manager, "agent_id", None) or "DPC Agent"),
                         "provider": "dpc_agent",
                         "model": "agent",
                         "image_filename": filename,
@@ -8552,6 +8556,37 @@ class CoreService:
             # Cleanup temp file (if not moved to peer storage)
             if tmp_path.exists():
                 tmp_path.unlink()
+
+    def _keep_agent_chat_image(
+        self, agent_manager, conversation_id, tmp_path, filename, mime_type, size_bytes, dimensions,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """The attachment for a screenshot pasted into a 1:1 agent chat.
+
+        Same shape and same place as a screenshot pasted into a group
+        (`send_group_image`): the file moves to `<conversation>/files/screenshots/`
+        and the record carries the thumbnail and, only when the owner keeps
+        screenshots on disk, `file_path`. With that setting off the temp file is
+        left for the caller to delete and the record keeps the thumbnail alone.
+        Returns None, so the message goes in as before, when nothing can be kept.
+        """
+        import shutil
+        from .utils.image_utils import generate_thumbnail
+        try:
+            try:
+                thumbnail = generate_thumbnail(tmp_path)
+            except Exception:  # noqa: BLE001 — the same fallback as the group path
+                thumbnail = ""
+            kept_at = None
+            if saves_screenshots_to_disk(self.firewall):
+                monitor = agent_manager._get_or_create_agent_monitor(conversation_id)
+                kept_at = screenshot_target(monitor._get_conversation_dir(), filename)
+                shutil.move(str(tmp_path), str(kept_at))
+            return [screenshot_attachment(
+                filename, mime_type, size_bytes, thumbnail, dimensions, kept_at,
+            )]
+        except Exception as e:  # noqa: BLE001 — the agent still gets the image and the message
+            logger.error("Could not keep the image pasted into %s: %s", conversation_id, e, exc_info=True)
+            return None
 
     def _record_ai_chat_image_exchange(
         self, monitor, tmp_path, filename, mime_type, size_bytes, dimensions,
