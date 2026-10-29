@@ -736,6 +736,7 @@ class DpcAgentManager:
             event_filter = None
             max_events_per_minute = 20
             cooldown_seconds = 3.0
+            burst_quiet_seconds = None
             transcription_enabled = True
             unified_conversation = False
             footer_enabled = True
@@ -761,6 +762,7 @@ class DpcAgentManager:
             event_filter = agent_meta.get("telegram_event_filter")
             max_events_per_minute = agent_meta.get("telegram_max_events_per_minute", 20)
             cooldown_seconds = agent_meta.get("telegram_cooldown_seconds", 3.0)
+            burst_quiet_seconds = agent_meta.get("telegram_burst_quiet_seconds")
             transcription_enabled = agent_meta.get("telegram_transcription_enabled", True)
             unified_conversation = agent_meta.get("telegram_unified_conversation", False)
             footer_enabled = agent_meta.get("telegram_footer_enabled", True)
@@ -838,6 +840,7 @@ class DpcAgentManager:
                 agent_id=self.agent_id or "",
                 unified_conversation=unified_conversation,
                 footer_enabled=footer_enabled,
+                burst_quiet_seconds=burst_quiet_seconds,
             )
 
             # Set message handler for two-way communication

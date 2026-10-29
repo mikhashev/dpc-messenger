@@ -8045,6 +8045,7 @@ class CoreService:
         cooldown_seconds: float = 3.0,
         transcription_enabled: bool = True,
         unified_conversation: bool = False,
+        burst_quiet_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Delegates to TelegramService."""
         if not self.telegram_service:
@@ -8058,6 +8059,7 @@ class CoreService:
             cooldown_seconds,
             transcription_enabled,
             unified_conversation,
+            burst_quiet_seconds,
         )
 
     async def _start_agent_telegram_bridges(self) -> None:

@@ -2,10 +2,9 @@
 
 Until 2026-10-29 every text, voice or photo update started its own run, and
 the runs queued on the agent's run gate one per message. The bridge now holds
-a chat's messages until the chat is quiet (BURST_QUIET_SECONDS since the last
-one, BURST_CEILING_SECONDS since the first at most); while the agent is busy it
-waits at the gate itself and whatever arrived by the moment the run starts goes
-into that run.
+a chat's messages until the chat is quiet (the agent's pause since the last one,
+three pauses since the first at most); while the agent is busy it waits at the
+gate itself and whatever arrived by the moment the run starts goes into that run.
 
 The fake agent takes the gate the way `DpcAgentManager.process_message` does,
 so the pass-through of a gate its own task holds is exercised too.
@@ -19,20 +18,12 @@ import pytest
 
 from dpc_client_core.dpc_agent import run_gate
 from dpc_client_core.dpc_agent.run_gate import RunGate, agent_turn_snapshot, hold
-from dpc_client_core.managers import agent_telegram_bridge
 from dpc_client_core.managers.agent_telegram_bridge import AgentTelegramBridge
 
 CHAT_A = "111"
 CHAT_B = "222"
 AGENT_ID = "agent_burst_test"
 QUIET = 0.08
-CEILING = 0.4
-
-
-@pytest.fixture(autouse=True)
-def _windows(monkeypatch):
-    monkeypatch.setattr(agent_telegram_bridge, "BURST_QUIET_SECONDS", QUIET)
-    monkeypatch.setattr(agent_telegram_bridge, "BURST_CEILING_SECONDS", CEILING)
 
 
 @pytest.fixture(autouse=True)
@@ -65,8 +56,9 @@ class FakeAgent:
         return "⚠️ Stopped by user while waiting for its turn."
 
 
-def _bridge(transcribe=None):
-    bridge = AgentTelegramBridge(bot_token="t", allowed_chat_ids=[CHAT_A, CHAT_B])
+def _bridge(transcribe=None, quiet=QUIET):
+    bridge = AgentTelegramBridge(
+        bot_token="t", allowed_chat_ids=[CHAT_A, CHAT_B], burst_quiet_seconds=quiet)
     bridge.footer_enabled = False
     gate = run_gate._RUN_GATES[AGENT_ID]
     agent = FakeAgent(gate)
@@ -225,9 +217,8 @@ async def test_the_ceiling_starts_a_run_during_a_stream_that_never_goes_quiet():
 
 
 @pytest.mark.asyncio
-async def test_a_command_and_a_button_bypass_the_gathering(monkeypatch):
-    monkeypatch.setattr(agent_telegram_bridge, "BURST_QUIET_SECONDS", 0.5)
-    bridge, agent = _bridge()
+async def test_a_command_and_a_button_bypass_the_gathering():
+    bridge, agent = _bridge(quiet=0.5)
     text = _send(bridge, _update(text="gathered"))
     await asyncio.sleep(0.02)
 
@@ -375,3 +366,91 @@ async def test_a_task_holding_the_gate_passes_through_it_and_another_task_still_
     await asyncio.wait_for(spawned, 2)
     assert other_got_it == [True]
     assert not gate.locked()
+
+
+# --- the pause is the agent's own -------------------------------------------
+
+PAUSE = 0.6  # not the default, and not the one the other tests use
+
+
+@pytest.mark.asyncio
+async def test_two_texts_a_little_less_than_the_pause_apart_are_one_run():
+    bridge, agent = _bridge(quiet=PAUSE)
+    first = _send(bridge, _update(text="Part one"))
+    await asyncio.sleep(PAUSE - 0.25)
+    second = _send(bridge, _update(text="part two"))
+    await _settle([first, second])
+
+    assert len(agent.runs) == 1
+    assert agent.runs[0]["message"].startswith("[2 messages sent in a row]")
+
+
+@pytest.mark.asyncio
+async def test_two_texts_a_little_more_than_the_pause_apart_are_two_runs():
+    bridge, agent = _bridge(quiet=PAUSE)
+    first = _send(bridge, _update(text="Part one"))
+    await asyncio.sleep(PAUSE + 0.25)
+    second = _send(bridge, _update(text="part two"))
+    await _settle([first, second])
+
+    assert [r["message"] for r in agent.runs] == ["Part one", "part two"]
+
+
+@pytest.mark.asyncio
+async def test_a_person_who_keeps_typing_is_cut_at_three_pauses():
+    pause = 0.3
+    bridge, agent = _bridge(quiet=pause)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    tasks = []
+    first_run_after = None
+    sent = 0
+    for i in range(20):  # a message every 0.12 s: never quiet for 0.3 s, 2.4 s in all
+        tasks.append(_send(bridge, _update(text=f"m{i:02d}")))
+        sent += 1
+        await asyncio.sleep(0.12)
+        if agent.runs and first_run_after is None:
+            first_run_after = loop.time() - began
+            sent_when_first_run = sent
+    await _settle(tasks)
+
+    assert first_run_after is not None
+    # The ceiling is three pauses (0.9 s) after the first message, not 30 s and
+    # not at once: the run began well inside the stream and not before 0.9 s.
+    assert 0.85 <= first_run_after <= 1.5
+    assert sent_when_first_run < 20
+    assert len(agent.runs) >= 2
+
+
+@pytest.mark.asyncio
+async def test_with_no_pause_an_idle_agent_gets_each_message_at_once():
+    bridge, agent = _bridge(quiet=0)
+    first = _send(bridge, _update(text="one"))
+    await _settle([first])
+    second = _send(bridge, _update(text="two"))
+    await _settle([second])
+
+    assert [r["message"] for r in agent.runs] == ["one", "two"]
+
+
+@pytest.mark.asyncio
+async def test_with_no_pause_what_arrives_while_the_agent_is_busy_is_still_drained_together():
+    bridge, agent = _bridge(quiet=0)
+    release = asyncio.Event()
+
+    async def other_chat_run():
+        async with agent.gate.hold({"conversation_id": "agent_other", "conversation_title": ""}):
+            await release.wait()
+
+    busy = asyncio.create_task(other_chat_run())
+    await asyncio.sleep(0)
+    tasks = [_send(bridge, _update(text="one")), _send(bridge, _update(text="two"))]
+    await asyncio.sleep(0.1)
+    assert agent.runs == []  # waiting at the gate, not started
+    tasks.append(_send(bridge, _update(text="three")))
+    await asyncio.sleep(0.02)
+    release.set()
+    await _settle(tasks + [busy])
+
+    assert len(agent.runs) == 1
+    assert agent.runs[0]["message"].startswith("[3 messages sent in a row]")

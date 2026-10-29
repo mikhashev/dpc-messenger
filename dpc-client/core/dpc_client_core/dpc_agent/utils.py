@@ -197,6 +197,11 @@ def auto_commit_agent_change(agent_root: pathlib.Path, message: str) -> None:
 # Agent Registry
 # ---------------------------------------------------------------------------
 
+# The longest pause a person may set for gathering messages sent in a row; the
+# bridge owns the default (`agent_telegram_bridge.BURST_QUIET_SECONDS`).
+TELEGRAM_BURST_QUIET_MAX_SECONDS = 300.0
+
+
 class AgentRegistry:
     """
     Manages the agent registry stored in ~/.dpc/agents/_registry.json.
@@ -340,6 +345,7 @@ class AgentRegistry:
         cooldown_seconds: float = 3.0,
         transcription_enabled: bool = True,
         unified_conversation: bool = False,
+        burst_quiet_seconds: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Link an agent to Telegram with full configuration.
@@ -354,12 +360,16 @@ class AgentRegistry:
             transcription_enabled: Enable voice message transcription
             unified_conversation: When True, Telegram messages share conversation history
                                   with the DPC chat UI (use agent_id as conversation_id)
+            burst_quiet_seconds: Seconds a chat must stay quiet before the messages
+                                 gathered from it reach the agent as one run; 0 is no
+                                 pause, None leaves the bridge's default (20)
 
         Returns:
             Updated agent metadata or None if not found
 
         Raises:
-            ValueError: If bot_token or chat_ids format is invalid
+            ValueError: If bot_token or chat_ids format is invalid, or
+                        burst_quiet_seconds is not a number from 0 to 300
         """
         # Validate bot_token format
         if not isinstance(bot_token, str):
@@ -385,6 +395,15 @@ class AgentRegistry:
                 if not isinstance(event_type, str):
                     raise ValueError("event_filter must contain only strings")
 
+        if burst_quiet_seconds is not None:
+            if (isinstance(burst_quiet_seconds, bool)
+                    or not isinstance(burst_quiet_seconds, (int, float))
+                    or not 0 <= burst_quiet_seconds <= TELEGRAM_BURST_QUIET_MAX_SECONDS):
+                raise ValueError(
+                    "burst_quiet_seconds must be a number from 0 to "
+                    f"{TELEGRAM_BURST_QUIET_MAX_SECONDS:g}"
+                )
+
         # Build Telegram config
         telegram_config = {
             "telegram_enabled": True,
@@ -392,6 +411,7 @@ class AgentRegistry:
             "telegram_allowed_chat_ids": chat_ids,
             "telegram_max_events_per_minute": max_events_per_minute,
             "telegram_cooldown_seconds": cooldown_seconds,
+            "telegram_burst_quiet_seconds": burst_quiet_seconds,
             "telegram_transcription_enabled": transcription_enabled,
             "telegram_unified_conversation": unified_conversation,
             "telegram_linked_at": utc_now_iso()
@@ -468,6 +488,7 @@ class AgentRegistry:
             "telegram_event_filter": None,
             "telegram_max_events_per_minute": None,
             "telegram_cooldown_seconds": None,
+            "telegram_burst_quiet_seconds": None,
             "telegram_transcription_enabled": None,
             "telegram_chat_id": None,  # Legacy field
             "telegram_linked_at": None,

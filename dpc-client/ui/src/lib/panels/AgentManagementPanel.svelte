@@ -164,6 +164,7 @@
     event_filter?: string[];
     max_events_per_minute?: number;
     cooldown_seconds?: number;
+    burst_quiet_seconds?: number;
     transcription_enabled?: boolean;
     unified_conversation?: boolean;
   }) {
@@ -177,6 +178,7 @@
         event_filter: config.event_filter,
         max_events_per_minute: config.max_events_per_minute || 20,
         cooldown_seconds: config.cooldown_seconds || 3.0,
+        burst_quiet_seconds: config.burst_quiet_seconds,
         transcription_enabled: config.transcription_enabled !== false,
         unified_conversation: config.unified_conversation === true,
       });

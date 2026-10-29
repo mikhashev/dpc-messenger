@@ -187,12 +187,20 @@ uv run python run_service.py
 | `telegram_enabled` | bool | Yes | Enable Telegram linking for this agent |
 | `telegram_chat_id` | string | Yes | Your Telegram chat ID (number) |
 | `telegram_linked_at` | string | Yes | ISO timestamp of when linking was created |
+| `telegram_burst_quiet_seconds` | number | No | How long the chat must stay quiet before messages you sent in a row reach the agent as one request (0 to 300, default 20; 0 sends each message at once). Set in the Telegram configuration dialog as "Join messages sent within (seconds)"; a changed value applies when the dialog is saved |
 
 ### Using the Telegram Bot
 
 #### Sending Messages to Agent
 
 Simply send any text message to the bot. The agent will process it and respond.
+
+Messages you send in a row are gathered into one request (a **burst**): the agent
+waits until the chat has been quiet for the agent's pause (20 seconds by default,
+set per agent in the Telegram configuration dialog) and answers them together, or
+at most three pauses after your first message if you never stop. A photo is always
+its own request. With the pause set to 0 each message goes at once, and only
+messages that arrive while the agent is busy are still sent together when it is free.
 
 **Examples:**
 - "What's the weather forecast?"

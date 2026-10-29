@@ -120,14 +120,17 @@ class RateLimitConfig:
 
 
 # Messages a person sends in a row become one agent run, not one run each.
-# The run starts once the chat has been quiet this long since the last message:
-# a thought split over several short messages, or a forward of several, arrives
-# within a second or two, and every second here is added to the answer to a
-# single message too, so it stays short. Messages that arrive while the agent
-# is busy elsewhere are gathered until its run gate frees, however long that is.
-BURST_QUIET_SECONDS = 3.0
-# A stream that never goes quiet still starts this long after its first message.
-BURST_CEILING_SECONDS = 30.0
+# The run starts once the chat has been quiet this long since the last message.
+# This is the default of the per-agent pause (`telegram_burst_quiet_seconds`,
+# set in Edit Telegram Configuration): a person typing one sentence in pieces
+# leaves gaps of several seconds, so 3 s closed the burst after its first piece.
+# Every second of it is added to the answer to a single message too. Messages
+# that arrive while the agent is busy elsewhere are gathered until its run gate
+# frees, however long that is, and with a pause of 0 that is the only gathering.
+BURST_QUIET_SECONDS = 20.0
+# A stream that never goes quiet still starts this many pauses after its first
+# message: 60 s at the default, 0 with no pause.
+BURST_CEILING_PAUSES = 3.0
 
 
 @dataclass
@@ -187,6 +190,7 @@ class AgentTelegramBridge:
         agent_id: str = "",
         unified_conversation: bool = False,
         footer_enabled: bool = True,
+        burst_quiet_seconds: Optional[float] = None,
     ):
         """
         Initialize agent Telegram bridge.
@@ -202,6 +206,11 @@ class AgentTelegramBridge:
                                   with the DPC chat UI (conversation_id = agent_id)
             footer_enabled: Append the context-window/balance footer after an
                             agent reply (default: True)
+            burst_quiet_seconds: How long a chat must be quiet before the messages
+                            gathered from it go to the agent as one run (None =
+                            BURST_QUIET_SECONDS; 0 = no pause). Read here, once:
+                            a changed value takes a bridge restart, which saving
+                            the Telegram configuration does.
         """
         self.bot_token = bot_token
         self.allowed_chat_ids = [str(cid) for cid in allowed_chat_ids]  # Ensure strings
@@ -211,6 +220,10 @@ class AgentTelegramBridge:
         self._agent_id = agent_id
         self._unified_conversation = unified_conversation
         self.footer_enabled = footer_enabled
+        self._burst_quiet_seconds = (
+            BURST_QUIET_SECONDS if burst_quiet_seconds is None else float(burst_quiet_seconds)
+        )
+        self._burst_ceiling_seconds = BURST_CEILING_PAUSES * self._burst_quiet_seconds
 
         self._bot = None
         self._application = None  # telegram.ext.Application
@@ -254,7 +267,7 @@ class AgentTelegramBridge:
         # Consecutive network error counter for log suppression
         self._network_error_count = 0
 
-        # Messages gathered per chat until their run starts (BURST_QUIET_SECONDS).
+        # Messages gathered per chat until their run starts (the burst pause).
         self._bursts: Dict[str, _ChatBurst] = {}
 
         log.info(f"AgentTelegramBridge initialized for {len(allowed_chat_ids)} chat(s), "
@@ -1657,8 +1670,7 @@ Send a voice message and it will be transcribed and processed\\.
             if self._bursts.get(chat_id) is burst:
                 del self._bursts[chat_id]
 
-    @staticmethod
-    async def _wait_for_burst_quiet(burst: _ChatBurst) -> None:
+    async def _wait_for_burst_quiet(self, burst: _ChatBurst) -> None:
         """Until the burst may start: quiet and every message ready, or the ceiling.
 
         The ceiling starts the run only once its first message is ready; a
@@ -1668,8 +1680,8 @@ Send a voice message and it will be transcribed and processed\\.
             now = time.monotonic()
             items = burst.items
             settled = all(i.ready for i in items)
-            quiet_at = items[-1].arrived_at + BURST_QUIET_SECONDS
-            ceiling_at = items[0].arrived_at + BURST_CEILING_SECONDS
+            quiet_at = items[-1].arrived_at + self._burst_quiet_seconds
+            ceiling_at = items[0].arrived_at + self._burst_ceiling_seconds
             if settled and now >= quiet_at:
                 return
             if items[0].ready and now >= ceiling_at:

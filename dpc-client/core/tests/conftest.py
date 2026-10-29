@@ -101,12 +101,13 @@ def service_with_ui(answer: str = "approve", **extra):
 @pytest.fixture(autouse=True)
 def _telegram_bursts_start_at_once(monkeypatch):
     """The agent's Telegram bridge waits for a quiet chat before it starts a run
-    (BURST_QUIET_SECONDS). A test that sends one message would sit that wait
-    out; here the windows are zero, and the tests of the gathering set their own."""
+    (BURST_QUIET_SECONDS, 20 s unless the agent sets its own). A test that sends
+    one message would sit that wait out; here the default pause is zero, and a
+    test of the gathering passes its own `burst_quiet_seconds` to the bridge. A
+    test of the real default overrides this fixture by its name."""
     from dpc_client_core.managers import agent_telegram_bridge
 
     monkeypatch.setattr(agent_telegram_bridge, "BURST_QUIET_SECONDS", 0.0)
-    monkeypatch.setattr(agent_telegram_bridge, "BURST_CEILING_SECONDS", 0.0)
 
 
 @pytest.fixture(autouse=True)

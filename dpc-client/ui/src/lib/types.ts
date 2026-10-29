@@ -130,6 +130,7 @@ export interface AgentInfo {
     telegram_event_filter?: string[];
     telegram_max_events_per_minute?: number;
     telegram_cooldown_seconds?: number;
+    telegram_burst_quiet_seconds?: number | null;
     telegram_transcription_enabled?: boolean;
     telegram_linked_at?: string;
     // Legacy field (deprecated in favor of telegram_allowed_chat_ids)

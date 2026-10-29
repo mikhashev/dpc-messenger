@@ -14,6 +14,7 @@
   import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
   import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
   import { agentTurns } from '$lib/services/agents';
+  import { BURST_QUIET_DEFAULT_SECONDS, BURST_QUIET_MAX_SECONDS, burstQuietFromAgent, burstQuietToSend } from '$lib/utils/burstQuiet';
   import { agentStatusLine, buttonSummary, chatNamer } from '$lib/utils/agentMap';
 
   // Account balance rows (one per DeepSeek/NeuralDeep/... account, 2026-09-28
@@ -131,6 +132,7 @@
   let telegramEventFilter = $state(DEFAULT_EVENT_FILTER);
   let telegramMaxEventsPerMinute = $state(20);
   let telegramCooldownSeconds = $state(3.0);
+  let telegramBurstQuietSeconds = $state<number | null>(BURST_QUIET_DEFAULT_SECONDS);
   let telegramTranscriptionEnabled = $state(true);
   let telegramUnifiedConversation = $state(false);
 
@@ -145,6 +147,7 @@
     telegramEventFilter = agent?.telegram_event_filter?.join(',') || DEFAULT_EVENT_FILTER;
     telegramMaxEventsPerMinute = agent?.telegram_max_events_per_minute || 20;
     telegramCooldownSeconds = agent?.telegram_cooldown_seconds || 3.0;
+    telegramBurstQuietSeconds = burstQuietFromAgent(agent?.telegram_burst_quiet_seconds);
     telegramTranscriptionEnabled = agent?.telegram_transcription_enabled !== false;
     telegramUnifiedConversation = agent?.telegram_unified_conversation === true;
 
@@ -163,6 +166,11 @@
       try {
         const chatIds = telegramAllowedChatIds.split(',').map(id => id.trim()).filter(id => id);
         const eventFilter = telegramEventFilter.split(',').map(e => e.trim()).filter(e => e);
+        const burstQuiet = burstQuietToSend(telegramBurstQuietSeconds);
+        if ('error' in burstQuiet) {
+          linkErrorMessage = burstQuiet.error;
+          return;
+        }
 
         await onLinkAgentTelegram(linkingAgentId, {
           bot_token: telegramBotToken.trim(),
@@ -170,6 +178,7 @@
           event_filter: eventFilter,
           max_events_per_minute: telegramMaxEventsPerMinute,
           cooldown_seconds: telegramCooldownSeconds,
+          burst_quiet_seconds: burstQuiet.value,
           transcription_enabled: telegramTranscriptionEnabled,
           unified_conversation: telegramUnifiedConversation,
         });
@@ -180,6 +189,7 @@
         telegramEventFilter = DEFAULT_EVENT_FILTER;
         telegramMaxEventsPerMinute = 20;
         telegramCooldownSeconds = 3.0;
+        telegramBurstQuietSeconds = BURST_QUIET_DEFAULT_SECONDS;
         telegramTranscriptionEnabled = true;
         telegramUnifiedConversation = false;
         linkErrorMessage = '';
@@ -211,6 +221,7 @@
         telegramEventFilter = DEFAULT_EVENT_FILTER;
         telegramMaxEventsPerMinute = 20;
         telegramCooldownSeconds = 3.0;
+        telegramBurstQuietSeconds = BURST_QUIET_DEFAULT_SECONDS;
         telegramTranscriptionEnabled = true;
         telegramUnifiedConversation = false;
         linkErrorMessage = '';
@@ -229,6 +240,7 @@
     telegramEventFilter = 'task_completed,task_failed,agent_message';
     telegramMaxEventsPerMinute = 20;
     telegramCooldownSeconds = 3.0;
+    telegramBurstQuietSeconds = BURST_QUIET_DEFAULT_SECONDS;
     telegramTranscriptionEnabled = true;
     telegramUnifiedConversation = false;
     linkErrorMessage = '';
@@ -330,6 +342,7 @@
     telegram_event_filter?: string[];
     telegram_max_events_per_minute?: number;
     telegram_cooldown_seconds?: number;
+    telegram_burst_quiet_seconds?: number | null;
     telegram_transcription_enabled?: boolean;
     telegram_unified_conversation?: boolean;
     telegram_linked_at?: string;
@@ -415,6 +428,7 @@
       event_filter?: string[];
       max_events_per_minute?: number;
       cooldown_seconds?: number;
+      burst_quiet_seconds?: number;
       transcription_enabled?: boolean;
       unified_conversation?: boolean;
     }) => Promise<void>;
@@ -1392,6 +1406,25 @@
             />
           </div>
         </div>
+
+        <!-- Messages sent in a row -->
+        <div class="form-row">
+          <div class="form-col">
+            <label for="telegram-burst-quiet" class="dialog-label">
+              Join messages sent within (seconds):
+            </label>
+            <input
+              id="telegram-burst-quiet"
+              type="number"
+              bind:value={telegramBurstQuietSeconds}
+              min="0"
+              max={BURST_QUIET_MAX_SECONDS}
+              step="1"
+              class="dialog-input"
+            />
+          </div>
+        </div>
+        <p class="dialog-hint">Messages you send in a row, each within this many seconds of the one before, reach the agent as one request; the agent waits that long after your last message before it starts (default 20, at most 300). A stream that never pauses is cut after three times this long. 0 means no waiting: each message goes at once, and only messages that arrive while the agent is busy are still gathered and sent together when it is free.</p>
 
         <!-- Transcription -->
         <label class="dialog-label checkbox-label">

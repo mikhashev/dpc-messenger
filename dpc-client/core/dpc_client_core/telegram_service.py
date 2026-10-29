@@ -379,6 +379,7 @@ class TelegramService:
         cooldown_seconds: float = 3.0,
         transcription_enabled: bool = True,
         unified_conversation: bool = False,
+        burst_quiet_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Link an agent to Telegram with full configuration."""
         try:
@@ -407,6 +408,7 @@ class TelegramService:
                         cooldown_seconds=cooldown_seconds,
                         transcription_enabled=transcription_enabled,
                         unified_conversation=unified_conversation,
+                        burst_quiet_seconds=burst_quiet_seconds,
                     )
                 except ValueError as e:
                     return {"status": "error", "message": str(e)}
