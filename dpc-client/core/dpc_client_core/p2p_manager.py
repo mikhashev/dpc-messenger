@@ -713,6 +713,15 @@ class P2PManager:
             task = asyncio.create_task(self._listen_to_peer(peer))
             self._peer_listener_tasks[peer_node_id] = task
 
+            # Ask the peer for its AI providers, as the outgoing paths do: the
+            # listener is running, so the PROVIDERS_RESPONSE can be read.
+            from dpc_protocol.protocol import create_get_providers_message
+            try:
+                await self.send_message_to_peer(peer_node_id, create_get_providers_message())
+                logger.debug("Requested AI providers from %s", peer_node_id)
+            except Exception as e:
+                logger.warning("Failed to request providers from %s: %s", peer_node_id, e)
+
         except Exception as e:
             self._record_failed_hello(peer_ip)
             if peer_node_id:

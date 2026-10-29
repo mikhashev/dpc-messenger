@@ -253,7 +253,11 @@ async def test_a_verified_reconnect_replaces_the_old_session_and_closes_it(tmp_p
 
         # The old session is closed at both ends and its listener has ended.
         assert old.writer.is_closing()
-        assert await asyncio.wait_for(_next(first[0]), timeout=5) is None
+        # The GET_PROVIDERS the old session was sent comes first; then the hang-up.
+        first_frame = await asyncio.wait_for(_next(first[0]), timeout=5)
+        if first_frame is not None:
+            assert first_frame["command"] == "GET_PROVIDERS"
+            assert await asyncio.wait_for(_next(first[0]), timeout=5) is None
         await asyncio.wait_for(asyncio.gather(old_listener, return_exceptions=True), timeout=5)
         assert old_listener.done()
 
