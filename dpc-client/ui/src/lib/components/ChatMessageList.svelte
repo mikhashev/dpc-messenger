@@ -215,14 +215,18 @@
 
   // A drag on the scrollbar or a touch also counts. Listened to directly: the
   // window is not a control, and a handler attribute would make it one to a11y.
+  // The wheel too, and passive: Svelte's onwheel is not, which made Chromium
+  // hold every wheel scroll for a handler that never cancels it.
   $effect(() => {
     const el = chatWindowElement;
     if (!el) return;
     el.addEventListener('pointerdown', onReaderInput, { passive: true });
     el.addEventListener('touchstart', onReaderInput, { passive: true });
+    el.addEventListener('wheel', onWheel, { passive: true });
     return () => {
       el.removeEventListener('pointerdown', onReaderInput);
       el.removeEventListener('touchstart', onReaderInput);
+      el.removeEventListener('wheel', onWheel);
     };
   });
 
@@ -287,7 +291,6 @@
   class="chat-window"
   bind:this={chatWindowElement}
   onscroll={onScroll}
-  onwheel={onWheel}
 >
   {#if boundaryLine}
     <div class="history-boundary">{boundaryLine}</div>
