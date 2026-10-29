@@ -583,6 +583,9 @@ def image_attachment_markers(record: Dict[str, Any]) -> List[str]:
     it is kept, as a path under the DPC home — the folder above `agents/` in
     the sandbox path the runtime section shows — so the agent can open it again
     with describe_image without the machine's user name travelling in the prompt.
+    describe_image checks an absolute path against the firewall, and no default
+    grants read access to the conversations folder, so the marker says the
+    reopening depends on that access instead of promising it.
     A record whose image was not kept on disk says so. The thumbnail and the
     bytes never go in. A function of the record alone, like `history_body`.
     """
@@ -608,7 +611,8 @@ def image_attachment_markers(record: Dict[str, Any]) -> List[str]:
             where = f"this chat's files folder, as {name}"
         out.append(
             f"[image: {name}{size}; kept at {where} under the DPC home "
-            "(the folder above agents/ in your sandbox path); describe_image opens it again]")
+            "(the folder above agents/ in your sandbox path); describe_image can open it "
+            "again where your read access reaches that folder]")
     return out
 
 
