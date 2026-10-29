@@ -193,7 +193,9 @@ class ConnectionOrchestrator:
                 # the rest still need an endpoint, as they had before the list.
                 tried_direct = True
                 from ..models.peer_endpoint import PeerEndpoint, IPv4Info
-                first = next((e for e in candidates if ":" not in e["ip"]), candidates[0])
+                # An answered address before an advertised local_addresses hint.
+                answered = [e for e in candidates if not e.get("dial_timeout_s")] or candidates
+                first = next((e for e in answered if ":" not in e["ip"]), answered[0])
                 endpoints = PeerEndpoint(
                     schema_version="1.0",
                     node_id=node_id,

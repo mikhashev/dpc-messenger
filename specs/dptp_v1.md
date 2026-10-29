@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.11
+# DPTP Specification: D-PC Transfer Protocol v1.12
 
-**Version:** 1.11
+**Version:** 1.12
 **Status:** Draft / PoC
 **Date:** October 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -62,7 +62,7 @@ All DPTP messages follow a fixed binary framing format:
 
 - **Encoding**: UTF-8 JSON
 - **Structure**: Object with `command` or `status` field
-- **Maximum Size**: 67 108 864 bytes (64 MiB) per payload — `MAX_FRAME_BYTES` in `dpc_protocol/protocol.py` (v1.7). A header declaring more is refused before any of the payload is read: the receiver logs the declared length and the cap, and closes the connection. A sender refuses to frame a larger payload at all, raising at the origin rather than failing silently at the far end. The cap must clear a whole conversation history in one `CHAT_HISTORY_RESPONSE` (3 885 616 bytes at the largest measured) and a base64-encoded image at `vision.max_image_size_mb`; the measurements behind the number are kept beside the constant, and the two move together. Before the far end has proved its key the cap is 65 536 bytes (64 KiB) — `MAX_HELLO_FRAME_BYTES`, beside the other: the direct-TLS `HELLO_CHALLENGE`, `HELLO` and `HELLO_ACK` are read under it, and refused the same way. A `HELLO` measured 1 675 bytes framed (v1.11); after `HELLO_ACK` the 64 MiB cap applies
+- **Maximum Size**: 67 108 864 bytes (64 MiB) per payload — `MAX_FRAME_BYTES` in `dpc_protocol/protocol.py` (v1.7). A header declaring more is refused before any of the payload is read: the receiver logs the declared length and the cap, and closes the connection. A sender refuses to frame a larger payload at all, raising at the origin rather than failing silently at the far end. The cap must clear a whole conversation history in one `CHAT_HISTORY_RESPONSE` (3 885 616 bytes at the largest measured) and a base64-encoded image at `vision.max_image_size_mb`; the measurements behind the number are kept beside the constant, and the two move together. Before the far end has proved its key the cap is 65 536 bytes (64 KiB) — `MAX_HELLO_FRAME_BYTES`, beside the other: the direct-TLS `HELLO_CHALLENGE`, `HELLO` and `HELLO_ACK` are read under it, and refused the same way. A `HELLO` measured 1 675 bytes framed (v1.11); after `HELLO_ACK` the 64 MiB cap applies. The optional `local_addresses` of §3.1 (v1.12) adds at most 119 bytes to a `HELLO` or `HELLO_ACK`
 
 ### Example Wire Format
 
@@ -146,7 +146,8 @@ node's nonce through and present the dialler's HELLO there.
     "name": "Alice",
     "cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
     "hello_preimage_version": "dptp-hello-v1",
-    "hello_signature": "base64-encoded RSA-PSS signature over hello_content_hash"
+    "hello_signature": "base64-encoded RSA-PSS signature over hello_content_hash",
+    "local_addresses": ["192.168.1.10:8888"]
   }
 }
 ```
@@ -170,6 +171,8 @@ node's nonce through and present the dialler's HELLO there.
 - `hello_signature` (string, required on direct TLS, v1.11): the signature over
   `hello_content_hash` described above, made with the private key behind `cert_pem`.
   Replaces v1.10's `nonce_signature`, which is no longer sent or read.
+- `local_addresses` (array of strings, optional, v1.12): the dialler's own LAN addresses;
+  see **local_addresses** below.
 
 A direct-TLS HELLO lacking `cert_pem`, `hello_signature` or `hello_preimage_version`
 `dptp-hello-v1` is rejected — "sent HELLO without cert_pem, hello_signature or
@@ -189,7 +192,8 @@ and the claimed `node_id` as field 4. Any failure closes the connection.
   "command": "HELLO_ACK",
   "status": "OK",
   "name": "Bob",
-  "node_id": "dpc-node-[32 hex characters]"
+  "node_id": "dpc-node-[32 hex characters]",
+  "local_addresses": ["10.1.2.3:9001", "192.168.1.20:9001"]
 }
 ```
 - `status` (string, required): `"OK"`
@@ -197,6 +201,44 @@ and the claimed `node_id` as field 4. Any failure closes the connection.
 - `node_id` (string, required): The listener's own `node_id`. The dialling side checks it
   against the `node_id` it dialled; a mismatch is treated as a possible MITM and the
   connection is dropped.
+- `local_addresses` (array of strings, optional, v1.12): the listener's own LAN
+  addresses; see below.
+
+**local_addresses** (direct TLS, HELLO from the dialler and HELLO_ACK from the listener,
+v1.12). The sender's own addresses on its local networks, as `"ip:port"` strings — the
+format of `IPv4Info.local` in `models/peer_endpoint.py` — with the port its P2P listener
+is bound to: private IPv4 only (RFC 1918: 10/8, 172.16/12, 192.168/16), at most 4, in the
+sender's order of preference (`own_addresses.lan_addresses`: interfaces that are up, have
+a link-layer address and are not tunnels or virtual adapters by name; 192.168/16, then
+172.16/12, then 10/8, the default route's address first within its range). A node not
+listening sends an empty list.
+
+- **Receiver.** The field is ignored when it is not a list (logged at DEBUG). Of a list,
+  the first 4 entries are read; an entry is dropped unless it is a string `ip:port` with a
+  dotted-decimal RFC 1918 IPv4 address and a decimal port of 1–65535, and dropped when the
+  address is one of the receiver's own or repeats an earlier entry. Drops are logged at
+  DEBUG by count, never by address. The checked list is kept per peer
+  (`peer_cache.json`, `metadata.local_addresses`) and **replaced, not merged**, on every
+  HELLO or HELLO_ACK from that peer that carries the field; an empty list clears it, and a
+  frame without the field leaves it as it was. It is read only after the identity checks
+  of the handshake have passed.
+- **An advertised address becomes known only after it answers.** It is never written into
+  the peer cache's `addresses`, which means "every address a direct connection worked on".
+  A dial from the cache tries the advertised addresses first, each with a budget of 2 s
+  (`ADVERTISED_ADDRESS_DIAL_TIMEOUT_S`, `peer_cache.py`: a host on the same LAN answers
+  in milliseconds or refuses at once), skipping one whose `ip:port` is already in
+  `addresses`, then the answered addresses as before. A candidate that answers is recorded
+  into `addresses` by the dial's own success path, with direction `out`.
+- **The field is unsigned.** It is a hint about where to dial, not a claim of identity:
+  every dial over it is a full direct-TLS handshake that proves the peer by its
+  certificate and HELLO_ACK `node_id`, so a false address costs at most a few failed
+  2-second dials and can never bind an address to the wrong node.
+- **Older nodes.** There is no version field on the wire. A v1.11 node ignores the key:
+  its listener reads only the named HELLO payload keys (`node_id`, `name`, `cert_pem`,
+  `hello_preimage_version`, `hello_signature`) and its dialler only `status`, `node_id`
+  and `name` of HELLO_ACK (`p2p_manager.py`, `_handle_direct_connection` and
+  `connect_directly`, by `dict.get`). A v1.12 node handles a frame without the field as
+  before and stores nothing.
 
 **Response:** Hub WebRTC — none, fire-and-forget. Direct TLS — HELLO_CHALLENGE precedes
 HELLO and HELLO_ACK follows it; the connection is not usable before HELLO_ACK.
@@ -2776,6 +2818,15 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.12 (October 2026)
+- **§3.1 HELLO, HELLO_ACK** — optional `local_addresses`: the sender's own LAN
+  addresses, `"ip:port"`, RFC 1918 IPv4 only, at most 4. The receiver checks the
+  entries, keeps them per peer replaced on every handshake, and dials them first with a
+  2 s budget before the addresses that already worked; an advertised address enters the
+  peer cache's `addresses` only after a dial over it succeeds (Mike's rule, 2026-10-29).
+  Unsigned: a hint where to dial, the dial still proves the peer. **Additive:** a v1.11
+  node ignores the key and a v1.12 node handles its frames as before.
 
 ### v1.11 (October 2026)
 - **§3.1 HELLO** — the direct-TLS HELLO signature covers a domain-separated preimage,

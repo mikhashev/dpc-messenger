@@ -27,7 +27,10 @@ from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
 from .dht import DHTManager, DHTConfig
-from .peer_cache import PeerCache, addresses_to_try, dial_in_order
+from .peer_cache import (
+    PeerCache, addresses_to_try, dial_in_order,
+    checked_local_addresses, local_addresses_to_advertise,
+)
 from .own_addresses import OwnAddresses, lan_addresses
 from pathlib import Path
 
@@ -269,6 +272,7 @@ class P2PManager:
         """
         ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ssl_context.load_cert_chain(certfile=self.cert_file, keyfile=self.key_file)
+        self._listen_port = port  # the port our local_addresses name
 
         async def _listen(bind_host: str):
             # One clock for "connected and not yet proved": the TLS handshake
@@ -488,10 +492,13 @@ class P2PManager:
             async def _dial(ip, port, budget):
                 return await self.connect_directly(ip, port, target_node_id, timeout=budget)
 
-            # Quick, before the DHT is asked: 5 s an address, at most three.
+            # Quick, before the DHT is asked: the advertised local_addresses at
+            # their own short budget, then 5 s an answered address, at most three.
+            advertised = sum(e.get("dial_timeout_s") or 0 for e in candidates)
+            answered = sum(1 for e in candidates if not e.get("dial_timeout_s"))
             connection, entry, error = await dial_in_order(
                 _dial, candidates,
-                total_timeout=5.0 * min(len(candidates), 3), per_address_timeout=5.0,
+                total_timeout=advertised + 5.0 * min(answered, 3), per_address_timeout=5.0,
             )
             if connection is not None:
                 logger.info("Connected to %s via peer cache (no DHT lookup needed)", target_node_id[:20])
@@ -647,7 +654,8 @@ class P2PManager:
                 "command": "HELLO_ACK",
                 "status": "OK",
                 "name": self.display_name,
-                "node_id": self.node_id  # Include actual node_id for validation
+                "node_id": self.node_id,  # Include actual node_id for validation
+                "local_addresses": self._own_local_addresses(),
             }
             await write_message(writer, ack)
 
@@ -693,6 +701,10 @@ class P2PManager:
                     direction="in",
                 )
                 logger.debug("Cached inbound address of peer %s", peer_node_id[:20])
+            self.peer_cache.set_local_addresses(
+                peer_node_id,
+                checked_local_addresses(payload.get("local_addresses"), getattr(self, "own_addresses", None)),
+            )
 
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())
@@ -953,6 +965,7 @@ class P2PManager:
                     "cert_pem": own_cert_pem,
                     "hello_preimage_version": HELLO_PREIMAGE_VERSION,
                     "hello_signature": hello_signature,
+                    "local_addresses": self._own_local_addresses(),
                 }
             }
             # Loud here rather than a silent hang-up at a listener that reads
@@ -1025,13 +1038,18 @@ class P2PManager:
                 logger.info("Connection with %s replaced by a new one", target_node_id)
                 await replaced.close()
 
-            # Persist successful endpoint to peer cache
+            # Persist successful endpoint to peer cache. An advertised
+            # local_addresses candidate becomes a known address here and only here.
             self.peer_cache.add_or_update_peer(
                 node_id=target_node_id,
                 direct_ip=host,
                 direct_port=port,
                 supports_direct=True,
                 direction="out",
+            )
+            self.peer_cache.set_local_addresses(
+                target_node_id,
+                checked_local_addresses(response.get("local_addresses"), getattr(self, "own_addresses", None)),
             )
 
             # Announce to DHT after successful connection
@@ -1693,6 +1711,17 @@ class P2PManager:
             logger.debug("Detected LAN IP for DHT: %s (default route: %s)", lan[0], route_ip)
             return lan[0]
         return route_ip
+
+    def _own_local_addresses(self) -> list:
+        """This node's `local_addresses` for HELLO and HELLO_ACK; [] when not listening or unknown."""
+        port = getattr(self, "_listen_port", None)
+        if not port:
+            return []
+        try:
+            return local_addresses_to_advertise(lan_addresses(self._default_route_source_ip()), port)
+        except Exception as e:  # noqa: BLE001 - a hint must never stop a handshake
+            logger.debug("Could not list local_addresses: %s", e)
+            return []
 
     def _default_route_source_ip(self) -> str:
         """The source address the OS would use toward 8.8.8.8, or 0.0.0.0."""

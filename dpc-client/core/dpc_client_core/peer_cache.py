@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Awaitable, Callable, Tuple
 from datetime import datetime, timezone, timedelta
@@ -30,6 +31,85 @@ _LOCAL_NETWORKS = tuple(
     for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
               "fc00::/7", "::1/128")
 )
+
+# `local_addresses` (DPTP 1.12 §3.1): a peer's own LAN "ip:port" list, a hint
+# where to dial. Kept in metadata, replaced per HELLO/HELLO_ACK, and never put
+# into `addresses` until a dial over it succeeds.
+LOCAL_ADDRESSES_KEY = "local_addresses"
+MAX_LOCAL_ADDRESSES = 4
+_RFC1918 = tuple(
+    ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+_PORT_TEXT = re.compile(r"[0-9]{1,5}")
+
+# A LAN host answers a connect in milliseconds or refuses at once; 2 s also
+# covers the TLS handshake, and caps a candidate on another network at 2 s.
+ADVERTISED_ADDRESS_DIAL_TIMEOUT_S = 2.0
+
+
+def checked_local_addresses(value: Any, own_addresses: Any = None) -> Optional[List[str]]:
+    """The usable entries of a received `local_addresses`; None when it is not a list.
+
+    The first MAX_LOCAL_ADDRESSES entries, each kept if it is "ip:port" with a
+    private RFC 1918 IPv4 address, a port of 1-65535, not one of our own
+    addresses and not repeated. Drops are logged at DEBUG by count, not address.
+    """
+    if not isinstance(value, list):
+        if value is not None:
+            logger.debug("local_addresses is not a list (%s), ignored", type(value).__name__)
+        return None
+    kept: List[str] = []
+    dropped: Dict[str, int] = {}
+
+    def drop(reason: str) -> None:
+        dropped[reason] = dropped.get(reason, 0) + 1
+
+    if len(value) > MAX_LOCAL_ADDRESSES:
+        dropped["over the cap"] = len(value) - MAX_LOCAL_ADDRESSES
+    for item in value[:MAX_LOCAL_ADDRESSES]:
+        if not isinstance(item, str) or item.count(":") != 1:
+            drop("not ip:port")
+            continue
+        host, port_text = item.split(":")
+        try:
+            ip = ipaddress.IPv4Address(host)
+        except ValueError:
+            drop("not IPv4")
+            continue
+        if not any(ip in net for net in _RFC1918):
+            drop("not RFC 1918")
+            continue
+        if not _PORT_TEXT.fullmatch(port_text) or not 1 <= int(port_text) <= 65535:
+            drop("bad port")
+            continue
+        if own_addresses is not None and own_addresses.contains(str(ip)):
+            drop("our own address")
+            continue
+        entry = f"{ip}:{int(port_text)}"
+        if entry in kept:
+            drop("repeated")
+            continue
+        kept.append(entry)
+    if dropped:
+        logger.debug("local_addresses: kept %d, dropped %s", len(kept), dropped)
+    return kept
+
+
+def local_addresses_to_advertise(lan: List[str], port: Optional[int]) -> List[str]:
+    """This node's `local_addresses`: its LAN addresses with the P2P listen port, at most four."""
+    if not port:
+        return []
+    out: List[str] = []
+    for ip in lan:
+        try:
+            addr = ipaddress.IPv4Address(ip)
+        except ValueError:
+            continue
+        if any(addr in net for net in _RFC1918):
+            out.append(f"{addr}:{port}")
+        if len(out) == MAX_LOCAL_ADDRESSES:
+            break
+    return out
 
 
 def normalise_ip(ip: str) -> str:
@@ -62,7 +142,9 @@ def _seen_at(entry: Dict[str, Any]) -> float:
 def addresses_to_try(cached: Any, own_addresses: Any = None) -> List[Dict[str, Any]]:
     """The cached addresses of a peer in the order to dial them.
 
-    Local-network addresses first, as ICE puts host candidates first (see
+    First the peer's advertised `local_addresses` (new entries with the short
+    `dial_timeout_s`), minus any already answered or our own; then the
+    answered `addresses`: local-network addresses first, as ICE puts host candidates first (see
     ipv4_direct.py), then the rest by most recent last_seen, then IPv4
     link-local. IPv6 link-local is left out: without its zone it cannot be
     dialled. An address that is also this node's own goes last, not nowhere:
@@ -96,7 +178,23 @@ def addresses_to_try(cached: Any, own_addresses: Any = None) -> List[Dict[str, A
         own = bool(own_addresses is not None and own_addresses.contains(entry.get("ip")))
         ordered.append(((own, r, -_seen_at(entry)), entry))
     ordered.sort(key=lambda pair: pair[0])
-    return [entry for _, entry in ordered]
+    answered = [entry for _, entry in ordered]
+    return _advertised_candidates(cached, answered, own_addresses) + answered
+
+
+def _advertised_candidates(cached: Any, answered: List[Dict[str, Any]], own_addresses: Any) -> List[Dict[str, Any]]:
+    """The peer's `local_addresses` not yet answered, as dial entries with the short budget."""
+    metadata = getattr(cached, "metadata", None) or {}
+    stored = checked_local_addresses(metadata.get(LOCAL_ADDRESSES_KEY), own_addresses) or []
+    have = {(e.get("ip"), e.get("port")) for e in answered}
+    out: List[Dict[str, Any]] = []
+    for text in stored:
+        ip, port_text = text.split(":")
+        if (ip, int(port_text)) in have:
+            continue
+        out.append({"ip": ip, "port": int(port_text),
+                    "dial_timeout_s": ADVERTISED_ADDRESS_DIAL_TIMEOUT_S})
+    return out
 
 
 async def dial_in_order(
@@ -107,7 +205,8 @@ async def dial_in_order(
 ) -> Tuple[Any, Optional[Dict[str, Any]], Optional[BaseException]]:
     """Dial each entry in turn and stop on the first that answers.
 
-    Every address but the last gets at most per_address_timeout, the last what
+    An entry with `dial_timeout_s` gets at most that, wherever it stands. Every
+    other address but the last gets at most per_address_timeout, the last what
     is left of total_timeout. Returns (connection, entry, None) on success,
     (None, None, last_error) otherwise.
     """
@@ -118,7 +217,11 @@ async def dial_in_order(
         left = deadline - loop.time()
         if left <= 0:
             break
-        budget = left if i == len(entries) - 1 else min(per_address_timeout, left)
+        cap = entry.get("dial_timeout_s")
+        if cap:
+            budget = min(cap, left)
+        else:
+            budget = left if i == len(entries) - 1 else min(per_address_timeout, left)
         try:
             connection = await asyncio.wait_for(
                 dial(entry["ip"], entry["port"], budget), timeout=budget
@@ -354,6 +457,21 @@ class PeerCache:
                 peer.record_address(direct_ip, direct_port, direction)
             self._peers[node_id] = peer
 
+        self._save_cache()
+
+    def set_local_addresses(self, node_id: str, local_addresses: Optional[List[str]]) -> None:
+        """Replace a cached peer's `local_addresses`; None (field absent) changes nothing.
+
+        Replaced, never merged; an empty list clears it. `addresses` is not touched.
+        """
+        peer = self._peers.get(node_id)
+        if local_addresses is None or peer is None:
+            return
+        if not local_addresses and LOCAL_ADDRESSES_KEY not in peer.metadata:
+            return
+        if peer.metadata.get(LOCAL_ADDRESSES_KEY) == local_addresses:
+            return
+        peer.metadata[LOCAL_ADDRESSES_KEY] = list(local_addresses)
         self._save_cache()
 
     def get_peer(self, node_id: str) -> Optional[CachedPeer]:
