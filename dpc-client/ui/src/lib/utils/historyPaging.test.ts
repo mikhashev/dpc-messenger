@@ -13,6 +13,9 @@ import {
     scrollTopKeepingAnchor,
     readerIsAtBottom,
     boundaryLineText,
+    stopPagerUntilReopen,
+    forgetPagerOnReopen,
+    placeholdersOnly,
     type HistoryPager,
 } from './historyPaging';
 
@@ -46,6 +49,56 @@ describe('setPager', () => {
         const map = get(historyPagers);
         expect(map.get('chat-a')).toEqual({ hasOlder: true, boundary: null, stopped: false, loading: true });
         expect(map.get('chat-b')?.boundary).toBe('x');
+    });
+});
+
+describe('a failed page request', () => {
+    it('stops the pager while the chat stays open, and notes it for a reload', () => {
+        const reloadOnOpen = new Set<string>();
+        setPager('reset-chat', { ...open, loading: true });
+        stopPagerUntilReopen('reset-chat', reloadOnOpen);
+        const pager = get(historyPagers).get('reset-chat');
+        expect(pager).toEqual({ ...open, loading: false, stopped: true });
+        // No request loop: a scroll at the top asks for nothing.
+        expect(shouldLoadOlder({ pager, scrollTop: 0, movedUp: true, userScrolled: true })).toBe(false);
+        expect(reloadOnOpen.has('reset-chat')).toBe(true);
+    });
+
+    it('is forgotten when the chat is opened again, so the newest page is asked for', () => {
+        const loaded = new Set<string>(['reset-chat', 'other-chat']);
+        const reloadOnOpen = new Set<string>();
+        setPager('reset-chat', open);
+        setPager('other-chat', open);
+        stopPagerUntilReopen('reset-chat', reloadOnOpen);
+
+        expect(forgetPagerOnReopen('reset-chat', loaded, reloadOnOpen)).toBe(true);
+        expect(loaded.has('reset-chat')).toBe(false);
+        expect(get(historyPagers).has('reset-chat')).toBe(false);
+        expect(reloadOnOpen.has('reset-chat')).toBe(false);
+        // Other chats keep their state.
+        expect(loaded.has('other-chat')).toBe(true);
+        expect(get(historyPagers).get('other-chat')).toEqual(open);
+    });
+
+    it('leaves a chat that never failed alone on reopen, and acts only once', () => {
+        const loaded = new Set<string>(['fine-chat', 'reset-chat']);
+        const reloadOnOpen = new Set<string>();
+        setPager('fine-chat', open);
+        expect(forgetPagerOnReopen('fine-chat', loaded, reloadOnOpen)).toBe(false);
+        expect(loaded.has('fine-chat')).toBe(true);
+        expect(get(historyPagers).get('fine-chat')).toEqual(open);
+
+        stopPagerUntilReopen('reset-chat', reloadOnOpen);
+        expect(forgetPagerOnReopen('reset-chat', loaded, reloadOnOpen)).toBe(true);
+        loaded.add('reset-chat');
+        expect(forgetPagerOnReopen('reset-chat', loaded, reloadOnOpen)).toBe(false);
+        expect(loaded.has('reset-chat')).toBe(true);
+    });
+
+    it('keeps only bubbles not stored yet when the chat starts again', () => {
+        const list = [m('a', 1), m('p', 2, { commandId: 'c1' }), m('b', 3), m('q', 4, { pending: true })];
+        expect(placeholdersOnly(list).map((x) => x.id)).toEqual(['p', 'q']);
+        expect(placeholdersOnly([])).toEqual([]);
     });
 });
 

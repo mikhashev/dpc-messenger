@@ -7,6 +7,8 @@
  * UI asks for the newest page when a chat opens and for the next older one
  * only when the reader scrolls to the top. An error stops the pager: the
  * backend refuses an unknown cursor rather than answering the newest page.
+ * The stop lasts until the chat is next opened, which starts it again from the
+ * newest page (stopPagerUntilReopen, forgetPagerOnReopen).
  *
  * The scroll position is kept by hand — the top visible message stays where it
  * was — because CSS `overflow-anchor` cannot be relied on in WebKit (macOS
@@ -43,6 +45,45 @@ export function setPager(chatId: string, patch: Partial<HistoryPager>): void {
         next.set(chatId, { ...current, ...patch });
         return next;
     });
+}
+
+/**
+ * A page request failed — most often an unknown cursor, because the chat was
+ * reset or archived under the reader. The pager stays stopped while the chat
+ * stays open, so a scroll at the top cannot turn into a request loop, and the
+ * chat is noted for a fresh start the next time it is opened.
+ */
+export function stopPagerUntilReopen(chatId: string, reloadOnOpen: Set<string>): void {
+    setPager(chatId, { loading: false, stopped: true });
+    reloadOnOpen.add(chatId);
+}
+
+/**
+ * The chat has just been opened. If a failed page request noted it, its pager
+ * and its "fetched once" mark are dropped so the loader asks for the newest
+ * page again; returns whether that happened. A chat not noted is left alone.
+ */
+export function forgetPagerOnReopen(chatId: string, loaded: Set<string>, reloadOnOpen: Set<string>): boolean {
+    if (!reloadOnOpen.has(chatId)) return false;
+    reloadOnOpen.delete(chatId);
+    loaded.delete(chatId);
+    historyPagers.update((map) => {
+        if (!map.has(chatId)) return map;
+        const next = new Map(map);
+        next.delete(chatId);
+        return next;
+    });
+    return true;
+}
+
+/**
+ * What survives the fresh start of a chat whose loaded pages no longer match
+ * the backend: only the bubbles that are not stored records yet (an answer in
+ * flight). Everything stored comes back with the newest page, or by scrolling;
+ * keeping the old pages would put them after the new page, out of order.
+ */
+export function placeholdersOnly<T extends PagedMessage>(messages: T[]): T[] {
+    return messages.filter((m) => !!m.commandId || !!m.pending);
 }
 
 /** What a page answer says about what is left; unknown or missing means nothing. */

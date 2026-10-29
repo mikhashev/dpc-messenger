@@ -9,7 +9,7 @@
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import { mergeBackfillWithLive } from '$lib/utils/liveMessageIdentity';
   import { isAIChatId, legacyImportPending } from '$lib/utils/aiChatStore';
-  import { HISTORY_PAGE_LIMIT, historyPagers, setPager, pageFacts, oldestRecordId, prependOlderPage } from '$lib/utils/historyPaging';
+  import { HISTORY_PAGE_LIMIT, historyPagers, setPager, pageFacts, oldestRecordId, prependOlderPage, stopPagerUntilReopen, forgetPagerOnReopen, placeholdersOnly } from '$lib/utils/historyPaging';
   import { onMount, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import type { Message } from '$lib/types.js';
@@ -64,6 +64,12 @@
   // way. The flag belongs here, not in the content.
   // ---------------------------------------------------------------------------
   const loadedHistory = new Set<string>();
+  // Chats whose older-page request failed (the chat was reset or archived under
+  // the reader): stopped until next opened, then reloaded from the newest page.
+  // Without it a stopped pager stayed stopped until the app restarted.
+  const reloadOnOpen = new Set<string>();
+  // The chat the effect last saw as open, so a reopen is told from a re-run.
+  let lastOpenedChatId: string | null = null;
 
   // Backend records to chat messages, the same way for the first page and
   // every older one.
@@ -128,8 +134,8 @@
         conversation_id: chatId, before_message_id: cursor, limit: HISTORY_PAGE_LIMIT,
       });
       if (result?.status !== 'success' || (result.conversation_id && result.conversation_id !== chatId)) {
-        console.warn(`[ChatHistory] Older page for ${chatId.slice(0,20)} refused, pager stopped: ${result?.message ?? result?.status}`);
-        setPager(chatId, { loading: false, stopped: true });
+        console.warn(`[ChatHistory] Older page for ${chatId.slice(0,20)} refused, pager stopped until the chat is reopened: ${result?.message ?? result?.status}`);
+        stopPagerUntilReopen(chatId, reloadOnOpen);
         return 0;
       }
       const older = mapLoadedPage(result.messages || [], chatId);
@@ -155,8 +161,8 @@
       console.log(`[ChatHistory] Older page for ${chatId.slice(0,20)}: +${added}, has_older=${facts.hasOlder}`);
       return added;
     } catch (e) {
-      console.error(`[ChatHistory] Older page for ${chatId.slice(0,20)} failed, pager stopped:`, e);
-      setPager(chatId, { loading: false, stopped: true });
+      console.error(`[ChatHistory] Older page for ${chatId.slice(0,20)} failed, pager stopped until the chat is reopened:`, e);
+      stopPagerUntilReopen(chatId, reloadOnOpen);
       return 0;
     }
   }
@@ -167,6 +173,23 @@
   // copy they are restored from, no longer the UI's localStorage.
   // ---------------------------------------------------------------------------
   $effect(() => {
+    // A chat becoming the open one, told apart from the effect re-running for
+    // the chat already open. Read before the guards below, so a switch made
+    // while disconnected still counts.
+    const openedChatId = activeChatId || null;
+    if (openedChatId !== lastOpenedChatId) {
+      lastOpenedChatId = openedChatId;
+      if (openedChatId && forgetPagerOnReopen(openedChatId, loadedHistory, reloadOnOpen)) {
+        console.log(`[ChatHistory] ${openedChatId.slice(0,20)} reopened after a failed page request - reloading its newest page`);
+        untrack(() => chatHistories.update(map => {
+          const current = map.get(openedChatId);
+          if (!current) return map;
+          const newMap = new Map(map);
+          newMap.set(openedChatId, placeholdersOnly(current));
+          return newMap;
+        }));
+      }
+    }
     // An AI chat waits for the one-time import from the old UI store: fetched
     // before it, the chat would be marked loaded with an empty history.
     const importPending = $legacyImportPending;
