@@ -20,6 +20,13 @@ mentions an agent is not flagged: the agent's turn is a task. What the walk
 cannot see: a call through a variable whose class it cannot name is matched by
 method name only for the sentinels marked `any_receiver`, and a task awaited
 later by name (`t = create_task(...); await t`) is not followed.
+
+A wait on a thread is a wait on the loop too. A handler that hands work to a
+thread and awaits it holds the socket for as long as the thread works, though
+nothing outside this process is involved: the whole-file hash before a
+FILE_OFFER is that (`run_in_executor`). Section (e) of SENTINELS lists the forms
+of that hand-off the code uses. `test_no_other_form_of_thread_hand_off_is_in_use`
+fails when a module uses a form the walk does not read.
 """
 
 from __future__ import annotations
@@ -33,8 +40,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 PKG = Path(__file__).resolve().parent.parent / "dpc_client_core"
 
 # key -> (any_receiver, what it waits on). A key is "Class.method", a module-level
-# function's name, or "asyncio.wait_for". `any_receiver` lets a call through a
-# local variable (`agent_manager.process_message(...)`) match by method name.
+# function's name, or a dotted name in the asyncio module ("asyncio.wait_for",
+# "asyncio.to_thread", "asyncio.AbstractEventLoop.run_in_executor"). `any_receiver`
+# lets a call through a local variable (`agent_manager.process_message(...)`)
+# match by method name; the loop is always reached that way (`loop.`, `self._loop.`,
+# `asyncio.get_running_loop().`).
 SENTINELS: Dict[str, Tuple[bool, str]] = {
     # (a) an agent turn, or starting the agent that runs one
     "DpcAgentManager.process_message": (True, "a whole agent turn"),
@@ -68,10 +78,54 @@ SENTINELS: Dict[str, Tuple[bool, str]] = {
     "DpcAgentManager._start_telegram_bridge": (True, "logs a Telegram bot in and starts polling"),
     "TelegramService._stop_agent_telegram_bridge": (False, "stops a Telegram bot's polling"),
     "AgentTelegramBridge.send_markdown": (True, "a Telegram Bot API send"),
+    # (e) local work handed to a thread and awaited: nothing outside the process, but
+    # the socket is held for as long as the thread works
+    "asyncio.AbstractEventLoop.run_in_executor": (True, "work in an executor thread"),
+    "asyncio.to_thread": (False, "work in a worker thread"),
+    "write_index_async": (False, "an agent's index writer thread, possibly draining a rebuild"),
 }
 
 # Handlers that reach a sentinel and stay on the read loop, each with why.
+_WHOLE_FILE_HASH = (
+    "Hashes the whole file in the executor before FILE_OFFER (`send_file` > "
+    "`compute_file_fingerprint` > `_hash_in_executor`, a read of the file that takes as "
+    "long as the file is big) and stays inline so that a text sent next cannot overtake "
+    "the offer. Card A-SEND-KEEPS-ITS-PLACE-IN-A-CHAT-ONLY-BY-HOLDING-THE-UI-SOCKETS-READ-LOOP."
+)
+# The handlers that hash a whole file before an offer, by the walk's own finding.
+HASHES_A_WHOLE_FILE = (
+    "send_file", "send_p2p_image", "send_voice_message",
+    "send_group_file", "send_group_voice_message",
+)
+
+_STATUS_PUSH_SCAN = (
+    "Local work in a thread, not yet judged: the status push after the change "
+    "(`get_status`) scans the host's addresses in an executor (service.py:2419, "
+    "`_scan_local_ips`: UDP connects, a host-name lookup bounded at 3 s, `ip addr` with "
+    "a 2 s timeout); a scan under 30 s old is reused."
+)
+
 INLINE_ON_PURPOSE: Dict[str, str] = {
+    **{c: _WHOLE_FILE_HASH for c in HASHES_A_WHOLE_FILE},
+    "get_providers_list": (
+        "Reaches the Ollama daemon in a thread (`_provider_rows` > `supports_vision`, "
+        "service.py:2774). A read that sets a store: answers arriving out of order could "
+        "leave an older snapshot on screen."
+    ),
+    # --- local work in a thread, not yet judged: the walk found them, nobody has decided ---
+    "clear_peer_cache": _STATUS_PUSH_SCAN,
+    "remove_cached_peer": _STATUS_PUSH_SCAN,
+    "list_processes": (
+        "Local work in a thread, not yet judged: the psutil walk of the process registry "
+        "and the nvidia-smi reads (service.py:10604, `read` > `read_vram_mib`, each probe "
+        "capped at 10 s, a reading reused for 30 s)."
+    ),
+    "reset_model_download_decline": (
+        "Local work in a thread, not yet judged: for the Camoufox download it asks "
+        "`camoufox_binary.size_bytes` in a thread (model_download_service.py:178), which "
+        "makes one GitHub API read of the pinned tag only when the size table has no row "
+        "for this platform (camoufox_binary.py:212-229; no timeout set here)."
+    ),
     "send_group_image": (
         "Keeps the group's order: with 'Describe for agents' on it waits for a vision "
         "model, and a text the user sends after the image must not land before it."
@@ -258,7 +312,7 @@ class _Walker:
         by_method: Dict[str, List[str]] = defaultdict(list)
         for key, (any_receiver, _) in SENTINELS.items():
             if "." in key and any_receiver:
-                by_method[key.split(".", 1)[1]].append(key)
+                by_method[key.rsplit(".", 1)[1]].append(key)
         self._by_method = by_method
 
     def _sentinel_for(self, call: ast.Call, owner: Optional[str]) -> Optional[str]:
@@ -282,8 +336,10 @@ class _Walker:
             return []
         if isinstance(recv, ast.Name) and recv.id == "self":
             return [owner]
-        if _is_self_attr(recv):
-            return sorted(self.ix.attr_types(owner).get(recv.attr, ()))
+        if isinstance(recv, ast.Attribute):
+            # `self.a` and the longer `self.service.a`: the coordinators reach
+            # CoreService's managers through the `service` they were built with.
+            return sorted(self.ix._types_of(recv, owner, {}))
         return []
 
     def _targets(self, call: ast.Call, owner: Optional[str], nested: Dict[str, ast.AST]):
@@ -320,6 +376,13 @@ class _Walker:
         return hits
 
 
+def _asyncio_attr(dotted: str):
+    obj = asyncio
+    for part in dotted.split(".")[1:]:
+        obj = getattr(obj, part, None)
+    return obj
+
+
 def _allowed_commands(index: _Index) -> List[str]:
     for node in ast.walk(index.modules["local_api.py"]):
         if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "ALLOWED_COMMANDS":
@@ -350,8 +413,8 @@ def test_every_sentinel_still_names_a_definition():
     handler that waits on it would pass as if it did not."""
     stale = []
     for key in SENTINELS:
-        if key == "asyncio.wait_for":
-            ok = callable(getattr(asyncio, "wait_for", None))
+        if key.startswith("asyncio."):
+            ok = callable(_asyncio_attr(key))
         elif "." in key:
             cls, name = key.split(".", 1)
             ok = cls in _INDEX.classes and bool(_INDEX.method(cls, name))
@@ -414,6 +477,85 @@ def test_the_marks_read_from_the_source_are_the_ones_the_dispatcher_reads():
         live = getattr(CoreService, c)
         assert ("slow_command" in _marks(fn)) == getattr(live, "dpc_slow", False), c
         assert ("sends_own_response" in _marks(fn)) == getattr(live, "dpc_sends_own_response", False), c
+
+
+RUN_IN_EXECUTOR = "asyncio.AbstractEventLoop.run_in_executor"
+
+
+def test_the_handlers_that_hash_a_file_are_found_reaching_the_executor():
+    """Not vacuous: the hand-off to a thread is what the five file-sending handlers
+    are listed for, so the walk must still see it from each of them."""
+    blind = [c for c in HASHES_A_WHOLE_FILE
+             if not any(p.endswith(RUN_IN_EXECUTOR) and "_hash_in_executor" in p
+                        for p in _REACH.get(c, []))]
+    assert not blind, f"the walk no longer sees these hash a file in the executor: {blind}"
+    for c in HASHES_A_WHOLE_FILE:
+        assert c in INLINE_ON_PURPOSE and not _marks(_HANDLERS[c]), c
+
+
+def test_each_thread_sentinel_is_reached_by_a_handler():
+    """One handler per sentinel kind the walk reads for a thread: a form the walk
+    stopped matching would leave its handlers passing as if they did not wait."""
+    expected = {
+        "get_providers_list": "asyncio.to_thread",
+        "clear_peer_cache": RUN_IN_EXECUTOR,
+        "purge_denied_shared_knowledge": "write_index_async",
+    }
+    for c, sentinel in expected.items():
+        assert any(p.endswith(sentinel) for p in _REACH.get(c, [])), (c, sentinel, _REACH.get(c))
+
+
+def test_the_forms_of_thread_hand_off_are_read_wherever_the_receiver_is_written():
+    src = (
+        "async def a(self):\n    await asyncio.get_running_loop().run_in_executor(None, f)\n"
+        "async def b(self):\n    await self._loop.run_in_executor(None, f)\n"
+        "async def c(self, loop):\n    await asyncio.wait_for(loop.run_in_executor(ex, f), timeout=3)\n"
+        "async def d(self):\n    await asyncio.gather(asyncio.to_thread(f), asyncio.to_thread(g))\n"
+        "async def e(self):\n    await write_index_async(p, f)\n"
+        "async def g(self, loop):\n    asyncio.create_task(asyncio.to_thread(f))\n"
+    )
+    funcs = {fn.name: fn for fn in ast.parse(src).body}
+    for name in "abc":
+        assert any(p.endswith(RUN_IN_EXECUTOR) for p in _WALKER.reach("CoreService", funcs[name])), name
+    assert sum(p.endswith("asyncio.to_thread") for p in _WALKER.reach("CoreService", funcs["d"])) == 2
+    assert _WALKER.reach("CoreService", funcs["e"]) == ["write_index_async"]
+    assert _WALKER.reach("CoreService", funcs["g"]) == []
+
+
+# Forms of handing work to a thread or another loop that the walk does not read, and
+# where the code uses them today. A new use somewhere else fails the next test.
+UNREAD_FORMS_KNOWN: Dict[str, str] = {
+    "asyncio.wrap_future@local_api.py": "hops a send to the owner loop; waits on no work of its own",
+    "asyncio.wrap_future@managers/llama_server_supervisor.py": (
+        "`on_the_owner_loop`: awaits a coroutine on the supervisor's loop; what it waits "
+        "on is the engine call the walk meets elsewhere"
+    ),
+    "asyncio.wrap_future@dpc_agent/index_writer.py": "`write_index_async`, a sentinel above",
+}
+
+
+def test_no_other_form_of_thread_hand_off_is_in_use():
+    """The walk reads `run_in_executor` (any receiver), `asyncio.to_thread` and
+    `write_index_async`. A bare `to_thread`, `anyio`'s `run_sync` or a
+    `wrap_future` somewhere new is a way to wait on a thread it would not see."""
+    found = set()
+    for rel, tree in _INDEX.modules.items():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in ("asyncio", "anyio.to_thread", "anyio"):
+                if any(a.name in ("to_thread", "run_sync", "wrap_future", "run_in_executor")
+                       for a in node.names):
+                    found.add(f"from {node.module} import@{rel}")
+            if not isinstance(node, ast.Call):
+                continue
+            text = ast.unparse(node.func)
+            if text in ("to_thread", "run_sync", "wrap_future") or text.endswith(".run_sync"):
+                found.add(f"{text}@{rel}")
+            elif text == "asyncio.wrap_future":
+                found.add(f"asyncio.wrap_future@{rel}")
+    assert found == set(UNREAD_FORMS_KNOWN), (
+        f"forms of thread hand-off the walk does not read: new {sorted(found - set(UNREAD_FORMS_KNOWN))}, "
+        f"gone {sorted(set(UNREAD_FORMS_KNOWN) - found)}"
+    )
 
 
 def test_a_task_handed_to_create_task_is_not_followed():
