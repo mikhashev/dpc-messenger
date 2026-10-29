@@ -21,7 +21,11 @@ dependencies = [
     "aiortc>=1.6.0,<2.0.0",
     "certifi>=2024.0.0",
     "psutil>=5.9.0,<6.0.0",
-    "Pillow>=10.0.0,<11.0.0",
+    # No ceiling, for the reason tiktoken's says: <11 held 10.4.0, which has no
+    # cp314 wheel, so from 2026-10-29 CI's 3.14 could not install the client.
+    # 13.0.0 is the floor because it closes the October 2026 advisories that
+    # every release up to 12.3.0 carries, five of them critical.
+    "Pillow>=13.0.0",
     "transformers>=4.44.0,<5.0.0",
     "sentencepiece>=0.2.0,<0.3.0",
     "torch>=2.7.0,<3.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
