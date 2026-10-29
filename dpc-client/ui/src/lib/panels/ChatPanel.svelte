@@ -591,8 +591,10 @@
         }]);
         return m;
       });
+      // An agent's answer may take minutes, and the user may switch chats meanwhile.
+      const visionChatId = activeChatId;
       try {
-        setChatLoading(activeChatId, true);
+        setChatLoading(visionChatId, true);
         const visionProvider = parseProviderSelection(selectedVisionProvider);
         const payload: any = {
           conversation_id: agentChatToAgentId.get(activeChatId) ?? activeChatId,
@@ -621,12 +623,12 @@
         }
         chatHistories.update(h => {
           const m = new Map(h);
-          const hist = m.get(activeChatId) || [];
-          m.set(activeChatId, [...hist, { id: crypto.randomUUID(), sender: 'ai', text: `⚠️ **${userMessage}**\n\n${errorDetails}`, timestamp: Date.now(), isError: true }]);
+          const hist = m.get(visionChatId) || [];
+          m.set(visionChatId, [...hist, { id: crypto.randomUUID(), sender: 'ai', text: `⚠️ **${userMessage}**\n\n${errorDetails}`, timestamp: Date.now(), isError: true }]);
           return m;
         });
         autoScroll();
-        setChatLoading(activeChatId, false);
+        setChatLoading(visionChatId, false);
       }
     } else if (activeChatId.startsWith('telegram-')) {
       // Telegram screenshot

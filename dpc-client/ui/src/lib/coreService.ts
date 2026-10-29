@@ -127,6 +127,10 @@ import { availableProviders, defaultProviders, providersList, peerProviders, aiR
 import { accountRowsFromBalances, accountLevel, balanceErrorText, providerTypeLabel, type AccountRow } from './components/inferenceSharing';
 import { showNotificationIfBackground } from './notificationService';
 import { fileSendTimeoutFor, getLocalFileSize } from './fileSendTimeout';
+import {
+    TURN_COMMAND_CHECK_MS, chatHasTurnOrWaits, isTurnCommand, noteTurnCommandLook, turnCommandTimedOut,
+    type TurnCommandWatch,
+} from './utils/turnCommandWait';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded } from './services/voice';
 import { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress } from './services/modelDownload';
@@ -168,7 +172,22 @@ const MAX_AUTH_RETRIES = 3;
 const API_URL = "ws://127.0.0.1:9999";
 
 // Map to track pending command responses
-const pendingCommands = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; resetTimeout?: () => void }>();
+// `turnConversationId` marks a turn command (utils/turnCommandWait.ts): its answer
+// may also come as `ai_response_with_image`, which settles it when the reply cannot.
+const pendingCommands = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; resetTimeout?: () => void; turnConversationId?: string }>();
+
+/** Resolve the oldest turn command waiting on this chat; true if there was one. */
+function settleTurnCommand(conversationId: string | undefined): boolean {
+    if (!conversationId) return false;
+    for (const [id, cmd] of pendingCommands) {
+        if (cmd.turnConversationId === conversationId) {
+            pendingCommands.delete(id);
+            cmd.resolve({ status: 'analyzed', conversation_id: conversationId });
+            return true;
+        }
+    }
+    return false;
+}
 
 function startPolling() {
     if (pollingInterval) {
@@ -318,6 +337,15 @@ export async function connectToCoreService() {
                         sendCommand("get_telegram_status");    // Fetch Telegram status including conversation links
                         loadGroups();                             // Fetch group chats (v0.19.0)
                         startBalancePolling();                    // DeepSeek balance poll + low-balance alerts (Phase 2b)
+
+                        // The turns were forgotten when the socket opened and nothing else
+                        // seeds them again after the first connect; a turn command that
+                        // outlived the old socket judges its chat by them.
+                        if ([...pendingCommands.values()].some((c) => c.turnConversationId)) {
+                            Promise.resolve(listAgents()).then((r: any) => {
+                                if (r?.status === 'success' && r.agents) agentsList.set(r.agents);
+                            }).catch(() => { /* the next turn event seeds it */ });
+                        }
 
                         // Stop polling
                         if (pollingInterval) {
@@ -567,6 +595,9 @@ export async function connectToCoreService() {
                 // Handle AI vision response (Phase 2)
                 else if (message.event === "ai_response_with_image") {
                     console.log("AI vision response received:", message.payload);
+                    // The answer of a turn command: it settles the command even when the
+                    // socket that carried it closed and its reply can no longer come.
+                    settleTurnCommand(message.payload?.conversation_id);
                     aiResponseWithImage.set(message.payload);
                 }
                 // File transfer event handlers (Week 1)
@@ -1371,6 +1402,32 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
         ]);
         const expectsResponse = !fireAndForgetCommands.has(command);
 
+        if (expectsResponse && isTurnCommand(command, payload)) {
+            // An agent turn has no fixed length: no timeout from the send, only from the
+            // last look that saw a turn in the chat. No resetTimeout either, so another
+            // command's keepalive (file_preparation_progress) never touches this one.
+            return new Promise((resolve, reject) => {
+                const conversationId: string = payload.conversation_id;
+                let watch: TurnCommandWatch = { sentAt: Date.now(), lastTurnSeenAt: null };
+                const timer = setInterval(() => {
+                    const now = Date.now();
+                    watch = noteTurnCommandLook(watch, chatHasTurnOrWaits(get(agentTurns), conversationId), now);
+                    const why = turnCommandTimedOut(watch, now);
+                    if (why && pendingCommands.has(id)) {
+                        pendingCommands.delete(id);
+                        clearInterval(timer);
+                        reject(new Error(`Command '${command}' got no answer: ${why}`));
+                    }
+                }, TURN_COMMAND_CHECK_MS);
+                pendingCommands.set(id, {
+                    resolve: (value) => { clearInterval(timer); resolve(value); },
+                    reject: (reason) => { clearInterval(timer); reject(reason); },
+                    turnConversationId: conversationId,
+                });
+                socket!.send(JSON.stringify(message));
+            });
+        }
+
         if (expectsResponse) {
             return new Promise((resolve, reject) => {
                 // Calculate dynamic timeout for file operations and connections
@@ -1391,8 +1448,8 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // Subsequent uses: ~5-10s
                     timeout = 240000;
                 } else if (command === 'send_image') {
-                    // Image vision analysis timeout: 240s (v0.20.0+)
-                    // Local vision models can be slow, especially on first load or with large images
+                    // Image vision analysis timeout: 240s (v0.20.0+), for the plain AI chat;
+                    // in an agent chat it is a turn command and waits for the turn instead.
                     timeout = 240000;
                 } else if (fileSendTimeoutFor(command, payload) !== null) {
                     // send_file / send_group_file / send_group_image: scaled by file size (v0.11.2+)
