@@ -254,7 +254,7 @@ async def test_local_inference_still_gets_the_whole_context_unchanged(firewall):
         contexts={"local": context},
         device_context=device,
         peer_device_contexts={},
-        message_history=[{"role": "user", "content": "what should I run?"}],
+        message_history=[],  # the first message: the query is the only place it appears
         include_context=True,
         instruction_set_name=None,
     )

@@ -9727,10 +9727,16 @@ class CoreService:
                 else:
                     logger.warning("Peer %s... not connected", node_id[:20])
 
-        # Phase 7: Add user prompt to conversation history BEFORE assembling prompt
+        # Phase 7: the history sent with the prompt is what came BEFORE this turn.
+        # The current message goes in once, as the prompt's USER QUERY line; taking
+        # the copy after add_message put it there a second time, as the last
+        # history entry (and the window paid for it twice).
+        history_before_this_turn = monitor.get_message_history()
+
+        # Add user prompt to conversation history (the record, not the prompt)
         monitor.add_message('user', prompt)
 
-        # Phase 7: Get conversation history for message array
+        # The record with this turn's message in it: the token estimate below counts it
         message_history = monitor.get_message_history()
 
         # Assemble final prompt (with or without context, message history always included)
@@ -9743,7 +9749,7 @@ class CoreService:
             contexts=aggregated_contexts,
             device_context=device_context_data,
             peer_device_contexts=peer_device_contexts,
-            message_history=message_history,
+            message_history=history_before_this_turn,
             include_context=include_full_context,
             instruction_set_name=effective_instruction_set
         )
