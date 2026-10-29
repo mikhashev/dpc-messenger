@@ -6,36 +6,65 @@ address and the DHT announce and the UI's first "Local Network" entry both named
 address no peer on the Wi-Fi can reach. `lan_addresses` lists the addresses of real
 local networks by interface name; the announce prefers its first, the old routing
 guess stays as the fallback, and the tunnel address is still learned as our own.
+
+Review of 6234b329 (Zcode, Johnny): a renamed tunnel passed the name filter, two
+NICs of one range came in psutil's order, and the generic bridge prefix dropped a
+Linux host whose address lives on bridge0. A tunnel is now also told by having no
+link-layer (MAC) address, bridgeN is dropped on macOS only, and the default
+route's address goes first inside its range. The fake psutil below carries MACs
+only where a test says so; with none at all the MAC rule stays off.
 """
 
 from __future__ import annotations
 
+import logging
 import socket
 from types import SimpleNamespace
 
 import pytest
 
+from dpc_client_core import own_addresses as own_addresses_module
 from dpc_client_core import service as service_module
 from dpc_client_core.own_addresses import OwnAddresses, lan_addresses
 from dpc_client_core.p2p_manager import P2PManager
 from dpc_client_core.service import CoreService
 
 AF = socket.AF_INET
+AF_LINK = -1  # what psutil reports on Windows; the value only has to match
+# A locally administered placeholder, never a real adapter's.
+MAC = "02-00-00-00-00-01"
 
 
 def _addr(ip: str):
     return SimpleNamespace(family=AF, address=ip)
 
 
-def _fake_psutil(monkeypatch, interfaces: dict, up: bool = True, down=()):
-    """interfaces: name -> [ip]; every interface is up except those in `down`."""
+def _fake_psutil(monkeypatch, interfaces: dict, up: bool = True, down=(), macs=None):
+    """interfaces: name -> [ip]; every interface is up except those in `down`.
+
+    macs: None gives the fake no AF_LINK entries at all (the MAC rule stays off);
+    else name -> link address, an interface absent from it having no AF_LINK
+    entry, the way psutil shows a Wintun adapter on Windows.
+    """
+    def _entries(name, ips):
+        out = [_addr(i) for i in ips]
+        if macs is not None and name in macs:
+            out.insert(0, SimpleNamespace(family=AF_LINK, address=macs[name]))
+        return out
+
     fake = SimpleNamespace(
-        net_if_addrs=lambda: {n: [_addr(i) for i in ips] for n, ips in interfaces.items()},
+        AF_LINK=AF_LINK,
+        net_if_addrs=lambda: {n: _entries(n, ips) for n, ips in interfaces.items()},
         net_if_stats=lambda: {
             n: SimpleNamespace(isup=(n not in down)) for n in interfaces
         },
     )
     monkeypatch.setitem(__import__("sys").modules, "psutil", fake)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_full_tunnel_note(monkeypatch):
+    monkeypatch.setattr(own_addresses_module, "_full_tunnel_noted", False)
 
 
 # --------------------------------------------------------------------------
@@ -65,6 +94,7 @@ def test_linux_eth0_is_kept_and_wireguard_and_docker_are_dropped(monkeypatch):
 
 
 def test_macos_en0_is_kept_and_utun_and_bridge_are_dropped(monkeypatch):
+    monkeypatch.setattr(own_addresses_module.sys, "platform", "darwin")
     _fake_psutil(monkeypatch, {
         "lo0": ["127.0.0.1"],
         "en0": ["192.168.1.30"],
@@ -73,6 +103,103 @@ def test_macos_en0_is_kept_and_utun_and_bridge_are_dropped(monkeypatch):
     })
 
     assert lan_addresses() == ["192.168.1.30"]
+
+
+def test_a_linux_host_whose_address_lives_on_bridge0_keeps_it(monkeypatch):
+    """The NIC is enslaved to bridge0 and has no address; bridge0 is the LAN."""
+    monkeypatch.setattr(own_addresses_module.sys, "platform", "linux")
+    _fake_psutil(
+        monkeypatch,
+        {"lo": ["127.0.0.1"], "enp3s0": [], "bridge0": ["192.168.1.40"],
+         "br-1a2b3c": ["172.18.0.1"], "wg0": ["10.0.0.2"]},
+        macs={"lo": "00:00:00:00:00:00", "enp3s0": "02:00:00:00:00:02",
+              "bridge0": "02:00:00:00:00:02", "br-1a2b3c": "02:42:00:00:00:03",
+              "wg0": ""},
+    )
+
+    assert lan_addresses() == ["192.168.1.40"]
+
+
+def test_a_docker_bridge_is_dropped_on_every_platform(monkeypatch):
+    for platform in ("linux", "win32", "darwin"):
+        monkeypatch.setattr(own_addresses_module.sys, "platform", platform)
+        _fake_psutil(monkeypatch, {"eth0": ["192.168.1.20"], "br-1a2b3c": ["172.18.0.1"]})
+        assert lan_addresses() == ["192.168.1.20"], platform
+
+
+def test_macos_bridge100_is_dropped_even_with_a_mac(monkeypatch):
+    monkeypatch.setattr(own_addresses_module.sys, "platform", "darwin")
+    _fake_psutil(
+        monkeypatch,
+        {"en0": ["192.168.1.30"], "bridge100": ["192.168.64.1"], "utun3": ["10.8.0.2"]},
+        macs={"en0": MAC, "bridge100": "02:00:00:00:00:64", "utun3": ""},
+    )
+
+    assert lan_addresses() == ["192.168.1.30"]
+
+
+def test_a_renamed_tunnel_with_no_mac_is_dropped(monkeypatch):
+    """AmneziaVPN's adapter renamed "Ethernet 3": the name passes, the missing MAC does not."""
+    _fake_psutil(
+        monkeypatch,
+        {"Wi-Fi": ["192.168.0.5"], "Ethernet 3": ["10.8.1.5"],
+         "vEthernet (WSL)": ["172.20.0.1"], "Loopback Pseudo-Interface 1": ["127.0.0.1"]},
+        macs={"Wi-Fi": MAC, "vEthernet (WSL)": "02-15-5D-00-00-01"},
+    )
+
+    assert lan_addresses() == ["192.168.0.5"]
+
+
+def test_a_zero_or_empty_link_address_counts_as_none(monkeypatch):
+    _fake_psutil(
+        monkeypatch,
+        {"eth0": ["192.168.1.20"], "tun0": ["10.8.0.6"], "Ethernet 4": ["10.9.0.6"]},
+        macs={"eth0": MAC, "tun0": "00:00:00:00:00:00", "Ethernet 4": None},
+    )
+
+    assert lan_addresses() == ["192.168.1.20"]
+
+
+def test_two_nics_in_one_range_put_the_default_route_first(monkeypatch):
+    _fake_psutil(
+        monkeypatch,
+        {"Ethernet": ["192.168.0.10"], "Wi-Fi": ["192.168.1.11"], "eth9": ["10.1.1.1"]},
+        macs={"Ethernet": MAC, "Wi-Fi": "02-00-00-00-00-02", "eth9": "02-00-00-00-00-03"},
+    )
+
+    assert lan_addresses() == ["192.168.0.10", "192.168.1.11", "10.1.1.1"]
+    assert lan_addresses("192.168.1.11") == ["192.168.1.11", "192.168.0.10", "10.1.1.1"]
+    # The route only breaks a tie inside its range; ranges keep their order.
+    assert lan_addresses("10.1.1.1") == ["192.168.0.10", "192.168.1.11", "10.1.1.1"]
+
+
+def test_a_full_tunnel_is_said_once_and_without_the_address(monkeypatch, caplog):
+    _fake_psutil(
+        monkeypatch,
+        {"Wi-Fi": ["192.168.0.5"], "Ethernet 3": ["10.8.1.5"]},
+        macs={"Wi-Fi": MAC},
+    )
+    caplog.set_level(logging.INFO, logger=own_addresses_module.logger.name)
+
+    assert lan_addresses("10.8.1.5") == ["192.168.0.5"]
+    assert lan_addresses("10.8.1.5") == ["192.168.0.5"]
+
+    notes = [r for r in caplog.records if "full-tunnel" in r.getMessage()]
+    assert len(notes) == 1
+    assert notes[0].levelno == logging.INFO
+    assert "10.0.0.0/8" in notes[0].getMessage()
+    assert "10.8.1.5" not in notes[0].getMessage()
+
+
+def test_no_full_tunnel_note_when_the_route_is_on_the_lan_or_public(monkeypatch, caplog):
+    _fake_psutil(monkeypatch, {"Wi-Fi": ["192.168.0.5"]}, macs={"Wi-Fi": MAC})
+    caplog.set_level(logging.INFO, logger=own_addresses_module.logger.name)
+
+    lan_addresses("192.168.0.5")
+    lan_addresses("198.51.100.7")
+    lan_addresses(None)
+
+    assert not [r for r in caplog.records if "full-tunnel" in r.getMessage()]
 
 
 def test_a_corporate_lan_in_10_8_on_a_physical_nic_is_kept(monkeypatch):
@@ -143,7 +270,7 @@ def _manager(route_ip: str):
 async def test_the_announce_ip_is_the_lan_address_when_there_is_one(monkeypatch):
     import dpc_client_core.p2p_manager as p2p_module
 
-    monkeypatch.setattr(p2p_module, "lan_addresses", lambda: [LAN])
+    monkeypatch.setattr(p2p_module, "lan_addresses", lambda *a: [LAN])
     m = _manager(TUNNEL)
 
     assert await m._get_primary_local_ip() == LAN
@@ -153,17 +280,30 @@ async def test_the_announce_ip_is_the_lan_address_when_there_is_one(monkeypatch)
 async def test_the_announce_ip_falls_back_to_the_route_guess_with_no_lan(monkeypatch):
     import dpc_client_core.p2p_manager as p2p_module
 
-    monkeypatch.setattr(p2p_module, "lan_addresses", lambda: [])
+    monkeypatch.setattr(p2p_module, "lan_addresses", lambda *a: [])
     m = _manager(TUNNEL)
 
     assert await m._get_primary_local_ip() == TUNNEL
 
 
 @pytest.mark.asyncio
+async def test_the_announce_passes_the_route_guess_to_break_the_tie(monkeypatch):
+    import dpc_client_core.p2p_manager as p2p_module
+
+    seen = []
+    monkeypatch.setattr(p2p_module, "lan_addresses", lambda route_ip=None: seen.append(route_ip) or [LAN])
+    m = _manager(TUNNEL)
+
+    await m._get_primary_local_ip()
+
+    assert seen == [TUNNEL]
+
+
+@pytest.mark.asyncio
 async def test_the_tunnel_address_is_still_learned_as_our_own(monkeypatch):
     import dpc_client_core.p2p_manager as p2p_module
 
-    monkeypatch.setattr(p2p_module, "lan_addresses", lambda: [LAN])
+    monkeypatch.setattr(p2p_module, "lan_addresses", lambda *a: [LAN])
     m = _manager(TUNNEL)
 
     await m._get_primary_local_ip()
@@ -201,7 +341,7 @@ class _RouteSocket:
 
 
 def test_the_ui_list_starts_with_the_lan_address_and_keeps_the_tunnel(monkeypatch):
-    monkeypatch.setattr(service_module, "lan_addresses", lambda: [LAN])
+    monkeypatch.setattr(service_module, "lan_addresses", lambda *a: [LAN])
     monkeypatch.setattr(service_module.socket, "socket", _RouteSocket)
     monkeypatch.setattr(service_module, "_bounded_hostname_lookup", lambda *a, **k: [])
 
@@ -213,7 +353,7 @@ def test_the_ui_list_starts_with_the_lan_address_and_keeps_the_tunnel(monkeypatc
 
 
 def test_the_ui_list_is_unchanged_when_there_is_no_lan_address(monkeypatch):
-    monkeypatch.setattr(service_module, "lan_addresses", lambda: [])
+    monkeypatch.setattr(service_module, "lan_addresses", lambda *a: [])
     monkeypatch.setattr(service_module.socket, "socket", _RouteSocket)
     monkeypatch.setattr(service_module, "_bounded_hostname_lookup", lambda *a, **k: [])
 

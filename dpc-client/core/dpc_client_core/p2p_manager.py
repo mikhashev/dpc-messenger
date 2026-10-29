@@ -1684,8 +1684,9 @@ class P2PManager:
 
         For internet-wide DHT, external IP should be used instead (call update_dht_ip()).
         """
-        lan = lan_addresses()
         route_ip = self._default_route_source_ip()
+        # The route guess breaks a tie inside a range, and names a full tunnel.
+        lan = lan_addresses(route_ip)
         self.own_addresses.learn_all(lan, "lan interface")
         self.own_addresses.learn(route_ip, "default route")
         if lan:

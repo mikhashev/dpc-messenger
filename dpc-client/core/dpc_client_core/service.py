@@ -2276,6 +2276,7 @@ class CoreService:
         """
         local_ips = []
         errors = []
+        route_ip = None
 
         # Method 1: Use socket to external address (most reliable, finds primary interface)
         # Try IPv4
@@ -2284,6 +2285,7 @@ class CoreService:
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
+            route_ip = local_ip
             # Use new filtering method
             if local_ip and self._is_usable_ipv4(local_ip):
                 local_ips.append(local_ip)
@@ -2361,7 +2363,7 @@ class CoreService:
         # LAN addresses first: behind a full-tunnel VPN the routing guess above
         # is the tunnel's address, and the UI shows the first entry as the one to
         # copy. Nothing the methods above found is dropped.
-        lan = lan_addresses()
+        lan = lan_addresses(route_ip)
         if lan:
             local_ips = lan + [ip for ip in local_ips if ip not in lan]
 
