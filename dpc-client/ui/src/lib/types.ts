@@ -162,6 +162,9 @@ export interface FileTransfer {
     mime_type?: string;
     bytes_per_second?: number;     // From file_transfer_progress: speed over the last 5 s
     seconds_left?: number | null;  // From file_transfer_progress: null while the speed is not known
+    group_id?: string;             // A group file, either direction
+    sender_name?: string;          // An incoming offer's name for node_id
+    sender_node_id?: string;       // A group file's author as the offer claims it (unsigned); node_id is the hop
 }
 
 // --- Group Chat ---

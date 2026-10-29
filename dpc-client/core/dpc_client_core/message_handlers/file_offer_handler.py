@@ -163,6 +163,15 @@ class FileOfferHandler(MessageHandler):
         # Get sender name for UI display
         sender_name = self.service.peer_metadata.get(sender_node_id, {}).get("name") or sender_node_id
 
+        def add_group_fields(event_data):
+            if group_id:
+                event_data["group_id"] = group_id
+                if author_node_id:
+                    # The author as the offer claims it (unsigned). `node_id` is
+                    # the hop: the node the dialog's answer is about, and the
+                    # Active Transfers row's "via".
+                    event_data["sender_node_id"] = author_node_id
+
         # Broadcast appropriate event based on type. An asked offer goes out as
         # the dialog's event whatever it carries, naming its kind.
         if awaiting_permission:
@@ -178,12 +187,7 @@ class FileOfferHandler(MessageHandler):
                 "awaiting_permission": True,
                 "kind": "image" if is_image else "voice" if is_voice else "file",
             }
-            if group_id:
-                event_data["group_id"] = group_id
-                if author_node_id:
-                    # The author as the offer claims it (unsigned). `node_id` is
-                    # the hop, the node the dialog's answer is about.
-                    event_data["sender_node_id"] = author_node_id
+            add_group_fields(event_data)
             await self.service.local_api.broadcast_event("file_transfer_offered", event_data)
         elif is_image:
             # Image offer: include thumbnail and dimensions
@@ -201,8 +205,7 @@ class FileOfferHandler(MessageHandler):
                 "source": image_metadata.get("source", "unknown"),
                 "captured_at": image_metadata.get("captured_at", "")
             }
-            if group_id:
-                event_data["group_id"] = group_id
+            add_group_fields(event_data)
             await self.service.local_api.broadcast_event("image_offer_received", event_data)
         elif is_voice:
             # Voice offer: include duration and codec info
@@ -221,8 +224,7 @@ class FileOfferHandler(MessageHandler):
                 "codec": voice_metadata.get("codec", "unknown"),
                 "recorded_at": voice_metadata.get("recorded_at", "")
             }
-            if group_id:
-                event_data["group_id"] = group_id
+            add_group_fields(event_data)
             await self.service.local_api.broadcast_event("voice_offer_received", event_data)
         else:
             # Regular file offer: standard notification
@@ -236,8 +238,7 @@ class FileOfferHandler(MessageHandler):
                 "mime_type": mime_type,
                 "hash": hash_value
             }
-            if group_id:
-                event_data["group_id"] = group_id
+            add_group_fields(event_data)
             await self.service.local_api.broadcast_event("file_transfer_offered", event_data)
 
         # Create pending download transfer

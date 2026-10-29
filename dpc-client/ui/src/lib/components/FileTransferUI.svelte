@@ -6,6 +6,7 @@
   import VoicePlayer from './VoicePlayer.svelte';
   import { alwaysAllowLabel, alwaysAllowLimits, offerQuestion, senderLabel } from '$lib/fileTransferPermission';
   import { speedAndTimeLeft } from '$lib/utils/transferSpeed';
+  import { transferRowLabel } from '$lib/utils/transferRowLabel';
 
   // Props (Svelte 5 runes mode)
   let {
@@ -29,6 +30,7 @@
     currentFileOffer = null,
     firewallRules = null,
     nameOf,
+    groupNameOf,
     onAcceptFile,
     onRejectFile,
 
@@ -67,6 +69,7 @@
     currentFileOffer?: any;
     firewallRules?: any;
     nameOf?: (nodeId: string) => string | undefined;
+    groupNameOf?: (groupId: string) => string | undefined;
     onAcceptFile: (remember?: boolean) => void;
     onRejectFile: () => void;
     showSendFileDialog?: boolean;
@@ -435,6 +438,7 @@
             ×
           </button>
         </div>
+        <div class="transfer-party">{transferRowLabel(transfer, nameOf, groupNameOf)}</div>
         {#if transfer.progress !== undefined}
           {@const rate = speedAndTimeLeft(transfer)}
           <div class="progress-bar">
@@ -700,6 +704,13 @@
     color: #888;
     font-size: 12px;
     white-space: nowrap;
+  }
+
+  .transfer-party {
+    color: #888;
+    font-size: 12px;
+    margin: -4px 0 8px;
+    overflow-wrap: anywhere;
   }
 
   .cancel-transfer-button {

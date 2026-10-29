@@ -956,14 +956,17 @@ class FileTransferManager:
 
         # Broadcast file transfer started event to UI
         if self.local_api:
-            await self.local_api.broadcast_event("file_transfer_started", {
+            started = {
                 "transfer_id": transfer_id,
                 "node_id": node_id,
                 "filename": transfer.filename,
                 "size_bytes": transfer.file_path.stat().st_size,
                 "direction": "upload",
                 "total_chunks": transfer.total_chunks
-            })
+            }
+            if transfer.group_id:
+                started["group_id"] = transfer.group_id  # the row names the group it is sent in
+            await self.local_api.broadcast_event("file_transfer_started", started)
 
         # Send chunks. The file is held until it is closed: on Windows a
         # FILE_COMPLETE that arrives during the last chunk's pause could not

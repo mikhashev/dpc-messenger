@@ -1190,6 +1190,7 @@
     currentFileOffer={currentFileOffer}
     firewallRules={fileOfferRules}
     nameOf={(id) => peerDisplayNames.get(id)}
+    groupNameOf={(id) => $groupChats.get(id)?.name}
     onAcceptFile={handleAcceptFile}
     onRejectFile={handleRejectFile}
     showSendFileDialog={showSendFileDialog}

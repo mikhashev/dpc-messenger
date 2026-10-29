@@ -39,7 +39,8 @@ export function offerOpensDialog(offer: IncomingOffer): boolean {
     return offer.awaiting_permission === true || !offer.group_id;
 }
 
-function labelOf(id: string, name: string | undefined): string {
+/** A node as the dialog names it: its name with a short id, or the short id alone. */
+export function labelOf(id: string, name: string | undefined): string {
     const shortId = id.length > 20 ? `${id.slice(0, 20)}…` : id;
     const shown = name && name !== id ? name : '';
     return shown ? `${shown} (${shortId})` : shortId || 'an unknown peer';
