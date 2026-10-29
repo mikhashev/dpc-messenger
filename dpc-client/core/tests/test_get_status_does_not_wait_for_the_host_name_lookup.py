@@ -173,6 +173,8 @@ def test_the_scan_keeps_the_order_and_the_filters_of_the_two_lookups(monkeypatch
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr(service_module, "_hostname_lookup_pending", False)
     monkeypatch.setattr(service_module.sys, "platform", "win32")
+    # this test is about the two lookups, not about the interfaces of the box it runs on
+    monkeypatch.setattr(service_module, "lan_addresses", lambda: [])
     # the two UDP-connect methods find nothing on a box with no route
     monkeypatch.setattr(
         socket, "socket", lambda *a, **k: (_ for _ in ()).throw(OSError("no route"))

@@ -28,7 +28,7 @@ from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
 from .dht import DHTManager, DHTConfig
 from .peer_cache import PeerCache, addresses_to_try, dial_in_order
-from .own_addresses import OwnAddresses
+from .own_addresses import OwnAddresses, lan_addresses
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -1671,14 +1671,30 @@ class P2PManager:
 
     async def _get_primary_local_ip(self) -> str:
         """
-        Get the primary local IP address for DHT announcements.
+        Get the local IP address for DHT announcements.
 
-        Returns the first non-Docker, non-loopback IPv4 address,
-        or falls back to 0.0.0.0 if none found.
+        Prefers this node's first LAN address (`lan_addresses`: a physical
+        interface, 192.168/16 first), because behind a full-tunnel VPN the OS's
+        route toward the internet is the tunnel address, which a peer on the
+        same LAN cannot reach. With no LAN address it falls back to the source
+        address of the default route, or 0.0.0.0 when that fails too.
 
-        Note: For local network testing, this returns LAN IP (192.168.x.x).
+        Every address seen here, the tunnel's included, is learned as our own,
+        so self-dial detection stays as wide as before.
+
         For internet-wide DHT, external IP should be used instead (call update_dht_ip()).
         """
+        lan = lan_addresses()
+        route_ip = self._default_route_source_ip()
+        self.own_addresses.learn_all(lan, "lan interface")
+        self.own_addresses.learn(route_ip, "default route")
+        if lan:
+            logger.debug("Detected LAN IP for DHT: %s (default route: %s)", lan[0], route_ip)
+            return lan[0]
+        return route_ip
+
+    def _default_route_source_ip(self) -> str:
+        """The source address the OS would use toward 8.8.8.8, or 0.0.0.0."""
         import socket
         try:
             # Use UDP socket trick to get local IP (doesn't actually send packet)

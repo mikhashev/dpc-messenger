@@ -37,6 +37,7 @@ from .dpc_agent.pricing import vendor_ceiling_currency
 from . import node_ledger
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
+from .own_addresses import lan_addresses
 from .llm_manager import LLMManager, PROVIDER_MAP, entry_point_for
 from . import provider_alias_refs
 from .providers.base import (
@@ -2356,6 +2357,13 @@ class CoreService:
                             logger.debug("Found local IPv6 via 'ip addr' command: %s", ip)
             except Exception as e:
                 errors.append(f"Linux 'ip addr' method: {e}")
+
+        # LAN addresses first: behind a full-tunnel VPN the routing guess above
+        # is the tunnel's address, and the UI shows the first entry as the one to
+        # copy. Nothing the methods above found is dropped.
+        lan = lan_addresses()
+        if lan:
+            local_ips = lan + [ip for ip in local_ips if ip not in lan]
 
         # Report results
         if not local_ips:
