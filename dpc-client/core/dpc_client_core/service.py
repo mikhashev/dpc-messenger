@@ -3099,6 +3099,7 @@ class CoreService:
 
         return summary
 
+    @slow_command
     async def query_ollama_model_info(self, provider_alias: str) -> Dict[str, Any]:
         """
         Query Ollama provider for model parameters and info.
@@ -3198,6 +3199,7 @@ class CoreService:
                     "message": f"Could not reach {url}: {type(e).__name__}: {e}".rstrip(": ")}
         return {"status": "success", "models": sorted_models(ids)}
 
+    @slow_command
     async def query_remote_providers(self, peer_id: str, timeout: float = 10.0) -> Dict[str, Any]:
         """
         Query a remote peer for their available AI providers.
@@ -3714,6 +3716,7 @@ class CoreService:
             logger.error("Error loading wizard template: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    @slow_command
     async def ai_assisted_instruction_creation(
         self,
         user_responses: Dict[str, str],
@@ -3751,6 +3754,7 @@ class CoreService:
             logger.error("Error in AI-assisted instruction creation: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    @slow_command
     async def ai_assisted_instruction_creation_remote(
         self,
         user_responses: Dict[str, str],
@@ -4052,6 +4056,7 @@ class CoreService:
             "mime_type": mime_type
         }
 
+    @slow_command
     async def transcribe_audio(
         self,
         audio_base64: str = "",
@@ -4359,6 +4364,7 @@ class CoreService:
                 except Exception:
                     pass
 
+    @slow_command
     async def preload_whisper_model(self, provider_alias: str | None = None) -> dict:
         """Delegated to VoiceService."""
         return await self.voice_service.preload_whisper_model(provider_alias)
@@ -7538,6 +7544,8 @@ class CoreService:
             logger.error("Error sending group file: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    # Not @slow_command on purpose: with 'Describe for agents' it waits on a vision
+    # model, and a text sent after the image must not land before it in the group.
     async def send_group_image(
         self, group_id: str, image_base64: str, filename: str = None, text: str = "",
         describe_for_agents: bool = False,
@@ -8026,6 +8034,7 @@ class CoreService:
             return {"status": "error", "message": "Telegram integration not enabled"}
         return await self.telegram_service.delete_telegram_conversation_link(conversation_id)
 
+    @slow_command
     async def link_agent_telegram(
         self,
         agent_id: str,
@@ -8069,6 +8078,7 @@ class CoreService:
             return
         await self.telegram_service._restart_agent_telegram_bridge(agent_id)
 
+    @slow_command
     async def set_agent_telegram_enabled(
         self, agent_id: str, enabled: bool
     ) -> Dict[str, Any]:
@@ -8077,6 +8087,7 @@ class CoreService:
             return {"status": "error", "message": "Telegram integration not enabled"}
         return await self.telegram_service.set_agent_telegram_enabled(agent_id, enabled)
 
+    @slow_command
     async def unlink_agent_telegram(self, agent_id: str) -> Dict[str, Any]:
         """Delegates to TelegramService."""
         if not self.telegram_service:
@@ -8188,6 +8199,7 @@ class CoreService:
 
     # --- P2P Connection Methods ---
 
+    @slow_command
     async def connect_to_peer(self, uri: str):
         """
         Connect to a peer using a dpc:// URI (Direct TLS).
@@ -8224,6 +8236,7 @@ class CoreService:
         """
         await self.p2p_coordinator.connect_via_hub(node_id)
 
+    @slow_command
     async def connect_via_dht(self, node_id: str) -> dict:
         """
         Connect to a peer using DHT-first strategy.
@@ -8332,6 +8345,7 @@ class CoreService:
         """Delegated to P2PCoordinator."""
         return await self.p2p_coordinator.send_file(node_id, file_path, file_size_bytes)
 
+    @slow_command
     async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = "", provider_alias: str = None, compute_host: str = None, chat_provider: str = None):
         """
         Send an image from clipboard paste (Phase 2.3: Vision + Remote Vision).
@@ -9290,6 +9304,7 @@ class CoreService:
         """
         self._cc_ark_chain_depths.pop(conversation_id, None)
 
+    @slow_command
     async def send_cc_agent_response(self, conversation_id: str, text: str, _skip_broadcast: bool = False, **kwargs) -> dict:
         """Inject CC's response into an agent conversation.
 
@@ -10238,6 +10253,7 @@ class CoreService:
             logger.error("get_corpus_stats failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    @slow_command
     async def purge_denied_shared_knowledge(self) -> Dict[str, Any]:
         """Drop shared-layer documents from the stores of agents denied that layer.
 
@@ -10440,6 +10456,7 @@ class CoreService:
             agent_id = self._get_default_agent_id()
         return await self.agent_service.get_agent_learning(agent_id)
 
+    @slow_command
     async def schedule_agent_task(
         self,
         agent_id: str = None,
@@ -10550,6 +10567,7 @@ class CoreService:
         except ValueError as e:
             return {"status": "error", "message": str(e)}
 
+    @slow_command
     async def local_engine_status(self) -> Dict[str, Any]:
         """The card holder and each Strata alias's state; never starts an engine."""
         from dpc_client_core.providers.strata_provider import local_engine_status
@@ -10782,6 +10800,7 @@ class CoreService:
         """
         return list((metadata.get("agents") or {}).get(local_node_id) or [])
 
+    @slow_command
     async def trigger_group_sleep(self, group_id: str) -> Dict[str, Any]:
         """Trigger sleep pipeline for all agents in a group, using group archives only."""
         conversations_dir = Path.home() / ".dpc" / "conversations"
@@ -10949,6 +10968,7 @@ class CoreService:
 
     # --- Hub Methods ---
 
+    @slow_command
     async def login_to_hub(self, provider: str = "google"):
         """Login to Hub using OAuth."""
         await self.hub_client.login(provider=provider)
@@ -10975,6 +10995,7 @@ class CoreService:
 
         logger.info("Successfully logged in to Hub")
 
+    @slow_command
     async def disconnect_from_hub(self):
         """Disconnect from Hub."""
         # Cancel the signal listening task
