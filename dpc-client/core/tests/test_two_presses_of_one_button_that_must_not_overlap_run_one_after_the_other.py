@@ -63,7 +63,9 @@ class _Bridge:
 
 
 class _Manager:
-    """Builds a bridge and only then awaits it, as DpcAgentManager does."""
+    """Stops the running bridge, builds a new one and only then awaits it, as
+    DpcAgentManager does, but without the manager's own lock: the order here is
+    the TelegramService lock's alone."""
 
     def __init__(self):
         self.gate = asyncio.Event()
@@ -72,7 +74,13 @@ class _Manager:
         self.active = 0
         self.max_active = 0
 
+    async def _stop_telegram_bridge(self):
+        bridge, self._telegram_bridge = self._telegram_bridge, None
+        if bridge is not None:
+            await bridge.stop()
+
     async def _start_telegram_bridge(self):
+        await self._stop_telegram_bridge()
         bridge = _Bridge(self)
         self._telegram_bridge = bridge
         self.bridges.append(bridge)

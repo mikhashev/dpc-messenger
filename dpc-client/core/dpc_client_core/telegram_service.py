@@ -517,6 +517,9 @@ class TelegramService:
         pollers on one bot token make Telegram answer 409 Conflict. A start that
         overlaps a stop could leave a bridge running for a link marked disabled.
         asyncio.Lock wakes waiters in arrival order, so the last press wins.
+        This lock orders the registry writes; the bridge itself is replaced under
+        the manager's _telegram_bridge_lock, which the manager's own start() takes
+        too.
 
         Not re-entrant: a path that holds it must call only _restart_agent_telegram_bridge
         and _stop_agent_telegram_bridge, which do not take it, never another path
@@ -540,13 +543,8 @@ class TelegramService:
 
         agent_manager = dpc_agent_provider._managers[agent_id]
 
-        if hasattr(agent_manager, "_telegram_bridge") and agent_manager._telegram_bridge:
-            try:
-                await agent_manager._telegram_bridge.stop()
-                logger.info("Stopped Telegram bridge for agent %s", agent_id)
-            except Exception as e:
-                logger.error("Error stopping Telegram bridge for agent %s: %s", agent_id, e, exc_info=True)
-
+        # The manager stops the running bridge and builds the new one under its own
+        # lock, which a start() still in progress takes too.
         try:
             await agent_manager._start_telegram_bridge()
             logger.info("Restarted Telegram bridge for agent %s", agent_id)
@@ -562,13 +560,10 @@ class TelegramService:
         if not dpc_agent_provider or not hasattr(dpc_agent_provider, "_managers"):
             return
         agent_manager = dpc_agent_provider._managers.get(agent_id)
-        bridge = getattr(agent_manager, "_telegram_bridge", None) if agent_manager else None
-        if bridge is None:
+        if agent_manager is None:
             return
         try:
-            await bridge.stop()
-            agent_manager._telegram_bridge = None
-            logger.info("Stopped Telegram bridge for agent %s", agent_id)
+            await agent_manager._stop_telegram_bridge()
         except Exception as e:
             logger.error(
                 "Error stopping Telegram bridge for agent %s: %s", agent_id, e, exc_info=True

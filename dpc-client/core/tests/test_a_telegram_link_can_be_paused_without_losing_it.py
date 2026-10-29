@@ -105,6 +105,13 @@ def _service(agent, bridge):
     svc = TelegramService.__new__(TelegramService)
     svc._telegram_link_locks = {}
     manager = SimpleNamespace(_telegram_bridge=bridge)
+
+    async def _stop_telegram_bridge():
+        if manager._telegram_bridge is not None:
+            await manager._telegram_bridge.stop()
+            manager._telegram_bridge = None
+
+    manager._stop_telegram_bridge = _stop_telegram_bridge
     svc.restarted = []
     provider = SimpleNamespace(_managers={AGENT: manager})
     svc.llm_manager = SimpleNamespace(providers={"dpc_agent": provider})

@@ -99,6 +99,11 @@ class DpcAgentManager:
 
         # Telegram bridge for notifications
         self._telegram_bridge = None
+        # Every start and stop of the bridge takes this. A start builds the bridge and
+        # then awaits its login, so two that overlap leave the first polling with no
+        # owner and Telegram answers 409 Conflict. Not re-entrant: a locked path
+        # calls only the *_unlocked parts.
+        self._telegram_bridge_lock = asyncio.Lock()
 
         self._memory_indexes_initialized = False
 
@@ -720,10 +725,46 @@ class DpcAgentManager:
         return self
 
     async def _start_telegram_bridge(self) -> None:
-        """Initialize and start the Telegram notification bridge from per-agent configuration.
+        """Start the bridge from the agent's configuration, replacing one that runs.
+
+        start() reaches this minutes after it began, behind the memory indexes, and
+        TelegramService reaches it whenever a link is enabled or edited. The running
+        bridge is stopped and the new one built under one lock, so whichever comes
+        second replaces the first instead of leaving it polling. When the registry
+        says Telegram is off for the agent, or the manager was stopped, no bridge is
+        left running.
+        """
+        async with self._telegram_bridge_lock:
+            await self._stop_telegram_bridge_unlocked()
+            if self._stop_event.is_set():
+                log.info("Agent %s was stopped; its Telegram bridge is not started",
+                         self.agent_id or "singleton")
+                return
+            await self._start_telegram_bridge_unlocked()
+
+    async def _stop_telegram_bridge(self) -> None:
+        """Stop the running bridge, if there is one, after any start in progress."""
+        async with self._telegram_bridge_lock:
+            await self._stop_telegram_bridge_unlocked()
+
+    async def _stop_telegram_bridge_unlocked(self) -> None:
+        """The caller holds _telegram_bridge_lock."""
+        bridge, self._telegram_bridge = self._telegram_bridge, None
+        if bridge is None:
+            return
+        try:
+            await bridge.stop()
+            log.info("Stopped Telegram bridge for agent %s", self.agent_id or "singleton")
+        except Exception as e:
+            log.error("Error stopping Telegram bridge for agent %s: %s",
+                      self.agent_id or "singleton", e, exc_info=True)
+
+    async def _start_telegram_bridge_unlocked(self) -> None:
+        """Build and start the bridge from per-agent configuration.
 
         Reads Telegram config from agent registry (_registry.json) with fallback
         to global [dpc_agent_telegram] config for backwards compatibility.
+        The caller holds _telegram_bridge_lock and has stopped any running bridge.
         """
         from ..dpc_agent.utils import AgentRegistry
 
@@ -831,7 +872,7 @@ class DpcAgentManager:
             )
 
             # Create bridge with per-agent config
-            self._telegram_bridge = AgentTelegramBridge(
+            bridge = AgentTelegramBridge(
                 bot_token=bot_token,
                 allowed_chat_ids=chat_ids,
                 event_filter=event_filter,
@@ -842,9 +883,10 @@ class DpcAgentManager:
                 footer_enabled=footer_enabled,
                 burst_quiet_seconds=burst_quiet_seconds,
             )
+            self._telegram_bridge = bridge
 
             # Set message handler for two-way communication
-            self._telegram_bridge.set_message_handler(
+            bridge.set_message_handler(
                 handler=self.process_message,
                 agent_manager=self,
             )
@@ -858,20 +900,20 @@ class DpcAgentManager:
             def _wire_to_emitter():
                 emitter = get_event_emitter()
                 emitter.add_listener(
-                    create_telegram_bridge_callback(self._telegram_bridge, agent_id=self.agent_id))
+                    create_telegram_bridge_callback(bridge, agent_id=self.agent_id))
                 log.info(
                     f"Telegram bridge started for agent {agent_desc}, "
-                    f"connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events, "
+                    f"connected to event emitter (filter={len(bridge.event_filter)} events, "
                     f"chat_ids={chat_ids})"
                 )
 
-            self._telegram_bridge._on_started = _wire_to_emitter
+            bridge._on_started = _wire_to_emitter
 
             # Start bridge
-            success = await self._telegram_bridge.start()
+            success = await bridge.start()
             if not success:
                 log.warning(f"Failed to start Telegram bridge for agent {agent_desc}")
-                if getattr(self._telegram_bridge, "_retry_task", None) is None:
+                if getattr(bridge, "_retry_task", None) is None:
                     self._telegram_bridge = None
                 else:
                     log.info(f"Telegram bridge for agent {agent_desc} is retrying in the background")
@@ -901,10 +943,9 @@ class DpcAgentManager:
     async def stop(self) -> None:
         """Shutdown the agent and Telegram bridge."""
         self._stop_event.set()
-        # Stop Telegram bridge first
-        if self._telegram_bridge is not None:
-            await self._telegram_bridge.stop()
-            self._telegram_bridge = None
+        # Stop Telegram bridge first; set above, the event keeps a start in progress
+        # from building one after this.
+        await self._stop_telegram_bridge()
 
         if self._agent is not None:
             self._agent.stop_task_processor()

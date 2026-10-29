@@ -15,6 +15,7 @@ test_a_burst_of_telegram_messages_is_one_agent_run.py.
 import asyncio
 import json
 import pathlib
+import threading
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -134,8 +135,12 @@ def _telegram_service_with_a_live_agent():
         service=SimpleNamespace(settings=None, telegram_manager=None),
         process_message=AsyncMock(),
         _telegram_bridge=_OldBridge(),
+        _telegram_bridge_lock=asyncio.Lock(),
+        _stop_event=threading.Event(),
     )
-    manager._start_telegram_bridge = MethodType(DpcAgentManager._start_telegram_bridge, manager)
+    for name in ("_start_telegram_bridge", "_start_telegram_bridge_unlocked",
+                 "_stop_telegram_bridge", "_stop_telegram_bridge_unlocked"):
+        setattr(manager, name, MethodType(getattr(DpcAgentManager, name), manager))
     svc.llm_manager = SimpleNamespace(
         providers={"dpc_agent": SimpleNamespace(_managers={AGENT: manager})})
     return svc, manager
