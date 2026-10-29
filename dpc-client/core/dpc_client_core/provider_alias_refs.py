@@ -380,9 +380,50 @@ def rename_references(old: str, new: str, home: Path) -> Dict[str, Any]:
     return result
 
 
+# An agent whose config.json names a `compute_host` sends every model call to that
+# peer (dpc_agent/llm_adapter.py), so its `provider_alias` is a row of the PEER's
+# providers.json and this node's file is the wrong place to look for it. The other
+# three keys are not routed: sleep, snapshot summarising and compaction call this
+# node's own LLMManager.query(provider_alias=...), compute_host or not, so they stay
+# checked against this node's providers.
+PEER_RESOLVED_AGENT_KEYS = ("provider_alias",)
+
+
+def _is_pinned_to_a_peer(config: Any) -> bool:
+    host = config.get("compute_host") if isinstance(config, dict) else None
+    return isinstance(host, str) and bool(host.strip())
+
+
+def _peer_resolved_places(home: Path) -> set:
+    """Labels of the references that a peer, not this node, has to resolve."""
+    pinned = set()
+    configured = set()
+    labels = set()
+    for agent_id, path in _agent_configs(home):
+        configured.add(agent_id)
+        if _is_pinned_to_a_peer(_read_json(path)):
+            pinned.add(agent_id)
+            labels.update(f"agents/{agent_id}/config.json:{key}"
+                          for key in PEER_RESOLVED_AGENT_KEYS)
+    # The registry mirrors config.json, which is what the agent runs from; its own
+    # copy of compute_host speaks only for an agent that has no config.json.
+    registry = _read_json(home / "agents" / "_registry.json")
+    entries = registry.get("agents") if isinstance(registry, dict) else None
+    for agent_id, entry in (entries or {}).items():
+        if agent_id in pinned or (agent_id not in configured and _is_pinned_to_a_peer(entry)):
+            labels.add(f"agents/_registry.json:{agent_id}.provider_alias")
+    return labels
+
+
 def unresolved_references(known_aliases, home: Path) -> List[str]:
-    """References naming an alias that `known_aliases` does not contain — an agent cut off from its provider."""
+    """References naming an alias that `known_aliases` does not contain — an agent cut off from its provider.
+
+    A reference that a peer resolves (the `provider_alias` of an agent pinned to a
+    `compute_host`) is not cut off from anything and is left out.
+    """
     known = set(known_aliases or ())
+    on_a_peer = _peer_resolved_places(home)
     return [f"{where} → '{value}'"
             for place in PLACES if place.in_unresolved
-            for where, value in place.scan(home) if value and value not in known]
+            for where, value in place.scan(home)
+            if value and value not in known and where not in on_a_peer]
