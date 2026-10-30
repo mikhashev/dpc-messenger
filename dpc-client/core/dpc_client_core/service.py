@@ -5936,6 +5936,52 @@ class CoreService:
                 else:
                     logger.debug("No history file found for %s", conversation_id)
 
+            # Discord per-user conversations (discord_coordinator.py): the agent's
+            # own monitor writes them, so as for agent_ the disk is the source.
+            if conversation_id.startswith("discord-user-"):
+                try:
+                    conv_dir = conversation_paths.resolve_store_dir(
+                        DPC_HOME_DIR / "conversations", conversation_id
+                    )
+                except ValueError as e:
+                    raise history_page.HistoryPageError(str(e))
+                history_path = conv_dir / "history.json"
+                if history_path.exists():
+                    try:
+                        import json as _json
+                        with open(history_path, encoding="utf-8") as f:
+                            data = _json.load(f)
+                        records = data.get("messages", [])
+
+                        def render_discord(msg):
+                            out = dict(msg)
+                            out.setdefault("message_id", out.get("id"))
+                            if "tool_calls" in out:
+                                out["tool_calls"] = clip_tool_calls(out["tool_calls"])
+                            return out
+
+                        messages, has_older = history_page.page_of(records, cursor, page_limit, render_discord)
+                        logger.info("Loaded %d of %d messages from disk for %s", len(messages), len(records), conversation_id)
+                        token_stats = data.get("token_stats", {})
+                        history_tokens = sum(len(msg.get("content", "") or "") for msg in records) // 4
+                        return {
+                            "status": "success",
+                            "conversation_id": conversation_id,
+                            "messages": messages,
+                            "message_count": len(records),
+                            "has_older": has_older,
+                            "live_history_boundary": live_history_boundary_in(conv_dir),
+                            "tokens_used": token_stats.get("current_token_count", history_tokens),
+                            "token_limit": token_stats.get("token_limit", 0) or 0,
+                            "history_tokens": history_tokens,
+                            "tokens_after_last_response": token_stats.get("tokens_after_last_response", 0),
+                            "tokens_after_last_response_at": token_stats.get("tokens_after_last_response_at"),
+                        }
+                    except history_page.HistoryPageError:
+                        raise
+                    except Exception as e:
+                        logger.error("Failed to load Discord history from disk: %s", e)
+
             # AI chats: the monitor loads its history.json when it is created
             # (2026-10-19), so after a restart the history comes from disk
             # rather than from an empty in-memory monitor.

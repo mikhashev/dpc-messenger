@@ -188,3 +188,22 @@ export function boundaryLineText(
     if (Number.isNaN(when.getTime())) return null;
     return `Session started ${format(when)} — earlier messages are in the archive`;
 }
+
+/**
+ * The one line at the top of a chat whose pager has nothing older to load:
+ * the backend said has_older false. A refused page says nothing — older pages
+ * may well exist, and the chat loads again on its next open. A chat reset at some moment gets the
+ * boundary line; any other chat says its loaded messages are all this node
+ * keeps, so scrolling up does not end in silence. Nothing while older pages
+ * may still come, and nothing above an empty list unless there is a boundary.
+ */
+export function startLineText(
+    pager: HistoryPager | undefined,
+    hasMessages: boolean,
+    format?: (d: Date) => string,
+): string | null {
+    if (!pager || pager.hasOlder) return null;
+    const boundary = boundaryLineText(pager.boundary, format);
+    if (boundary) return boundary;
+    return hasMessages ? 'No older messages on this node' : null;
+}

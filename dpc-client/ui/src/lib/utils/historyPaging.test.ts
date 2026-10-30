@@ -13,6 +13,7 @@ import {
     scrollTopKeepingAnchor,
     readerIsAtBottom,
     boundaryLineText,
+    startLineText,
     stopPagerUntilReopen,
     forgetPagerOnReopen,
     placeholdersOnly,
@@ -226,5 +227,36 @@ describe('boundaryLineText', () => {
     it('is nothing for a chat never reset, or an unreadable moment', () => {
         expect(boundaryLineText(null)).toBeNull();
         expect(boundaryLineText('not a date')).toBeNull();
+    });
+});
+
+describe('startLineText', () => {
+    const iso = (d: Date) => d.toISOString();
+    const NO_OLDER = 'No older messages on this node';
+
+    it('is nothing while older pages may still come, or before any page landed', () => {
+        expect(startLineText(open, true)).toBeNull();
+        expect(startLineText({ ...open, loading: true }, true)).toBeNull();
+        expect(startLineText(undefined, true)).toBeNull();
+    });
+
+    it('says nothing older is kept on this node once the pager reaches the start', () => {
+        expect(startLineText({ ...open, hasOlder: false }, true)).toBe(NO_OLDER);
+    });
+
+    it('says nothing when a page was refused: older pages may still exist', () => {
+        expect(startLineText({ ...open, stopped: true }, true)).toBeNull();
+    });
+
+    it('is the boundary line instead in a chat that was reset, so one line shows, not two', () => {
+        const reset = { ...open, hasOlder: false, boundary: '2026-10-27T17:31:25+00:00' };
+        expect(startLineText(reset, true, iso))
+            .toBe('Session started 2026-10-27T17:31:25.000Z — earlier messages are in the archive');
+        // An empty live history right after a reset still shows its boundary.
+        expect(startLineText(reset, false, iso)).toContain('Session started');
+    });
+
+    it('is nothing above an empty chat that was never reset', () => {
+        expect(startLineText({ ...open, hasOlder: false }, false)).toBeNull();
     });
 });

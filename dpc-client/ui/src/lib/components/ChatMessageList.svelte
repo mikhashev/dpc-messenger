@@ -16,7 +16,7 @@
   import { tick } from 'svelte';
   import {
     historyPagers, shouldLoadOlder, pickAnchorIndex, scrollTopKeepingAnchor,
-    readerIsAtBottom, boundaryLineText,
+    readerIsAtBottom, startLineText,
   } from '$lib/utils/historyPaging';
 
   // "Show in folder" failures, by the path that failed (file gone, no file manager).
@@ -135,7 +135,7 @@
   // scroll handlers write them and nothing renders from them.
   // ---------------------------------------------------------------------------
   let pager = $derived($historyPagers.get(conversationId));
-  let boundaryLine = $derived(pager && !pager.hasOlder ? boundaryLineText(pager.boundary) : null);
+  let startLine = $derived(startLineText(pager, displayMessages.length > 0));
   let lastScrollTop = 0;
   let userScrolled = false;   // the reader has touched this chat's scroll since it opened
   let atBottom = true;        // as of the last scroll: live content may follow the reader
@@ -292,8 +292,8 @@
   bind:this={chatWindowElement}
   onscroll={onScroll}
 >
-  {#if boundaryLine}
-    <div class="history-boundary">{boundaryLine}</div>
+  {#if startLine}
+    <div class="history-boundary">{startLine}</div>
   {/if}
   {#if displayMessages.length > 0}
     {#each displayMessages as msg, i (msg.id)}

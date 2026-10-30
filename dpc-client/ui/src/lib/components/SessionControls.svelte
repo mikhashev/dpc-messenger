@@ -147,8 +147,9 @@
         <span class="token-value">≈{staticMemory.toLocaleString()}</span>
         <span class="token-percentage"></span>
       </div>
-      <div class="token-row token-row--muted" title="Number of messages in current conversation">
-        <span class="token-label">Messages</span>
+      <!-- The messages on screen, not the whole live history: older pages load on scroll-up (historyPaging.ts). -->
+      <div class="token-row token-row--muted" title="Number of messages loaded in current conversation">
+        <span class="token-label">Loaded</span>
         <span class="token-value">{messageCount}</span>
         <span class="token-percentage"></span>
       </div>
