@@ -1701,19 +1701,20 @@ class ContextFirewall:
                 "nodes": {
                     "_comment": "Per-node access rules - Most specific, overrides group rules. Add entries like: \"dpc-node-xxxx\": {\"personal.json:profile.*\": \"allow\"}"
                 },
+                # No group gets knowledge or the whole personal.json by default:
+                # knowledge is shared topic by topic (personal.json:knowledge.<topic>),
+                # and a topic named here would not exist in a new user's context.
                 "groups": {
-                    "_comment": "Per-group access rules - Applied to all nodes in the group",
+                    "_comment": "Per-group access rules - Applied to all nodes in the group. Knowledge is shared topic by topic: \"personal.json:knowledge.<topic>\": \"allow\"",
                     "friends": {
-                        "personal.json:profile.*": "allow",
-                        "personal.json:knowledge.*": "allow"
+                        "personal.json:profile.*": "allow"
                     },
                     "colleagues": {
                         "personal.json:profile.name": "allow",
-                        "personal.json:profile.description": "allow",
-                        "personal.json:knowledge.professional_skills.*": "allow"
+                        "personal.json:profile.description": "allow"
                     },
                     "family": {
-                        "personal.json:*": "allow"
+                        "personal.json:profile.*": "allow"
                     }
                 },
                 "ai_scopes": {
@@ -1722,7 +1723,6 @@ class ContextFirewall:
                     "work": {
                         "_comment": "Work mode - Work files + hardware specs",
                         "@work:*": "allow",
-                        "personal.json:knowledge.work_projects.*": "allow",
                         "device_context.json:hardware.gpu.*": "allow",
                         "device_context.json:software.dev_tools.*": "allow"
                     },

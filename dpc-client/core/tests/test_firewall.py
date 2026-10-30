@@ -846,6 +846,30 @@ class TestAgentContextDefaultDeny:
         assert fw.rules['dpc_agent']['human_knowledge_access'] is False
         assert fw.can_agent_access_context('knowledge', profile_name='agent_x') is False
 
+    def test_a_fresh_rules_file_names_no_knowledge_topic_and_hands_no_group_everything(self, tmp_path):
+        """A new install's rules: knowledge is shared topic by topic and a new
+        user has no topics, so a rule naming one ('professional_skills',
+        'work_projects') allows nothing, and 'knowledge.*' or 'personal.json:*'
+        on a group would hand peers the whole of it once the filter reads
+        inside fields. The example file a reader copies says the same."""
+        import json
+        from pathlib import Path
+
+        rules_file = tmp_path / "privacy_rules.json"
+        ContextFirewall(rules_file)
+        example = Path(__file__).resolve().parents[2] / "privacy_rules.example.json"
+
+        for rules in (json.loads(rules_file.read_text(encoding="utf-8")),
+                      json.loads(example.read_text(encoding="utf-8"))):
+            for section in ("groups", "nodes", "ai_scopes"):
+                for name, entry in rules.get(section, {}).items():
+                    if not isinstance(entry, dict):
+                        continue
+                    for path in entry:
+                        assert not path.startswith("personal.json:knowledge."), (section, name, path)
+                        if section == "groups":
+                            assert path != "personal.json:*", (section, name, path)
+
     def test_explicit_allow_still_works(self, tmp_path):
         import json
         rules_file = tmp_path / "privacy_rules.json"
