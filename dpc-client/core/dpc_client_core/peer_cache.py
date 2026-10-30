@@ -474,6 +474,50 @@ class PeerCache:
         peer.metadata[LOCAL_ADDRESSES_KEY] = list(local_addresses)
         self._save_cache()
 
+    def remove_address(self, node_id: str, ip: str, port: Optional[int]) -> bool:
+        """Forget one address of a cached peer; True when something was removed.
+
+        For an address a dial found to lead somewhere else (back to this node).
+        It leaves `addresses` and, as "ip:port", the peer's `local_addresses`, so
+        it is not dialled again at the next start. `last_direct_ip`/`_port` follow
+        the newest entry left, or fall back to unset when none is.
+        """
+        peer = self._peers.get(node_id)
+        if peer is None:
+            return False
+        ip = normalise_ip(ip)
+        changed = False
+
+        kept = [e for e in peer.addresses
+                if not (normalise_ip(e.get("ip") or "") == ip and (port is None or e.get("port") == port))]
+        if len(kept) != len(peer.addresses):
+            peer.addresses = kept
+            changed = True
+
+        advertised = peer.metadata.get(LOCAL_ADDRESSES_KEY)
+        if isinstance(advertised, list):
+            left = []
+            for text in advertised:
+                host, _, port_text = str(text).rpartition(":")
+                if normalise_ip(host) == ip and (port is None or port_text == str(port)):
+                    continue
+                left.append(text)
+            if len(left) != len(advertised):
+                peer.metadata[LOCAL_ADDRESSES_KEY] = left
+                changed = True
+
+        if not changed:
+            return False
+        if peer.addresses:
+            newest = max(peer.addresses, key=_seen_at)
+            peer.last_direct_ip = newest["ip"]
+            peer.last_direct_port = newest["port"]
+        elif peer.last_direct_ip and normalise_ip(peer.last_direct_ip) == ip:
+            peer.last_direct_ip = None
+            peer.last_direct_port = DEFAULT_DIRECT_PORT
+        self._save_cache()
+        return True
+
     def get_peer(self, node_id: str) -> Optional[CachedPeer]:
         """
         Get cached peer information.

@@ -45,6 +45,14 @@ PROVED_CONNECTION_TYPES = ("direct_tls",)
 HELLO_NONCE_BYTES = 32
 
 
+class SelfDialError(ConnectionError):
+    """A dial reached this node itself: the certificate it met is our own.
+
+    A ConnectionError, so every caller that already fails a dial on one still
+    does; its text is the whole reason, short enough to stand in a log line.
+    """
+
+
 def peer_proof(peers: Any, peer_id: str) -> tuple[Optional[bool], Optional[str]]:
     """The two columns a usage row carries about the node at the other end of
     the call: whether its key was proved, and the tier that says so.
@@ -894,6 +902,21 @@ class P2PManager:
                 await writer.wait_closed()
                 raise ConnectionError(error_msg)
 
+            if self._certificate_is_this_nodes_own(peer_cert) and target_node_id != self.node_id:
+                # Not an attack and not a wrong identity: the address now leads
+                # back here (a shared exit, a port forward onto this machine, a
+                # peer that moved away). Nothing to dial at it ever again.
+                writer.close()
+                await writer.wait_closed()
+                dropped = self.peer_cache.remove_address(target_node_id, host, port)
+                logger.info(
+                    "Address %s:%d of %s leads back to this node%s",
+                    host, port, target_node_id[:20],
+                    " and is dropped from that peer's cache entry" if dropped
+                    else " (it was not in that peer's cache entry)",
+                )
+                raise SelfDialError(f"{host}:{port} leads back to this node")
+
             if not self._validate_peer_certificate(peer_cert, target_node_id):
                 error_msg = (
                     f"Certificate validation failed for {target_node_id}. "
@@ -1101,6 +1124,8 @@ class P2PManager:
             )
             logger.error(error_msg)
             raise ConnectionError(error_msg)
+        except SelfDialError:
+            raise  # already logged at INFO, with the cache entry dealt with
         except Exception as e:
             # Use target_node_id in error since actual_node_id may not be set yet
             logger.error("Failed to establish direct connection with %s: %s", target_node_id, e, exc_info=True)
@@ -1133,6 +1158,20 @@ class P2PManager:
         except Exception as e:
             logger.error("Failed to extract peer certificate: %s", e)
             return None
+
+    def _certificate_is_this_nodes_own(self, cert: Any) -> bool:
+        """True when the certificate carries this node's id as its CN and its key
+        hashes to that id: the far end answered with our own identity. A CN alone
+        is a claim anyone can write, so a stranger copying it falls through to
+        the ordinary check and its wording."""
+        own_id = getattr(self, "node_id", None)
+        if not own_id:
+            return False
+        try:
+            cn = next((a.value for a in cert.subject if a.oid == x509.oid.NameOID.COMMON_NAME), None)
+            return cn == own_id and generate_node_id(cert.public_key()) == own_id
+        except Exception:  # noqa: BLE001 — an unreadable certificate is the ordinary check's to refuse
+            return False
 
     def _validate_peer_certificate(
         self,
