@@ -211,7 +211,9 @@ is bound to: private IPv4 only (RFC 1918: 10/8, 172.16/12, 192.168/16), at most 
 sender's order of preference (`own_addresses.lan_addresses`: interfaces that are up, have
 a link-layer address and are not tunnels or virtual adapters by name; 192.168/16, then
 172.16/12, then 10/8, the default route's address first within its range). A node not
-listening sends an empty list.
+listening sends an empty list. The field is sent only to a peer the sender already knows —
+one in its peer cache or in a group with it, judged on the proven `node_id` before this
+handshake updates the cache — and is left out for any other node.
 
 - **Receiver.** The field is ignored when it is not a list (logged at DEBUG). Of a list,
   the first 4 entries are read; an entry is dropped unless it is a string `ip:port` with a

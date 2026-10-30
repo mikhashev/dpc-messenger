@@ -175,6 +175,9 @@ def _frames_written(monkeypatch, strip_field=False):
 async def test_hello_and_hello_ack_carry_it_and_each_side_keeps_the_others(tmp_path, monkeypatch):
     a = _manager(tmp_path, "a", A_LAN)
     b = _manager(tmp_path, "b", B_LAN)
+    # The addresses go only to a known peer: here the two share a group.
+    a.set_groups_for_peer(lambda node_id: ["group-shared"])
+    b.set_groups_for_peer(lambda node_id: ["group-shared"])
     sent = _frames_written(monkeypatch)
     port = await _listen(b, monkeypatch)
     try:

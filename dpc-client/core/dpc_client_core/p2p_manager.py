@@ -185,6 +185,8 @@ class P2PManager:
         self.on_peer_list_change: Callable | None = None
         self.on_message_received: Callable | None = None
         self.on_peer_disconnected: Callable | None = None  # Callback for peer disconnection
+        # GroupManager.get_groups_for_peer, set by the service: who gets local_addresses.
+        self.groups_for_peer: Callable | None = None
         self._server_task = None
         logger.info("P2PManager initialized with WebRTC support")
 
@@ -197,6 +199,10 @@ class P2PManager:
     def set_on_peer_disconnected(self, callback: Callable):
         """Set callback for peer disconnection events (for cleanup like file transfers)."""
         self.on_peer_disconnected = callback
+
+    def set_groups_for_peer(self, callback: Callable):
+        """Set the groups-shared-with-a-peer lookup that local_addresses is gated on."""
+        self.groups_for_peer = callback
 
     def set_core_service_ref(self, core_service):
         """Set reference to CoreService for storing peer metadata."""
@@ -663,8 +669,10 @@ class P2PManager:
                 "status": "OK",
                 "name": self.display_name,
                 "node_id": self.node_id,  # Include actual node_id for validation
-                "local_addresses": self._own_local_addresses(),
             }
+            local_addresses = self._own_local_addresses_for(peer_node_id)
+            if local_addresses is not None:
+                ack["local_addresses"] = local_addresses
             await write_message(writer, ack)
 
             peer = PeerConnection(node_id=peer_node_id, reader=reader, writer=writer)
@@ -997,9 +1005,11 @@ class P2PManager:
                     "cert_pem": own_cert_pem,
                     "hello_preimage_version": HELLO_PREIMAGE_VERSION,
                     "hello_signature": hello_signature,
-                    "local_addresses": self._own_local_addresses(),
                 }
             }
+            local_addresses = self._own_local_addresses_for(target_node_id)
+            if local_addresses is not None:
+                hello["payload"]["local_addresses"] = local_addresses
             # Loud here rather than a silent hang-up at a listener that reads
             # HELLO under the same cap.
             await write_message(writer, hello, max_frame_bytes=MAX_HELLO_FRAME_BYTES)
@@ -1778,6 +1788,23 @@ class P2PManager:
         except Exception as e:  # noqa: BLE001 - a hint must never stop a handshake
             logger.debug("Could not list local_addresses: %s", e)
             return []
+
+    def _own_local_addresses_for(self, node_id: str) -> Optional[list]:
+        """`local_addresses` for this peer's HELLO or HELLO_ACK; None leaves the key out.
+
+        Only a peer in the peer cache or in a group with this node gets them, so a
+        stranger that reaches the port does not learn the LAN (Mike's call,
+        2026-10-30). Both handshake sides ask after the peer's node id is proven
+        and before this handshake writes the cache.
+        """
+        try:
+            known = self.peer_cache.get_peer(node_id) is not None
+            if not known and getattr(self, "groups_for_peer", None):
+                known = bool(self.groups_for_peer(node_id))
+        except Exception as e:  # noqa: BLE001 - a hint must never stop a handshake
+            logger.debug("Could not tell whether %s is known: %s", node_id[:20], e)
+            known = False
+        return self._own_local_addresses() if known else None
 
     def _default_route_source_ip(self) -> str:
         """The source address the OS would use toward 8.8.8.8, or 0.0.0.0."""

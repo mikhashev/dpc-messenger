@@ -661,6 +661,7 @@ class CoreService:
         self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
         self.p2p_manager.set_on_peer_disconnected(self._handle_peer_disconnected)
+        self.p2p_manager.set_groups_for_peer(self.group_manager.get_groups_for_peer)
         self._processed_message_ids = set()  # Track processed messages
         # Certificates we have asked a neighbour for and not yet received.
         # Without it a busy group turns one missing certificate into a
