@@ -27,13 +27,13 @@ measured both from git and found the number had no source.
 
 | axis | decisions | board entries | awaiting observation |
 |---|---|---|---|
-| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 proposed | 220 | 70 |
-| **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 proposed · ADR-046 accepted | 202 | 39 |
+| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 proposed | 220 | 71 |
+| **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 proposed · ADR-046 accepted | 202 | 40 |
 | **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 proposed · ADR-046 accepted · ADR-047 proposed | 298 | 79 |
-| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 250 | 58 |
+| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 250 | 60 |
 | **reach** | ADR-035 accepted · ADR-043 proposed | 58 | 18 |
 
-**Observation debt: 250 under an axis + 19 in entries that carry none = 269.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
+**Observation debt: 254 under an axis + 19 in entries that carry none = 273.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
 Not yet placed: 130 of 1095 board entries carry no axis, and a guessed one would report coverage this does not have.
 
