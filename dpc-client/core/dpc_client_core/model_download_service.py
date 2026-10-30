@@ -180,7 +180,9 @@ class ModelDownloadService:
             measured_on = None
             cache_path = other.location()
         else:
-            size_bytes, size_source = model_size_bytes(model_name, revision)
+            # A model with no measured row is sized by a Hugging Face API read:
+            # off the event loop too, as the download's own size read is.
+            size_bytes, size_source = await asyncio.to_thread(model_size_bytes, model_name, revision)
             measured_on = model_size_measured_on(model_name, revision)
             cache_path = hf_cache_path()
         payload = {

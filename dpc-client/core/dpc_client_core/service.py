@@ -4384,6 +4384,7 @@ class CoreService:
         self.model_download_service.decline(model_name, remember)
         return {"status": "success"}
 
+    @slow_command
     async def reset_model_download_decline(self, model_name: str) -> dict:
         re_asked = await self.model_download_service.reset_decline(model_name)
         return {"status": "success", "re_asked": re_asked}

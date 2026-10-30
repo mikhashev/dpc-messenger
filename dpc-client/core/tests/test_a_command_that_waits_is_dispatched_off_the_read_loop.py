@@ -99,7 +99,7 @@ HASHES_A_WHOLE_FILE = (
 )
 
 _STATUS_PUSH_SCAN = (
-    "Local work in a thread, not yet judged: the status push after the change "
+    "Local work in a thread, kept on the read loop (Mike's call, 2026-10-30): the status push after the change "
     "(`get_status`) scans the host's addresses in an executor (service.py:2419, "
     "`_scan_local_ips`: UDP connects, a host-name lookup bounded at 3 s, `ip addr` with "
     "a 2 s timeout); a scan under 30 s old is reused."
@@ -112,19 +112,13 @@ INLINE_ON_PURPOSE: Dict[str, str] = {
         "service.py:2774). A read that sets a store: answers arriving out of order could "
         "leave an older snapshot on screen."
     ),
-    # --- local work in a thread, not yet judged: the walk found them, nobody has decided ---
+    # --- local work in a thread, bounded and reused, kept inline (Mike's call, 2026-10-30) ---
     "clear_peer_cache": _STATUS_PUSH_SCAN,
     "remove_cached_peer": _STATUS_PUSH_SCAN,
     "list_processes": (
-        "Local work in a thread, not yet judged: the psutil walk of the process registry "
-        "and the nvidia-smi reads (service.py:10604, `read` > `read_vram_mib`, each probe "
-        "capped at 10 s, a reading reused for 30 s)."
-    ),
-    "reset_model_download_decline": (
-        "Local work in a thread, not yet judged: for the Camoufox download it asks "
-        "`camoufox_binary.size_bytes` in a thread (model_download_service.py:178), which "
-        "makes one GitHub API read of the pinned tag only when the size table has no row "
-        "for this platform (camoufox_binary.py:212-229; no timeout set here)."
+        "Local work in a thread, kept on the read loop (Mike's call, 2026-10-30): the psutil "
+        "walk of the process registry and the nvidia-smi reads (service.py:10604, `read` > "
+        "`read_vram_mib`, each probe capped at 10 s, a reading reused for 30 s)."
     ),
     "send_group_image": (
         "Keeps the group's order: with 'Describe for agents' on it waits for a vision "

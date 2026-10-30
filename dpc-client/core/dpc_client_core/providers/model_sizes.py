@@ -92,7 +92,9 @@ def model_size_bytes(
     try:
         from huggingface_hub import HfApi
         api = HfApi()
-        info = api.model_info(model_name, revision=revision, files_metadata=True)
+        # Bounded like the Camoufox release read (camoufox_binary.py): the
+        # library sets no timeout of its own here.
+        info = api.model_info(model_name, revision=revision, files_metadata=True, timeout=20)
         total = sum((f.size or 0) for f in (info.siblings or []))
         if total:
             return total, "hf_api"
