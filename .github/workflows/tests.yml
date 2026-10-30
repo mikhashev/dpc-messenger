@@ -21,7 +21,10 @@ concurrency:
 jobs:
   core:
     name: dpc-client/core
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: on 26.04 `playwright install chromium` refuses the OS below
+    # Playwright 1.61, and pyproject.toml holds playwright <1.61 for Camoufox. 24.04
+    # also gives Python 3.12, what the nodes run. Back to latest when that pin lifts.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       # Full history: the long-tier eval golds are pinned to GOLD_COMMIT and their
