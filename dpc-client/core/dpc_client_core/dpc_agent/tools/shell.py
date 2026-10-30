@@ -117,6 +117,11 @@ _CMD_C = r"(?:\s+/[A-Za-z](?::\S+)?)*\s+/[ck]"
 # `pip -q install`, `uv --directory proj add`, `npm --prefix web ci`. An option
 # may carry a value, attached by `=` or as the next word.
 _PM_OPTS = r"(?:\s+--?[\w-]+(?:[=\s]\S+)?)*"
+# The manager is the command the segment runs, not a word in an argument:
+# `grep -n "pip install" README` and `echo pip install` only mention one. POSIX
+# `NAME=value` assignments and a path (quoted or not) may stand before the name.
+_PM_START = r'^(?:\w+=\S*\s+)*(?:"[^"]*[\\/]|[^\s"]*[\\/])?'
+_PY_M = r'(?:python[\d.]*|py)(?:\.exe)?"?(?:\s+-[\w.]+)*\s+-m\s+'
 
 # Tier 1 — a person is asked before the command runs (ADR-030). A segment that
 # matches none of these, nor a Tier 2 rule, is Tier 0 and runs without asking.
@@ -171,21 +176,26 @@ DANGEROUS_PATTERNS: list[re.Pattern] = [
     # package manager writes — `pip install --target X` passes it, and a plain
     # `pip install` lands in whichever interpreter is first on the PATH the
     # child inherits, which is the owner's. Keyed on the verb, not the program,
-    # so `pip list`, `uv pip show`, `winget list` and `npm ls` stay Tier 0.
-    # The pip rule also covers `python -m pip`, `py -m pip` and `uv pip`.
-    re.compile(rf"\bpip(?:3(?:\.\d+)?)?(?:\.exe)?{_PM_OPTS}\s+(?:install|uninstall|download)\b", re.I),
-    re.compile(r"\bensurepip\b", re.I),
-    re.compile(rf"\buv(?:\.exe)?{_PM_OPTS}\s+(?:add|remove|tool{_PM_OPTS}\s+install)\b", re.I),
-    re.compile(rf"\bnpm(?:\.cmd)?{_PM_OPTS}\s+(?:i|in|install|add|ci|uninstall|un|remove|rm)\b", re.I),
+    # so `pip list`, `uv pip show`, `winget list` and `npm ls` stay Tier 0, and
+    # on the command the segment runs (_PM_START), so a search for the words
+    # does too. The pip rule also covers `python -m pip`, `py -m pip`, `uv pip`.
+    re.compile(
+        rf'{_PM_START}(?:{_PY_M}|uv(?:\.exe)?"?{_PM_OPTS}\s+)?'
+        rf'pip(?:3(?:\.\d+)?)?(?:\.exe)?"?{_PM_OPTS}\s+(?:install|uninstall|download)\b',
+        re.I,
+    ),
+    re.compile(rf"{_PM_START}{_PY_M}ensurepip\b", re.I),
+    re.compile(rf'{_PM_START}uv(?:\.exe)?"?{_PM_OPTS}\s+(?:add|remove|tool{_PM_OPTS}\s+install)\b', re.I),
+    re.compile(rf'{_PM_START}npm(?:\.cmd)?"?{_PM_OPTS}\s+(?:i|in|install|add|ci|uninstall|un|remove|rm)\b', re.I),
     # `winget upgrade` with nothing after it, or with `--list`, only lists.
     re.compile(
-        rf"\bwinget(?:\.exe)?{_PM_OPTS}\s+(?:install|add|uninstall|remove|rm"
+        rf'{_PM_START}winget(?:\.exe)?"?{_PM_OPTS}\s+(?:install|add|uninstall|remove|rm'
         r"|(?:upgrade|update)\b(?!\s*$)(?!.*\s--list\b))\b",
         re.I,
     ),
-    re.compile(rf"\bchoco(?:\.exe)?{_PM_OPTS}\s+(?:install|upgrade|uninstall)\b", re.I),
-    re.compile(rf"\b(?:conda|(?:micro)?mamba)(?:\.exe)?{_PM_OPTS}\s+(?:install|remove|uninstall)\b", re.I),
-    re.compile(rf"\bpipx(?:\.exe)?{_PM_OPTS}\s+install\b", re.I),
+    re.compile(rf'{_PM_START}choco(?:\.exe)?"?{_PM_OPTS}\s+(?:install|upgrade|uninstall)\b', re.I),
+    re.compile(rf'{_PM_START}(?:conda|(?:micro)?mamba)(?:\.exe)?"?{_PM_OPTS}\s+(?:install|remove|uninstall)\b', re.I),
+    re.compile(rf'{_PM_START}pipx(?:\.exe)?"?{_PM_OPTS}\s+install\b', re.I),
 ]
 
 # Fork bomb needs special detection (bash function syntax not reliably regex-matchable)

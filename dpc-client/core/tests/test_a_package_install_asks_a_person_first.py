@@ -63,6 +63,12 @@ INSTALLS = [
     "pipx install black",
     # Inside a chain, the install segment still asks.
     "cd work && pip install requests",
+    # A path, quoted or not, or POSIX assignments before the program.
+    r"C:\Python312\python.exe -m pip install requests",
+    r'"C:\Program Files\nodejs\npm.cmd" install lodash',
+    "/usr/bin/python3 -m pip install requests",
+    "PIP_INDEX_URL=x pip install requests",
+    "py -3.12 -m pip install requests",
 ]
 
 
@@ -89,6 +95,18 @@ READ_ONLY = [
     "pip show requests",
     "npm ls",
     "conda list",
+    # Searching for the words, or printing them, installs nothing (Johnny's list,
+    # 2026-10-30): the rule matches the command a segment runs, not an argument.
+    "findstr pip install shell.py",
+    'findstr "pip install" shell.py',
+    'grep -n "pip install" shell.py',
+    'grep -rn "uv add" .',
+    'Select-String -Pattern "npm install" -Path README.md',
+    'findstr /s "uv pip install" *.py',
+    "echo pip install requests",
+    'findstr /n "winget upgrade" notes.txt',
+    'git log --grep "pip install"',
+    "findstr pip install shell.py | more",
 ]
 
 
