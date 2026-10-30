@@ -542,6 +542,12 @@ def history_prefix(record: Dict[str, Any]) -> str:
 # How much of a failed turn's notice goes back into the prompt.
 FAILED_TURN_REPLAY_CHARS = 200
 
+# What a group reads in place of a failed turn's error. A group record carries
+# no `turn_end`, so nothing caps it: the error, signed and posted, would reach
+# every member's disk and every agent's prompt whole. The error itself stays on
+# the owner's node (task_results, an error toast).
+FAILED_TURN_NOTICE = "⚠️ No answer this time: the run failed. Its owner was shown the error."
+
 
 def history_body(record: Dict[str, Any]) -> str:
     """The text a history record is replayed with — a function of the record

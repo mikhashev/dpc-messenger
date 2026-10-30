@@ -69,7 +69,8 @@ from .token_cache import TokenCache
 
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
-from .conversation_monitor import ConversationMonitor, Message as ConvMessage
+from .conversation_monitor import TURN_END_VALUES, ConversationMonitor, Message as ConvMessage
+from .dpc_agent.context import FAILED_TURN_NOTICE
 from .conversation_monitor import history_status_for as conversation_monitor_history_status_for
 from .conversation_monitor import live_history_boundary_in
 from . import conversation_paths
@@ -6928,10 +6929,11 @@ class CoreService:
                 # _agents is keyed by provider_alias, not group_id, so .get(group_id)
                 # was always None and tool_calls never persisted for group messages.
                 agent = manager._last_used_agent
-                if agent and hasattr(agent, '_last_trace'):
-                    tool_calls = (agent._last_trace or {}).get("accumulated_tool_calls")
+                trace = (getattr(agent, '_last_trace', None) or {}) if agent else {}
+                tool_calls = trace.get("accumulated_tool_calls")
                 await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls,
-                                                    mention_depth=mention_depth)
+                                                    mention_depth=mention_depth,
+                                                    turn_end=trace.get("turn_end"))
         except Exception as e:
             logger.error("Agent group response failed: %s", e, exc_info=True)
 
@@ -7102,6 +7104,7 @@ class CoreService:
         self, group_id: str, agent_name: str, text: str,
         tool_calls: Optional[list] = None,
         mention_depth: int = 0,
+        turn_end: Optional[str] = None,
     ) -> Optional[str]:
         """Send a group message attributed to an agent.
 
@@ -7109,6 +7112,9 @@ class CoreService:
         (signed), and is_agent=True for nodes older than DPTP v1.10. A peer's
         GroupTextHandler routes its mentions only below the depth bound
         (specs/dptp_v1.md §4.3).
+
+        `turn_end` is the trace's, None for an answer: "failed" posts
+        FAILED_TURN_NOTICE, and any value routes no mention on this node.
 
         Args:
             group_id: Target group ID
@@ -7160,6 +7166,22 @@ class CoreService:
                 agent_name, group_id, sorted(allowed))
             return {"status": "error", "message":
                     f"agent name not registered for this node in this group: {agent_name}"}
+
+        # A bridge's value arrives through the local API too; an unknown one is
+        # an answer, as on the 1:1 record (agent_manager._record_answer).
+        if turn_end is not None and turn_end not in TURN_END_VALUES:
+            logger.warning("send_group_agent_message: unknown turn_end %r in group %s; "
+                           "posted as an answer", turn_end, group_id)
+            turn_end = None
+        if turn_end == "failed":
+            # The error is the owner's: a provider's page of HTML or a
+            # traceback, signed into the record, would reach every member.
+            await self.local_api.broadcast_event("error_toast", {
+                "title": "Agent Run Failed",
+                "message": f"{agent_name} in {getattr(group, 'name', None) or group_id}: {text}",
+                "duration": 5000,
+            })
+            text = FAILED_TURN_NOTICE
 
         import uuid
         message_id = uuid.uuid4().hex[:16]
@@ -7256,10 +7278,17 @@ class CoreService:
             "context_agents": self._group_agent_context_list(group_id),
         })
 
-        # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
-        await self._handle_group_agent_mentions(group_id, text, agent_name, is_agent_sender=True,
-                                                trigger_message_id=message_id,
-                                                mention_depth=mention_depth)
+        # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication).
+        # A run that ended without an answer wakes nobody: a stop means the work
+        # ends, and a stop summary naming @X would start X. A peer cannot tell —
+        # the post carries no turn_end — and routes it by its depth as any other.
+        if turn_end:
+            logger.info("Agent post %s in group %s wakes nobody: its turn ended %s",
+                        message_id[:8], group_id, turn_end)
+        else:
+            await self._handle_group_agent_mentions(group_id, text, agent_name, is_agent_sender=True,
+                                                    trigger_message_id=message_id,
+                                                    mention_depth=mention_depth)
 
         return message_id
 

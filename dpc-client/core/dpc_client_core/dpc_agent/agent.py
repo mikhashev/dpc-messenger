@@ -1265,11 +1265,13 @@ class DpcAgent:
                 service = getattr(self, "_service", None)
                 sender = getattr(self, "display_name", None) or self.agent_root.name
                 if service is not None:
+                    turn_end = (getattr(self, "_last_trace", None) or {}).get("turn_end")
                     try:
                         posted = await service.send_group_agent_message(
                             group_id=reply_conversation_id,
                             agent_name=sender,
                             text=result,
+                            **({"turn_end": turn_end} if turn_end else {}),
                         )
                         # A refusal is a dict; the queue would otherwise record
                         # "completed successfully" over a report nobody saw.

@@ -533,8 +533,11 @@ class GroupTextHandler(MessageHandler):
             )
             if response:
                 agent_display = self.service._get_agent_display_name(agent_id)
+                agent = getattr(manager, "_last_used_agent", None)
+                trace = getattr(agent, "_last_trace", None) or {}
                 await self.service.send_group_agent_message(group_id, agent_display, response,
-                                                            mention_depth=mention_depth)
+                                                            mention_depth=mention_depth,
+                                                            turn_end=trace.get("turn_end"))
         except Exception as e:
             self.logger.error("Agent group response failed: %s", e, exc_info=True)
 
