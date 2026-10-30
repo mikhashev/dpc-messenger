@@ -9706,6 +9706,36 @@ class CoreService:
             )
             return None, None
 
+    def _instruction_set_for_compute_peer(self, instruction_set_name, peer_id: str):
+        """The instruction set to assemble with when a peer runs the inference.
+
+        The set's primary text goes into the prompt the peer receives, so it is
+        sent only when a node or node-group rule allows
+        `instructions.json:<set_key>.primary` for that peer. Otherwise, or when
+        the check raises, "none": the prompt carries no instruction text.
+        """
+        if instruction_set_name and instruction_set_name.lower() in ("none", "empty"):
+            return instruction_set_name
+        set_key = instruction_set_name
+        try:
+            if not set_key:
+                # The key get_default() would read: the default set, else "general".
+                sets = self.prompt_manager.instruction_set
+                set_key = sets.default if sets.default in sets.sets else "general"
+            if self.firewall.can_access(peer_id, f"instructions.json:{set_key}.primary"):
+                return instruction_set_name
+        except Exception as e:
+            logger.warning(
+                "Instruction rule check failed for compute host %s (%s); "
+                "the query goes out with no instruction text",
+                peer_id, e, exc_info=True,
+            )
+            return "none"
+        logger.info(
+            "Instruction set %r withheld from compute host %s: no rule allows it", set_key, peer_id
+        )
+        return "none"
+
     @sends_own_response
     async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, reasoning_effort: str = None, **kwargs):
         """
@@ -9917,6 +9947,10 @@ class CoreService:
         include_full_context = include_context or bool(aggregated_contexts)
         # Use instruction set from conversation monitor (which has the per-conversation instruction set)
         effective_instruction_set = instruction_set_name or monitor.instruction_set_name
+        if inference_peer and include_full_context:
+            effective_instruction_set = self._instruction_set_for_compute_peer(
+                effective_instruction_set, inference_peer
+            )
         final_prompt = self.prompt_manager.assemble_prompt(
             query=prompt,
             contexts=aggregated_contexts,

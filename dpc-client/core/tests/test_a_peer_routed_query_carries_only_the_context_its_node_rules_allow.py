@@ -111,6 +111,7 @@ class _FakeService:
 
     _inference_peer_for = CoreService._inference_peer_for
     _context_for_compute_peer = CoreService._context_for_compute_peer
+    _instruction_set_for_compute_peer = CoreService._instruction_set_for_compute_peer
     execute_ai_query = CoreService.execute_ai_query
     send_ai_query = CoreService.send_ai_query
     _compute_peer_context_hash = CoreService._compute_peer_context_hash
