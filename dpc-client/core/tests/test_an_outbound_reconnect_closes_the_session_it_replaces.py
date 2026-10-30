@@ -359,6 +359,10 @@ async def test_an_inbound_replacement_runs_no_loss_cleanup_either(tmp_path):
         old = manager.peers[who.node_id]
         second = await _dial_in(port, who, manager.node_id)
         await _until(lambda: manager.peers.get(who.node_id) is not old)
+        # An accepted inbound session asks the peer for its providers first
+        # (6a5566d6); the hang-up of the replaced session comes after that frame.
+        first_frame = await asyncio.wait_for(_next(first[0]), timeout=5)
+        assert first_frame == {"command": "GET_PROVIDERS"}, first_frame
         assert await asyncio.wait_for(_next(first[0]), timeout=5) is None
         await asyncio.sleep(0.1)
         assert lost == []
