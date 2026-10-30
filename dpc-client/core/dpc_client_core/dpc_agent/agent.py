@@ -270,6 +270,17 @@ class DpcAgent:
         # Callback set by agent_manager to deliver scheduled task results to Telegram
         self._telegram_send_fn: Optional[Any] = None
 
+        # Hook the agent manager installs so a chat or check_back task run shows
+        # the same live activity a chat turn does: called with the reply
+        # conversation id, it returns an async context manager that yields the
+        # `emit_progress` / `on_stream_chunk` keywords for process() and clears
+        # the activity line when the run ends. None means the run is silent.
+        self._task_progress_scope: Optional[Callable[[str], Any]] = None
+
+        # The loop the agent runs on, so a tool's worker thread can post an event
+        # onto it (schedule_task has no running loop there).
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+
         # Track last usage for session state access by agent_manager
         self._last_usage: Optional[Dict[str, Any]] = None
         # Track last full context estimate (from build_llm_messages cap_info)
@@ -543,6 +554,7 @@ class DpcAgent:
         # Store main event loop so sync tools running in executor threads can schedule
         # async calls back onto it via asyncio.run_coroutine_threadsafe.
         ctx.agent_event_loop = asyncio.get_event_loop()
+        self._event_loop = ctx.agent_event_loop
         ctx._agent = self  # Enable schedule_task and other agent-dependent tools
         self.tools.set_context(ctx)
 
@@ -821,6 +833,8 @@ class DpcAgent:
         if not self._queue_enabled:
             log.debug("Task queue not enabled")
             return
+
+        self._event_loop = asyncio.get_running_loop()
 
         # Archive old task results on startup
         try:
@@ -1144,18 +1158,32 @@ class DpcAgent:
             "conversation_title": turn_title(getattr(self, "_service", None), conversation_id),
         }
         async with hold_run_gate(self._run_gate, entry):
-            return await self._execute_task_guarded(task)
+            scope = getattr(self, "_task_progress_scope", None)
+            if scope is None or task.task_type not in ("chat", "check_back"):
+                return await self._execute_task_guarded(task)
+            if task.task_type in self._task_handlers:  # a custom handler owns the type
+                return await self._execute_task_guarded(task)
+            # The run shows its activity in the chat it answers in, from the
+            # model's first round to the post, and clears it however it ends.
+            async with scope(conversation_id) as live:
+                return await self._execute_task_guarded(task, live)
 
-    async def _execute_task_guarded(self, task: Task) -> str:
+    async def _execute_task_guarded(
+        self, task: Task, live: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
         Execute a queued task.
 
         Args:
             task: The task to execute
+            live: Keywords for process() that carry the run's progress and
+                streamed text to the UI (from `_task_progress_scope`); None
+                for a silent run
 
         Returns:
             Task result string
         """
+        live = live or {}
         # Check custom handlers first
         if task.task_type in self._task_handlers:
             handler = self._task_handlers[task.task_type]
@@ -1188,6 +1216,7 @@ class DpcAgent:
                 text,
                 conversation_id=reply_conversation_id,
                 reply_telegram_chat_id=reply_telegram_chat_id,
+                **live,
             )
 
             # Deliver result back to Telegram if the task originated from there
@@ -1214,6 +1243,7 @@ class DpcAgent:
                 conversation_id=reply_conversation_id,
                 reply_telegram_chat_id=task.data.get("_reply_telegram_chat_id"),
                 check_back_depth=depth,
+                **live,
             )
 
             # Waking up is only half of coming back: the answer has to land in
@@ -1366,8 +1396,19 @@ class DpcAgent:
                 "delay_seconds": delay_seconds,
             }))
         except RuntimeError:
-            # No running event loop - skip event emission
-            log.debug(f"Task {task.id} scheduled (no event loop for emission)")
+            # Called from a tool's worker thread: no loop runs here, but the
+            # agent's own does. Post the event onto it; with no loop known
+            # (a sync caller before the agent ever ran) there is nothing to do.
+            agent_loop = getattr(self, "_event_loop", None)
+            if agent_loop is not None and agent_loop.is_running():
+                asyncio.run_coroutine_threadsafe(self.events.emit(EventType.TASK_SCHEDULED, {
+                    "task_id": task.id,
+                    "task_type": task_type,
+                    "priority": priority.name,
+                    "delay_seconds": delay_seconds,
+                }), agent_loop)
+            else:
+                log.debug(f"Task {task.id} scheduled (no event loop for emission)")
 
         return task
 

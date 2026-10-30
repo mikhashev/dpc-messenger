@@ -14,6 +14,7 @@ This manager bridges the embedded DpcAgent with DPC Messenger's CoreService.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import pathlib
@@ -273,6 +274,9 @@ class DpcAgentManager:
 
         # Wire Telegram send-back so scheduled tasks can deliver their results
         self._agent._telegram_send_fn = self._deliver_telegram_result
+
+        # Wire the same live activity a chat turn shows into scheduled task runs
+        self._agent._task_progress_scope = self._task_progress_scope
 
         # Check for unconsumed morning brief from sleep pipeline (ADR-014)
         try:
@@ -1197,17 +1201,7 @@ class DpcAgentManager:
             # Create streaming callback that broadcasts text chunks via local_api
             async def emit_stream_chunk(chunk: str, conv_id: str):
                 _stream_chunks.append(chunk)
-                # Broadcast text_chunk event for WebSocket (UI streaming display)
-                try:
-                    local_api = getattr(self.service, "local_api", None)
-                    if local_api and hasattr(local_api, "broadcast_event"):
-                        await local_api.broadcast_event("agent_text_chunk", {
-                            "conversation_id": conv_id,
-                            "chunk": chunk,
-                            "ts": utc_now_iso(),
-                        })
-                except Exception as e:
-                    log.debug(f"Failed to emit text chunk: {e}")
+                await self._broadcast_text_chunk(chunk, conv_id)
 
                 # Note: We do NOT call on_stream_chunk here to avoid callback chain issues
                 # The broadcast above is sufficient for UI updates
@@ -1423,6 +1417,47 @@ class DpcAgentManager:
             # Clear progress indicator on failure too
             self._emit_progress_clear(conversation_id)
             raise
+
+    async def _broadcast_text_chunk(self, chunk: str, conversation_id: str) -> None:
+        """Broadcast one streamed text chunk to the UI (the agent_text_chunk event)."""
+        try:
+            local_api = getattr(self.service, "local_api", None)
+            if local_api and hasattr(local_api, "broadcast_event"):
+                await local_api.broadcast_event("agent_text_chunk", {
+                    "conversation_id": conversation_id,
+                    "chunk": chunk,
+                    "ts": utc_now_iso(),
+                })
+        except Exception as e:
+            log.debug(f"Failed to emit text chunk: {e}")
+
+    @contextlib.asynccontextmanager
+    async def _task_progress_scope(self, conversation_id: str):
+        """Live activity for a scheduled task run, the way a chat turn has it.
+
+        The agent's task executor enters this around a chat or check_back run:
+        the early thinking line goes up, the run gets progress and text-chunk
+        callbacks bound to the chat it answers in, and the line is cleared when
+        the run ends, whether it answered, failed or was stopped.
+        """
+        self._current_agent_display_name = (
+            self._agent_display_name or self.agent_id or "DPC Agent"
+        )
+        self._emit_progress("thinking", conversation_id)
+
+        def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None, speed=None):
+            self._emit_progress(msg, conversation_id, tool, round, tool_calls, speed)
+
+        async def emit_stream_chunk(chunk: str, conv_id: str):
+            await self._broadcast_text_chunk(chunk, conv_id)
+
+        try:
+            yield {
+                "emit_progress": emit_progress_with_context,
+                "on_stream_chunk": emit_stream_chunk,
+            }
+        finally:
+            self._emit_progress_clear(conversation_id)
 
     async def _complete_turn(self, emitter, task_id: str, conversation_id: str, response: str) -> None:
         """How a chat turn that answered ends: TASK_COMPLETED, then the progress line cleared."""
