@@ -722,7 +722,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **32 sections, 180 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **32 sections, 181 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -766,6 +766,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `remote_inference_timeout` | `1200` |  |
 | `hello_timeout` | `10` | Seconds the listener waits for the TLS handshake, and again for HELLO after its challenge |
 | `max_pending_hellos_per_ip` | `8` | Inbound connections one address may hold before HELLO_ACK |
+| `max_proved_connections_per_ip` | `8` | Inbound connections past the identity check one address may hold; the next new node from it is closed before HELLO_ACK |
 | `link_silence_timeout` | `90` | Seconds of silence after which a direct TLS link is declared dead |
 | `reconnect_slow_interval_max_seconds` | `900` | After five fast reconnect attempts to a peer we keep, retry from 60 s, doubling to this ceiling (±20 % jitter), until it answers, the user disconnects it or it leaves every shared group. Off when `[p2p] auto_connect_node_groups` is off |
 
@@ -1682,6 +1683,20 @@ gossip_timeout = 5         # Gossip fallback timeout
 - **Note:** ADR-041 D8. A NAT puts many honest peers behind one address, which is
   why this counts connections *still waiting for HELLO* rather than connections:
   an honest peer holds a slot for one round trip and releases it
+
+#### `max_proved_connections_per_ip`
+- **Description:** Inbound direct connections from one address that have passed
+  the HELLO identity check and are held at once. A new node id from that address
+  past the ceiling is closed after its identity check and before `HELLO_ACK`,
+  silently to it and with one INFO line here; it is not counted as a failed HELLO,
+  since the peer proved its key. A node that already holds a connection here may
+  always replace it, and connections this node dialled are not counted
+- **Default:** `8`
+- **Note:** This and `max_pending_hellos_per_ip` are two separate limits of 8: one
+  on connections still waiting for HELLO, the other on proved connections. A node
+  id costs one key pair, so without this one address could hold any number of
+  proved connections. It bounds an IPv4 address, not an IPv6 host that can choose
+  among many addresses. Read at start-up
 
 #### `link_silence_timeout`
 - **Description:** Seconds a direct TLS link to a peer may go without a single

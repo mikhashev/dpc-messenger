@@ -160,6 +160,7 @@ class Settings:
             # sends HELLO fails no HELLO, so the rate limiter alone never sees it
             'hello_timeout': '10',  # Seconds the listener waits for the TLS handshake, and again for HELLO after its challenge
             'max_pending_hellos_per_ip': '8',  # Inbound connections one address may hold before HELLO_ACK
+            'max_proved_connections_per_ip': '8',  # Inbound connections past the identity check one address may hold; the next new node from it is closed before HELLO_ACK
             # A direct TLS link to a peer that advertised link_ping is ended after
             # this long with no frame from it; LINK_PING goes out after a third of it
             'link_silence_timeout': '90',  # Seconds of silence after which a direct TLS link is declared dead
@@ -876,6 +877,10 @@ class Settings:
     def get_max_pending_hellos_per_ip(self) -> int:
         """How many inbound connections one address may hold before HELLO_ACK."""
         return int(self.get('connection', 'max_pending_hellos_per_ip', '8'))
+
+    def get_max_proved_connections_per_ip(self) -> int:
+        """How many inbound proved connections one address may hold at once."""
+        return int(self.get('connection', 'max_proved_connections_per_ip', '8'))
 
     def get_reconnect_slow_interval_max_seconds(self) -> float:
         """Ceiling of the slow reconnect backoff that follows the fast attempts."""

@@ -2,8 +2,9 @@
 
 The listener named its LAN addresses in HELLO_ACK to any node that completed the
 HELLO proof, so a stranger that reached the port learned the LAN layout. Now the
-key is sent only to a peer in the peer cache or in a group with this node, and
-left out for anyone else (Mike's call, 2026-10-30). The dialler's HELLO follows
+key is sent only to a peer this node has dialled (a peer-cache address with
+direction "out") or one in a group with it, and left out for anyone else (Mike's
+call, 2026-10-30). The dialler's HELLO follows
 the same rule; what a receiver does with the field is unchanged.
 
 Loopback TLS through the real `start_server` and `connect_directly`; every file
@@ -26,10 +27,10 @@ from tests.test_a_hello_carries_the_senders_local_addresses import (
 
 
 def _knows(manager, other):
-    """`manager` has `other` in its peer cache, as after an earlier connection."""
+    """`manager` has `other` in its peer cache, as after an earlier dial of its own."""
     manager.peer_cache.add_or_update_peer(
         node_id=other.node_id, direct_ip="198.51.100.20", direct_port=8888,
-        supports_direct=True, direction="in",
+        supports_direct=True, direction="out",
     )
 
 

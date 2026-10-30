@@ -218,8 +218,10 @@ sender's order of preference (`own_addresses.lan_addresses`: interfaces that are
 a link-layer address and are not tunnels or virtual adapters by name; 192.168/16, then
 172.16/12, then 10/8, the default route's address first within its range). A node not
 listening sends an empty list. The field is sent only to a peer the sender already knows —
-one in its peer cache or in a group with it, judged on the proven `node_id` before this
-handshake updates the cache — and is left out for any other node.
+one in a group with it, or one it has dialled successfully before (an address with
+direction `out` in its peer cache; an entry written only by inbound connections does not
+count), judged on the proven `node_id` before this handshake updates the cache — and is
+left out for any other node.
 
 - **Receiver.** The field is ignored when it is not a list (logged at DEBUG). Of a list,
   the first 4 entries are read; an entry is dropped unless it is a string `ip:port` with a

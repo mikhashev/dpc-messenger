@@ -79,11 +79,15 @@ _FRAME_SLICE_BYTES = 64 * 1024
 
 class PeerConnection:
     """A unified wrapper for a direct TLS P2P connection."""
-    def __init__(self, node_id: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    def __init__(self, node_id: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                 direction: Optional[str] = None):
         self.node_id = node_id
         self.reader = reader
         self.writer = writer
         self.connection_type = "direct_tls"
+        # "in" if the peer dialled this node, "out" if this node dialled it —
+        # the direction the peer cache records for the same connection.
+        self.direction = direction
         # time.monotonic() of the last bytes read from the peer: the clock
         # `_watch_peer_silence` holds against link_silence_timeout.
         self.last_received = time.monotonic()
@@ -197,6 +201,9 @@ class P2PManager:
         self._pending_hello_counts: Dict[str, int] = {}  # ip -> connections before HELLO_ACK
         self._hello_timeout = settings.get_hello_timeout() if settings else 10.0
         self._max_pending_hellos_per_ip = settings.get_max_pending_hellos_per_ip() if settings else 8
+        # Past HELLO_ACK the pending count is released, and a node id costs one
+        # key pair: inbound proved connections are bounded per address as well.
+        self._max_proved_connections_per_ip = settings.get_max_proved_connections_per_ip() if settings else 8
         # A link to a peer that advertised link_ping ends after this much silence.
         self._link_silence_timeout = settings.get_link_silence_timeout() if settings else 90.0
 
@@ -606,6 +613,22 @@ class P2PManager:
         else:
             self._pending_hello_counts.pop(ip, None)
 
+    def _proved_connections_from(self, ip: str) -> int:
+        """Inbound direct connections in `self.peers` that arrived from `ip`.
+
+        Derived from the entries rather than kept as a count, so a closed
+        connection frees its place with nothing to release.
+        """
+        count = 0
+        for connection in list(self.peers.values()):
+            if getattr(connection, "direction", None) != "in":
+                continue
+            writer = getattr(connection, "writer", None)
+            peername = writer.get_extra_info("peername") if writer is not None else None
+            if peername and peername[0] == ip:
+                count += 1
+        return count
+
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
         peer_node_id = None
@@ -687,6 +710,16 @@ class P2PManager:
                     f"— connection rejected"
                 )
 
+            # The peer proved its key, so this is not a failed HELLO; silent to
+            # it like the pre-HELLO ceiling. A node that holds an entry already
+            # replaces its own connection and is never refused.
+            ceiling = getattr(self, "_max_proved_connections_per_ip", 8)
+            if peer_node_id not in self.peers and self._proved_connections_from(peer_ip) >= ceiling:
+                logger.info("%s already holds %d proved connections, closing %s before HELLO_ACK",
+                            peer_ip, ceiling, peer_node_id)
+                writer.close()
+                return
+
             # Keep what the three checks above just proved — otherwise every
             # signature this peer ever makes verifies as None ("cannot verify").
             self._persist_peer_certificate(peer_node_id, cert_pem)
@@ -709,7 +742,7 @@ class P2PManager:
                 ack["local_addresses"] = local_addresses
             await write_message(writer, ack)
 
-            peer = PeerConnection(node_id=peer_node_id, reader=reader, writer=writer)
+            peer = PeerConnection(node_id=peer_node_id, reader=reader, writer=writer, direction="in")
 
             # Enable TCP keepalive on accepted connections to detect zombie connections.
             _enable_tcp_keepalive(writer)
@@ -1084,7 +1117,7 @@ class P2PManager:
                     self._core_service_ref.set_peer_metadata(target_node_id, name=peer_name)
 
             # actual_node_id is guaranteed to equal target_node_id after validation above
-            peer = PeerConnection(node_id=target_node_id, reader=reader, writer=writer)
+            peer = PeerConnection(node_id=target_node_id, reader=reader, writer=writer, direction="out")
 
             # Set strategy_used for outgoing direct connections (for UI display)
             sock = writer.get_extra_info('socket')
@@ -1955,13 +1988,22 @@ class P2PManager:
     def _own_local_addresses_for(self, node_id: str) -> Optional[list]:
         """`local_addresses` for this peer's HELLO or HELLO_ACK; None leaves the key out.
 
-        Only a peer in the peer cache or in a group with this node gets them, so a
+        Only a peer in a group with this node, or one this node has dialled
+        successfully (a peer-cache address with direction "out"), gets them, so a
         stranger that reaches the port does not learn the LAN (Mike's call,
-        2026-10-30). Both handshake sides ask after the peer's node id is proven
-        and before this handshake writes the cache.
+        2026-10-30). Every inbound handshake writes the cache, so a cache entry
+        alone does not count: a stranger that dials in twice would have one. Both
+        handshake sides ask after the peer's node id is proven and before this
+        handshake writes the cache.
+
+        Coverage: no live peer of this node holds an "out" address today, so in
+        practice the addresses go only through a shared group.
         """
         try:
-            known = self.peer_cache.get_peer(node_id) is not None
+            cached = self.peer_cache.get_peer(node_id)
+            known = cached is not None and any(
+                entry.get("direction") == "out" for entry in (cached.addresses or [])
+            )
             if not known and getattr(self, "groups_for_peer", None):
                 known = bool(self.groups_for_peer(node_id))
         except Exception as e:  # noqa: BLE001 - a hint must never stop a handshake
