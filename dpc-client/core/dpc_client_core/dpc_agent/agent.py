@@ -273,8 +273,9 @@ class DpcAgent:
         # Hook the agent manager installs so a chat or check_back task run shows
         # the same live activity a chat turn does: called with the reply
         # conversation id, it returns an async context manager that yields the
-        # `emit_progress` / `on_stream_chunk` keywords for process() and clears
-        # the activity line when the run ends. None means the run is silent.
+        # `emit_progress` / `on_stream_chunk` / `stop_event` / `kill_event`
+        # keywords for process() and clears the activity line when the run
+        # ends. None means the run is silent and cannot be stopped.
         self._task_progress_scope: Optional[Callable[[str], Any]] = None
 
         # The loop the agent runs on, so a tool's worker thread can post an event
@@ -1177,8 +1178,8 @@ class DpcAgent:
         Args:
             task: The task to execute
             live: Keywords for process() that carry the run's progress and
-                streamed text to the UI (from `_task_progress_scope`); None
-                for a silent run
+                streamed text to the UI and its Stop and Kill events (from
+                `_task_progress_scope`); None for a silent run
 
         Returns:
             Task result string

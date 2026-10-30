@@ -1438,7 +1438,8 @@ class DpcAgentManager:
         The agent's task executor enters this around a chat or check_back run:
         the early thinking line goes up, the run gets progress and text-chunk
         callbacks bound to the chat it answers in, and the line is cleared when
-        the run ends, whether it answered, failed or was stopped.
+        the run ends, whether it answered, failed or was stopped. Its Stop and
+        Kill events are registered as a chat run's are, so `interrupt` reaches it.
         """
         self._current_agent_display_name = (
             self._agent_display_name or self.agent_id or "DPC Agent"
@@ -1451,12 +1452,22 @@ class DpcAgentManager:
         async def emit_stream_chunk(chunk: str, conv_id: str):
             await self._broadcast_text_chunk(chunk, conv_id)
 
+        interrupt_ev = asyncio.Event()
+        kill_ev = asyncio.Event()
+        self._interrupt_events[conversation_id] = interrupt_ev
+        self._kill_events[conversation_id] = kill_ev
         try:
             yield {
                 "emit_progress": emit_progress_with_context,
                 "on_stream_chunk": emit_stream_chunk,
+                "stop_event": interrupt_ev,
+                "kill_event": kill_ev,
             }
         finally:
+            if self._interrupt_events.get(conversation_id) is interrupt_ev:
+                self._interrupt_events.pop(conversation_id, None)
+            if self._kill_events.get(conversation_id) is kill_ev:
+                self._kill_events.pop(conversation_id, None)
             self._emit_progress_clear(conversation_id)
 
     async def _complete_turn(self, emitter, task_id: str, conversation_id: str, response: str) -> None:
