@@ -964,6 +964,27 @@ class DpcAgentManager:
         return conversation_id in self._interrupt_events
 
     def interrupt(self, conversation_id: str, kill: bool = False) -> bool:
+        """A person's Stop on this agent (with `kill`, the Kill).
+
+        It also drops what the agent's Telegram bot has gathered and not yet
+        handed over, in every chat, so the burst does not start a run the
+        moment the stopped one ends (Mike's call, 2026-10-30).
+        """
+        self.drop_telegram_bursts()
+        return self._interrupt_loop(conversation_id, kill)
+
+    def drop_telegram_bursts(self) -> int:
+        """Drop the Telegram bursts not yet handed to this agent; how many messages."""
+        bridge = getattr(self, "_telegram_bridge", None)
+        if bridge is None:
+            return 0
+        try:
+            return bridge.drop_bursts()
+        except Exception as e:  # a Stop must still reach the loop
+            log.warning("Stop could not drop the gathered Telegram messages: %s", e)
+            return 0
+
+    def _interrupt_loop(self, conversation_id: str, kill: bool = False) -> bool:
         """Signal the active agent loop to stop after the current LLM call/tool finishes.
 
         With `kill` the model call in flight is cancelled at once instead.

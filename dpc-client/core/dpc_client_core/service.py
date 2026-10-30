@@ -10651,6 +10651,13 @@ class CoreService:
                 # does the same; there is no model call to cancel.
                 from .dpc_agent.run_gate import stop_waiting
                 stopped = stop_waiting(conversation_id)
+                # An idle agent's bot may still be gathering Telegram messages in
+                # their quiet window, with nothing at the gate yet. After
+                # stop_waiting, so a burst it already took out of line is not
+                # announced twice.
+                named_manager = managers.get(agent_id) if agent_id else None
+                if named_manager is not None and named_manager.drop_telegram_bursts() and not stopped:
+                    stopped = [agent_id]
             logger.info("interrupt_agent result: conversation_id=%s, stopped=%s", conversation_id, stopped)
             if not stopped:
                 return {"status": "no_active_loop"}

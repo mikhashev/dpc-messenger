@@ -269,6 +269,9 @@ class AgentTelegramBridge:
 
         # Messages gathered per chat until their run starts (the burst pause).
         self._bursts: Dict[str, _ChatBurst] = {}
+        # A desktop Stop's one line to each chat it dropped a burst in; held so
+        # the send is not collected half-way.
+        self._burst_notice_tasks: Set[asyncio.Task] = set()
 
         log.info(f"AgentTelegramBridge initialized for {len(allowed_chat_ids)} chat(s), "
                 f"filter={len(self.event_filter)} event types, transcription={transcription_enabled}")
@@ -536,6 +539,7 @@ Welcome\\! You can send messages to the DPC Agent\\.
 *Commands:*
 /help \\- Show available commands
 /status \\- Check agent status
+/stop \\- Stop the running turn, drop messages not yet sent to the agent
 /newsession \\- Start fresh conversation \\(current history archived\\)
 /extract\\_knowledge \\- Extract knowledge from conversation
 /sleep \\- Start sleep consolidation
@@ -561,6 +565,7 @@ Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] sectio
 /start \\- Initialize bot
 /help \\- Show this help
 /status \\- Check agent status
+/stop \\- Stop the running turn, drop messages not yet sent to the agent
 /newsession \\- Start fresh conversation \\(current history archived\\)
 /extract\\_knowledge \\- Extract knowledge from conversation
 /sleep \\- Start sleep consolidation
@@ -579,6 +584,7 @@ You can also send voice messages for transcription\\.
 Send a voice message and it will be transcribed and processed\\.
 
 *Session Management:*
+• /stop — stop the running turn and drop messages not yet sent to the agent
 • /newsession — start fresh conversation \\(current history archived\\)
 • /extract\\_knowledge — extracts knowledge, shows inline approve/reject buttons
 • /sleep — starts sleep consolidation \\(requires empty chat\\)
@@ -633,13 +639,18 @@ Send a voice message and it will be transcribed and processed\\.
             await update.message.reply_text("⚠️ Service not available\\.", parse_mode="MarkdownV2")
             return
 
+        # What the chat gathered belongs to the session being closed; left in,
+        # it would open the fresh one.
+        dropped = self._drop_chat_burst(chat_id)
+        dropped_line = (f"\n{escape_markdown(self._dropped_messages(dropped).capitalize())}\\."
+                        if dropped else "")
         try:
             result = await service.propose_new_session(conversation_id)
             if result.get("status") == "success":
                 await update.message.reply_text(
                     "🔄 *New Session Started*\n\n"
                     "Current history archived\\. "
-                    "Start fresh\\!",
+                    "Start fresh\\!" + dropped_line,
                     parse_mode="MarkdownV2"
                 )
                 # Push empty history to DPC chat UI if unified
@@ -647,9 +658,53 @@ Send a voice message and it will be transcribed and processed\\.
                     await self._broadcast_history_to_ui(conversation_id)
             else:
                 msg = escape_markdown(result.get("message", "Unknown error"))
-                await update.message.reply_text(f"❌ Failed to start new session: {msg}", parse_mode="MarkdownV2")
+                await update.message.reply_text(
+                    f"❌ Failed to start new session: {msg}{dropped_line}", parse_mode="MarkdownV2")
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+            await update.message.reply_text(
+                f"❌ Error: {escape_markdown(str(e)[:200])}{dropped_line}", parse_mode="MarkdownV2")
+
+    async def _handle_stop_command(self, update, context):
+        """Handle /stop: the desktop Stop for the turn that answers this chat.
+
+        Drops the chat's gathered messages first, then interrupts the agent's
+        loop in this chat's conversation or, when none runs, takes its waiting
+        turns out of line (`interrupt_agent` in the service, for one chat).
+        """
+        chat_id = str(update.effective_chat.id)
+
+        if chat_id not in self.allowed_chat_ids:
+            return
+
+        conversation_id = self._conversation_id_for(chat_id)
+        burst = self._bursts.get(chat_id)
+        worker = burst.worker if burst is not None else None
+        dropped = self._drop_chat_burst(chat_id)
+        # A worker cancelled out of the gate's line leaves it on its next step;
+        # until then stop_waiting below would count it as a turn this stopped.
+        if worker is not None and worker is not asyncio.current_task() and worker.cancelling():
+            await asyncio.wait([worker], timeout=1.0)
+
+        stopped = None
+        manager = self._agent_manager
+        interrupt_loop = getattr(manager, "_interrupt_loop", None) if manager else None
+        has_loop = getattr(manager, "has_active_loop", None) if manager else None
+        if callable(has_loop) and callable(interrupt_loop) and has_loop(conversation_id):
+            if interrupt_loop(conversation_id):
+                stopped = "running"
+        if stopped is None:
+            from ..dpc_agent.run_gate import stop_waiting
+            if stop_waiting(conversation_id):
+                stopped = "waiting"
+        log.info("Telegram /stop in %s: stopped=%s, dropped %d gathered message(s)",
+                 conversation_id, stopped, dropped)
+
+        head = {
+            "running": "⏹ Stopped the agent's running turn",
+            "waiting": "⏹ Stopped the turn waiting for the agent",
+        }.get(stopped, "⏹ Nothing was running")
+        tail = f"; {self._dropped_messages(dropped)}." if dropped else "; no messages were waiting to be sent."
+        await update.message.reply_text(head + tail)
 
     def _build_proposal_message(self, proposal_id: str, proposal) -> tuple:
         """Build Telegram message text and keyboard for a knowledge proposal.
@@ -862,6 +917,7 @@ Send a voice message and it will be transcribed and processed\\.
         application.add_handler(CommandHandler("start", self._handle_start_command))
         application.add_handler(CommandHandler("help", self._handle_help_command))
         application.add_handler(CommandHandler("status", self._handle_status_command))
+        application.add_handler(CommandHandler("stop", self._handle_stop_command))
         application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
         application.add_handler(CommandHandler("extract_knowledge", self._handle_extract_knowledge_command))
         application.add_handler(CommandHandler("sleep", self._handle_sleep_command))
@@ -1440,7 +1496,7 @@ Send a voice message and it will be transcribed and processed\\.
         item, owner = self._reserve_burst_slot(chat_id, "text", update, context, sender_name)
         self._fill_burst_slot(item, text=message_text)
         if owner:
-            await self._run_bursts(chat_id)
+            await self._run_bursts(chat_id, item.burst)
 
     async def _handle_voice_message(self, update, context):
         """
@@ -1476,7 +1532,7 @@ Send a voice message and it will be transcribed and processed\\.
             else:
                 self._drop_burst_slot(item)
         if owner:
-            await self._run_bursts(chat_id)
+            await self._run_bursts(chat_id, item.burst)
 
     async def _transcribe_voice(self, update, context, chat_id: str) -> Optional[str]:
         """The voice message's transcript, or None after telling the sender why not."""
@@ -1601,7 +1657,7 @@ Send a voice message and it will be transcribed and processed\\.
             log.error(f"Error processing photo message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing photo: {str(e)[:200]}")
         if owner:
-            await self._run_bursts(chat_id)
+            await self._run_bursts(chat_id, item.burst)
 
     # -- a burst: messages sent in a row become one run ------------------------
 
@@ -1633,6 +1689,66 @@ Send a voice message and it will be transcribed and processed\\.
         if item.burst is not None:
             item.burst.changed.set()
 
+    def _drop_chat_burst(self, chat_id: str) -> int:
+        """Drop what the chat has gathered and not yet handed to the agent.
+
+        Returns how many messages went. A worker waiting for quiet or at the
+        run gate is cancelled, so its place in line goes too; a run already
+        started is the agent's, and its Stop is the loop's own. A burst a Stop
+        already took out of the gate's line is left to `_close_stopped_burst`,
+        which records it and tells the chat itself.
+        """
+        burst = self._bursts.get(chat_id)
+        if burst is None:
+            return 0
+        worker = burst.worker
+        waiting = worker is not None and not worker.done() and not burst.running
+        if waiting and worker.cancelling():
+            return 0
+        items = list(burst.items)
+        burst.items.clear()
+        for item in items:
+            item.dropped = True
+        burst.changed.set()
+        # A message after this opens a burst of its own.
+        del self._bursts[chat_id]
+        if waiting and worker is not asyncio.current_task():
+            worker.cancel()
+        if items:
+            log.info("Dropped %d gathered Telegram message(s) in chat %s", len(items), chat_id)
+        return len(items)
+
+    def drop_bursts(self) -> int:
+        """A Stop on the agent: drop every chat's burst, tell each chat once.
+
+        Returns how many messages went in all. The line goes out on its own
+        task: the Stop that calls this is not async.
+        """
+        total = 0
+        for chat_id in list(self._bursts):
+            dropped = self._drop_chat_burst(chat_id)
+            if not dropped:
+                continue
+            total += dropped
+            text = f"⏹ Stopped from the desktop; {self._dropped_messages(dropped)}."
+            try:
+                task = asyncio.get_running_loop().create_task(self._send_burst_notice(chat_id, text))
+            except RuntimeError:  # no loop: nothing to send with
+                continue
+            self._burst_notice_tasks.add(task)
+            task.add_done_callback(self._burst_notice_tasks.discard)
+        return total
+
+    async def _send_burst_notice(self, chat_id: str, text: str) -> None:
+        try:
+            await self.send_markdown(chat_id, text)
+        except Exception as e:
+            log.warning("Could not tell Telegram chat %s its messages were dropped: %s", chat_id, e)
+
+    @staticmethod
+    def _dropped_messages(count: int) -> str:
+        return f"dropped {count} message{'' if count == 1 else 's'} not yet sent to the agent"
+
     @staticmethod
     def _drop_burst_slot(item: _BurstItem) -> None:
         """The message will not reach the agent (no speech, failed download)."""
@@ -1642,15 +1758,20 @@ Send a voice message and it will be transcribed and processed\\.
             burst.items[:] = [i for i in burst.items if i is not item]
             burst.changed.set()
 
-    async def _run_bursts(self, chat_id: str) -> None:
+    async def _run_bursts(self, chat_id: str, burst: Optional[_ChatBurst] = None) -> None:
         """Run the chat's burst until nothing is left in it.
 
         Each round waits for the chat to go quiet, then starts one run with
         everything gathered by the moment the run actually starts. What arrives
         during the run is the next round's.
+
+        `burst` is the one its owner opened: a burst dropped (`_drop_chat_burst`)
+        while its owner still prepared its message is not run, and neither is
+        the next one the chat opened since, which has an owner of its own.
         """
-        burst = self._bursts.get(chat_id)
         if burst is None:
+            burst = self._bursts.get(chat_id)
+        if burst is None or self._bursts.get(chat_id) is not burst:
             return
         burst.worker = asyncio.current_task()
         try:
@@ -1765,9 +1886,11 @@ Send a voice message and it will be transcribed and processed\\.
                                batch: List[_BurstItem], burst: _ChatBurst) -> tuple:
         """Hand one batch to the agent; returns (batch, response, error)."""
         last = batch[-1]
-        await self._show_chat_action(last.context, chat_id, "typing")
+        # Set before the first await: the batch is out of the burst already, so
+        # a drop from here on must leave this run alone (`_drop_chat_burst`).
         burst.running = True
         try:
+            await self._show_chat_action(last.context, chat_id, "typing")
             self._start_new_cc_chain(conversation_id)
             if batch[0].kind == "photo":
                 photo = batch[0]
