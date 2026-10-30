@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import time
+from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
 
 from .base import AIProvider
@@ -11,6 +13,10 @@ if TYPE_CHECKING:
     from dpc_client_core.managers.agent_manager import DpcAgentManager
 
 logger = logging.getLogger(__name__)
+
+# A wait shorter than this is the lock being taken, not another agent's turn
+# being waited out; only a longer one is worth a line at INFO.
+PROVIDER_LOCK_WAIT_LOGGED_S = 0.5
 
 
 class DpcAgentProvider(AIProvider):
@@ -60,18 +66,47 @@ class DpcAgentProvider(AIProvider):
         self._managers: Dict[str, "DpcAgentManager"] = {}  # NEW: Multiple managers (one per agent)
         self._service = None  # Injected by LLMManager during initialization
         self._provider_locks: Dict[str, asyncio.Lock] = {}  # Per-underlying-provider locks
+        # provider_alias -> (agent_id, conversation_id) of the turn holding that lock now
+        self._provider_lock_holders: Dict[str, tuple] = {}
 
         logger.info(f"DpcAgentProvider '{alias}' initialized (tools={len(self.enabled_tools)}, "
                    f"budget=${self.budget_usd})")
 
-    def _get_provider_lock(self, agent_id: str) -> asyncio.Lock:
-        """Get or create a lock for the agent's underlying LLM provider."""
+    @staticmethod
+    def _provider_alias_of(agent_id: str) -> str:
         from dpc_client_core.dpc_agent.utils import load_agent_config
         config = load_agent_config(agent_id) or {}
-        provider_alias = config.get("provider_alias", "default")
-        if provider_alias not in self._provider_locks:
-            self._provider_locks[provider_alias] = asyncio.Lock()
-        return self._provider_locks[provider_alias]
+        return config.get("provider_alias", "default")
+
+    @asynccontextmanager
+    async def _hold_provider_lock(self, agent_id: str, conversation_id: Optional[str]):
+        """Take the agent's provider lock, measuring the wait and the hold.
+
+        Measurement only: who waits, and for how long, is unchanged.
+        """
+        provider_alias = self._provider_alias_of(agent_id)
+        lock = self._provider_locks.setdefault(provider_alias, asyncio.Lock())
+        holder = self._provider_lock_holders.get(provider_alias)
+        asked_at = time.monotonic()
+        async with lock:
+            acquired_at = time.monotonic()
+            waited = acquired_at - asked_at
+            if waited > PROVIDER_LOCK_WAIT_LOGGED_S:
+                held_by = holder or (None, None)
+                logger.info(
+                    f"DpcAgentProvider '{self.alias}': agent '{agent_id}' (conversation "
+                    f"'{conversation_id}') waited {waited:.1f}s for provider '{provider_alias}', "
+                    f"held by agent '{held_by[0]}' (conversation '{held_by[1]}')"
+                )
+            self._provider_lock_holders[provider_alias] = (agent_id, conversation_id)
+            try:
+                yield
+            finally:
+                self._provider_lock_holders.pop(provider_alias, None)
+                logger.debug(
+                    f"DpcAgentProvider '{self.alias}': agent '{agent_id}' held provider "
+                    f"'{provider_alias}' for {time.monotonic() - acquired_at:.1f}s"
+                )
 
     def set_service(self, service: "CoreService") -> None:
         """
@@ -211,8 +246,7 @@ class DpcAgentProvider(AIProvider):
             RuntimeError: If agent processing fails
         """
         agent_id = conversation_id if conversation_id and conversation_id.startswith("agent_") else None
-        lock = self._get_provider_lock(agent_id or "default")
-        async with lock:
+        async with self._hold_provider_lock(agent_id or "default", conversation_id):
             return await self._generate_response_impl(prompt, conversation_id, agent_llm_provider, **kwargs)
 
     async def _generate_response_impl(self, prompt: str, conversation_id: str = None, agent_llm_provider: str = None, **kwargs) -> str:
@@ -264,8 +298,7 @@ class DpcAgentProvider(AIProvider):
         Sequential execution via per-provider lock (same as generate_response).
         """
         agent_id = conversation_id if conversation_id and conversation_id.startswith("agent_") else None
-        lock = self._get_provider_lock(agent_id or "default")
-        async with lock:
+        async with self._hold_provider_lock(agent_id or "default", conversation_id):
             return await self._generate_response_stream_impl(prompt, on_chunk, conversation_id, agent_llm_provider, **kwargs)
 
     async def _generate_response_stream_impl(
@@ -356,8 +389,7 @@ class DpcAgentProvider(AIProvider):
                 enhanced_prompt = f"{prompt}\n\nAttached images:\n" + "\n".join(image_info)
 
         agent_id = conversation_id if conversation_id and conversation_id.startswith("agent_") else None
-        lock = self._get_provider_lock(agent_id or "default")
-        async with lock:
+        async with self._hold_provider_lock(agent_id or "default", conversation_id):
             return await self._generate_response_impl(enhanced_prompt, conversation_id=conversation_id)
 
     def supports_thinking(self) -> bool:
