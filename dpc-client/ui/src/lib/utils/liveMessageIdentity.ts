@@ -50,3 +50,61 @@ export function mergeBackfillWithLive<T extends Identified>(loaded: T[], live: T
     const kept = live.filter((m) => !m.id || !loadedIds.has(m.id));
     return kept.length ? [...loaded, ...kept] : loaded;
 }
+
+export interface UserMessageConfirmed {
+    msg_index?: number | null;
+    message_id?: string | null;
+}
+
+interface ConfirmableMessage extends Identified {
+    sender?: string;
+    msg_index?: number | null;
+}
+
+/**
+ * A chat's messages after `user_message_confirmed` reached them.
+ *
+ * A question typed into an agent chat is drawn at once under an id the UI
+ * mints; the backend stores it and confirms with the record's index and id.
+ * The bubble takes both, so a reload of the newest page finds it in the page
+ * by id and the older-page cursor is an id the backend knows. Taking the index
+ * alone left the bubble beside the record it stood for: the question drawn
+ * twice, both numbered, whenever it was the page's first record.
+ *
+ * The bubble is the last message the person sent, while it has no index. A
+ * confirmation that finds the last one already numbered (one applied before, as
+ * on a remount) changes nothing, rather than numbering an older bubble.
+ *
+ * When the record is already in the list — a reload landed first and kept the
+ * bubble right in front of it — the bubble is dropped, not re-stamped: two
+ * entries with one id reach the keyed `{#each ... (msg.id)}` and Svelte 5
+ * throws each_key_duplicate.
+ *
+ * Returns the same array when nothing changes.
+ */
+export function applyUserMessageConfirmed<T extends ConfirmableMessage>(
+    messages: T[],
+    confirmed: UserMessageConfirmed | null | undefined,
+): T[] {
+    const msgIndex = confirmed?.msg_index;
+    if (!msgIndex) return messages;
+    const carried = confirmed?.message_id;
+    const messageId = typeof carried === 'string' && carried.length > 0 ? carried : null;
+    const isBubble = (m: T | undefined) => !!m && m.sender === 'user' && !m.msg_index;
+
+    if (messageId) {
+        const at = messages.findIndex((m) => m.id === messageId);
+        if (at >= 0) {
+            if (at > 0 && isBubble(messages[at - 1])) {
+                return messages.filter((_, i) => i !== at - 1);
+            }
+            return messages;
+        }
+    }
+
+    const last = messages.findLastIndex((m) => m.sender === 'user');
+    if (last < 0 || !isBubble(messages[last])) return messages;
+    const updated = [...messages];
+    updated[last] = { ...messages[last], msg_index: msgIndex, ...(messageId ? { id: messageId } : {}) };
+    return updated;
+}

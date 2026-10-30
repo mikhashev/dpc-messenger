@@ -62,7 +62,7 @@ export function forgetAgentTurns(): void {
 export const agentChatMessage = writable<Record<string, any> | null>(null);
 
 // Backend confirms user message with msg_index before LLM starts thinking
-export const userMessageConfirmed = writable<{ conversation_id: string; msg_index: number; command_id: string } | null>(null);
+export const userMessageConfirmed = writable<{ conversation_id: string; msg_index: number; message_id?: string; command_id?: string } | null>(null);
 
 // Sleep state (ADR-014)
 export const sleepStateChanged = writable<{ agent_id: string; group_id?: string; status: string; result?: string } | null>(null);

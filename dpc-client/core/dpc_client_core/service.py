@@ -8418,11 +8418,31 @@ class CoreService:
                     # own record (the agent's monitor is a read-only consumer there,
                     # ADR-031 §3), so nothing is moved for it.
                     attachments = None
-                    if not conversation_id.startswith("group-"):
+                    stored_here = not conversation_id.startswith("group-")
+                    if stored_here:
                         attachments = self._keep_agent_chat_image(
                             agent_manager, conversation_id, tmp_path, filename,
                             mime_type, size_bytes, dimensions,
                         )
+                        # Stored before the run, as a typed question is
+                        # (_execute_agent_query), so the bubble the UI drew
+                        # with an id of its own is given the record's.
+                        from dpc_client_core.dpc_agent.utils import utc_now_iso
+                        monitor = agent_manager._get_or_create_agent_monitor(conversation_id)
+                        monitor.add_message(
+                            role="user",
+                            content=caption or "Analyze this screenshot",
+                            attachments=attachments,
+                            timestamp=utc_now_iso(),
+                            sender_node_id=getattr(self.p2p_manager, "node_id", "local-user"),
+                            sender_name="User",
+                        )
+                        monitor.save_history()
+                        await self.local_api.broadcast_event("user_message_confirmed", {
+                            "conversation_id": conversation_id,
+                            "msg_index": monitor.get_last_msg_index(),
+                            "message_id": monitor.message_history[-1].get("id"),
+                        })
 
                     response = await agent_manager.process_message(
                         message=caption or "Analyze this screenshot",
@@ -8432,6 +8452,7 @@ class CoreService:
                         image_mime=mime_type,
                         image_caption=caption,
                         attachments=attachments,
+                        _skip_history=stored_here,
                     )
 
                     # Broadcast result
@@ -9104,6 +9125,14 @@ class CoreService:
                 )
                 monitor.save_history()
                 user_msg_index = monitor.get_last_msg_index()
+                # The same confirmation as a question to the agent, so the bubble
+                # takes the record's id here too.
+                await self.local_api.broadcast_event("user_message_confirmed", {
+                    "conversation_id": conversation_id,
+                    "msg_index": user_msg_index,
+                    "message_id": monitor.message_history[-1].get("id"),
+                    "command_id": command_id,
+                })
 
                 # Broadcast @CC mention event (picked up by dpc-agent-chat MCP server)
                 await self._check_agent_cc_mention(
@@ -9145,9 +9174,12 @@ class CoreService:
             monitor.save_history()
             _early_user_msg_index = monitor.get_last_msg_index()
 
+            # The record's own id goes with its index: the UI drew the question
+            # under an id of its own, and a reload joins the two by id.
             await self.local_api.broadcast_event("user_message_confirmed", {
                 "conversation_id": conversation_id,
                 "msg_index": _early_user_msg_index,
+                "message_id": monitor.message_history[-1].get("id"),
                 "command_id": command_id,
             })
 

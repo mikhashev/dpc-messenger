@@ -111,6 +111,7 @@ def _world(tmp_path, monkeypatch, *, save: bool, temp_dir: Path):
         llm_manager=SimpleNamespace(providers={"dpc_agent": provider}),
         firewall=SimpleNamespace(rules={"image_transfer": {"save_screenshots_to_disk": save}}),
         local_api=SimpleNamespace(broadcast_event=broadcast),
+        p2p_manager=manager.service.p2p_manager,
     )
     service._keep_agent_chat_image = MethodType(CoreService._keep_agent_chat_image, service)
     return SimpleNamespace(made=made, service=service, manager=manager, agent=agent, events=events,

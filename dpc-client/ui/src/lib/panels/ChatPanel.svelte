@@ -46,6 +46,7 @@
   import { confirmAsync } from '$lib/utils/dialog';
   import { appendToChatDraft, switchChatDraft } from '$lib/utils/chatDraftInputs';
   import { chatInstructionSet } from '$lib/utils/aiChatStore';
+  import { applyUserMessageConfirmed } from '$lib/utils/liveMessageIdentity';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
 
   type AIChatMeta = {
@@ -551,25 +552,22 @@
     autoScroll();
   }
 
-  // Apply msg_index to user message as soon as backend confirms (before LLM responds)
+  // Give the user message its record's msg_index and id as soon as the backend
+  // confirms (before the LLM responds); see applyUserMessageConfirmed.
   $effect(() => {
     const confirmed = $userMessageConfirmed;
     if (!confirmed) return;
     const { conversation_id, msg_index } = confirmed;
     if (!conversation_id || !msg_index) return;
     chatHistories.update(h => {
-      const m = new Map(h);
-      const chatId = Array.from(m.keys()).find(k => k === conversation_id || k.endsWith(conversation_id));
+      const chatId = Array.from(h.keys()).find(k => k === conversation_id || k.endsWith(conversation_id));
       if (!chatId) return h;
-      const hist = m.get(chatId) || [];
-      const lastUserIdx = hist.findLastIndex((msg: any) => msg.sender === 'user' && !msg.msg_index);
-      if (lastUserIdx >= 0) {
-        const updated = [...hist];
-        updated[lastUserIdx] = { ...updated[lastUserIdx], msg_index };
-        m.set(chatId, updated);
-        return m;
-      }
-      return h;
+      const hist = h.get(chatId) || [];
+      const updated = applyUserMessageConfirmed(hist, confirmed);
+      if (updated === hist) return h;
+      const m = new Map(h);
+      m.set(chatId, updated);
+      return m;
     });
   });
 
