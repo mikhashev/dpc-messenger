@@ -4,7 +4,7 @@ import hashlib
 import time
 import uuid
 from typing import Dict, Any, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from . import MessageHandler
 from dpc_protocol.message_signing import (
     LEGACY_PREIMAGE_VERSIONS,
@@ -19,12 +19,17 @@ from ..conversation_monitor import (
     history_status_for,
     later_boundary,
     live_history_boundary_of,
+    parse_moment,
     same_moment,
 )
 from .group_access import may_share_group, refuse_group_access
 
 
 _PREIMAGES_WITHOUT_MENTION_DEPTH = ("dptp-msg-v1", "dptp-msg-v2")
+
+# A mention merged by history sync wakes only within this age of its own
+# timestamp; past it the conversation has moved on (Mike's call, 2026-10-30).
+SYNCED_MENTION_MAX_AGE = timedelta(hours=1)
 
 
 def signed_mention_depth(payload: Dict[str, Any], verification: str):
@@ -936,8 +941,17 @@ class GroupHistoryResponseHandler(MessageHandler):
         # v0.20.0: Use merge_history instead of import_history
         # This handles duplicates and saves to disk
         rejected = []
+        merged = []
         if hasattr(monitor, "merge_history"):
+            # merge_history returns a count; which records it added is read off
+            # the ids, with no await between the two reads, so a second answer
+            # arriving a few ms later finds them present and adds nothing.
+            known = set(getattr(monitor, "message_ids", None) or ())
             added = monitor.merge_history(history)
+            if added:
+                incoming = {m.get("id") for m in history if isinstance(m, dict)}
+                merged = [m for m in getattr(monitor, "message_history", [])
+                          if m.get("id") and m["id"] in incoming and m["id"] not in known]
             rejected = list(getattr(monitor, "last_merge_rejected", []) or [])
             self.logger.info(
                 "Merged %d new messages into group %s history (%d older than the boundary archived)",
@@ -956,7 +970,71 @@ class GroupHistoryResponseHandler(MessageHandler):
             "message_count": len(history),
         })
 
+        # No GROUP_TEXT carried these — their node had no link when they were
+        # posted — so this is the only place their mentions can be routed.
+        await self._wake_merged_mentions(group_id, merged)
+
         return None
+
+    async def _wake_merged_mentions(self, group_id: str, merged: list) -> None:
+        """Route the mentions in records this merge added, once, as live.
+
+        Once: a record already in the history was routed live or by an earlier
+        merge, so only what this merge added is read — across restarts too,
+        with nothing stored. Only within SYNCED_MENTION_MAX_AGE of the record's
+        own timestamp, the sender's clock: ours is "now" for anything synced.
+        Who is woken, the verdict and the depth bound are the live path's own
+        `_handle_agent_mentions`. Oldest first. A reply by someone else does
+        not cancel the wake (Mike's call, 2026-10-30).
+        """
+        from dpc_client_core.service import mentions_in
+
+        now = datetime.now(timezone.utc)
+        processed = getattr(self.service, "_processed_message_ids", None)
+        due = []
+        for record in merged:
+            if not mentions_in(record.get("content")):
+                continue
+            message_id = record.get("id")
+            moment = parse_moment(record.get("timestamp"))
+            # A timestamp ahead of our clock counts as age 0.
+            age = None if moment is None else max(now - moment, timedelta(0))
+            if age is None or age > SYNCED_MENTION_MAX_AGE:
+                self.logger.info(
+                    "Synced mention %s in group %s wakes nobody: %s",
+                    str(message_id)[:8], group_id,
+                    "no readable timestamp" if age is None
+                    else f"{int(age.total_seconds())}s old, more than "
+                         f"{int(SYNCED_MENTION_MAX_AGE.total_seconds())}s")
+                continue
+            # The live handler marks a GROUP_TEXT here before its first await,
+            # so a copy it is still storing is routed there, not twice.
+            dedup_key = f"{group_id}:{message_id}"
+            if processed is not None:
+                if dedup_key in processed:
+                    continue
+                processed.add(dedup_key)
+            due.append(record)
+
+        # Oldest first needs no sort: a merge that added anything leaves the
+        # history in time order (restore_chronological_order).
+        live = GroupTextHandler(self.service) if due else None
+        for record in due:
+            sender_node_id = record.get("sender_node_id")
+            payload = {
+                "message_id": record.get("id"),
+                "preimage_version": record.get("preimage_version"),
+                "sender_type": record.get("sender_type"),
+                "mention_depth": record.get("mention_depth"),
+                # The export's spelling of the live payload's `is_agent`.
+                "is_agent": record.get("is_agent", record.get("isAgent", False)),
+            }
+            # `verification` was written by merge_history, never read off the wire.
+            await live._handle_agent_mentions(
+                group_id, payload, record.get("content") or "",
+                record.get("sender_name") or sender_node_id, sender_node_id,
+                verification=record.get("verification", "legacy"),
+            )
 
 
 class GroupHistoryStatusHandler(MessageHandler):
