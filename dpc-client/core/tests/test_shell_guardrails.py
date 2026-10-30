@@ -271,9 +271,7 @@ class TestAllowedCommands:
         "find . -name '*.py'",
         "grep -r 'pattern' .",
         "python train.py",
-        "pip install requests",
         "uv sync",
-        "npm install",
         "node server.js",
     ])
     def test_safe_commands_allowed(self, cmd):

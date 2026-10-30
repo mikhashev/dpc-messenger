@@ -6,7 +6,8 @@ Cross-platform: uses cmd.exe on Windows, /bin/sh on Unix.
 Restricted tool — requires explicit enable in privacy_rules.json.
 
 Safety guardrails (ADR-030): 3-tier command classification.
-  Tier 0 — auto-approve (safe read-only commands)
+  Tier 0 — runs without asking: every command no Tier 1 or Tier 2 rule matches
+           (there is no allowlist, so Tier 0 is not "known to be read-only")
   Tier 1 — goes to the approval queue: the caller is asked and the command runs
            only if a person says yes
   Tier 2 — hard block (catastrophic/destructive commands)
@@ -112,7 +113,13 @@ _SHELL_NAMES = r"bash|sh|zsh|fish|dash|ksh"
 _POSIX_C = r"(?:\s+--?[A-Za-z][\w-]*)*\s+-[A-Za-z]*c"
 _CMD_C = r"(?:\s+/[A-Za-z](?::\S+)?)*\s+/[ck]"
 
-# Tier 1 / Tier 2 in v1 — dangerous patterns (blocked in v1, approval in v2)
+# A package manager's options may stand between its name and its verb:
+# `pip -q install`, `uv --directory proj add`, `npm --prefix web ci`. An option
+# may carry a value, attached by `=` or as the next word.
+_PM_OPTS = r"(?:\s+--?[\w-]+(?:[=\s]\S+)?)*"
+
+# Tier 1 — a person is asked before the command runs (ADR-030). A segment that
+# matches none of these, nor a Tier 2 rule, is Tier 0 and runs without asking.
 DANGEROUS_PATTERNS: list[re.Pattern] = [
     # Privilege escalation
     re.compile(r"\b(sudo|su|runas|gsudo|pkexec)\b", re.I),
@@ -160,6 +167,25 @@ DANGEROUS_PATTERNS: list[re.Pattern] = [
     re.compile(r"\blaunchctl\s+(unload|remove)\b", re.I),
     # Docker (arbitrary code execution surface)
     re.compile(r"\bdocker\b", re.I),
+    # Package installs, removals and upgrades. The path check cannot see where a
+    # package manager writes — `pip install --target X` passes it, and a plain
+    # `pip install` lands in whichever interpreter is first on the PATH the
+    # child inherits, which is the owner's. Keyed on the verb, not the program,
+    # so `pip list`, `uv pip show`, `winget list` and `npm ls` stay Tier 0.
+    # The pip rule also covers `python -m pip`, `py -m pip` and `uv pip`.
+    re.compile(rf"\bpip(?:3(?:\.\d+)?)?(?:\.exe)?{_PM_OPTS}\s+(?:install|uninstall|download)\b", re.I),
+    re.compile(r"\bensurepip\b", re.I),
+    re.compile(rf"\buv(?:\.exe)?{_PM_OPTS}\s+(?:add|remove|tool{_PM_OPTS}\s+install)\b", re.I),
+    re.compile(rf"\bnpm(?:\.cmd)?{_PM_OPTS}\s+(?:i|in|install|add|ci|uninstall|un|remove|rm)\b", re.I),
+    # `winget upgrade` with nothing after it, or with `--list`, only lists.
+    re.compile(
+        rf"\bwinget(?:\.exe)?{_PM_OPTS}\s+(?:install|add|uninstall|remove|rm"
+        r"|(?:upgrade|update)\b(?!\s*$)(?!.*\s--list\b))\b",
+        re.I,
+    ),
+    re.compile(rf"\bchoco(?:\.exe)?{_PM_OPTS}\s+(?:install|upgrade|uninstall)\b", re.I),
+    re.compile(rf"\b(?:conda|(?:micro)?mamba)(?:\.exe)?{_PM_OPTS}\s+(?:install|remove|uninstall)\b", re.I),
+    re.compile(rf"\bpipx(?:\.exe)?{_PM_OPTS}\s+install\b", re.I),
 ]
 
 # Fork bomb needs special detection (bash function syntax not reliably regex-matchable)

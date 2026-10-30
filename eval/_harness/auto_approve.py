@@ -149,19 +149,22 @@ class Tier1AutoApprover:
             # An approver that cannot see why cannot judge. Refusing is the
             # only honest answer, and it is also what an old queue entry gets.
             return False, "the queue entry carries no reason"
+        # First, so an install names itself whichever rule put it in Tier 1:
+        # since run_shell asks about installs on its own, the pattern in the
+        # reason is often the install rule, not an inline-code wrapper.
+        command = entry.get("command") or ""
+        install = self._INSTALLS.search(command)
+        if install:
+            return False, f"installs into an interpreter: {install.group(0)!r}"
         patterns = self._patterns_in(reason)
         if patterns is None:
             return False, reason
         not_inline = [p for p in patterns if not self._is_inline_code(p)]
         if not_inline:
             return False, f"not an inline-code wrapper: {not_inline[0]}"
-        command = entry.get("command") or ""
         for pattern in self._NEVER:
             if pattern in command.lower():
                 return False, f"destructive without a person: {pattern!r}"
-        install = self._INSTALLS.search(command)
-        if install:
-            return False, f"installs into an interpreter: {install.group(0)!r}"
         home = self._OPERATOR_HOME.search(command)
         if home:
             return False, f"reaches the operator's home or credentials: {home.group(0)!r}"
