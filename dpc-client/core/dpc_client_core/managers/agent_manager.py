@@ -18,7 +18,7 @@ import contextlib
 import json
 import logging
 import pathlib
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..dpc_agent.agent import DpcAgent, AgentConfig
 from ..dpc_agent.run_gate import RunGate, StoppedWhileWaiting, _RUN_GATES, get_run_gate, hold, turn_title  # noqa: F401
@@ -33,6 +33,9 @@ if TYPE_CHECKING:
     from ..llm_manager import LLMManager
 
 log = logging.getLogger(__name__)
+
+# The text a run returns when it only thought; not an answer on its own.
+_THINKING_FALLBACK = "(thinking completed - see reasoning for details)"
 
 
 # One run at a time per agent, across every surface that can start one.
@@ -1166,16 +1169,7 @@ class DpcAgentManager:
             monitor.load_history()
 
         if not _skip_history and not is_group:
-            node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
-            monitor.add_message(
-                role="user",
-                content=message,
-                attachments=attachments,
-                timestamp=utc_now_iso(),
-                sender_node_id=node_id,
-                sender_name=sender_name
-            )
-            monitor.save_history()  # Save to disk immediately
+            self._record_prompt(monitor, message, sender_name, attachments=attachments)
 
             # tokens_after_last_response is updated after each LLM response
             # (writer below this block) from accurate token counts. No additive
@@ -1296,49 +1290,16 @@ class DpcAgentManager:
                 if last_usage and quota_limit:
                     self._daily_tokens_used += last_usage.get("total_tokens", 0)
 
-            # Track agent response in monitor.
-            # Always save if there's content, thinking, or streaming_raw — the UI
-            # already shows thinking/raw blocks, so they must be persisted to history.
-            _THINKING_FALLBACK = "(thinking completed - see reasoning for details)"
-            _thinking = agent._last_usage.get("thinking") if agent._last_usage else None
-            _raw = "".join(_stream_chunks) if _stream_chunks else None
-            _streaming_raw = _raw if _raw and _raw.strip() != (response or "").strip() else None
-            _has_content = response and response.strip() != _THINKING_FALLBACK
-            _has_extras = _thinking or _streaming_raw
-
-            # A turn that ended without an answer is saved too, marked with why:
-            # left out, the person's message stood with nothing after it and the
-            # next prompt held two user turns in a row. The loop names the reason
-            # in the branch that exits; the text is not read for it, so an answer
-            # that opens with a warning sign is an answer.
-            _turn_end = (getattr(agent, '_last_trace', None) or {}).get("turn_end")
-            if _turn_end is not None and _turn_end not in TURN_END_VALUES:
-                log.warning("Unknown turn_end %r from the loop; saved as an answer", _turn_end)
-                _turn_end = None
-            _is_empty_after_retry = not response and not _has_extras
-
-            if _is_empty_after_retry:
+            _thinking, _streaming_raw = self._answer_extras(agent, response, _stream_chunks)
+            if not response and not (_thinking or _streaming_raw):
                 log.warning("Agent returned empty response after retries — sending toast notification")
                 await self.service.local_api.broadcast_event("error_toast", {
                     "title": "Empty Response",
                     "message": f"{agent_display_name} returned an empty response after retries. Try again.",
                     "duration": 5000,
                 })
-            elif (_has_content or _has_extras) and not is_group:
-                _trace = getattr(agent, '_last_trace', None) or {}
-                _tool_calls_for_msg = _trace.get("accumulated_tool_calls") or []
-                monitor.add_message(
-                    role="assistant",
-                    content=response or "",
-                    timestamp=utc_now_iso(),
-                    sender_node_id=conversation_id,
-                    sender_name=agent_display_name,
-                    thinking=_thinking,
-                    streaming_raw=_streaming_raw,
-                    tool_calls=_tool_calls_for_msg if _tool_calls_for_msg else None,
-                    turn_end=_turn_end,
-                )
-                monitor.save_history()  # Save to disk immediately
+            elif not is_group:
+                self._record_answer(monitor, conversation_id, agent, response, _stream_chunks)
 
             # Store full context measurement from this request so next request's session_state
             # can expose it. One request stale, but accurate — context grows incrementally.
@@ -1418,6 +1379,61 @@ class DpcAgentManager:
             self._emit_progress_clear(conversation_id)
             raise
 
+    def _record_prompt(self, monitor: ConversationMonitor, message: str, sender_name: str,
+                       attachments: Optional[List[Dict[str, Any]]] = None,
+                       task_type: Optional[str] = None) -> None:
+        """The user-side record a run answers, saved at once."""
+        monitor.add_message(
+            role="user",
+            content=message,
+            attachments=attachments,
+            timestamp=utc_now_iso(),
+            sender_node_id=getattr(self.service.p2p_manager, "node_id", "local-user"),
+            sender_name=sender_name,
+            task_type=task_type,
+        )
+        monitor.save_history()
+
+    @staticmethod
+    def _answer_extras(agent: Any, response: Optional[str], stream_chunks: List[str]) -> tuple:
+        """What a run left beside its text: (thinking, streamed output when it differs)."""
+        thinking = agent._last_usage.get("thinking") if agent._last_usage else None
+        raw = "".join(stream_chunks) if stream_chunks else None
+        streaming_raw = raw if raw and raw.strip() != (response or "").strip() else None
+        return thinking, streaming_raw
+
+    def _record_answer(self, monitor: ConversationMonitor, conversation_id: str, agent: Any,
+                       response: Optional[str], stream_chunks: List[str]) -> None:
+        """The assistant record of a finished run, with its trace, saved at once.
+
+        Kept when there is text, thinking or streamed output: the UI shows the
+        last two too. A run that ended without an answer is kept with why
+        (`turn_end`, named by the loop's exit branch, never read from the
+        text), or the prompt stood alone and the next one held two user turns.
+        """
+        thinking, streaming_raw = self._answer_extras(agent, response, stream_chunks)
+        has_content = response and response.strip() != _THINKING_FALLBACK
+        if not (has_content or thinking or streaming_raw):
+            return
+        trace = getattr(agent, '_last_trace', None) or {}
+        turn_end = trace.get("turn_end")
+        if turn_end is not None and turn_end not in TURN_END_VALUES:
+            log.warning("Unknown turn_end %r from the loop; saved as an answer", turn_end)
+            turn_end = None
+        tool_calls = trace.get("accumulated_tool_calls") or []
+        monitor.add_message(
+            role="assistant",
+            content=response or "",
+            timestamp=utc_now_iso(),
+            sender_node_id=conversation_id,
+            sender_name=self._agent_display_name or self.agent_id or "DPC Agent",
+            thinking=thinking,
+            streaming_raw=streaming_raw,
+            tool_calls=tool_calls or None,
+            turn_end=turn_end,
+        )
+        monitor.save_history()
+
     async def _broadcast_text_chunk(self, chunk: str, conversation_id: str) -> None:
         """Broadcast one streamed text chunk to the UI (the agent_text_chunk event)."""
         try:
@@ -1432,7 +1448,7 @@ class DpcAgentManager:
             log.debug(f"Failed to emit text chunk: {e}")
 
     @contextlib.asynccontextmanager
-    async def _task_progress_scope(self, conversation_id: str):
+    async def _task_progress_scope(self, conversation_id: str, run: Optional[Dict[str, Any]] = None):
         """Live activity for a scheduled task run, the way a chat turn has it.
 
         The agent's task executor enters this around a chat or check_back run:
@@ -1440,16 +1456,37 @@ class DpcAgentManager:
         callbacks bound to the chat it answers in, and the line is cleared when
         the run ends, whether it answered, failed or was stopped. Its Stop and
         Kill events are registered as a chat run's are, so `interrupt` reaches it.
+
+        `run` carries the task's `prompt` and `task_type`, and the executor puts
+        the `answer` on it. Outside a group both are recorded in the chat as a
+        chat run's are, and an agent chat is pushed to the UI; a group's record
+        is the post (ADR-031 §3). No prompt means no record.
         """
         self._current_agent_display_name = (
             self._agent_display_name or self.agent_id or "DPC Agent"
         )
         self._emit_progress("thinking", conversation_id)
 
+        run = run if run is not None else {}
+        monitor = None
+        if run.get("prompt") and not conversation_id.startswith("group-"):
+            # A record that cannot be written must not cost the run its answer.
+            try:
+                monitor = self._get_or_create_agent_monitor(conversation_id)
+                task_type = run.get("task_type") or "chat"
+                self._record_prompt(monitor, run["prompt"], f"Scheduled {task_type}", task_type=task_type)
+            except Exception as e:
+                log.warning("Task run in %s: prompt not recorded: %s", conversation_id, e)
+                monitor = None
+            await self._broadcast_history_to_ui(conversation_id)
+
         def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None, speed=None):
             self._emit_progress(msg, conversation_id, tool, round, tool_calls, speed)
 
+        streamed: List[str] = []
+
         async def emit_stream_chunk(chunk: str, conv_id: str):
+            streamed.append(chunk)
             await self._broadcast_text_chunk(chunk, conv_id)
 
         interrupt_ev = asyncio.Event()
@@ -1463,12 +1500,43 @@ class DpcAgentManager:
                 "stop_event": interrupt_ev,
                 "kill_event": kill_ev,
             }
+            if monitor is not None and "answer" in run and self._agent is not None:
+                try:
+                    self._record_answer(monitor, conversation_id, self._agent, run["answer"], streamed)
+                except Exception as e:
+                    log.warning("Task run in %s: answer not recorded: %s", conversation_id, e)
+                await self._broadcast_history_to_ui(conversation_id)
         finally:
             if self._interrupt_events.get(conversation_id) is interrupt_ev:
                 self._interrupt_events.pop(conversation_id, None)
             if self._kill_events.get(conversation_id) is kill_ev:
                 self._kill_events.pop(conversation_id, None)
             self._emit_progress_clear(conversation_id)
+
+    async def _broadcast_history_to_ui(self, conversation_id: str) -> None:
+        """Push an agent chat's history to the open chat (agent_history_updated),
+        in the shape the Telegram bridge's method of this name sends."""
+        if not conversation_id.startswith("agent_"):
+            return
+        try:
+            local_api = getattr(self.service, "local_api", None)
+            monitor = self._agent_monitors.get(conversation_id)
+            if local_api is None or monitor is None:
+                return
+            messages = monitor.get_message_history()
+            last_usage = getattr(self._agent, "_last_usage", None) or {}
+            await local_api.broadcast_event("agent_history_updated", {
+                "conversation_id": conversation_id,
+                "messages": messages,
+                "message_count": len(messages),
+                "tokens_used": monitor.current_token_count,
+                "token_limit": monitor.token_limit,
+                "thinking": last_usage.get("thinking"),
+                "tokens_after_last_response": monitor._tokens_after_last_response,
+                "tokens_after_last_response_at": monitor._tokens_after_last_response_at,
+            })
+        except Exception as e:
+            log.warning("Failed to push agent history for %s: %s", conversation_id, e)
 
     async def _complete_turn(self, emitter, task_id: str, conversation_id: str, response: str) -> None:
         """How a chat turn that answered ends: TASK_COMPLETED, then the progress line cleared."""

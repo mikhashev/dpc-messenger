@@ -2134,7 +2134,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     tool_calls: Optional[List[Dict[str, Any]]] = None,
                     signature_fields: Optional[Dict[str, Any]] = None,
                     mention_depth: Optional[int] = None,
-                    turn_end: Optional[str] = None):
+                    turn_end: Optional[str] = None,
+                    task_type: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -2150,6 +2151,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             streaming_raw: Optional full streamed text output (persisted to history.json, for UI restore)
             turn_end: One of TURN_END_VALUES when the turn ended without an answer;
                 absent on an answer
+            task_type: The scheduled task type ('check_back', 'chat') whose run
+                wrote this prompt; absent on anything a person or a peer sent
 
         Note: This also adds to message_buffer and full_conversation for knowledge extraction.
         thinking and streaming_raw are stored in history.json but excluded from knowledge extraction.
@@ -2200,6 +2203,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["mention_depth"] = mention_depth
         if turn_end:
             message_dict["turn_end"] = turn_end
+        if task_type:
+            message_dict["task_type"] = task_type
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)

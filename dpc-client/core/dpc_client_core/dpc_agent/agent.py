@@ -1166,8 +1166,15 @@ class DpcAgent:
                 return await self._execute_task_guarded(task)
             # The run shows its activity in the chat it answers in, from the
             # model's first round to the post, and clears it however it ends.
-            async with scope(conversation_id) as live:
-                return await self._execute_task_guarded(task, live)
+            # A run with a chat to answer in hands the scope its prompt and its
+            # answer, which a 1:1 chat records as a chat run's.
+            run: Dict[str, Any] = {}
+            if data.get("_reply_conversation_id"):
+                prompt = data.get("text") or self._convert_task_data_to_prompt(data)
+                run = {"prompt": prompt, "task_type": task.task_type}
+            async with scope(conversation_id, run) as live:
+                run["answer"] = await self._execute_task_guarded(task, live)
+                return run["answer"]
 
     async def _execute_task_guarded(
         self, task: Task, live: Optional[Dict[str, Any]] = None,

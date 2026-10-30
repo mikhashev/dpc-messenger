@@ -9567,14 +9567,16 @@ class CoreService:
                 # ARCH-10: forward chain response to Telegram if the conversation
                 # is currently Telegram-active (last NON-CC user message came from
                 # Telegram bot). CC bridge relay messages are skipped — they're CC's
-                # automated reaction to a real user, not the user's own input.
+                # automated reaction to a real user, not the user's own input. A
+                # scheduled task's prompt (`task_type`) is skipped too: it neither
+                # starts nor stops the forwarding.
                 # UI-originated chains stay in UI only — see Mike's intent in S39.
                 last_user_source = None
                 if monitor and monitor.message_history:
                     for msg in reversed(monitor.message_history):
                         if msg.get("role") != "user":
                             continue
-                        if msg.get("sender_node_id") == "cc":
+                        if msg.get("sender_node_id") == "cc" or msg.get("task_type"):
                             continue
                         last_user_source = msg.get("source")
                         break

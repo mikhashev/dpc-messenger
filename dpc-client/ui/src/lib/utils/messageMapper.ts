@@ -77,6 +77,15 @@ export function resolveSenderIdentity(
             isAgent: true,
         };
     }
+    // A scheduled task's prompt carries this node's id, and no person wrote it:
+    // drawn as "You" it would read as the owner's own question.
+    if (msg.task_type) {
+        return {
+            sender: msg.sender_node_id || 'unknown',
+            senderName: msg.sender_name || msg.task_type,
+            isAgent: false,
+        };
+    }
     if (!msg.sender_node_id || msg.sender_node_id === opts.selfNodeId) {
         return { sender: 'user', senderName: msg.sender_name || 'You', isAgent: false };
     }
