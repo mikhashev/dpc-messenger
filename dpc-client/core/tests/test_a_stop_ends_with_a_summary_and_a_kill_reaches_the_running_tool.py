@@ -290,17 +290,17 @@ async def test_a_kill_during_a_tool_ends_the_processes_that_call_started(tmp_pat
                 handle.kill()
 
 
-# --- the registry's door: the call's own children only ---------------------------------
+# --- the registry's door: the turn's own children only ---------------------------------
 
 
-def test_only_the_children_of_that_one_call_are_killed():
+def test_only_the_children_of_that_turn_are_killed():
     registry = pr.get_registry()
-    call = SpawnOrigin(agent_id="agent_a", conversation_id="chat-1", tool="run_shell", round=4)
+    call = SpawnOrigin(agent_id="agent_a", conversation_id="chat-1", tool="run_shell", round=4, turn_id="t1")
     registry.register(7_990_001, launcher="run_shell", launcher_kind="tool", command="x", origin=call)
     others = [
-        SpawnOrigin(agent_id="agent_a", conversation_id="chat-1", tool="run_shell", round=3),
-        SpawnOrigin(agent_id="agent_b", conversation_id="chat-1", tool="run_shell", round=4),
-        SpawnOrigin(agent_id="agent_a", conversation_id="chat-2", tool="run_shell", round=4),
+        SpawnOrigin(agent_id="agent_a", conversation_id="chat-1", tool="run_shell", round=3, turn_id="t0"),
+        SpawnOrigin(agent_id="agent_b", conversation_id="chat-1", tool="run_shell", round=4, turn_id="t1"),
+        SpawnOrigin(agent_id="agent_a", conversation_id="chat-2", tool="run_shell", round=4, turn_id="t1"),
         None,  # a lost attribution
     ]
     for pid, origin in enumerate(others, start=7_990_002):
@@ -314,3 +314,6 @@ def test_only_the_children_of_that_one_call_are_killed():
     assert [(e.pid, e.exit_reason, e.stop_kind) for e in ended] == [(7_990_001, "stopped", "ui_stop")]
     assert sorted(e.pid for e in registry.open_entries()) == [7_990_002, 7_990_003, 7_990_004, 7_990_005, 7_990_009]
     assert registry.stop_commands_of(SpawnOrigin(), kill_tree=lambda t: killed.append(t)) == []
+    # A Kill that names no turn ends nothing, rather than guessing one call.
+    turnless = SpawnOrigin(agent_id="agent_a", conversation_id="chat-1", tool="run_shell", round=3)
+    assert registry.stop_commands_of(turnless, kill_tree=lambda t: killed.append(t)) == []

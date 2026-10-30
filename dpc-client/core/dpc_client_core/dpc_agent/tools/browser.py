@@ -1000,6 +1000,25 @@ def get_fetch_sessions() -> dict[str, "AuthBrowser"]:
     return _fetch_sessions
 
 
+# The window sweep, the idle sweep and the Kill each release a session; the
+# Kill runs on a thread of its own, so taking one out of its registry is a
+# compare-and-pop under this lock, and only the caller that took it closes it.
+_release_lock = threading.Lock()
+
+
+def _take_session(registry: dict, agent_id: str, session: "AuthBrowser") -> bool:
+    """Remove `session` from `registry` if it is still the one there; True when
+    this caller removed it, and so is the one to close it."""
+    with _release_lock:
+        if registry.get(agent_id) is not session:
+            return False
+        registry.pop(agent_id, None)
+        if registry is _active_browser_sessions:
+            # What `_deregister` drops with it; it no longer finds the session there.
+            _session_locks.pop(agent_id, None)
+        return True
+
+
 async def sweep_closed_windows() -> int:
     """Close headed sessions whose window the person has closed.
 
@@ -1011,7 +1030,7 @@ async def sweep_closed_windows() -> int:
     """
     released = 0
     for agent_id, session in list(_active_browser_sessions.items()):
-        if not session._headed:
+        if not session._headed or _active_browser_sessions.get(agent_id) is not session:
             continue
         started = time.monotonic()
         try:
@@ -1034,7 +1053,7 @@ async def sweep_closed_windows() -> int:
             "window probe for %s: gone=%s in %.0f ms",
             agent_id, gone, (time.monotonic() - started) * 1000,
         )
-        if not gone:
+        if not gone or not _take_session(_active_browser_sessions, agent_id, session):
             continue
         log.info("Window closed for %s — releasing the browser", agent_id)
         try:
@@ -1043,7 +1062,6 @@ async def sweep_closed_windows() -> int:
             log.warning(
                 "Error releasing %s after its window went away: %s", agent_id, e
             )
-        _active_browser_sessions.pop(agent_id, None)
         released += 1
     return released
 
@@ -1080,7 +1098,7 @@ async def cleanup_idle_browser_sessions() -> int:
     ):
         for agent_id, session in list(registry.items()):
             idle = _session_idle_seconds(session, now)
-            if idle <= IDLE_TIMEOUT_SECONDS:
+            if idle <= IDLE_TIMEOUT_SECONDS or not _take_session(registry, agent_id, session):
                 continue
             page_event = getattr(session, "_last_page_event", 0.0) or 0.0
             # Which clock ran out, and on what window: without it a closed
@@ -1098,8 +1116,41 @@ async def cleanup_idle_browser_sessions() -> int:
                 await _run_in_session(session, "close")
             except Exception as e:
                 log.warning("Error closing idle %s %s: %s", label, agent_id, e)
-            registry.pop(agent_id, None)
             closed += 1
+    return closed
+
+
+async def close_browser_sessions_of(agent_id: str) -> int:
+    """The user's Kill: close this agent's browser sessions, interactive and fetch.
+
+    The orderly close first, so the cookies are written back and the process
+    registry records `browser_closed`; when it does not finish within
+    `KILL_CLOSE_TIMEOUT_SECONDS` (often because the killed call itself still
+    holds the session thread), the browser's processes are killed instead.
+    A session a sweep has already taken is left to that sweep. Returns the
+    number of sessions closed."""
+    closed = 0
+    for registry, label in (
+        (_active_browser_sessions, "browser session"),
+        (_fetch_sessions, "fetch browser"),
+    ):
+        session = registry.get(agent_id)
+        if session is None or not _take_session(registry, agent_id, session):
+            continue
+        log.info("Kill: closing the %s of %s", label, agent_id)
+        try:
+            await _run_in_session(
+                session, "close", _touch=False, _timeout=KILL_CLOSE_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            log.warning(
+                "Kill: the %s of %s did not close (%s: %s); killing its processes",
+                label, agent_id, type(e).__name__, e,
+            )
+            session._force_kill_process()
+            _active_camoufox_browsers.discard(session)
+            session._shutdown_executor()
+        closed += 1
     return closed
 
 
@@ -2474,6 +2525,11 @@ class AuthBrowser:
         # the subprocess orphans and survives Python exit. See
         # _force_kill_process.
         self._browser_pids: set[int] = set()
+        # The call that asked for this browser, for its process-registry entry:
+        # read here because the launch runs on the session's own thread, which
+        # does not inherit the dispatcher's context.
+        from dpc_client_core.process_registry import SPAWN_ORIGIN
+        self._spawn_origin = SPAWN_ORIGIN.get()
         # True while a `download()` call holds an `expect_download`, so the
         # file it is about to save is not also saved as unclaimed.
         self._download_claimed = False
@@ -2564,6 +2620,76 @@ class AuthBrowser:
         except Exception as e:
             log.debug("browser pid capture failed (agent=%s): %s", self._agent_id, e)
 
+    def _register_browser_pids(self) -> None:
+        """Enter the launched browser in the process registry as the `browser`
+        subsystem (ADR-046 point 5): each captured process whose parent is the
+        backend, which is the Playwright driver the browser runs under, so the
+        sampler's walk of its tree counts the whole browser. A pid the registry
+        already holds is another spawn's that landed in the same window."""
+        if not self._browser_pids:
+            return
+        try:
+            import psutil
+            from dpc_client_core.process_registry import get_registry
+        except Exception:
+            return
+        registry = get_registry()
+        held = {e.pid for e in registry.open_entries()}
+        backend = os.getpid()
+        for pid in sorted(self._browser_pids - held):
+            try:
+                proc = psutil.Process(pid)
+                if proc.ppid() != backend:
+                    continue
+            except Exception:
+                continue
+            try:
+                command = proc.cmdline() or proc.name()
+            except Exception:
+                command = "camoufox"
+            try:
+                registry.register(
+                    pid, launcher="browser", launcher_kind="subsystem", command=command,
+                    origin=self._spawn_origin, log=log, detail=f"agent={self._agent_id}",
+                )
+            except Exception as e:
+                log.warning(
+                    "browser pid %s not entered in the process registry (agent=%s): %s",
+                    pid, self._agent_id, e,
+                )
+
+    def _browser_entries(self) -> list:
+        """This browser's open entries in the process registry."""
+        try:
+            from dpc_client_core.process_registry import get_registry
+            return [
+                e for e in get_registry().open_entries("subsystem")
+                if e.launcher == "browser" and e.pid in self._browser_pids
+            ]
+        except Exception:
+            return []
+
+    def _note_browser_closed(self) -> None:
+        """Announce the stop before it is sent, so the end reads
+        `stopped`/`browser_closed` (or `backend_stop` once the backend stops)."""
+        try:
+            from dpc_client_core.process_registry import get_registry
+            for entry in self._browser_entries():
+                get_registry().note_stop_sent(entry.pid, "stopped", "browser_closed")
+        except Exception as exc:
+            log.debug("browser stop not announced (agent=%s): %s", self._agent_id, exc)
+
+    def _end_browser_entries(self) -> None:
+        """Close this browser's registry entries whose process is gone; one
+        still running stays open for the backend's stop to find."""
+        try:
+            from dpc_client_core.process_registry import get_registry, probe_identity
+            for entry in self._browser_entries():
+                if probe_identity(entry.pid, entry.start_time) != "same":
+                    get_registry().end(entry.pid)
+        except Exception as exc:
+            log.debug("browser entries not ended (agent=%s): %s", self._agent_id, exc)
+
     def _force_kill_process(self) -> None:
         """Kill the Camoufox/Firefox subprocess tree captured at launch.
 
@@ -2580,6 +2706,7 @@ class AuthBrowser:
             import psutil
         except Exception:
             return
+        self._note_browser_closed()
         victims: list = []
         for pid in list(pids):
             try:
@@ -2604,12 +2731,19 @@ class AuthBrowser:
                 proc.kill()
             except Exception:
                 pass
+        if alive:
+            # The kill returns before the process is gone; the registry entry
+            # is closed only for a process that is.
+            try:
+                psutil.wait_procs(alive, timeout=2)
+            except Exception:
+                pass
         if victims:
             log.info(
-                "Force-killed %d Camoufox subprocess(es) during shutdown "
-                "(agent=%s)",
+                "Force-killed %d Camoufox subprocess(es) (agent=%s)",
                 len(victims), self._agent_id,
             )
+        self._end_browser_entries()
         self._browser_pids = set()
 
     def __enter__(self):
@@ -2688,6 +2822,7 @@ class AuthBrowser:
         self._cm = Camoufox(headless=not self._headed, **_camoufox_launch_kwargs())
         self._browser = self._cm.__enter__()
         self._capture_browser_pids(before_pids)
+        self._register_browser_pids()
         try:
             self._browser.on("disconnected", self._on_browser_disconnected)
         except Exception as e:
@@ -4687,6 +4822,9 @@ class AuthBrowser:
             # drains its pipe. Best-effort: log at DEBUG since a disconnected
             # browser's __exit__ commonly raises (connection already gone).
             if self._cm is not None:
+                if not self._disconnected:
+                    # A browser that went by itself was not stopped: its end is read, not announced.
+                    self._note_browser_closed()
                 try:
                     self._cm.__exit__(None, None, None)
                 except Exception as exc:
@@ -4694,6 +4832,7 @@ class AuthBrowser:
                         "Camoufox __exit__ during close (agent=%s): %s",
                         self._agent_id, exc,
                     )
+                self._end_browser_entries()
             self._cm = None
             self._browser = None
             self._context = None
@@ -4861,6 +5000,11 @@ IDLE_SWEEP_EVERY_N_PROBES = 10
 # other window would go unnoticed for that long. A browser that cannot
 # answer in ten seconds is not the case this sweep is looking for.
 WINDOW_PROBE_TIMEOUT_SECONDS = 10
+
+# How long the Kill waits for a session's orderly close (which writes the
+# cookies back) before it kills the browser's processes instead. The same
+# bound the backend's stop gives each browser.
+KILL_CLOSE_TIMEOUT_SECONDS = 5
 
 
 _SESSION_CALL_TIMEOUT = 120  # seconds — prevents hung executor from blocking the event loop forever

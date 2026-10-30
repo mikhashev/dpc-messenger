@@ -10,7 +10,7 @@ that the next start can find the children of a run that died without cleaning up
 time; pids are reused, the pair identifies a process), its parent (the backend,
 with its own creation time), the `launcher` and its kind (`tool` for an agent's
 tool call, `subsystem` for an engine, the browser or a short probe), the spawn origin (`agent_id`,
-`conversation_id`, `tool`, `round`, read from the `SPAWN_ORIGIN` context variable
+`conversation_id`, `tool`, `round`, `turn_id`, read from the `SPAWN_ORIGIN` context variable
 the tool dispatcher sets), the command (bounded), when it started and ended, the
 `exit_reason`, the stop field (`STOP_FIELD`, `stop_kind`) when the reason is `stopped`,
 and the raw `exit_code` and `signal`; then the resource peaks and `last_output_at`.
@@ -128,8 +128,8 @@ history is the daily files, which are append-only.
 behind the local API command of that name and the agent tool `list_my_processes`;
 `cancel_by_agent` is the only door `kill_my_process` has, and it checks the
 spawn origin itself, never a pid's owner as a model states it. `stop_commands_of`
-is the user's Kill of a running tool call (`dpc_agent/loop.py`): it ends only the
-children whose spawn origin is that call.
+is the user's Kill of a turn (`dpc_agent/loop.py`): it ends only the children
+whose spawn origin is that turn.
 
 Imports nothing beyond the standard library (psutil lazily) so that
 `run_service.py` can use it before anything else exists. The tree kills it needs
@@ -175,8 +175,9 @@ EXIT_REASONS = (
 STOP_FIELD = "stop_kind"
 _OLD_STOP_FIELD = "stop_reason"  # read from an older file, never written
 # A value stays only while something produces it or a named decision will create its
-# producer (ADR-046 point 4). `browser_closed` waits on browser registration;
-# `idle_unload` on the owner's open choice of who unloads an idle engine.
+# producer (ADR-046 point 4). `browser_closed` is the browser's orderly close
+# (`AuthBrowser.close` in `dpc_agent/tools/browser.py`); `idle_unload` waits on
+# the owner's open choice of who unloads an idle engine.
 STOP_VALUES = ("idle_unload", "ui_stop", "engine_died", "failed_start", "browser_closed")
 LAUNCHER_KINDS = ("tool", "subsystem")
 # A subsystem's launcher is one of these words; a tool's is the tool's name.
@@ -241,12 +242,15 @@ class ProcessRegistryClosed(RuntimeError):
 class SpawnOrigin:
     """Who asked for a process: set by the tool dispatcher around a tool call.
 
-    `conversation_id` is the code's word; the screen says "chat"."""
+    `conversation_id` is the code's word; the screen says "chat". `turn_id` is
+    the loop's id of the turn the call belongs to (`loop._new_turn_id`): what
+    the user's Kill ends is the turn, every round and tool of it."""
 
     agent_id: str = ""
     conversation_id: str = ""
     tool: str = ""
     round: int = 0
+    turn_id: str = ""
 
 
 SPAWN_ORIGIN: "contextvars.ContextVar[Optional[SpawnOrigin]]" = contextvars.ContextVar(
@@ -335,6 +339,7 @@ class ProcessEntry:
     conversation_id: Optional[str] = None
     tool: Optional[str] = None
     round: Optional[int] = None
+    turn_id: Optional[str] = None
     command: str = ""
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
@@ -553,6 +558,8 @@ def describe_start(entry: ProcessEntry, detail: str = "") -> str:
         else:
             who = (f"agent_id={entry.agent_id} conversation_id={entry.conversation_id} "
                    f"tool={entry.tool} round={entry.round}")
+            if entry.turn_id:
+                who += f" turn_id={entry.turn_id}"
     else:
         who = f"parent pid {entry.parent_pid}"
     extra = f"; {detail}" if detail else ""
@@ -904,6 +911,7 @@ class ProcessRegistry:
                 conversation_id=origin.conversation_id if origin is not None else None,
                 tool=origin.tool if origin is not None else None,
                 round=origin.round if origin is not None else None,
+                turn_id=(origin.turn_id or None) if origin is not None else None,
                 command=_one_line(command),
                 started_at=_iso(self._clock()),
             )
@@ -1334,25 +1342,23 @@ class ProcessRegistry:
         kill_tree: Optional[Callable[[Any], str]] = None,
         wait_s: float = 2.0,
     ) -> List[ProcessEntry]:
-        """Kill the command children of one tool call, `stopped` with `ui_stop`:
-        the user's Kill abandoned that call, and what it started goes with it.
+        """Kill the command children of the user's Kill, `stopped` with `ui_stop`.
 
-        A child is the call's when it is an open `tool` entry whose spawn origin
-        is exactly `origin` (agent, conversation, tool, round). A subsystem woken
-        by the call is not (its owner is the backend), nor a child whose origin
-        was lost, nor anything an earlier call left running. A git child is
-        killed too, and the `.git/index.lock` it may leave is named in the log.
-        Returns the entries this call killed."""
-        if not origin.agent_id:
+        Every open `tool` entry of that agent, conversation and `turn_id`, any
+        tool and round. An earlier turn's entry stays (an agent may have started
+        a server on purpose), and so does one with no turn; an origin with no
+        turn ends nothing. Never a subsystem (its owner is the backend) nor a
+        lost attribution. A killed git's `.git/index.lock` is named in the log.
+        Returns the entries killed."""
+        if not origin.agent_id or not origin.turn_id:
             return []
         if kill_tree is None:
             kill_tree = _kill_tree_of
         shielded = own_and_ancestor_pids()
         ended: List[ProcessEntry] = []
+        turn = (origin.agent_id, origin.conversation_id, origin.turn_id)
         for entry in self.open_entries("tool"):
-            if (entry.agent_id, entry.conversation_id, entry.tool, entry.round) != (
-                origin.agent_id, origin.conversation_id, origin.tool, origin.round,
-            ) or entry.pid in shielded:
+            if (entry.agent_id, entry.conversation_id, entry.turn_id) != turn or entry.pid in shielded:
                 continue
             cwd = self._cwd_of(entry.pid)
             if self._kill_command(entry, kill_tree, wait_s, ended, reason="stopped", stop="ui_stop") and _is_git(entry):

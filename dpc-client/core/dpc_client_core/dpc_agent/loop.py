@@ -1000,6 +1000,7 @@ async def _execute_with_timeout(
     session_id: str = "",
     ctx: "Optional[ToolContext]" = None,
     agent_id: str = "",
+    turn_id: str = "",
 ) -> Dict[str, Any]:
     """Execute a tool call with a hard timeout using shared executor.
 
@@ -1007,6 +1008,7 @@ async def _execute_with_timeout(
     allowing other async operations (like handling other chats) to proceed.
 
     `agent_id` names who asked; absent, it is the agent folder `logs_dir` sits in.
+    `turn_id` is the turn the call belongs to, which is what the Kill ends.
     """
     fn_name = tc["function"]["name"]
     tool_call_id = tc["id"]
@@ -1015,6 +1017,7 @@ async def _execute_with_timeout(
         conversation_id=session_id,
         tool=fn_name,
         round=round_number,
+        turn_id=turn_id,
     )
 
     try:
@@ -1126,7 +1129,7 @@ async def _chat_unless_killed(coro, kill_event: Optional[asyncio.Event]):
     row it writes afterwards is never written. Plain asyncio, same on every OS.
 
     The loop wraps a tool call in it too (`_dispatch_round`): there the
-    cancelled task is only the await of a pool thread, see `_end_killed_call`.
+    cancelled task is only the await of a pool thread, see `_end_killed_turn`.
     """
     if kill_event is None:
         return await coro
@@ -1168,28 +1171,36 @@ USER_STOP_SUMMARY_REQUEST = (
 NOT_RUN_AFTER_STOP = "Not run: the user pressed Stop before this call."
 
 
-def _end_killed_call(origin: SpawnOrigin) -> None:
-    """After a Kill abandoned a tool call: end the processes that call started.
+def _end_killed_turn(origin: SpawnOrigin) -> None:
+    """After a Kill ended a turn: end what the turn started, and the agent's browser.
 
     Every tool runs on a `_DaemonToolPool` thread (an async handler on a loop of
     its own inside it, `ToolRegistry.execute`), and a thread cannot be cancelled:
     the Kill abandons the await, and the thread runs on until the tool returns,
     its result discarded (its own outcome row still lands in tools.jsonl). What
-    can be ended is its children, through the process registry (ADR-046), and
-    only those whose spawn origin is this call. The kill waits for the tree to go
-    (`_kill_command`), so it runs on a thread of its own and the loop does not."""
+    can be ended is the processes, through the process registry (ADR-046): those
+    of this turn, any round and tool (`stop_commands_of`), not an earlier turn's.
+    The agent's browser sessions are closed too, whichever turn opened them
+    (`close_browser_sessions_of`). Both wait for processes to go, so they run on
+    a thread of its own and the loop does not."""
 
     def _run() -> None:
         try:
             ended = get_registry().stop_commands_of(origin)
         except Exception:
-            log.warning("Kill: ending the processes of %s failed", origin.tool, exc_info=True)
-            return
-        if ended:
-            log.info(
-                "Kill: ended %d process(es) started by %s in round %d: %s",
-                len(ended), origin.tool, origin.round, ", ".join(str(e.pid) for e in ended),
-            )
+            log.warning("Kill: ending the processes of turn %s failed", origin.turn_id, exc_info=True)
+        else:
+            if ended:
+                log.info(
+                    "Kill: ended %d process(es) started in turn %s: %s",
+                    len(ended), origin.turn_id,
+                    ", ".join(f"{e.pid} ({e.tool}, round {e.round})" for e in ended),
+                )
+        try:
+            from .tools.browser import close_browser_sessions_of
+            asyncio.run(close_browser_sessions_of(origin.agent_id))
+        except Exception:
+            log.warning("Kill: closing the browser of %s failed", origin.agent_id, exc_info=True)
 
     threading.Thread(target=_run, name="dpc_agent_kill", daemon=True).start()
 
@@ -1489,7 +1500,8 @@ async def run_llm_loop(
     (`_finalize_after_user_stop`). `kill_event` (second Stop press) ends the
     loop at once: a model call in flight is cancelled, the HTTP request closes,
     and no usage row is written because `llm.chat` never returns; a tool call in
-    flight is abandoned and the processes it started are ended (`_end_killed_call`).
+    flight is abandoned; then every process of the turn and the agent's browser
+    are ended (`_end_killed_turn`).
 
     Sends messages to LLM, executes tool calls, repeats until final response.
 
@@ -1658,21 +1670,15 @@ async def run_llm_loop(
                 # keeps more than it returns (store_beside_call).
                 _loop_ctx.tool_output_turn = turn_id
                 _loop_ctx.tool_output_name = f"r{round_idx}-{position}"
-            try:
-                exec_result = await _chat_unless_killed(_execute_with_timeout(
-                    tools, tc, logs_dir, timeout, task_id,
-                    round_number=round_idx,
-                    session_id=conversation_id or "",
-                    ctx=_loop_ctx,
-                    agent_id=_divergence_agent,
-                ), kill_event)
-            except CallKilled:
-                # The origin `_execute_with_timeout` gave the call's spawns.
-                _end_killed_call(SpawnOrigin(
-                    agent_id=_divergence_agent, conversation_id=conversation_id or "",
-                    tool=tool_name, round=round_idx,
-                ))
-                raise
+            # A Kill raises CallKilled here; the turn's end is `run_llm_loop`'s finally.
+            exec_result = await _chat_unless_killed(_execute_with_timeout(
+                tools, tc, logs_dir, timeout, task_id,
+                round_number=round_idx,
+                session_id=conversation_id or "",
+                ctx=_loop_ctx,
+                agent_id=_divergence_agent,
+                turn_id=turn_id,
+            ), kill_event)
 
             truncated_result = _truncate_tool_result(exec_result["result"])
             safe_result = _sanitize_tool_result(truncated_result)
@@ -2084,3 +2090,11 @@ async def run_llm_loop(
         log.error(f"Loop error: {e}", exc_info=True)
         llm_trace["turn_end"] = "failed"
         return f"⚠️ Loop error: {e}", accumulated_usage, llm_trace
+    finally:
+        # One place for every way a Kill ends the turn: mid-call, mid-tool, or
+        # in a finalising call. Stop alone ends nothing.
+        if llm_trace.get("turn_end") == "killed":
+            _end_killed_turn(SpawnOrigin(
+                agent_id=_divergence_agent, conversation_id=conversation_id or "",
+                turn_id=turn_id,
+            ))
