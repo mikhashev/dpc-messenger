@@ -71,6 +71,12 @@ def peer_proof(peers: Any, peer_id: str) -> tuple[Optional[bool], Optional[str]]
     return connection_type in PROVED_CONNECTION_TYPES, connection_type
 
 
+# The most one read of a frame asks the stream for. `last_received` is stamped
+# after each read, so a frame of many megabytes on a slow link keeps the link
+# alive while it arrives instead of only once it is whole.
+_FRAME_SLICE_BYTES = 64 * 1024
+
+
 class PeerConnection:
     """A unified wrapper for a direct TLS P2P connection."""
     def __init__(self, node_id: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -78,14 +84,32 @@ class PeerConnection:
         self.reader = reader
         self.writer = writer
         self.connection_type = "direct_tls"
+        # time.monotonic() of the last bytes read from the peer: the clock
+        # `_watch_peer_silence` holds against link_silence_timeout.
+        self.last_received = time.monotonic()
 
     async def send(self, message: Dict[str, Any]):
         """Sends a message over the TLS stream."""
         await write_message(self.writer, message)
 
     async def read(self) -> Dict[str, Any] | None:
-        """Reads a message from the TLS stream."""
-        return await read_message(self.reader)
+        """Reads a message from the TLS stream, stamping `last_received` per slice of it."""
+        # read_message calls only readexactly() on what it is given, so this
+        # object stands in for the StreamReader and the framing stays in one place.
+        return await read_message(self)
+
+    async def readexactly(self, n: int) -> bytes:
+        """StreamReader.readexactly, read in slices that each stamp `last_received`."""
+        data = bytearray()
+        while True:
+            try:
+                data += await self.reader.readexactly(min(_FRAME_SLICE_BYTES, n - len(data)))
+            except asyncio.IncompleteReadError as e:
+                # The whole frame's partial, as one readexactly(n) would report it.
+                raise asyncio.IncompleteReadError(bytes(data) + e.partial, n) from None
+            self.last_received = time.monotonic()
+            if len(data) >= n:
+                return bytes(data)
 
     async def close(self):
         """Closes the TLS connection with timeout protection."""
@@ -129,6 +153,12 @@ def _enable_tcp_keepalive(writer: asyncio.StreamWriter) -> None:
         logger.debug("Could not set TCP keepalive: %s", e)
 
 
+def _advertises_link_ping(fields: Any) -> bool:
+    """A HELLO payload or HELLO_ACK says its sender answers LINK_PING (DPTP 1.13)."""
+    value = fields.get("link_ping") if isinstance(fields, dict) else None
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
 class P2PManager:
     """Manages all P2P connections (both direct TLS and WebRTC)."""
 
@@ -148,6 +178,7 @@ class P2PManager:
 
         # Background task tracking for graceful shutdown
         self._peer_listener_tasks: Dict[str, asyncio.Task] = {}  # Track _listen_to_peer tasks
+        self._peer_watchdog_tasks: Dict[str, asyncio.Task] = {}  # Track _watch_peer_silence tasks
 
         # Addresses that are this machine — see own_addresses.py
         self.own_addresses = OwnAddresses()
@@ -166,6 +197,8 @@ class P2PManager:
         self._pending_hello_counts: Dict[str, int] = {}  # ip -> connections before HELLO_ACK
         self._hello_timeout = settings.get_hello_timeout() if settings else 10.0
         self._max_pending_hellos_per_ip = settings.get_max_pending_hellos_per_ip() if settings else 8
+        # A link to a peer that advertised link_ping ends after this much silence.
+        self._link_silence_timeout = settings.get_link_silence_timeout() if settings else 90.0
 
         # Peer cache for faster reconnection (stores last known IP/port)
         cache_file = Path.home() / ".dpc" / "peer_cache.json"
@@ -669,6 +702,7 @@ class P2PManager:
                 "status": "OK",
                 "name": self.display_name,
                 "node_id": self.node_id,  # Include actual node_id for validation
+                "link_ping": 1,  # this node answers LINK_PING (DPTP 1.13)
             }
             local_addresses = self._own_local_addresses_for(peer_node_id)
             if local_addresses is not None:
@@ -726,7 +760,9 @@ class P2PManager:
             asyncio.create_task(self.announce_to_dht())
 
             # Start listener task and track it for graceful shutdown
-            task = asyncio.create_task(self._listen_to_peer(peer))
+            task = asyncio.create_task(self._listen_to_peer(
+                peer, link_ping=_advertises_link_ping(payload), direction="in",
+            ))
             self._peer_listener_tasks[peer_node_id] = task
 
             # Ask the peer for its AI providers, as the outgoing paths do: the
@@ -1005,6 +1041,7 @@ class P2PManager:
                     "cert_pem": own_cert_pem,
                     "hello_preimage_version": HELLO_PREIMAGE_VERSION,
                     "hello_signature": hello_signature,
+                    "link_ping": 1,  # this node answers LINK_PING (DPTP 1.13)
                 }
             }
             local_addresses = self._own_local_addresses_for(target_node_id)
@@ -1071,7 +1108,9 @@ class P2PManager:
             # callbacks (e.g. _notify_peer_change runs get_status/ip-addr which can be slow).
             # If the strategy timeout fires during _notify_peer_change, the peer is already
             # in self.peers and the listener is running, so request-response patterns work.
-            task = asyncio.create_task(self._listen_to_peer(peer))
+            task = asyncio.create_task(self._listen_to_peer(
+                peer, link_ping=_advertises_link_ping(response), direction="out",
+            ))
             self._peer_listener_tasks[target_node_id] = task
 
             # Closed only now, with the new session registered and listening: the old
@@ -1386,13 +1425,41 @@ class P2PManager:
             logger.warning("Could not cache certificate for %s: %s", peer_node_id, e)
             return False
 
-    async def _listen_to_peer(self, peer: PeerConnection):
-        """Background task to listen for messages from a TLS peer."""
+    async def _listen_to_peer(self, peer: PeerConnection, link_ping: bool = False, direction: str = ""):
+        """Background task to listen for messages from a TLS peer.
+
+        `link_ping`: the peer advertised it in HELLO or HELLO_ACK, so its silence
+        is watched (`_watch_peer_silence`); a peer that did not is never pinged
+        and never cut. `direction` is the peer cache's "in" or "out", for the log.
+        """
+        watchdog = None
+        if link_ping:
+            watchdog = asyncio.create_task(self._watch_peer_silence(peer, direction))
+            # getattr: tests build managers with __new__, without these attributes.
+            if getattr(self, "_peer_watchdog_tasks", None) is None:
+                self._peer_watchdog_tasks = {}
+            self._peer_watchdog_tasks[peer.node_id] = watchdog
         try:
             while True:
                 message = await peer.read()
                 if message is None:
                     break
+
+                # Answered here, before the router: a LINK_PING never reaches it,
+                # and a busy service loop cannot make a live link look dead.
+                command = message.get("command") if isinstance(message, dict) else None
+                if command == "LINK_PING":
+                    payload = message.get("payload")
+                    asyncio.create_task(self._send_link_frame(
+                        peer, {"command": "LINK_PONG", "payload": payload if isinstance(payload, dict) else {}},
+                    ))
+                    continue
+                if command == "LINK_PONG":
+                    payload = message.get("payload")
+                    sent_at = payload.get("sent_at") if isinstance(payload, dict) else None
+                    if isinstance(sent_at, (int, float)):
+                        logger.debug("LINK_PONG from %s after %.3fs", peer.node_id, time.monotonic() - sent_at)
+                    continue
 
                 if self.on_message_received:
                     asyncio.create_task(self.on_message_received(peer.node_id, message))
@@ -1416,11 +1483,107 @@ class P2PManager:
             # slot holds the newer connection's listener
             if self._peer_listener_tasks.get(peer.node_id) is asyncio.current_task():
                 self._peer_listener_tasks.pop(peer.node_id, None)
+            if watchdog is not None:
+                watchdog.cancel()
+                if self._peer_watchdog_tasks.get(peer.node_id) is watchdog:
+                    self._peer_watchdog_tasks.pop(peer.node_id, None)
 
             # Only trigger shutdown if this connection is still the one registered
             if self.peers.get(peer.node_id) is peer:
                 logger.info("Connection with peer %s was lost", peer.node_id)
                 await self.shutdown_peer_connection(peer.node_id)
+
+    async def _watch_peer_silence(self, peer: PeerConnection, direction: str = ""):
+        """End a direct TLS link to a link_ping peer that has gone silent.
+
+        Any frame counts, a LINK_PONG no more than the rest: `last_received` is
+        stamped per slice of every frame. After a third of link_silence_timeout with
+        nothing, a LINK_PING asks for a frame, and again after each further
+        third. At the threshold the transport is aborted — not closed: a TLS
+        close on a dead path waits for a shutdown that never comes — so the
+        pending read in `_listen_to_peer` ends and its cleanup, the only one,
+        runs. That listener cancels this task when it ends.
+        """
+        threshold = getattr(self, "_link_silence_timeout", 90.0)
+        interval = threshold / 3
+        last_ping = 0.0
+        while True:
+            now = time.monotonic()
+            silence = now - peer.last_received
+            if silence >= threshold:
+                logger.warning(
+                    "No frame from peer %s for %.0fs (threshold %gs) — ending the connection",
+                    peer.node_id, silence, threshold,
+                )
+                try:
+                    self._log_dead_link_path(peer, silence, direction)
+                except Exception as e:  # noqa: BLE001 - the verdict stands without its details
+                    logger.debug("Could not describe the path to %s: %s", peer.node_id, e)
+                peer.writer.transport.abort()
+                return
+            if now - max(peer.last_received, last_ping) >= interval:
+                last_ping = now
+                await self._send_link_frame(peer, {"command": "LINK_PING", "payload": {"sent_at": now}})
+                continue
+            wake = min(peer.last_received + threshold, max(peer.last_received, last_ping) + interval)
+            await asyncio.sleep(max(wake - time.monotonic(), 0.01))
+
+    async def _send_link_frame(self, peer: PeerConnection, message: Dict[str, Any]):
+        """Write a LINK_PING or LINK_PONG within a third of the threshold.
+
+        Bounded because write_message awaits drain(), which on a dead link with
+        a full buffer never returns. A failure is only logged: the silence
+        clock, not a write error, decides whether the link is dead.
+        """
+        timeout = getattr(self, "_link_silence_timeout", 90.0) / 3
+        try:
+            await asyncio.wait_for(peer.send(message), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.debug("%s to %s not drained within %gs", message["command"], peer.node_id, timeout)
+        except Exception as e:  # noqa: BLE001 - a dead link is the watchdog's verdict
+            logger.debug("Could not send %s to %s: %s", message["command"], peer.node_id, e)
+
+    def _log_dead_link_path(self, peer: PeerConnection, silence: float, direction: str):
+        """One INFO line beside the dead-link WARNING: the path the link ran on.
+
+        To tell a peer whose process died from a path that died under a live
+        peer — a VPN that dropped, or changed its exit — the line names both
+        ends as the socket saw them, who dialled, when the last frame came,
+        whether the peer's address is one of this node's own (interfaces,
+        default route, the STUN-seen external address: `own_addresses`), and
+        whether the local address is still on an interface of this host.
+        """
+        def _plain(ip):
+            # A dual-stack socket names an IPv4 peer as ::ffff:a.b.c.d.
+            return ip[7:] if isinstance(ip, str) and ip.startswith("::ffff:") else ip
+
+        def _endpoint(info):
+            if not info:
+                return "unknown"
+            host = _plain(info[0])
+            return f"[{host}]:{info[1]}" if ":" in host else f"{host}:{info[1]}"
+
+        peername = peer.writer.get_extra_info("peername")
+        sockname = peer.writer.get_extra_info("sockname")
+        peer_ip = _plain(peername[0]) if peername else None
+        local_ip = _plain(sockname[0]) if sockname else None
+        own = getattr(self, "own_addresses", None)
+        if own is None or not peer_ip:
+            peer_is_own = "unknown"
+        else:
+            peer_is_own = "yes" if own.contains(peer_ip) else "no"
+        if own is None or not local_ip:
+            local_still_up = "unknown"
+        else:
+            local_still_up = "yes" if local_ip in own.learn_local_interfaces() else "no"
+        dialler = {"out": "this node", "in": "the peer"}.get(direction, "unknown")
+        last_frame_at = time.strftime("%H:%M:%S", time.localtime(time.time() - silence))
+        logger.info(
+            "Silent link to %s: peer %s, local %s, dialled by %s, last frame at %s; "
+            "peer address is this node's own: %s; local address still on an interface: %s",
+            peer.node_id, _endpoint(peername), _endpoint(sockname), dialler, last_frame_at,
+            peer_is_own, local_still_up,
+        )
 
     # --- WebRTC Connection Methods (NEW) ---
 
@@ -1972,6 +2135,8 @@ class P2PManager:
         if self._peer_listener_tasks:
             await asyncio.gather(*self._peer_listener_tasks.values(), return_exceptions=True)
         self._peer_listener_tasks.clear()
+        # Each listener cancels its own watchdog on the way out; none outlives it.
+        getattr(self, "_peer_watchdog_tasks", {}).clear()
 
         # Step 3: Now safely close peer connections
         for peer_id in list(self.peers.keys()):

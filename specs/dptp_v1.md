@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.12
+# DPTP Specification: D-PC Transfer Protocol v1.13
 
-**Version:** 1.12
+**Version:** 1.13
 **Status:** Draft / PoC
 **Date:** October 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -147,7 +147,8 @@ node's nonce through and present the dialler's HELLO there.
     "cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
     "hello_preimage_version": "dptp-hello-v1",
     "hello_signature": "base64-encoded RSA-PSS signature over hello_content_hash",
-    "local_addresses": ["192.168.1.10:8888"]
+    "local_addresses": ["192.168.1.10:8888"],
+    "link_ping": 1
   }
 }
 ```
@@ -173,6 +174,8 @@ node's nonce through and present the dialler's HELLO there.
   Replaces v1.10's `nonce_signature`, which is no longer sent or read.
 - `local_addresses` (array of strings, optional, v1.12): the dialler's own LAN addresses;
   see **local_addresses** below.
+- `link_ping` (integer, optional, v1.13): `1` — the dialler answers LINK_PING; see
+  **LINK_PING and LINK_PONG** below.
 
 A direct-TLS HELLO lacking `cert_pem`, `hello_signature` or `hello_preimage_version`
 `dptp-hello-v1` is rejected — "sent HELLO without cert_pem, hello_signature or
@@ -193,7 +196,8 @@ and the claimed `node_id` as field 4. Any failure closes the connection.
   "status": "OK",
   "name": "Bob",
   "node_id": "dpc-node-[32 hex characters]",
-  "local_addresses": ["10.1.2.3:9001", "192.168.1.20:9001"]
+  "local_addresses": ["10.1.2.3:9001", "192.168.1.20:9001"],
+  "link_ping": 1
 }
 ```
 - `status` (string, required): `"OK"`
@@ -203,6 +207,8 @@ and the claimed `node_id` as field 4. Any failure closes the connection.
   connection is dropped.
 - `local_addresses` (array of strings, optional, v1.12): the listener's own LAN
   addresses; see below.
+- `link_ping` (integer, optional, v1.13): `1` — the listener answers LINK_PING; see
+  **LINK_PING and LINK_PONG** below.
 
 **local_addresses** (direct TLS, HELLO from the dialler and HELLO_ACK from the listener,
 v1.12). The sender's own addresses on its local networks, as `"ip:port"` strings — the
@@ -244,6 +250,46 @@ handshake updates the cache — and is left out for any other node.
 
 **Response:** Hub WebRTC — none, fire-and-forget. Direct TLS — HELLO_CHALLENGE precedes
 HELLO and HELLO_ACK follows it; the connection is not usable before HELLO_ACK.
+
+#### LINK_PING and LINK_PONG
+
+Direct TLS only, v1.13: an answer that crosses TLS end to end, so a node learns that a
+link is dead when the kernel does not (a VPN or middlebox can keep the TCP side answered
+after the far end is gone).
+
+```json
+{"command": "LINK_PING", "payload": {"sent_at": 51234.5}}
+{"command": "LINK_PONG", "payload": {"sent_at": 51234.5}}
+```
+- `sent_at` (number): the pinging node's own monotonic clock. The answer echoes the
+  ping's `payload` unchanged; the pinging node reads it only to log the round trip at
+  DEBUG.
+
+- **Capability.** A node that answers LINK_PING says so with `link_ping: 1` in its HELLO
+  payload (dialler) or HELLO_ACK (listener). A receiver treats an integer of 1 or more as
+  the capability and anything else, the key's absence included, as none. The key is
+  outside the HELLO preimage, like `local_addresses`.
+- **Any frame counts.** The silence clock is the time since the last bytes read from the
+  connection: it is reset by every frame, a LINK_PONG no more than the rest, and while a
+  frame arrives by every slice of up to 64 KiB of it, so a large frame on a slow link is
+  not taken for silence. A busy link carries no LINK_PING at all.
+- **Sender.** Both ends run the same clock, whoever dialled, and only for a peer that
+  advertised the capability. After a third of `[connection] link_silence_timeout`
+  (default 90 s, so 30 s) with nothing from the peer, a LINK_PING goes out, and again
+  after each further third. At the threshold the node logs one WARNING —
+  `No frame from peer <node_id> for <s>s (threshold <t>s) — ending the connection` — and
+  one INFO line naming the path (both socket ends, who dialled, when the last frame came,
+  whether the peer's address is one of the node's own, whether the local address is still
+  on an interface), then aborts the connection. The disconnect that follows is the one
+  any lost link takes; the dialler redials as after any loss.
+- **Receiver.** A LINK_PING is answered with a LINK_PONG at once, by the connection's
+  reader before anything is routed; neither command is handed to the message router.
+  A write that does not drain within a third of the threshold is abandoned, never awaited
+  further.
+- **Older nodes.** A v1.12 node sends no `link_ping`, so a v1.13 node never pings it and
+  never ends its link for silence — TCP keepalive stays its only check. A LINK_PING that
+  reached a v1.12 node anyway would be logged as an unknown command and ignored, the link
+  kept (§7, Extensions).
 
 ---
 
@@ -2820,6 +2866,13 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.13 (October 2026)
+- **§3.1 LINK_PING, LINK_PONG** — an application-level liveness check on direct TLS, and
+  the `link_ping` capability key in HELLO and HELLO_ACK. Any frame resets the silence
+  clock; after a third of `link_silence_timeout` (default 90 s) of silence a capable peer
+  is pinged, at the threshold the link is aborted and logged. **Additive:** a peer that
+  did not advertise `link_ping` is never pinged and never cut.
 
 ### v1.12 (October 2026)
 - **§3.1 HELLO, HELLO_ACK** — optional `local_addresses`: the sender's own LAN

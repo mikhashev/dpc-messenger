@@ -722,7 +722,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **32 sections, 179 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **32 sections, 180 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -766,6 +766,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `remote_inference_timeout` | `1200` |  |
 | `hello_timeout` | `10` | Seconds the listener waits for the TLS handshake, and again for HELLO after its challenge |
 | `max_pending_hellos_per_ip` | `8` | Inbound connections one address may hold before HELLO_ACK |
+| `link_silence_timeout` | `90` | Seconds of silence after which a direct TLS link is declared dead |
 | `reconnect_slow_interval_max_seconds` | `900` | After five fast reconnect attempts to a peer we keep, retry from 60 s, doubling to this ceiling (±20 % jitter), until it answers, the user disconnects it or it leaves every shared group. Off when `[p2p] auto_connect_node_groups` is off |
 
 #### `[conversations]`
@@ -1681,6 +1682,19 @@ gossip_timeout = 5         # Gossip fallback timeout
 - **Note:** ADR-041 D8. A NAT puts many honest peers behind one address, which is
   why this counts connections *still waiting for HELLO* rather than connections:
   an honest peer holds a slot for one round trip and releases it
+
+#### `link_silence_timeout`
+- **Description:** Seconds a direct TLS link to a peer may go without a single
+  frame before it is ended. Any frame counts, and a large one counts while it
+  arrives. After a third of this with nothing from the peer, `LINK_PING` asks for a
+  frame, and again after each further third; the ping interval is derived from this
+  key, not set on its own. At the threshold the node logs one WARNING naming it, plus
+  one INFO line with the path (both socket ends, who dialled, when the last frame
+  came), and ends the link as any lost link ends; the side that dialled redials
+- **Default:** `90` (so a `LINK_PING` after 30 s of silence)
+- **Note:** DPTP 1.13. Applies only to a peer that advertised `link_ping` in its
+  HELLO or HELLO_ACK; an older peer is never pinged and never cut, and TCP
+  keepalive stays its only check. Read at start-up
 
 **Example Configuration** — this is what a fresh install writes, so copying it changes
 nothing. Two strategies ship off; turn them on deliberately, not by pasting a block.

@@ -160,6 +160,9 @@ class Settings:
             # sends HELLO fails no HELLO, so the rate limiter alone never sees it
             'hello_timeout': '10',  # Seconds the listener waits for the TLS handshake, and again for HELLO after its challenge
             'max_pending_hellos_per_ip': '8',  # Inbound connections one address may hold before HELLO_ACK
+            # A direct TLS link to a peer that advertised link_ping is ended after
+            # this long with no frame from it; LINK_PING goes out after a third of it
+            'link_silence_timeout': '90',  # Seconds of silence after which a direct TLS link is declared dead
             # After the five fast reconnect attempts, a kept peer is retried from
             # 60s, doubling up to this ceiling, until it answers
             'reconnect_slow_interval_max_seconds': '900'  # After five fast reconnect attempts to a peer we keep, retry from 60 s, doubling to this ceiling (±20 % jitter), until it answers, the user disconnects it or it leaves every shared group. Off when `[p2p] auto_connect_node_groups` is off
@@ -862,6 +865,13 @@ class Settings:
     def get_hello_timeout(self) -> float:
         """How long the listener waits for HELLO after issuing its challenge."""
         return float(self.get('connection', 'hello_timeout', '10'))
+
+    def get_link_silence_timeout(self) -> float:
+        """How long a direct TLS link to a link_ping peer may stay silent before it is ended.
+
+        The LINK_PING interval is a third of it, derived rather than set.
+        """
+        return float(self.get('connection', 'link_silence_timeout', '90'))
 
     def get_max_pending_hellos_per_ip(self) -> int:
         """How many inbound connections one address may hold before HELLO_ACK."""
