@@ -3,12 +3,14 @@
 // idle --press--> stopping --press--> killing
 // A first press asks the loop to stop at the next round boundary. While that is
 // pending (a local model can spend minutes prefilling) the button becomes Kill,
-// and a second press sends `force`, which cancels the model call in flight.
+// and a second press sends `force`: the model call in flight is cancelled, and
+// every process of the turn and the agent's browser are ended (Kill).
 
 export type StopState = 'idle' | 'stopping' | 'killing' | 'miss' | 'error';
 
 export const KILL_TITLE =
-    'Stop is pending. Kill aborts the model call now instead of waiting for it to answer.';
+    'Stop is pending. Kill ends it now, with no summary: the model call, every process '
+    + "this turn started and the agent's browser.";
 
 /** What a press does in this state: nothing, a stop, or a kill. */
 export function pressAction(state: StopState): 'ignore' | 'stop' | 'kill' {

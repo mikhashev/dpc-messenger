@@ -11,7 +11,7 @@ describe('stop button state machine', () => {
         expect(stopButtonLabel('stopping')).toBe('Kill');
         expect(stopButtonDisabled('stopping')).toBe(false);
         expect(pressAction('stopping')).toBe('kill');
-        expect(stopButtonTitle('stopping', 'stopping…')).toMatch(/aborts the model call now/);
+        expect(stopButtonTitle('stopping', 'stopping…')).toMatch(/the model call, every process this turn started and the agent's browser/);
     });
 
     it('once killing, further presses are ignored', () => {
