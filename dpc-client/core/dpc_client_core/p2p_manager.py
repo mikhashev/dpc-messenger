@@ -1393,6 +1393,14 @@ class P2PManager:
             raise  # Re-raise to properly exit the task
         except (asyncio.IncompleteReadError, ConnectionResetError, TimeoutError):
             pass
+        except OSError as e:
+            # Any other socket error ends the link the same way (WinError 121
+            # on a dead route); left to escape, it died as "Task exception was
+            # never retrieved" with no errno beside the peer.
+            logger.warning(
+                "Read from peer %s failed: errno %s, winerror %s: %s",
+                peer.node_id, e.errno, getattr(e, "winerror", None), e.strerror,
+            )
         finally:
             # Clean up task tracking — only our own entry: after a reconnect the
             # slot holds the newer connection's listener
