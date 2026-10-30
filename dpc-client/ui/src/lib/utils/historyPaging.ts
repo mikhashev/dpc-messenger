@@ -102,10 +102,19 @@ interface PagedMessage {
     pending?: boolean;
 }
 
-/** The cursor for the next older page: the first message in the list that is a stored record. */
-export function oldestRecordId<T extends PagedMessage>(messages: T[]): string | null {
+/**
+ * The cursor for the next older page: the first message in the list that is a
+ * stored record. `unconfirmed` holds the ids of user bubbles still awaiting
+ * user_message_confirmed (unconfirmedUserBubbles): the backend never had those
+ * ids and refuses them as a cursor.
+ */
+export function oldestRecordId<T extends PagedMessage>(
+    messages: T[],
+    unconfirmed: { has(id: string): boolean } = new Set<string>(),
+): string | null {
     for (const m of messages) {
         if (m.commandId || m.pending) continue;
+        if (m.id && unconfirmed.has(m.id)) continue;
         if (m.id) return m.id;
     }
     return null;

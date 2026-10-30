@@ -121,3 +121,82 @@ describe('applyUserMessageConfirmed', () => {
         expect(applyUserMessageConfirmed([answer], confirmed)).toEqual([answer]);
     });
 });
+
+describe('applyUserMessageConfirmed with two sends before the first confirmation', () => {
+    // Both questions are on screen before either record is confirmed; the
+    // last-unconfirmed rule would hand the first record to the second bubble.
+    const first = { id: 'minted-a', sender: 'user', text: 'one', timestamp: 1000 };
+    const second = { id: 'minted-b', sender: 'user', text: 'two', timestamp: 1100 };
+    const confirmFirst = { msg_index: 1, message_id: 'stored-a', command_id: 'cmd-a' };
+    const confirmSecond = { msg_index: 2, message_id: 'stored-b', command_id: 'cmd-b' };
+    const sent = () => new Map<string, string | null>([['minted-a', 'cmd-a'], ['minted-b', 'cmd-b']]);
+
+    it('gives each bubble its own record when the confirmations arrive in order', () => {
+        const unconfirmed = sent();
+        let list = applyUserMessageConfirmed([first, second], confirmFirst, unconfirmed);
+        list = applyUserMessageConfirmed(list, confirmSecond, unconfirmed);
+
+        expect(list).toEqual([
+            { ...first, id: 'stored-a', msg_index: 1 },
+            { ...second, id: 'stored-b', msg_index: 2 },
+        ]);
+        expect(unconfirmed.size).toBe(0);
+    });
+
+    it('gives each bubble its own record when the second confirmation arrives first', () => {
+        const unconfirmed = sent();
+        let list = applyUserMessageConfirmed([first, second], confirmSecond, unconfirmed);
+        list = applyUserMessageConfirmed(list, confirmFirst, unconfirmed);
+
+        expect(list).toEqual([
+            { ...first, id: 'stored-a', msg_index: 1 },
+            { ...second, id: 'stored-b', msg_index: 2 },
+        ]);
+    });
+
+    it('stamps the last unconfirmed bubble when the confirmation carries no command id', () => {
+        // send_image sends none
+        const unconfirmed = new Map<string, string | null>([['minted-b', null]]);
+        const after = applyUserMessageConfirmed([first, second], { msg_index: 2, message_id: 'stored-b' }, unconfirmed);
+
+        expect(after).toEqual([first, { ...second, id: 'stored-b', msg_index: 2 }]);
+        expect(unconfirmed.has('minted-b')).toBe(false);
+    });
+
+    it('gives an image confirmation to the image bubble, not to a question typed after it', () => {
+        const image = { id: 'minted-img', sender: 'user', text: '[Image]', timestamp: 1000 };
+        const unconfirmed = new Map<string, string | null>([['minted-img', null], ['minted-b', 'cmd-b']]);
+        let list = applyUserMessageConfirmed([image, second], { msg_index: 1, message_id: 'stored-img' }, unconfirmed);
+        list = applyUserMessageConfirmed(list, confirmSecond, unconfirmed);
+
+        expect(list).toEqual([
+            { ...image, id: 'stored-img', msg_index: 1 },
+            { ...second, id: 'stored-b', msg_index: 2 },
+        ]);
+        expect(unconfirmed.size).toBe(0);
+    });
+
+    it('stamps the last unconfirmed bubble when the command id is not on record', () => {
+        const after = applyUserMessageConfirmed([first, second], { ...confirmSecond, command_id: 'cmd-unknown' }, new Map());
+        expect(after).toEqual([first, { ...second, id: 'stored-b', msg_index: 2 }]);
+    });
+
+    it('still drops the bubble when a reload already brought its record', () => {
+        const unconfirmed = sent();
+        const storedA = { id: 'stored-a', sender: 'user', text: 'one', timestamp: 1003, msg_index: 1 };
+        const after = applyUserMessageConfirmed([first, storedA, second], confirmFirst, unconfirmed);
+
+        expect(after).toEqual([storedA, second]);
+        expect(unconfirmed.has('minted-a')).toBe(false);
+        expect(unconfirmed.has('minted-b')).toBe(true);
+    });
+
+    it('keeps a bubble awaiting confirmation off the older-page cursor until it is confirmed', () => {
+        const unconfirmed = sent();
+        const list = [first, second];
+        expect(oldestRecordId(list, unconfirmed)).toBeNull();
+
+        const confirmedFirst = applyUserMessageConfirmed(list, confirmFirst, unconfirmed);
+        expect(oldestRecordId(confirmedFirst, unconfirmed)).toBe('stored-a');
+    });
+});

@@ -111,6 +111,18 @@ describe('oldestRecordId', () => {
     it('is null for an empty chat', () => {
         expect(oldestRecordId([])).toBeNull();
     });
+
+    it('skips a user bubble still awaiting confirmation, an id the backend never had', () => {
+        // an AI chat with no agent behind it never confirms; neither does a failed save
+        const list = [m('minted', 1), m('r1', 2)];
+        expect(oldestRecordId(list, new Set(['minted']))).toBe('r1');
+        expect(oldestRecordId([m('minted', 1)], new Set(['minted']))).toBeNull();
+    });
+
+    it('takes a bubble once it is confirmed', () => {
+        const list = [m('stored', 1), m('r1', 2)];
+        expect(oldestRecordId(list, new Set(['minted']))).toBe('stored');
+    });
 });
 
 describe('prependOlderPage', () => {

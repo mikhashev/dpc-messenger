@@ -46,7 +46,7 @@
   import { confirmAsync } from '$lib/utils/dialog';
   import { appendToChatDraft, switchChatDraft } from '$lib/utils/chatDraftInputs';
   import { chatInstructionSet } from '$lib/utils/aiChatStore';
-  import { applyUserMessageConfirmed } from '$lib/utils/liveMessageIdentity';
+  import { applyUserMessageConfirmed, unconfirmedUserBubbles } from '$lib/utils/liveMessageIdentity';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
 
   type AIChatMeta = {
@@ -517,15 +517,16 @@
     chatDraftInputs = new Map(chatDraftInputs).set(activeChatId, '');
     clearAgentStreaming();
 
+    const bubbleId = crypto.randomUUID();
     chatHistories.update(h => {
       const m = new Map(h);
       const hist = m.get(activeChatId) || [];
-      m.set(activeChatId, [...hist, { id: crypto.randomUUID(), sender: 'user', text, timestamp: Date.now() }]);
+      m.set(activeChatId, [...hist, { id: bubbleId, sender: 'user', text, timestamp: Date.now() }]);
       return m;
     });
 
     if ($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')) {
-      await _sendAIQuery(text);
+      await _sendAIQuery(text, bubbleId);
     } else if (activeChatId.startsWith('telegram-')) {
       await _sendTelegramMessage(text);
     } else if (activeChatId.startsWith('group-')) {
@@ -579,12 +580,14 @@
     pendingImage = null;
 
     if ($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')) {
-      // AI vision
+      // AI vision; send_image carries no command id to match the confirmation by
+      const bubbleId = crypto.randomUUID();
+      unconfirmedUserBubbles.set(bubbleId, null);
       chatHistories.update(h => {
         const m = new Map(h);
         const hist = m.get(activeChatId) || [];
         m.set(activeChatId, [...hist, {
-          id: crypto.randomUUID(), sender: 'user', text: text || '[Image]', timestamp: Date.now(),
+          id: bubbleId, sender: 'user', text: text || '[Image]', timestamp: Date.now(),
           attachments: [{ type: 'image', filename: imageData.filename, thumbnail: imageData.dataUrl, size_bytes: imageData.sizeBytes }],
         }]);
         return m;
@@ -714,11 +717,13 @@
     }
   }
 
-  async function _sendAIQuery(text: string) {
+  async function _sendAIQuery(text: string, bubbleId: string) {
     setChatLoading(activeChatId, true);
     const commandId = crypto.randomUUID();
     commandToChatMap.set(commandId, activeChatId);
     persistCommandToChatMap?.();
+    // user_message_confirmed comes back with this command id; it names the bubble
+    unconfirmedUserBubbles.set(bubbleId, commandId);
 
     chatHistories.update(h => {
       const m = new Map(h);

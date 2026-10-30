@@ -7,7 +7,7 @@
   import type { Writable } from 'svelte/store';
   import { connectionStatus, sendCommand } from '$lib/coreService';
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
-  import { mergeBackfillWithLive } from '$lib/utils/liveMessageIdentity';
+  import { mergeBackfillWithLive, unconfirmedUserBubbles } from '$lib/utils/liveMessageIdentity';
   import { isAIChatId, legacyImportPending } from '$lib/utils/aiChatStore';
   import { HISTORY_PAGE_LIMIT, historyPagers, setPager, pageFacts, oldestRecordId, prependOlderPage, stopPagerUntilReopen, forgetPagerOnReopen, placeholdersOnly } from '$lib/utils/historyPaging';
   import { onMount, untrack } from 'svelte';
@@ -123,7 +123,7 @@
   export async function loadOlderPage(chatId: string, beforeInsert?: () => void): Promise<number> {
     const pager = get(historyPagers).get(chatId);
     if (!pager || !pager.hasOlder || pager.stopped || pager.loading) return 0;
-    const cursor = oldestRecordId(get(chatHistories).get(chatId) || []);
+    const cursor = oldestRecordId(get(chatHistories).get(chatId) || [], unconfirmedUserBubbles);
     if (!cursor) {
       setPager(chatId, { stopped: true });
       return 0;
