@@ -823,18 +823,28 @@ class TestAgentContextDefaultDeny:
     def test_global_fallback_denies_personal_and_device(self, firewall_minimal):
         assert firewall_minimal.can_agent_access_context('personal', profile_name='agent_x') is False
         assert firewall_minimal.can_agent_access_context('device', profile_name='agent_x') is False
+        assert firewall_minimal.can_agent_access_context('knowledge', profile_name='agent_x') is False
 
     def test_new_profile_safe_defaults_deny(self, firewall_minimal):
         firewall_minimal.create_agent_profile('agent_new', copy_from_global=False)
         profile = firewall_minimal.rules['agent_profiles']['agent_new']
         assert profile['personal_context_access'] is False
         assert profile['device_context_access'] is False
+        assert profile['human_knowledge_access'] is False
 
     def test_new_profile_copied_from_global_denies(self, firewall_minimal):
         firewall_minimal.create_agent_profile('agent_copy', copy_from_global=True)
         firewall_minimal._parse_dpc_agent_settings()
         assert firewall_minimal.can_agent_access_context('personal', profile_name='agent_copy') is False
         assert firewall_minimal.can_agent_access_context('device', profile_name='agent_copy') is False
+        assert firewall_minimal.can_agent_access_context('knowledge', profile_name='agent_copy') is False
+
+    def test_fresh_rules_file_denies_knowledge(self, tmp_path):
+        rules_file = tmp_path / "privacy_rules.json"
+        fw = ContextFirewall(rules_file)
+        assert rules_file.exists()
+        assert fw.rules['dpc_agent']['human_knowledge_access'] is False
+        assert fw.can_agent_access_context('knowledge', profile_name='agent_x') is False
 
     def test_explicit_allow_still_works(self, tmp_path):
         import json
@@ -846,12 +856,26 @@ class TestAgentContextDefaultDeny:
                     "enabled": True,
                     "personal_context_access": True,
                     "device_context_access": True,
+                    "human_knowledge_access": True,
                 }
             }
         }))
         fw = ContextFirewall(rules_file)
         assert fw.can_agent_access_context('personal', profile_name='agent_allowed') is True
         assert fw.can_agent_access_context('device', profile_name='agent_allowed') is True
+        assert fw.can_agent_access_context('knowledge', profile_name='agent_allowed') is True
+        assert fw.rules['agent_profiles']['agent_allowed']['human_knowledge_access'] is True
+
+    def test_explicit_global_knowledge_is_kept_either_way(self, tmp_path):
+        import json
+        for value in (True, False):
+            rules_file = tmp_path / f"privacy_rules_{value}.json"
+            rules_file.write_text(json.dumps({
+                "dpc_agent": {"enabled": True, "human_knowledge_access": value},
+            }))
+            fw = ContextFirewall(rules_file)
+            assert fw.can_agent_access_context('knowledge', profile_name='agent_x') is value
+            assert json.loads(rules_file.read_text())['dpc_agent']['human_knowledge_access'] is value
 
 
 class TestGetDpcContextToolGate:

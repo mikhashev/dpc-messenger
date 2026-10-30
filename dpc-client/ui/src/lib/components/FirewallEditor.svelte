@@ -271,9 +271,10 @@
       editedRules.agent_profiles = {
         default: {
           enabled: true,
-          personal_context_access: true,
-          device_context_access: true,
-          human_knowledge_access: true,
+          // The backend's defaults for a file without these keys: default-deny.
+          personal_context_access: false,
+          device_context_access: false,
+          human_knowledge_access: false,
           tools: {
             read_file: true,
             write_file: false,
@@ -591,9 +592,9 @@
     // Create new profile with default settings (copy from dpc_agent defaults)
     const defaultSettings = editedRules.dpc_agent || {
       enabled: true,
-      personal_context_access: true,
-      device_context_access: true,
-      human_knowledge_access: true,
+      personal_context_access: false,
+      device_context_access: false,
+      human_knowledge_access: false,
       tools: {
         read_file: true,
         write_file: false,
@@ -604,9 +605,9 @@
 
     editedRules.agent_profiles[profileName] = {
       enabled: true,
-      personal_context_access: defaultSettings.personal_context_access,
-      device_context_access: defaultSettings.device_context_access,
-      human_knowledge_access: defaultSettings.human_knowledge_access ?? true,
+      personal_context_access: defaultSettings.personal_context_access ?? false,
+      device_context_access: defaultSettings.device_context_access ?? false,
+      human_knowledge_access: defaultSettings.human_knowledge_access ?? false,
       tools: { ...(defaultSettings.tools || {}) },
       sandbox_extensions: {
         read_only: [],
@@ -704,9 +705,9 @@
     editedRules.agent_profiles[selectedAgentId] = JSON.parse(
       JSON.stringify(editedRules.dpc_agent || {
         enabled: true,
-        personal_context_access: true,
-        device_context_access: true,
-        human_knowledge_access: true,
+        personal_context_access: false,
+        device_context_access: false,
+        human_knowledge_access: false,
         tools: { read_file: true, write_file: false, list_dir: true, update_scratchpad: true, browse_page: true, search_web: true },
       })
     );

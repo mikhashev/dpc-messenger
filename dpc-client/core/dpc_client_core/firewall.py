@@ -1121,7 +1121,8 @@ class ContextFirewall:
         self.dpc_agent_enabled = dpc_agent.get('enabled', True)
         self.dpc_agent_personal_context_access = dpc_agent.get('personal_context_access', False)
         self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', False)
-        self.dpc_agent_human_knowledge_access = dpc_agent.get('human_knowledge_access', True)
+        # 2026-10-30: default-deny like the two above; an explicit value in the file is kept.
+        self.dpc_agent_human_knowledge_access = dpc_agent.get('human_knowledge_access', False)
 
         # Parse tool permissions from config — defaults come from the
         # registry (ToolEntry.default_enabled) and were seeded above.
@@ -1613,7 +1614,7 @@ class ContextFirewall:
                 'enabled': True,
                 'personal_context_access': False,
                 'device_context_access': False,
-                'human_knowledge_access': True,
+                'human_knowledge_access': False,
                 'tools': {
                     'read_file': True,
                     'write_file': False,
@@ -1772,7 +1773,7 @@ class ContextFirewall:
                     "enabled": True,
                     "personal_context_access": False,
                     "device_context_access": False,
-                    "human_knowledge_access": True,
+                    "human_knowledge_access": False,
                     "tools": {}
                 },
                 "file_transfer": {
