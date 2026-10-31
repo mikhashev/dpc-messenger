@@ -403,6 +403,34 @@
     editedConfig = editedConfig;
   }
 
+  // Keys of STRATA_MODEL_PARAMS that also have a typed alias field in the Strata section. The
+  // typed field wins over the model_params copy, so the list below leaves the copy out: a key
+  // offered twice shows one of the two values as if it were in force.
+  const TYPED_FIELD_PARAMS = new Set(['vram_reserve_mib']);
+  const STRATA_PARAMS_LISTED = STRATA_MODEL_PARAMS.filter((spec) => !TYPED_FIELD_PARAMS.has(spec.key));
+
+  /** The VRAM reserve field: an older alias may still carry the model_params copy, which the
+   *  typed value replaces, so a typed value drops it rather than leave it to come back. */
+  function setStrataVramReserve(i: number, raw: string) {
+    setNum(i, 'vram_reserve_mib', raw);
+    const p = editedConfig?.providers[i];
+    if (!editedConfig || !p?.model_params || !('vram_reserve_mib' in p.model_params)) return;
+    const params = { ...p.model_params };
+    delete params.vram_reserve_mib;
+    if (Object.keys(params).length) p.model_params = params; else delete p.model_params;
+    editedConfig = editedConfig;
+  }
+
+  /** What the empty VRAM reserve field resolves to at the next start: the alias's older
+   *  model_params value if it has one, else the base config's, else Strata's own 700. */
+  function strataVramReservePlaceholder(inspect: typeof strataInspect, i: number): string {
+    const older = editedConfig?.providers[i]?.model_params?.vram_reserve_mib;
+    if (older !== undefined && older !== null && older !== '') {
+      return `${modelParamText(older)} (older model_params value, replaced by one typed here)`;
+    }
+    return basePlaceholder(strataBase(inspect, i, 'vram_reserve_mib'), 'engine default 700');
+  }
+
   // The local engines' state (local_engine_status): the card holder and each
   // strata alias's supervisor. Read only; loading it never starts an engine.
   let engineStatus: { card_holder: any; strata: any[]; free_commit: FreeCommitReading | null } | null = null;
@@ -2629,10 +2657,13 @@
                             min="0"
                             step="256"
                             value={sp.vram_reserve_mib ?? ''}
-                            on:input={(e) => setNum(i, 'vram_reserve_mib', e.currentTarget.value)}
-                            placeholder={basePlaceholder(strataBase(strataInspect, i, 'vram_reserve_mib'), 'engine default')}
+                            on:input={(e) => setStrataVramReserve(i, e.currentTarget.value)}
+                            placeholder={strataVramReservePlaceholder(strataInspect, i)}
                           />
-                          <p class="help-text">VRAM left free for the desktop and other programs.</p>
+                          <p class="help-text">
+                            VRAM left free for the desktop and other programs. Empty: the placeholder is the value
+                            the next start sends.
+                          </p>
                         </div>
                       </div>
 
@@ -2687,7 +2718,7 @@
                           <code>sampling.temperature</code> only reaches requests that send none, such as those from
                           Strata's own page.
                         </p>
-                        {#each STRATA_MODEL_PARAMS as spec}
+                        {#each STRATA_PARAMS_LISTED as spec}
                           {@const current = sp.model_params?.[spec.key]}
                           {@const fromBase = insp?.model_params?.[spec.key]}
                           <div class="form-group">

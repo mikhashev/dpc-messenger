@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import src from './ProvidersEditor.svelte?raw';
+import { STRATA_MODEL_PARAMS } from '../utils/strataFields';
 
 // The editor has no component-mount harness, so this reads the markup the way
 // the other source guards do and runs the handler the fields call.
@@ -22,8 +23,8 @@ const setNum = (() => {
 })();
 
 const FIELDS = [
-  { id: 'strata-resident-gib', key: 'resident_budget_gib', float: true },
-  { id: 'strata-vram-reserve', key: 'vram_reserve_mib', float: false },
+  { id: 'strata-resident-gib', key: 'resident_budget_gib', handler: "setNum(i, 'resident_budget_gib', e.currentTarget.value, true)" },
+  { id: 'strata-vram-reserve', key: 'vram_reserve_mib', handler: 'setStrataVramReserve(i, e.currentTarget.value)' },
 ];
 
 describe('Strata resident budget and VRAM reserve fields', () => {
@@ -31,16 +32,14 @@ describe('Strata resident budget and VRAM reserve fields', () => {
     it(`${f.key} shows the alias value and the base config's as placeholder`, () => {
       const b = block(f.id);
       expect(b).toContain(`value={sp.${f.key} ?? ''}`);
-      expect(b).toContain(`strataBase(strataInspect, i, '${f.key}')`);
+      expect(b.includes(`strataBase(strataInspect, i, '${f.key}')`)
+        || b.includes('strataVramReservePlaceholder(strataInspect, i)')).toBe(true);
       expect(b).toContain('<p class="help-text">');
     });
 
     it(`${f.key} is written through setNum (no bind:value inside the providers loop)`, () => {
       const b = block(f.id);
-      const call = f.float
-        ? `setNum(i, '${f.key}', e.currentTarget.value, true)`
-        : `setNum(i, '${f.key}', e.currentTarget.value)`;
-      expect(b).toContain(`on:input={(e) => ${call}}`);
+      expect(b).toContain(`on:input={(e) => ${f.handler}}`);
       expect(b).not.toContain('bind:value');
     });
 
@@ -62,5 +61,56 @@ describe('Strata resident budget and VRAM reserve fields', () => {
     const at = labels.indexOf('strata-cc-slots');
     expect(at).toBeGreaterThan(-1);
     expect(labels.slice(at + 1, at + 3)).toEqual(['strata-resident-gib', 'strata-vram-reserve']);
+  });
+});
+
+// A function of the script by name, rebuilt over plain values: the body only, its parameters named.
+function script(name: string, params: string[], scope: string[]) {
+  const m = src.match(new RegExp(String.raw`function ${name}\([^)]*\)[^{]*\{([\s\S]*?)\n  \}`));
+  expect(m, name + ' is in the script').not.toBeNull();
+  return new Function(...scope, ...params, m![1]);
+}
+
+describe('a Strata key with a typed alias field is not offered a second time', () => {
+  it('the keys the editor leaves out of the model-parameters list are the ones with a typed field', () => {
+    const m = src.match(/const TYPED_FIELD_PARAMS = new Set\(\[([^\]]*)\]\)/);
+    expect(m, 'TYPED_FIELD_PARAMS is in the script').not.toBeNull();
+    const left = [...m![1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+    // A typed field is an input of the Strata section above the model-parameters list whose label
+    // names the key's engine flag, "(--vram-reserve-mib)".
+    const start = src.indexOf("editedConfig.providers[i].type === 'strata'}");
+    const section = src.slice(start, src.indexOf('Model parameters (Strata', start));
+    expect(start).toBeGreaterThan(0);
+    const typed = STRATA_MODEL_PARAMS.map((s) => s.key).filter((k) => section.includes(`(--${k.replace(/_/g, '-')})`));
+    expect(typed).toEqual(['vram_reserve_mib']);
+    expect(left).toEqual(typed);
+  });
+
+  it('the list the editor loops over is the mirror minus those keys', () => {
+    expect(src).toContain('const STRATA_PARAMS_LISTED = STRATA_MODEL_PARAMS.filter((spec) => !TYPED_FIELD_PARAMS.has(spec.key));');
+    expect(src).toContain('{#each STRATA_PARAMS_LISTED as spec}');
+    expect(src).not.toContain('{#each STRATA_MODEL_PARAMS as spec}');
+  });
+
+  it('a typed reserve replaces an older model_params copy, and an emptied model_params goes', () => {
+    const run = script('setStrataVramReserve', ['i', 'raw'], ['editedConfig', 'setNum']);
+    const cfg: any = { providers: [{ alias: 'a', model_params: { vram_reserve_mib: 900, idle_unload_s: 60 } }] };
+    const setNum = (i: number, k: string, r: string) => { cfg.providers[i][k] = parseInt(r); };
+    run(cfg, setNum, 0, '1152');
+    expect(cfg.providers[0].vram_reserve_mib).toBe(1152);
+    expect(cfg.providers[0].model_params).toEqual({ idle_unload_s: 60 });
+    const only: any = { providers: [{ alias: 'b', model_params: { vram_reserve_mib: 900 } }] };
+    run(only, (i: number, k: string, r: string) => { only.providers[i][k] = parseInt(r); }, 0, '1152');
+    expect('model_params' in only.providers[0]).toBe(false);
+  });
+
+  it('the empty field names what the next start sends: the older value, else the base, else 700', () => {
+    const run = script('strataVramReservePlaceholder', ['inspect', 'i'], ['editedConfig', 'strataBase', 'basePlaceholder', 'modelParamText']);
+    const basePlaceholder = (v: unknown, fallback: string) => (v === undefined || v === null || v === '' ? fallback : `base config: ${v}`);
+    const at = (providers: any[], base: unknown) => run({ providers }, () => base, basePlaceholder, String, {}, 0);
+    expect(at([{ alias: 'a' }], 1536)).toBe('base config: 1536');
+    expect(at([{ alias: 'a' }], undefined)).toBe('engine default 700');
+    expect(at([{ alias: 'a', model_params: { vram_reserve_mib: 900 } }], 1536)).toContain('900');
+    expect(at([{ alias: 'a', model_params: { vram_reserve_mib: 900 } }], 1536)).not.toContain('1536');
   });
 });
