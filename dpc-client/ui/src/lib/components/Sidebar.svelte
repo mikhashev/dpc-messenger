@@ -58,6 +58,7 @@
   let modelConfigCompactionThreshold = $state<number>(0.8);
   let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string}[]>([]);
   let modelConfigSaving = $state(false);
+  let modelConfigError = $state('');
   let modelConfigReasoningEffort = $state('');
   // The words belong to the model picked above, so the sentence follows the dropdown.
   const FLEET_EFFORTS = ['low', 'medium', 'high', 'max'];
@@ -262,6 +263,7 @@
   async function handleModelConfig(agentId: string) {
     modelConfigAgentId = agentId;
     modelConfigSaving = false;
+    modelConfigError = '';
     try {
       const result = await onGetAgentModelConfig(agentId);
       modelConfigProviderAlias = result.provider_alias || '';
@@ -295,6 +297,7 @@
 
   async function saveModelConfig() {
     modelConfigSaving = true;
+    modelConfigError = '';
     try {
       await onSaveAgentModelConfig(modelConfigAgentId, buildAgentModelConfigPayload({
         providerAlias: modelConfigProviderAlias,
@@ -312,6 +315,7 @@
       showModelConfigPopup = false;
     } catch (error) {
       console.error('Failed to save agent model config:', error);
+      modelConfigError = error instanceof Error ? error.message : String(error);
     } finally {
       modelConfigSaving = false;
     }
@@ -1287,6 +1291,9 @@
         </select>
         <p class="dialog-hint">Text/keyword search backend. native is the safe default; grafeo is opt-in (parity work in progress).</p>
       </div>
+      {#if modelConfigError}
+        <p class="dialog-error" role="alert">{modelConfigError}</p>
+      {/if}
       <div class="dialog-actions">
         <button type="button" class="btn-cancel" onclick={() => showModelConfigPopup = false}>Cancel</button>
         <button type="button" class="btn-save" onclick={saveModelConfig} disabled={modelConfigSaving}>

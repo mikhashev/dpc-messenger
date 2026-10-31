@@ -24,6 +24,7 @@ defect back.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,6 +67,8 @@ def saver(tmp_path, monkeypatch):
 
     service = AgentService.__new__(AgentService)
     service.peer_metadata = {}
+    # A new main model has to be served somewhere or the save is refused.
+    service.llm_manager = SimpleNamespace(providers={"deepseek_flash": object()})
 
     async def _no_refresh(_aid, _config):
         return None

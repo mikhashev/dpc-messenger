@@ -145,12 +145,40 @@ async def test_an_alias_only_a_peer_has_still_resolves_to_that_peer(saver):
 
 
 @pytest.mark.asyncio
-async def test_an_alias_nobody_has_pins_nothing(saver):
+async def test_an_alias_nobody_has_is_refused_and_the_config_is_unchanged(saver):
+    """Until 2026-10-31 this saved `compute_host = ""` next to an alias this
+    node does not serve. Now the save is refused and nothing is written."""
     saver.configure(local_aliases=["ds_flash"], peer_aliases=["qwen3.8 27b Mythos"])
+    before = saver.read()
 
-    await saver.save(provider_alias="a name neither side knows")
+    result = await saver.save(provider_alias="a name neither side knows")
 
-    assert saver.read()["compute_host"] == ""
+    assert result["status"] == "error"
+    assert "neither locally nor by a connected peer" in result["message"]
+    assert saver.read() == before
+    assert saver.registry.updates == []
+
+
+@pytest.mark.asyncio
+async def test_the_same_alias_with_its_host_offline_keeps_the_host(saver, tmp_path):
+    """The host peer is not connected at Save; the agent keeps naming it."""
+    cfg_path = tmp_path / "agent_test" / "config.json"
+    cfg_path.write_text(json.dumps({
+        "provider_alias": "qwen3.8 27b Mythos",
+        "compute_host": PEER,
+        "context_window": 40000,
+    }), encoding="utf-8")
+    saver.configure(local_aliases=["ds_flash"], peer_aliases=[])
+
+    result = await saver.save(provider_alias="qwen3.8 27b Mythos",
+                              sleep_provider_alias="ds_flash")
+
+    assert result["status"] == "ok"
+    cfg = saver.read()
+    assert cfg["compute_host"] == PEER
+    assert cfg["context_window"] == 40000
+    assert cfg["sleep_provider_alias"] == "ds_flash"
+    assert not [p for _aid, p in saver.registry.updates if "compute_host" in p]
 
 
 # --- B: why the switch could not remove it ---------------------------------

@@ -171,8 +171,11 @@ class TestPeerProviderContextWindow:
 
 
 class TestSaveAgentModelConfigComputeHost:
-    def _run(self, peer_metadata, provider_alias, start_config):
-        stub = SimpleNamespace(peer_metadata=peer_metadata)
+    def _run(self, peer_metadata, provider_alias, start_config, local_aliases=()):
+        stub = SimpleNamespace(
+            peer_metadata=peer_metadata,
+            llm_manager=SimpleNamespace(providers={a: object() for a in local_aliases}),
+        )
         stub._peer_provider_context_window = (
             lambda host, alias: AgentService._peer_provider_context_window(stub, host, alias)
         )
@@ -187,7 +190,7 @@ class TestSaveAgentModelConfigComputeHost:
         with patch("dpc_client_core.dpc_agent.utils.load_agent_config", return_value=dict(start_config)), \
              patch("dpc_client_core.dpc_agent.utils.save_agent_config", side_effect=lambda aid, cfg: saved.update(cfg)), \
              patch("dpc_client_core.dpc_agent.utils.AgentRegistry", return_value=reg):
-            asyncio.run(AgentService.save_agent_model_config(
+            self.last_result = asyncio.run(AgentService.save_agent_model_config(
                 stub, "agent_x", provider_alias=provider_alias, providers_getter=_providers,
             ))
         return saved, reg
@@ -208,18 +211,33 @@ class TestSaveAgentModelConfigComputeHost:
         saved, reg = self._run(
             peer_meta, "ollama_local",
             {"compute_host": "dpc-node-peer1", "context_window": 204800},
+            local_aliases=["ollama_local"],
         )
         assert saved["compute_host"] == ""
         assert "context_window" not in saved
         reg.update_agent.assert_any_call("agent_x", {"compute_host": ""})
 
-    def test_unknown_alias_falls_back_to_local(self):
+    def test_unknown_new_alias_is_refused_and_nothing_is_written(self):
         saved, reg = self._run(
             {}, "typo_or_deleted",
-            {"compute_host": "dpc-node-peer1", "context_window": 204800},
+            {"provider_alias": "zai_glm", "compute_host": "dpc-node-peer1", "context_window": 204800},
         )
-        assert saved["compute_host"] == ""
-        assert "context_window" not in saved
+        assert self.last_result["status"] == "error"
+        assert "typo_or_deleted" in self.last_result["message"]
+        assert "neither locally nor by a connected peer" in self.last_result["message"]
+        assert saved == {}
+        reg.update_agent.assert_not_called()
+
+    def test_unchanged_alias_with_offline_host_keeps_host_and_window(self):
+        saved, reg = self._run(
+            {}, "zai_glm",
+            {"provider_alias": "zai_glm", "compute_host": "dpc-node-peer1", "context_window": 204800},
+        )
+        assert self.last_result["status"] == "ok"
+        assert saved["provider_alias"] == "zai_glm"
+        assert saved["compute_host"] == "dpc-node-peer1"
+        assert saved["context_window"] == 204800
+        assert not any("compute_host" in call.args[1] for call in reg.update_agent.call_args_list)
 
 
 class FakeMonitor:

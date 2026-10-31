@@ -954,8 +954,8 @@ class AgentService:
                 return {"status": "error", "message": f"Agent not found: {agent_id}"}
             config = load_agent_config(agent_id)
             if provider_alias is not None:
-                config["provider_alias"] = provider_alias
-                registry.update_agent(agent_id, {"provider_alias": provider_alias})
+                previous_alias = config.get("provider_alias")
+                previous_host = config.get("compute_host") or ""
                 # Local first. An alias is a bare string and two machines may
                 # well use the same one; until 2026-08-31 only `peer_metadata`
                 # was consulted here, so a peer advertising our own name took
@@ -963,7 +963,8 @@ class AgentService:
                 # peer ahead of every local branch, so it never came back.
                 local_providers = getattr(getattr(self, "llm_manager", None), "providers", None) or {}
                 resolved_peer = None
-                if provider_alias in local_providers:
+                served_locally = provider_alias in local_providers
+                if served_locally:
                     logger.info("Agent %s: '%s' is served locally — not resolving to a peer",
                                 agent_id, provider_alias)
                 else:
@@ -971,7 +972,28 @@ class AgentService:
                         if any(p.get("alias") == provider_alias for p in meta.get("providers", [])):
                             resolved_peer = peer_id
                             break
-                if resolved_peer:
+                # Found nowhere: the host peer may simply be offline right now.
+                # An alias the agent already holds, with a host on record, is
+                # left exactly as it is — clearing the host here would turn a
+                # remote agent into a local one naming an alias this node does
+                # not have. Any other alias found nowhere is refused, so no
+                # dangling config is written (2026-10-31).
+                keep_offline_host = (
+                    not served_locally and not resolved_peer
+                    and provider_alias == previous_alias and bool(previous_host)
+                )
+                if not served_locally and not resolved_peer and provider_alias != previous_alias:
+                    return {
+                        "status": "error",
+                        "message": (f"Model '{provider_alias}' is served neither locally nor by a "
+                                    f"connected peer; the agent's model was not changed."),
+                    }
+                config["provider_alias"] = provider_alias
+                registry.update_agent(agent_id, {"provider_alias": provider_alias})
+                if keep_offline_host:
+                    logger.info("Agent %s: host %s of '%s' is offline — host and context window kept",
+                                agent_id, previous_host, provider_alias)
+                elif resolved_peer:
                     config["compute_host"] = resolved_peer
                     cw = self._peer_provider_context_window(resolved_peer, provider_alias)
                     if cw:
