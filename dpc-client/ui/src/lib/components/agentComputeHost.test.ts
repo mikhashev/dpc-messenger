@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { agentHostDisplay } from "./agentComputeHost";
+import { agentHostDisplay, heldModelLabel } from "./agentComputeHost";
 
 const HOST = "dpc-node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -43,5 +43,28 @@ describe("agentHostDisplay", () => {
   it("copes with a missing peer list", () => {
     expect(agentHostDisplay(HOST, undefined).host).toBe(HOST);
     expect(agentHostDisplay(HOST, null).connected).toBe(false);
+  });
+});
+
+describe("heldModelLabel", () => {
+  it("names the alias, the host by its known name, and that it is offline", () => {
+    const label = heldModelLabel("llamacpp_qwen38_27b", HOST, [{ node_id: HOST, display_name: "Old PC", is_connected: false }]);
+    expect(label).toBe("llamacpp_qwen38_27b @ Old PC (offline)");
+  });
+
+  it("falls back to the node id when the host has no known name", () => {
+    const label = heldModelLabel("a", HOST, []);
+    expect(label).toBe(`a @ ${HOST.slice(0, 20)}... (offline)`);
+  });
+
+  it("does not say offline for a connected host that does not offer the alias", () => {
+    const label = heldModelLabel("a", HOST, [{ node_id: HOST, name: "Johnny", is_connected: true }]);
+    expect(label).toBe("a @ Johnny (not offered by it now)");
+  });
+
+  it("has no host to name for a local agent", () => {
+    for (const v of [undefined, "", "local"]) {
+      expect(heldModelLabel("a", v, [])).toBe("a (not available now)");
+    }
   });
 });

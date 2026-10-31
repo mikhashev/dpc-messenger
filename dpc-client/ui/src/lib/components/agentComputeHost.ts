@@ -42,3 +42,19 @@ export function agentHostDisplay(
     shortName: name || short
   };
 }
+
+/**
+ * The text of a dropdown option for a model the agent has configured but the
+ * lists do not carry now: the alias, where it lives, and why it is not offered.
+ * A peer's alias is not in any list while that peer is offline, so without this
+ * the select shows nothing and the stored value looks lost.
+ */
+export function heldModelLabel(
+  alias: string,
+  computeHost: string | undefined,
+  peers: HostPeer[] | undefined | null
+): string {
+  const d = agentHostDisplay(computeHost, peers);
+  if (d.host === "local") return `${alias} (not available now)`;
+  return `${alias} @ ${d.shortName} (${d.connected ? "not offered by it now" : "offline"})`;
+}

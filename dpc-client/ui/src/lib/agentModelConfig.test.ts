@@ -87,4 +87,29 @@ describe('agent model config payload', () => {
     expect(payload.retrieval_vector).toBe('grafeo');
     expect(payload.retrieval_text).toBe('grafeo');
   });
+
+  it('says nothing about the Main LLM while it is the one the dialog opened with', () => {
+    // The backend re-resolves a named alias to a host from the peers it can see;
+    // an alias whose peer is offline resolves to none and the agent's compute_host
+    // is cleared. Muse, 2026-10-31: llamacpp_qwen38_27b on an offline peer.
+    const payload = buildAgentModelConfigPayload({
+      ...base,
+      providerAlias: 'llamacpp_qwen38_27b',
+      loadedProviderAlias: 'llamacpp_qwen38_27b',
+    });
+
+    expect(payload.provider_alias).toBeNull();
+    // The other fields still go: the dialog is saving, not skipping.
+    expect(payload.sleep_provider_alias).toBe('qwen3.8:latest');
+  });
+
+  it('sends the Main LLM once the user changed it, and again when it is changed back to something else', () => {
+    const changed = buildAgentModelConfigPayload({
+      ...base,
+      providerAlias: 'deepseek_flash',
+      loadedProviderAlias: 'llamacpp_qwen38_27b',
+    });
+
+    expect(changed.provider_alias).toBe('deepseek_flash');
+  });
 });

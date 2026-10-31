@@ -23,10 +23,17 @@ export type AgentModelConfigState = {
   retrievalVector: 'native' | 'grafeo';
   retrievalText: 'native' | 'grafeo';
   reasoningEffort: string;
+  /**
+   * The Main LLM the dialog opened with. When the selection is still that, the
+   * payload says nothing about it (`null`): the backend re-resolves a named
+   * alias to a host from the peers it can see, and an alias whose peer is offline
+   * resolves to none, which would clear the agent's `compute_host`.
+   */
+  loadedProviderAlias?: string;
 };
 
 export type AgentModelConfigPayload = {
-  provider_alias: string;
+  provider_alias: string | null;
   sleep_provider_alias: string;
   snapshot_summarize_provider: string;
   snapshot_summarize_threshold: number | null;
@@ -42,7 +49,10 @@ export function buildAgentModelConfigPayload(
   state: AgentModelConfigState,
 ): AgentModelConfigPayload {
   return {
-    provider_alias: state.providerAlias,
+    provider_alias:
+      state.loadedProviderAlias !== undefined && state.providerAlias === state.loadedProviderAlias
+        ? null
+        : state.providerAlias,
     // The three below carry the empty string through on purpose — see the note
     // above. The numeric fields keep `null` for "unset", where there is no
     // "clear to default" to express: both have a documented default value.

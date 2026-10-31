@@ -14,6 +14,7 @@
   import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
   import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
   import { agentTurns } from '$lib/services/agents';
+  import { agentHostDisplay, heldModelLabel, type HostPeer } from './agentComputeHost';
   import { BURST_QUIET_DEFAULT_SECONDS, BURST_QUIET_MAX_SECONDS, burstQuietFromAgent, burstQuietToSend } from '$lib/utils/burstQuiet';
   import { agentStatusLine, buttonSummary, chatNamer } from '$lib/utils/agentMap';
 
@@ -86,11 +87,16 @@
       ? { words: row.reasoning_words as string[], default: row.reasoning_default as string | null }
       : null;
   });
+  // The node the agent's Main LLM runs on (its stored `compute_host`; '' = this node)
+  // and the aliases the dialog opened with. A peer's models are in no list while the
+  // peer is offline, so these are what keep the dropdowns from going empty.
+  let modelConfigComputeHost = $state('');
+  let modelConfigLoaded = $state({ main: '', sleep: '', snapshot: '', compaction: '' });
+  // Names of peers that are not connected now, from the peer cache; only read to
+  // name a host. Whether a host is connected comes from the status alone.
+  let knownPeerRows = $state<HostPeer[]>([]);
   let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
   let modelConfigRetrievalText = $state<'native' | 'grafeo'>('native');
-  let mainConfigPeerId = $derived(
-    modelConfigProvidersList.find(p => p.alias === modelConfigProviderAlias && p.is_remote)?.peer_id || ''
-  );
 
   // All available agent event types (mirrors EVENT_EMOJIS in agent_telegram_bridge.py)
   const ALL_EVENT_TYPES: { key: string; label: string }[] = [
@@ -261,11 +267,18 @@
       modelConfigProviderAlias = result.provider_alias || '';
       modelConfigSleepProvider = result.sleep_provider_alias || '';
       modelConfigSnapshotProvider = result.snapshot_summarize_provider || '';
+      modelConfigComputeHost = result.compute_host || '';
       modelConfigSnapshotThreshold = Number(result.snapshot_summarize_threshold) > 0
         ? Number(result.snapshot_summarize_threshold)
         : 8000;
       modelConfigCompactionEnabled = result.compaction_enabled === true;
       modelConfigCompactionProvider = result.compaction_provider || '';
+      modelConfigLoaded = {
+        main: modelConfigProviderAlias,
+        sleep: modelConfigSleepProvider,
+        snapshot: modelConfigSnapshotProvider,
+        compaction: modelConfigCompactionProvider,
+      };
       modelConfigCompactionThreshold = Number(result.compaction_threshold) > 0
         ? Number(result.compaction_threshold)
         : 0.8;
@@ -273,6 +286,7 @@
       modelConfigReasoningEffort = result.reasoning_effort || '';
       modelConfigRetrievalVector = (result.retrieval_vector === 'grafeo') ? 'grafeo' : 'native';
       modelConfigRetrievalText = (result.retrieval_text === 'grafeo') ? 'grafeo' : 'native';
+      if (hostOffline(modelConfigComputeHost)) await loadKnownPeerNames();
       showModelConfigPopup = true;
     } catch (error) {
       console.error('Failed to load agent model config:', error);
@@ -293,6 +307,7 @@
         retrievalVector: modelConfigRetrievalVector,
         retrievalText: modelConfigRetrievalText,
         reasoningEffort: modelConfigReasoningEffort,
+        loadedProviderAlias: modelConfigLoaded.main,
       }));
       showModelConfigPopup = false;
     } catch (error) {
@@ -331,6 +346,7 @@
     name: string;
     provider_alias: string;
     reasoning_effort?: string;
+    compute_host?: string;
     profile_name: string;
     instruction_set_name?: string;
     created_at: string;
@@ -437,7 +453,7 @@
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
     onSetAgentTelegramEnabled?: (agentId: string, enabled: boolean) => Promise<void>;
     onGetAgentModelConfig: (agentId: string) => Promise<any>;
-    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; compaction_enabled?: boolean; compaction_provider?: string | null; compaction_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
+    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string | null; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; compaction_enabled?: boolean; compaction_provider?: string | null; compaction_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
   } = $props();
 
   // The agent whose dialog is open, and the two states it can be in. Being
@@ -451,6 +467,65 @@
   const linkingAgent = $derived(agents.find(a => a.agent_id === linkingAgentId));
   const linkingConfigured = $derived(isTelegramConfigured(linkingAgent));
   const linkingEnabled = $derived(!!linkingAgent?.telegram_enabled);
+
+  // The Main LLM's host: what the dialog and the agent rows say when it is offline.
+  // Connected peers first, so a cached row never overrides what the status says.
+  let hostPeers = $derived<HostPeer[]>([...(nodeStatus?.peer_info ?? []), ...knownPeerRows]);
+
+  // Unknown (no status yet) is not offline.
+  function hostOffline(host?: string): boolean {
+    return !!host && host !== 'local' && !!nodeStatus && !agentHostDisplay(host, nodeStatus.peer_info).connected;
+  }
+  function hostName(host: string): string {
+    return agentHostDisplay(host, hostPeers).shortName;
+  }
+
+  async function loadKnownPeerNames() {
+    try {
+      const r: any = await sendCommand('list_cached_peers', {});
+      if (r?.status === 'success' && Array.isArray(r.peers)) {
+        knownPeerRows = r.peers.map((row: any) => ({
+          node_id: row.node_id,
+          display_name: row.display_name || undefined,
+          is_connected: false,
+        }));
+      }
+    } catch (e) {
+      // Names are a courtesy; the node id is shown without them.
+    }
+  }
+
+  // The value the agent has stored stays on the list when no list carries it,
+  // the way a reasoning level the model does not know stays on its list.
+  function heldOption(alias: string): { value: string; label: string } | null {
+    if (!alias || modelConfigProvidersList.some(p => p.alias === alias)) return null;
+    return { value: alias, label: heldModelLabel(alias, modelConfigComputeHost, hostPeers) };
+  }
+  let heldMain = $derived(heldOption(modelConfigLoaded.main));
+  let heldSleep = $derived(heldOption(modelConfigLoaded.sleep));
+  let heldSnapshot = $derived(heldOption(modelConfigLoaded.snapshot));
+  let heldCompaction = $derived(heldOption(modelConfigLoaded.compaction));
+
+  let mainConfigPeerId = $derived(
+    modelConfigProvidersList.find(p => p.alias === modelConfigProviderAlias && p.is_remote)?.peer_id
+      || (heldMain && modelConfigProviderAlias === heldMain.value ? modelConfigComputeHost : '')
+  );
+
+  let modelConfigAgentName = $derived(
+    agents.find(a => a.agent_id === modelConfigAgentId)?.name || modelConfigAgentId
+  );
+  // Still on the model the dialog opened with, whose host is not connected.
+  let modelConfigHostOffline = $derived(
+    hostOffline(modelConfigComputeHost) && modelConfigProviderAlias === modelConfigLoaded.main
+  );
+
+  // Name the hosts of agents that are offline, once per change in that set.
+  let offlineHostIds = $derived(
+    agents.map(a => a.compute_host).filter(h => hostOffline(h)).join(',')
+  );
+  $effect(() => {
+    if (offlineHostIds && connectionStatus === 'connected') loadKnownPeerNames();
+  });
 
   // The "N cached peers" line opens a list of them to copy names and node ids from.
   // The status carries only the count, so the list is read when it is opened.
@@ -892,6 +967,16 @@
                   onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
                   onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
                 >{agent.provider_alias}</span>
+                {#if hostOffline(agent.compute_host)}
+                  <span
+                    role="button"
+                    tabindex="0"
+                    class="agent-host-offline"
+                    title="Runs on {hostName(agent.compute_host ?? '')}, which is offline now. This agent will not answer until that node is back or its model is changed."
+                    onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
+                  >⚠ offline</span>
+                {/if}
                 <span
                   role="button"
                   tabindex="0"
@@ -1077,7 +1162,7 @@
   <div class="telegram-link-dialog-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && (showModelConfigPopup = false)}>
     <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="model-config-title">
       <div class="dialog-header">
-        <h3 id="model-config-title">Agent Models Configuration</h3>
+        <h3 id="model-config-title">Agent {modelConfigAgentName} Configuration</h3>
         <button type="button" class="dialog-close-btn" onclick={() => showModelConfigPopup = false} aria-label="Close dialog">&times;</button>
       </div>
       <div class="dialog-content">
@@ -1090,11 +1175,17 @@
 
         <label for="main-llm" class="dialog-label">Agent Main LLM:</label>
         <select id="main-llm" class="dialog-input" bind:value={modelConfigProviderAlias}>
+          {#if heldMain}<option value={heldMain.value}>{heldMain.label}</option>{/if}
           {#each modelConfigProvidersList as p}
             <option value={p.alias}>{providerOptionLabel(p)}</option>
           {/each}
         </select>
         <p class="dialog-hint">Primary language model used for agent conversations.</p>
+        {#if modelConfigHostOffline}
+          <p class="dialog-warning" role="alert" title={modelConfigComputeHost}>
+            ⚠ This agent runs on {hostName(modelConfigComputeHost)}, which is offline now, so it will not answer until that node is back or you change the Main LLM.
+          </p>
+        {/if}
 
         <label for="agent-reasoning" class="dialog-label">Reasoning effort:</label>
         <select id="agent-reasoning" class="dialog-input" bind:value={modelConfigReasoningEffort}>
@@ -1118,6 +1209,7 @@
         <label for="sleep-llm" class="dialog-label">Sleep feature LLM:</label>
         <select id="sleep-llm" class="dialog-input" bind:value={modelConfigSleepProvider}>
           <option value="">Default (global)</option>
+          {#if heldSleep}<option value={heldSleep.value}>{heldSleep.label}</option>{/if}
           {#each modelConfigProvidersList as p}
             <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
           {/each}
@@ -1127,6 +1219,7 @@
         <label for="snapshot-llm" class="dialog-label">Snapshot summarization LLM:</label>
         <select id="snapshot-llm" class="dialog-input" bind:value={modelConfigSnapshotProvider}>
           <option value="">Default (global)</option>
+          {#if heldSnapshot}<option value={heldSnapshot.value}>{heldSnapshot.label}</option>{/if}
           {#each modelConfigProvidersList as p}
             <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
           {/each}
@@ -1158,6 +1251,7 @@
           <label for="compaction-llm" class="dialog-label">Compaction LLM:</label>
           <select id="compaction-llm" class="dialog-input" bind:value={modelConfigCompactionProvider}>
             <option value="">Default (global)</option>
+            {#if heldCompaction}<option value={heldCompaction.value}>{heldCompaction.label}</option>{/if}
             {#each modelConfigProvidersList as p}
               <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
             {/each}
@@ -2463,6 +2557,18 @@
     cursor: not-allowed;
   }
 
+  .agent-host-offline {
+    font-size: 0.65rem;
+    color: #f9e2af;
+    background: rgba(249, 226, 175, 0.12);
+    border: 1px solid rgba(249, 226, 175, 0.4);
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    margin-left: 0.25rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
   .agent-effort {
     font-size: 0.68rem;
     padding: 1px 5px;
@@ -2591,6 +2697,17 @@
     color: #dc3545;
     font-size: 0.85rem;
     margin: -0.25rem 0 0.5rem 0;
+  }
+
+  .dialog-warning {
+    color: #b8860b;
+    background: rgba(255, 193, 7, 0.12);
+    border: 1px solid rgba(255, 193, 7, 0.5);
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    margin: 0 0 0.5rem 0;
   }
 
   .dialog-hint {
