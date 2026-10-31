@@ -209,6 +209,37 @@ async def test_an_editor_save_from_before_the_block_does_not_lift_it(node):
     assert service.firewall.is_blocked(BLOCKED)
 
 
+@pytest.mark.asyncio
+async def test_an_editor_save_from_before_the_block_puts_back_no_rule_it_deleted(node):
+    """Johnny's run on a copy of the live file, 2026-10-31: the stale snapshot
+    brought back the node_groups entries and the file_transfer key, so an
+    Unblock would have returned the node with every old rule."""
+    service = node.service
+    stale = service.firewall.get_rules_as_dict()
+    await service.block_peer(BLOCKED)
+
+    result = await service.save_firewall_rules(stale)
+
+    rules = service.firewall.get_rules_as_dict()
+    assert rules["blocked_nodes"] == [BLOCKED]
+    rest = {k: v for k, v in rules.items() if k != "blocked_nodes"}
+    assert BLOCKED not in json.dumps(rest), json.dumps(rest, indent=2)
+    assert rules["node_groups"]["friends"] == [OTHER]
+    assert "naming a blocked node dropped" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_an_editor_save_without_a_blocked_node_says_nothing_about_one(node):
+    service = node.service
+    await service.block_peer(BLOCKED)
+    fresh = service.firewall.get_rules_as_dict()
+
+    result = await service.save_firewall_rules(fresh)
+
+    assert result["status"] == "success"
+    assert "blocked node" not in result["message"]
+
+
 def test_both_commands_are_reachable_from_the_ui_like_disconnect():
     from dpc_client_core.local_api import ALLOWED_COMMANDS
 

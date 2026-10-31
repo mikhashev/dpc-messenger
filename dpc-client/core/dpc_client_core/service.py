@@ -4974,9 +4974,20 @@ class CoreService:
             # Owned by block_peer / unblock_peer: an editor snapshot taken
             # before a Block would otherwise lift it on Save.
             on_disk = self.firewall.get_rules_as_dict().get("blocked_nodes")
+            dropped = []
             if isinstance(on_disk, list):
                 rules_dict["blocked_nodes"] = on_disk
+                # Nor may it put back what the Block deleted: while a node is
+                # blocked no rule is its id, as no group may hold it.
+                for blocked_id in on_disk:
+                    dropped += ContextFirewall._remove_node_mentions(rules_dict, blocked_id)
+            if dropped:
+                logger.info("Editor save: dropped %d entr(ies) naming a blocked node: %s",
+                            len(dropped), ", ".join(dropped))
             success, message, errors = self.firewall.save_rules_from_dict(rules_dict)
+            if success and dropped:
+                message = (f"{message}; {len(dropped)} entr{'y' if len(dropped) == 1 else 'ies'} "
+                           f"naming a blocked node dropped (unblock it first)")
 
             if not success:
                 return {"status": "error", "message": message, "errors": errors}

@@ -1321,7 +1321,8 @@ relayed and wake nobody. The list is written by Block (`block_peer`), which also
 the node from every group and deletes every other entry in this file that is its id (a key,
 a value or a list item; a sandbox path that merely contains the id stays), and is
 cleared by Unblock (`unblock_peer`), which restores none of that; the editor's Save keeps
-the list on disk. A block names a key, so it does not survive the peer's reinstall. Mike's
+the list on disk and drops any entry that is a blocked id, so a snapshot from before the
+Block puts nothing back. A block names a key, so it does not survive the peer's reinstall. Mike's
 call, 2026-10-31.
 
 **Transcription has two directions and two permissions.** `enabled` / `allow_nodes` /
