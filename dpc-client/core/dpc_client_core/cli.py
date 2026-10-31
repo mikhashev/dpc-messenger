@@ -364,6 +364,11 @@ async def amain(argv: Sequence[str], home: Optional[Path] = None, emit=print) ->
 
 
 def main(argv: Optional[Sequence[str]] = None, home: Optional[Path] = None) -> int:
+    # The masked key carries an ellipsis; a pipe on Windows would otherwise get the
+    # locale code page (as cc_group_chat_bridge.py does it).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     try:
         return asyncio.run(amain(sys.argv[1:] if argv is None else argv, home))
     except KeyboardInterrupt:
