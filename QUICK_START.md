@@ -11,6 +11,12 @@ Pick your operating system:
 - [macOS](#macos)
 - [Linux](#linux)
 
+Want no window at all — only the backend, lending a peer's models to your own
+tools (an IDE, Claude Code, Codex, the Hermes agent)? Install Python and uv
+(your system's Step 1) and run `uv sync` in `dpc-client/core` (Step 2); skip
+Node, Rust and `npm install`. Then go to
+[Backend only: a peer's models for your own tools](#backend-only-a-peers-models-for-your-own-tools).
+
 ---
 
 ## Windows
@@ -171,6 +177,191 @@ npm run tauri dev
 A desktop window will open — that's the app. 
 
 Your private data is stored in `~/.dpc/`.
+
+---
+
+## Backend only: a peer's models for your own tools
+
+This is the setup with no window: you run only the backend, it takes inference from
+another DPC node that shares its models, and it hands that to the tools you already use
+— an IDE, Claude Code, Codex, the Hermes agent, a `curl` line. Two nodes take part:
+
+- the **host** shares its models (the peer with the GPU);
+- the **guest** runs the **gateway** on its own loopback (ADR-041), and your tools talk to it.
+
+Both run the backend only. The gateway and the peer route are described in full in
+[CONFIGURATION.md → Gateway Settings](./docs/CONFIGURATION.md#gateway-settings-gateway);
+this section is the shortest path through them.
+
+### Read this first: the network condition
+
+**Peer inference is served only over a proved direct TLS session.** Nothing else
+carries it. If the two nodes are linked over WebRTC, hole punching, a relay or gossip,
+the node status can say "connected" and there is still no service: the gateway lists
+none of that peer's models and answers `503 peer_unproved` to a call, and the host
+refuses with `identity_unproved`. There is no fallback to another tier
+([ADR-041 D2](./docs/decisions/041-openai-compatible-gateway-as-a-dpc-surface.md)).
+
+What that needs:
+
+- **Direction does not matter.** Either node may dial the other.
+- **At least one of the two nodes must be reachable on 8888/TCP** from the other: a port
+  forward on the router, a public IPv6 address (the default `listen_host = dual` in
+  `[p2p]` listens on IPv6 too), or an address on a LAN or an overlay network such as
+  Tailscale, WireGuard or ZeroTier.
+- **If both nodes are behind CGNAT, there is no service**, whatever the other tiers report.
+
+If you cannot meet this, stop here: the steps below will not produce a working setup.
+
+### On the host
+
+1. Start the backend:
+
+   ```bash
+   cd dpc-client/core
+   uv sync
+   uv run python run_service.py
+   ```
+
+   Add `--skip-knowledge-index` if no agent on this node uses memory; it skips the
+   start-up rebuild of the agent-memory index. The first start creates the node's
+   identity and the default files in `~/.dpc/`.
+2. Make 8888/TCP reachable, as above.
+3. Define a local alias in `~/.dpc/providers.json` (an Ollama model, a `llama-server`
+   child, a paid API; see [Configure an AI provider](#configure-an-ai-provider) and
+   [providers.example.json](./dpc-client/providers.example.json). Without the UI, edit
+   the file by hand).
+4. Get the guest's node id (`dpc-node-…`) from the guest. It is in the guest's
+   `~/.dpc/node.id` and in the `Node ID:` line of its start-up log, so the guest must
+   have been started once.
+5. In `~/.dpc/privacy_rules.json` edit the `compute` block, in this order. The default
+   file already has the block, with `enabled` false:
+
+   ```json
+   "compute": {
+     "enabled": true,
+     "allow_nodes": ["dpc-node-<guest id>"],
+     "serving_local": ["<alias>"]
+   }
+   ```
+
+   - `enabled` first: while it is false nothing is served, whatever the lists say.
+   - `allow_nodes` second: who may ask. The guest's id is the one from step 4.
+   - `serving_local` last: which aliases are served. **An empty list serves nothing**
+     (the opposite of `allowed_models`, where empty means every model; if you fill
+     `allowed_models`, it is matched against the alias's underlying model string, and a
+     list that omits the serving alias's model makes the node offer nothing). A paid
+     alias goes in `serving_vendor`, with a daily ceiling in `vendor_quotas`.
+6. Restart the backend.
+7. Give the guest the host's node id (the host's `~/.dpc/node.id`) and address, as
+   `dpc://<host address>:8888?node_id=<host id>`.
+
+### On the guest
+
+1. Start the backend once and read its node id (see host step 4), then stop it.
+2. Turn the gateway on, in `~/.dpc/config.ini`:
+
+   ```ini
+   [gateway]
+   enabled = true
+   ```
+
+   or set `DPC_GATEWAY_ENABLED=true` in the environment. The port is 9997 and the host is
+   fixed at 127.0.0.1. The setting is read when the backend starts, so restart after
+   changing it. The guest needs no `compute` setting to call a peer.
+3. Recommended: put the host's node id in a group in `node_groups` of
+   `~/.dpc/privacy_rules.json` (the default file has empty `friends`, `colleagues` and
+   `family` lists). The backend then dials it 5 s after start and reconnects when the
+   link drops. Auto-connect tries every tier, so check that the link ended up on direct
+   TLS (the condition above).
+4. **The first connection.** A fresh node cannot find the host by itself: `[dht] seed_nodes`
+   is empty by default and the peer cache has nothing in it. Make one `connect_to_peer`
+   call over the local API with the backend running. Save this as `connect_once.py` (it
+   uses `websockets`, which is already installed) and run it from `dpc-client/core` with
+   `uv run python connect_once.py`:
+
+   ```python
+   import asyncio, json, pathlib, websockets
+
+   HOST_URI = "dpc://203.0.113.5:8888?node_id=dpc-node-<host id>"  # the host's address and id
+
+   async def main():
+       token = (pathlib.Path.home() / ".dpc" / ".ws_token").read_text().strip()
+       async with websockets.connect("ws://127.0.0.1:9999") as ws:
+           await ws.send(json.dumps({"command": "auth", "token": token, "id": "1"}))
+           print(await ws.recv())  # the auth answer
+           await ws.send(json.dumps({"id": "2", "command": "connect_to_peer",
+                                     "payload": {"uri": HOST_URI}}))
+           while True:  # events can arrive in between; wait for our own id
+               message = json.loads(await ws.recv())
+               if message.get("id") == "2":
+                   print(message)  # "status": "OK" means connected
+                   break
+
+   asyncio.run(main())
+   ```
+
+   A small command-line tool for this step is planned next and will replace the snippet.
+   After one successful call the host's address is in the peer cache
+   (`~/.dpc/peer_cache.json`) and later starts reconnect without it. If only the guest
+   is reachable on 8888, run the same call on the host instead, with the guest's address
+   and id.
+5. The gateway key is `~/.dpc/.gateway_key`. It is created on the first start with the
+   gateway on, and nothing rotates it by itself.
+6. List the models:
+
+   ```bash
+   curl http://127.0.0.1:9997/v1/models -H "Authorization: Bearer <key>"
+   ```
+
+   The host's models are named `remote:<host node id>:<alias>`. If none of them is on the
+   list, the link is not on direct TLS, the host has not allowed this node, or the host
+   serves nothing: go back over the host steps and read the host's log.
+7. Point your tools at the gateway:
+   - **OpenAI-compatible tools** (Continue, Cursor, the Hermes agent, SDKs): base
+     URL `http://127.0.0.1:9997/v1`, the key, the model `remote:...`. The gateway serves
+     `/v1/chat/completions` and `/v1/messages`, not the Responses API, so a tool that
+     defaults to Responses (Codex, for one) has to be set to Chat Completions.
+   - **Claude Code** (the Anthropic form; the base URL has no `/v1`):
+
+     ```bash
+     export ANTHROPIC_BASE_URL=http://127.0.0.1:9997
+     export ANTHROPIC_API_KEY=<key>            # or ANTHROPIC_AUTH_TOKEN
+     export ANTHROPIC_MODEL='remote:<host node id>:<alias>'
+     ```
+
+     Pin the same id as `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`
+     and `ANTHROPIC_DEFAULT_OPUS_MODEL`: Claude Code sends its background and subagent
+     calls to those tiers, and an unpinned tier names a model the gateway does not
+     serve. Where the `/v1/models` row states a `context_window`, also set
+     `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to it. These `export` lines are POSIX shell; on
+     Windows use the settings-file form (`claude --settings`) in
+     [CONFIGURATION.md](./docs/CONFIGURATION.md#gateway-settings-gateway).
+   - Both `Authorization: Bearer <key>` and `x-api-key: <key>` are accepted.
+   - The `Host` header must be `127.0.0.1:9997` or `localhost:9997`. A tool inside Docker
+     that reaches the gateway as `host.docker.internal` is answered `400 invalid_host`.
+
+### What crosses the peer route, and what does not
+
+- **Crosses:** streaming, tools, images, reasoning effort and the usage rows.
+- **Refused with 400:** a forced `tool_choice` (`required`, or a named tool) and
+  `parallel_tool_calls: false` (`disable_parallel_tool_use` on the Anthropic form). Some
+  clients send them; switch that option off in the client.
+- **One call at a time:** the host serves calls to one local alias one after another, so
+  a second caller waits for the first.
+- **Timeout:** a call the host does not answer within `[connection]
+  remote_inference_timeout` (1200 s by default) fails with 504.
+- **A refusal keeps the host's reason:** the guest gets `400`, `403`, `404`, `429` or
+  `503` with the host's own code, and `502` only for a refusal that has none. The codes
+  are in the *refusal code* row of [docs/GLOSSARY.md](./docs/GLOSSARY.md). A host that is
+  misconfigured and lists nothing leaves the guest with `404 model_not_found`.
+
+### Footprint
+
+This role does not use torch, transformers, sentence-transformers or faiss (importing
+the service pulls none of them in), but today a plain `uv sync` still installs them:
+about 3 GB on Windows and Linux. Moving the machine-learning stack into an optional
+extra is decided and comes later; until then the install is the full size.
 
 ---
 

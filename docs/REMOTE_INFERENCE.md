@@ -18,8 +18,11 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 - They're both working on a game design document
 
 **With Remote Inference:**
-1. Bob connects to Anna via P2P (Direct TLS or WebRTC)
-2. Bob enables inference sharing for Anna in his firewall config
+1. Anna enables inference sharing for Bob in her own firewall config (`compute.enabled`,
+   Bob's node id in `allow_nodes`, her model's alias in `serving_local`) — the host decides
+   what it shares, the requester sets nothing
+2. Bob and Anna connect over direct TLS (either may dial; at least one must be reachable
+   on 8888/TCP) — peer inference is served over no other connection (ADR-041 D2)
 3. Bob asks a complex question about game mechanics
 4. Bob selects "Anna" as the compute host in the UI
 5. The query runs on Anna's powerful model
@@ -168,11 +171,14 @@ Edit `~/.dpc/privacy_rules.json` to enable inference sharing:
 
 1. **Enable Inference Sharing** (Host Side):
    - Edit `~/.dpc/privacy_rules.json`
-   - Add `"compute"` section with permissions
+   - Set the `"compute"` section: `enabled`, then `allow_nodes` (or `allow_groups`) with
+     the requester's node id, then `serving_local` with the aliases to share
    - Restart the client
 
 2. **Connect to Peer**:
-   - Use Direct TLS (`dpc://...`) or WebRTC (node_id)
+   - Use Direct TLS (`dpc://host:8888?node_id=...`), dialled from either side. A peer
+     reached over WebRTC, a relay, hole punching or gossip is connected but **not served**:
+     the host refuses it with `identity_unproved` (ADR-041 D2)
    - Ensure peer appears in "Connected Peers" list
 
 3. **Select Compute Host**:
@@ -253,13 +259,20 @@ result = await core_service.send_ai_query(
    - Error: "Model 'llama3-70b' not found"
    - Solution: Peer must have the specified model installed
 
+5. **Connection Not Proved**
+   - Error: "This node serves peer inference only over a connection whose key is
+     proved..." (refusal code `identity_unproved`)
+   - Solution: Reconnect over Direct TLS (`dpc://host:8888?node_id=...`); WebRTC, relay and
+     gossip are never served (ADR-041 D2)
+
 ---
 
 ## Performance
 
 **Latency:**
 - Direct TLS (LAN): ~50-200ms overhead
-- WebRTC (Internet): ~100-500ms overhead
+- Direct TLS (Internet, through a port forward, a public IPv6 address or an overlay
+  network such as Tailscale): depends on the route
 - Inference time: Depends on model and prompt complexity
 
 **Bandwidth:**
@@ -333,7 +346,7 @@ cd dpc-client/core
 uv run python run_service.py
 
 # UI:
-# 1. Connect both clients to each other (Direct TLS or WebRTC)
+# 1. Connect both clients to each other over Direct TLS (dpc://host:8888?node_id=...)
 # 2. In requestor's UI, select host from compute dropdown
 # 3. Send a query - should run on host's hardware
 ```
@@ -392,7 +405,9 @@ ollama serve  # Ensure service is running
 
 **Check P2P connection:**
 - Verify peer appears in "Connected Peers" sidebar
-- Check connection type (Direct TLS or WebRTC)
+- Check connection type: it must be Direct TLS. A peer connected over WebRTC, relay or
+  gossip is refused by the host with `identity_unproved` (ADR-041 D2); reconnect it
+  directly with its `dpc://` URI
 - Try reconnecting if connection was dropped
 
 ---

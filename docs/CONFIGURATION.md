@@ -604,8 +604,13 @@ everywhere else on this node. A completion on such a name travels the P2P path t
 peer (`REMOTE_INFERENCE_REQUEST`) and is served only while the peer is connected over
 direct TLS, where its key has been proved (ADR-041 D2); a peer reached over WebRTC, a
 relay or gossip is answered `503` naming the rule, never served from a local alias
-instead. The peer's own firewall decides what it serves you (`404` when the alias is
-not on its menu, `502` carrying the peer's refusal), the peer's card and quota bound
+instead. The peer's own firewall decides what it serves you: a refusal comes back with
+the host's own code and the status the cause deserves — `400` (`invalid_value`,
+`tools_unsupported`), `403` (`not_allowed`, `identity_unproved`, `onward_sharing_refused`),
+`404` (`model_not_found`, also when the alias is not on its menu), `429`
+(`insufficient_quota`) or `503` (`unrated`, `misconfigured`, `provider_unavailable`,
+`provider_loading`) — and `502` (`peer_refused`) only for a refusal that carries no code
+this door knows (see *refusal code* in [GLOSSARY.md](./GLOSSARY.md)). The peer's card and quota bound
 the call — this node's card lock and `vendor_quotas` are not consulted — and a peer
 that does not answer within `[connection] remote_inference_timeout` is `504`. The row
 this node writes says `route = peer` under the request id both nodes share, with the
