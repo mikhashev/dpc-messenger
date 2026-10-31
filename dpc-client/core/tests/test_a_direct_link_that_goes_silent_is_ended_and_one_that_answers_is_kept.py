@@ -519,3 +519,61 @@ async def test_an_unknown_link_ping_at_an_old_node_is_a_router_warning_and_the_l
         assert target in manager.peers and lost == []
     finally:
         await _finish(manager, remotes=[old])
+
+
+# --- which source made the peer's address ours --------------------------------------------
+
+
+class _Writer:
+    def __init__(self, peer_ip, local_ip):
+        self._info = {"peername": (peer_ip, 8888), "sockname": (local_ip, 50000)}
+
+    def get_extra_info(self, name):
+        return self._info.get(name)
+
+
+def _dead_link_line(manager, peer_ip, caplog):
+    class _Peer:
+        node_id = "dpc-node-" + "0" * 32
+        writer = _Writer(peer_ip, "192.0.2.10")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        manager._log_dead_link_path(_Peer(), 95.0, "out")
+    lines = [r.getMessage() for r in caplog.records
+             if r.name == LOGGER and r.getMessage().startswith("Silent link to ")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+def test_an_address_found_on_an_interface_is_named_as_that_source(tmp_path, caplog):
+    manager = _manager(tmp_path, "local")
+    manager.own_addresses.learn("192.0.2.77", "lan interface")
+    manager.own_addresses.learn("192.0.2.77", "default route")
+    line = _dead_link_line(manager, "192.0.2.77", caplog)
+    assert "peer address is this node's own: yes (lan interface, default route);" in line
+
+
+def test_a_stun_address_that_is_the_current_external_one_says_current(tmp_path, caplog):
+    manager = _manager(tmp_path, "local")
+    manager._external_ip = None
+    asyncio.run(manager.update_dht_ip("198.51.100.5"))
+    line = _dead_link_line(manager, "198.51.100.5", caplog)
+    assert "own: yes (stun: the current external address);" in line
+
+
+def test_a_stun_address_the_exit_has_since_left_says_earlier(tmp_path, caplog):
+    manager = _manager(tmp_path, "local")
+    asyncio.run(manager.update_dht_ip("198.51.100.5"))
+    asyncio.run(manager.update_dht_ip("203.0.113.9"))
+    line = _dead_link_line(manager, "198.51.100.5", caplog)
+    assert "own: yes (stun: an earlier external address);" in line
+    caplog.clear()
+    line = _dead_link_line(manager, "203.0.113.9", caplog)
+    assert "own: yes (stun: the current external address);" in line
+
+
+def test_an_address_that_is_not_ours_carries_no_parentheses(tmp_path, caplog):
+    manager = _manager(tmp_path, "local")
+    manager.own_addresses.learn("192.0.2.77", "lan interface")
+    line = _dead_link_line(manager, "203.0.113.50", caplog)
+    assert "peer address is this node's own: no;" in line

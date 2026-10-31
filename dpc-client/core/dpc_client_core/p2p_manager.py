@@ -186,6 +186,9 @@ class P2PManager:
 
         # Addresses that are this machine — see own_addresses.py
         self.own_addresses = OwnAddresses()
+        # The latest STUN-seen external address (service.py keeps the same word);
+        # own_addresses never forgets an earlier one.
+        self._external_ip: Optional[str] = None
 
         # DHT (Distributed Hash Table) for decentralized peer discovery
         self.dht_manager: DHTManager | None = None  # Initialized in start_server()
@@ -1583,7 +1586,10 @@ class P2PManager:
         peer — a VPN that dropped, or changed its exit — the line names both
         ends as the socket saw them, who dialled, when the last frame came,
         whether the peer's address is one of this node's own (interfaces,
-        default route, the STUN-seen external address: `own_addresses`), and
+        default route, the STUN-seen external address: `own_addresses`) and,
+        when it is, which sources say so, a STUN one marked current or earlier
+        (the set keeps an exit seen an hour ago: "we dialled our own interface"
+        and "the peer sits behind our own VPN exit" read differently), and
         whether the local address is still on an interface of this host.
         """
         def _plain(ip):
@@ -1605,6 +1611,15 @@ class P2PManager:
             peer_is_own = "unknown"
         else:
             peer_is_own = "yes" if own.contains(peer_ip) else "no"
+            if peer_is_own == "yes":
+                named = []
+                for source in own.sources_of(peer_ip):
+                    if source == "stun":
+                        source += ": the current external address" if peer_ip == getattr(
+                            self, "_external_ip", None) else ": an earlier external address"
+                    named.append(source)
+                if named:
+                    peer_is_own += f" ({', '.join(named)})"
         if own is None or not local_ip:
             local_still_up = "unknown"
         else:
@@ -2039,6 +2054,7 @@ class P2PManager:
         # Learned before the guard: the peer-cache check needs this address
         # even on a node whose DHT is switched off.
         self.own_addresses.learn(external_ip, "stun")
+        self._external_ip = external_ip
 
         if not self.dht_manager:
             return

@@ -11,7 +11,7 @@ and A-PEERS-CACHED-ENDPOINT on the board.
 import ipaddress
 import logging
 import sys
-from typing import Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -198,10 +198,16 @@ class OwnAddresses:
 
     def __init__(self) -> None:
         self._addresses: Set[str] = set()
+        # Every source an address was learned from, in the order they first said so.
+        self._sources: Dict[str, List[str]] = {}
 
     def learn(self, ip: Optional[str], source: str = "") -> None:
         if not ip or ip in _UNSPECIFIED:
             return
+        if source:
+            seen = self._sources.setdefault(ip, [])
+            if source not in seen:
+                seen.append(source)
         if ip not in self._addresses:
             self._addresses.add(ip)
             logger.debug("Own address learned: %s%s", ip, f" ({source})" if source else "")
@@ -238,6 +244,10 @@ class OwnAddresses:
 
     def known(self) -> Set[str]:
         return set(self._addresses)
+
+    def sources_of(self, ip: Optional[str]) -> List[str]:
+        """The sources that named this address ours, in the order they first did."""
+        return list(self._sources.get(ip, [])) if ip else []
 
     def self_seeds(self, seeds: Iterable) -> list:
         """The (ip, port) seeds whose address is one of ours."""
