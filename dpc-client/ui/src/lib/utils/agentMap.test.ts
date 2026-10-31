@@ -31,6 +31,7 @@ import {
     type ProcessListing,
 } from './agentMap';
 import { applyTurnSnapshot, noteAgentActivity, type AgentTurn, type AgentTurnStates } from './agentTurnNotice';
+import mapSrc from '../components/AgentMap.svelte?raw';
 
 const NOW = Date.parse('2026-10-27T10:00:00Z');
 const iso = (secondsAgo: number) => new Date(NOW - secondsAgo * 1000).toISOString();
@@ -398,6 +399,15 @@ describe('the button, the refresh and the selection', () => {
         expect(turnsKey(noteAgentActivity(st, 'agent_ark', NOW + 5000))).toBe(turnsKey(st));
         const next = applyTurnSnapshot(st, { agent_id: 'agent_ark', ts: 't2', waiting: [], turn: turn({ tool: 'run_shell' }) }, NOW);
         expect(turnsKey(next)).not.toBe(turnsKey(st));
+    });
+
+    it('one agent waiting twice in the same room is two rows, and the map does not key them by chat', () => {
+        const wait = { conversation_id: 'group-b', conversation_title: '', waiting_since: iso(1),
+                       wait_reason: 'room_busy' as const, held_by: null };
+        const map = build(states([{ agent_id: 'agent_ark', ts: 't1', turn: null, waiting: [wait, { ...wait }] }]));
+        const ark = map.agents.find(a => a.agent_id === 'agent_ark')!;
+        expect(ark.waiting.map(w => w.conversation_id)).toEqual(['group-b', 'group-b']);
+        expect(mapSrc).not.toMatch(/\{#each selected\.waiting as q \(q\.conversation_id\)\}/);
     });
 
     it('keeps the chosen agent while it is on the map, else the first', () => {

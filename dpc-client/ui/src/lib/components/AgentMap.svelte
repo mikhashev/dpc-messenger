@@ -404,7 +404,9 @@
               {#if selected.waiting.length === 0}
                 <span class="muted">No chat is waiting.</span>
               {/if}
-              {#each selected.waiting as q (q.conversation_id)}
+              <!-- Unkeyed: one agent can wait twice in the same room (two messages queued
+                   behind another agent's turn), so the chat is not a unique key. -->
+              {#each selected.waiting as q}
                 <div class="queue-row">
                   <span class="queue-chat">{q.chat}</span>
                   {#if q.place}<span class="muted">{q.place}</span>{/if}
