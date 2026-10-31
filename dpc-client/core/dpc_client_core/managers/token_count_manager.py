@@ -251,6 +251,9 @@ class TokenCountManager:
                     self._hf_tokenizer_cache[repo] = AutoTokenizer.from_pretrained(
                         repo, local_files_only=True
                     )
+                except ImportError:
+                    self._note_transformers_missing()
+                    return
                 except Exception:
                     tokenizer = self._fetch_tokenizer(repo, "startup")
                     if tokenizer is None:
@@ -304,12 +307,26 @@ class TokenCountManager:
                 hf_model, model,
             )
             return tokenizer
+        except ImportError:
+            self._note_transformers_missing()
+            return None
         except Exception as exc:
             logger.warning(
                 "Tokenizer %s could not be fetched (%s) — counting characters for %s",
                 hf_model, exc, model,
             )
             return None
+
+    def _note_transformers_missing(self) -> None:
+        """Say once that Ollama token counts fall back to characters, and why."""
+        if getattr(self, "_transformers_missing_noted", False):
+            return
+        self._transformers_missing_noted = True
+        logger.warning(
+            "transformers is not installed (the voice-memory extra), so token "
+            "counts for Ollama models are estimated from characters. From "
+            "dpc-client/core run: uv sync --extra voice-memory --inexact"
+        )
 
     def _get_tokenizer_for_ollama(self, model: str) -> Optional[Any]:
         """Get HuggingFace tokenizer for Ollama model.
@@ -363,7 +380,7 @@ class TokenCountManager:
             return None
 
         except ImportError:
-            logger.warning("transformers library not available - using character estimation")
+            self._note_transformers_missing()
             return None
         except Exception as e:
             logger.warning("Failed to load tokenizer for %s: %s", model, e)

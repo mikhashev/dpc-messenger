@@ -14,6 +14,12 @@ WHISPER_MODEL_REVISION = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
 
 logger = logging.getLogger(__name__)
 
+# What a missing package of the optional `voice-memory` extra tells the user.
+_VOICE_MEMORY_HINT = (
+    "local Whisper transcription needs the voice-memory extra (not installed); "
+    "from dpc-client/core run: uv sync --extra voice-memory --inexact"
+)
+
 
 class LocalWhisperProvider(AIProvider):
     """
@@ -114,7 +120,7 @@ class LocalWhisperProvider(AIProvider):
                 logger.info("MLX detected (Apple Silicon) - Using Apple GPU for local transcription")
                 return "mlx"
             except ImportError:
-                logger.debug("MLX not available (install with: uv sync --extra mlx)")
+                logger.debug("MLX not available (install with: uv sync --extra mlx --inexact)")
 
         # 2. Check for CUDA (NVIDIA GPUs)
         try:
@@ -181,8 +187,11 @@ class LocalWhisperProvider(AIProvider):
                     device = "cpu"
 
             # PyTorch path (CUDA/MPS/CPU)
-            import torch
-            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+            try:
+                import torch
+                from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+            except ImportError as e:
+                raise ImportError(f"{_VOICE_MEMORY_HINT} ({e})") from e
             from .model_sizes import hf_cache_path
 
             cache_dir = hf_cache_path()
@@ -356,8 +365,17 @@ class LocalWhisperProvider(AIProvider):
             await progress_callback("Preparing download", 0.0)
 
         def _download():
-            import torch
-            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+            try:
+                import torch
+                from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+            except ImportError as e:
+                logger.error("%s (%s)", _VOICE_MEMORY_HINT, e)
+                return {
+                    "success": False,
+                    "message": f"Download failed: {_VOICE_MEMORY_HINT}",
+                    "model_name": self.model_name,
+                    "cache_path": None,
+                }
             from .model_sizes import hf_cache_path
 
             cache_dir = hf_cache_path()
@@ -492,8 +510,12 @@ class LocalWhisperProvider(AIProvider):
                     await asyncio.to_thread(self._load_model)
 
         # Clear CUDA cache before transcription to free fragmented memory
-        import torch
-        if torch.cuda.is_available():
+        # (MLX transcribes without torch, so its absence is not an error here)
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
             free_mem_gb = torch.cuda.mem_get_info()[0] / 1024**3
             logger.debug(f"Cleared CUDA cache before transcription. Free memory: {free_mem_gb:.2f} GB")
@@ -502,7 +524,10 @@ class LocalWhisperProvider(AIProvider):
             # MLX path (Apple Silicon)
             if self.pipeline == "mlx":
                 import mlx_whisper
-                import librosa
+                try:
+                    import librosa
+                except ImportError as e:
+                    raise ImportError(f"{_VOICE_MEMORY_HINT} ({e})") from e
 
                 logger.info(f"Transcribing audio with MLX Whisper: model={self.model_name}")
                 start_time = asyncio.get_event_loop().time()
@@ -538,7 +563,10 @@ class LocalWhisperProvider(AIProvider):
 
             # PyTorch path (CUDA/MPS/CPU)
             else:
-                import librosa
+                try:
+                    import librosa
+                except ImportError as e:
+                    raise ImportError(f"{_VOICE_MEMORY_HINT} ({e})") from e
 
                 try:
                     audio_array, sample_rate = librosa.load(audio_path, sr=16000)

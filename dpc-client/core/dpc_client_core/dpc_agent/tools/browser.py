@@ -5594,7 +5594,7 @@ async def browse_page(
             )
             return (
                 "⚠️ Camoufox browser is not installed. Run "
-                "`uv sync --extra browser` in dpc-client/core to enable."
+                "`uv sync --extra browser --inexact` in dpc-client/core to enable."
             )
         except (RuntimeError, OSError) as e:
             # Camoufox launch / browser-binary failure / page load timeout

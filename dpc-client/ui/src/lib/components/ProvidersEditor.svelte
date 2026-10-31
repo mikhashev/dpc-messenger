@@ -1759,6 +1759,7 @@
                           placeholder="http://127.0.0.1:11434"
                         />
                         <p class="help-text">No API key needed for Ollama</p>
+                        <p class="help-text">Exact token counts for Ollama models need the voice-memory extra; without it they are estimated from characters. In dpc-client/core: <code>uv sync --extra voice-memory --inexact</code></p>
                       </div>
                     {/if}
 

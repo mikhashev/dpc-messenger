@@ -147,7 +147,7 @@ def _get_gliner_model(device: Optional[str] = None):
             from gliner import GLiNER
             import torch
         except ImportError:
-            log.debug("GLiNER not installed — skip entity extraction (install with: uv sync --extra graph-ner)")
+            log.debug("GLiNER not installed — skip entity extraction (install with: uv sync --extra graph-ner --inexact)")
             return None
         if device in (None, "auto"):
             resolved = "cuda" if torch.cuda.is_available() else "cpu"

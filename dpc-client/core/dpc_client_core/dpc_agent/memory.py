@@ -638,8 +638,15 @@ class EmbeddingProvider:
                     "lowercase \"true\" does", existing,
                 )
             os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "true")
-            from sentence_transformers import SentenceTransformer
-            import torch
+            try:
+                from sentence_transformers import SentenceTransformer
+                import torch
+            except ImportError as e:
+                raise ImportError(
+                    "memory search needs the voice-memory extra (not installed); "
+                    "from dpc-client/core run: uv sync --extra voice-memory "
+                    f"--inexact ({e})"
+                ) from e
             kwargs = {"device": self.device}
             dtype = self._torch_dtype()
             if dtype is not None:

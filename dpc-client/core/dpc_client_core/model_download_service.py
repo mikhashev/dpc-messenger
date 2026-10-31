@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import logging
 import os
 import threading
@@ -90,6 +91,19 @@ _OTHER_DOWNLOADS: Dict[str, Any] = {
 }
 
 
+# The Python package that loads each model, which is in the optional
+# `voice-memory` extra. A model not listed is not checked.
+_VOICE_MEMORY_PACKAGE: Dict[str, str] = {
+    "BAAI/bge-m3": "sentence_transformers",
+    "openai/whisper-large-v3-turbo": "transformers",
+}
+
+_VOICE_MEMORY_MISSING = (
+    "needs the voice-memory extra (not installed); from dpc-client/core run: "
+    "uv sync --extra voice-memory --inexact"
+)
+
+
 class ModelDownloadService:
     def __init__(self, llm_manager: Any, settings: Any, local_api: Any, firewall: Any = None):
         self.llm_manager = llm_manager
@@ -161,6 +175,16 @@ class ModelDownloadService:
             entry["error"] = error
         self._status[model_name] = entry
 
+    def _missing_package(self, model_name: str) -> Optional[str]:
+        """The import name of the package that loads `model_name` when it is
+        not installed, else None (installed, or a model this does not check)."""
+        package = _VOICE_MEMORY_PACKAGE.get(model_name)
+        if package is None and self._provider_alias_for(model_name) is not None:
+            package = "transformers"
+        if package is not None and importlib.util.find_spec(package) is None:
+            return package
+        return None
+
     async def maybe_emit_required(
         self,
         model_name: str,
@@ -171,6 +195,21 @@ class ModelDownloadService:
         on_decline: str = "degrade",
         provider_alias: Optional[str] = None,
     ) -> bool:
+        # Before any size read and before the dialog: nobody is asked to consent
+        # to gigabytes that the missing package then cannot load. The reason
+        # reaches the UI as the existing model_download_failed event.
+        package = self._missing_package(model_name)
+        if package is not None:
+            if self.settings.get_model_download_declined(model_name):
+                self._set_status(model_name, "declined")
+                return False
+            error = f"{model_name} {_VOICE_MEMORY_MISSING}"
+            self._set_status(model_name, "failed", error=error)
+            if model_name not in self._emitted_this_session:
+                self._emitted_this_session.add(model_name)
+                logger.warning("Not offering the %s download: %s", model_name, error)
+                await self.emit_failed(model_name, error)
+            return False
         other = _OTHER_DOWNLOADS.get(model_name)
         if other is not None:
             # The size is the one GitHub lists for the asset the package
@@ -400,7 +439,10 @@ class ModelDownloadService:
 
         def _download():
             os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "true")
-            from sentence_transformers import SentenceTransformer
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as e:
+                raise ImportError(f"{model_name} {_VOICE_MEMORY_MISSING} ({e})") from e
             # On the CPU and dropped at once: this call is for the files, and
             # the same loader fetches exactly the set the size table measured.
             SentenceTransformer(model_name, device="cpu", local_files_only=False)

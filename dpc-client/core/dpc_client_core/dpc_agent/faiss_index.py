@@ -19,6 +19,18 @@ from .index_meta import atomic_write_bytes, read_meta, write_meta
 log = logging.getLogger(__name__)
 
 
+def _import_faiss():
+    """faiss is in the optional `voice-memory` extra: say so when it is missing."""
+    try:
+        import faiss
+    except ImportError as e:
+        raise ImportError(
+            "memory search needs the voice-memory extra (not installed); from "
+            f"dpc-client/core run: uv sync --extra voice-memory --inexact ({e})"
+        ) from e
+    return faiss
+
+
 @dataclass
 class IndexHeader:
     model_name: str = ""
@@ -42,12 +54,12 @@ class FaissIndex:
 
     def _ensure_index(self):
         if self._index is None:
-            import faiss
+            faiss = _import_faiss()
             self._index = faiss.IndexFlatIP(self._header.dimensions)
 
     def add(self, vectors: np.ndarray, chunk_metas: List[dict]) -> None:
         self._ensure_index()
-        import faiss
+        faiss = _import_faiss()
         if vectors.ndim == 1:
             vectors = vectors.reshape(1, -1)
         faiss.normalize_L2(vectors)
@@ -60,7 +72,7 @@ class FaissIndex:
             return []
         if query_vector.ndim == 1:
             query_vector = query_vector.reshape(1, -1)
-        import faiss as _faiss
+        _faiss = _import_faiss()
         _faiss.normalize_L2(query_vector)
         scores, indices = self._index.search(query_vector, min(top_k, self._index.ntotal))
         results = []
@@ -81,7 +93,7 @@ class FaissIndex:
         removed = len(self._chunks) - len(keep)
         if removed == 0:
             return 0
-        import faiss
+        faiss = _import_faiss()
         new_index = faiss.IndexFlatIP(self._header.dimensions)
         if keep:
             vectors = np.vstack([self._index.reconstruct(i).reshape(1, -1) for i, _ in keep])
@@ -107,7 +119,7 @@ class FaissIndex:
         removed = len(self._chunks) - len(keep)
         if removed == 0:
             return 0
-        import faiss
+        faiss = _import_faiss()
         new_index = faiss.IndexFlatIP(self._header.dimensions)
         if keep:
             new_index.add(np.vstack([self._index.reconstruct(i).reshape(1, -1) for i, _ in keep]))
@@ -125,7 +137,7 @@ class FaissIndex:
         removed = len(self._chunks) - len(keep)
         if removed == 0:
             return 0
-        import faiss
+        faiss = _import_faiss()
         new_index = faiss.IndexFlatIP(self._header.dimensions)
         if keep:
             new_index.add(np.vstack([self._index.reconstruct(i).reshape(1, -1) for i in keep]))
@@ -137,7 +149,7 @@ class FaissIndex:
     def save(self) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         if self._index is not None:
-            import faiss
+            faiss = _import_faiss()
             # Written beside and moved into place: a reader arriving mid-write would
             # otherwise meet a truncated index, and `load()` answers that with False —
             # one turn of recall returning nothing, with no line anywhere saying why.
@@ -162,7 +174,7 @@ class FaissIndex:
             self._header = IndexHeader(**{k: v for k, v in h.items() if k in IndexHeader.__dataclass_fields__})
             self._chunks = data.get("chunks", [])
             if self._index_path.exists():
-                import faiss
+                faiss = _import_faiss()
                 self._index = faiss.read_index(str(self._index_path))
             # A row number is only meaningful against the chunk list: `search` maps
             # `idx` into it, so a list shorter than the index makes later rows

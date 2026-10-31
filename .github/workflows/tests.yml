@@ -51,7 +51,7 @@ jobs:
       # grafeo parity tests now skip themselves through `pytest.importorskip`.
       - name: Sync (with the extras whose tests exist here)
         working-directory: dpc-client/core
-        run: uv sync --extra browser --extra pdf
+        run: uv sync --extra browser --extra pdf --extra voice-memory
       # The extra brings the playwright package and no browser. The snapshot
       # secret-field tests run the real walk in Chromium and skip cleanly
       # without a binary — which here would mean ~60 skips under a green run,

@@ -355,11 +355,10 @@ If you cannot meet this, stop here: the steps below will not produce a working s
 
 ### Footprint
 
-This role does not use torch, transformers, sentence-transformers or faiss (importing
-the service pulls none of them in), but today a plain `uv sync` still installs them:
-about 3.0 GB to download on Windows and 4.2 GB on Linux (macOS arm64 about 280 MB).
-Moving the machine-learning stack into an optional extra is decided and comes later;
-until then the install is the full size.
+This role does not use torch, transformers, sentence-transformers or faiss, and a plain
+`uv sync` no longer installs them: they sit in the optional `voice-memory` extra (local
+Whisper voice transcription and agent memory search). The default install is the size
+of the rest of the client.
 
 ---
 
@@ -385,9 +384,12 @@ needs an internet connection.
 
 ## GPU acceleration
 
-`uv sync` installs a CUDA build of PyTorch for NVIDIA GPUs (used for
-local Whisper transcription and agent-memory embeddings). No NVIDIA GPU?
-The app still runs — PyTorch falls back to CPU, just slower.
+PyTorch is installed by the optional `voice-memory` extra
+(`uv sync --extra voice-memory --inexact`), which brings a CUDA build for
+NVIDIA GPUs (used for local Whisper transcription and agent-memory embeddings).
+No NVIDIA GPU? The app still runs — PyTorch falls back to CPU, just slower.
+Without the extra there is no PyTorch and those two features are off; the
+backend says so once in its log at start.
 
 **Troubleshooting — `NVIDIA ... with CUDA capability sm_120 is not
 compatible` or `no kernel image is available for execution on the
@@ -398,7 +400,7 @@ use `cu128`:
 
 ```bash
 cd dpc-client/core
-uv pip install --index-url https://download.pytorch.org/whl/cu128 "torch>=2.7" torchvision
+uv pip install --index-url https://download.pytorch.org/whl/cu128 "torch>=2.7"
 ```
 
 Note: `Loaded ... on cuda` in the logs does **not** confirm the GPU
@@ -409,20 +411,18 @@ with a quick `torch.randn(64,64,device="cuda") @ ...` if unsure.
 
 ```bash
 cd dpc-client/core
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+uv pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
 ```
 
 ---
 
 ## Optional features
 
-The default `uv sync` is lean only compared with `uv sync --all-extras`: it still
-installs the machine-learning stack (torch, transformers, sentence-transformers,
-faiss, librosa; CUDA torch from the cu128 index everywhere except macOS). Download
-size by `uv.lock`, measured 2026-10-31: Windows about 3.0 GB (about 4.9 GB on disk),
-Linux about 4.2 GB, macOS arm64 about 280 MB (CPU torch); the size on disk was
-measured on Windows only. Extras add optional capabilities and can be enabled at any
-time.
+The default `uv sync` is lean: it does not install the machine-learning stack
+(torch, transformers, sentence-transformers, faiss, librosa), which is the
+`voice-memory` extra below. Extras add optional capabilities and can be enabled at any
+time. (Before the extra existed the default install carried that stack: about 3.0 GB
+to download on Windows, 4.2 GB on Linux, measured 2026-10-31.)
 
 **`uv sync` makes the environment match exactly what you ask for.** Any extra
 you leave out of the command is *uninstalled* if it was there before. So pass
@@ -437,8 +437,9 @@ uv sync --all-extras
 
 | Extra | What it adds |
 |---|---|
+| `voice-memory` | torch, transformers, sentence-transformers, faiss, librosa — local Whisper voice transcription and agent memory search (bge-m3). Needs `uv`: a packaged app without it cannot add this |
 | `browser` | camoufox — headless browser tool for agents |
-| `graph-ner` | gliner — named-entity extraction |
+| `graph-ner` | gliner — named-entity extraction (includes `voice-memory`, gliner runs on torch) |
 | `pdf` | pypdfium2 — PDF reading for `read_document` |
 | `mlx` | macOS Apple Silicon only — GPU Whisper via MLX |
 

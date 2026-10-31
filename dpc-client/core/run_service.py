@@ -405,12 +405,37 @@ def setup_logging(settings):
         logger.info(_HF_STARTUP_NOTE)
 
 
+_VOICE_MEMORY_COMMAND = "uv sync --extra voice-memory --inexact"
+
+
+def _warn_if_voice_memory_missing():
+    """One WARNING when the optional `voice-memory` extra is not installed.
+
+    The stack (torch, transformers, sentence-transformers, faiss, librosa)
+    carries local Whisper transcription and agent memory search; the service
+    starts without it and those two features say what is missing. The command
+    needs `uv`, which a packaged app may not ship: there the extra is added
+    from a source checkout, or the features stay off. Called once logging exists.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("torch") is None:
+        logger.warning(
+            "The voice-memory extra is not installed: local voice transcription "
+            "(Whisper) and agent memory search (bge-m3) are unavailable. "
+            "From dpc-client/core run: %s (needs uv; --inexact keeps the other "
+            "extras)",
+            _VOICE_MEMORY_COMMAND,
+        )
+
+
 def dependency_setup():
     """Check GPU/torch status at startup (ADR-012).
 
     CUDA/ROCm torch is configured via platform markers in pyproject.toml
     [tool.uv.sources]. This function only verifies the result and warns
-    if there's a mismatch.
+    if there's a mismatch; with torch absent (the `voice-memory` extra not
+    installed) there is nothing to verify.
     """
     try:
         import torch
@@ -426,7 +451,8 @@ def dependency_setup():
             if result.returncode == 0:
                 gpu_name = result.stdout.strip()
                 print(f"\n[DPC] NVIDIA GPU detected ({gpu_name}) but torch lacks CUDA.")
-                print("[DPC] Try: rm -rf .venv && uv sync\n")
+                print("[DPC] The torch build comes from the cu128 index in pyproject.toml; "
+                      "check `uv sync --dry-run` before re-syncing, a bare sync drops the extras.\n")
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
     except ImportError:
@@ -475,6 +501,7 @@ async def main():
 
     # Setup logging infrastructure before service starts
     setup_logging(service.settings)
+    _warn_if_voice_memory_missing()
     job_outcome.log()
     sweep_outcome.log()
     # After logging, so its one-time warnings reach the file (ADR-046 point 3).

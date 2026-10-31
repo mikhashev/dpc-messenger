@@ -1,7 +1,7 @@
 # dpc_client_core/camoufox_binary.py
 """The Camoufox browser binary as a download the owner consents to (2026-10-21).
 
-`uv sync --extra browser` installs the camoufox Python package and no browser.
+`uv sync --extra browser --inexact` installs the camoufox Python package and no browser.
 Left to itself, the package fetches the browser on the first `Camoufox(...)`
 (`pkgman.camoufox_path(download_if_missing=True)`): the newest GitHub release,
 inside an agent's tool call, with a tqdm bar on stdout only. This module is the

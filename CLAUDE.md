@@ -92,7 +92,9 @@ uv run pytest --cov=dpc_client_core  # Run with coverage
 > ⚠️ **`uv sync` is declarative, not additive.** It makes the environment match
 > exactly what the command asks for, so a bare `uv sync` **uninstalls** every
 > optional extra installed earlier — `browser` (camoufox, playwright),
-> `graph-ner` (gliner), `pdf` (pypdfium2), `mlx` (Apple Silicon only).
+> `graph-ner` (gliner), `pdf` (pypdfium2), `voice-memory` (torch, transformers,
+> sentence-transformers, faiss, librosa: local Whisper voice and memory search),
+> `mlx` (Apple Silicon only).
 > Re-syncing an environment that uses extras asks the package rather than a
 > memory:
 >
@@ -130,12 +132,12 @@ cd dpc-client/core
 uv sync
 
 # Install with MLX support (enables GPU-accelerated offline transcription)
-uv sync --extra mlx
+uv sync --extra mlx --inexact
 ```
 
 > These two are alternatives, not steps — and `--extra mlx` alone drops any
 > other extras (see the `uv sync` warning above). On a machine that also uses
-> `browser`/`graph-ner`/`pdf`, take them all at once with `uv sync --all-extras`:
+> `browser`/`graph-ner`/`pdf`/`voice-memory`, take them all at once with `uv sync --all-extras`:
 > `mlx` carries `sys_platform == 'darwin' and platform_machine == 'arm64'`, so
 > the same command installs it on Apple Silicon and skips it everywhere else.
 
@@ -640,7 +642,7 @@ Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CH
 **Transcription:**
 - **Local Whisper**: `LocalWhisperProvider` in `providers/whisper_provider.py`
 - **GPU Acceleration**:
-  - MLX (Apple Silicon M1/M2/M3/M4) - Optional via `uv sync --extra mlx`
+  - MLX (Apple Silicon M1/M2/M3/M4) - Optional via `uv sync --extra mlx --inexact`
   - CUDA (NVIDIA GPUs) - Auto-detected
   - MPS (macOS Metal) - Fallback
   - CPU - Universal fallback

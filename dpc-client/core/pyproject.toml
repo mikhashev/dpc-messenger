@@ -26,15 +26,10 @@ dependencies = [
     # 13.0.0 is the floor because it closes the October 2026 advisories that
     # every release up to 12.3.0 carries, five of them critical.
     "Pillow>=13.0.0",
-    "transformers>=4.44.0,<5.0.0",
-    "sentencepiece>=0.2.0,<0.3.0",
-    "torch>=2.7.0,<3.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "torchvision>=0.22.0,<1.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "accelerate>=0.34.0,<1.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "librosa>=0.10.0,<1.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "soundfile>=0.12.0,<1.0.0",
-    "sentence-transformers>=5.4.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "faiss-cpu>=1.8; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    # Declared, not inherited: faiss_index.py, indexing_pipeline.py and the
+    # retrieval/ modules import it at top level, and until the machine-learning
+    # stack moved into the voice-memory extra torch and faiss brought it in.
+    "numpy>=2.0,<3.0",
     "python-telegram-bot>=21.0,<22.0",
     "google-genai>=1.0.0",
     "gigachat>=0.2.0",
@@ -67,6 +62,29 @@ pdf = [
     # The last release whose x86_64 macOS wheel still accepts 12.x.
     "pypdfium2>=5.0,<5.12; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
+# The machine-learning stack, off the default install (Mike's call, 2026-10-31).
+# Local Whisper voice transcription (torch, transformers, accelerate, librosa,
+# soundfile, sentencepiece) and agent memory search (sentence-transformers with
+# bge-m3, faiss-cpu). Without it the client starts, chats, and everything else
+# works; those two features say what is missing instead of failing in silence.
+# The CUDA build of torch is the bulk of the default install on Windows and
+# Linux, which is why a machine that never transcribes or searches memory should
+# not carry it.
+#
+# `uv sync --all-extras` installs this on every OS and stays safe because each
+# line carries its own platform marker: torch and what needs it keep the
+# Intel-mac marker (no torch wheel for that platform), the rest are plain
+# wheels. Add a line without its marker and --all-extras breaks on an untested OS.
+voice-memory = [
+    "transformers>=4.44.0,<5.0.0",
+    "sentencepiece>=0.2.0,<0.3.0",
+    "torch>=2.7.0,<3.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "accelerate>=0.34.0,<1.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "librosa>=0.10.0,<1.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "soundfile>=0.12.0,<1.0.0",
+    "sentence-transformers>=5.4.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "faiss-cpu>=1.8; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+]
 mlx = [
     "mlx>=0.4.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-whisper>=0.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -84,6 +102,10 @@ browser = [
 ]
 graph-ner = [
     "gliner>=0.2.20",
+    # GLiNER runs on torch; naming the extra here keeps torch coming from the
+    # one index [tool.uv.sources] points it at, instead of resolving a second
+    # copy from PyPI.
+    "dpc-client-core[voice-memory]",
 ]
 
 [dependency-groups]
@@ -96,7 +118,6 @@ dev = [
 [tool.uv.sources]
 dpc-protocol = { path = "../../dpc-protocol", editable = true }
 torch = { index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }
-torchvision = { index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
