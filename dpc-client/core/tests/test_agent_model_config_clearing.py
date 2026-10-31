@@ -1,6 +1,6 @@
 """Choosing «Default (global)» has to be a choice, not a no-op.
 
-The Agent Models Configuration dialog offers `<option value="">Default
+The "Agent <name> Configuration" dialog offers `<option value="">Default
 (global)</option>` for the sleep, snapshot-summarisation and compaction models.
 Selecting it produced an empty string, which the save handler converted to
 `null`, which this layer reads as «the caller did not mention this field» — so

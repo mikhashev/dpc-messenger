@@ -1116,7 +1116,7 @@
                 value={$chatEfforts.get(activeChatId) || ''}
                 onchange={(e: Event) => {
                   // A lever over this chat, not the agent's setting: the level the
-                  // agent keeps lives in Agent Models Configuration, and the empty
+                  // agent keeps lives in the Agent <name> Configuration dialog, and the empty
                   // option is how a chat hands the choice back to it.
                   const level = (e.currentTarget as HTMLSelectElement).value;
                   chatEfforts.update(m => new Map(m).set(activeChatId, level));

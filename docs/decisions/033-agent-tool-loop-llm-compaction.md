@@ -93,7 +93,7 @@ Scope is the agent loop only; the human chat (hard-block at 100%) is not touched
   regardless of input, but 1.7–4.1s with thinking off. Compaction is a mechanical task; reasoning
   only adds a latency floor that blows any workable timeout.
 - Per-agent auxiliary-model configuration already exists for snapshot summarization and sleep
-  consolidation and is already exposed in the **Agent Models Configuration** UI dialog; compaction
+  consolidation and is already exposed in the agent's models UI dialog (titled "Agent <name> Configuration" since 2026-10-31); compaction
   becomes a third field of the same kind rather than a new subsystem.
 
 ## Considered Options
@@ -172,7 +172,7 @@ Bench scripts: `docs/decisions/adr-033-benches/`.
 - `agent_service.py` — `set_agent_models` / `get_agent_models`: add `compaction_enabled`,
   `compaction_provider`, and `compaction_threshold` keys, mirroring the existing
   `snapshot_summarize_*` keys.
-- `dpc-client/ui/src/lib/components/Sidebar.svelte` — Agent Models Configuration dialog: add a
+- `dpc-client/ui/src/lib/components/Sidebar.svelte` — the agent configuration dialog ("Agent <name> Configuration"): add a
   "Compaction" enable toggle, a "Compaction LLM" dropdown, and a "Compaction threshold" input,
   mirroring the Snapshot fields.
 - Session stats / `budget.py` — log compaction token spend as a distinct `compaction_tokens_spent`

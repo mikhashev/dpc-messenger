@@ -360,8 +360,9 @@ If you cannot meet this, stop here: the steps below will not produce a working s
 
 This role does not use torch, transformers, sentence-transformers or faiss (importing
 the service pulls none of them in), but today a plain `uv sync` still installs them:
-about 3 GB on Windows and Linux. Moving the machine-learning stack into an optional
-extra is decided and comes later; until then the install is the full size.
+about 3.0 GB to download on Windows and 4.2 GB on Linux (macOS arm64 about 280 MB).
+Moving the machine-learning stack into an optional extra is decided and comes later;
+until then the install is the full size.
 
 ---
 
@@ -418,8 +419,13 @@ uv pip install torch torchvision --index-url https://download.pytorch.org/whl/ro
 
 ## Optional features
 
-The default `uv sync` stays lean. Extras add optional capabilities and can be
-enabled at any time.
+The default `uv sync` is lean only compared with `uv sync --all-extras`: it still
+installs the machine-learning stack (torch, transformers, sentence-transformers,
+faiss, librosa; CUDA torch from the cu128 index everywhere except macOS). Download
+size by `uv.lock`, measured 2026-10-31: Windows about 3.0 GB (about 4.9 GB on disk),
+Linux about 4.2 GB, macOS arm64 about 280 MB (CPU torch); the size on disk was
+measured on Windows only. Extras add optional capabilities and can be enabled at any
+time.
 
 **`uv sync` makes the environment match exactly what you ask for.** Any extra
 you leave out of the command is *uninstalled* if it was there before. So pass

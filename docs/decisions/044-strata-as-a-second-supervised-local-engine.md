@@ -118,7 +118,8 @@ card.** Every point is Mike's call, 2026-10-18.
    type `_warn_if_explicit_type_exceeds_budget` only warns and loads, so the
    `llama-server` child would otherwise start while Strata holds the card and silently
    page through WDDM. The supervisor's existing stop is exposed for a manual switch.
-5. **Updates are mixed.** Strata installs and updates through its own scripts
+5. ~~**Updates are mixed.**~~ Superseded 2026-10-31 (Mike's call): the tested version gives
+   way to a pin in code, see the amendment of that date below. Strata installs and updates through its own scripts
    (`START-HERE.bat`, `UPDATE.bat`); DPC starts `serve/server.py` directly with its own
    `--config` file (point 6). DPC stores a *tested version* with its date in the provider
    config. At start the supervisor reads the real engine's version from `/metrics`
@@ -244,8 +245,9 @@ scheduler.
   parking (that layer, like all of Strata's HTTP, belongs to its launcher), no `project`
   control vector. That llama.cpp would compute the experts on the CPU is read from its
   `--help`, not measured.
-- **DPC installs and pins Strata as it does llama.cpp** — not now: the mixed update of
-  point 5 is cheaper while upstream moves fast; it is the fallback Ark's falsifier names.
+- **DPC installs and pins Strata as it does llama.cpp** — ~~not now: the mixed update of
+  point 5 is cheaper while upstream moves fast; it is the fallback Ark's falsifier names.~~
+  Taken 2026-10-31 (Mike's call): see the amendment of that date below.
 
 ## Consequences
 

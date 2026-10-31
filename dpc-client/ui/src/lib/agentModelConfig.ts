@@ -1,5 +1,5 @@
 /**
- * The payload the Agent Models Configuration dialog sends.
+ * The payload the "Agent <name> Configuration" dialog sends.
  *
  * Extracted from Sidebar.svelte because the difference between "the user chose
  * Default (global)" and "the caller did not mention this field" lives here, and

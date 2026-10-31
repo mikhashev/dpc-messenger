@@ -506,7 +506,7 @@ holds on Windows only.
    - **On screen,** a card of its own (the UI card waits on the API command): activity in
      the agent's row of the AGENTS list (working or idle, the **turn** and the chats
      **waiting** for it, since when, thinking or tool or command, live process count) and
-     details in Agent Models Configuration,
+     details in the agent configuration dialog ("Agent <name> Configuration"),
      shaped like an agent map: the agent, its current and recent runs, their tool calls
      and the processes they started with pid, command, start, resources and how each
      ended. The system section lists Strata, `llamacpp_server` and the browser with RSS and
@@ -859,7 +859,7 @@ files.**
 | Review fixes of the move: the structural test walks every script under `dpc-client/core` (`probe_rename_orphan.py` allow-listed), an entry's `due` is an ISO date or `None` and fails once passed (`comfyui`: `None`), the `explorer.exe` entry's reason; a device probe let through the stop only with `while_stopping` (Strata's release check alone passes it); git given `GIT_STOP_GRACE_S` (10 s, one budget) at steps 2 and 5 with the `index.lock` WARNING; `SupervisedRun.stdout`/`stderr` typed `str` or `bytes`; tests in the two files above and `tests/test_the_process_registry_records_how_every_child_ends.py` | Done 2026-10-26 | the commit that carries this row |
 | Local API command `list_processes` (`ProcessRegistry.list_processes`: the kept entries, the daily history for `since`/`until`, `commit_mb` read at the request on Windows; `free_commit` by `commit_memory.read_free_commit_or_physical`, physical memory by psutil and commit null off Windows); agent tools `list_my_processes` and `kill_my_process` (`ProcessRegistry.cancel_by_agent`, the orderly stop's announce-kill-end path with `cancelled_by_agent`); `FreeCommitReading` and `freeCommitLine` in the UI take a reading with no commit; tests in `tests/test_the_local_api_answers_which_processes_run_now.py` and `tests/test_an_agent_sees_and_ends_only_its_own_processes.py` | Done 2026-10-27 | the commit that carries this row |
 | The turn and the waiting chats (point 8, amended 2026-10-27): `RunGate` in `dpc_agent/run_gate.py` for the agent's run gate (both doors register the chat they answer in) and the room lock (`room_busy`); `model_call` around the adapter's call, `approval` around the run_shell and schedule_task waits (from the executor thread through `call_soon_threadsafe`), `round` and `tool` from the loop; `turn` and `waiting` on each `list_agents` row and `agent_turn_updated` at every change; the words for them (`utils/agentTurnNotice.ts`; the line in the waiting chat was removed on 2026-10-27, Mike's call: the sidebar's state line says it) with the 120 s rule (`TURN_UNCONFIRMED_AFTER_S`); tests in `tests/test_a_waiting_chat_is_on_the_run_gate_until_it_runs.py`, `tests/test_the_turn_says_when_it_waits_for_the_model_or_an_approval.py` and `src/lib/utils/agentTurnNotice.test.ts` | Done 2026-10-27 | the commit that carries this row |
-| UI: AGENTS row and Agent Models Configuration (own card) | Pending | — |
+| UI: AGENTS row and the agent configuration dialog (own card) | Pending | — |
 
 ## Open Questions
 
