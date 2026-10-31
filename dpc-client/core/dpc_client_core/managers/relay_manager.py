@@ -109,6 +109,9 @@ class RelayManager:
         self.sessions: Dict[str, RelaySession] = {}  # session_id -> RelaySession
         self.peer_to_session: Dict[str, str] = {}  # node_id -> session_id
         self.peer_connections: Dict[str, Any] = {}  # node_id -> PeerConnection (for forwarding)
+        # node_id -> the node_id it registered for and is still waiting to see
+        # register back; pairs into a session when the target names it in turn
+        self.peer_waiting_for: Dict[str, str] = {}
         self.rate_limits: Dict[str, List[float]] = defaultdict(list)  # node_id -> timestamps
 
         # Client mode: pending session handshakes and active relayed connections
@@ -650,9 +653,9 @@ class RelayManager:
 
         Algorithm:
             1. Check if we're at capacity (max_peers)
-            2. Check if target is already registered
-            3. If target registered, create session and notify both peers
-            4. If target not registered, wait for target to register
+            2. Check if target is already waiting for this requester
+            3. If so, create session (the caller notifies both peers)
+            4. If not, remember that the requester waits for the target
 
         Example:
             >>> # Peer A registers first
@@ -688,9 +691,11 @@ class RelayManager:
         # Store connection reference for message forwarding
         self.peer_connections[requester_id] = requester_connection
 
-        # Check if target already registered
-        if target_id in self.peer_to_session:
-            # Both peers registered - create session
+        # The target is waiting for exactly this requester: the pair is complete.
+        # (A target waiting for somebody else is not a match.)
+        if self.peer_waiting_for.get(target_id) == requester_id:
+            self.peer_waiting_for.pop(target_id, None)
+            self.peer_waiting_for.pop(requester_id, None)
             session_id = str(uuid.uuid4())
             session = RelaySession(
                 session_id=session_id,
@@ -710,9 +715,23 @@ class RelayManager:
             logger.info("Relay session created: %s (peers: %s, %s)", session_id, requester_id[:20], target_id[:20])
             return session_id
         else:
-            # Waiting for target to register
+            # Waiting for target to register; a repeat registration replaces
+            # the requester's own earlier entry
+            self.peer_waiting_for[requester_id] = target_id
             logger.debug("Waiting for target peer %s to register", target_id[:20])
             return None
+
+    def forget_peer(self, node_id: str) -> None:
+        """Drop what the relay holds for a peer whose connection to us is gone.
+
+        Its waiting entry (so a later registration of its target waits rather
+        than pairing with a dead connection) and its forwarding connection.
+        Sessions are left to RELAY_DISCONNECT, as before.
+        """
+        waiting = self.peer_waiting_for.pop(node_id, None)
+        connection = self.peer_connections.pop(node_id, None)
+        if waiting is not None or connection is not None:
+            logger.debug("Relay forgot peer %s (waiting=%s)", node_id[:20], waiting is not None)
 
     async def handle_relay_message(
         self,

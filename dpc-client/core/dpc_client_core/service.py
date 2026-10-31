@@ -1977,6 +1977,11 @@ class CoreService:
         """
         logger.info(f"Handling peer disconnection cleanup for {peer_id}")
 
+        # A volunteer relay keeps no waiting entry or forwarding connection for a peer that has gone.
+        relay_manager = getattr(self, 'relay_manager', None)
+        if relay_manager:
+            relay_manager.forget_peer(peer_id)
+
         # Find all active transfers with this peer
         transfers_to_cancel = [
             (transfer_id, transfer)

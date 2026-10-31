@@ -78,16 +78,17 @@ async def test_a_relay_session_naming_a_blocked_node_is_never_created(caplog):
 
 @pytest.mark.asyncio
 async def test_a_registration_between_unblocked_nodes_is_admitted():
-    """Admitted = its connection is kept for forwarding. (That the second
-    registration then finds no session is the relay's own, older matter:
-    the first never writes `peer_to_session`.)"""
+    """Positive control: two unblocked nodes registering for each other form a session."""
     relay = RelayManager(SimpleNamespace(node_id=SELF), p2p_manager=_p2p(BLOCKED), volunteer=True)
     other = "dpc-node-" + "e" * 32
-    conn = object()
+    conn, other_conn = object(), object()
 
-    await relay.handle_relay_register(FRIEND, other, conn)
+    assert await relay.handle_relay_register(FRIEND, other, conn) is None
+    session_id = await relay.handle_relay_register(other, FRIEND, other_conn)
 
-    assert relay.peer_connections == {FRIEND: conn}
+    assert session_id is not None and session_id in relay.sessions
+    assert relay.peer_connections == {FRIEND: conn, other: other_conn}
+    assert relay.peer_to_session == {FRIEND: session_id, other: session_id}
 
 
 # --- relay, client side ----------------------------------------------------
