@@ -68,7 +68,7 @@ describe('Strata resident budget and VRAM reserve fields', () => {
 function script(name: string, params: string[], scope: string[]) {
   const m = src.match(new RegExp(String.raw`function ${name}\([^)]*\)[^{]*\{([\s\S]*?)\n  \}`));
   expect(m, name + ' is in the script').not.toBeNull();
-  return new Function(...scope, ...params, m![1]);
+  return new Function(...scope, ...params, m![1].replace(/ as any/g, ''));
 }
 
 describe('a Strata key with a typed alias field is not offered a second time', () => {
@@ -112,5 +112,53 @@ describe('a Strata key with a typed alias field is not offered a second time', (
     expect(at([{ alias: 'a' }], undefined)).toBe('engine default 700');
     expect(at([{ alias: 'a', model_params: { vram_reserve_mib: 900 } }], 1536)).toContain('900');
     expect(at([{ alias: 'a', model_params: { vram_reserve_mib: 900 } }], 1536)).not.toContain('1536');
+  });
+});
+
+describe('Strata alias-level reasoning effort and max_tokens fields', () => {
+  it('both are in the Strata section, written through the shared setters', () => {
+    const effort = block('strata-reasoning-effort');
+    expect(effort).toContain("on:change={(e) => setStr(i, 'reasoning_effort', e.currentTarget.value)}");
+    expect(effort).toContain('value={sp.reasoning_effort ?? \'\'}');
+    expect(effort).not.toContain('bind:value');
+    const max = block('strata-max-tokens');
+    expect(max).toContain("on:input={(e) => setNum(i, 'max_tokens', e.currentTarget.value)}");
+    expect(max).toContain('value={sp.max_tokens ?? \'\'}');
+    expect(max).toContain('placeholder="default 8192"');
+    expect(max).not.toContain('bind:value');
+  });
+
+  it('they sit inside the Strata section, not the llama-server one', () => {
+    const strata = src.indexOf("editedConfig.providers[i].type === 'strata'}");
+    for (const id of ['strata-reasoning-effort', 'strata-max-tokens']) {
+      expect(src.indexOf(`id="${id}-{i}"`)).toBeGreaterThan(strata);
+    }
+  });
+
+  it('each is drawn once per alias, not once per entry of the model-parameters list', () => {
+    const paramsLoop = src.indexOf('{#each STRATA_PARAMS_LISTED as spec}');
+    expect(paramsLoop).toBeGreaterThan(-1);
+    for (const id of ['strata-reasoning-effort', 'strata-max-tokens']) {
+      expect(src.indexOf(`id="${id}-{i}"`)).toBeLessThan(paramsLoop);
+    }
+  });
+
+  it('the empty select says what is sent, and the help says what unset means', () => {
+    const b = block('strata-reasoning-effort');
+    expect(b).toContain("Not set — the chat template's default is sent");
+    expect(b).toContain('<p class="help-text">');
+    expect(block('strata-max-tokens')).toContain('Empty sends');
+  });
+
+  it('an emptied effort or ceiling deletes the key instead of writing "" or 0', () => {
+    const providers: Record<string, unknown>[] = [{ alias: 'f', reasoning_effort: 'low', max_tokens: 16384 }];
+    expect(setNum(providers, 0, 'max_tokens', '8192').max_tokens).toBe(8192);
+    expect('max_tokens' in setNum(providers, 0, 'max_tokens', '')).toBe(false);
+    const setStr = script('setStr', ['i', 'key', 'raw'], ['editedConfig']);
+    const cfg: any = { providers };
+    setStr(cfg, 0, 'reasoning_effort', 'xhigh');
+    expect(cfg.providers[0].reasoning_effort).toBe('xhigh');
+    setStr(cfg, 0, 'reasoning_effort', '');
+    expect('reasoning_effort' in cfg.providers[0]).toBe(false);
   });
 });

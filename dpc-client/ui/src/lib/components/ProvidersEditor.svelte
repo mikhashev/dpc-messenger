@@ -2709,6 +2709,47 @@
                         </p>
                       </div>
 
+                      <div class="form-group">
+                        <label for="strata-reasoning-effort-{i}">Reasoning effort (optional)</label>
+                        <select
+                          id="strata-reasoning-effort-{i}"
+                          value={sp.reasoning_effort ?? ''}
+                          on:change={(e) => setStr(i, 'reasoning_effort', e.currentTarget.value)}
+                        >
+                          <option value="">Not set — the chat template's default is sent</option>
+                          <option value="off">Off</option>
+                          {#each effortOptions(effortWords, sp.alias, sp.reasoning_effort) as w}
+                            <option value={w.value}>{w.label}</option>
+                          {/each}
+                        </select>
+                        <p class="help-text">
+                          The level this alias asks for when neither the chat nor the agent named one. Unset
+                          still sends a word: Strata would fill a request without one from its own shared
+                          settings, so DPC sends the chat template's default rung (<code>xhigh</code> when the
+                          template names none). The list is the shared scale; <code>high</code> and
+                          <code>max</code> are folded onto <code>xhigh</code>. A word the template refuses is
+                          refused on save.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="strata-max-tokens-{i}">Max output tokens (max_tokens)</label>
+                        <input
+                          id="strata-max-tokens-{i}"
+                          type="number"
+                          min="1"
+                          value={sp.max_tokens ?? ''}
+                          on:input={(e) => setNum(i, 'max_tokens', e.currentTarget.value)}
+                          placeholder="default 8192"
+                        />
+                        <p class="help-text">
+                          The output window each request carries: thinking and answer share it. Empty sends
+                          8192. Only a plain or image call can name its own ceiling; chat streams and agent rounds
+                          always use this one. Not a flag Strata is started with — changing it does not restart
+                          the engine.
+                        </p>
+                      </div>
+
                       <details class="supervisor-flags">
                         <summary>Model parameters (Strata's own settings page)</summary>
                         <p class="help-text">

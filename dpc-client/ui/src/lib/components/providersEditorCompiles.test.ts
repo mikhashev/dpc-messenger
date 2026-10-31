@@ -121,6 +121,7 @@ describe('ProvidersEditor compiled output', () => {
         'effortOptions(effortWords, editedConfig.providers[i].alias',
         'effortOptions(editedConfig.providers[i].alias',
       )
+      .replace('effortOptions(effortWords, sp.alias', 'effortOptions(sp.alias')
       .replace(
         'function effortOptions(allWords: typeof effortWords, alias: string, current?: string) {\n    const known = allWords[alias]',
         'function effortOptions(alias: string, current?: string) {\n    const allWords = effortWords;\n    const known = allWords[alias]',
