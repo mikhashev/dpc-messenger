@@ -109,6 +109,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_status",
     "connect_to_peer",
     "connect_via_dht",
+    "test_port",  # the CLI's check before connect_to_peer
     "disconnect_from_peer",
     # Block / Unblock: blocked_nodes in privacy_rules.json
     "block_peer",

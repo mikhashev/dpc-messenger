@@ -65,6 +65,21 @@ async def test_a_peer_row_carries_the_connection_it_was_built_from():
 
 
 @pytest.mark.asyncio
+async def test_a_peer_row_says_which_tier_proved_the_peer_or_did_not():
+    """What the gateway's peer route checks (ADR-041 D2), so the CLI need not
+    infer it from the strategy's name."""
+    stub = _status_stub({
+        "dpc-node-alice": SimpleNamespace(strategy_used="ipv4_direct", connection_type="direct_tls"),
+        "dpc-node-bob": SimpleNamespace(strategy_used="hub_webrtc", connection_type="webrtc"),
+    })
+
+    rows = {r["node_id"]: r for r in (await CoreService.get_status(stub))["peer_info"]}
+
+    assert (rows["dpc-node-alice"]["connection_type"], rows["dpc-node-alice"]["peer_proved"]) == ("direct_tls", True)
+    assert (rows["dpc-node-bob"]["connection_type"], rows["dpc-node-bob"]["peer_proved"]) == ("webrtc", False)
+
+
+@pytest.mark.asyncio
 async def test_no_peers_means_no_rows_rather_than_a_row_saying_false():
     """The absent-peer baseline: the field is never a *dis*connected claim."""
     status = await CoreService.get_status(_status_stub({}))

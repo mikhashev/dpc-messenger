@@ -275,39 +275,36 @@ If you cannot meet this, stop here: the steps below will not produce a working s
    link drops. Auto-connect tries every tier, so check that the link ended up on direct
    TLS (the condition above).
 4. **The first connection.** A fresh node cannot find the host by itself: `[dht] seed_nodes`
-   is empty by default and the peer cache has nothing in it. Make one `connect_to_peer`
-   call over the local API with the backend running. Save this as `connect_once.py` (it
-   uses `websockets`, which is already installed) and run it from `dpc-client/core` with
-   `uv run python connect_once.py`:
+   is empty by default and the peer cache has nothing in it. Make one connection by hand
+   with the command-line client, from `dpc-client/core`:
 
-   ```python
-   import asyncio, json, pathlib, websockets
-
-   HOST_URI = "dpc://203.0.113.5:8888?node_id=dpc-node-<host id>"  # the host's address and id
-
-   async def main():
-       token = (pathlib.Path.home() / ".dpc" / ".ws_token").read_text().strip()
-       async with websockets.connect("ws://127.0.0.1:9999") as ws:
-           await ws.send(json.dumps({"command": "auth", "token": token, "id": "1"}))
-           print(await ws.recv())  # the auth answer
-           await ws.send(json.dumps({"id": "2", "command": "connect_to_peer",
-                                     "payload": {"uri": HOST_URI}}))
-           while True:  # events can arrive in between; wait for our own id
-               message = json.loads(await ws.recv())
-               if message.get("id") == "2":
-                   print(message)  # "status": "OK" means connected
-                   break
-
-   asyncio.run(main())
+   ```bash
+   uv run python -m dpc_client_core.cli connect "dpc://<host address>:8888?node_id=dpc-node-<host id>"
    ```
 
-   A small command-line tool for this step is planned next and will replace the snippet.
+   The CLI is a client, not a second backend: the backend must already be running on this
+   machine (`uv run python run_service.py`), because the CLI reads the token it wrote to
+   `~/.dpc/.ws_token` and talks to its local API on port 9999. It checks the port, connects,
+   and then prints which transport the link to the host ended up on. If that is not direct
+   TLS it says so, because the peer route serves models over direct TLS only. A host you
+   blocked on this node is reported as blocked (unblock it first), not as a network failure.
+   `connect dpc-node-<host id>` (no URI) searches the DHT and the peer cache instead, and
+   on a fresh node with no seed it tells you to use the URI.
    After one successful call the host's address is in the peer cache
    (`~/.dpc/peer_cache.json`) and later starts reconnect without it. If only the guest
    is reachable on 8888, run the same call on the host instead, with the guest's address
    and id.
 5. The gateway key is `~/.dpc/.gateway_key`. It is created on the first start with the
-   gateway on, and nothing rotates it by itself.
+   gateway on, and nothing rotates it by itself. Read it with the CLI:
+
+   ```bash
+   uv run python -m dpc_client_core.cli gateway key     # the key, in clear
+   uv run python -m dpc_client_core.cli gateway lines   # paste-ready settings for Continue, Cursor, Claude Code, curl
+   uv run python -m dpc_client_core.cli gateway state   # on or off, port, masked key
+   ```
+
+   `gateway rotate --yes` makes a new key; every tool configured with the old one then
+   gets a 401 until you paste the new one.
 6. List the models:
 
    ```bash

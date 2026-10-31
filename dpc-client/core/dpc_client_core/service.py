@@ -36,7 +36,7 @@ from .firewall import NODE_ID_RE, VENDOR_PROVIDER_TYPES, ContextFirewall, is_blo
 from .dpc_agent.pricing import vendor_ceiling_currency
 from . import node_ledger
 from .hub_client import HubClient
-from .p2p_manager import P2PManager
+from .p2p_manager import P2PManager, peer_proof
 from .own_addresses import lan_addresses
 from .llm_manager import LLMManager, PROVIDER_MAP, entry_point_for
 from . import provider_alias_refs
@@ -2412,10 +2412,15 @@ class CoreService:
         # Get peer info with names
         peer_info = []
         for peer_id, peer_conn in self.p2p_manager.peers.items():
+            peer_proved, connection_type = peer_proof(self.p2p_manager.peers, peer_id)
             peer_data = {
                 "node_id": peer_id,
                 "name": self.peer_metadata.get(peer_id, {}).get("name", None),
                 "strategy_used": getattr(peer_conn, 'strategy_used', None),
+                # The tier that proved the peer's key, or did not (ADR-041 D2): what the
+                # gateway's peer route checks, so a client need not infer it from the strategy.
+                "connection_type": connection_type,
+                "peer_proved": peer_proved,
                 # Every row here is built from `p2p_manager.peers`, which holds
                 # the connections that exist; the field says so rather than
                 # leaving each reader to infer it from the list it came in.
