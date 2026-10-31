@@ -529,6 +529,11 @@ UNSERVED_ROUTES = {
         "same prompt as one user turn to POST /v1/chat/completions, which this gateway serves; "
         "GET /v1/models lists the aliases it answers for"
     ),
+    "/v1/responses": (
+        "/v1/responses is not served: the OpenAI Responses API has no route here. A client that defaults "
+        "to it (Codex, for one) has to be set to Chat Completions and send to POST "
+        "/v1/chat/completions, which this gateway serves; GET /v1/models lists the aliases it answers for"
+    ),
     COMPLETE_PATH: (
         "/v1/complete is not served: the legacy Anthropic Text Completions form has no route "
         "here. Send the same prompt as one user message to POST /v1/messages, which this gateway "

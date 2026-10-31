@@ -33,12 +33,13 @@ from tests.test_the_gateway_speaks_the_anthropic_messages_form_over_the_same_doo
     _anthropic_error,
 )
 
-# The three, written out here rather than read from the module, so a route
+# The four, written out here rather than read from the module, so a route
 # quietly dropped from `UNSERVED_ROUTES` fails a test instead of shrinking the
 # loop that checks them.
 EMBEDDINGS = "/v1/embeddings"
 COMPLETIONS = "/v1/completions"
 COMPLETE = "/v1/complete"
+RESPONSES = "/v1/responses"
 
 
 @pytest.mark.asyncio
@@ -46,7 +47,7 @@ async def test_each_unserved_route_is_404_naming_itself_and_the_routes_that_are_
     service = _service(tmp_path, BOTH_LISTS)
     async with _running(tmp_path, service) as (server, ledger):
         key = _key(tmp_path)
-        for path in (EMBEDDINGS, COMPLETIONS):
+        for path in (EMBEDDINGS, COMPLETIONS, RESPONSES):
             status, text = await _request(server, "POST", path, key=key, body={"input": "hi"})
             error = json.loads(text)["error"]
             assert status == 404, path
@@ -105,4 +106,16 @@ async def test_the_three_served_routes_still_answer(tmp_path):
     async with _running(tmp_path, _service(tmp_path, BOTH_LISTS)) as (server, _):
         status, _text = await _request(server, "GET", "/v1/models", key=_key(tmp_path))
         assert status == 200
-        assert set(UNSERVED_ROUTES) == {EMBEDDINGS, COMPLETIONS, COMPLETE}
+        assert set(UNSERVED_ROUTES) == {EMBEDDINGS, COMPLETIONS, COMPLETE, RESPONSES}
+
+
+@pytest.mark.asyncio
+async def test_the_responses_refusal_points_a_codex_style_client_to_chat_completions(tmp_path):
+    """QUICK_START tells such a client to switch to Chat Completions; the refusal
+    says the same, so a client that reads only the body is not left guessing."""
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS)) as (server, _):
+        status, text = await _request(server, "POST", RESPONSES, key=_key(tmp_path),
+                                      body={"model": "anything", "input": "hi"})
+        assert status == 404
+        message = json.loads(text)["error"]["message"]
+        assert "Chat Completions" in message and "/v1/chat/completions" in message
