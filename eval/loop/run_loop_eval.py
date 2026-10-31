@@ -730,13 +730,14 @@ def _strata_dry_run(entry: Dict[str, Any]) -> None:
     """What a `strata` alias would start, without starting it: the alias's own
     errors with its paths checked, the launcher, the base config, and the files
     of the start config DPC would write. The engine's version is read only by a
-    running launcher, so the tested version is printed, not compared."""
+    running launcher, so the pin is printed, not compared."""
     facts = local_engine.strata_start_facts(entry)
     for key in ("install", "python", "server_script", "base_config"):
         if key in facts:
             exists = facts.get(f"{key}_exists")
             print(f"  {key}: {facts[key]}" + ("" if exists is None else f" (exists={exists})"))
-    print(f"  tested version: {facts.get('tested_version')!r} ({facts.get('tested_version_date')})")
+    pin = facts["pin"]
+    print(f"  pin: Strata {pin['release_tag']} (engine {pin['engine_version']})")
     missing = []
     for key, value in facts.get("model_files", {}).items():
         rec = local_engine.path_record(value)

@@ -19,6 +19,7 @@ import pytest
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.managers import strata_supervisor as mod
 from dpc_client_core.managers.llama_server_supervisor import LlamaServerError
+from dpc_client_core.managers.strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG
 from dpc_client_core.managers.strata_supervisor import StrataSupervisor, exit_code_words
 
 BASE_ARGS = [
@@ -388,17 +389,42 @@ def test_exit_code_words_reads_both_forms():
 
 class TestTheVersionCheck:
     @pytest.mark.asyncio
-    async def test_a_mismatch_warns_and_is_stored(self, tmp_path, home, monkeypatch, caplog):
-        sup = _sup(_install(tmp_path), tested_version="0.1.45", tested_version_date="2026-10-18")
+    async def test_a_mismatch_with_the_pin_warns_naming_both_pin_numbers_and_is_stored(
+        self, tmp_path, home, monkeypatch, caplog,
+    ):
+        sup = _sup(_install(tmp_path))
         monkeypatch.setattr(sup, "_get", lambda p: _ret({"engine": {"version": "0.1.46"}}))
         with caplog.at_level(logging.WARNING, logger=mod.__name__):
             await sup._check_version()
         assert sup.engine_version == "0.1.46"
-        assert any(r.levelno == logging.WARNING and "0.1.45" in r.getMessage() for r in caplog.records)
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warned) == 1
+        assert "0.1.46" in warned[0]
+        assert f"pinned engine {STRATA_ENGINE_VERSION} (Strata {STRATA_RELEASE_TAG})" in warned[0]
+
+    @pytest.mark.asyncio
+    async def test_the_pinned_engine_version_does_not_warn(self, tmp_path, home, monkeypatch, caplog):
+        sup = _sup(_install(tmp_path))
+        monkeypatch.setattr(sup, "_get", lambda p: _ret({"engine": {"version": STRATA_ENGINE_VERSION}}))
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            assert await sup._check_version() == STRATA_ENGINE_VERSION
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    @pytest.mark.asyncio
+    async def test_an_alias_that_still_carries_the_old_tested_keys_neither_warns_nor_is_compared_by_them(
+        self, tmp_path, home, monkeypatch, caplog,
+    ):
+        sup = _sup(_install(tmp_path), tested_version="0.1.46", tested_version_date="2026-10-18")
+        monkeypatch.setattr(sup, "_get", lambda p: _ret({"engine": {"version": STRATA_ENGINE_VERSION}}))
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            await sup._check_version()
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert "pin" in sup.build_start_config(1)["_dpc"]
+        assert "tested_version" not in sup.build_start_config(1)["_dpc"]
 
     @pytest.mark.asyncio
     async def test_a_missing_version_is_an_error_naming_the_mock_engine(self, tmp_path, home, monkeypatch, caplog):
-        sup = _sup(_install(tmp_path), tested_version="0.1.45")
+        sup = _sup(_install(tmp_path))
         sup.props = {"modalities": {"vision": False}}
         monkeypatch.setattr(sup, "_get", lambda p: _ret({"engine": {"model": "x"}}))
         with caplog.at_level(logging.ERROR, logger=mod.__name__):
@@ -408,8 +434,8 @@ class TestTheVersionCheck:
 
     @pytest.mark.asyncio
     async def test_props_build_info_is_the_fallback(self, tmp_path, home, monkeypatch, caplog):
-        sup = _sup(_install(tmp_path), tested_version="0.1.45")
-        sup.props = {"build_info": "Strata 0.1.45"}
+        sup = _sup(_install(tmp_path))
+        sup.props = {"build_info": f"Strata {STRATA_ENGINE_VERSION}"}
 
         async def no_metrics(path):
             raise OSError("down")
@@ -417,7 +443,7 @@ class TestTheVersionCheck:
         monkeypatch.setattr(sup, "_get", no_metrics)
         with caplog.at_level(logging.WARNING, logger=mod.__name__):
             await sup._check_version()
-        assert sup.engine_version == "0.1.45"
+        assert sup.engine_version == STRATA_ENGINE_VERSION
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
@@ -471,7 +497,7 @@ class TestNoVersionFailsClosed:
     async def test_no_version_after_health_stops_the_launcher_and_refuses_until_reset(
         self, tmp_path, home, monkeypatch,
     ):
-        sup = _sup(_install(tmp_path), tested_version="0.1.45")
+        sup = _sup(_install(tmp_path))
         spawned = _started_through_the_real_launch(
             sup, monkeypatch, metrics={"live": {"state": "loaded"}})
 
@@ -498,8 +524,8 @@ class TestNoVersionFailsClosed:
         assert len(spawned) == 2, "after a reset a person's call starts it again"
 
     @pytest.mark.asyncio
-    async def test_a_mismatch_with_the_tested_version_still_serves(self, tmp_path, home, monkeypatch, caplog):
-        sup = _sup(_install(tmp_path), tested_version="0.1.45")
+    async def test_a_mismatch_with_the_pin_still_serves(self, tmp_path, home, monkeypatch, caplog):
+        sup = _sup(_install(tmp_path))
         spawned = _started_through_the_real_launch(
             sup, monkeypatch, metrics={"engine": {"version": "0.1.46"}})
         with caplog.at_level(logging.WARNING, logger=mod.__name__):
@@ -507,7 +533,8 @@ class TestNoVersionFailsClosed:
         assert props == {"total_slots": 1}
         assert sup.failure is None and sup._proc is spawned[0]
         assert sup.engine_version == "0.1.46"
-        assert any(r.levelno == logging.WARNING and "0.1.45" in r.getMessage() for r in caplog.records)
+        assert any(r.levelno == logging.WARNING and STRATA_ENGINE_VERSION in r.getMessage()
+                   for r in caplog.records)
         await sup.stop()
 
     @pytest.mark.asyncio

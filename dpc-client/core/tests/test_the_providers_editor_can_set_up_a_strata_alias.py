@@ -14,6 +14,7 @@ import pytest
 
 from dpc_client_core.local_api import ALLOWED_COMMANDS
 from dpc_client_core.managers import llama_server_supervisor as base_mod
+from dpc_client_core.managers.strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG
 from dpc_client_core.managers.strata_supervisor import (
     STRATA_MODEL_PARAMS,
     LlamaServerError,
@@ -138,6 +139,12 @@ class TestTheModelParameters:
         assert model_param_error("aliases", "a, b") is None
         assert model_param_error("vram_reserve_mib", None) is None
         assert "always false" in model_param_error("open_browser", True)
+        assert model_param_error("mtp", False) is None
+        assert "true or false" in model_param_error("mtp", "off")
+
+    def test_mtp_is_written_as_a_top_level_key_of_the_start_config(self, tmp_path):
+        cfg = _sup(_install(tmp_path), model_params={"mtp": False}).build_start_config(1)
+        assert cfg["mtp"] is False
 
     def test_lazy_load_with_vision_is_refused(self, tmp_path):
         with pytest.raises(LlamaServerError, match="lazy_load is text-only"):
@@ -198,7 +205,7 @@ def _provider(tmp_path, alias="flash", **extra):
     return StrataProvider(alias, {
         "type": "strata", "model": "flash", "strata_install_dir": str(_install(tmp_path)),
         "strata_base_config": "strata-base.json", "conversation_cache_mib": 10240,
-        "tested_version": "0.1.46", "tested_version_date": "2026-10-17", **extra,
+        **extra,
     })
 
 
@@ -230,9 +237,30 @@ class TestStatusCommand:
         assert out["status"] == "success" and out["card_holder"] is None
         [row] = out["strata"]
         assert row["alias"] == "flash" and row["state"] == "stopped"
-        assert row["metrics"] is None and row["tested_version"] == "0.1.46"
+        assert row["metrics"] is None
+        assert row["pin"] == {"release_tag": STRATA_RELEASE_TAG, "engine_version": STRATA_ENGINE_VERSION}
+        assert "tested_version" not in row and "tested_version_date" not in row
+        assert row["version_matches"] is None, "no engine version read yet"
         assert calls == []
         assert p.supervisor._proc is None
+
+    @pytest.mark.asyncio
+    async def test_an_alias_saved_with_the_old_tested_keys_loads_and_reports_the_pin(self, tmp_path):
+        p = _provider(tmp_path, tested_version="0.1.46", tested_version_date="2026-10-17")
+        assert strata_config_errors(p.supervisor.config) == []
+        _never_start(p.supervisor)
+        [row] = (await CoreService.local_engine_status(SimpleNamespace()))["strata"]
+        assert row["pin"]["engine_version"] == STRATA_ENGINE_VERSION
+        assert "tested_version" not in row and "tested_version_date" not in row
+        assert p.engine_status()["pin"] == row["pin"]
+        assert "tested_version" not in p.engine_status()
+
+    @pytest.mark.asyncio
+    async def test_the_pinned_engine_version_matches_and_another_does_not(self, tmp_path):
+        p = _provider(tmp_path)
+        p.supervisor.engine_version = STRATA_ENGINE_VERSION
+        [row] = (await CoreService.local_engine_status(SimpleNamespace()))["strata"]
+        assert row["version_matches"] is True
 
     @pytest.mark.asyncio
     async def test_a_running_launcher_shows_its_metrics_summary(self, tmp_path):

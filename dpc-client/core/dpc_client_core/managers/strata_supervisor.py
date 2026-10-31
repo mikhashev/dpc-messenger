@@ -26,8 +26,9 @@ What differs, by ADR-044 point:
   `reset_failure()` is called by a person.
 - 5. After `/health` the engine's version is read from `/metrics`
   `engine.version` (fallback `/props` `build_info`) and compared with the
-  alias's tested version: a mismatch warns, an absent version is an ERROR,
-  because the mock engine reports none and would pass every other check.
+  pinned engine version (`strata_fetcher.STRATA_ENGINE_VERSION`): a mismatch
+  warns, an absent version is an ERROR, because the mock engine reports none and
+  would pass every other check.
   Then, once per start, the smoke: `/health`, `/props` and two forced tool
   calls, thinking off and then on at the alias's effort. An HTTP error or no
   tool call at all fails closed like the missing version; a call that timed
@@ -62,6 +63,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from . import llama_server_supervisor as _base
 from .commit_memory import describe_free_commit, read_free_commit
 from .llama_server_supervisor import LlamaServerError, LlamaServerSupervisor, _free_port
+from .strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG, strata_pin
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +103,9 @@ class PeerStartRefused(PeerCallRefused):
 
 # Typed alias key -> (engine flag, Strata's own default, highest value Strata
 # takes). The rules that decide what the conversation cache admits, from the
-# engine's flag parser and help (src/program/generate.cpp, Strata 0.1.45 at
-# 477ac13c, read 2026-10-19). Each is written into every start config, the
+# engine's flag parser and help (src/program/generate.cpp, read at Strata 0.1.45,
+# 477ac13c, 2026-10-19; the three defaults below re-checked in the `--help` of
+# engine 0.1.55, Strata v0.2.9, 2026-10-31). Each is written into every start config, the
 # default too, so the value the engine parks by is ours and named even when the
 # alias sets none (Mike's call, 2026-10-19). The RAM floor is physical RAM —
 # MemAvailable, GlobalMemoryStatusEx ullAvailPhys on Windows, under the cgroup
@@ -180,8 +183,6 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     "control_vector_file": None,
     # Engine flags, appended to the start config's "args" last.
     "extra_args": [],
-    "tested_version": None,
-    "tested_version_date": None,
     # The launcher loads a 20+ GB model before it listens; "a minute or two"
     # by its own words, longer on a cold disk.
     "start_timeout_s": 600.0,
@@ -208,7 +209,7 @@ _STRUCTURAL_KEYS = frozenset({
 _ARG_PARAMS = {"vram_reserve_mib": "--vram-reserve-mib"}
 
 # The keys Strata's own page edits, with their kinds — serve/runconfig.py
-# EDITABLE as of Strata 477ac13c (read 2026-10-18). `open_browser` is left out:
+# EDITABLE as of Strata v0.2.9 (read 2026-10-31). `open_browser` is left out:
 # DPC's start config always writes it false. Mirrored for the UI in
 # dpc-client/ui/src/lib/utils/strataFields.ts (a test keeps the two equal).
 STRATA_MODEL_PARAMS: Dict[str, Any] = {
@@ -222,6 +223,7 @@ STRATA_MODEL_PARAMS: Dict[str, Any] = {
     "effort_position": ("enum", ("start", "end")),
     "aliases": "names",
     "idle_unload_s": "num>=0",
+    "mtp": "bool",
     "lazy_load": "bool",
     "engine_silence_s": "num>=0",
     "api_monitor": "bool",
@@ -1040,8 +1042,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             "written_by": "DPC Messenger (ADR-044)",
             "alias": self.alias,
             "base_config": str(base_path),
-            "tested_version": c.get("tested_version"),
-            "tested_version_date": c.get("tested_version_date"),
+            "pin": strata_pin(),
         }
         return cfg
 
@@ -1196,7 +1197,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             "conversation_cache_mib=%s beside %s, conversation_cache_slots=%s, "
             "conversation_cache_min_free_mib=%s (physical RAM floor), conversation_cache_min_tokens=%s, "
             "conversation_cache_park_gain=%s, max_context=%s, "
-            "context_window=%s, vision=%s, control_vector=%s, tested_version=%s%s)",
+            "context_window=%s, vision=%s, control_vector=%s, pin=Strata %s (engine %s))",
             self.alias, self.port, binary, self.start_config_used,
             c.get("strata_base_config"), c.get("conversation_cache_mib"),
             describe_free_commit(self._sample_free_commit()),
@@ -1206,8 +1207,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             _base._fmt_knob(c.get("max_context")), _base._fmt_knob(c.get("context_window")),
             "base config" if c.get("vision") is None else c.get("vision"),
             "base config" if c.get("control_vector") is None else c.get("control_vector"),
-            c.get("tested_version") or "unset",
-            f" of {c['tested_version_date']}" if c.get("tested_version_date") else "",
+            STRATA_RELEASE_TAG, STRATA_ENGINE_VERSION,
         )
 
     # --- lifecycle ----------------------------------------------------------------
@@ -1360,11 +1360,11 @@ class StrataSupervisor(LlamaServerSupervisor):
         return self.props or props
 
     async def _check_version(self) -> Optional[str]:
-        """The real engine's version against the tested one (ADR-044 point 5).
+        """The real engine's version against the pinned one (ADR-044 point 5).
 
         Returns the version, or None when the launcher reports none — the
-        caller fails closed on that. A mismatch with the tested version only
-        warns."""
+        caller fails closed on that. A mismatch with the pin only warns: the
+        alias's install is the owner's own checkout."""
         version: Optional[str] = None
         try:
             metrics = await self._get("/metrics")
@@ -1380,7 +1380,6 @@ class StrataSupervisor(LlamaServerSupervisor):
                 if version.lower().startswith("strata "):
                     version = version[len("strata "):].strip()
         self.engine_version = version
-        tested = self.config.get("tested_version")
         if version is None:
             logger.error(
                 "strata[%s]: the launcher reports no engine version (/metrics engine.version "
@@ -1390,16 +1389,15 @@ class StrataSupervisor(LlamaServerSupervisor):
                 self.alias,
             )
             return None
-        if tested and str(tested).strip() != version:
+        if version != STRATA_ENGINE_VERSION:
             logger.warning(
-                "strata[%s]: engine version %s differs from the tested version %s%s — "
-                "starting anyway; re-test and update the alias's tested version",
-                self.alias, version, tested,
-                f" (tested {self.config['tested_version_date']})"
-                if self.config.get("tested_version_date") else "",
+                "strata[%s]: engine version %s is not the pinned engine %s (Strata %s) — "
+                "starting anyway; this install is not the one DPC was tested against",
+                self.alias, version, STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG,
             )
         else:
-            logger.info("strata[%s]: engine version %s (tested %s)", self.alias, version, tested or "unset")
+            logger.info("strata[%s]: engine version %s (the pin, Strata %s)",
+                        self.alias, version, STRATA_RELEASE_TAG)
         return version
 
     async def _smoke(self) -> Optional[str]:

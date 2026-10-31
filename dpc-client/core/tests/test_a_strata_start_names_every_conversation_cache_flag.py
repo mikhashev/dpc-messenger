@@ -35,7 +35,10 @@ ADR_044 = REPO / "docs" / "decisions" / "044-strata-as-a-second-supervised-local
 
 UI_FIELDS = Path(__file__).resolve().parents[2] / "ui" / "src" / "lib" / "utils" / "strataFields.ts"
 
-# Strata 0.1.45 (src/program/generate.cpp, its help text and Options struct), read 2026-10-19.
+# Strata 0.1.45 (src/program/generate.cpp, its help text and Options struct), read 2026-10-19;
+# the three defaults re-checked unchanged in the `--help` of engine 0.1.55 (Strata v0.2.9), read 2026-10-31.
+# Only `--conversation-cache-mib`'s help default text changed there: "sized from the free RAM, up to
+# 8192; 0 = off" (DPC writes no default for it).
 STRATA_DOCUMENTED = {
     "conversation_cache_min_free_mib": ("--conversation-cache-min-free-mib", 2560),
     "conversation_cache_min_tokens": ("--conversation-cache-min-tokens", 0),

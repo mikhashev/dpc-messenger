@@ -161,9 +161,9 @@ def engine_checks(alias: str, entry, known: List[str], src: Path, efforts: List[
         else:
             add("OK", "strata",
                 f"launcher {facts['server_script']} under {facts['python']}; base config "
-                f"{facts['base_config']}; tested version {facts.get('tested_version')!r} "
-                f"({facts.get('tested_version_date')}) — the engine's own version is read "
-                f"only at start, where a mismatch warns")
+                f"{facts['base_config']}; pin Strata {facts['pin']['release_tag']} "
+                f"(engine {facts['pin']['engine_version']}) — the engine's own version is read "
+                f"only at start, where a mismatch with the pin warns")
         # 3. the model files of the start config. Not hashed: a Strata model is
         # shards, packs and folders, and one file's digest would not name it.
         for key, value in facts.get("model_files", {}).items():

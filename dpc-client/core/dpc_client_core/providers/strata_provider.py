@@ -18,6 +18,7 @@ from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING
 from ..managers import llama_server_supervisor as _base
 from ..managers.commit_memory import read_free_commit
 from ..managers.llama_server_supervisor import effort_dictionary_of
+from ..managers.strata_fetcher import STRATA_ENGINE_VERSION, strata_pin
 from ..managers.strata_supervisor import (
     StrataSupervisor, peer_being_served, reasoning_effort_error, strata_chat_template,
     strata_config_errors,
@@ -29,9 +30,9 @@ logger = logging.getLogger(__name__)
 # ADR-044 point 9 (Mike's call, 2026-10-20): every call served to a peer goes
 # out with Strata's per-request checkpoint switch off. The launcher reads the
 # request body as its sampling dict and turns this key into the engine's
-# `ckpt=0` (serve/server.py:1216-1219, Strata 0.1.45 at 477ac13c); the engine
+# `ckpt=0` (serve/server.py:1478-1481, Strata v0.2.9); the engine
 # then takes no checkpoint for the request and neither continues nor parks its
-# session afterwards (src/program/generate.cpp:11638-11642, :14477), so a
+# session afterwards (src/program/generate.cpp:13882-13886, :17183), so a
 # peer's call leaves no snapshot in the conversation cache to compete with ours.
 PEER_CHECKPOINT_OFF = {"strata_checkpoint": False}
 
@@ -309,8 +310,7 @@ class StrataProvider(LlamaServerProvider):
         sup = self.supervisor
         return {
             "engine_version": sup.engine_version,
-            "tested_version": sup.config.get("tested_version"),
-            "tested_version_date": sup.config.get("tested_version_date"),
+            "pin": strata_pin(),
             "start_config": str(sup.start_config_used) if sup.start_config_used else None,
             "failure": sup.failure,
             "vram_released": sup.vram_released,
@@ -363,7 +363,6 @@ async def strata_status(sup: StrataSupervisor, metrics_timeout_s: float = 3.0) -
     """One Strata alias as the UI shows it. Reads `/metrics` of a running
     launcher only; never starts one."""
     state = _strata_state(sup)
-    tested = sup.config.get("tested_version")
     version = sup.engine_version
     failure = dict(sup.failure) if sup.failure else None
     out: Dict[str, Any] = {
@@ -372,9 +371,8 @@ async def strata_status(sup: StrataSupervisor, metrics_timeout_s: float = 3.0) -
         "state": state,
         "port": sup.port if state in ("running", "draining", "starting") else None,
         "engine_version": version,
-        "tested_version": tested,
-        "tested_version_date": sup.config.get("tested_version_date"),
-        "version_matches": None if not (version and tested) else str(tested).strip() == version,
+        "pin": strata_pin(),
+        "version_matches": None if not version else version == STRATA_ENGINE_VERSION,
         "failure": failure,
         "vram_released": sup.vram_released,
         "last_stop_vram": dict(sup.last_stop_vram),

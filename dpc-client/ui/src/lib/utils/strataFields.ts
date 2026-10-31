@@ -20,7 +20,7 @@ export interface StrataParamSpec {
 }
 
 /**
- * Strata's serve/runconfig.py EDITABLE (Strata 477ac13c, read 2026-10-18), in
+ * Strata's serve/runconfig.py EDITABLE (Strata v0.2.9, read 2026-10-31), in
  * its order, with its help texts. `open_browser` is left out: DPC's start
  * config always writes it false. The backend's STRATA_MODEL_PARAMS
  * (strata_supervisor.py) is the same list; a backend test keeps them equal.
@@ -37,7 +37,7 @@ export const STRATA_MODEL_PARAMS: StrataParamSpec[] = [
   { key: 'reasoning_budget_tokens', kind: 'int', min: 0, step: 256,
     help: 'Cap the thinking of every request at this many tokens (0 or empty: no cap)' },
   { key: 'fit_max_tokens', kind: 'bool',
-    help: 'Shorten a max_tokens that does not fit the context instead of answering 400' },
+    help: 'Shorten a max_tokens that does not fit the context (on by default); off: answer 400 like llama.cpp' },
   { key: 'anthropic_thinking', kind: 'enum', choices: ['model', 'on_request'],
     help: 'Anthropic requests that do not ask for thinking: think as the model does (model) or not (on_request)' },
   { key: 'effort_position', kind: 'enum', choices: ['start', 'end'],
@@ -46,6 +46,8 @@ export const STRATA_MODEL_PARAMS: StrataParamSpec[] = [
     help: 'Other model names the server lists and answers to (comma-separated)' },
   { key: 'idle_unload_s', kind: 'number', min: 0, step: 60,
     help: 'Unload the model after this many seconds without requests (0 or empty: never)' },
+  { key: 'mtp', kind: 'bool',
+    help: 'Draft layer (MTP): off starts the engine without it (about 1 GB less graphics memory, slower words per second); empty or on: as installed' },
   { key: 'lazy_load', kind: 'bool',
     help: 'Start without loading the model; the first request loads it (text only)' },
   { key: 'engine_silence_s', kind: 'number', min: 0, step: 30,
@@ -67,8 +69,9 @@ export interface StrataCacheAdmissionSpec {
 }
 
 /**
- * The conversation cache's admission rules (Strata 0.1.45, src/program/generate.cpp,
- * read 2026-10-19). Every start config carries all three, the default included,
+ * The conversation cache's admission rules (read in src/program/generate.cpp at Strata
+ * 0.1.45, 2026-10-19; the defaults re-checked in the `--help` of engine 0.1.55, Strata
+ * v0.2.9, 2026-10-31). Every start config carries all three, the default included,
  * so the value is the alias's and visible. The backend's CACHE_ADMISSION_FLAGS
  * (strata_supervisor.py) is the same list; a backend test keeps them equal.
  */
@@ -201,9 +204,9 @@ export function basePlaceholder(value: unknown, fallback: string): string {
 }
 
 /** `true` mismatch, `false` match, `null` when either side is unknown. */
-export function versionDiffers(engine: string | null | undefined, tested: string | null | undefined): boolean | null {
-  if (!engine || !tested) return null;
-  return engine.trim() !== tested.trim();
+export function versionDiffers(engine: string | null | undefined, pinned: string | null | undefined): boolean | null {
+  if (!engine || !pinned) return null;
+  return engine.trim() !== pinned.trim();
 }
 
 export function formatMib(bytes: number | null | undefined): string {

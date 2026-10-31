@@ -345,3 +345,39 @@ it changes here.)*
   CTRL_BREAK is not, because the stop was sent. At the backend's stop it is
   `backend_stop`; a stop while the backend runs (idle unload, a stop from the UI, a switch
   of engines) has no word yet, ADR-046 Q8. Point 3's fail-closed rule is unchanged.
+
+## Amendment, 2026-10-31 — the Strata pin lives in code (B2, step 1)
+
+*(Mike's call, 2026-10-31: DPC owns Strata's install the way it owns llama.cpp's, in three
+steps, one mechanism for both local engines. The reason given was one consistent mechanism
+for two engines. This note records the decision and step 1; it rewrites nothing above.)*
+
+- **What the decision supersedes.** Point 5's "Updates are mixed" and the Considered Options
+  line "DPC installs and pins Strata as it does llama.cpp — not now". Both stay above as the
+  record of 2026-10-18; the cheaper mixed update is no longer the plan.
+- **The three steps.** (1) a pin in code replaces the hand-raised tested version, **built
+  with this note**; (2) a DPC-owned install fetched by that pin, the fetch arriving in
+  `managers/strata_fetcher.py` beside a module the two engines share (**not built**); (3) a
+  consent dialog and progress for both engines' downloads (**not built**).
+- **Step 1.** `strata_fetcher.py` holds `STRATA_RELEASE_TAG` (`v0.2.9`, the tag of a Strata release on
+  Strata's app line, 0.2.x) and `STRATA_ENGINE_VERSION` (`0.1.55`, the engine version inside
+  that release, which the engine's `/metrics` `engine.version` reports; its **Control**
+  package `strata-control-<ver>-<platform>.zip` is on the same 0.1.x line).
+  A person reads both: "Strata v0.2.9 (engine 0.1.55)". The alias no longer carries
+  `tested_version` or `tested_version_date`: an alias that still has them loads and the keys
+  are ignored, and the providers editor's Save drops them. The status of an alias (`engine_status`,
+  `local_engine_status`) and the eval's provenance carry `pin: {release_tag, engine_version}` in
+  place of the two keys; the version the engine reports stays beside it.
+- **What point 5 keeps.** The start compares the reported engine version with the pin. A
+  mismatch **warns and starts**, because until step 2 the alias's install is the owner's own
+  checkout; a missing version is still refused as the mock engine's mark; the smoke still
+  counts only after the version check.
+- **Moving the pin.** Update Strata on a node, run DPC's start smoke there live, record the
+  result on the point-5 card, then change both constants in one reviewed commit.
+- **Words.** **Control** is Strata's package, **launcher** the program DPC starts
+  (`serve/server.py`), **engine** `strata.exe` with `strata-vision.exe`; **pin** has two
+  senses, told apart in `docs/GLOSSARY.md`.
+- **Seen on the pinned release.** The node was updated to Strata v0.2.9, engine 0.1.55, on
+  2026-10-31 and DPC's start smoke passed there live (`dpc-client.log`, 20:22:43 and 20:50:38
+  local time). v0.2.9 adds the
+  `mtp` key to the run config's editable keys; DPC mirrors it as a model parameter.

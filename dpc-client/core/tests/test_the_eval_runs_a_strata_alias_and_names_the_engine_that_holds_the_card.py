@@ -24,6 +24,7 @@ from _harness import local_engine, provenance  # noqa: E402
 from dpc_client_core.dpc_agent.provider_facts import LOCAL_TYPES  # noqa: E402
 from dpc_client_core.firewall import LOCAL_PROVIDER_TYPES  # noqa: E402
 from dpc_client_core.managers import llama_server_supervisor as base_mod  # noqa: E402
+from dpc_client_core.managers.strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG  # noqa: E402
 
 from tests.test_strata_supervisor import _install  # noqa: E402
 
@@ -48,7 +49,6 @@ def _strata_entry(tmp_path: Path, **overrides):
         "type": "strata", "alias": "flash", "model": "qwen3.8-flash-next-iq3_xxs",
         "strata_install_dir": str(root), "strata_base_config": "strata-base.json",
         "conversation_cache_mib": 10240, "context_window": 200000,
-        "tested_version": "0.9.1", "tested_version_date": "2026-10-18",
     }
     entry.update(overrides)
     return entry
@@ -157,7 +157,8 @@ def test_the_loop_dry_run_reads_the_strata_start_and_refuses_a_missing_file(tmp_
     entry = _strata_entry(tmp_path)
     R._strata_dry_run(entry)
     out = capsys.readouterr().out
-    assert "server_script" in out and "native_gguf" in out and "0.9.1" in out
+    assert "server_script" in out and "native_gguf" in out
+    assert f"pin: Strata {STRATA_RELEASE_TAG} (engine {STRATA_ENGINE_VERSION})" in out
     (tmp_path / "models" / "flash-next-00001-of-00002.gguf").unlink()
     with pytest.raises(SystemExit, match="native_gguf"):
         R._strata_dry_run(entry)
@@ -194,7 +195,9 @@ def test_a_strata_run_records_its_start_files_and_its_template_default(tmp_path)
     record = provenance.model_files(entry, tmp_path)
     assert record["model_files"]["native_gguf"]["size"] == 4
     assert record["model_files"]["pack_dir"]["kind"] == "folder"
-    assert record["strata"]["tested_version"] == "0.9.1"
+    assert record["strata"]["pin"] == {"release_tag": STRATA_RELEASE_TAG,
+                                       "engine_version": STRATA_ENGINE_VERSION}
+    assert "tested_version" not in record["strata"]
     effort = provenance.effort_record(entry)
     assert effort["value"] == "xhigh" and "Strata base config" in effort["source"]
 
@@ -323,8 +326,10 @@ def test_no_nvidia_smi_is_unknown_too_and_free_vram_is_null():
     assert stamp["card_holders"] == "unknown"
     assert stamp["card_holders_unread"] == "no nvidia-smi on this machine"
     assert stamp["free_vram_mib"] is None
-    assert stamp["engine"] == {"name": "strata", "tested_version": "0.9.1",
-                               "tested_version_date": None, "version_reported": None}
+    # An old alias key is not stamped: the pin is, and the version the engine reports sits beside it.
+    assert stamp["engine"] == {"name": "strata",
+                               "pin": {"release_tag": STRATA_RELEASE_TAG, "engine_version": STRATA_ENGINE_VERSION},
+                               "version_reported": None}
 
 
 def test_a_read_card_is_stamped_as_a_list_of_holders():

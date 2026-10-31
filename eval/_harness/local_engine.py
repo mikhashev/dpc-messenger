@@ -199,8 +199,11 @@ def card_stamp(entry: Dict[str, Any], *, free_mib: Any = _READ,
         stamp["card_holders"] = [who for _engine, who in holders]
     facts: Dict[str, Any] = {"name": engine}
     if engine == "strata":
-        facts["tested_version"] = entry.get("tested_version")
-        facts["tested_version_date"] = entry.get("tested_version_date")
+        try:
+            from dpc_client_core.managers.strata_fetcher import strata_pin
+            facts["pin"] = strata_pin()
+        except Exception as exc:
+            facts["pin"] = f"[unavailable: {type(exc).__name__}]"
     else:
         try:
             from dpc_client_core.managers.llama_server_fetcher import LLAMA_CPP_TAG
@@ -239,16 +242,16 @@ def strata_start_facts(entry: Dict[str, Any]) -> Dict[str, Any]:
     """What a `strata` alias would start, without starting it: the launcher's
     python and script, the base config, the alias's own errors with the paths
     checked (the save's check), the model files of the start config DPC would
-    write, and the tested version. Errors are collected, never raised.
+    write, and the pin. Errors are collected, never raised.
     """
     from dpc_client_core.managers.llama_server_supervisor import LlamaServerError
+    from dpc_client_core.managers.strata_fetcher import strata_pin
     from dpc_client_core.managers.strata_supervisor import (
         MODEL_FILE_FLAGS, StrataSupervisor, _flag_value, strata_config_errors)
     alias = str(entry.get("alias") or "strata")
     facts: Dict[str, Any] = {
         "config_errors": strata_config_errors(entry, check_paths=True),
-        "tested_version": entry.get("tested_version"),
-        "tested_version_date": entry.get("tested_version_date"),
+        "pin": strata_pin(),
         "model_files": {},
     }
     sup = StrataSupervisor(alias, entry)

@@ -296,7 +296,7 @@ def strata_files(entry: Dict[str, Any]) -> Dict[str, Any]:
     files the start would load, by path and size. Not hashed: the model is a set
     of shards, packs and folders, and one file's digest would not identify it.
     The engine's own version is read only by a running launcher (`/metrics`);
-    the alias's tested version is recorded beside it."""
+    the pin (release tag and engine version) is recorded beside it."""
     from _harness.local_engine import path_record, strata_start_facts
     facts = strata_start_facts(entry)
     return {

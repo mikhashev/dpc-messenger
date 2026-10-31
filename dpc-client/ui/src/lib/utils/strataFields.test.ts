@@ -60,6 +60,7 @@ describe('parseModelParam', () => {
 
   it('reads booleans, choices and name lists', () => {
     expect(parseModelParam(spec('lazy_load'), 'false')).toEqual({ value: false });
+    expect(parseModelParam(spec('mtp'), 'false')).toEqual({ value: false });
     expect(parseModelParam(spec('effort_position'), 'end')).toEqual({ value: 'end' });
     expect('error' in parseModelParam(spec('effort_position'), 'middle')).toBe(true);
     expect(parseModelParam(spec('aliases'), 'a, b,')).toEqual({ value: ['a', 'b'] });
@@ -75,7 +76,7 @@ describe('parseModelParam', () => {
 describe('the list itself', () => {
   it('leaves out open_browser, which DPC always writes false', () => {
     expect(STRATA_MODEL_PARAMS.some((s) => s.key === 'open_browser')).toBe(false);
-    expect(STRATA_MODEL_PARAMS.length).toBe(14);
+    expect(STRATA_MODEL_PARAMS.length).toBe(15);
   });
 });
 

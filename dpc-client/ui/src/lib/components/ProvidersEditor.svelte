@@ -103,8 +103,6 @@
     vision?: boolean;            // unset = the base config decides
     control_vector?: boolean;    // unset = the base config decides
     model_params?: Record<string, unknown>; // Strata /config keys (runconfig.py EDITABLE)
-    tested_version?: string;
-    tested_version_date?: string;
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -774,6 +772,12 @@
       if (p.temperature === null) delete p.temperature;
       if (p.context_window === null) delete p.context_window;
       if (p.max_tokens === null) delete p.max_tokens;
+      // A Strata alias saved before the pin carries the hand-raised tested version; the backend
+      // ignores both keys, so the save drops them rather than keep a number nothing reads.
+      if (p.type === 'strata') {
+        delete (p as Record<string, unknown>).tested_version;
+        delete (p as Record<string, unknown>).tested_version_date;
+      }
     }
 
     try {
@@ -1340,12 +1344,14 @@
       </p>
       <p>
         <strong>Engine version:</strong> {row.engine_version ?? 'not read yet'}
-        {#if versionDiffers(row.engine_version, row.tested_version)}
-          <span class="strata-badge-warn" title="Starting anyway; re-test and update the tested version">
-            differs from tested {row.tested_version}{row.tested_version_date ? ` (${row.tested_version_date})` : ''}
-          </span>
-        {:else if row.tested_version}
-          <span class="help-text">tested {row.tested_version}{row.tested_version_date ? ` on ${row.tested_version_date}` : ''}</span>
+        {#if row.pin}
+          {#if versionDiffers(row.engine_version, row.pin.engine_version)}
+            <span class="strata-badge-warn" title="Starting anyway; this install is not the one DPC was tested against">
+              not the pin: Strata {row.pin.release_tag} (engine {row.pin.engine_version})
+            </span>
+          {:else}
+            <span class="help-text">the pin: Strata {row.pin.release_tag} (engine {row.pin.engine_version})</span>
+          {/if}
         {/if}
       </p>
       {#if row.failure}
@@ -2572,7 +2578,7 @@
                         file)</strong>, not by RAM alone: Strata takes most of it right after load and can exit with
                         an NTSTATUS code and no message when a park pushes past it. More conversations need a
                         larger page file. The pair here is <strong>a measurement on this machine</strong>, not a
-                        default — there is none{sp.tested_version_date ? `; this alias was tested ${sp.tested_version_date}` : ''}.
+                        default — there is none.
                         Re-measure after changing the page file, the model or the server window.
                         <br />Now: {freeCommitLine(engineStatus ? engineStatus.free_commit : undefined)}.
                       </p>
@@ -2718,7 +2724,7 @@
                       </details>
 
                       <details class="supervisor-flags">
-                        <summary>Extra flags and tested version</summary>
+                        <summary>Extra flags</summary>
                         <div class="form-group">
                           <label for="strata-extra-{i}">Extra engine flags (one token per line)</label>
                           <textarea
@@ -2733,23 +2739,6 @@
                             without a field here goes this way. One token per line.
                           </p>
                         </div>
-                        <div class="form-group strata-pair">
-                          <div>
-                            <label for="strata-tested-{i}">Tested version</label>
-                            <input id="strata-tested-{i}" type="text" value={sp.tested_version ?? ''}
-                              on:input={(e) => setStr(i, 'tested_version', e.currentTarget.value.trim())}
-                              placeholder="engine.version, e.g. 0.1.46" />
-                          </div>
-                          <div>
-                            <label for="strata-tested-date-{i}">Tested on</label>
-                            <input id="strata-tested-date-{i}" type="date" value={sp.tested_version_date ?? ''}
-                              on:input={(e) => setStr(i, 'tested_version_date', e.currentTarget.value)} />
-                          </div>
-                        </div>
-                        <p class="help-text">
-                          The engine version this alias was last verified with, read back from the launcher's
-                          /metrics at each start. A different version warns and starts anyway.
-                        </p>
                       </details>
                     {/if}
 
@@ -3345,9 +3334,6 @@
                         {STRATA_CACHE_ADMISSION.map((s) => `${s.label} ${(provider[s.key] ?? s.strataDefault).toLocaleString()}${provider[s.key] == null ? ' (Strata default)' : ''}`).join(' · ')}</p>
                       {#if provider.max_context}
                         <p><strong>Server window:</strong> {provider.max_context.toLocaleString()} tokens</p>
-                      {/if}
-                      {#if provider.tested_version}
-                        <p><strong>Tested version:</strong> {provider.tested_version}{provider.tested_version_date ? ` (${provider.tested_version_date})` : ''}</p>
                       {/if}
                       {@render strataStatus(provider.alias)}
                     {/if}
