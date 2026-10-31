@@ -152,6 +152,8 @@ On connect, nodes reconcile group history so all members converge.
 - **Delete** — creator-only; broadcasts `GROUP_DELETE`; all members clean up, including the on-disk conversation directory (GROUP-DELETE-FOLDER-REMNANT fix). Peers that were offline learn of the deletion via `GROUP_DELETED_STATUS` on next connect.
 - **Sync** — `GROUP_SYNC` on connect (version + content-hash tie-break); history reconciliation (hash-based). Adding a member sends it `GROUP_CREATE` and then `GROUP_HISTORY_STATUS`, and the invited node answers `GROUP_CREATE` with its own status even when the version was already applied, so a re-added member that kept its history compares and merges instead of waiting for the next reconnect. No history is pushed.
 - **Remove while offline** — the removal is recorded in `~/.dpc/groups/removal_registry.json`, and the node's next connect starts with a `GROUP_SYNC` carrying the roster that leaves it out, before any other group traffic.
+- **Block** — removes the node from every group whose roster holds it, through `remove_group_member`, so the remaining members and the node itself get the `GROUP_SYNC` (or the removal is recorded for an offline node), and writes it into `blocked_nodes` (Mike's call, 2026-10-31). Unblock puts it back in no group; that is done by hand. This node then refuses to add it (`add_group_member`, `create_group_chat`: "unblock it first"), ignores a `GROUP_CREATE` or `GROUP_SYNC` the blocked node sends, and applies a `GROUP_SYNC` from a third member whose roster lists it as that group's state, with one INFO line: the gates read the block list, never the roster.
+- **A blocked author's records are kept.** A post, image, voice message or file whose author (`sender_node_id`, or `agent_owner` for an agent post) is blocked is stored as any other, with its signature and hash untouched, and is still served to other members in history sync so their chains stay whole. On this node it is not relayed onward, routes no mention, emits no `cc_group_mention` and wakes no agent, live or merged by history sync; the UI folds it on display.
 
 ## Backend Files
 
@@ -189,6 +191,8 @@ On connect, nodes reconcile group history so all members converge.
 | `update_group_topic` | group_id, topic | Update topic (creator-only; broadcasts `GROUP_SYNC`) |
 | `add_group_member` | group_id, node_id | Add member + push full history |
 | `remove_group_member` | group_id, node_id | Remove member; broadcast `GROUP_SYNC` |
+| `block_peer` | node_id | Block: `blocked_nodes`, removal from every group, every rule naming it deleted, session and transfers ended. Answers `removed_from_groups`, `removed_rules`, `was_connected`; broadcasts `firewall_rules_updated` |
+| `unblock_peer` | node_id | Remove the id from `blocked_nodes` and nothing else; broadcasts `firewall_rules_updated` |
 | `set_group_agents` | group_id, agent_ids | Choose which of this node's agents take part |
 | `set_group_reasoning_effort` | group_id, reasoning_effort | Group-scoped thinking depth for this node's agents; local, not synced |
 | `trigger_group_sleep` | group_id | Run sleep consolidation and post the morning briefs |

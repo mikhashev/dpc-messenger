@@ -23,6 +23,7 @@ from ..conversation_monitor import (
     same_moment,
 )
 from .group_access import may_share_group, refuse_group_access
+from ..firewall import is_blocked_by
 
 
 _PREIMAGES_WITHOUT_MENTION_DEPTH = ("dptp-msg-v1", "dptp-msg-v2")
@@ -30,6 +31,19 @@ _PREIMAGES_WITHOUT_MENTION_DEPTH = ("dptp-msg-v1", "dptp-msg-v2")
 # A mention merged by history sync wakes only within this age of its own
 # timestamp; past it the conversation has moved on (Mike's call, 2026-10-30).
 SYNCED_MENTION_MAX_AGE = timedelta(hours=1)
+
+
+def _is_blocked(service, *node_ids) -> Optional[str]:
+    """The first of `node_ids` this node blocks (`blocked_nodes`), else None.
+
+    Read from the block list, never from membership: a third member's roster
+    may list the node again, and that roster is the group's state.
+    """
+    firewall = getattr(service, "firewall", None)
+    for node_id in node_ids:
+        if node_id and is_blocked_by(firewall, node_id):
+            return node_id
+    return None
 
 
 def signed_mention_depth(payload: Dict[str, Any], verification: str):
@@ -107,6 +121,11 @@ class GroupCreateHandler(MessageHandler):
         """
         group_id = payload.get("group_id")
         name = payload.get("name", "")
+
+        if _is_blocked(self.service, sender_node_id):
+            self.logger.info("Ignoring GROUP_CREATE for %s from blocked node %s",
+                             group_id, sender_node_id)
+            return None
 
         self.logger.info(
             "Received GROUP_CREATE from %s: group=%s name='%s'",
@@ -269,6 +288,8 @@ class GroupTextHandler(MessageHandler):
             # this record passes through rather than one it retires in.
             await self._ask_for_certificate(author_node_id, sender_node_id)
         sender_node_id = author_node_id
+        # Kept and shown as any record (the UI folds it), never passed on.
+        blocked_author = _is_blocked(self.service, sender_node_id, payload.get("agent_owner"))
 
         # v0.20.0: Use sender-provided message_id if available, else generate for backwards compat
         message_id = payload.get("message_id")
@@ -304,7 +325,12 @@ class GroupTextHandler(MessageHandler):
         # In a star topology (B↔A↔C, but B↛C), A must relay B's message to C.
         # Dedup key already set above prevents relay loops.
         group = self.service.group_manager.get_group(group_id)
-        if group:
+        if blocked_author:
+            self.logger.info(
+                "Group message %s in %s is by blocked node %s: stored, not relayed, wakes nobody",
+                str(message_id)[:8], group_id, blocked_author,
+            )
+        elif group:
             relay_msg = {"command": "GROUP_TEXT", "payload": payload}
             for member_id in group.members:
                 if member_id == self.service.p2p_manager.node_id:
@@ -383,8 +409,9 @@ class GroupTextHandler(MessageHandler):
         })
 
         # Detect @Ark / @CC mentions and route to agents
-        await self._handle_agent_mentions(group_id, payload, text, sender_name, sender_node_id,
-                                          verification=verification)
+        if not blocked_author:
+            await self._handle_agent_mentions(group_id, payload, text, sender_name, sender_node_id,
+                                              verification=verification)
 
         return None
 
@@ -715,6 +742,11 @@ class GroupSyncHandler(MessageHandler):
         group_id = payload.get("group_id")
         remote_version = payload.get("version", 0)
 
+        if _is_blocked(self.service, sender_node_id):
+            self.logger.info("Ignoring GROUP_SYNC for %s from blocked node %s",
+                             group_id, sender_node_id)
+            return None
+
         self.logger.info(
             "Received GROUP_SYNC from %s for group %s (v%d)",
             sender_node_id[:20], group_id, remote_version
@@ -742,6 +774,13 @@ class GroupSyncHandler(MessageHandler):
         members_before = frozenset(local.members)
 
         result = self.service.group_manager.apply_sync(payload)
+        if result:
+            listed = _is_blocked(self.service, *getattr(result, "members", ()))
+            if listed:
+                self.logger.info(
+                    "GROUP_SYNC from %s lists blocked node %s in group %s: roster applied, "
+                    "the block still holds", sender_node_id[:20], listed, group_id,
+                )
         await self._honour_session_marker(members_before, marker_before, result)
         # Re-added by the same peer that refused us: the standing refusal is
         # spent, and without this the group would stay unasked until a restart.
@@ -999,6 +1038,11 @@ class GroupHistoryResponseHandler(MessageHandler):
             if not mentions_in(record.get("content")):
                 continue
             message_id = record.get("id")
+            blocked = _is_blocked(self.service, record.get("sender_node_id"), record.get("agent_owner"))
+            if blocked:
+                self.logger.info("Synced mention %s in group %s wakes nobody: by blocked node %s",
+                                 str(message_id)[:8], group_id, blocked)
+                continue
             moment = parse_moment(record.get("timestamp"))
             # A timestamp ahead of our clock counts as age 0.
             age = None if moment is None else max(now - moment, timedelta(0))

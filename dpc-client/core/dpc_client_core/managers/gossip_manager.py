@@ -673,6 +673,11 @@ class GossipManager:
             return
 
         if msg.destination == self.node_id:
+            # By the origin its signature proved, not the hop that handed it over.
+            refuse = getattr(self.p2p_manager, "refuse_if_blocked", None)
+            if callable(refuse) and refuse(proven_id, "gossip delivery") is True:
+                self.seen_messages.add(msg.id)
+                return
             await self._deliver_message(msg, proven_id)
             return
 

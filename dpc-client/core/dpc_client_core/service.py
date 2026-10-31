@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _BACKEND_OWNED_PROFILE_KEYS = frozenset()
 
 from .__version__ import __version__
-from .firewall import VENDOR_PROVIDER_TYPES, ContextFirewall
+from .firewall import NODE_ID_RE, VENDOR_PROVIDER_TYPES, ContextFirewall, is_blocked_by
 from .dpc_agent.pricing import vendor_ceiling_currency
 from . import node_ledger
 from .hub_client import HubClient
@@ -1735,7 +1735,8 @@ class CoreService:
             for group in self.group_manager.get_all_groups():
                 node_ids.update(group.members)
         node_ids.discard(self.p2p_manager.node_id)
-        return node_ids
+        # A blocked node stays out even while a third member's roster lists it.
+        return {nid for nid in node_ids if not is_blocked_by(getattr(self, "firewall", None), nid)}
 
     async def _auto_connect_node_groups(self):
         """Auto-connect on startup to every peer we keep a connection to."""
@@ -1956,6 +1957,10 @@ class CoreService:
         Routes messages to appropriate handlers via message router.
         """
         command = message.get("command")
+        # A session that outlived its Block by a frame: nothing it sends is read.
+        refuse = getattr(getattr(self, "p2p_manager", None), "refuse_if_blocked", None)
+        if callable(refuse) and refuse(sender_node_id, f"incoming {command}") is True:
+            return
         # A bulk command says the same thing here and one layer down, and at
         # 131 211 chunks in a single transfer that is two floods rather than
         # one. The router keeps the heartbeat; this layer stays quiet.
@@ -2062,6 +2067,8 @@ class CoreService:
         situation changed, has to be tried at least once, or the rule would
         only ever learn from failures.
         """
+        if is_blocked_by(getattr(self, "firewall", None), peer_id):
+            return False
         cache = getattr(getattr(self, "p2p_manager", None), "peer_cache", None)
         cached = cache.get_peer(peer_id) if cache else None
         if cached is None:
@@ -4890,6 +4897,7 @@ class CoreService:
         """Get current firewall rules as JSON dict for editor."""
         try:
             rules_dict = self.firewall.get_rules_as_dict()
+            rules_dict.setdefault("blocked_nodes", [])
             return {
                 "status": "success",
                 "rules": rules_dict,
@@ -4958,6 +4966,11 @@ class CoreService:
         """
         try:
             self._merge_unknown_agent_profile_keys(rules_dict)
+            # Owned by block_peer / unblock_peer: an editor snapshot taken
+            # before a Block would otherwise lift it on Save.
+            on_disk = self.firewall.get_rules_as_dict().get("blocked_nodes")
+            if isinstance(on_disk, list):
+                rules_dict["blocked_nodes"] = on_disk
             success, message, errors = self.firewall.save_rules_from_dict(rules_dict)
 
             if not success:
@@ -4979,6 +4992,89 @@ class CoreService:
         except Exception as e:
             logger.error("Error saving firewall rules: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    async def _apply_saved_firewall_rules(self, message: str) -> None:
+        """What follows a Block or Unblock save, the same steps as at the end of
+        `save_firewall_rules`: peers re-learn our providers, agents re-read
+        their permissions, and the UI gets `firewall_rules_updated`."""
+        await self._notify_peers_of_provider_changes()
+
+        try:
+            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+            if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                for mgr in dpc_agent_provider._managers.values():
+                    mgr.sync_firewall_settings()
+        except Exception as e:
+            logger.warning("Failed to sync agent firewall settings: %s", e)
+
+        await self.local_api.broadcast_event("firewall_rules_updated", {"message": message})
+
+    async def block_peer(self, node_id: str) -> Dict[str, Any]:
+        """Block a node (Mike's call, 2026-10-31): `blocked_nodes` gets its id,
+        every other rule naming it is deleted, every group of ours drops it,
+        and its session and file transfers end. Irreversible but for the gate:
+        `unblock_peer` restores no rule and no group.
+        """
+        if not isinstance(node_id, str) or not NODE_ID_RE.fullmatch(node_id):
+            return {"status": "error", "message": f"Not a node id: {node_id!r}"}
+        if node_id == self.p2p_manager.node_id:
+            return {"status": "error", "message": "This node cannot block itself"}
+        if self.firewall.is_blocked(node_id):
+            return {"status": "error", "message": f"{node_id} is already blocked"}
+
+        was_connected = node_id in self.p2p_manager.peers
+
+        # The gate first: from here every door refuses it, whatever below fails.
+        success, message, removed_rules = self.firewall.block_node(node_id)
+        if not success:
+            return {"status": "error", "message": message}
+
+        # While its session is still open, so it is told by GROUP_SYNC.
+        removed_from_groups = []
+        for group in list(self.group_manager.get_all_groups()):
+            if node_id not in group.members:
+                continue
+            result = await self.remove_group_member(group.group_id, node_id)
+            if result.get("status") == "success":
+                removed_from_groups.append(group.group_id)
+            else:
+                logger.warning("Block of %s: could not remove it from group %s: %s",
+                               node_id, group.group_id, result.get("message"))
+
+        for transfer_id, transfer in list(self.file_transfer_manager.active_transfers.items()):
+            if transfer.node_id != node_id:
+                continue
+            await self.file_transfer_manager.cancel_transfer(transfer_id, "user_cancelled")
+            await self.local_api.broadcast_event("file_transfer_cancelled", {
+                "transfer_id": transfer_id,
+                "node_id": node_id,
+                "filename": transfer.filename,
+                "direction": transfer.direction,
+                "reason": "user_cancelled",
+                "status": "cancelled",
+            })
+
+        await self.disconnect_from_peer(node_id)
+        await self._apply_saved_firewall_rules(message)
+        logger.info("Blocked %s: removed from %d group(s), %d rule(s) deleted, was connected: %s",
+                    node_id, len(removed_from_groups), len(removed_rules), was_connected)
+        return {
+            "status": "success",
+            "node_id": node_id,
+            "removed_from_groups": removed_from_groups,
+            "removed_rules": removed_rules,
+            "was_connected": was_connected,
+        }
+
+    async def unblock_peer(self, node_id: str) -> Dict[str, Any]:
+        """Lift the gate and nothing else: no dial, no group, no rule comes back."""
+        if not isinstance(node_id, str) or not NODE_ID_RE.fullmatch(node_id):
+            return {"status": "error", "message": f"Not a node id: {node_id!r}"}
+        success, message = self.firewall.unblock_node(node_id)
+        if not success:
+            return {"status": "error", "message": message}
+        await self._apply_saved_firewall_rules(message)
+        return {"status": "success", "node_id": node_id}
 
     def _merge_unknown_agent_profile_keys(self, rules_dict: Dict[str, Any]) -> None:
         """Mutate `rules_dict` in place: for every agent profile present
@@ -6566,6 +6662,9 @@ class CoreService:
             topic: Group topic/description
             member_node_ids: List of peer node IDs to invite
         """
+        blocked = [n for n in (member_node_ids or []) if is_blocked_by(getattr(self, "firewall", None), n)]
+        if blocked:
+            return self._unblock_first(blocked[0])
         try:
             members = member_node_ids or []
             group = self.group_manager.create_group(name, topic, members)
@@ -7356,6 +7455,8 @@ class CoreService:
             group_id: Target group ID
             node_id: Node ID to add
         """
+        if is_blocked_by(getattr(self, "firewall", None), node_id):
+            return self._unblock_first(node_id)
         try:
             group = self.group_manager.add_member(group_id, node_id)
             if not group:
@@ -8277,6 +8378,13 @@ class CoreService:
         Args:
             uri: dpc:// URI with host, port, and node_id query parameter
         """
+        from dpc_protocol.utils import parse_dpc_uri
+        try:
+            _host, _port, target_node_id = parse_dpc_uri(uri)
+        except Exception:
+            target_node_id = None
+        if target_node_id and is_blocked_by(getattr(self, "firewall", None), target_node_id):
+            return self._unblock_first(target_node_id)
         await self.p2p_coordinator.connect_via_uri(uri)
 
     async def test_port(self, uri: str) -> dict:
@@ -8300,7 +8408,16 @@ class CoreService:
         Orchestrates a P2P connection to a peer using its node_id via Hub.
         Uses WebRTC with NAT traversal.
         """
+        if is_blocked_by(getattr(self, "firewall", None), node_id):
+            return self._unblock_first(node_id)
         await self.p2p_coordinator.connect_via_hub(node_id)
+
+    @staticmethod
+    def _unblock_first(node_id: str) -> Dict[str, Any]:
+        """The answer to a manual connect, or a group add, naming a blocked node."""
+        logger.info("Refused blocked node %s on a manual connect or a group add", node_id)
+        return {"status": "error",
+                "message": f"{node_id} is blocked. Unblock it first."}
 
     @slow_command
     async def connect_via_dht(self, node_id: str) -> dict:
@@ -8325,6 +8442,8 @@ class CoreService:
             result = await core_service.connect_via_dht("dpc-node-abc123...")
             # {"status": "success", "method": "dht", "message": "Connected via DHT"}
         """
+        if is_blocked_by(getattr(self, "firewall", None), node_id):
+            return {**self._unblock_first(node_id), "method": None}
         try:
             if self.connection_orchestrator:
                 # Use full 6-tier fallback hierarchy (IPv6 → IPv4 → WebRTC → hole punch → relay → gossip)

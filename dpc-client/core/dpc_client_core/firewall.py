@@ -32,6 +32,26 @@ TOOL_SETTING_SUFFIXES = ('_group_allowed', '_tier1_whitelist')
 # tool_settings: {"run_shell": {"group_allowed": bool, "tier1_whitelist": [...]}}
 TOOL_SETTINGS_KEY = 'tool_settings'
 
+# A node id as dpc_protocol.crypto.generate_node_id writes it: the first 32 hex
+# of the SHA-256 of the public key. A reinstall makes a new key and a new id,
+# so a block by id does not outlive the peer's reinstall.
+NODE_ID_RE = re.compile(r"dpc-node-[0-9a-f]{32}")
+
+
+def is_blocked_by(firewall: Any, node_id: Any) -> bool:
+    """Whether `firewall` blocks `node_id` (`blocked_nodes`); False without one.
+
+    For callers that may hold no firewall or a test double: only a real
+    `True` from `ContextFirewall.is_blocked` counts.
+    """
+    check = getattr(firewall, "is_blocked", None)
+    if not callable(check):
+        return False
+    try:
+        return check(node_id) is True
+    except Exception:
+        return False
+
 
 def _is_tool_key(name: str) -> bool:
     """True for keys in a `tools` block that name an actual tool."""
@@ -274,6 +294,13 @@ class ContextFirewall:
             k: v for k, v in self.rules.get('node_groups', {}).items()
             if not k.startswith('_') and isinstance(v, list)
         }
+
+        # Nodes this node refuses outright: no session, no dial, their group
+        # posts relayed nowhere and waking nobody. Wins over every allow.
+        blocked = self.rules.get('blocked_nodes', [])
+        self.blocked_nodes: Set[str] = (
+            {n for n in blocked if isinstance(n, str)} if isinstance(blocked, list) else set()
+        )
 
         # Parse compute sharing settings
         self._parse_compute_settings()
@@ -1664,6 +1691,10 @@ class ContextFirewall:
                     "colleagues": [],
                     "family": []
                 },
+                # Node ids refused outright: no connection either way, wins over
+                # every allow below. Changed by Block / Unblock (block_peer,
+                # unblock_peer), not by hand.
+                "blocked_nodes": [],
                 "file_groups": {
                     "_comment": "Define aliases for groups of context files (supports wildcards)",
                     "work": ["work_*.json", "projects.json"],
@@ -2429,7 +2460,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', 'dpc_agent', 'agent_profiles', '_comment']
+            valid_top_level_keys = ['hub', 'blocked_nodes', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', 'dpc_agent', 'agent_profiles', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -2445,6 +2476,19 @@ class ContextFirewall:
                             continue  # Skip comments
                         if action not in ['allow', 'deny']:
                             errors.append(f"Invalid action in hub: '{resource_path} = {action}' (should be 'allow' or 'deny')")
+
+            # Validate blocked_nodes: a list of whole node ids, nothing else
+            if 'blocked_nodes' in config_dict:
+                blocked = config_dict['blocked_nodes']
+                if not isinstance(blocked, list):
+                    errors.append("'blocked_nodes' must be a list of node IDs")
+                else:
+                    for node_id in blocked:
+                        if not isinstance(node_id, str) or not NODE_ID_RE.fullmatch(node_id):
+                            errors.append(
+                                f"Invalid node ID in blocked_nodes: {node_id!r} "
+                                f"(should be 'dpc-node-' followed by 32 lowercase hex characters)"
+                            )
 
             # Validate node_groups section
             if 'node_groups' in config_dict:
@@ -2907,17 +2951,100 @@ class ContextFirewall:
         backup = self.access_file_path.read_text() if self.access_file_path.exists() else None
 
         rules_text = json.dumps(rules_dict, indent=2)
-        self.access_file_path.write_text(rules_text)
+        self._replace_rules_file(rules_text)
 
         success, message = self.reload()
         if not success and backup is not None:
-            self.access_file_path.write_text(backup)
+            self._replace_rules_file(backup)
             logger.warning("Rolled back firewall rules after failed reload")
 
         if success and path_warnings:
             message = f"{message} — {len(path_warnings)} path(s) do not exist:\n" + "\n".join(path_warnings)
 
         return (success, message, [])
+
+    def _replace_rules_file(self, text: str) -> None:
+        """Write the rules file whole or not at all: a temp file beside it, then
+        os.replace. write_text truncated first, so a crash mid-write left an
+        empty or half file — and with it, every block and every deny gone."""
+        tmp = self.access_file_path.with_name(self.access_file_path.name + ".tmp")
+        tmp.write_text(text)
+        os.replace(tmp, self.access_file_path)
+
+    # --- Block / Unblock (blocked_nodes) ---
+
+    def is_blocked(self, node_id: Any) -> bool:
+        """`node_id` is in `blocked_nodes`: no session, no dial, no relay, no wake."""
+        return isinstance(node_id, str) and node_id in getattr(self, 'blocked_nodes', ())
+
+    @staticmethod
+    def _remove_node_mentions(rules: Any, node_id: str, path: str = "") -> List[str]:
+        """Remove, in place, every mention of `node_id` anywhere in `rules`.
+
+        A mention is a dict key, a dict value or a list entry that IS the id. A
+        string that only contains it is not a rule about the node and stays:
+        an agent's sandbox path to `conversations/<node id>/files` would lose
+        its middle and point at nothing. Walked over the whole structure rather
+        than a list of sections, so a section added later is covered too.
+        `blocked_nodes` at the top is left alone. Returns the dotted path of
+        each removed dict entry, and of the list each removed list entry stood in.
+        """
+        removed: List[str] = []
+        if isinstance(rules, dict):
+            for key in list(rules.keys()):
+                if not path and key == 'blocked_nodes':
+                    continue
+                here = f"{path}.{key}" if path else str(key)
+                value = rules[key]
+                if key == node_id or value == node_id:
+                    del rules[key]
+                    removed.append(here)
+                else:
+                    removed.extend(ContextFirewall._remove_node_mentions(value, node_id, here))
+        elif isinstance(rules, list):
+            kept = []
+            for index, value in enumerate(rules):
+                if value == node_id:
+                    removed.append(path)
+                    continue
+                removed.extend(ContextFirewall._remove_node_mentions(value, node_id, f"{path}[{index}]"))
+                kept.append(value)
+            rules[:] = kept
+        return removed
+
+    def block_node(self, node_id: str) -> Tuple[bool, str, List[str]]:
+        """Add `node_id` to `blocked_nodes` and remove every other mention of it.
+
+        Irreversible for the removed rules: `unblock_node` restores none of
+        them. One save, through the same validation as the editor's.
+        Returns (success, message, removed_paths).
+        """
+        rules = self.get_rules_as_dict()
+        removed = self._remove_node_mentions(rules, node_id)
+        blocked = rules.get('blocked_nodes')
+        if not isinstance(blocked, list):
+            blocked = []
+        if node_id not in blocked:
+            blocked.append(node_id)
+        rules['blocked_nodes'] = blocked
+        success, message, errors = self.save_rules_from_dict(rules)
+        if not success:
+            return (False, "; ".join([message, *errors]), [])
+        logger.info("Blocked %s; removed %d rule(s) naming it", node_id, len(removed))
+        return (True, message, removed)
+
+    def unblock_node(self, node_id: str) -> Tuple[bool, str]:
+        """Remove `node_id` from `blocked_nodes` and nothing else."""
+        rules = self.get_rules_as_dict()
+        blocked = rules.get('blocked_nodes')
+        if not isinstance(blocked, list) or node_id not in blocked:
+            return (False, f"{node_id} is not blocked")
+        rules['blocked_nodes'] = [n for n in blocked if n != node_id]
+        success, message, errors = self.save_rules_from_dict(rules)
+        if not success:
+            return (False, "; ".join([message, *errors]))
+        logger.info("Unblocked %s", node_id)
+        return (True, message)
 
 
 # --- Self-testing block ---

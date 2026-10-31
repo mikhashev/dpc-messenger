@@ -23,7 +23,7 @@ from dpc_protocol.message_signing import HELLO_PREIMAGE_VERSION, hello_content_h
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
 
-from .firewall import ContextFirewall
+from .firewall import ContextFirewall, is_blocked_by
 from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
 from .dht import DHTManager, DHTConfig
@@ -232,6 +232,15 @@ class P2PManager:
         self.groups_for_peer: Callable | None = None
         self._server_task = None
         logger.info("P2PManager initialized with WebRTC support")
+
+    def refuse_if_blocked(self, node_id: Any, path: str) -> bool:
+        """True, with one INFO line naming the node and the path, when the
+        node is in `blocked_nodes`. Every door that admits a peer or delivers
+        a message as coming from it asks this."""
+        if not is_blocked_by(getattr(self, "firewall", None), node_id):
+            return False
+        logger.info("Refused blocked node %s on %s", node_id, path)
+        return True
 
     def set_on_peer_list_change(self, callback: Callable):
         self.on_peer_list_change = callback
@@ -713,6 +722,13 @@ class P2PManager:
                     f"— connection rejected"
                 )
 
+            # A blocked node proved its key too, so not a failed HELLO either,
+            # and it is told nothing, as at the ceiling below. Before the
+            # ceiling's own exception: a blocked node holding an entry is refused.
+            if self.refuse_if_blocked(peer_node_id, "direct TLS accept, before HELLO_ACK"):
+                writer.close()
+                return
+
             # The peer proved its key, so this is not a failed HELLO; silent to
             # it like the pre-HELLO ceiling. A node that holds an entry already
             # replaces its own connection and is never refused.
@@ -888,6 +904,9 @@ class P2PManager:
             ConnectionRefusedError: If peer actively refuses connection (firewall/not running)
             ConnectionError: If peer handshake fails
         """
+        if self.refuse_if_blocked(target_node_id, "direct TLS dial"):
+            raise ConnectionError(f"{target_node_id} is blocked. Unblock it first to connect.")
+
         # Use configured timeout if not explicitly provided
         if timeout is None:
             timeout = self.settings.get_p2p_connection_timeout() if self.settings else 60.0
@@ -1685,6 +1704,9 @@ class P2PManager:
         Initiates a WebRTC connection to a peer via Hub signaling.
         This is the INITIATOR side (Alice).
         """
+        if self.refuse_if_blocked(target_node_id, "Hub WebRTC dial"):
+            raise ConnectionError(f"{target_node_id} is blocked. Unblock it first to connect.")
+
         logger.info("Initiating WebRTC connection to %s via Hub", target_node_id)
 
         if target_node_id in self.peers:
@@ -1799,6 +1821,10 @@ class P2PManager:
 
     async def _handle_webrtc_offer(self, from_node: str, payload: Dict[str, Any], hub_client: HubClient):
         """Handle incoming WebRTC offer (ANSWERER side - Bob)."""
+        # No answer: the offerer learns nothing, as on the direct path.
+        if self.refuse_if_blocked(from_node, "Hub WebRTC offer"):
+            return
+
         logger.info("Handling WebRTC offer from %s", from_node)
 
         if from_node in self.peers:
@@ -1878,7 +1904,10 @@ class P2PManager:
     async def _handle_ice_candidate(self, from_node: str, payload: Dict[str, Any]):
         """Handle incoming ICE candidate."""
         candidate = payload.get("candidate")
-        
+        # Not buffered for a node whose offer is refused: it would never drain.
+        if is_blocked_by(getattr(self, "firewall", None), from_node):
+            return
+
         webrtc_peer = self._pending_webrtc.get(from_node) or self.peers.get(from_node)
         
         if webrtc_peer and isinstance(webrtc_peer, WebRTCPeerConnection):
@@ -1903,6 +1932,11 @@ class P2PManager:
 
             # Move from pending to active peers
             self._pending_webrtc.pop(node_id, None)
+
+            # Blocked while ICE ran: closed instead of entered.
+            if self.refuse_if_blocked(node_id, "Hub WebRTC connection"):
+                await webrtc_peer.close()
+                return
 
             # Set strategy_used for WebRTC connections (for UI display)
             webrtc_peer.strategy_used = "hub_webrtc"

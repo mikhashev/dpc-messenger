@@ -353,6 +353,9 @@ class RelayManager:
         if not self.p2p_manager:
             raise ConnectionError("P2PManager not initialized")
 
+        if self._refuses_blocked(peer_id, "relay dial"):
+            raise ConnectionError(f"{peer_id} is blocked. Unblock it first to connect.")
+
         # Register a Future that RelayReadyHandler will resolve with the session_id
         loop = asyncio.get_running_loop()
         ready_future: asyncio.Future = loop.create_future()
@@ -458,6 +461,9 @@ class RelayManager:
         Returns:
             True if dispatched, False if no matching active connection
         """
+        if self._refuses_blocked(from_peer, "relayed session message"):
+            return False
+
         conn = self._active_relay_connections.get(from_peer)
         if not conn:
             logger.warning(
@@ -475,6 +481,11 @@ class RelayManager:
 
         await conn._dispatch_incoming(data_b64)
         return True
+
+    def _refuses_blocked(self, node_id: str, path: str) -> bool:
+        """P2PManager.refuse_if_blocked, False without a P2P manager."""
+        refuse = getattr(self.p2p_manager, "refuse_if_blocked", None)
+        return callable(refuse) and refuse(node_id, path) is True
 
     def deregister_relay_connection(self, peer_id: str):
         """Remove an active relay connection from the dispatch registry."""
@@ -658,6 +669,11 @@ class RelayManager:
         """
         if not self.volunteer:
             logger.warning("Not volunteering as relay - rejecting registration")
+            return None
+
+        # Neither end of a session through us may be a node we block.
+        if (self._refuses_blocked(requester_id, "relay registration")
+                or self._refuses_blocked(target_id, "relay registration (as its target)")):
             return None
 
         if len(self.sessions) >= self.max_peers:

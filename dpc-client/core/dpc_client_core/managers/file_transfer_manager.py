@@ -56,7 +56,7 @@ from typing import Optional, Dict, Callable, List, Any, NamedTuple, Tuple, TYPE_
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ..firewall import FILE_TRANSFER_PROVED_CONNECTION_DEFAULT, FILE_TRANSFER_PROVED_CONNECTION_KEY
+from ..firewall import FILE_TRANSFER_PROVED_CONNECTION_DEFAULT, FILE_TRANSFER_PROVED_CONNECTION_KEY, is_blocked_by
 from ..p2p_manager import peer_proof
 from .transfer_speed import TransferSpeed
 
@@ -1782,7 +1782,15 @@ class FileTransferManager:
         # topology). Once per file: the key, not the transfer, decides, because
         # every relay is a new transfer and keying on that relayed one file
         # around a full mesh for as long as everyone stayed online.
+        blocked_author = (
+            transfer.group_id and transfer.sender_node_id
+            and is_blocked_by(getattr(self.service, "firewall", None), transfer.sender_node_id)
+        )
+        if blocked_author:
+            logger.info("Group file %s in %s is by blocked node %s: kept, not relayed",
+                        transfer.filename, transfer.group_id, transfer.sender_node_id)
         if (transfer.group_id and save_to_disk and file_path and file_path.exists()
+                and not blocked_author
                 and self.service and hasattr(self.service, 'group_manager')):
             file_key = self._offer_key(transfer.group_id, transfer.message_id, transfer.hash)
             relay_key = f"relay:{file_key or transfer.transfer_id}"

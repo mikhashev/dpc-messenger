@@ -1262,6 +1262,7 @@ Access control file format (`~/.dpc/privacy_rules.json`):
     "personal.json:profile.name": "allow",
     "personal.json:profile.description": "allow"
   },
+  "blocked_nodes": [],
   "node_groups": {
     "friends": ["dpc-node-alice-123", "dpc-node-bob-456"],
     "trusted": ["dpc-node-charlie-789"]
@@ -1311,6 +1312,17 @@ Access control file format (`~/.dpc/privacy_rules.json`):
   }
 }
 ```
+
+**`blocked_nodes` keeps a node out, and wins over every allow.** A node id in it gets no
+session either way: the listener closes it after its key is proved and before HELLO_ACK,
+telling it nothing (as at `max_proved_connections_per_ip`), and nothing dials it, answers
+its Hub offer, relays for it or delivers its gossip. Its group records are kept but not
+relayed and wake nobody. The list is written by Block (`block_peer`), which also removes
+the node from every group and deletes every other entry in this file that is its id (a key,
+a value or a list item; a sandbox path that merely contains the id stays), and is
+cleared by Unblock (`unblock_peer`), which restores none of that; the editor's Save keeps
+the list on disk. A block names a key, so it does not survive the peer's reinstall. Mike's
+call, 2026-10-31.
 
 **Transcription has two directions and two permissions.** `enabled` / `allow_nodes` /
 `allow_groups` / `allowed_models` govern *serving*: whether a peer may use this node's

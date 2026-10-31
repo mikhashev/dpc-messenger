@@ -7,6 +7,8 @@
     "personal.json:profile.description": "allow"
   },
 
+  "blocked_nodes": [],
+
   "node_groups": {
     "_comment": "Define which nodes belong to which groups for easier permission management",
     "colleagues": ["dpc-node-alice-123", "dpc-node-bob-456"],

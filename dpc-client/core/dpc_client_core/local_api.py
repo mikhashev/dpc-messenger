@@ -110,6 +110,9 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "connect_to_peer",
     "connect_via_dht",
     "disconnect_from_peer",
+    # Block / Unblock: blocked_nodes in privacy_rules.json
+    "block_peer",
+    "unblock_peer",
     # Hub
     "login_to_hub",
     "disconnect_from_hub",

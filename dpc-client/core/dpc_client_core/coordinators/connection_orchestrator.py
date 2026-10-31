@@ -150,6 +150,12 @@ class ConnectionOrchestrator:
             ... except ConnectionFailedError as e:
             ...     print(f"All strategies failed: {e}")
         """
+        # Every strategy below dials through here — DHT, cache, hole punch,
+        # relay and gossip included — so one refusal covers them all.
+        refuse = getattr(self.p2p_manager, "refuse_if_blocked", None)
+        if callable(refuse) and refuse(node_id, "connection orchestrator") is True:
+            raise ConnectionFailedError(f"{node_id} is blocked. Unblock it first to connect.")
+
         self.stats["total_attempts"] += 1
         logger.info("Connecting to %s (timeout=%ds)", node_id[:20], timeout)
 
