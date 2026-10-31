@@ -3,7 +3,9 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand } from '$lib/coreService';
+  import { sendCommand, blockedNodeIds, firewallRulesUpdated } from '$lib/coreService';
+  import { unblockPeer } from '$lib/services/blockedPeers';
+  import type { CachedPeerRow } from '$lib/utils/cachedPeers';
   import AgentPermissionsPanel from './AgentPermissionsPanel.svelte';
   import InferenceSharingEditor from './InferenceSharingEditor.svelte';
   import type { ComputeRules } from './inferenceSharing';
@@ -89,6 +91,8 @@
       events: Record<string, boolean>;
     };
     nodes?: Record<string, Record<string, string>>;
+    // Node ids refused at the door; owned by block_peer / unblock_peer, not by Save.
+    blocked_nodes?: string[];
     groups?: Record<string, Record<string, string>>;
     ai_scopes?: Record<string, Record<string, string>>;
     device_sharing?: Record<string, Record<string, string>>;
@@ -129,7 +133,7 @@
   }
 
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'dpc-agent' | 'agent-profiles' | 'peers' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'dpc-agent' | 'agent-profiles' | 'peers' | 'blocked' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -181,6 +185,70 @@
   let transcriptionAllowedModelsText: string = '';
   let transcriptionSendToNodesText: string = '';
   let transcriptionSendToGroupsText: string = '';
+
+  // Blocked tab: names for the blocked ids come from the known-peers cache, the same
+  // `list_cached_peers` the sidebar reads. The list itself is the `blockedNodeIds` store.
+  let blockedNames: Record<string, string> = {};
+  let blockedNamesLoaded: boolean = false;
+  let unblockingId: string | null = null;
+  let unblockError: string = '';
+
+  $: if (open && selectedTab === 'blocked' && !blockedNamesLoaded) {
+    loadBlockedNames();
+  }
+  $: if (!open) {
+    blockedNamesLoaded = false;
+    unblockError = '';
+  }
+
+  async function loadBlockedNames() {
+    blockedNamesLoaded = true;
+    try {
+      const result = await sendCommand('list_cached_peers', {});
+      if (result?.status === 'success' && Array.isArray(result.peers)) {
+        const names: Record<string, string> = {};
+        for (const row of result.peers as CachedPeerRow[]) {
+          const name = (row.display_name ?? '').trim();
+          if (name) names[row.node_id] = name;
+        }
+        blockedNames = names;
+      }
+    } catch (error) {
+      console.error('Error loading cached peers for the Blocked tab:', error);
+    }
+  }
+
+  // Unblock acts at once through unblock_peer; it is not part of Save. The backend
+  // answers with a firewall_rules_updated broadcast that updates the store, and the
+  // local copies are trimmed too so a later Save does not write the id back.
+  async function unblock(nodeId: string) {
+    unblockingId = nodeId;
+    unblockError = '';
+    try {
+      const result = await unblockPeer(nodeId, sendCommand);
+      if (result?.status === 'success') {
+        if (rules?.blocked_nodes) rules.blocked_nodes = rules.blocked_nodes.filter(id => id !== nodeId);
+        if (editedRules?.blocked_nodes) editedRules.blocked_nodes = editedRules.blocked_nodes.filter(id => id !== nodeId);
+        rules = rules;
+      } else {
+        unblockError = result?.message || 'Unblock failed';
+      }
+    } catch (error) {
+      unblockError = `Unblock failed: ${error}`;
+    }
+    unblockingId = null;
+  }
+
+  // A block or unblock rewrites the rules file (it deletes the rules that name the
+  // node), so the copy shown here is read again unless the user is mid-edit. The guard
+  // keeps the store's first value, which arrives before any change, from asking.
+  let seenRulesEvent = false;
+  $: onRulesEvent($firewallRulesUpdated);
+
+  function onRulesEvent(event: unknown) {
+    if (!seenRulesEvent) { seenRulesEvent = true; return; }
+    if (event && open && rules && !editMode) loadRules();
+  }
 
   // Load rules when modal opens
   $: if (open && !rules) {
@@ -305,6 +373,10 @@
     saveMessage = '';
     saveMessageType = '';
     saveErrors = [];
+
+    // The block list changes through block_peer / unblock_peer; Save must carry the
+    // current list, not the copy this edit session started from.
+    editedRules.blocked_nodes = [...$blockedNodeIds];
 
     try {
       const result = await sendCommand('save_firewall_rules', {
@@ -1089,6 +1161,13 @@
           on:click={() => selectedTab = 'peers'}
         >
           Peer Permissions
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'blocked'}
+          on:click={() => selectedTab = 'blocked'}
+        >
+          Blocked
         </button>
       </div>
 
@@ -2317,6 +2396,36 @@
               {/each}
             {:else}
               <p class="empty">No group permissions defined.</p>
+            {/if}
+          </div>
+
+        {:else if selectedTab === 'blocked'}
+          <div class="section">
+            <h3>Blocked</h3>
+            <p class="help-text">
+              Blocked nodes cannot connect. Unblock lets a node connect again; it does not put the
+              node back into groups or firewall rules, which blocking deleted. Unblock takes effect at
+              once and is not part of Save.
+            </p>
+            {#if unblockError}
+              <div class="save-message error">{unblockError}</div>
+            {/if}
+            {#if $blockedNodeIds.length > 0}
+              <div class="node-list">
+                {#each $blockedNodeIds as nodeId (nodeId)}
+                  <div class="node-item">
+                    <span>
+                      {#if blockedNames[nodeId]}<strong>{blockedNames[nodeId]}</strong>{/if}
+                      <code title={nodeId}>{nodeId}</code>
+                    </span>
+                    <button class="btn-small" disabled={unblockingId === nodeId} on:click={() => unblock(nodeId)}>
+                      {unblockingId === nodeId ? 'Unblocking...' : 'Unblock'}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="empty">No blocked nodes.</p>
             {/if}
           </div>
         {/if}

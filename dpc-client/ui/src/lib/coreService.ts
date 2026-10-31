@@ -125,6 +125,9 @@ import { connectionStatus, nodeStatus, coreMessages } from './services/connectio
 import { p2pMessages, unreadMessageCounts } from './services/messaging';
 import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries } from './services/providers';
 import { accountRowsFromBalances, accountLevel, balanceErrorText, providerTypeLabel, type AccountRow } from './components/inferenceSharing';
+import { blockedNodeIds, loadBlockedNodes } from './services/blockedPeers';
+import { blockedIdsFromRules } from './utils/blockedPeers';
+import { isBlockedAuthor } from './utils/blockedRuns';
 import { showNotificationIfBackground } from './notificationService';
 import { fileSendTimeoutFor, getLocalFileSize } from './fileSendTimeout';
 import {
@@ -145,6 +148,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 // services/providers.ts and re-export it here. See CLAUDE.md "UI Integration Pattern".
 export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
+export { blockedNodeIds };
 export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded };
@@ -154,6 +158,14 @@ export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, ag
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionFallback, tokenWarning, integrityWarnings, votingConversationId };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
+
+// A group event whose author node (or the node owning the agent that wrote it) is blocked.
+function isFromBlockedNode(payload: { sender_node_id?: string; agent_owner?: string | null }): boolean {
+    return isBlockedAuthor(new Set(get(blockedNodeIds)), {
+        sender: payload?.sender_node_id,
+        agentOwner: payload?.agent_owner,
+    });
+}
 
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
@@ -588,6 +600,10 @@ export async function connectToCoreService() {
                 else if (message.event === "firewall_rules_updated") {
                     console.log("Firewall rules updated, triggering AI scope and provider list reload");
                     firewallRulesUpdated.set(message.payload);
+                    // A broadcast without `blocked_nodes` of its own does not say the list is empty.
+                    if (blockedIdsFromRules(message.payload) === null) {
+                        void loadBlockedNodes(sendCommand, true);
+                    }
                     // Also reload provider list since allowed models may have changed
                     sendCommand("get_providers_list");
                     sendCommand("get_default_providers");
@@ -1054,9 +1070,10 @@ export async function connectToCoreService() {
                 else if (message.event === "group_text_received") {
                     groupTextReceived.set(message.payload);
 
-                    // Track unread messages for group
+                    // Track unread messages for group (a blocked node's messages do not count)
                     const groupId = message.payload.group_id;
-                    if (groupId && typeof window !== 'undefined' && groupId !== activeChat) {
+                    if (groupId && typeof window !== 'undefined' && groupId !== activeChat
+                        && !isFromBlockedNode(message.payload)) {
                         const currentCounts = get(unreadMessageCounts);
                         const currentCount = currentCounts.get(groupId) || 0;
                         currentCounts.set(groupId, currentCount + 1);
@@ -1066,9 +1083,10 @@ export async function connectToCoreService() {
                 else if (message.event === "group_file_received") {
                     groupFileReceived.set(message.payload);
 
-                    // Track unread messages for group
+                    // Track unread messages for group (a blocked node's messages do not count)
                     const groupId = message.payload.group_id;
-                    if (groupId && typeof window !== 'undefined' && groupId !== activeChat) {
+                    if (groupId && typeof window !== 'undefined' && groupId !== activeChat
+                        && !isFromBlockedNode(message.payload)) {
                         const currentCounts = get(unreadMessageCounts);
                         const currentCount = currentCounts.get(groupId) || 0;
                         currentCounts.set(groupId, currentCount + 1);

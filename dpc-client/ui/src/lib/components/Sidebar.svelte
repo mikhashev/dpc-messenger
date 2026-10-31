@@ -379,6 +379,7 @@
     onAddAgentChat,
     onDeleteAIChat,
     onDisconnectPeer,
+    onBlockPeer,
     groupChats = new Map(),
     onCreateGroup,
     // Agent list (Phase 4)
@@ -416,6 +417,7 @@
     onAddAgentChat?: () => void;
     onDeleteAIChat: (chatId: string) => void;
     onDisconnectPeer: (peerId: string) => void;
+    onBlockPeer?: (peerId: string) => void;
     groupChats?: Map<string, any>;
     onCreateGroup?: () => void;
     // Agent list (Phase 4)
@@ -1004,6 +1006,16 @@
               >
                 ×
               </button>
+              {#if onBlockPeer}
+                <button
+                  type="button"
+                  class="block-btn"
+                  onclick={(e) => { e.stopPropagation(); onBlockPeer(peerId); }}
+                  title="Block this peer: ends the connection and stops it from connecting again"
+                >
+                  Block
+                </button>
+              {/if}
             </li>
           {/each}
         {:else}
@@ -1926,6 +1938,20 @@
   }
 
   .disconnect-btn:hover {
+    background: #ffebee;
+    color: #dc3545;
+  }
+
+  .block-btn {
+    flex: 0 0 auto;
+    padding: 0.3rem 0.5rem;
+    background: transparent;
+    color: #999;
+    font-size: 0.75rem;
+    border: 1px solid transparent;
+  }
+
+  .block-btn:hover {
     background: #ffebee;
     color: #dc3545;
   }

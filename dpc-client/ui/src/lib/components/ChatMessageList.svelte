@@ -8,7 +8,8 @@
   import ThinkingBlock from './ThinkingBlock.svelte';
   import { showsThinkingBlock } from '$lib/utils/thinkingVisibility';
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
-  import { agentLiveTools, agentLiveAgentIds } from '$lib/coreService';
+  import { agentLiveTools, agentLiveAgentIds, blockedNodeIds } from '$lib/coreService';
+  import { foldBlockedRuns, isBlockedAuthor, blockedRunLabel } from '$lib/utils/blockedRuns';
   import { dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import type { Message, Mention } from '$lib/types.js';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
@@ -85,6 +86,26 @@
   // uses it too, not the raw prop.
   let deduped = $derived(dedupeMessagesById(messages));
   let displayMessages = $derived(deduped.kept);
+
+  // A blocked node's group messages stay in the history; here a run of them folds into
+  // one row. `runAt` maps a message's position in `displayMessages` to its run: the
+  // run's key (the id of its first message), its length, and whether this is the first.
+  let blockedSet = $derived(new Set($blockedNodeIds));
+  let expandedRuns = $state<Record<string, boolean>>({});
+  let runAt = $derived.by(() => {
+    const at = new Map<number, { key: string; count: number; first: boolean }>();
+    if (!conversationId.startsWith('group-') || blockedSet.size === 0) return at;
+    const rows = foldBlockedRuns(displayMessages, (m) =>
+      isBlockedAuthor(blockedSet, { sender: m.sender, agentOwner: m.agentOwner }));
+    for (const row of rows) {
+      if (row.kind !== 'run') continue;
+      const key = row.messages[0].id;
+      row.messages.forEach((_, k) => {
+        at.set(row.startIndex + k, { key, count: row.messages.length, first: k === 0 });
+      });
+    }
+    return at;
+  });
 
   let lastWarnedDropped = 0;
   $effect(() => {
@@ -297,6 +318,16 @@
   {/if}
   {#if displayMessages.length > 0}
     {#each displayMessages as msg, i (msg.id)}
+      {@const run = runAt.get(i)}
+      {#if run?.first}
+        <button
+          type="button"
+          class="blocked-run"
+          aria-expanded={!!expandedRuns[run.key]}
+          onclick={() => { expandedRuns = { ...expandedRuns, [run.key]: !expandedRuns[run.key] }; }}
+        >{expandedRuns[run.key] ? '▼' : '▶'} {blockedRunLabel(run.count)}</button>
+      {/if}
+      {#if !run || expandedRuns[run.key]}
       <div id="msg-{i}" class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'} class:error={msg.isError || msg.turnEnd === 'failed'} class:muted={!!msg.turnEnd && msg.turnEnd !== 'failed'}>
         <div class="message-header">
           <strong>
@@ -440,6 +471,7 @@
           </div>
         {/if}
       </div>
+      {/if}
     {/each}
   {:else}
     <div class="empty-chat">
@@ -483,6 +515,23 @@
     margin: 0 0 1rem;
     padding: 0.4rem 0;
     border-bottom: 1px dashed #ddd;
+  }
+
+  .blocked-run {
+    display: block;
+    margin: 0 0 1rem;
+    padding: 0.4rem 0.75rem;
+    border: 1px dashed #bbb;
+    border-radius: 12px;
+    background: transparent;
+    color: #777;
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .blocked-run:hover {
+    background: #f0f0f0;
   }
 
   .empty-chat {

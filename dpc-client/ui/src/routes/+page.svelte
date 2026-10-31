@@ -7,7 +7,9 @@
   import { DEFAULT_AI_CHAT_NAME, DEFAULT_CHAT_INSTRUCTION_SET } from '$lib/utils/aiChatStore';
   import { voteStatusAppliesTo } from '$lib/utils/voteStatusIdentity';
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig, blockedNodeIds, loadGroups } from "$lib/coreService";
+  import { loadBlockedNodes, resetBlockedNodesLoad, blockPeer, unblockPeer } from "$lib/services/blockedPeers";
+  import { blockConfirmQuestion, blockedNotice, unblockedNotice, groupsWithMember, peerLabel } from "$lib/utils/blockedPeers";
   import { confirmAsync } from "$lib/utils/dialog";
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from "$lib/utils/messageMapper";
   import { HISTORY_PAGE_LIMIT, olderThanPage } from "$lib/utils/historyPaging";
@@ -729,6 +731,57 @@
     }
   }
   
+  // The block list is read once per connection; later changes arrive through the
+  // firewall_rules_updated broadcast. The load guard lives in loadBlockedNodes, so
+  // this effect depends on the connection status alone.
+  $effect(() => {
+    if ($connectionStatus === 'connected') {
+      void loadBlockedNodes(sendCommand);
+    } else {
+      resetBlockedNodesLoad();
+    }
+  });
+
+  function showBlockToast(message: string, type: 'info' | 'warning' | 'error') {
+    agentToastMessage = message;
+    agentToastType = type;
+    showAgentToast = true;
+    setTimeout(() => { showAgentToast = false; }, type === 'error' ? 6000 : 5000);
+  }
+
+  async function handleBlockPeer(nodeId: string) {
+    const label = peerLabel(nodeId, peerDisplayNames.get(nodeId));
+    const groupCount = groupsWithMember($groupChats.values(), nodeId);
+    const ok = await confirmAsync(blockConfirmQuestion(label, groupCount), { kind: 'warning', title: 'Block peer' });
+    if (!ok) return;
+    try {
+      const result: any = await blockPeer(nodeId, sendCommand);
+      if (result?.status === 'success') {
+        showBlockToast(blockedNotice(label, result), 'info');
+        // Group membership changed on the backend; re-read the groups.
+        void loadGroups();
+      } else {
+        showBlockToast(`Could not block ${label}: ${result?.message || 'no answer from the backend'}`, 'error');
+      }
+    } catch (error: any) {
+      showBlockToast(`Could not block ${label}: ${error?.message || error}`, 'error');
+    }
+  }
+
+  async function handleUnblockPeer(nodeId: string) {
+    const label = peerLabel(nodeId, peerDisplayNames.get(nodeId));
+    try {
+      const result: any = await unblockPeer(nodeId, sendCommand);
+      if (result?.status === 'success') {
+        showBlockToast(unblockedNotice(label), 'info');
+      } else {
+        showBlockToast(`Could not unblock ${label}: ${result?.message || 'no answer from the backend'}`, 'error');
+      }
+    } catch (error: any) {
+      showBlockToast(`Could not unblock ${label}: ${error?.message || error}`, 'error');
+    }
+  }
+
   function handleReconnect() {
     resetReconnection();
     connectToCoreService();
@@ -981,6 +1034,7 @@
       onAddAgentChat={handleAddAgentChat}
       onDeleteAIChat={handleDeleteAIChat}
       onDisconnectPeer={handleDisconnectPeer}
+      onBlockPeer={handleBlockPeer}
       groupChats={$groupChats}
       onCreateGroup={() => showNewGroupDialog = true}
       agents={$agentsList}
@@ -1100,6 +1154,21 @@
           <!-- Telegram bot integration status (v0.14.0+) - P2P chats only -->
           {#if isP2PChat}
             <TelegramStatus conversationId={activeChatId} />
+            {#if $blockedNodeIds.includes(activeChatId)}
+              <button
+                type="button"
+                class="peer-block-btn"
+                title="Unblock this peer: it may connect again, but groups and firewall rules it was removed from are not restored"
+                onclick={() => handleUnblockPeer(activeChatId)}
+              >Unblock</button>
+            {:else}
+              <button
+                type="button"
+                class="peer-block-btn"
+                title="Block this peer: ends the connection, removes it from groups and deletes the firewall rules that name it"
+                onclick={() => handleBlockPeer(activeChatId)}
+              >Block</button>
+            {/if}
           {/if}
         </div>
 
@@ -1811,6 +1880,22 @@
     color: #888;
     font-weight: 400;
     margin-left: 0.3em;
+  }
+
+  .peer-block-btn {
+    padding: 0.2rem 0.6rem;
+    background: transparent;
+    color: #999;
+    font-size: 0.8rem;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .peer-block-btn:hover {
+    background: #ffebee;
+    color: #dc3545;
+    border-color: #dc3545;
   }
 
   .group-settings-btn {
