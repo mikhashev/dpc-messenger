@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
+    AGENT_MAP_WINDOW,
     DEFAULT_HEIGHT,
     DEFAULT_WIDTH,
+    GROUP_SETTINGS_WINDOW,
     HEADER_HEIGHT,
     MIN_HEIGHT,
     MIN_WIDTH,
@@ -141,5 +143,50 @@ describe('what is remembered', () => {
         };
         expect(() => saveWindowState(hostile, { rect: defaultRect(VP), minimised: false })).not.toThrow();
         expect(loadWindowState(hostile, VP)).toEqual({ rect: defaultRect(VP), minimised: false });
+    });
+});
+
+describe('a window of another kind', () => {
+    const { limits } = GROUP_SETTINGS_WINDOW;
+    const memory = () => {
+        const data = new Map<string, string>();
+        return { data, getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v) };
+    };
+
+    it('keeps the Agent map under its own key and sizes when no kind is named', () => {
+        expect(AGENT_MAP_WINDOW.key).toBe(WINDOW_STORAGE_KEY);
+        expect(GROUP_SETTINGS_WINDOW.key).not.toBe(WINDOW_STORAGE_KEY);
+        expect(defaultRect(VP)).toEqual(defaultRect(VP, AGENT_MAP_WINDOW.limits));
+    });
+
+    it('opens at its own default size, centred', () => {
+        expect(defaultRect(VP, limits)).toEqual({
+            x: (1600 - limits.defaultWidth) / 2, y: (900 - limits.defaultHeight) / 2,
+            width: limits.defaultWidth, height: limits.defaultHeight,
+        });
+    });
+
+    it('shrinks to its own minimum, which is below the Agent map minimum', () => {
+        const start = { x: 200, y: 100, width: 480, height: 600 };
+        expect(limits.minWidth).toBeLessThan(MIN_WIDTH);
+        expect(resizeRect(start, -9999, -9999, VP, limits)).toEqual({ x: 200, y: 100, width: limits.minWidth, height: limits.minHeight });
+        expect(clampRect({ x: 0, y: 0, width: 10, height: 10 }, VP, false, limits))
+            .toMatchObject({ width: limits.minWidth, height: limits.minHeight });
+        expect(moveRect(start, -9999, 9999, VP, false, limits)).toMatchObject({ x: 0, y: 300 });
+    });
+
+    it('is remembered under its own key, apart from the Agent map', () => {
+        const s = memory();
+        const state = { rect: { x: 10, y: 20, width: 400, height: 500 }, minimised: false };
+        saveWindowState(s, state, GROUP_SETTINGS_WINDOW);
+        expect(s.data.has(GROUP_SETTINGS_WINDOW.key)).toBe(true);
+        expect(s.data.has(WINDOW_STORAGE_KEY)).toBe(false);
+        expect(loadWindowState(s, VP, GROUP_SETTINGS_WINDOW)).toEqual(state);
+        expect(loadWindowState(s, VP)).toEqual({ rect: defaultRect(VP), minimised: false });
+    });
+
+    it('gives its own default box when nothing is stored', () => {
+        expect(loadWindowState(memory(), VP, GROUP_SETTINGS_WINDOW))
+            .toEqual({ rect: defaultRect(VP, limits), minimised: false });
     });
 });

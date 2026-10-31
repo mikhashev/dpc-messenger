@@ -1,8 +1,22 @@
 <!-- GroupSettingsDialog.svelte - View/edit group settings and manage members -->
+<!--
+  A window the viewer can drag by its header and resize by the corner handle, as
+  the Agent map is; its box is remembered in localStorage (utils/windowGeometry.ts),
+  and the dialog works without it. The content scrolls inside when the box is small.
+-->
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { getConversationSettings, setConversationPersistHistory, updateGroupTopic } from '$lib/coreService';
+  import {
+    GROUP_SETTINGS_WINDOW,
+    clampRect,
+    loadWindowState,
+    moveRect,
+    resizeRect,
+    saveWindowState,
+    type WindowRect,
+  } from '$lib/utils/windowGeometry';
 
   export let open: boolean = false;
   export let group: {
@@ -196,6 +210,62 @@
     dispatch('deleteGroup', { group_id: group?.group_id });
   }
 
+  // The window: its box, and the gesture under the pointer.
+  const limits = GROUP_SETTINGS_WINDOW.limits;
+  let rect: WindowRect = { x: 0, y: 0, width: 0, height: 0 };
+  let placed = false;
+  let gesture: { kind: 'move' | 'resize'; px: number; py: number; start: WindowRect } | null = null;
+
+  const viewport = () => ({ width: window.innerWidth, height: window.innerHeight });
+  function storage(): Storage | null {
+    try {
+      return window.localStorage;
+    } catch {
+      return null;
+    }
+  }
+  const remember = () => saveWindowState(storage(), { rect, minimised: false }, GROUP_SETTINGS_WINDOW);
+
+  // Each opening takes the remembered box, fitted to the viewport as it is now;
+  // a change to the group while open leaves the box where the viewer put it.
+  $: if (open && group) {
+    if (!placed) {
+      rect = loadWindowState(storage(), viewport(), GROUP_SETTINGS_WINDOW).rect;
+      placed = true;
+    }
+  } else {
+    placed = false;
+  }
+
+  function beginGesture(e: PointerEvent, kind: 'move' | 'resize') {
+    if (e.button !== 0) return;
+    if (kind === 'move' && (e.target as HTMLElement).closest('button')) return;
+    gesture = { kind, px: e.clientX, py: e.clientY, start: { ...rect } };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+
+  function moveGesture(e: PointerEvent) {
+    if (!gesture) return;
+    const dx = e.clientX - gesture.px;
+    const dy = e.clientY - gesture.py;
+    rect = gesture.kind === 'move'
+      ? moveRect(gesture.start, dx, dy, viewport(), false, limits)
+      : resizeRect(gesture.start, dx, dy, viewport(), limits);
+  }
+
+  function endGesture(e: PointerEvent) {
+    if (!gesture) return;
+    gesture = null;
+    const el = e.currentTarget as HTMLElement;
+    if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
+    remember();
+  }
+
+  function refit() {
+    if (open) rect = clampRect(rect, viewport(), false, limits);
+  }
+
   function handleClose() {
     showAddMember = false;
     agentsDirty = false;
@@ -204,10 +274,26 @@
   }
 </script>
 
+<svelte:window on:resize={refit} />
+
 {#if open && group}
   <div class="modal-overlay" role="presentation">
-    <div class="modal" role="dialog" aria-labelledby="settings-title" tabindex="-1">
-      <div class="modal-header">
+    <div
+      class="modal"
+      role="dialog"
+      aria-labelledby="settings-title"
+      tabindex="-1"
+      style="left: {rect.x}px; top: {rect.y}px; width: {rect.width}px; height: {rect.height}px"
+    >
+      <div
+        class="modal-header"
+        role="presentation"
+        title="Drag to move"
+        on:pointerdown={(e) => beginGesture(e, 'move')}
+        on:pointermove={moveGesture}
+        on:pointerup={endGesture}
+        on:pointercancel={endGesture}
+      >
         <h2 id="settings-title">Group Settings</h2>
         <button class="close-btn" on:click={handleClose} title="Close">&times;</button>
       </div>
@@ -451,6 +537,15 @@
           {/if}
         </div>
       </div>
+      <div
+        class="resize-handle"
+        role="presentation"
+        title="Drag to resize"
+        on:pointerdown={(e) => beginGesture(e, 'resize')}
+        on:pointermove={moveGesture}
+        on:pointerup={endGesture}
+        on:pointercancel={endGesture}
+      ></div>
     </div>
   </div>
 {/if}
@@ -463,29 +558,31 @@
     width: 100%;
     height: 100%;
     background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
     z-index: 1000;
   }
 
   .modal {
+    position: fixed;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     background: #1e1e2e;
     border: 1px solid #45475a;
     border-radius: 12px;
-    width: 400px;
-    max-width: 90vw;
-    max-height: 80vh;
-    overflow-y: auto;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
   }
 
   .modal-header {
+    flex: 0 0 auto;
     padding: 16px 20px;
     border-bottom: 1px solid #45475a;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    cursor: move;
+    user-select: none;
+    touch-action: none;
   }
 
   .modal-header h2 {
@@ -509,7 +606,22 @@
   }
 
   .modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
     padding: 16px 20px;
+  }
+
+  .resize-handle {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 18px;
+    height: 18px;
+    cursor: nwse-resize;
+    touch-action: none;
+    background: linear-gradient(135deg, transparent 0 50%, #6c7086 50% 56%, transparent 56% 70%, #6c7086 70% 76%, transparent 76%);
+    border-bottom-right-radius: 12px;
   }
 
   .section {

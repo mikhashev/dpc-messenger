@@ -1,5 +1,5 @@
-// The geometry of a floating window (the Agent map): its default box, where a
-// drag or a resize may take it, and what is remembered between openings.
+// The geometry of a floating window (the Agent map, Group Settings): its default
+// box, where a drag or a resize may take it, and what is remembered between openings.
 //
 // Pure: the component reads pointer events and the viewport and calls these.
 // The box is kept inside the viewport; a minimised window is only its header
@@ -37,15 +37,40 @@ export const CLICK_SLOP_PX = 4;
 /** The browser storage key of the remembered window. */
 export const WINDOW_STORAGE_KEY = 'dpc.agentMap.window';
 
+/** The sizes one kind of window works within. */
+export interface WindowLimits {
+    minWidth: number;
+    minHeight: number;
+    defaultWidth: number;
+    defaultHeight: number;
+}
+
+/** A kind of window: where it is remembered and the sizes it works within. */
+export interface WindowSpec {
+    key: string;
+    limits: WindowLimits;
+}
+
+export const AGENT_MAP_WINDOW: WindowSpec = {
+    key: WINDOW_STORAGE_KEY,
+    limits: { minWidth: MIN_WIDTH, minHeight: MIN_HEIGHT, defaultWidth: DEFAULT_WIDTH, defaultHeight: DEFAULT_HEIGHT },
+};
+
+/** Group Settings: a narrow column, so its minimum and default are smaller. */
+export const GROUP_SETTINGS_WINDOW: WindowSpec = {
+    key: 'dpc.groupSettings.window',
+    limits: { minWidth: 360, minHeight: 280, defaultWidth: 480, defaultHeight: 720 },
+};
+
 function between(value: number, low: number, high: number): number {
     return Math.min(Math.max(value, low), Math.max(low, high));
 }
 
 /** The window's box, kept in the viewport: sizes within [min, viewport], and the
  *  whole box in view, or only the header bar when minimised. */
-export function clampRect(rect: WindowRect, vp: Viewport, minimised = false): WindowRect {
-    const width = between(rect.width, Math.min(MIN_WIDTH, vp.width), vp.width);
-    const height = between(rect.height, Math.min(MIN_HEIGHT, vp.height), vp.height);
+export function clampRect(rect: WindowRect, vp: Viewport, minimised = false, limits = AGENT_MAP_WINDOW.limits): WindowRect {
+    const width = between(rect.width, Math.min(limits.minWidth, vp.width), vp.width);
+    const height = between(rect.height, Math.min(limits.minHeight, vp.height), vp.height);
     const shown = minimised ? Math.min(HEADER_HEIGHT, vp.height) : height;
     return {
         x: between(rect.x, 0, vp.width - width),
@@ -56,24 +81,28 @@ export function clampRect(rect: WindowRect, vp: Viewport, minimised = false): Wi
 }
 
 /** The first box: centred, leaving a margin, never smaller than the minimum. */
-export function defaultRect(vp: Viewport): WindowRect {
-    const width = Math.min(DEFAULT_WIDTH, vp.width - 2 * VIEWPORT_MARGIN);
-    const height = Math.min(DEFAULT_HEIGHT, vp.height - 2 * VIEWPORT_MARGIN);
-    const box = clampRect({ x: 0, y: 0, width, height }, vp);
+export function defaultRect(vp: Viewport, limits = AGENT_MAP_WINDOW.limits): WindowRect {
+    const width = Math.min(limits.defaultWidth, vp.width - 2 * VIEWPORT_MARGIN);
+    const height = Math.min(limits.defaultHeight, vp.height - 2 * VIEWPORT_MARGIN);
+    const box = clampRect({ x: 0, y: 0, width, height }, vp, false, limits);
     return { ...box, x: Math.round((vp.width - box.width) / 2), y: Math.round((vp.height - box.height) / 2) };
 }
 
 /** The box after a header drag of (dx, dy) from `start`. */
-export function moveRect(start: WindowRect, dx: number, dy: number, vp: Viewport, minimised = false): WindowRect {
-    return clampRect({ ...start, x: start.x + dx, y: start.y + dy }, vp, minimised);
+export function moveRect(
+    start: WindowRect, dx: number, dy: number, vp: Viewport, minimised = false, limits = AGENT_MAP_WINDOW.limits,
+): WindowRect {
+    return clampRect({ ...start, x: start.x + dx, y: start.y + dy }, vp, minimised, limits);
 }
 
 /** The box after the bottom-right handle moved by (dx, dy): the top-left corner
  *  stays, and the box cannot grow past the viewport's edge. */
-export function resizeRect(start: WindowRect, dx: number, dy: number, vp: Viewport): WindowRect {
-    const width = between(start.width + dx, Math.min(MIN_WIDTH, vp.width), vp.width - start.x);
-    const height = between(start.height + dy, Math.min(MIN_HEIGHT, vp.height), vp.height - start.y);
-    return clampRect({ ...start, width, height }, vp);
+export function resizeRect(
+    start: WindowRect, dx: number, dy: number, vp: Viewport, limits = AGENT_MAP_WINDOW.limits,
+): WindowRect {
+    const width = between(start.width + dx, Math.min(limits.minWidth, vp.width), vp.width - start.x);
+    const height = between(start.height + dy, Math.min(limits.minHeight, vp.height), vp.height - start.y);
+    return clampRect({ ...start, width, height }, vp, false, limits);
 }
 
 /** True when a press-and-release moved too little to be a drag. */
@@ -106,21 +135,25 @@ type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
 /** The remembered window fitted to this viewport, or the default box. Storage
  *  that throws or is absent is the same as nothing remembered. */
-export function loadWindowState(storage: StorageLike | null | undefined, vp: Viewport): WindowState {
+export function loadWindowState(
+    storage: StorageLike | null | undefined, vp: Viewport, spec: WindowSpec = AGENT_MAP_WINDOW,
+): WindowState {
     let stored: WindowState | null = null;
     try {
-        stored = parseWindowState(storage?.getItem(WINDOW_STORAGE_KEY));
+        stored = parseWindowState(storage?.getItem(spec.key));
     } catch {
         stored = null;
     }
-    if (!stored) return { rect: defaultRect(vp), minimised: false };
-    return { rect: clampRect(stored.rect, vp, stored.minimised), minimised: stored.minimised };
+    if (!stored) return { rect: defaultRect(vp, spec.limits), minimised: false };
+    return { rect: clampRect(stored.rect, vp, stored.minimised, spec.limits), minimised: stored.minimised };
 }
 
 /** Remember the window; a storage that refuses is ignored. */
-export function saveWindowState(storage: StorageLike | null | undefined, state: WindowState): void {
+export function saveWindowState(
+    storage: StorageLike | null | undefined, state: WindowState, spec: WindowSpec = AGENT_MAP_WINDOW,
+): void {
     try {
-        storage?.setItem(WINDOW_STORAGE_KEY, JSON.stringify(state));
+        storage?.setItem(spec.key, JSON.stringify(state));
     } catch {
         /* private window, blocked or full storage: the window works without it */
     }
