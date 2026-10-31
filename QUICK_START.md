@@ -176,12 +176,21 @@ Your private data is stored in `~/.dpc/`.
 
 ## First run: model downloads
 
-The first time an agent uses its memory, the backend downloads an
-embedding model (`BAAI/bge-m3`, ~2.3 GB) from Hugging Face. This needs
-an internet connection and can make the first launch — and the first
-click on some UI panels — appear to **hang for a minute or two**. This
-is normal, happens **once**, and the model is cached in
-`~/.cache/huggingface/` and reused afterward.
+DPC does not download these models on its own. Agent memory needs an embedding
+model (`BAAI/bge-m3`, ~2.3 GB) and voice transcription needs Whisper
+(`openai/whisper-large-v3-turbo`, ~1.6 GB). When one is missing, the
+app opens a **Download Required** dialog that names the model, says what
+it is for and how large it is, and shows where it will be stored. Choose
+**Download**, **Not now**, or **Don't remind me**. The dialog is asked
+once per session per model, and the download runs in the background with
+a progress bar, so the app stays usable.
+
+Until you agree, the feature that needs the model stays off: memory
+search reports that it is unavailable and Active Recall is skipped (for
+Whisper, voice messages are not transcribed). Nothing hangs and nothing
+is fetched behind your back. After the download the model is cached in
+`~/.cache/huggingface/` and reused, so you answer **once**; downloading
+needs an internet connection.
 
 ---
 
