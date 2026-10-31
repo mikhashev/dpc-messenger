@@ -36,7 +36,7 @@
     api_key_env?: string;    // Environment variable (cloud providers)
     context_window?: number; // Optional override
     temperature?: number;    // Model creativity (0.0-2.0, default 0.7)
-    max_tokens?: number;     // Max output tokens (zai/deepseek/neuraldeep/anthropic/llamacpp_server)
+    max_tokens?: number;     // Max output tokens (zai/deepseek/neuraldeep/anthropic/llamacpp_server/strata)
     top_p?: number;          // Nucleus sampling (zai, ollama)
     // Whether the model reasons before answering. Unset is not the same as
     // false: unset lets the capability decide, false says no to a model that
@@ -705,6 +705,27 @@
         w.charAt(0).toUpperCase() + w.slice(1) +
         (known && w === allWords[alias]?.default ? ' — default for this model' : '') +
         (known && !known.includes(w) ? ' — not in this model' : ''),
+    }));
+  }
+
+  // The words a Strata chat template takes. The backend reads them from a GGUF
+  // (`effort_words`, keyed by gguf_path), which a Strata alias has none of, so
+  // this mirrors `TEMPLATE_EFFORTS` in llamacpp_server_provider.py; a test pins
+  // the two equal. `high` and `max` reach the engine as `xhigh`, so they are not
+  // offered as separate rungs.
+  const STRATA_EFFORTS = ['low', 'medium', 'xhigh'];
+
+  /** The Strata list. A stored value outside it (an old `high`) stays on the
+   *  list so opening the form cannot silently clear it. */
+  function strataEffortOptions(current?: string) {
+    const words = current && current !== 'off' && !STRATA_EFFORTS.includes(current)
+      ? [...STRATA_EFFORTS, current]
+      : STRATA_EFFORTS;
+    return words.map((w) => ({
+      value: w,
+      label: w + (STRATA_EFFORTS.includes(w) ? ''
+        : w === 'high' || w === 'max' ? ' — sent to the engine as xhigh'
+        : ' — not a word of the template, refused on save'),
     }));
   }
 
@@ -2419,7 +2440,10 @@
                             per line — a flag and its value are separate lines, which is what
                             keeps a path containing spaces in one piece. Anything the child
                             rejects makes it exit before becoming healthy, and the supervisor
-                            reports that with the child's own last lines.
+                            reports that with the child's own last lines. They come after every field
+                            above, so a flag that also has its own field reaches the child twice (both
+                            copies are in the args); which copy it honours is not measured. Leave this
+                            empty and use the field instead of repeating a flag here.
                           </p>
                         </div>
                       </details>
@@ -2718,7 +2742,7 @@
                         >
                           <option value="">Not set — the chat template's default is sent</option>
                           <option value="off">Off</option>
-                          {#each effortOptions(effortWords, sp.alias, sp.reasoning_effort) as w}
+                          {#each strataEffortOptions(sp.reasoning_effort) as w}
                             <option value={w.value}>{w.label}</option>
                           {/each}
                         </select>
@@ -2726,9 +2750,8 @@
                           The level this alias asks for when neither the chat nor the agent named one. Unset
                           still sends a word: Strata would fill a request without one from its own shared
                           settings, so DPC sends the chat template's default rung (<code>xhigh</code> when the
-                          template names none). The list is the shared scale; <code>high</code> and
-                          <code>max</code> are folded onto <code>xhigh</code>. A word the template refuses is
-                          refused on save.
+                          template names none). The list is the words of Strata's chat template. A word the
+                          template refuses is refused on save.
                         </p>
                       </div>
 
@@ -2808,7 +2831,10 @@
                           ></textarea>
                           <p class="help-text warn">
                             Appended to the start config's engine "args" last, verbatim and unchecked; every flag
-                            without a field here goes this way. One token per line.
+                            without a field here goes this way. One token per line. They come after every field
+                            above, so a flag that also has its own field reaches the engine twice (both copies
+                            are in the args); which copy the engine honours is not measured. Leave this empty
+                            and use the field instead of repeating a flag here.
                           </p>
                         </div>
                       </details>

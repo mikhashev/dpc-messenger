@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import src from './ProvidersEditor.svelte?raw';
+import py from '../../../../core/dpc_client_core/providers/llamacpp_server_provider.py?raw';
 import { STRATA_MODEL_PARAMS } from '../utils/strataFields';
 
 // The editor has no component-mount harness, so this reads the markup the way
@@ -148,6 +149,28 @@ describe('Strata alias-level reasoning effort and max_tokens fields', () => {
     expect(b).toContain("Not set — the chat template's default is sent");
     expect(b).toContain('<p class="help-text">');
     expect(block('strata-max-tokens')).toContain('Empty sends');
+  });
+
+  it('the effort list is the chat template words, pinned to the backend TEMPLATE_EFFORTS', () => {
+    const backend = py.match(/^TEMPLATE_EFFORTS = \(([^)]*)\)/m);
+    expect(backend, 'TEMPLATE_EFFORTS is in the backend').not.toBeNull();
+    const words = [...backend![1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    const ui = src.match(/const STRATA_EFFORTS = \[([^\]]*)\];/);
+    expect(ui, 'STRATA_EFFORTS is in the script').not.toBeNull();
+    expect([...ui![1].matchAll(/'([^']+)'/g)].map((x) => x[1])).toEqual(words);
+    expect(block('strata-reasoning-effort')).toContain('strataEffortOptions(sp.reasoning_effort)');
+    expect(block('strata-reasoning-effort')).not.toContain('effortOptions(effortWords');
+  });
+
+  it('a saved word outside the list stays selectable, off is not duplicated', () => {
+    const run = script('strataEffortOptions', ['current'], ['STRATA_EFFORTS']);
+    const opts = (cur?: string) => run(['low', 'medium', 'xhigh'], cur) as { value: string; label: string }[];
+    expect(opts().map((o) => o.value)).toEqual(['low', 'medium', 'xhigh']);
+    expect(opts('high').map((o) => o.value)).toEqual(['low', 'medium', 'xhigh', 'high']);
+    expect(opts('off').map((o) => o.value)).toEqual(['low', 'medium', 'xhigh']);
+    expect(opts('medium').map((o) => o.value)).toEqual(['low', 'medium', 'xhigh']);
+    expect(opts('max').at(-1)!.label).toContain('as xhigh');
+    expect(opts('loud').at(-1)!.label).toContain('refused on save');
   });
 
   it('an emptied effort or ceiling deletes the key instead of writing "" or 0', () => {
