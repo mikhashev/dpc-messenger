@@ -456,9 +456,10 @@
     }
   }
 
-  $: hasStrata = !!config?.providers?.some((p) => p.type === 'strata');
+  // Both local engines share one card, so the status loads for either type.
+  $: hasLocalEngine = !!config?.providers?.some((p) => p.type === 'strata' || p.type === 'llamacpp_server');
   let engineStatusLoadedForOpen = false;
-  $: if (open && hasStrata && !engineStatusLoadedForOpen) {
+  $: if (open && hasLocalEngine && !engineStatusLoadedForOpen) {
     engineStatusLoadedForOpen = true;
     loadEngineStatus();
   }
@@ -1374,7 +1375,6 @@
 <!-- The read-only state of one strata alias (local_engine_status). -->
 {#snippet strataStatus(alias: string)}
   {@const row = strataRow(engineStatus, alias)}
-  {@const holder = engineStatus?.card_holder}
   <div class="strata-status">
     <div class="strata-status-head">
       <strong>Engine status</strong>
@@ -1435,9 +1435,26 @@
         <p class="help-text">Start config used: <code>{row.start_config}</code></p>
       {/if}
     {/if}
+  </div>
+{/snippet}
+
+<!-- The state of the one card both local engines share (local_engine_status). -->
+{#snippet cardStatus()}
+  {@const holder = engineStatus?.card_holder}
+  <div class="strata-status">
+    <div class="strata-status-head">
+      <strong>Local engines</strong>
+      <button type="button" class="btn-fetch" on:click={loadEngineStatus} disabled={engineStatusLoading}
+        title="Read the launcher's state again; never starts it">{engineStatusLoading ? '⏳' : 'Refresh'}</button>
+    </div>
+    {#if engineStatusError}
+      <p class="help-text warn">{engineStatusError}</p>
+    {/if}
     <p>
       <strong>Card holder:</strong>
-      {#if holder}
+      {#if !engineStatus}
+        not loaded yet — Refresh
+      {:else if holder}
         {holder.alias} ({holder.engine}, {holder.state})
         <button type="button" class="btn-fetch" disabled={!!engineActionBusy}
           on:click={() => engineAction('stop_local_engine', holder.alias)}
@@ -1448,6 +1465,9 @@
         none — the card is free
       {/if}
     </p>
+    {#if engineStatus?.free_commit}
+      <p class="help-text">{freeCommitLine(engineStatus.free_commit)}</p>
+    {/if}
   </div>
 {/snippet}
 
@@ -1535,6 +1555,10 @@
                 </div>
               {/each}
             </div>
+          {/if}
+
+          {#if displayConfig.providers.some((p) => p.type === 'strata' || p.type === 'llamacpp_server')}
+            {@render cardStatus()}
           {/if}
 
           <!-- Provider Cards -->
