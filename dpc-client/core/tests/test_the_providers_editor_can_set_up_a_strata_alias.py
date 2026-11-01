@@ -29,6 +29,8 @@ from dpc_client_core.service import CoreService
 from tests.test_strata_supervisor import BASE_ARGS, _FakeProc, _install, _sup, _value
 
 NATIVE = "D:/models/flash-next-00001-of-00002.gguf"
+# local_engine_status also reports the model files folder, read from the service's settings.
+_HOST = SimpleNamespace(settings=SimpleNamespace(get_model_files_dir=lambda: Path("/models")))
 UI_FIELDS = Path(__file__).resolve().parents[2] / "ui" / "src" / "lib" / "utils" / "strataFields.ts"
 
 
@@ -233,7 +235,7 @@ class TestStatusCommand:
             raise AssertionError("read /metrics of a launcher that is not running")
 
         p.supervisor._get = no_metrics
-        out = await CoreService.local_engine_status(SimpleNamespace())
+        out = await CoreService.local_engine_status(_HOST)
         assert out["status"] == "success" and out["card_holder"] is None
         [row] = out["strata"]
         assert row["alias"] == "flash" and row["state"] == "stopped"
@@ -249,7 +251,7 @@ class TestStatusCommand:
         p = _provider(tmp_path, tested_version="0.1.46", tested_version_date="2026-10-17")
         assert strata_config_errors(p.supervisor.config) == []
         _never_start(p.supervisor)
-        [row] = (await CoreService.local_engine_status(SimpleNamespace()))["strata"]
+        [row] = (await CoreService.local_engine_status(_HOST))["strata"]
         assert row["pin"]["engine_version"] == STRATA_ENGINE_VERSION
         assert "tested_version" not in row and "tested_version_date" not in row
         assert p.engine_status()["pin"] == row["pin"]
@@ -259,7 +261,7 @@ class TestStatusCommand:
     async def test_the_pinned_engine_version_matches_and_another_does_not(self, tmp_path):
         p = _provider(tmp_path)
         p.supervisor.engine_version = STRATA_ENGINE_VERSION
-        [row] = (await CoreService.local_engine_status(SimpleNamespace()))["strata"]
+        [row] = (await CoreService.local_engine_status(_HOST))["strata"]
         assert row["version_matches"] is True
 
     @pytest.mark.asyncio
@@ -281,7 +283,7 @@ class TestStatusCommand:
             }
 
         sup._get = metrics
-        [row] = (await CoreService.local_engine_status(SimpleNamespace()))["strata"]
+        [row] = (await CoreService.local_engine_status(_HOST))["strata"]
         assert row["state"] == "running" and row["port"] == 5123
         assert row["version_matches"] is False
         m = row["metrics"]
@@ -300,7 +302,7 @@ class TestStatusCommand:
             raise ConnectionError("refused")
 
         sup._get = broken
-        [row] = (await CoreService.local_engine_status(SimpleNamespace()))["strata"]
+        [row] = (await CoreService.local_engine_status(_HOST))["strata"]
         assert row["metrics"] is None and "refused" in row["metrics_error"]
 
     @pytest.mark.asyncio
@@ -308,7 +310,7 @@ class TestStatusCommand:
         p = _provider(tmp_path)
         p.supervisor.failure = {"reason": "exit code 0xC0000409", "exit_code": "exit code 0xC0000409",
                                 "at": 1.0, "log_tail": []}
-        [row] = (await CoreService.local_engine_status(SimpleNamespace()))["strata"]
+        [row] = (await CoreService.local_engine_status(_HOST))["strata"]
         assert row["state"] == "failed" and row["failure"]["exit_code"] == "exit code 0xC0000409"
 
 

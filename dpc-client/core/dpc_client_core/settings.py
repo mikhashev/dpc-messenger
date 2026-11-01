@@ -1,9 +1,66 @@
 # dpc-client/core/dpc_client_core/settings.py
 
+import logging
 import os
+import tempfile
 from pathlib import Path
-from typing import Optional, Dict
+from typing import List, Optional, Dict
 import configparser
+
+logger = logging.getLogger(__name__)
+
+# Folders a model files folder is never put in (the folder itself or anything under it).
+# Short and explicit on purpose: it stops the obvious mistake, it is not a sandbox.
+_SYSTEM_FOLDERS_POSIX = (
+    "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/sbin", "/sys", "/usr",
+    "/System", "/Library",
+)
+_SYSTEM_FOLDERS_WINDOWS = (
+    r"C:\Windows", r"C:\Program Files", r"C:\Program Files (x86)",
+)
+
+
+def _system_folders() -> List[str]:
+    """The refused folders: the static lists plus this Windows install's own variables."""
+    folders = list(_SYSTEM_FOLDERS_POSIX) + list(_SYSTEM_FOLDERS_WINDOWS)
+    for var in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        value = os.environ.get(var)
+        if value:
+            folders.append(value)
+    return folders
+
+
+def _probe_writable(folder: Path) -> None:
+    """Create and delete a temp file in `folder`; raises OSError when it cannot."""
+    fd, name = tempfile.mkstemp(prefix=".dpc-write-test-", dir=folder)
+    os.close(fd)
+    os.unlink(name)
+
+
+def _check_model_files_dir(raw: str) -> Path:
+    """The folder `raw` names, created and proved writable, or ValueError (one sentence)."""
+    expanded = Path(raw).expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(f"The model files folder {raw!r} is not an absolute path.")
+    folder = Path(os.path.normpath(expanded))
+    if folder.parent == folder:
+        raise ValueError(f"The model files folder {folder} is a filesystem root.")
+    # Compared on the path as typed and on where it really lands (a link into /usr).
+    for candidate in {folder, Path(os.path.normpath(folder.resolve()))}:
+        here = Path(os.path.normcase(candidate))
+        for system in _system_folders():
+            root = Path(os.path.normcase(os.path.normpath(system)))
+            if here == root or root in here.parents:
+                raise ValueError(f"The model files folder {folder} is a system folder ({system}).")
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ValueError(f"The model files folder {folder} cannot be created: {e.strerror or e}.") from e
+    try:
+        _probe_writable(folder)
+    except OSError as e:
+        raise ValueError(f"The model files folder {folder} is not writable: {e.strerror or e}.") from e
+    return folder
 
 
 class Settings:
@@ -79,6 +136,13 @@ class Settings:
             'enabled': 'false',  # Serve /v1/models and /v1/chat/completions to local tools (ADR-041). This node's own aliases need `compute.enabled` in privacy_rules.json too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone
             'port': '9997',  # 9998 is the file server, 9999 the local API
             'host': '127.0.0.1'  # Not configurable: any other value is refused at start (ADR-041 D1)
+        }
+
+        # Where the local engines keep their model files. Empty is the default, which
+        # is <DPC home>/models: the getter substitutes it, so a config that never
+        # had the key and one that has it empty read alike.
+        self._config['local_engines'] = {
+            'model_files_dir': ''  # Empty = ~/.dpc/models. Set from the Providers editor ("Model files folder"); must be an absolute path to a writable folder
         }
 
         # A fresh config ships with no TURN relay at all: empty here means the same
@@ -767,6 +831,44 @@ class Settings:
         # Save to file
         with open(self.config_file, 'w') as f:
             self._config.write(f)
+
+    def get_model_files_dir(self) -> Path:
+        """The model files folder (`[local_engines] model_files_dir`), resolved.
+
+        Empty (the default) is `<DPC home>/models`; `~` is expanded. Only reads: the
+        folder is not created here, step 2 of the flow creates it on a first install.
+        A hand-edited value that is not absolute cannot name one folder on every
+        machine, so it is read as the default rather than against the working directory.
+        """
+        try:
+            raw = self.get('local_engines', 'model_files_dir', '').strip()
+        except configparser.Error as e:  # a hand-edited '%' that configparser cannot interpolate
+            logger.warning("[local_engines] model_files_dir is unreadable (%s); using the default", e)
+            raw = ''
+        if raw:
+            chosen = Path(raw).expanduser()
+            if chosen.is_absolute():
+                return Path(os.path.normpath(chosen))
+            logger.warning("[local_engines] model_files_dir %r is not an absolute path; using the default", raw)
+        return Path(os.path.abspath(self.dpc_home_dir.expanduser() / "models"))
+
+    def set_model_files_dir(self, path: str) -> Path:
+        """Write `[local_engines] model_files_dir`; an empty string resets it to the default.
+
+        A non-empty path is checked first and nothing is written when it is refused
+        (ValueError, one sentence naming the path): it must be absolute after `~` is
+        expanded, not a filesystem root or a system folder, creatable and writable.
+        The folder is created if missing. Nothing in it is moved or deleted.
+        Returns the resolved folder, as `get_model_files_dir` then reads it.
+        """
+        raw = (path or "").strip()
+        if not raw:
+            self.set('local_engines', 'model_files_dir', '')
+            return self.get_model_files_dir()
+        folder = _check_model_files_dir(raw)
+        # '%' is configparser's interpolation mark: a literal one is written doubled.
+        self.set('local_engines', 'model_files_dir', str(folder).replace('%', '%%'))
+        return self.get_model_files_dir()
 
     def get_dht_enabled(self) -> bool:
         """Check if DHT peer discovery is enabled."""

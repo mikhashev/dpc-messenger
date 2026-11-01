@@ -446,7 +446,7 @@
   // strata alias's supervisor. Read only; loading it never starts an engine.
   let engineStatus: {
     card_holder: any; strata: any[]; free_commit: FreeCommitReading | null; engine_backends: string[];
-    pins: Record<string, EnginePins> | null;
+    pins: Record<string, EnginePins> | null; model_files_dir: string;
   } | null = null;
   let engineStatusError = '';
   let engineStatusLoading = false;
@@ -460,6 +460,7 @@
         engineStatus = {
           card_holder: r.card_holder ?? null, strata: r.strata ?? [], free_commit: r.free_commit ?? null,
           engine_backends: r.engine_backends ?? [], pins: r.pins ?? null,
+          model_files_dir: r.model_files_dir ?? '',
         };
         engineStatusError = '';
       } else {
@@ -469,6 +470,41 @@
       engineStatusError = `Error: ${error}`;
     } finally {
       engineStatusLoading = false;
+    }
+  }
+
+  // The model files folder: the resolved path comes from local_engine_status, a
+  // choice goes to set_model_files_dir (which checks and creates it) and the status
+  // is read again. An empty path resets to the default, ~/.dpc/models.
+  let modelFilesDirBusy = false;
+
+  async function setModelFilesDir(path: string) {
+    modelFilesDirBusy = true;
+    try {
+      const r = await sendCommand('set_model_files_dir', { path });
+      if (r?.status !== 'success') engineStatusError = r?.message || 'Could not set the model files folder';
+    } catch (error) {
+      engineStatusError = `Error: ${error}`;
+    } finally {
+      modelFilesDirBusy = false;
+      await loadEngineStatus();
+    }
+  }
+
+  async function pickModelFilesDir() {
+    if (!canBrowse) return;
+    try {
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const picked = await openDialog({
+        multiple: false,
+        directory: true,
+        defaultPath: engineStatus?.model_files_dir || undefined,
+        title: 'Select the model files folder',
+      });
+      if (typeof picked !== 'string' || !picked) return;   // cancelled
+      await setModelFilesDir(picked);
+    } catch (err) {
+      console.error('[ProvidersEditor] model files folder dialog failed:', err);
     }
   }
 
@@ -1478,6 +1514,24 @@
     {#if engineStatusError}
       <p class="help-text warn">{engineStatusError}</p>
     {/if}
+    <div class="form-group">
+      <label for="model-files-dir">Model files folder</label>
+      <div class="path-row">
+        <input id="model-files-dir" type="text" readonly value={engineStatus?.model_files_dir ?? ''}
+          placeholder="not loaded yet — Refresh" />
+        {#if canBrowse}
+          <button type="button" class="btn btn-browse" disabled={modelFilesDirBusy} on:click={pickModelFilesDir}
+            title="Pick the folder where the local engines keep their model files">Browse…</button>
+        {/if}
+        <button type="button" class="btn btn-browse" disabled={modelFilesDirBusy || !engineStatus}
+          on:click={() => setModelFilesDir('')}
+          title="Back to the default, ~/.dpc/models">Default</button>
+      </div>
+      <p class="help-text">
+        Where DPC keeps the local engines' model files. Default: <code>~/.dpc/models</code>. Changing it
+        moves nothing: files already in another folder stay where they are.
+      </p>
+    </div>
     <p>
       <strong>Card holder:</strong>
       {#if !engineStatus}

@@ -10905,13 +10905,34 @@ class CoreService:
 
     @slow_command
     async def local_engine_status(self) -> Dict[str, Any]:
-        """The card holder and each Strata alias's state; never starts an engine."""
+        """The card holder and each Strata alias's state; never starts an engine.
+
+        `model_files_dir` is the resolved model files folder as a string (the default
+        substituted). It is read from the settings here, since the provider module has
+        no settings; the read creates nothing.
+        """
         from dpc_client_core.providers.strata_provider import local_engine_status
         try:
-            return {"status": "success", **(await local_engine_status())}
+            return {
+                "status": "success",
+                **(await local_engine_status()),
+                "model_files_dir": str(self.settings.get_model_files_dir()),
+            }
         except Exception as e:
             logger.error("local_engine_status failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e) or type(e).__name__}
+
+    async def set_model_files_dir(self, path: str = "") -> Dict[str, Any]:
+        """Choose the model files folder (`[local_engines] model_files_dir`); empty resets it.
+
+        The folder is checked, created and proved writable before anything is written;
+        a refusal leaves config.ini as it was. Nothing in any folder is moved or deleted.
+        """
+        try:
+            resolved = self.settings.set_model_files_dir(path)
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+        return {"status": "success", "model_files_dir": str(resolved)}
 
     async def list_processes(self, since: str = None, until: str = None) -> Dict[str, Any]:
         """What runs now and what ended recently (ADR-046 point 8): the process

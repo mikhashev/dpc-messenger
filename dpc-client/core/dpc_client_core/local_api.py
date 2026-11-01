@@ -133,6 +133,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "local_engine_status",
     "stop_local_engine",
     "strata_reset_failure",
+    # The model files folder: where the local engines keep their model files
+    "set_model_files_dir",
     # The process registry (ADR-046 point 8): what runs now, who started it
     "list_processes",
     # The peer cache by name, for the sidebar's cached-peers list (never the address)
