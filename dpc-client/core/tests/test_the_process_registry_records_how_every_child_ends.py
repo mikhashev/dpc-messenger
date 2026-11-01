@@ -412,7 +412,9 @@ class TestTheStateFileAndTheDailyHistory:
         both = dict(old, pid=7_900_002, stop_kind="failed_start")
         path = tmp_path / "process_registry.json"
         path.write_text(json.dumps({"schema": 1, "entries": [old, both]}), encoding="utf-8")
-        registry = ProcessRegistry(path)
+        # A fixed clock: on the real one these entries age past the seven days a
+        # finished entry is kept and are pruned on load.
+        registry = ProcessRegistry(path, clock=lambda: _utc(2026, 10, 25, 11, 0, 0))
         registry.load()
         first, second = registry.entries()
         assert (first.exit_reason, _stop_of(first)) == ("stopped", "ui_stop"), "yesterday's key was lost"
