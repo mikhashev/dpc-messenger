@@ -17,7 +17,10 @@ What differs, by ADR-044 point:
   for `conversation_cache_mib`: the working value is a dated measurement.
 - 1. `build_command` emits the venv's python and `serve/server.py` with
   `--engine strata` and `--port` always explicit — the launcher defaults to
-  the mock engine and to a port of its own.
+  the mock engine and to a port of its own. An alias with no
+  `strata_install_dir` runs DPC's own install of the pin instead (B2 step 2):
+  Control's python and launcher, fetched before the card is claimed, with the
+  base config's checkout paths moved by `_base_config_for_the_pin`.
 - 3. An engine death is fail-closed. The launcher restarts a dead engine on
   the next request, so a watcher reads `/metrics` while the launcher runs; a
   `live.state` of `unloaded` that no idle unload explains, a 503 naming the
@@ -27,8 +30,9 @@ What differs, by ADR-044 point:
 - 5. After `/health` the engine's version is read from `/metrics`
   `engine.version` (fallback `/props` `build_info`) and compared with the
   pinned engine version (`strata_fetcher.STRATA_ENGINE_VERSION`): a mismatch
-  warns, an absent version is an ERROR, because the mock engine reports none and
-  would pass every other check.
+  warns on the owner's checkout and is refused on DPC's own install; an absent
+  version is an ERROR, because the mock engine reports none and would pass every
+  other check.
   Then, once per start, the smoke: `/health`, `/props` and two forced tool
   calls, thinking off and then on at the alias's effort. An HTTP error or no
   tool call at all fails closed like the missing version; a call that timed
@@ -63,6 +67,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from . import llama_server_supervisor as _base
 from .commit_memory import describe_free_commit, read_free_commit
 from .llama_server_supervisor import LlamaServerError, LlamaServerSupervisor, _free_port
+from . import strata_fetcher
 from .strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG, strata_pin
 
 logger = logging.getLogger(__name__)
@@ -358,11 +363,17 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
     `check_paths`, and an alias saved before the word check is not dropped
     from the loaded set — its provider warns instead (`StrataProvider`)."""
     errors: List[str] = []
-    missing = [k for k in ("strata_install_dir", "strata_base_config") if not config.get(k)]
-    if missing:
+    if not config.get("strata_base_config"):
         errors.append(
-            f"needs {' and '.join(missing)}: the Strata root (serve/server.py, .venv) "
-            "and an existing Strata run config to start from"
+            "needs strata_base_config: an existing Strata run config to start from "
+            "(strata_install_dir may stay empty: empty means DPC's own install of Strata "
+            f"{STRATA_RELEASE_TAG} (engine {STRATA_ENGINE_VERSION}))"
+        )
+    elif not config.get("strata_install_dir") and not os.path.isabs(str(config["strata_base_config"])):
+        errors.append(
+            f"strata_base_config: {config['strata_base_config']} must be an absolute path when "
+            f"strata_install_dir is empty — DPC's own install of Strata {STRATA_RELEASE_TAG} "
+            "holds no run config of yours to read it against"
         )
     if config.get("conversation_cache_mib") is None:
         errors.append(
@@ -396,7 +407,9 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
             if not value:
                 continue
             path = Path(str(value))
-            if key == "strata_base_config" and not path.is_absolute() and install is not None:
+            if key == "strata_base_config" and not path.is_absolute():
+                if install is None:
+                    continue  # refused above
                 path = install / path
             if not path.exists():
                 errors.append(f"{key}: {path} does not exist")
@@ -412,10 +425,12 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
 def strata_chat_template(config: Dict[str, Any]) -> str:
     """The text of `<tokenizer>/chat_template.jinja` the alias's base config names.
 
-    A relative base config is read against the install dir, a relative
-    tokenizer against the base config's `cwd` (else the install dir), as
-    Strata reads them. Raises OSError, ValueError, TypeError or AttributeError."""
-    install = Path(str(config.get("strata_install_dir") or ""))
+    A relative base config is read against the install dir (`strata_install_dir`,
+    else DPC's own install of the pin), a relative tokenizer against the base
+    config's `cwd` (else the install dir), as Strata reads them. Raises OSError,
+    ValueError, TypeError or AttributeError."""
+    configured = config.get("strata_install_dir")
+    install = Path(str(configured)) if configured else strata_fetcher.install_root()
     base = Path(str(config.get("strata_base_config") or ""))
     if not base.is_absolute():
         base = install / base
@@ -849,16 +864,24 @@ class StrataSupervisor(LlamaServerSupervisor):
 
     # --- paths ----------------------------------------------------------------
 
+    def install_is_the_pin(self) -> bool:
+        """Whether this alias runs DPC's own install of the pin: `strata_install_dir` empty."""
+        return not self.config.get("strata_install_dir")
+
     def install_dir(self) -> Path:
+        """The owner's checkout when `strata_install_dir` is set, else where the pin
+        lives (`strata_fetcher.install_root`, no network)."""
         value = self.config.get("strata_install_dir")
-        if not value:
-            raise LlamaServerError(
-                f"strata[{self.alias}] needs strata_install_dir: the Strata root "
-                "holding serve/server.py and .venv"
-            )
-        return Path(str(value))
+        if value:
+            return Path(str(value))
+        try:
+            return strata_fetcher.install_root()
+        except ValueError as e:
+            raise LlamaServerError(f"strata[{self.alias}]: {e}") from None
 
     def python_path(self) -> Path:
+        if self.install_is_the_pin():
+            return strata_fetcher.control_python_path(self.install_dir())
         venv = self.install_dir() / ".venv"
         if sys.platform == "win32":
             return venv / "Scripts" / "python.exe"
@@ -876,7 +899,15 @@ class StrataSupervisor(LlamaServerSupervisor):
                 "tokenizer and the flags from"
             )
         path = Path(str(value))
-        return path if path.is_absolute() else self.install_dir() / path
+        if path.is_absolute():
+            return path
+        if self.install_is_the_pin():
+            raise LlamaServerError(
+                f"strata[{self.alias}] needs an absolute strata_base_config when "
+                f"strata_install_dir is empty, not {value}: DPC's own install of Strata "
+                f"{STRATA_RELEASE_TAG} holds no run config of yours"
+            )
+        return self.install_dir() / path
 
     def start_config_path(self) -> Path:
         """DPC's own start config for this alias, under ~/.dpc, never in the install."""
@@ -899,6 +930,8 @@ class StrataSupervisor(LlamaServerSupervisor):
             cfg = read_base_config(base_path)
         except ValueError as e:
             raise LlamaServerError(f"strata[{self.alias}]: {e}") from None
+        if self.install_is_the_pin():
+            cfg = self._base_config_for_the_pin(cfg)
         args = [str(a) for a in cfg["args"]]
 
         # Model files: each set key replaces the base's flag value; unset keeps it.
@@ -1032,7 +1065,7 @@ class StrataSupervisor(LlamaServerSupervisor):
 
         args += [str(a) for a in (c.get("extra_args") or [])]
         cfg["args"] = args
-        cfg.setdefault("cwd", str(self.install_dir()))
+        cfg.setdefault("cwd", str(self.install_dir()))  # the pin's is set above
         # The base config's log sits in the install; DPC's start writes its own.
         cfg["log"] = str(self._engine_log_path)
         cfg["port"] = int(port)
@@ -1045,6 +1078,82 @@ class StrataSupervisor(LlamaServerSupervisor):
             "pin": strata_pin(),
         }
         return cfg
+
+    def _base_config_for_the_pin(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """The base config as DPC's own install runs it (B2 step 2), before any typed field.
+
+        The engine is Strata's component reference and the vision exe the pinned
+        engine folder's; `cwd` is the Control root and `lib_dirs` goes (the
+        checkout's venv). Every absolute path inside the base's own `cwd` (the
+        checkout) moves to the same place under the Control root, and a file not
+        there is refused; Strata-data and other paths outside are untouched, and
+        a path an alias field replaces right after is left for it."""
+        c = self.config
+        root = self.install_dir()
+        out = dict(cfg)
+        out["exe"] = "component:strata-engine"
+        block = dict(cfg["vision"]) if isinstance(cfg.get("vision"), dict) else None
+        if block is not None:
+            folder = strata_fetcher.engine_folder(root)
+            if folder is not None:
+                block["exe"] = str(folder / "strata-vision.exe")
+            out["vision"] = block
+        out["cwd"] = str(root)
+        out.pop("lib_dirs", None)
+        checkout = cfg.get("cwd")
+        if not isinstance(checkout, str) or not Path(checkout).is_absolute():
+            return out
+        # Normalised and case-folded on Windows; a string prefix would take
+        # `...\Strata-data` for a path inside `...\Strata`.
+        inside = Path(os.path.normcase(os.path.normpath(checkout)))
+        depth = len(Path(os.path.normpath(checkout)).parts)
+
+        def moved(where: str, value: str, alias_key: Optional[str]) -> str:
+            if not Path(value).is_absolute():
+                return value
+            if not Path(os.path.normcase(os.path.normpath(value))).is_relative_to(inside):
+                return value
+            new = root.joinpath(*Path(os.path.normpath(value)).parts[depth:])
+            if not new.exists():
+                fix = (f"set the alias's {alias_key} to a file outside the checkout" if alias_key
+                       else "point the base config at a file outside the checkout")
+                raise LlamaServerError(
+                    f"strata[{self.alias}]: the base config's {where} names {value}, inside "
+                    f"the Strata checkout {checkout}; DPC's own install has no {new}; {fix}"
+                )
+            return str(new)
+
+        flag_keys = {flag: key for key, flag in MODEL_FILE_FLAGS.items()}
+        flag_keys["--control-vector-scaled"] = "control_vector_file"
+        args = [str(a) for a in cfg["args"]]
+        base_native = _flag_value(args, "--native")
+        new_args: List[str] = []
+        flag: Optional[str] = None
+        for token in args:
+            if token.startswith("--"):
+                flag = token
+                new_args.append(token)
+                continue
+            key = flag_keys.get(flag or "")
+            dropped = flag is not None and _is_control_vector_flag(flag) and c.get("control_vector") is False
+            if (key and c.get(key)) or dropped:
+                new_args.append(token)  # the alias's own value replaces it after this
+            elif flag == "--control-vector-scaled":
+                file, scale = split_control_vector(token)
+                file = moved(f"args {flag}", file, key)
+                new_args.append(f"{file}:{scale}" if scale else file)
+            else:
+                new_args.append(moved(f"args {flag or token}", token, key))
+        out["args"] = new_args
+        if isinstance(cfg.get("tokenizer"), str):
+            out["tokenizer"] = moved("tokenizer", cfg["tokenizer"], None)
+        if block is not None and c.get("vision") is not False:
+            if isinstance(block.get("mmproj"), str) and not c.get("mmproj"):
+                block["mmproj"] = moved("vision.mmproj", block["mmproj"], "mmproj")
+            follows = c.get("native_gguf") and base_native and block.get("model") == base_native
+            if isinstance(block.get("model"), str) and not follows:
+                block["model"] = moved("vision.model", block["model"], None)
+        return out
 
     def start_reads_images(self) -> bool:
         """Whether a start now would read images — `build_start_config`'s own
@@ -1083,6 +1192,11 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"strata[{self.alias}]: cannot create the session files folder "
                     f"slot_save_path {slot_dir}: {e}"
                 ) from None
+        if self.install_is_the_pin() and strata_fetcher.engine_folder(self.install_dir()) is None:
+            raise LlamaServerError(
+                f"strata[{self.alias}]: DPC's own install of Strata {STRATA_RELEASE_TAG} at "
+                f"{self.install_dir()} names no engine folder; it is not installed"
+            )
         path = self.start_config_path()
         install = self.install_dir().resolve()
         target = path.resolve()
@@ -1141,6 +1255,10 @@ class StrataSupervisor(LlamaServerSupervisor):
         # not end the launcher on a cp1252 encode error.
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
+        if self.install_is_the_pin():
+            # Where `component:strata-engine` is looked up. LOCALAPPDATA is not
+            # redirected: the launcher's leftover cleanup stays shared.
+            env["STRATA_COMPONENTS_DIR"] = str(strata_fetcher.components_dir(self.install_dir()))
         return env
 
     async def _spawn(self, cmd: List[str], env: Dict[str, str]) -> asyncio.subprocess.Process:
@@ -1266,6 +1384,18 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"strata[{self.alias}] is not running, and a call served to peer "
                     f"{peer} does not start it"
                 )
+            if self.install_is_the_pin():
+                # Before the card is claimed: a first fetch takes minutes, and the
+                # card stays free for the other engine meanwhile.
+                try:
+                    await asyncio.to_thread(strata_fetcher.ensure_install, self.config)
+                except (ValueError, OSError, RuntimeError) as e:
+                    raise LlamaServerError(
+                        f"strata[{self.alias}]: DPC's own install of Strata {STRATA_RELEASE_TAG} "
+                        f"(engine {STRATA_ENGINE_VERSION}) is not ready: {e}"
+                    ) from None
+                if self._draining:
+                    raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
             await self._clear_unfinished_start()
             await self._await_predecessor()
             self._claim_card()
@@ -1363,8 +1493,9 @@ class StrataSupervisor(LlamaServerSupervisor):
         """The real engine's version against the pinned one (ADR-044 point 5).
 
         Returns the version, or None when the launcher reports none — the
-        caller fails closed on that. A mismatch with the pin only warns: the
-        alias's install is the owner's own checkout."""
+        caller fails closed on that. A mismatch with the pin warns on the
+        owner's checkout and is refused on DPC's own install, whose engine is
+        the pin by construction (fail-closed, both fingerprints named)."""
         version: Optional[str] = None
         try:
             metrics = await self._get("/metrics")
@@ -1389,6 +1520,12 @@ class StrataSupervisor(LlamaServerSupervisor):
                 self.alias,
             )
             return None
+        if version != STRATA_ENGINE_VERSION and self.install_is_the_pin():
+            await self._fail_closed(
+                f"the engine reports version {version}, and DPC's own install runs only the pin",
+                note=self._pin_fingerprints(version), refused_start=True,
+            )
+            raise self._refusal()
         if version != STRATA_ENGINE_VERSION:
             logger.warning(
                 "strata[%s]: engine version %s is not the pinned engine %s (Strata %s) — "
@@ -1399,6 +1536,22 @@ class StrataSupervisor(LlamaServerSupervisor):
             logger.info("strata[%s]: engine version %s (the pin, Strata %s)",
                         self.alias, version, STRATA_RELEASE_TAG)
         return version
+
+    def _pin_fingerprints(self, version: str) -> str:
+        """What a pin-mode start found against what the pin says."""
+        found = f"found: engine {version}"
+        root: Optional[Path] = None
+        commit = "unknown"
+        try:
+            root = self.install_dir()
+            engine = (strata_fetcher.read_marker(root) or {}).get("engine") or {}
+            found += (f" (DPC's install marker: version {engine.get('version')}, build_id "
+                      f"{engine.get('build_id')}, variant {engine.get('variant')}, folder {engine.get('folder')})")
+            commit = strata_fetcher.PLATFORM_ASSETS[strata_fetcher.platform_tag()]["commit"]
+        except (LlamaServerError, ValueError, KeyError, AttributeError):
+            pass
+        pinned = f"pinned: Strata {STRATA_RELEASE_TAG}, engine {STRATA_ENGINE_VERSION}, build commit {commit}"
+        return f"{found}; {pinned}" + (f"; delete {root} to fetch the pin again" if root else "")
 
     async def _smoke(self) -> Optional[str]:
         """The start smoke of ADR-044 point 5, run by `_launch` once per start

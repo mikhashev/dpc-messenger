@@ -18,7 +18,8 @@ from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING
 from ..managers import llama_server_supervisor as _base
 from ..managers.commit_memory import read_free_commit
 from ..managers.llama_server_supervisor import effort_dictionary_of
-from ..managers.strata_fetcher import STRATA_ENGINE_VERSION, strata_pin
+from ..managers import strata_fetcher as _strata_fetcher
+from ..managers.strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG, strata_pin
 from ..managers.strata_supervisor import (
     StrataSupervisor, peer_being_served, reasoning_effort_error, strata_chat_template,
     strata_config_errors,
@@ -257,6 +258,7 @@ class StrataProvider(LlamaServerProvider):
         """Why a peer's request may not begin a start of the stopped launcher, or
         None when it began one or one is under way (ADR-044 point 9).
 
+        (0) DPC's own install: a peer's request never sets off its fetch (~700 MB).
         (a) The card: the refusal the owner's start would meet (`_card_held_error`).
         (b) Free VRAM: Strata sizes its expert cache to what is free, so the
             config holds no per-model figure; the bar is the llama-server
@@ -265,6 +267,16 @@ class StrataProvider(LlamaServerProvider):
         pending = sup.peer_start_task
         if pending is not None and not pending.done():
             return None
+        if sup.install_is_the_pin():
+            try:
+                installed = await asyncio.to_thread(_strata_fetcher.resolve_install, sup.config)
+            except (ValueError, OSError) as e:
+                return f"'{self.alias}' is not running: DPC's own install of Strata {STRATA_RELEASE_TAG} is unusable ({e})"
+            if installed is None:
+                return (
+                    f"'{self.alias}' is not running: Strata {STRATA_RELEASE_TAG} is not installed on "
+                    "this node yet, and a peer's request does not fetch it"
+                )
         not_started = f"'{self.alias}' is not running, and a peer's request does not start it now"
 
         def card_refusal() -> Optional[str]:

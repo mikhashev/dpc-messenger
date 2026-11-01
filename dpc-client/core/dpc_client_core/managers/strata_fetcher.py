@@ -13,8 +13,9 @@ Until now the second number lived on each alias as a hand-raised
 `tested_version`. It is in code instead, as `LLAMA_CPP_TAG` is for the llama.cpp
 child (`llama_server_fetcher.py`): one place, moved by one reviewed commit, the
 same for every alias. The supervisor compares what the engine reports with it
-(`StrataSupervisor._check_version`); a mismatch only warns, because an alias's
-install is the owner's own checkout and ADR-044 point 5 says warn, not refuse.
+(`StrataSupervisor._check_version`). On an alias with `strata_install_dir` set (the
+owner's own checkout) a mismatch only warns, as ADR-044 point 5 says; on DPC's own
+install of the pin it is refused, naming what was found against the pin.
 
 To move the pin: update Strata on a node, run DPC's start smoke there live
 (version check, `/health`, `/props`, the two forced tool calls), record the

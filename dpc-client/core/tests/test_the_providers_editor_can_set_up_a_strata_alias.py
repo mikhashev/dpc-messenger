@@ -367,10 +367,12 @@ class TestSaveValidation:
     def test_a_complete_alias_passes(self, tmp_path):
         assert self._errors(self._ok(tmp_path)) == []
 
-    def test_the_three_required_keys(self, tmp_path):
+    def test_the_two_required_keys(self, tmp_path):
         errors = self._errors({"alias": "flash", "type": "strata", "model": "flash"})
         joined = " ".join(errors)
-        assert "strata_install_dir and strata_base_config" in joined
+        assert "needs strata_base_config" in joined
+        assert "empty means DPC's own install of Strata v0.2.9 (engine 0.1.55)" in joined
+        assert "needs strata_install_dir" not in joined
         assert "conversation_cache_mib" in joined
 
     def test_the_budget_must_be_a_positive_whole_number(self, tmp_path):

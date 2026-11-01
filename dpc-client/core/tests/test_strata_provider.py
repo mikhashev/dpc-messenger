@@ -44,10 +44,10 @@ def test_the_type_is_registered_and_the_validator_accepts_it(tmp_path):
     assert errors == []
 
 
-def test_the_provider_owns_a_strata_supervisor_and_needs_the_install(tmp_path):
+def test_the_provider_owns_a_strata_supervisor_and_needs_an_absolute_base_without_an_install(tmp_path):
     p = StrataProvider("flash", _config(_install(tmp_path)))
     assert type(p.supervisor) is StrataSupervisor
-    with pytest.raises(ValueError, match="strata_install_dir"):
+    with pytest.raises(ValueError, match="must be an absolute path when strata_install_dir is empty"):
         StrataProvider("flash", {"type": "strata", "strata_base_config": "x.json"})
 
 

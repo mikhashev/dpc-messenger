@@ -162,7 +162,8 @@ card.** Every point is Mike's call, 2026-10-18.
 7. **Provider fields.** Model files with Browse — the first shard (`--native`);
    `--ple-gguf`, `--pack`, `--mtp`, `--expert-profile`, mmproj and control vector derived
    from that shard or the Strata data directory by default, each overridable. Install
-   path. The cache pair `--conversation-cache-mib` / `--conversation-cache-slots` as two
+   path — optional since B2 step 2: empty runs DPC's own install of the pin, set runs that
+   checkout (amendment of 2026-11-01). The cache pair `--conversation-cache-mib` / `--conversation-cache-slots` as two
    typed fields, with a hint that the byte budget is bounded by the Windows commit limit
    (RAM plus page file); the working pair is a dated measurement stored with the config,
    **not a default**, and the first supervised start uses a measured budget, never the
@@ -359,7 +360,8 @@ for two engines. This note records the decision and step 1; it rewrites nothing 
   record of 2026-10-18; the cheaper mixed update is no longer the plan.
 - **The three steps.** (1) a pin in code replaces the hand-raised tested version, **built
   with this note**; (2) a DPC-owned install fetched by that pin, the fetch arriving in
-  `managers/strata_fetcher.py` beside a module the two engines share (**not built**); (3) a
+  `managers/strata_fetcher.py` beside a module the two engines share (**built**, amendment
+  of 2026-11-01); (3) a
   consent dialog and progress for both engines' downloads (**not built**).
 - **Step 1.** `strata_fetcher.py` holds `STRATA_RELEASE_TAG` (`v0.2.9`, the tag of a Strata release on
   Strata's app line, 0.2.x) and `STRATA_ENGINE_VERSION` (`0.1.55`, the engine version inside
@@ -383,3 +385,73 @@ for two engines. This note records the decision and step 1; it rewrites nothing 
   2026-10-31 and DPC's start smoke passed there live (`dpc-client.log`, 20:22:43 and 20:50:38
   local time). v0.2.9 adds the
   `mtp` key to the run config's editable keys; DPC mirrors it as a model parameter.
+
+## Amendment, 2026-11-01 — DPC's own Strata install (B2, step 2)
+
+*(Step 2 of Mike's call of 2026-10-31, built in three commits on 2026-11-01; the team's
+consensus of the same day settled the open questions of the plan. This note rewrites
+nothing above.)*
+
+- **The fetch.** `strata_fetcher.install_pin` downloads the platform's **Control** archive
+  by its row in `PLATFORM_ASSETS` (name, sha256, size) from the pinned release's own folder,
+  never `releases/latest`, into a staging folder beside `~/.dpc/bin/strata/<tag>/<platform>/`.
+  The swap is the one llama.cpp now shares (`local_engine_pin_fetcher.install_with_staging_swap`):
+  the old root is renamed aside, staging takes its place, the old one is removed, and a
+  failed rename puts it back — no state passes through "no install".
+- **The engine, by Strata's own updater.** Control's python runs `strata.py update
+  --no-control --feed <release folder> --components-dir <staging>/components --output json`
+  under `run_supervised` (launcher `strata`, a subsystem child, an hour's timeout).
+  `--no-control` keeps the updater off the Control DPC just checked; the release folder
+  makes Strata pick its own feed file there (linux-aarch64 has its own). The environment
+  drops every `STRATA_*` of the parent (`STRATA_UPDATE_TRUSTED_KEYS` among them, so Control's
+  own key list, pinned by the archive digest, is the only trust) and sets
+  `STRATA_NO_HANDOVER`, so `strata.py` never re-runs the command under a newer Control
+  staged in `components/control/` (`strata_cli/handover.py`). APPDATA,
+  LOCALAPPDATA and the XDG homes point into a throwaway folder: there the updater's test
+  start finds no model to load in full on the card, and the user's Strata settings,
+  tuning marks and process records stay untouched.
+- **DPC's own check.** The engine Strata installed is then checked by DPC
+  (`check_engine_identity`): the manifest's Ed25519 signature by the key held in code
+  (`STRATA_UPDATE_PUBLIC_KEY`, key id derived as Strata derives it), `id`, `version`,
+  `platform`, the platform's build commit as a whole hex token in `build_id`, and every
+  file's size and sha256. `.dpc-pin.json` marks the install with the tag, the platform, the
+  Control digest and the engine's folder and identity; every pin-mode start re-checks the
+  signature, the fields and the manifest's sha256 against the marker, and a mismatch is
+  refused, never refetched silently.
+- **The launcher from Control.** An alias with an empty `strata_install_dir` runs Control's
+  python and `serve/server.py` from the Control root, with `STRATA_COMPONENTS_DIR` naming
+  its `components/` folder; LOCALAPPDATA is not redirected for the launcher, so its
+  leftover cleanup is shared with a checkout's. The base config is read as before and,
+  before any typed field, `StrataSupervisor._base_config_for_the_pin` makes `exe`
+  `component:strata-engine`, the vision exe the pinned engine folder's
+  `strata-vision.exe`, `cwd` the Control root, drops `lib_dirs`, and moves every absolute
+  path inside the base's original `cwd` (the checkout: `args` tokens, the file part of
+  `--control-vector-scaled`, `tokenizer`, the vision `mmproj` and `model`) to the same
+  place under the Control root, refusing one that is not there. "Inside" is a path
+  comparison, case-folded on Windows, never a string prefix; Strata-data and an alias's own
+  paths are never moved. On the owner's base config this moves `--expert-profile` alone.
+- **`strata_install_dir` is optional and wins.** Set, the owner's checkout runs exactly as
+  before and nothing is fetched; empty, `strata_base_config` must be an absolute path.
+- **The fetch comes before the card.** `ensure_running` fetches before it clears an
+  unfinished start, waits on a predecessor's drain or claims the card, so a download of
+  minutes leaves the card to the other engine; `_draining` is read again after it.
+- **A peer does not fetch.** A peer's request meeting a pin that is not installed yet is
+  refused (`_peer_start_refusal`) and begins no start: the download is about 700 MB.
+- **Point 5 on the pin.** An engine of DPC's own install reporting another version is
+  refused like a missing version (fail-closed, `failed_start`), the reason naming what
+  was found — the version and the marker's build_id and variant — against the pin
+  (Strata release, engine version, build commit). The owner's checkout keeps warn and start.
+- **Measured on the owner's node, 2026-11-01**, through the supervisor's own code outside
+  the backend, alias copies with the cache at 1024 MiB: a from-scratch install took 133 s
+  (Control 43 s, Strata's updater and the identity check with every file hashed 90 s); the
+  staging rename right after the updater ran executables from staging succeeded and left
+  neither `.staging` nor `.old`; the launcher answered `/health` in 34.5 s, the version
+  check named the pin, the start smoke passed in 2.2 s, a text and an image request
+  answered, VRAM peaked at 31,465 MiB and the stop gave the card back. The shared-LOCALAPPDATA
+  question could not be put: killing a checkout launcher ended its engine with it (the
+  launcher holds `strata.exe` in a kill-on-close job object), so no orphan of one install
+  was there for the other's start to find. The case stays open only for an engine the job
+  object did not hold.
+- **Deferred.** A consent dialog and progress for the download (step 3); retention of an
+  older pin's folder and a way back to the previous pin; a base config for a user with no
+  checkout and no Strata-data.

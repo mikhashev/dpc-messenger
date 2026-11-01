@@ -1209,8 +1209,8 @@
     } else if (newProvider.type === 'strata') {
       // Nothing to default: the model files come from the base config chosen
       // in Edit, and the cache budget is a measurement, never a default
-      // (ADR-044 point 7). Save refuses the alias until install dir, base
-      // config and conversation_cache_mib are set.
+      // (ADR-044 point 7). Save refuses the alias until the base config and
+      // conversation_cache_mib are set; an empty install dir is DPC's own install.
     } else if (newProvider.type === 'local_whisper') {
       provider.device = 'auto';
       provider.compile_model = true;
@@ -2468,7 +2468,7 @@
                             type="text"
                             value={sp.strata_install_dir ?? ''}
                             on:change={(e) => setStrataPath(i, 'strata_install_dir', e.currentTarget.value)}
-                            placeholder="Absolute path to the Strata clone (serve/server.py, .venv)"
+                            placeholder="Optional: your own Strata clone (serve/server.py, .venv); empty = DPC's install"
                           />
                           {#if canBrowse}
                             <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, 'strata_install_dir')}
@@ -2476,9 +2476,12 @@
                           {/if}
                         </div>
                         <p class="help-text">
-                          Strata installs and updates through its own START-HERE.bat / UPDATE.bat. DPC runs
-                          the venv's python with <code>serve/server.py --engine strata</code> from here and
-                          writes its own start config under <code>~/.dpc/strata/</code>, never into this folder.
+                          Optional. Empty: DPC fetches the Strata release it is pinned to into
+                          <code>~/.dpc/bin/strata/</code> on the first start and runs its launcher; the base
+                          config below must then be an absolute path. Set: that checkout wins — it installs and
+                          updates through its own START-HERE.bat / UPDATE.bat, and DPC runs the venv's python
+                          with <code>serve/server.py --engine strata</code> from it. Either way DPC writes its
+                          own start config under <code>~/.dpc/strata/</code>, never into the Strata folder.
                         </p>
                       </div>
 
@@ -2490,7 +2493,7 @@
                             type="text"
                             value={sp.strata_base_config ?? ''}
                             on:change={(e) => setStrataPath(i, 'strata_base_config', e.currentTarget.value)}
-                            placeholder="strata-<model>.json (relative to the Strata folder, or absolute)"
+                            placeholder="strata-<model>.json (absolute; relative only to a set Strata folder)"
                           />
                           {#if canBrowse}
                             <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, 'strata_base_config')}
