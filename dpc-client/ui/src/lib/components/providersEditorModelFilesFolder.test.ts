@@ -77,3 +77,18 @@ describe('Add Provider and Edit pick a model from the model files folder', () =>
     expect(snippet('projectorPicker')).toContain('projectorsBeside(modelFiles, modelPath)');
   });
 });
+
+describe('a model picked from the folder list leaves the Add button usable', () => {
+  // Seen live 2026-11-02: one change of the select filled the alias by suggestion,
+  // but the check ran first on the empty alias and kept Add disabled.
+  it('suggests the alias before the draft is validated', () => {
+    const suggest = src.indexOf('$: if (!aliasTouched) {');
+    const validate = src.indexOf('$: addProviderValidation = validateProviderDraftForAdd(');
+    expect(suggest).toBeGreaterThan(0);
+    expect(validate).toBeGreaterThan(suggest);
+  });
+
+  it('the projector hint carries no stray file name', () => {
+    expect(src).not.toMatch(/taken for you\.'[^}]*\}\s*\{fileNameOf/);
+  });
+});

@@ -13,7 +13,7 @@
   import { enginePinLines, runsRetainedPin, type EnginePins } from '$lib/utils/enginePins';
   import { trackRename } from '$lib/utils/aliasRenames';
   import {
-    groupModelFiles, modelFileLabel, mmprojAfterChoosing, projectorsBeside, fileNameOf, type ModelFileRow,
+    groupModelFiles, modelFileLabel, mmprojAfterChoosing, projectorsBeside, type ModelFileRow,
   } from '$lib/utils/modelFiles';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
   import { envNameOrUndefined, looksLikeKey } from '$lib/utils/apiKeyEnv';
@@ -786,12 +786,15 @@
   let aliasTouched = false;
 
   $: existingProviderAliases = editedConfig?.providers.map((p) => p.alias) ?? [];
-  $: addProviderValidation = validateProviderDraftForAdd(newProvider, existingProviderAliases);
 
+  // Before the validation below: a reactive statement does not re-run for an
+  // assignment made by a later one in the same tick, so a model picked from a
+  // list (one change, no further keystroke) left the check on the empty alias.
   $: if (!aliasTouched) {
     const suggested = suggestProviderAlias(newProvider.model, newProvider.type, existingProviderAliases);
     if (newProvider.alias !== suggested) newProvider.alias = suggested;
   }
+  $: addProviderValidation = validateProviderDraftForAdd(newProvider, existingProviderAliases);
 
   function onAliasInput() {
     aliasTouched = newProvider.alias.trim() !== '';
@@ -1630,7 +1633,6 @@
       </select>
       <p class="help-text">
         {beside.length === 1 ? 'The one projector in this folder is taken for you.' : 'Several projectors are in this folder: choose one.'}
-        {fileNameOf(modelPath)}
       </p>
     </div>
   {/if}
