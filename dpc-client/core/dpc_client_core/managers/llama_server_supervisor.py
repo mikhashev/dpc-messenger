@@ -639,6 +639,149 @@ def gguf_integer_keys(path: str, keys: Iterable[str]) -> Dict[str, int]:
     return found
 
 
+_GGUF_KEYS_WALKED_AT_MOST = 4096
+_GGUF_STRING_STEPS_AT_MOST = 200_000
+_GGUF_STRING_BYTES_AT_MOST = 1 << 16
+
+
+def gguf_string_key(path: str, key: str) -> Optional[str]:
+    """The string metadata `key` a GGUF header holds, or None.
+
+    Header only, with bounded reads: at most `_GGUF_KEYS_WALKED_AT_MOST` keys are
+    walked, a string array is stepped over by length without being read (at most
+    `_GGUF_STRING_STEPS_AT_MOST` strings in all), and the wanted value is read only
+    up to `_GGUF_STRING_BYTES_AT_MOST` bytes. A file that is not GGUF, is older than
+    version 2, is cut short, or lacks the key answers None; nothing is raised.
+    """
+    try:
+        size = os.stat(path).st_size
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF" or struct.unpack("<I", f.read(4))[0] < 2:
+                return None
+            _, n_kv = struct.unpack("<QQ", f.read(16))
+            steps = 0
+
+            def read_len():
+                return struct.unpack("<Q", f.read(8))[0]
+
+            def skip(n):
+                if n < 0 or f.tell() + n > size:
+                    raise EOFError("a length runs past the end of the file")
+                f.seek(n, 1)
+
+            for _ in range(min(n_kv, _GGUF_KEYS_WALKED_AT_MOST)):
+                n = read_len()
+                if n > _GGUF_STRING_BYTES_AT_MOST:
+                    return None
+                found = f.read(n).decode("utf-8", errors="replace") == key
+                t = struct.unpack("<I", f.read(4))[0]
+                if t == 8:
+                    n = read_len()
+                    if found:
+                        if n > _GGUF_STRING_BYTES_AT_MOST:
+                            return None
+                        data = f.read(n)
+                        return data.decode("utf-8", errors="replace") if len(data) == n else None
+                    skip(n)
+                elif found:
+                    return None  # the key is there but is not a string
+                elif t == 9:
+                    et = struct.unpack("<I", f.read(4))[0]
+                    cnt = read_len()
+                    if et == 8:
+                        steps += cnt
+                        if steps > _GGUF_STRING_STEPS_AT_MOST:
+                            return None
+                        for _ in range(cnt):
+                            skip(read_len())
+                    elif et in _GGUF_VALUE_SIZES:
+                        skip(_GGUF_VALUE_SIZES[et] * cnt)
+                    else:
+                        return None
+                elif t in _GGUF_VALUE_SIZES:
+                    skip(_GGUF_VALUE_SIZES[t])
+                else:
+                    return None
+    except Exception as e:
+        logger.debug("GGUF string key %s unreadable in %s: %s", key, path, e)
+    return None
+
+
+_SHARD_NAME = re.compile(r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<count>\d{5})\.gguf$", re.IGNORECASE)
+
+
+def model_files_in(folder: Path) -> List[Dict[str, Any]]:
+    """The GGUF files of a model files folder, as the `list_model_files` rows.
+
+    Walks `.gguf` files directly in `folder` and in its subfolders, one level and
+    no deeper, skipping the subfolder `strata`. A split model (`...-00001-of-0000N.gguf`)
+    is one row for its first part, with the summed size of the parts found beside it
+    and `shard_count` N; the other parts are not rows. `architecture` is the header's
+    `general.architecture` (None when the header cannot be read) and `is_mmproj` is
+    `architecture == "clip"`, never the file name. A folder that is missing or
+    unreadable gives an empty list; nothing is created.
+    """
+    rows: List[Dict[str, Any]] = []
+
+    def scan(directory: Path, label: str) -> None:
+        try:
+            entries = sorted(os.scandir(directory), key=lambda e: e.name)
+        except OSError as e:
+            logger.warning("model files folder %s cannot be listed: %s", directory, e)
+            return
+        sizes: Dict[str, int] = {}
+        for entry in entries:
+            try:
+                if entry.name.lower().endswith(".gguf") and entry.is_file():
+                    sizes[entry.name] = entry.stat().st_size
+            except OSError:
+                continue
+        for name, size in sizes.items():
+            shard = _SHARD_NAME.match(name)
+            count = 1
+            if shard:
+                count = int(shard.group("count"))
+                if int(shard.group("index")) != 1:
+                    continue  # a later part of a split model: counted in its first part
+                size = 0
+                for other, other_size in sizes.items():
+                    m = _SHARD_NAME.match(other)
+                    if m and m.group("stem") == shard.group("stem") and int(m.group("count")) == count:
+                        size += other_size
+            path = Path(os.path.abspath(Path(directory) / name))
+            architecture = gguf_string_key(str(path), "general.architecture")
+            rows.append({
+                "path": str(path),
+                "folder": label,
+                "size_bytes": size,
+                "architecture": architecture,
+                "is_mmproj": architecture == "clip",
+                "shard_count": count,
+            })
+
+    root = Path(folder)
+    scan(root, "")
+    try:
+        subfolders = sorted(e.name for e in os.scandir(root) if e.name != "strata" and e.is_dir())
+    except OSError:
+        subfolders = []
+    for name in subfolders:
+        scan(root / name, name)
+    rows.sort(key=lambda r: (r["folder"].casefold(), r["folder"], Path(r["path"]).name.casefold(), r["path"]))
+    return rows
+
+
+def run_configs_in(folder: Path) -> List[str]:
+    """Absolute paths of `strata-*.json` in `<folder>/strata/run-configs/`; empty when it is absent."""
+    directory = Path(folder) / "strata" / "run-configs"
+    try:
+        names = sorted(e.name for e in os.scandir(directory)
+                       if e.name.startswith("strata-") and e.name.endswith(".json") and e.is_file())
+    except OSError:
+        return []
+    return [str(Path(os.path.abspath(directory / n))) for n in names]
+
+
 def gguf_effort_dictionary(path: str) -> Optional[Tuple[Tuple[str, ...], Optional[str]]]:
     """(words the chat template accepts, the word it defaults to), or None.
 

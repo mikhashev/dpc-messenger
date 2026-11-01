@@ -10934,6 +10934,30 @@ class CoreService:
             return {"status": "error", "message": str(e)}
         return {"status": "success", "model_files_dir": str(resolved)}
 
+    @slow_command
+    async def list_model_files(self) -> Dict[str, Any]:
+        """The GGUF files in the model files folder, and Strata's run configs there.
+
+        `model_files` rows: path, folder, size_bytes, architecture, is_mmproj,
+        shard_count (see `model_files_in`); `run_configs` are the absolute paths of
+        `strata-*.json` in `<folder>/strata/run-configs/`. A missing folder gives empty
+        lists and is not created. The walk and the header reads run off the event loop.
+        """
+        from .managers.llama_server_supervisor import model_files_in, run_configs_in
+        folder = self.settings.get_model_files_dir()
+        try:
+            model_files = await asyncio.to_thread(model_files_in, folder)
+            run_configs = await asyncio.to_thread(run_configs_in, folder)
+        except Exception as e:
+            logger.error("list_model_files failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e) or type(e).__name__}
+        return {
+            "status": "success",
+            "model_files_dir": str(folder),
+            "model_files": model_files,
+            "run_configs": run_configs,
+        }
+
     async def list_processes(self, since: str = None, until: str = None) -> Dict[str, Any]:
         """What runs now and what ended recently (ADR-046 point 8): the process
         registry's kept entries with `commit_mb` read at this request, the daily

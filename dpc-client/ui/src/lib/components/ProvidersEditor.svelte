@@ -12,6 +12,9 @@
   import { confirmAsync } from '$lib/utils/dialog';
   import { enginePinLines, runsRetainedPin, type EnginePins } from '$lib/utils/enginePins';
   import { trackRename } from '$lib/utils/aliasRenames';
+  import {
+    groupModelFiles, modelFileLabel, mmprojAfterChoosing, projectorsBeside, fileNameOf, type ModelFileRow,
+  } from '$lib/utils/modelFiles';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
   import { envNameOrUndefined, looksLikeKey } from '$lib/utils/apiKeyEnv';
   import { isProviderDraftFilled, validateProviderDraftForAdd, suggestProviderAlias } from '$lib/utils/providerDraft';
@@ -487,8 +490,62 @@
       engineStatusError = `Error: ${error}`;
     } finally {
       modelFilesDirBusy = false;
-      await loadEngineStatus();
+      await Promise.all([loadEngineStatus(), loadModelFiles()]);
     }
+  }
+
+  // The GGUFs in that folder (list_model_files), for the "From the model files
+  // folder" selects of the Add Provider and Edit forms. Read only; it creates nothing.
+  let modelFiles: ModelFileRow[] = [];
+  let modelFilesError = '';
+  let modelFilesLoading = false;
+
+  async function loadModelFiles() {
+    modelFilesLoading = true;
+    try {
+      const r = await sendCommand('list_model_files', {});
+      if (r?.status === 'success') {
+        modelFiles = r.model_files ?? [];
+        modelFilesError = '';
+      } else {
+        modelFilesError = r?.message || 'Could not list the model files folder';
+      }
+    } catch (error) {
+      modelFilesError = `Error: ${error}`;
+    } finally {
+      modelFilesLoading = false;
+    }
+  }
+
+  // Read the folder (and, in Add Provider, the status that carries its path) when a
+  // form that picks a local model opens, so a user with no local alias yet sees it.
+  let modelFilesLoadedForForm = false;
+  $: wantsModelFiles = open && (
+    (selectedTab === 'add' && (newProvider.type === 'llamacpp_server' || newProvider.type === 'strata'))
+    || (editMode && !!editedConfig?.providers?.some((p) => p.type === 'llamacpp_server'))
+  );
+  $: if (wantsModelFiles && !modelFilesLoadedForForm) {
+    modelFilesLoadedForForm = true;
+    loadModelFiles();
+    if (!engineStatus && !engineStatusLoading) loadEngineStatus();
+  }
+  $: if (!wantsModelFiles) modelFilesLoadedForForm = false;
+
+  // A model chosen from the list fills the GGUF path; the one projector in its
+  // folder, if exactly one, fills mmproj (see mmprojAfterChoosing).
+  function chooseNewModelFile(path: string) {
+    if (!path) return;
+    newProvider.model = path;
+    newProvider.mmproj = mmprojAfterChoosing(modelFiles, path, newProvider.mmproj);
+    newProvider = newProvider;
+  }
+
+  function chooseEditedModelFile(i: number, path: string) {
+    if (!editedConfig || !path) return;
+    const provider = editedConfig.providers[i];
+    provider.gguf_path = path;
+    provider.mmproj = mmprojAfterChoosing(modelFiles, path, provider.mmproj);
+    editedConfig = editedConfig;
   }
 
   async function pickModelFilesDir() {
@@ -1253,6 +1310,7 @@
       // thing this type cannot default. Everything else has a measured default
       // in the supervisor (n_ctx 262144, -ngl 999, MTP draft 3, --jinja).
       provider.gguf_path = newProvider.model || '';
+      if (newProvider.mmproj) provider.mmproj = newProvider.mmproj;
       provider.context_window = 262144;
       // The card's thinking-mode sampling, prefilled so the alias is honest
       // from birth; the backend logs an advisory when these are missing.
@@ -1502,6 +1560,82 @@
   </div>
 {/snippet}
 
+<!-- The model files folder: shown in the Local engines block and in Add Provider. -->
+{#snippet modelFilesFolderRow()}
+  <div class="form-group">
+    <label for="model-files-dir">Model files folder</label>
+    <div class="path-row">
+      <input id="model-files-dir" type="text" readonly value={engineStatus?.model_files_dir ?? ''}
+        placeholder="not loaded yet — Refresh" />
+      {#if canBrowse}
+        <button type="button" class="btn btn-browse" disabled={modelFilesDirBusy} on:click={pickModelFilesDir}
+          title="Pick the folder where the local engines keep their model files">Browse…</button>
+      {/if}
+      <button type="button" class="btn btn-browse" disabled={modelFilesDirBusy || !engineStatus}
+        on:click={() => setModelFilesDir('')}
+        title="Back to the default, ~/.dpc/models">Default</button>
+    </div>
+    <p class="help-text">
+      Where DPC keeps the local engines' model files. Default: <code>~/.dpc/models</code>. Changing it
+      moves nothing: files already in another folder stay where they are.
+    </p>
+  </div>
+{/snippet}
+
+<!-- "From the model files folder": the folder's GGUFs that are not projectors, grouped by
+     subfolder (list_model_files). Choosing one fills the GGUF path through `choose`. -->
+{#snippet modelFilePicker(id: string, current: string, choose: (path: string) => void)}
+  {@const groups = groupModelFiles(modelFiles)}
+  <div class="model-file-picker">
+    <label for={id}>From the model files folder</label>
+    <select
+      {id}
+      value={groups.some((g) => g.rows.some((r) => r.path === current)) ? current : ''}
+      on:change={(e) => choose(e.currentTarget.value)}
+      disabled={!groups.length}
+    >
+      <option value="">{modelFilesLoading ? 'Loading…' : groups.length ? 'Pick a model file' : 'No GGUF files in the folder'}</option>
+      {#each groups as group}
+        <optgroup label={group.label}>
+          {#each group.rows as r}
+            <option value={r.path}>{modelFileLabel(r)}</option>
+          {/each}
+        </optgroup>
+      {/each}
+    </select>
+    {#if modelFilesError}
+      <p class="help-text warn">{modelFilesError}</p>
+    {:else}
+      <p class="help-text">
+        The GGUF files in the model files folder, one subfolder level deep. A path typed or
+        browsed for still works.
+      </p>
+    {/if}
+  </div>
+{/snippet}
+
+<!-- The vision projectors found in the chosen model's own folder (header architecture
+     "clip", not the file name). Shown only when there is at least one. -->
+{#snippet projectorPicker(id: string, modelPath: string, current: string, choose: (path: string) => void)}
+  {@const beside = projectorsBeside(modelFiles, modelPath)}
+  {#if beside.length}
+    <div class="model-file-picker">
+      <label for={id}>Vision projector found beside it</label>
+      <select {id} value={beside.some((r) => r.path === current) ? current : ''}
+        on:change={(e) => choose(e.currentTarget.value)}>
+        <option value="">none (text only)</option>
+        {#each beside as r}
+          <option value={r.path}>{modelFileLabel(r)}</option>
+        {/each}
+      </select>
+      <p class="help-text">
+        {beside.length === 1 ? 'The one projector in this folder is taken for you.' : 'Several projectors are in this folder: choose one.'}
+        {fileNameOf(modelPath)}
+      </p>
+    </div>
+  {/if}
+{/snippet}
+
 <!-- The state of the one card both local engines share (local_engine_status). -->
 {#snippet cardStatus()}
   {@const holder = engineStatus?.card_holder}
@@ -1514,24 +1648,7 @@
     {#if engineStatusError}
       <p class="help-text warn">{engineStatusError}</p>
     {/if}
-    <div class="form-group">
-      <label for="model-files-dir">Model files folder</label>
-      <div class="path-row">
-        <input id="model-files-dir" type="text" readonly value={engineStatus?.model_files_dir ?? ''}
-          placeholder="not loaded yet — Refresh" />
-        {#if canBrowse}
-          <button type="button" class="btn btn-browse" disabled={modelFilesDirBusy} on:click={pickModelFilesDir}
-            title="Pick the folder where the local engines keep their model files">Browse…</button>
-        {/if}
-        <button type="button" class="btn btn-browse" disabled={modelFilesDirBusy || !engineStatus}
-          on:click={() => setModelFilesDir('')}
-          title="Back to the default, ~/.dpc/models">Default</button>
-      </div>
-      <p class="help-text">
-        Where DPC keeps the local engines' model files. Default: <code>~/.dpc/models</code>. Changing it
-        moves nothing: files already in another folder stay where they are.
-      </p>
-    </div>
+    {@render modelFilesFolderRow()}
     <p>
       <strong>Card holder:</strong>
       {#if !engineStatus}
@@ -1899,6 +2016,8 @@
                           (ADR-040): first call fetch-verifies the pinned binary, then serves —
                           no host, no key.
                         </p>
+                        {@render modelFilePicker(`gguf-file-${i}`, editedConfig.providers[i].gguf_path ?? '',
+                          (path) => chooseEditedModelFile(i, path))}
                       </div>
 
                       <div class="form-group">
@@ -1925,6 +2044,9 @@
                           projector's own VRAM is not counted by the admission arithmetic (see
                           VRAM overhead below), so leave room for it.
                         </p>
+                        {@render projectorPicker(`mmproj-file-${i}`, editedConfig.providers[i].gguf_path ?? '',
+                          editedConfig.providers[i].mmproj ?? '',
+                          (path) => { if (editedConfig) { editedConfig.providers[i].mmproj = path || undefined; editedConfig = editedConfig; } })}
                       </div>
 
                       <div class="form-group">
@@ -3645,6 +3767,13 @@
               </select>
             </div>
 
+            {#if newProvider.type === 'llamacpp_server' || newProvider.type === 'strata'}
+              {@render modelFilesFolderRow()}
+              {#if engineStatusError}
+                <p class="help-text warn">{engineStatusError}</p>
+              {/if}
+            {/if}
+
             {#if newProvider.type !== 'dpc_agent'}
               <div class="form-group">
                 <label for="new-model">{newProvider.type === 'llamacpp_server' ? 'GGUF path' : 'Model'}</label>
@@ -3707,6 +3836,9 @@
                     Absolute path to the model file — DPC starts its own llama-server on it
                     (no host, no key). The Ollama blob can be named here directly.
                   </p>
+                  {@render modelFilePicker('new-model-file', newProvider.model ?? '', chooseNewModelFile)}
+                  {@render projectorPicker('new-mmproj', newProvider.model ?? '', newProvider.mmproj ?? '',
+                    (path) => { newProvider.mmproj = path || undefined; newProvider = newProvider; })}
                 {/if}
                 {#if newProvider.type === 'strata'}
                   <p class="help-text">
