@@ -7,7 +7,8 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { getConversationSettings, setConversationPersistHistory, updateGroupTopic } from '$lib/coreService';
+  import { getConversationSettings, nodeStatus, setConversationPersistHistory, updateGroupTopic } from '$lib/coreService';
+  import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
   import {
     GROUP_SETTINGS_WINDOW,
     clampRect,
@@ -379,6 +380,9 @@
               </span>
             </label>
           </div>
+          {#if voiceMemoryNote($nodeStatus)}
+            <p class="toggle-hint">{voiceMemoryNote($nodeStatus)}</p>
+          {/if}
         </div>
 
         <!-- Members -->
@@ -899,6 +903,9 @@
     font-size: 0.75rem;
     color: #6c7086;
     font-style: italic;
+  }
+  .section > p.toggle-hint {
+    margin: 0.4rem 0 0;
   }
   .agent-provider-hint {
     font-size: 0.8em;

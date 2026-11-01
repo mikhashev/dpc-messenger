@@ -98,10 +98,33 @@ _VOICE_MEMORY_PACKAGE: Dict[str, str] = {
     "openai/whisper-large-v3-turbo": "transformers",
 }
 
+VOICE_MEMORY_COMMAND = "uv sync --extra voice-memory --inexact"
+
 _VOICE_MEMORY_MISSING = (
     "needs the voice-memory extra (not installed); from dpc-client/core run: "
-    "uv sync --extra voice-memory --inexact"
+    + VOICE_MEMORY_COMMAND
 )
+
+# What the two features import: Whisper (providers/whisper_provider.py) takes
+# torch, transformers, soundfile and librosa; memory search (dpc_agent/memory.py,
+# faiss_index.py) takes sentence_transformers, torch and faiss. accelerate and
+# sentencepiece ride along in the extra but nothing here imports them by name.
+VOICE_MEMORY_IMPORTS = (
+    "torch",
+    "transformers",
+    "sentence_transformers",
+    "faiss",
+    "librosa",
+    "soundfile",
+)
+
+
+def voice_memory_installed() -> bool:
+    """True when every package the voice and memory paths import can be found.
+
+    `find_spec` looks without importing, so this does not load torch.
+    """
+    return all(importlib.util.find_spec(name) is not None for name in VOICE_MEMORY_IMPORTS)
 
 
 class ModelDownloadService:

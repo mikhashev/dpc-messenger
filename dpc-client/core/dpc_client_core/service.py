@@ -151,7 +151,7 @@ from .voice_service import VoiceService
 from .knowledge_service import KnowledgeService
 from .telegram_service import TelegramService
 from .agent_service import AgentService
-from .model_download_service import ModelDownloadService
+from .model_download_service import ModelDownloadService, voice_memory_installed
 from .managers.group_manager import GroupManager
 from .managers.prompt_manager import PromptManager
 from .managers.instruction_manager import InstructionManager
@@ -2512,6 +2512,9 @@ class CoreService:
             "external_uris": external_uris,
             # Connection orchestrator stats (6-tier fallback metrics)
             "orchestrator_stats": orchestrator_stats,
+            # False when the optional voice-memory extra is missing: the voice
+            # and memory toggles in the UI say so (older backends omit it).
+            "voice_memory_installed": voice_memory_installed(),
         }
 
         # If running in background mode, send response via WebSocket

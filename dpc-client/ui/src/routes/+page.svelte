@@ -7,6 +7,7 @@
   import { DEFAULT_AI_CHAT_NAME, DEFAULT_CHAT_INSTRUCTION_SET } from '$lib/utils/aiChatStore';
   import { voteStatusAppliesTo } from '$lib/utils/voteStatusIdentity';
   import { writable } from "svelte/store";
+  import { voiceMemoryNote } from "$lib/utils/voiceMemoryExtra";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig, blockedNodeIds, loadGroups } from "$lib/coreService";
   import { loadBlockedNodes, resetBlockedNodesLoad, blockPeer, unblockPeer } from "$lib/services/blockedPeers";
   import { blockConfirmQuestion, blockedNotice, unblockedNotice, groupsWithMember, peerLabel } from "$lib/utils/blockedPeers";
@@ -1149,6 +1150,9 @@
                 <span class="whisper-error-indicator" title={whisperModelLoadError}>⚠️</span>
               {/if}
             </label>
+            {#if voiceMemoryNote($nodeStatus)}
+              <p class="voice-memory-note">{voiceMemoryNote($nodeStatus)}</p>
+            {/if}
           {/if}
 
           <!-- Telegram bot integration status (v0.14.0+) - P2P chats only -->
@@ -1992,6 +1996,14 @@
   .whisper-error-indicator {
     font-size: 14px;
     color: #ff9800;
+  }
+
+  /* The voice-memory extra is missing: one line under the toggle, aligned with it
+     (the title section is a column, so auto on the left pushes it right). */
+  .voice-memory-note {
+    margin: 0 0 0 auto;
+    font-size: 12px;
+    color: #856404;
   }
 
 </style>

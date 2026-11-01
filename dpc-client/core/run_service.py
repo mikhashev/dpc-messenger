@@ -255,6 +255,7 @@ import re
 import traceback
 from pathlib import Path
 from dpc_client_core.service import CoreService
+from dpc_client_core.model_download_service import VOICE_MEMORY_COMMAND, voice_memory_installed
 from dpc_client_core.dpc_agent.loop import shutdown_shared_executor
 from dpc_client_core.__version__ import __version__
 from dpc_client_core import ai_chats, single_instance
@@ -405,7 +406,7 @@ def setup_logging(settings):
         logger.info(_HF_STARTUP_NOTE)
 
 
-_VOICE_MEMORY_COMMAND = "uv sync --extra voice-memory --inexact"
+_VOICE_MEMORY_COMMAND = VOICE_MEMORY_COMMAND
 
 
 def _warn_if_voice_memory_missing():
@@ -417,9 +418,7 @@ def _warn_if_voice_memory_missing():
     needs `uv`, which a packaged app may not ship: there the extra is added
     from a source checkout, or the features stay off. Called once logging exists.
     """
-    import importlib.util
-
-    if importlib.util.find_spec("torch") is None:
+    if not voice_memory_installed():
         logger.warning(
             "The voice-memory extra is not installed: local voice transcription "
             "(Whisper) and agent memory search (bge-m3) are unavailable. "

@@ -199,6 +199,8 @@ export interface NodeStatus {
     peer_info?: PeerInfo[];
     connected_peers?: string[];
     p2p_peers?: string[];      // Legacy: flat list of connected peer node_ids
+    /** False when the optional voice-memory extra is missing; absent on an older backend. */
+    voice_memory_installed?: boolean;
 }
 
 // --- P2P Messaging ---

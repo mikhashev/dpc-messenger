@@ -3,7 +3,8 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand, peerProviders, providerAccounts, getProviderBalances } from '$lib/coreService';
+  import { nodeStatus, sendCommand, peerProviders, providerAccounts, getProviderBalances } from '$lib/coreService';
+  import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
   import {
     blockedModelLine, formatQuotaLine, formatQuotaLineTitle, quotaHasWarning,
     accountLevel, balanceErrorText, providerTypeLabel, type AccountRow,
@@ -1759,7 +1760,9 @@
                           placeholder="http://127.0.0.1:11434"
                         />
                         <p class="help-text">No API key needed for Ollama</p>
-                        <p class="help-text">Exact token counts for Ollama models need the voice-memory extra; without it they are estimated from characters. In dpc-client/core: <code>uv sync --extra voice-memory --inexact</code></p>
+                        {#if voiceMemoryNote($nodeStatus)}
+                          <p class="help-text">{voiceMemoryNote($nodeStatus)} Without it, token counts for Ollama models are estimated from characters.</p>
+                        {/if}
                       </div>
                     {/if}
 

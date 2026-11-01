@@ -3,7 +3,8 @@
    * AgentPermissionsPanel - Unified panel for editing agent permissions
    * Works for both global settings (dpc_agent) and individual agent profiles
    */
-  import { sendCommand } from '$lib/coreService';
+  import { nodeStatus, sendCommand } from '$lib/coreService';
+  import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
   import { openPath } from '@tauri-apps/plugin-opener';
   import { onMount } from 'svelte';
 
@@ -682,6 +683,9 @@
               <span>Enable Memory System</span>
             </label>
             <p class="help-text-small">Enables embedding-based knowledge search and Active Recall hints</p>
+            {#if voiceMemoryNote($nodeStatus)}
+              <p class="help-text-small">{voiceMemoryNote($nodeStatus)}</p>
+            {/if}
           </div>
 
           <div class="setting-item">

@@ -3,6 +3,7 @@
 
 <script lang="ts">
   import { providerAccounts, getProviderBalances, sendCommand } from '$lib/coreService';
+  import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
   import {
     cachedPeerLines,
     cachedPeerName,
@@ -335,6 +336,7 @@
     peer_info?: Array<{ node_id: string; name?: string }>;
     p2p_peers?: string[];
     cached_peers_count?: number;
+    voice_memory_installed?: boolean;
   };
 
   type ChatInfo = {
@@ -1547,6 +1549,9 @@
           />
           Enable voice message transcription
         </label>
+        {#if voiceMemoryNote(nodeStatus)}
+          <p class="dialog-hint">{voiceMemoryNote(nodeStatus)}</p>
+        {/if}
 
         <!-- Unified conversation -->
         <label class="dialog-label checkbox-label">
