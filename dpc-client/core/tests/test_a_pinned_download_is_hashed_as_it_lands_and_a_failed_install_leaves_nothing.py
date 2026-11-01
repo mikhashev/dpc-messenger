@@ -93,6 +93,30 @@ def test_the_download_hashes_the_whole_stream_and_reports_progress(tmp_path, mon
     assert not dest.with_suffix(".zip.part").exists()
 
 
+def test_progress_across_two_assets_is_one_rising_count_that_ends_at_their_sum(tmp_path, monkeypatch):
+    # One bar for the whole pin: the second asset continues where the first ended.
+    first, second = _zip({"a.bin": b"a" * 5000}), _zip({"b.bin": b"b" * 3000})
+    assets = [
+        {"name": "one.zip", "sha256": _sha(first), "size": len(first)},
+        {"name": "two.zip", "sha256": _sha(second), "size": len(second)},
+    ]
+
+    def _urlopen(url, timeout):
+        return _FakeResponse({"one.zip": first, "two.zip": second}[url.rsplit("/", 1)[1]], 64)
+
+    monkeypatch.setattr(pin.urllib.request, "urlopen", _urlopen)
+    seen = []
+    pin.install_with_staging_swap(
+        tmp_path / "plat", assets, "https://example.test/rel", {"tag": "v1"},
+        progress=lambda done, total: seen.append((done, total)),
+    )
+    total = len(first) + len(second)
+    assert {t for _, t in seen} == {total}
+    dones = [d for d, _ in seen]
+    assert dones == sorted(dones) and dones[-1] == total
+    assert len(first) in dones and any(d > len(first) for d in dones)
+
+
 def test_a_sha256_mismatch_leaves_no_destination_and_no_part_file(tmp_path, monkeypatch):
     asset = {"name": "x.zip", "sha256": _sha(b"pinned"), "size": 6}
     dest = tmp_path / "x.zip"
@@ -226,7 +250,9 @@ def test_a_stale_old_copy_from_an_earlier_crash_does_not_block_the_swap(tmp_path
 def test_a_staging_rename_that_fails_leaves_the_old_install_intact(tmp_path, monkeypatch):
     root = tmp_path / "plat"
     _old_install(root)
-    (root / ".dpc-kv-fit.json").write_text('{"fit": 1}', encoding="utf-8")  # DPC's own file
+    # The old marker, with what a passed start wrote into it (the KV-fit memo used to be the example).
+    old_marker = '{"tag": "v0", "start_passed_at": "2026-11-01T00:00:00+00:00"}'
+    pin.marker_path(root).write_text(old_marker, encoding="utf-8")
 
     real_replace = pin.Path.replace
 
@@ -239,5 +265,5 @@ def test_a_staging_rename_that_fails_leaves_the_old_install_intact(tmp_path, mon
     with pytest.raises(PermissionError, match="antivirus"):
         _install(monkeypatch, root)
     assert (root / "engine.bin").read_bytes() == b"old engine"
-    assert (root / ".dpc-kv-fit.json").read_text(encoding="utf-8") == '{"fit": 1}'
+    assert pin.marker_path(root).read_text(encoding="utf-8") == old_marker
     assert _siblings(root) == ["plat"]

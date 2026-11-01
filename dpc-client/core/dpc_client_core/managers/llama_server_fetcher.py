@@ -17,6 +17,7 @@ and refuses to leave a partial install behind.
 
 import platform as _platform
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -29,6 +30,7 @@ from .local_engine_pin_fetcher import (
 
 LLAMA_CPP_TAG = "b11669"
 LLAMA_CPP_RELEASE_BASE = "https://github.com/ggml-org/llama.cpp/releases/download"
+_INSTALL_LOCK = threading.Lock()
 
 # The CUDA family for the Windows asset key, the two Windows asset names and
 # `platform_tag()`'s return all name the same CUDA toolkit version; one
@@ -96,9 +98,14 @@ def server_binary_name() -> str:
     return "llama-server.exe" if sys.platform == "win32" else "llama-server"
 
 
+def pins_dir() -> Path:
+    """The folder every llama.cpp pin lives in: ~/.dpc/bin/llama.cpp/."""
+    return DPC_HOME / "bin" / "llama.cpp"
+
+
 def install_root(tag: str = LLAMA_CPP_TAG, plat: Optional[str] = None) -> Path:
     """Where a fetched pin lives: ~/.dpc/bin/llama.cpp/<tag>/<platform>/."""
-    return DPC_HOME / "bin" / "llama.cpp" / tag / (plat or platform_tag())
+    return pins_dir() / tag / (plat or platform_tag())
 
 
 def resolve_binary(config: Dict[str, Any]) -> Optional[Path]:
@@ -145,36 +152,37 @@ def find_cuda_backend(binary_dir: Path) -> Optional[Path]:
 
 
 def install_pin(progress: Optional[Callable[[int, int], None]] = None) -> Path:
-    """Fetch and install the pinned release; atomic enough to leave no half state."""
-    plat = platform_tag()
-    assets = PLATFORM_ASSETS[plat]
-    root = install_root(plat=plat)
-    if (root / server_binary_name()).is_file() and marker_path(root).is_file():
+    """Fetch and install the pinned release; atomic enough to leave no half state, one at a time."""
+    with _INSTALL_LOCK:
+        plat = platform_tag()
+        assets = PLATFORM_ASSETS[plat]
+        root = install_root(plat=plat)
+        if (root / server_binary_name()).is_file() and marker_path(root).is_file():
+            return root / server_binary_name()
+
+        def _check(staging: Path) -> None:
+            if not (staging / server_binary_name()).is_file():
+                # Archives lay out files differently than this pin expects.
+                found = sorted(staging.rglob(server_binary_name()))
+                if not found:
+                    raise ValueError(
+                        f"{plat} assets of {LLAMA_CPP_TAG} contain no {server_binary_name()}"
+                    )
+
+        install_with_staging_swap(
+            root,
+            assets,
+            f"{LLAMA_CPP_RELEASE_BASE}/{LLAMA_CPP_TAG}",
+            {
+                "tag": LLAMA_CPP_TAG,
+                "platform": plat,
+                "assets": {a["name"]: a["sha256"] for a in assets},
+            },
+            check=_check,
+            progress=progress,
+            temp_prefix="llama-pin-",
+        )
         return root / server_binary_name()
-
-    def _check(staging: Path) -> None:
-        if not (staging / server_binary_name()).is_file():
-            # Archives lay out files differently than this pin expects.
-            found = sorted(staging.rglob(server_binary_name()))
-            if not found:
-                raise ValueError(
-                    f"{plat} assets of {LLAMA_CPP_TAG} contain no {server_binary_name()}"
-                )
-
-    install_with_staging_swap(
-        root,
-        assets,
-        f"{LLAMA_CPP_RELEASE_BASE}/{LLAMA_CPP_TAG}",
-        {
-            "tag": LLAMA_CPP_TAG,
-            "platform": plat,
-            "assets": {a["name"]: a["sha256"] for a in assets},
-        },
-        check=_check,
-        progress=progress,
-        temp_prefix="llama-pin-",
-    )
-    return root / server_binary_name()
 
 
 def ensure_binary(

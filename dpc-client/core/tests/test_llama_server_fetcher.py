@@ -100,28 +100,11 @@ def test_every_asset_name_carries_its_platform_key_and_the_pinned_tag():
 
 
 def test_install_root_without_arguments_is_the_pinned_tag_and_this_platform(tmp_path, monkeypatch):
-    # The supervisor calls it bare, for the `.dpc-kv-fit.json` memo beside the binary.
+    # Every pin sits in pins_dir(), which also holds the `.dpc-kv-fit.json` memo.
     monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
+    assert fetcher.pins_dir() == tmp_path / "bin" / "llama.cpp"
     assert fetcher.install_root() == (
-        tmp_path / "bin" / "llama.cpp" / fetcher.LLAMA_CPP_TAG / fetcher.platform_tag()
-    )
-
-
-def test_an_unreadable_or_non_object_marker_resolves_to_no_install(tmp_path, monkeypatch):
-    monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
-    root = fetcher.install_root()
-    root.mkdir(parents=True)
-    (root / fetcher.server_binary_name()).write_bytes(b"")
-    for text in ("[1, 2]", "not json", '"b11669"'):
-        (root / ".dpc-pin.json").write_text(text, encoding="utf-8")
-        assert fetcher.resolve_binary({}) is None
-
-
-def test_install_root_without_arguments_is_the_pinned_tag_and_this_platform(tmp_path, monkeypatch):
-    # The supervisor calls it bare, for the `.dpc-kv-fit.json` memo beside the binary.
-    monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
-    assert fetcher.install_root() == (
-        tmp_path / "bin" / "llama.cpp" / fetcher.LLAMA_CPP_TAG / fetcher.platform_tag()
+        fetcher.pins_dir() / fetcher.LLAMA_CPP_TAG / fetcher.platform_tag()
     )
 
 

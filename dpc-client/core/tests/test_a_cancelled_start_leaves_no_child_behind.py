@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from dpc_client_core.managers import llama_server_supervisor as base_mod
+from dpc_client_core.managers import llama_server_fetcher as fetcher_mod
 from dpc_client_core.managers.llama_server_supervisor import LlamaServerError, LlamaServerSupervisor
 from tests.test_strata_supervisor import (
     _FakeProc,
@@ -230,6 +231,8 @@ class TestACancelledStrataStart:
 class TestACancelledLlamaServerStart:
     def _sup(self, tmp_path, monkeypatch, healthy):
         monkeypatch.setattr(base_mod, "DPC_HOME", tmp_path)
+        # The KV-fit memo lives beside the pins: keep it out of the real ~/.dpc.
+        monkeypatch.setattr(fetcher_mod, "DPC_HOME", tmp_path)
         monkeypatch.setattr(base_mod, "ensure_binary", lambda config: Path("C:/bin/llama-server.exe"))
         monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: None)
         monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)

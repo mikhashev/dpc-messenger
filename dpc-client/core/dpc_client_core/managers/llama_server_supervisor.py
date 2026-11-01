@@ -34,7 +34,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .. import process_registry as _procreg
-from .llama_server_fetcher import DPC_HOME, ensure_binary, find_cuda_backend, install_root
+from .llama_server_fetcher import (
+    DPC_HOME,
+    LLAMA_CPP_TAG,
+    ensure_binary,
+    find_cuda_backend,
+    pins_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -967,16 +973,32 @@ class LlamaServerSupervisor:
 
     # --- the KV ladder --------------------------------------------------------
 
+    def _fit_build(self) -> str:
+        """Which build the memo entry is for: a rung that fit one build is no word
+        about another. The pin is its tag; a configured binary is its resolved
+        path with size and mtime, so a rebuild in place re-runs the ladder once."""
+        configured = self.config.get("binary_path")
+        if not configured:
+            return LLAMA_CPP_TAG
+        path = Path(configured).resolve()
+        try:
+            st = path.stat()
+        except OSError:
+            return str(path)
+        return f"{path}@{st.st_size}@{st.st_mtime_ns}"
+
     def _fit_key(self) -> str:
         c = self.config
         return ":".join(str(x) for x in (
-            _gguf_mib(c["gguf_path"]), c["n_ctx"], c["n_gpu_layers"],
+            self._fit_build(), _gguf_mib(c["gguf_path"]), c["n_ctx"], c["n_gpu_layers"],
             c["n_parallel"], c["spec_draft_n_max"],
         ))
 
     @staticmethod
     def _fit_memo_path() -> Path:
-        return install_root() / ".dpc-kv-fit.json"
+        # Beside the pins, not in one: a pin folder holds only its install and marker.
+        # The old <pin>/.dpc-kv-fit.json is not read; its keys lack the build, so none would match.
+        return pins_dir() / ".dpc-kv-fit.json"
 
     def _read_fit_memo(self) -> Dict[str, Any]:
         try:

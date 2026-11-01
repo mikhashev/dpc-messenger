@@ -16,14 +16,18 @@ import os
 import shutil
 import tarfile
 import tempfile
+import threading
 import urllib.request
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
 DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+
+_MARKER_LOCK = threading.Lock()
 
 
 def marker_path(root: Path) -> Path:
@@ -106,11 +110,23 @@ def install_with_staging_swap(
         staging = root.with_name(root.name + ".staging")
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
+        # Progress is one bar across all assets: bytes landed so far against their sum.
+        total = sum(int(a["size"]) for a in assets)
+        done = 0
         try:
             for asset in assets:
                 archive = tmp_dir / asset["name"]
                 logger.info("Fetching %s (%d bytes)", asset["name"], asset["size"])
-                download_asset(f"{url_base}/{asset['name']}", asset, archive, progress)
+                landed = [0]
+
+                def _report(got: int, _size: int, base: int = done) -> None:
+                    landed[0] = got
+                    progress(base + got, total)
+
+                download_asset(
+                    f"{url_base}/{asset['name']}", asset, archive, _report if progress else None
+                )
+                done += landed[0]
                 extract_archive(archive, staging)
             extra = check(staging) if check else None
             marker_path(staging).write_text(
@@ -136,3 +152,128 @@ def install_with_staging_swap(
                 shutil.rmtree(old, ignore_errors=True)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+
+
+# --- installed pins: the retained one and the rest ---------------------------------------
+# Each engine keeps `<pins_dir>/<tag>/<platform>/`. A folder is a pin only when its marker
+# names that same tag and platform; anything else there (a hand-made build, a folder from
+# before markers, a `.staging` or `.old` leftover) is not DPC's to run or to remove.
+
+
+def installed_pins(pins_dir: Path) -> List[Dict[str, Any]]:
+    """Every pin under `pins_dir`: `{"root", "tag", "platform", "marker"}`, sorted by root.
+
+    The platform folder is read from disk, never built: its name changes between
+    builds (win-cuda-13.3-x64, then 13.4).
+    """
+    pins: List[Dict[str, Any]] = []
+    try:
+        tag_dirs = sorted(p for p in Path(pins_dir).iterdir() if p.is_dir())
+    except OSError:
+        return pins
+    for tag_dir in tag_dirs:
+        try:
+            plat_dirs = sorted(p for p in tag_dir.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for root in plat_dirs:
+            marker = read_marker(root)
+            if marker and marker.get("tag") == tag_dir.name and marker.get("platform") == root.name:
+                pins.append({"root": root, "tag": tag_dir.name, "platform": root.name, "marker": marker})
+    return pins
+
+
+def _start_passed_at(marker: Dict[str, Any]) -> Optional[datetime]:
+    value = marker.get("start_passed_at")
+    try:
+        when = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    if when is not None and when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when
+
+
+def retained_pin(pins_dir: Path, current_tag: str) -> Optional[Dict[str, Any]]:
+    """The other pin that last passed a start (newest `start_passed_at`); None when none did."""
+    passed = [
+        (when, pin) for pin in installed_pins(pins_dir)
+        if pin["tag"] != current_tag and (when := _start_passed_at(pin["marker"])) is not None
+    ]
+    return max(passed, key=lambda item: item[0])[1] if passed else None
+
+
+def note_start_passed(root: Path) -> bool:
+    """Record in `root`'s marker that a start passed; True only the first time.
+
+    The marker is rewritten whole through a temporary file and `os.replace`, so a
+    crash leaves the old marker or the new one, never half of one.
+    """
+    root = Path(root)
+    with _MARKER_LOCK:
+        marker = read_marker(root)
+        if marker is None or "start_passed_at" in marker:
+            return False
+        marker["start_passed_at"] = datetime.now(timezone.utc).isoformat()
+        fd, tmp = tempfile.mkstemp(prefix=".dpc-pin-", suffix=".tmp", dir=root)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                out.write(json.dumps(marker, indent=2))
+            os.replace(tmp, marker_path(root))
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        return True
+
+
+def _same_path(path: Path) -> str:
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def _tree_bytes(root: Path) -> int:
+    total = 0
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def prune_pins(pins_dir: Path, keep: Iterable[Path], in_use: Iterable[Path]) -> List[Dict[str, Any]]:
+    """Remove every installed pin whose root is in neither `keep` nor `in_use`; return those removed.
+
+    Each removal renames `<root>` to `<root>.old` first and deletes that: Windows
+    refuses the rename while an exe inside runs, and such a pin is skipped. Only
+    `installed_pins` are candidates, so a folder without a matching marker is never
+    touched, nor anything that resolves outside `pins_dir`.
+    """
+    pins_dir = Path(pins_dir)
+    spared = {_same_path(p) for p in (*keep, *in_use)}
+    inside = pins_dir.resolve()
+    removed: List[Dict[str, Any]] = []
+    for pin in installed_pins(pins_dir):
+        root = pin["root"]
+        if _same_path(root) in spared or root.is_symlink() or not root.resolve().is_relative_to(inside):
+            continue
+        size = _tree_bytes(root)
+        old = root.with_name(root.name + ".old")
+        shutil.rmtree(old, ignore_errors=True)
+        try:
+            root.replace(old)
+        except OSError as exc:
+            logger.info("Kept pin %s: it could not be moved aside (%s); probably still running", root, exc)
+            continue
+        shutil.rmtree(old, ignore_errors=True)
+        if old.exists():
+            logger.warning("Pin %s removed, but some of %s could not be deleted", root, old)
+        logger.info("Removed pin %s %s at %s, freeing %d bytes", pin["tag"], pin["platform"], root, size)
+        removed.append(pin)
+        tag_dir = root.parent
+        try:
+            if not any(tag_dir.iterdir()):
+                tag_dir.rmdir()
+        except OSError:
+            pass
+    return removed

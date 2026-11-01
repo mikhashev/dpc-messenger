@@ -336,6 +336,20 @@ def test_a_marker_of_another_tag_is_no_install(world):
     assert sf.engine_folder() is None
 
 
+def test_the_engine_folder_of_an_older_pin_is_read_against_its_own_folders(tmp_path, monkeypatch):
+    # B2 step 3 runs a retained pin: its marker names its own tag folder, not the constant.
+    monkeypatch.setattr(sf, "DPC_HOME", tmp_path)
+    root = sf.pins_dir() / "v0.2.8" / PLAT
+    root.mkdir(parents=True)
+    marker = {"tag": "v0.2.8", "platform": PLAT, "engine": {"folder": FOLDER}}
+    pin.marker_path(root).write_text(json.dumps(marker), encoding="utf-8")
+    assert sf.pins_dir() == tmp_path / "bin" / "strata"
+    assert sf.engine_folder(root) == root / "components" / "engine" / FOLDER
+    for wrong in ({"tag": sf.STRATA_RELEASE_TAG}, {"platform": "linux-x86_64"}):
+        pin.marker_path(root).write_text(json.dumps({**marker, **wrong}), encoding="utf-8")
+        assert sf.engine_folder(root) is None
+
+
 def test_a_set_strata_install_dir_skips_the_fetch(world, tmp_path):
     checkout = tmp_path / "Strata"
     checkout.mkdir()

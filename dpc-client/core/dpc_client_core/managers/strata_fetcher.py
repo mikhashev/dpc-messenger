@@ -126,9 +126,14 @@ def platform_tag() -> str:
     )
 
 
+def pins_dir() -> Path:
+    """The folder every Strata pin lives in: ~/.dpc/bin/strata/."""
+    return DPC_HOME / "bin" / "strata"
+
+
 def install_root(tag: str = STRATA_RELEASE_TAG, plat: Optional[str] = None) -> Path:
     """Where a fetched pin lives: ~/.dpc/bin/strata/<tag>/<platform>/."""
-    return DPC_HOME / "bin" / "strata" / tag / (plat or platform_tag())
+    return pins_dir() / tag / (plat or platform_tag())
 
 
 def components_dir(root: Optional[Path] = None) -> Path:
@@ -143,10 +148,11 @@ def control_python_path(root: Path) -> Path:
 
 
 def engine_folder(root: Optional[Path] = None) -> Optional[Path]:
-    """The engine folder the marker names, when the marker is this pin's; no hashing."""
+    """The engine folder the marker names, when the marker is the one of the folders it
+    sits in (`<tag>/<platform>/`, any installed pin, not only the current); no hashing."""
     root = root or install_root()
     pinned = read_marker(root)
-    if not pinned or pinned.get("tag") != STRATA_RELEASE_TAG or pinned.get("platform") != platform_tag():
+    if not pinned or pinned.get("tag") != root.parent.name or pinned.get("platform") != root.name:
         return None
     engine = pinned.get("engine")
     folder = engine.get("folder") if isinstance(engine, dict) else None

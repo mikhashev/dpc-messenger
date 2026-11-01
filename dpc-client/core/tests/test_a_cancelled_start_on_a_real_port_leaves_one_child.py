@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from dpc_client_core.managers import llama_server_supervisor as base_mod
+from dpc_client_core.managers import llama_server_fetcher as fetcher_mod
 from dpc_client_core.managers.llama_server_supervisor import LlamaServerSupervisor
 
 CHILD = r'''
@@ -101,6 +102,8 @@ async def _until(predicate, timeout):
 class _Rig:
     def __init__(self, tmp_path: Path, monkeypatch, exit_delay: float):
         monkeypatch.setattr(base_mod, "DPC_HOME", tmp_path / "dpc-home")
+        # The KV-fit memo lives beside the pins: keep it out of the real ~/.dpc.
+        monkeypatch.setattr(fetcher_mod, "DPC_HOME", tmp_path / "dpc-home")
         monkeypatch.setattr(base_mod, "ensure_binary", lambda config: Path(sys.executable))
         monkeypatch.setattr(base_mod, "find_cuda_backend", lambda path: None)
         monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: None)

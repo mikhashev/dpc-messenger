@@ -772,3 +772,63 @@ class TestTelemetryUnderConcurrency:
         sup._in_flight = 0
 
         assert sup.last_task_timings()["prefill_tok_s"] == 438
+
+
+class TestTheFitMemoIsPerBuild:
+    """The KV-fit memo sits beside the pins and its key names the build that ran.
+
+    Johnny's case (B2 step 3): a memo entry with free_mib 0 always hits, so a key
+    without the build would let a new pin skip the ladder on the old pin's word.
+    """
+
+    def _with_pins_in(self, monkeypatch, tmp_path):
+        from dpc_client_core.managers import llama_server_fetcher as fetcher
+
+        monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
+        return fetcher
+
+    def test_the_memo_is_written_beside_the_pins_not_inside_one(self, monkeypatch, tmp_path):
+        fetcher = self._with_pins_in(monkeypatch, tmp_path)
+        assert not fetcher.pins_dir().exists()
+        _sup()._write_fit_memo("k", "q8_0", 30000)
+        memo = fetcher.pins_dir() / ".dpc-kv-fit.json"
+        assert memo.is_file()
+        assert not (fetcher.install_root() / ".dpc-kv-fit.json").exists()
+        assert _sup()._read_fit_memo()["k"]["type"] == "q8_0"
+
+    @pytest.mark.asyncio
+    async def test_a_memo_entry_of_one_pin_is_not_a_hit_for_the_next(self, monkeypatch, tmp_path):
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        self._with_pins_in(monkeypatch, tmp_path)
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 31200)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
+        monkeypatch.setattr(mod, "LLAMA_CPP_TAG", "b11669")
+        _sup()._write_fit_memo(_sup()._fit_key(), "q4_0", 0)  # free_mib 0: hits on any card
+
+        async def run():
+            sup = _sup()
+            attempts = []
+
+            async def fake_launch(binary, cache_type=None):
+                attempts.append(cache_type)
+                return {"total_slots": 4}
+
+            sup._launch = fake_launch
+            await sup.ensure_running()
+            return attempts
+
+        assert await run() == ["q4_0"]  # the same build trusts its own memo
+        monkeypatch.setattr(mod, "LLAMA_CPP_TAG", "b11700")
+        assert await run() == ["q8_0"]  # the next pin runs the ladder
+
+    def test_a_configured_binary_has_its_own_key_and_a_rebuild_changes_it(self, tmp_path):
+        binary = tmp_path / "llama-server.exe"
+        binary.write_bytes(b"operator build")
+        pinned = _sup()._fit_key()
+        configured = _sup(binary_path=str(binary))._fit_key()
+        assert configured != pinned
+        assert str(binary.resolve()) in configured
+        binary.write_bytes(b"operator build, rebuilt")
+        assert _sup(binary_path=str(binary))._fit_key() != configured
