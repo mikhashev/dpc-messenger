@@ -162,6 +162,7 @@ def test_the_owners_start_asks_once_and_refuses_before_the_card(sup, service):
     assert payload["installed_bytes"] == (
         sf.PLATFORM_ASSETS[PLAT]["installed_bytes"] + sf.ENGINE_INSTALLED_BYTES_MAX[PLAT]) == sf.installed_bytes()
     assert payload["size_source"] == "package_max"
+    assert payload["size_measured_on"] is None  # the feed's own sizes, held with the pin
     assert payload["on_decline"] == "block"
     assert payload["cache_path"] == str(sf.install_root())
     assert payload["provider_alias"] == ALIAS

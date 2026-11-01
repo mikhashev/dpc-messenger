@@ -358,6 +358,9 @@ class ModelDownloadService:
             "size_source": size_source,
             # ISO date the size row was measured, or null — a UI that does not
             # read this field is unaffected, it only gains one (finding F).
+            # Always null for a download module: its size_bytes is the pinned
+            # assets' own, held with the pin, not a measurement. A module's
+            # measured installed_bytes keeps its date in code (INSTALLED_BYTES_MEASURED_ON).
             "size_measured_on": measured_on,
             "cache_path": cache_path,
             # Bytes the download occupies once unpacked, or null = not stated

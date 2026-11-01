@@ -104,6 +104,7 @@ def test_the_owners_start_asks_once_and_refuses_before_the_card(sup, service):
     assert name == "model_download_required"
     assert payload["model_name"] == NAME
     assert payload["size_bytes"] == _exact_size() == fetcher_mod.size_bytes()
+    assert payload["size_measured_on"] is None  # the pin's own asset size, not a measurement
     assert payload["on_decline"] == "block"
     assert payload["cache_path"] == str(fetcher_mod.install_root())
     assert payload["provider_alias"] == ALIAS
