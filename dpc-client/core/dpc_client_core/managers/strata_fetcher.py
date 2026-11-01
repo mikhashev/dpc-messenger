@@ -104,6 +104,7 @@ PLATFORM_ASSETS: Dict[str, Dict[str, Any]] = {
 # `installed_bytes` (two figures on purpose, not to be folded into one). From the signed
 # strata-feed.json of v0.2.9 (-linux-aarch64 for that platform); re-read at every pin
 # move. The rows: tests/fixtures/strata_v0.2.9_feed_packages.json, tied by a test.
+# The one package of the platform with the largest size + installed_bytes, both figures from it.
 ENGINE_SIZE_MAX: Dict[str, int] = {
     "windows-x86_64": 904_164_080,   # cuda12
     "linux-x86_64": 935_156_308,     # cuda12

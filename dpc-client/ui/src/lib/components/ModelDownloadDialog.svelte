@@ -107,7 +107,7 @@
           <p><strong>Cache Location:</strong> <code>{cachePath}</code></p>
           <p class:space-short={shortOfSpace}><strong>Disk Space:</strong> {spaceText}{shortOfSpace ? ' — not enough; free some space first' : ''}</p>
           {#if verdict === 'may_not_fit'}
-            <p class="space-warning">May not fit: depends on the package Strata picks for this card.</p>
+            <p class="space-warning">May not fit: depends on the package Strata picks for this card. If it does not, the install stops after its first part has downloaded.</p>
           {/if}
           {#if providerAlias}
             <p><strong>Provider:</strong> {providerAlias}</p>

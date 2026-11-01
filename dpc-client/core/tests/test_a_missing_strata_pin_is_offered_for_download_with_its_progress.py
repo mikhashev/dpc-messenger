@@ -443,9 +443,11 @@ def test_the_pinned_sizes_are_the_extremes_of_the_feed_rows_of_the_pinned_releas
         engines.setdefault(row["platform"], []).append(row)
     assert set(engines) == set(sf.PLATFORM_ASSETS)
     for plat, rows in engines.items():
-        assert sf.ENGINE_SIZE_MAX[plat] == max(r["size"] for r in rows), plat
-        assert sf.ENGINE_INSTALLED_BYTES_MAX[plat] == max(r["installed_bytes"] for r in rows), plat
-        # The minima are one row: the package with the smallest download plus unpacked size.
+        # Both bounds are one row each, so "up to" names a package that exists.
+        largest = max(rows, key=lambda r: r["size"] + r["installed_bytes"])
+        assert (sf.ENGINE_SIZE_MAX[plat], sf.ENGINE_INSTALLED_BYTES_MAX[plat]) == (
+            largest["size"], largest["installed_bytes"]), plat
+        # The minima: the package with the smallest download plus unpacked size.
         smallest = min(rows, key=lambda r: r["size"] + r["installed_bytes"])
         pair = (sf.ENGINE_SIZE_MIN[plat], sf.ENGINE_INSTALLED_BYTES_MIN[plat])
         assert pair == (smallest["size"], smallest["installed_bytes"]), plat
