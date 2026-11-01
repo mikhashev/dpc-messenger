@@ -11024,6 +11024,7 @@ class CoreService:
             except (json.JSONDecodeError, OSError):
                 pass
 
+        from dpc_client_core.dpc_agent.llm_adapter import _llm_manager_for_agent
         from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep, _read_sleep_state
         from dpc_client_core.dpc_agent.utils import load_agent_config
 
@@ -11046,9 +11047,10 @@ class CoreService:
                     "message": f"{self._get_agent_display_name(agent_id)} is busy in {chat}"
                                " — start sleep after the turn ends"}
 
-        # Read per-agent sleep LLM override
+        # Read per-agent sleep LLM override; on a pinned agent a peer's alias runs on that peer
         agent_config = load_agent_config(agent_id)
         sleep_provider = agent_config.get("sleep_provider_alias") or None
+        sleep_llm = _llm_manager_for_agent(self.llm_manager, agent_config.get("compute_host"), agent_id)
 
         sleep_data = {"agent_id": agent_id, "status": "sleeping"}
         await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
@@ -11062,7 +11064,7 @@ class CoreService:
                 })
 
             try:
-                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=False, provider_alias=sleep_provider, progress_callback=_sleep_progress)
+                result = await run_sleep(conversation_dir, sleep_llm, agent_id=agent_id, force=False, provider_alias=sleep_provider, progress_callback=_sleep_progress)
                 if result.get("status") == "completed":
                     brief = result.get("morning_brief", {})
                     chat_text = self._format_morning_brief(brief)
@@ -11173,6 +11175,7 @@ class CoreService:
         logger.info("Group sleep: found %d agents for %s (node=%s): %s",
                      len(sleep_agents), group_id, local_node_id, sleep_agents)
 
+        from dpc_client_core.dpc_agent.llm_adapter import _llm_manager_for_agent
         from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep
         from dpc_client_core.dpc_agent.utils import load_agent_config
 
@@ -11187,6 +11190,8 @@ class CoreService:
 
                 agent_config = load_agent_config(agent_id)
                 sleep_provider = agent_config.get("sleep_provider_alias") or None
+                sleep_llm = _llm_manager_for_agent(
+                    self.llm_manager, agent_config.get("compute_host"), agent_id)
 
                 agent_display_name = self._get_agent_display_name(agent_id)
                 if local_node_id:
@@ -11215,7 +11220,8 @@ class CoreService:
                 failures[agent_id] = str(e)
                 continue
 
-            async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider, dname=agent_display_name):
+            async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider, dname=agent_display_name,
+                                       lm=sleep_llm):
                 async def _progress(current, total, phase, archive_file):
                     await self.local_api.broadcast_event("sleep_progress", {
                         "agent_id": aid, "group_id": group_id,
@@ -11224,7 +11230,7 @@ class CoreService:
                     })
                 try:
                     result = await run_sleep(
-                        adir, self.llm_manager, agent_id=aid, force=False,
+                        adir, lm, agent_id=aid, force=False,
                         provider_alias=sp, progress_callback=_progress, group_id=group_id,
                     )
                     if result.get("status") == "completed":

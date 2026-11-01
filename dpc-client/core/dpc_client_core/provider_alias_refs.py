@@ -382,11 +382,16 @@ def rename_references(old: str, new: str, home: Path) -> Dict[str, Any]:
 
 # An agent whose config.json names a `compute_host` sends every model call to that
 # peer (dpc_agent/llm_adapter.py), so its `provider_alias` is a row of the PEER's
-# providers.json and this node's file is the wrong place to look for it. The other
-# three keys are not routed: sleep, snapshot summarising and compaction call this
-# node's own LLMManager.query(provider_alias=...), compute_host or not, so they stay
-# checked against this node's providers.
-PEER_RESOLVED_AGENT_KEYS = ("provider_alias",)
+# providers.json and this node's file is the wrong place to look for it. Sleep,
+# snapshot summarising and compaction run a local alias here and send any other to
+# the same peer (llm_adapter._PinnedAgentQueries), so none of the four keys of a
+# pinned agent can name an alias missing from here; an unpinned agent's are checked.
+PEER_RESOLVED_AGENT_KEYS = (
+    "provider_alias",
+    "sleep_provider_alias",
+    "snapshot_summarize_provider",
+    "compaction_provider",
+)
 
 
 def _is_pinned_to_a_peer(config: Any) -> bool:
@@ -418,7 +423,7 @@ def _peer_resolved_places(home: Path) -> set:
 def unresolved_references(known_aliases, home: Path) -> List[str]:
     """References naming an alias that `known_aliases` does not contain — an agent cut off from its provider.
 
-    A reference that a peer resolves (the `provider_alias` of an agent pinned to a
+    A reference that a peer resolves (any model key of an agent pinned to a
     `compute_host`) is not cut off from anything and is left out.
     """
     known = set(known_aliases or ())

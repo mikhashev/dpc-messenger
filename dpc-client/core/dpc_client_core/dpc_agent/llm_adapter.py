@@ -571,6 +571,34 @@ class DpcLlmAdapter:
         )
         return response_msg, usage
 
+    async def _ask_once(self, prompt: str, reasoning_effort: Optional[str] = None) -> str:
+        """One prompt through this adapter's own route, answered as text: an
+        agent's auxiliary model (sleep, snapshot summarising, compaction) whose
+        alias lives on the agent's peer. `chat` writes the usage row and `_chat`
+        takes the route; the prompt is re-cut here first, since the re-cut in
+        `_chat` reads tool turns and this is a single user turn.
+
+        A peer that is unreachable or refuses raises, naming the peer and the
+        alias; nothing falls back to a model of this node.
+        """
+        peer = self._compute_host
+        service = None
+        if peer:
+            service = getattr(self._llm_manager.providers.get("dpc_agent"), "_service", None)
+            prompt = self._prompt_for_peer(prompt, peer, service)
+        try:
+            response, _ = await self.chat([{"role": "user", "content": prompt}],
+                                          reasoning_effort=reasoning_effort)
+        except Exception as e:
+            if not peer:
+                raise
+            host = _host_name(service, peer) if service is not None else peer
+            where = peer if host == peer else f"{host} ({peer})"
+            raise RuntimeError(
+                f"Model '{self._provider_alias}' on peer {where} did not answer: {e}"
+            ) from e
+        return str((response or {}).get("content") or "")
+
     def _note_call(self, **facts: Any) -> None:
         """What only the route knows — where the counts came from, and on the
         peer route which model answered — for the row `chat` writes."""
@@ -1692,6 +1720,26 @@ class DpcLlmAdapter:
             out.append({**msg, "content": replaced})
         return out
 
+    @staticmethod
+    def _prompt_for_peer(prompt: str, peer_id: str, service: Any) -> str:
+        """`_messages_for_peer` for a one-off prompt: a get_dpc_context result
+        in it becomes what `peer_id`'s node rules allow. Its end is not marked
+        inside a prompt, so everything from its header on is replaced."""
+        from .tools.core import PEER_CONTEXT_WITHHELD, get_dpc_context_for_peer
+
+        header = _DPC_CONTEXT_HEADER.search(prompt or "")
+        if not header:
+            return prompt
+        try:
+            replaced = (get_dpc_context_for_peer(service, header.group(1), peer_id)
+                        if service is not None else PEER_CONTEXT_WITHHELD)
+        except Exception:
+            log.warning("get_dpc_context result in a prompt not filtered for peer %s; withheld",
+                        peer_id, exc_info=True)
+            replaced = PEER_CONTEXT_WITHHELD
+        log.info("get_dpc_context result in a one-off prompt re-cut for inference peer %s", peer_id)
+        return prompt[:header.start()] + replaced
+
     def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
         """Format tool schemas as text descriptions for prompt injection."""
         lines = ["# Available Tools\n"]
@@ -1964,3 +2012,41 @@ class DpcLlmAdapter:
         return await self.chat(messages=messages, tools=tools, **kwargs)
 
 
+class _PinnedAgentQueries:
+    """This node's LLMManager as an agent pinned to a peer has its auxiliary
+    models call it: sleep, snapshot summarising and compaction.
+
+    `query` with an alias this node does not have goes to the agent's
+    compute_host by `DpcLlmAdapter`'s peer route, the one its main calls take:
+    the agent dialog offers that peer's models for these keys, and they are
+    meant to run there (Mike's call, 2026-11-01). Every other call, and every
+    other attribute, is the LLMManager's own.
+    """
+
+    def __init__(self, llm_manager: Any, compute_host: str, caller: Optional[str]):
+        self._llm_manager = llm_manager
+        self._compute_host = compute_host
+        self._caller = caller
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "_llm_manager":
+            raise AttributeError(name)
+        return getattr(self._llm_manager, name)
+
+    async def query(self, prompt: str, provider_alias: Optional[str] = None, **kwargs: Any) -> Any:
+        providers = getattr(self._llm_manager, "providers", None) or {}
+        if not provider_alias or provider_alias in providers:
+            return await self._llm_manager.query(prompt, provider_alias=provider_alias, **kwargs)
+        if kwargs.get("images") or kwargs.get("return_metadata"):
+            raise ValueError(f"'{provider_alias}' is a peer's alias; it is asked for text here")
+        adapter = DpcLlmAdapter(self._llm_manager, provider_alias=provider_alias,
+                                compute_host=self._compute_host, caller=self._caller)
+        return await adapter._ask_once(prompt, reasoning_effort=kwargs.get("reasoning_effort"))
+
+
+def _llm_manager_for_agent(llm_manager: Any, compute_host: Any, caller: Optional[str] = None) -> Any:
+    """`llm_manager` as an agent's auxiliary models call it: itself for an agent
+    with no compute_host, `_PinnedAgentQueries` around it for one pinned to a peer."""
+    if llm_manager is None or not isinstance(compute_host, str) or not compute_host.strip():
+        return llm_manager
+    return _PinnedAgentQueries(llm_manager, compute_host.strip(), caller)

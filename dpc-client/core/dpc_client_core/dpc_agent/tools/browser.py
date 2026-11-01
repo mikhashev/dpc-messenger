@@ -5899,21 +5899,22 @@ def _cleanup_screenshots_lru(screenshots_dir: Path, max_keep: int = 50) -> None:
             pass
 
 
-def _load_agent_summarize_config(agent_id: str) -> tuple[Optional[str], int]:
-    """Return (provider_alias, threshold) for agent snapshot
+def _load_agent_summarize_config(agent_id: str) -> tuple[Optional[str], int, Optional[str]]:
+    """Return (provider_alias, threshold, compute_host) for agent snapshot
     summarization. `provider_alias=None` falls back to llm_manager's
     default_provider; `threshold` defaults to SNAPSHOT_SUMMARIZE_THRESHOLD
-    when missing or invalid in agent config."""
+    when missing or invalid in agent config; `compute_host` is the peer
+    the agent is pinned to, if any."""
     try:
         from dpc_client_core.dpc_agent.utils import load_agent_config
         config = load_agent_config(agent_id)
     except Exception:
-        return None, SNAPSHOT_SUMMARIZE_THRESHOLD
+        return None, SNAPSHOT_SUMMARIZE_THRESHOLD, None
     provider = config.get("snapshot_summarize_provider") or None
     threshold = config.get("snapshot_summarize_threshold")
     if not isinstance(threshold, int) or threshold <= 0:
         threshold = SNAPSHOT_SUMMARIZE_THRESHOLD
-    return provider, threshold
+    return provider, threshold, config.get("compute_host") or None
 
 
 async def _maybe_summarize_snapshot(
@@ -5933,13 +5934,16 @@ async def _maybe_summarize_snapshot(
     the caller needs."""
     if not snapshot_text:
         return snapshot_text
-    provider, threshold = _load_agent_summarize_config(agent_id)
+    provider, threshold, compute_host = _load_agent_summarize_config(agent_id)
     if len(snapshot_text) <= threshold:
         return snapshot_text
     llm_manager = None
     dpc_service = getattr(ctx, "dpc_service", None)
     if dpc_service is not None:
-        llm_manager = getattr(dpc_service, "llm_manager", None)
+        from dpc_client_core.dpc_agent.llm_adapter import _llm_manager_for_agent
+        # A pinned agent's peer alias is asked of that peer, by its main calls' route.
+        llm_manager = _llm_manager_for_agent(
+            getattr(dpc_service, "llm_manager", None), compute_host, agent_id)
     return await _llm_summarize_snapshot(
         snapshot_text, None, llm_manager,
         provider_alias=provider, max_chars=threshold,

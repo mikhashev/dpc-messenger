@@ -2,9 +2,10 @@
 
 `unresolved_references` compared every agent alias with this node's providers.json,
 so an agent whose `provider_alias` lives on its compute host was reported as cut
-off on every providers save. Only `provider_alias` is routed to the peer
-(dpc_agent/llm_adapter.py); sleep, snapshot summarising and compaction aliases are
-resolved by this node's own LLMManager, so they stay checked. Built in tmp_path.
+off on every providers save. Since 2026-11-01 the sleep, snapshot summarising and
+compaction aliases of such an agent run here when they are this node's and on the
+same peer otherwise (llm_adapter._PinnedAgentQueries), so none of its keys is cut
+off; an unpinned agent's keys stay checked. Built in tmp_path.
 """
 
 import json
@@ -44,8 +45,17 @@ def test_a_peer_only_alias_of_an_agent_with_a_compute_host_is_not_reported(tmp_p
     assert _unresolved(tmp_path) == []
 
 
-def test_an_alias_the_node_resolves_itself_is_still_reported_for_that_agent(tmp_path):
+def test_the_auxiliary_model_keys_of_a_pinned_agent_are_not_reported(tmp_path):
+    # Muse's shape: every model key names the peer's alias.
     _agent(tmp_path, "agent_a", provider_alias=PEER_ONLY, compute_host=PEER,
+           sleep_provider_alias=PEER_ONLY, snapshot_summarize_provider=PEER_ONLY,
+           compaction_provider=PEER_ONLY)
+
+    assert _unresolved(tmp_path) == []
+
+
+def test_the_auxiliary_model_keys_of_an_unpinned_agent_are_still_reported(tmp_path):
+    _agent(tmp_path, "agent_a", provider_alias="deepseek_flash",
            sleep_provider_alias="gone-1", snapshot_summarize_provider="gone-2",
            compaction_provider="gone-3")
 

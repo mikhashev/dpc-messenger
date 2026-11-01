@@ -35,7 +35,7 @@ from . import prompt_divergence
 from .tool_ledger import record_attempt, sweep_unfinished
 from dpc_protocol.protocol import PeerRefused
 
-from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading
+from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading, _llm_manager_for_agent
 from ..process_registry import SpawnOrigin, get_registry, spawn_origin
 from .run_gate import note_turn
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
@@ -1582,7 +1582,11 @@ async def run_llm_loop(
         _compaction_cfg = load_agent_config(agent_root.name)
     except Exception:
         _compaction_cfg = {}
-    _compaction_llm = getattr(llm, "_llm_manager", None)
+    # A pinned agent's compaction alias that lives on its peer goes to that peer.
+    _compaction_llm = _llm_manager_for_agent(
+        getattr(llm, "_llm_manager", None), getattr(llm, "_compute_host", ""),
+        getattr(llm, "_caller", None),
+    )
     # Resolve the agent's real context window when config.json does not store one
     # (local models leave it null). The trigger denominator must be the actual model
     # window, not CompactionState's generic fallback — otherwise the fallback can be
