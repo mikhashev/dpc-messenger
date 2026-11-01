@@ -3586,9 +3586,9 @@
                 {#if newProvider.type === 'strata'}
                   <p class="help-text">
                     The model name requests are sent under, e.g. the base config's model_name. After
-                    adding, fill the Strata folder, the base config and the conversation-cache budget in
-                    the provider's form: Save refuses a strata alias without them, and there is no default
-                    budget (ADR-044).
+                    adding, fill the base config and the conversation-cache budget in the provider's form:
+                    Save refuses a strata alias without them, and there is no default budget (ADR-044).
+                    The Strata folder is optional: empty runs DPC's own install of the pinned release.
                   </p>
                 {/if}
               </div>
