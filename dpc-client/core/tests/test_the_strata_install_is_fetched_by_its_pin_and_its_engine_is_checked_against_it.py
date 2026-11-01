@@ -205,7 +205,7 @@ def test_the_pin_installs_control_then_the_engine_by_the_updater_and_records_it(
     assert feed == f"https://github.com/Niko1221/Strata/releases/download/{sf.STRATA_RELEASE_TAG}"
     assert "latest" not in feed
     assert cmd[cmd.index("--components-dir") + 1] == str(staging / "components")
-    assert cmd[cmd.index("--output") + 1] == "json"
+    assert cmd[cmd.index("--output") + 1] == "jsonl"
     assert (call["launcher"], call["launcher_kind"], call["timeout"]) == ("strata", "subsystem", 3600)
     assert call["cwd"] == str(staging)
 

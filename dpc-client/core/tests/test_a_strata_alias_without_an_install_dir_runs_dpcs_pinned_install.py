@@ -409,7 +409,7 @@ class TestThePinsEngineVersion:
     async def test_another_version_on_the_pin_fails_closed_naming_both_fingerprints(self, world, monkeypatch):
         sup = world.sup()
         root = world.control()
-        monkeypatch.setattr(sf, "ensure_install", lambda config: root)
+        monkeypatch.setattr(sf, "resolve_install", lambda config: root)
         spawned = _started_through_the_real_launch(sup, monkeypatch, metrics={"engine": {"version": "0.1.46"}})
         with pytest.raises(LlamaServerError, match="will not start it again"):
             await sup.ensure_running()
@@ -424,7 +424,7 @@ class TestThePinsEngineVersion:
     async def test_the_pinned_version_on_the_pin_starts(self, world, monkeypatch):
         sup = world.sup()
         root = world.control()
-        monkeypatch.setattr(sf, "ensure_install", lambda config: root)
+        monkeypatch.setattr(sf, "resolve_install", lambda config: root)
         _started_through_the_real_launch(sup, monkeypatch, metrics={"engine": {"version": sf.STRATA_ENGINE_VERSION}})
         await sup.ensure_running()
         assert sup.failure is None

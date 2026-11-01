@@ -1029,21 +1029,26 @@ class LlamaServerSupervisor:
                 self._release_card_unless_live()
                 raise
 
-    async def _refuse_missing_pin(self) -> NoReturn:
+    async def _refuse_missing_pin(
+        self, fetcher: Any = None, tag: str = LLAMA_CPP_TAG, for_peer: Optional[str] = None
+    ) -> NoReturn:
         """Raise `PinNotInstalledError` for a start with no pin to run. A peer's call
-        neither asks nor fetches; the owner's asks once per session through the
-        consent service and is worded by what that service now knows."""
-        name = _fetcher.DOWNLOAD_NAME
-        size = _fetcher.size_bytes()
-        if peer_being_served() is not None:
+        (or a start begun `for_peer`) neither asks nor fetches; the owner's asks once
+        per session through the consent service and is worded by what that service
+        now knows. `fetcher` is the engine's fetcher module, llama.cpp's by default."""
+        fetcher = fetcher or _fetcher
+        name = fetcher.DOWNLOAD_NAME
+        size = fetcher.size_bytes()
+        at_most = getattr(fetcher, "SIZE_SOURCE", None) is not None
+        if for_peer is not None or peer_being_served() is not None:
             reason, percent = "peer", None
         else:
             service = _MODEL_DOWNLOAD_SERVICE
             try:
                 await service.maybe_emit_required(
                     name,
-                    purpose=_fetcher.PURPOSE,
-                    consequence_if_declined=_fetcher.CONSEQUENCE_IF_DECLINED,
+                    purpose=fetcher.PURPOSE,
+                    consequence_if_declined=fetcher.CONSEQUENCE_IF_DECLINED,
                     on_decline="block",
                     provider_alias=self.alias,
                 )
@@ -1054,8 +1059,10 @@ class LlamaServerSupervisor:
             reason = state if state in ("downloading", "declined") else "asked"
             percent = status.get("progress_percent")
         logger.info("%s[%s]: not started, the %s pin %s is not installed (%s)",
-                    self.ENGINE, self.alias, name, LLAMA_CPP_TAG, reason)
-        raise PinNotInstalledError(refusal_text(name, self.alias, size, reason, percent=percent), name)
+                    self.ENGINE, self.alias, name, tag, reason)
+        raise PinNotInstalledError(
+            refusal_text(name, self.alias, size, reason, percent=percent, at_most=at_most), name
+        )
 
     # --- the KV ladder --------------------------------------------------------
 

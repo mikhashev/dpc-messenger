@@ -438,6 +438,11 @@ class _OutputReader:
     writing does not grow the backend. One blocked on a silent pipe stays blocked,
     holding what it had. Only the reading thread closes its stream: closing a
     buffered reader another thread is blocked in can wait on that reader's lock.
+
+    `on_stdout`, when given, gets each complete stdout line as it arrives (UTF-8,
+    `errors="replace"`, line ending stripped), from the stdout reader's thread;
+    a last line with no newline is given at the pipe's end. What it raises is
+    ignored, as `on_output`'s is.
     """
 
     def __init__(
@@ -445,8 +450,11 @@ class _OutputReader:
         process: "subprocess.Popen",
         on_output: Callable[[float], None],
         decode: Callable[[Sequence[bytes]], Any] = _decode_output,
+        on_stdout: Optional[Callable[[str], None]] = None,
     ):
         self._decode = decode
+        self._on_stdout = on_stdout
+        self._partial_line = b""
         self._chunks: dict = {"stdout": [], "stderr": []}
         # Each pipe's last chunk, wall clock, written only by its own reader.
         self._last_chunk_at: dict = {"stdout": None, "stderr": None}
@@ -474,6 +482,8 @@ class _OutputReader:
                 if not chunk or self._abandoned:
                     break
                 sink.append(chunk)
+                if name == "stdout" and self._on_stdout is not None:
+                    self._give_lines(chunk)
                 self._last_chunk_at[name] = at = time.time()
                 now = time.monotonic()
                 if now - self._noted_at >= _OUTPUT_NOTE_MIN_INTERVAL_S:
@@ -485,10 +495,23 @@ class _OutputReader:
         except (OSError, ValueError):
             pass  # the pipe was closed under the read
         finally:
+            if name == "stdout" and self._on_stdout is not None and self._partial_line and not self._abandoned:
+                self._give_line(self._partial_line)
             try:
                 stream.close()
             except Exception:
                 pass
+
+    def _give_lines(self, chunk: bytes) -> None:
+        *lines, self._partial_line = (self._partial_line + chunk).split(b"\n")
+        for line in lines:
+            self._give_line(line)
+
+    def _give_line(self, line: bytes) -> None:
+        try:
+            self._on_stdout(line.decode("utf-8", errors="replace").rstrip("\r"))
+        except Exception:
+            pass  # a caller's parser must never cost the output
 
     @property
     def last_output_at(self) -> Optional[float]:
@@ -699,6 +722,7 @@ def run_supervised(
     launcher_kind: str = "tool",
     output_bytes: bool = False,
     while_stopping: bool = False,
+    on_stdout: Optional[Callable[[str], None]] = None,
 ) -> SupervisedRun:
     """Spawn, watch, and never wait unbounded on anything.
 
@@ -723,6 +747,8 @@ def run_supervised(
     tool made (`run_probe`'s). With `output_bytes` the run's `stdout` and
     `stderr` are the bytes as written, for a caller that decodes them itself.
     `while_stopping` is the registry's `check_open` argument (`run_probe`'s).
+    `on_stdout` gets each stdout line as it arrives (`_OutputReader`), for a
+    caller that reads a child's progress live; `stdout` still holds all of it.
     """
     ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
     if ceiling is None:
@@ -805,7 +831,7 @@ def run_supervised(
         if registry is not None:
             registry.note_output(process.pid, at)
 
-    output = _OutputReader(process, _noted, _join_bytes if output_bytes else _decode_output)
+    output = _OutputReader(process, _noted, _join_bytes if output_bytes else _decode_output, on_stdout)
     run = SupervisedRun(ceiling_mb=ceiling)
     try:
         _wait_for_output(process, output, timeout)

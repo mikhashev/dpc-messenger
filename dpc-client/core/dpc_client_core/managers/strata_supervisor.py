@@ -77,6 +77,11 @@ _PEER_CALL = _base._PEER_CALL
 serving_a_peer = _base.serving_a_peer
 peer_being_served = _base.peer_being_served
 
+# Set inside a start `start_for_peer` began for a peer's request, holding its node id.
+# That start runs unmarked, as the owner's would, but a missing pin is still never
+# asked for or fetched on a peer's behalf.
+_STARTED_FOR_PEER: contextvars.ContextVar = contextvars.ContextVar("dpc_strata_started_for_peer", default=None)
+
 
 class PeerCallRefused(LlamaServerError):
     """A peer's call refused by the Strata supervisor itself (ADR-044 point 9):
@@ -1373,15 +1378,23 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"{peer} does not start it"
                 )
             if self.install_is_the_pin():
-                # Before the card is claimed: a first fetch takes minutes, and the
-                # card stays free for the other engine meanwhile.
+                # Before the card is claimed, and never a fetch on this loop: a missing
+                # pin is offered to the owner and refused, installed in a thread when no
+                # consent service is bound, and neither asked for nor fetched for a peer.
                 try:
-                    await asyncio.to_thread(strata_fetcher.ensure_install, self.config)
-                except (ValueError, OSError, RuntimeError) as e:
-                    raise LlamaServerError(
-                        f"strata[{self.alias}]: DPC's own install of Strata {STRATA_RELEASE_TAG} "
-                        f"(engine {STRATA_ENGINE_VERSION}) is not ready: {e}"
-                    ) from None
+                    installed = await asyncio.to_thread(strata_fetcher.resolve_install, self.config)
+                except (ValueError, OSError) as e:
+                    raise self._install_not_ready(e) from None
+                if installed is None:
+                    for_peer = _STARTED_FOR_PEER.get()
+                    if for_peer is not None or _base._MODEL_DOWNLOAD_SERVICE is not None:
+                        await self._refuse_missing_pin(strata_fetcher, STRATA_RELEASE_TAG, for_peer)
+                    if self._draining:
+                        raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
+                    try:
+                        await asyncio.to_thread(strata_fetcher.ensure_install, self.config)
+                    except (ValueError, OSError, RuntimeError) as e:
+                        raise self._install_not_ready(e) from None
                 if self._draining:
                     raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
             await self._clear_unfinished_start()
@@ -1402,6 +1415,12 @@ class StrataSupervisor(LlamaServerSupervisor):
                 self._release_card_unless_live()
                 raise
 
+    def _install_not_ready(self, error: BaseException) -> LlamaServerError:
+        return LlamaServerError(
+            f"strata[{self.alias}]: DPC's own install of Strata {STRATA_RELEASE_TAG} "
+            f"(engine {STRATA_ENGINE_VERSION}) is not ready: {error}"
+        )
+
     def start_for_peer(self, peer_id: Optional[str]) -> bool:
         """Begin the owner's own start (`ensure_running`) in the background for a
         peer's request, without the peer mark; False when one is already under
@@ -1416,6 +1435,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             return False
         ctx = contextvars.copy_context()
         ctx.run(_PEER_CALL.set, None)
+        ctx.run(_STARTED_FOR_PEER.set, peer_id or "peer")
         owner = _base._foreign_owner_loop()
         if owner is not None:
             # Called from a foreign loop: the start is begun on the owner loop,

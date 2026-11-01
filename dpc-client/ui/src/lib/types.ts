@@ -435,12 +435,16 @@ export interface ModelDownloadRequiredEvent {
     consequence_if_declined: string;
     on_decline: 'degrade' | 'block';
     size_bytes: number | null;
-    size_source: 'measured' | 'hf_api' | null;
+    // 'package_max': an upper bound (Strata's engine package depends on the card).
+    size_source: 'measured' | 'hf_api' | 'package_max' | null;
     cache_path: string;
     // Bytes it occupies once unpacked; null = not stated, never 0.
     installed_bytes?: number | null;
     // Free bytes on cache_path's volume; null when unknown or not checked.
     free_bytes?: number | null;
+    // With 'package_max': the smallest variant's sizes, which alone may refuse.
+    size_bytes_min?: number | null;
+    installed_bytes_min?: number | null;
     provider_alias: string | null;
 }
 

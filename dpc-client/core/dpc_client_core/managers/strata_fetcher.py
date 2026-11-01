@@ -39,11 +39,11 @@ import json
 import os
 import platform as _platform
 import re
+import shutil
 import sys
-import tempfile
 import threading
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -65,32 +65,69 @@ STRATA_RELEASE_BASE = "https://github.com/Niko1221/Strata/releases/download"
 # the head on Windows, Linux x86_64 and macOS (`99866a47a2b8+cuda13.0`), at the tail on
 # linux-aarch64 (`release-0.1.55-cuda13-13.0-aarch64-99866a47a2b8`).
 # A bump fills `name`/`sha256`/`size` from the release's install-manifest.txt (check the
-# API digest) and `commit` from the build_id of the platform's engines in its feed file.
+# API digest), `commit` from the build_id of the platform's engines in its strata-feed.json,
+# and `installed_bytes` (Control unpacked: its archive's regular-file members) from the
+# control entry of that file; on 2026-11-01 the Windows zip's members summed to that figure to the byte.
 PLATFORM_ASSETS: Dict[str, Dict[str, Any]] = {
     "windows-x86_64": {
         "name": "strata-control-0.1.55-windows-x86_64.zip",
         "sha256": "bdca3a42071704eab33455a4c85d4867c0ecfd6face95a08f13e8967e5594e99",
         "size": 73_121_142,
+        "installed_bytes": 228_912_696,
         "commit": "99866a47a2b8",
     },
     "linux-x86_64": {
         "name": "strata-control-0.1.55-linux-x86_64.tar.gz",
         "sha256": "50783d2fa6c6e98e9bdc8d4f66ad070706b1e1f3e5e2782cc59fd5dabd9488e8",
         "size": 99_498_096,
+        "installed_bytes": 334_063_585,
         "commit": "99866a47a2b8",
     },
     "linux-aarch64": {
         "name": "strata-control-0.1.55-linux-aarch64.tar.gz",
         "sha256": "0f298b915c6bbf71e14fcfcfea96348ea5333a86981c6f9c8398488671203789",
         "size": 83_372_878,
+        "installed_bytes": 274_092_725,
         "commit": "99866a47a2b8",
     },
     "macos-arm64": {
         "name": "strata-control-0.1.55-macos-arm64.tar.gz",
         "sha256": "5c3f8eada00ebfffa0fcca71f5f8a9abf45c8f8e5bb94ef07e9862191626f226",
         "size": 50_763_163,
+        "installed_bytes": 150_421_924,
         "commit": "4cf0d8cd3809",
     },
+}
+
+# Strata's updater picks the engine package by the card, so before it runs only the range
+# is known, by the pair strata-feed.json declares per package: download `size` and
+# `installed_bytes` (two figures on purpose, not to be folded into one). From the signed
+# strata-feed.json of v0.2.9 (-linux-aarch64 for that platform); re-read at every pin
+# move. The rows: tests/fixtures/strata_v0.2.9_feed_packages.json, tied by a test.
+ENGINE_SIZE_MAX: Dict[str, int] = {
+    "windows-x86_64": 904_164_080,   # cuda12
+    "linux-x86_64": 935_156_308,     # cuda12
+    "linux-aarch64": 656_111_027,    # cuda13, the only one
+    "macos-arm64": 5_304_303,        # metal, the only one
+}
+ENGINE_INSTALLED_BYTES_MAX: Dict[str, int] = {
+    "windows-x86_64": 1_444_237_804,
+    "linux-x86_64": 1_546_437_671,
+    "linux-aarch64": 928_127_879,
+    "macos-arm64": 14_743_181,
+}
+# The one package of the platform with the smallest size + installed_bytes, both figures from it.
+ENGINE_SIZE_MIN: Dict[str, int] = {
+    "windows-x86_64": 172_708_267,   # hip rdna2
+    "linux-x86_64": 186_756_682,     # sycl
+    "linux-aarch64": 656_111_027,    # the only one
+    "macos-arm64": 5_304_303,        # the only one
+}
+ENGINE_INSTALLED_BYTES_MIN: Dict[str, int] = {
+    "windows-x86_64": 577_773_839,   # hip rdna2
+    "linux-x86_64": 685_939_381,     # sycl
+    "linux-aarch64": 928_127_879,
+    "macos-arm64": 14_743_181,
 }
 
 # The ed25519 entry of `keys[]` in Control's strata_control/update_keys.json (NOT
@@ -103,6 +140,9 @@ _ENGINE_MANIFEST = "engine-component.json"
 # besides a backend restart (an agent's kill does not reach a subsystem child).
 _UPDATER_TIMEOUT_S = 3600
 _UPDATER_EXIT_MEANING = {5: "refused", 6: "failed", 7: "an engine is serving"}
+# Strata's own free-space refusal (updater.py `_free_space_check`, exit 6): the exact
+# package's download plus its unpacked size, checked before it downloads.
+_NO_SPACE = re.compile(r"not enough free space on (?P<drive>.+?): (?P<free>\d+) MiB free, (?P<needed>\d+) MiB needed")
 _INSTALL_LOCK = threading.Lock()
 
 
@@ -303,6 +343,7 @@ def _updater_env(root: Path, home: Path) -> Dict[str, str]:
 
 
 def _last_json_line(text: str) -> Optional[Dict[str, Any]]:
+    """The updater's result: the last JSON object line that is not a `--output jsonl` event."""
     for line in reversed((text or "").splitlines()):
         line = line.strip()
         if line.startswith("{"):
@@ -310,15 +351,78 @@ def _last_json_line(text: str) -> Optional[Dict[str, Any]]:
                 value = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(value, dict):
+            if isinstance(value, dict) and "event" not in value:
                 return value
     return None
 
 
-def _install_engine(staging: Path) -> Dict[str, Any]:
-    """Install the pinned engine into staging's components by Strata's own updater, then check it."""
+def _engine_progress(line: str) -> Optional[Tuple[int, int]]:
+    """`(done, total)` of one engine download line of `--output jsonl`, else None
+    (`{"event": "progress", "component": "engine", "done", "total", ...}`, Strata's
+    updater.py `_download`)."""
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(event, dict) or event.get("event") != "progress" or event.get("component") != "engine":
+        return None
+    done, total = event.get("done"), event.get("total")
+    if type(done) is not int or type(total) is not int or done < 0 or total <= 0:
+        return None
+    return min(done, total), total
+
+
+class _InstallBar:
+    """One cumulative bar for the pin: Control's bytes, then the engine's `done`,
+    against Control plus the engine's total: `ENGINE_SIZE_MAX` until the first
+    progress line gives the exact one. Shown bytes never go back (a download
+    Strata restarts from 0 holds the bar)."""
+
+    def __init__(self, control_size: int, engine_max: int, report: Callable[[int, int], None]):
+        self._control_size = control_size
+        self._engine_total = engine_max
+        self._exact = False
+        self._shown = 0
+        self._report = report
+
+    def _send(self, done: int) -> None:
+        self._shown = max(self._shown, done)
+        self._report(self._shown, self._control_size + self._engine_total)
+
+    def control(self, got: int, _size: int) -> None:
+        self._send(min(got, self._control_size))
+
+    def engine_line(self, line: str) -> None:
+        progress = _engine_progress(line)
+        if progress is None:
+            return
+        done, total = progress
+        if not self._exact:
+            self._engine_total, self._exact = total, True
+        self._send(self._control_size + min(done, self._engine_total))
+
+    def finished(self) -> None:
+        """The engine is in: with no progress line seen the bar jumps to the end here."""
+        self._send(self._control_size + self._engine_total)
+
+
+def _install_engine(
+    staging: Path,
+    root: Optional[Path] = None,
+    on_stdout: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """Install the pinned engine into staging's components by Strata's own updater, then check it.
+
+    The updater's throwaway home is a folder inside `<root>.download`, beside the pin
+    on DPC's volume and never the system temp folder, removed when the updater ends.
+    `on_stdout` gets the updater's `--output jsonl` lines as they arrive."""
     from ..dpc_agent.tools import process as _process
 
+    if root is None:
+        root = staging.with_name(staging.name.removesuffix(".staging"))
     python = control_python_path(staging)
     for need in (python, staging / "strata.py", staging / "serve" / "server.py"):
         if not need.is_file():
@@ -330,17 +434,22 @@ def _install_engine(staging: Path) -> Dict[str, Any]:
         str(python), str(staging / "strata.py"), "update", "--no-control",
         "--feed", f"{STRATA_RELEASE_BASE}/{STRATA_RELEASE_TAG}",
         "--components-dir", str(components),
-        "--output", "json",
+        "--output", "jsonl",
     ]
-    with tempfile.TemporaryDirectory(prefix="strata-updater-home-", ignore_cleanup_errors=True) as home:
+    home = root.with_name(root.name + ".download") / "updater-home"
+    shutil.rmtree(home, ignore_errors=True)
+    try:
         run = _process.run_supervised(
             cmd,
             launcher="strata",
             launcher_kind="subsystem",
             timeout=_UPDATER_TIMEOUT_S,
             cwd=str(staging),
-            env=_updater_env(staging, Path(home)),
+            env=_updater_env(staging, home),
+            on_stdout=on_stdout,
         )
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
     if run.timed_out:
         raise RuntimeError(
             f"Strata's updater ran past {_UPDATER_TIMEOUT_S}s and was stopped ({run.killed}); nothing was installed"
@@ -355,6 +464,13 @@ def _install_engine(staging: Path) -> Dict[str, Any]:
         code = error.get("code") or report.get("exit_code") or engine.get("exit_code") or run.returncode
         message = (error.get("message") or engine.get("error")
                    or (run.stderr or "").strip()[-300:] or "no message")
+        space = _NO_SPACE.search(message) if code == 6 else None
+        if space:
+            raise RuntimeError(
+                f"not enough free disk space for the Strata engine: needs about "
+                f"{int(space['needed']) * (1 << 20) / 1e9:.1f} GB, "
+                f"{int(space['free']) * (1 << 20) / 1e9:.1f} GB free on {space['drive']}"
+            )
         meaning = _UPDATER_EXIT_MEANING.get(code)
         raise RuntimeError(
             f"Strata's updater did not install the engine (exit {code}{', ' + meaning if meaning else ''}): {message}"
@@ -402,7 +518,9 @@ def resolve_install(config: Dict[str, Any]) -> Optional[Path]:
 
 
 def install_pin(progress: Optional[Callable[[int, int], None]] = None) -> Path:
-    """Fetch Control, install the engine through it, check it; one install at a time."""
+    """Fetch Control, install the engine through it, check it; one install at a time.
+
+    `progress(done, total)` is one bar across both (`_InstallBar`)."""
     with _INSTALL_LOCK:
         found = resolve_install({})
         if found:
@@ -410,15 +528,80 @@ def install_pin(progress: Optional[Callable[[int, int], None]] = None) -> Path:
         plat = platform_tag()
         row = PLATFORM_ASSETS[plat]
         root = install_root(plat=plat)
+        bar = _InstallBar(row["size"], ENGINE_SIZE_MAX[plat], progress) if progress else None
+
+        def _check(staging: Path) -> Dict[str, Any]:
+            extra = _install_engine(staging, root, bar.engine_line if bar else None)
+            if bar:
+                bar.finished()
+            return extra
+
         install_with_staging_swap(
             root,
             [row],
             f"{STRATA_RELEASE_BASE}/{STRATA_RELEASE_TAG}",
             {"tag": STRATA_RELEASE_TAG, "platform": plat, "assets": {row["name"]: row["sha256"]}},
-            check=_install_engine,
-            progress=progress,
+            check=_check,
+            progress=bar.control if bar else None,
         )
         return root
+
+
+# --- the pin as a download the owner consents to -----------------------------
+# After the pattern of `camoufox_binary`: `ModelDownloadService` offers and runs
+# it through the `model_download_*` flow; a start only refuses while it is missing.
+
+DOWNLOAD_NAME = "strata"
+PURPOSE = "Running Strata models through DPC's own install of Strata (strata aliases)"
+CONSEQUENCE_IF_DECLINED = (
+    "strata aliases without strata_install_dir cannot start until it is downloaded; "
+    "other providers are not affected."
+)
+# The `size_source` of the consent payload: the engine part of the size is the largest
+# package of this platform, an upper bound (`size_bytes_min` is the lower one).
+SIZE_SOURCE = "package_max"
+
+
+def is_present() -> bool:
+    """The pin resolves (a configured `strata_install_dir` is not the pin). An install
+    that does not check out is not present; its download then names why."""
+    try:
+        return resolve_install({}) is not None
+    except (ValueError, OSError):
+        return False
+
+
+def size_bytes() -> int:
+    """Control plus the largest engine package of this platform (`SIZE_SOURCE`)."""
+    plat = platform_tag()
+    return int(PLATFORM_ASSETS[plat]["size"]) + ENGINE_SIZE_MAX[plat]
+
+
+def installed_bytes() -> int:
+    """Control unpacked plus the largest unpacked engine of this platform."""
+    plat = platform_tag()
+    return int(PLATFORM_ASSETS[plat]["installed_bytes"]) + ENGINE_INSTALLED_BYTES_MAX[plat]
+
+
+def size_bytes_min() -> int:
+    """Control plus the smallest engine package of this platform."""
+    plat = platform_tag()
+    return int(PLATFORM_ASSETS[plat]["size"]) + ENGINE_SIZE_MIN[plat]
+
+
+def installed_bytes_min() -> int:
+    """Control unpacked plus the smallest unpacked engine of this platform."""
+    plat = platform_tag()
+    return int(PLATFORM_ASSETS[plat]["installed_bytes"]) + ENGINE_INSTALLED_BYTES_MIN[plat]
+
+
+def location() -> str:
+    return str(install_root())
+
+
+def download(on_progress: Optional[Callable[[int, int], None]] = None) -> str:
+    """Install the pin; blocking, run it in a thread. Returns the install's root."""
+    return str(install_pin(on_progress))
 
 
 def ensure_install(

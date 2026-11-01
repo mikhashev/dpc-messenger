@@ -22,7 +22,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from . import camoufox_binary
-from .managers import llama_server_fetcher
+from .managers import llama_server_fetcher, strata_fetcher
 from .providers.model_sizes import (
     hf_cache_path,
     is_model_cached,
@@ -65,6 +65,13 @@ def _stated_installed_bytes(other: Any) -> Optional[int]:
     """The unpacked size a download module states; None when it states none (camoufox)."""
     read = getattr(other, "installed_bytes", None)
     return read() if read else None
+
+
+def _stated_minima(other: Any) -> tuple:
+    """(size, installed) of the smallest variant a download module may fetch when its
+    size is a range (Strata's engine package); (None, None) when it is one size."""
+    size, installed = getattr(other, "size_bytes_min", None), getattr(other, "installed_bytes_min", None)
+    return (size() if size else None, installed() if installed else None)
 
 
 def _needed_bytes(size_bytes: Optional[int], installed_bytes: Optional[int]) -> Optional[float]:
@@ -132,15 +139,22 @@ _KNOWN_CONSENT_MODELS: Dict[str, Dict[str, str]] = {
         "consequence_if_declined": llama_server_fetcher.CONSEQUENCE_IF_DECLINED,
         "on_decline": "block",
     },
+    strata_fetcher.DOWNLOAD_NAME: {
+        "purpose": strata_fetcher.PURPOSE,
+        "consequence_if_declined": strata_fetcher.CONSEQUENCE_IF_DECLINED,
+        "on_decline": "block",
+    },
 }
 
 # Downloads that are not Hugging Face repositories, by the name the events
 # carry. Each answers is_present(), size_bytes(), location() and download()
 # (blocking; run in a thread) in place of is_model_cached / model_size_bytes /
-# hf_cache_path and the Whisper or embedding executor.
+# hf_cache_path and the Whisper or embedding executor. One whose size is not
+# exact states how in SIZE_SOURCE, sent as the payload's size_source.
 _OTHER_DOWNLOADS: Dict[str, Any] = {
     camoufox_binary.DOWNLOAD_NAME: camoufox_binary,
     llama_server_fetcher.DOWNLOAD_NAME: llama_server_fetcher,
+    strata_fetcher.DOWNLOAD_NAME: strata_fetcher,
 }
 
 
@@ -290,10 +304,10 @@ class ModelDownloadService:
         if other is not None:
             # The size is the one GitHub lists for the asset the package
             # would fetch: a network read, kept off the event loop.
-            size_bytes, installed_bytes = await asyncio.to_thread(
-                lambda: (other.size_bytes(), _stated_installed_bytes(other))
+            size_bytes, installed_bytes, (size_min, installed_min) = await asyncio.to_thread(
+                lambda: (other.size_bytes(), _stated_installed_bytes(other), _stated_minima(other))
             )
-            size_source = None
+            size_source = getattr(other, "SIZE_SOURCE", None)
             measured_on = None
             cache_path = other.location()
             free_bytes = await asyncio.to_thread(_free_bytes, cache_path)
@@ -305,6 +319,7 @@ class ModelDownloadService:
             cache_path = hf_cache_path()
             installed_bytes = None
             free_bytes = None
+            size_min = installed_min = None
         payload = {
             "model_name": model_name,
             "revision": revision,
@@ -312,6 +327,8 @@ class ModelDownloadService:
             "consequence_if_declined": consequence_if_declined,
             "on_decline": on_decline,
             "size_bytes": size_bytes,
+            # "measured" / "hf_api" for a model; for a download module its
+            # SIZE_SOURCE (Strata's "package_max": an upper bound), else null = exact.
             "size_source": size_source,
             # ISO date the size row was measured, or null — a UI that does not
             # read this field is unaffected, it only gains one (finding F).
@@ -320,9 +337,12 @@ class ModelDownloadService:
             # Bytes the download occupies once unpacked, or null = not stated
             # (never 0). Free bytes on cache_path's volume, or null = not checked.
             # A download needs (size_bytes + installed_bytes) x _FREE_SPACE_MARGIN
-            # of it; download_other refuses less.
+            # of it; download_other refuses less. For a size that is a range
+            # (package_max) the check takes the smallest variant, *_min; else null.
             "installed_bytes": installed_bytes,
             "free_bytes": free_bytes,
+            "size_bytes_min": size_min,
+            "installed_bytes_min": installed_min,
             "provider_alias": provider_alias,
         }
         self._last_required_payload[model_name] = payload
@@ -486,11 +506,17 @@ class ModelDownloadService:
         asked = self._last_required_payload.get(model_name)
         if asked is not None:
             size, installed = asked.get("size_bytes"), asked.get("installed_bytes")
+            size_min, installed_min = asked.get("size_bytes_min"), asked.get("installed_bytes_min")
             free = await asyncio.to_thread(_free_bytes, other.location())
         else:
-            size, installed, free = await asyncio.to_thread(
-                lambda: (other.size_bytes(), _stated_installed_bytes(other), _free_bytes(other.location()))
+            size, installed, (size_min, installed_min), free = await asyncio.to_thread(
+                lambda: (other.size_bytes(), _stated_installed_bytes(other), _stated_minima(other),
+                         _free_bytes(other.location()))
             )
+        # A range is refused only when even its smallest variant cannot fit; the
+        # install checks again once the updater names the exact one.
+        if size_min:
+            size, installed = size_min, installed_min
         if _short_of_space(size, installed, free):
             error = (
                 f"not enough free disk space for {model_name}: it needs about "

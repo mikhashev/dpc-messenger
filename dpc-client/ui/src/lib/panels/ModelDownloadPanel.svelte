@@ -261,6 +261,8 @@
   cachePath={current?.cache_path || ''}
   installedBytes={current?.installed_bytes ?? null}
   freeBytes={current?.free_bytes ?? null}
+  sizeBytesMin={current?.size_bytes_min ?? null}
+  installedBytesMin={current?.installed_bytes_min ?? null}
   providerAlias={current?.provider_alias ?? null}
   downloading={isDownloadingModel}
   progressPercent={current ? (progressMap[current.model_name]?.progress_percent ?? null) : null}

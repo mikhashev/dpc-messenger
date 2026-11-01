@@ -50,12 +50,14 @@ def refusal_text(
     reason: str,
     *,
     percent: Optional[float] = None,
+    at_most: bool = False,
 ) -> str:
     """The sentence a start returns instead of fetching a missing pin, after the
     pattern of `camoufox_binary.refusal_text`. `reason` is `asked`, `downloading`,
-    `declined` or `peer`. It names the app, never a dialog: it reaches Telegram
-    and peers too."""
-    size = f"about {size_bytes / 1e9:.1f} GB" if size_bytes else "unknown size"
+    `declined` or `peer`; `at_most` when `size_bytes` is an upper bound. It names
+    the app, never a dialog: it reaches Telegram and peers too."""
+    size = (f"{'up to' if at_most else 'about'} {size_bytes / 1e9:.1f} GB"
+            if size_bytes else "unknown size")
     head = (
         f"⚠️ The {download_name} engine is not downloaded on this node, so "
         f"'{alias}' was not started for this call."

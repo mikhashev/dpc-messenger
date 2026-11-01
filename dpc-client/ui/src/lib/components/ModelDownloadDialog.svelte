@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { spaceVerdict } from '$lib/utils/downloadSpace';
 
   // Props — generic across any download (Whisper, bge-m3, the Camoufox
   // browser binary, ...), so no text below names one source. No numeric
@@ -10,12 +11,16 @@
   export let purpose: string = '';
   export let consequenceIfDeclined: string = '';
   export let sizeBytes: number | null = null;
-  export let sizeSource: 'measured' | 'hf_api' | null = null;
+  // 'package_max': sizeBytes and installedBytes are upper bounds.
+  export let sizeSource: 'measured' | 'hf_api' | 'package_max' | null = null;
   export let cachePath: string = '';
   // Bytes it occupies once unpacked; null = not stated (never read as 0).
   export let installedBytes: number | null = null;
   // Free bytes on cachePath's volume; null = not checked.
   export let freeBytes: number | null = null;
+  // For 'package_max': the smallest variant's figures; null otherwise.
+  export let sizeBytesMin: number | null = null;
+  export let installedBytesMin: number | null = null;
   export let providerAlias: string | null = null;
   export let downloading: boolean = false;
   // From model_download_progress; null until the first report arrives.
@@ -34,17 +39,19 @@
 
   $: sizeText = sizeBytes == null
     ? 'Size unknown'
-    : `~${(sizeBytes / 1e9).toFixed(1)}GB${sizeSource === 'hf_api' ? ' (approximate, from Hugging Face)' : ''}`;
+    : sizeSource === 'package_max'
+      ? `up to ~${(sizeBytes / 1e9).toFixed(1)} GB (the exact size depends on this machine's card)`
+      : `~${(sizeBytes / 1e9).toFixed(1)}GB${sizeSource === 'hf_api' ? ' (approximate, from Hugging Face)' : ''}`;
 
-  // The backend refuses a download below (size + installed) x 1.1 free; the
-  // dialog says so first. Unknown free space is never shown as enough.
-  const FREE_SPACE_MARGIN = 1.1;
-  $: neededBytes = !sizeBytes ? null : (sizeBytes + (installedBytes ?? 0)) * FREE_SPACE_MARGIN;
+  // The backend's space rule, said first (downloadSpace.ts): with 'package_max'
+  // only the smallest variant refuses and the largest warns.
+  $: verdict = spaceVerdict(freeBytes, sizeBytes, installedBytes, sizeBytesMin, installedBytesMin);
   $: volume = (cachePath.match(/^[A-Za-z]:/) || [cachePath])[0];
-  $: shortOfSpace = neededBytes != null && freeBytes != null && freeBytes < neededBytes;
+  $: shortOfSpace = verdict === 'short';
+  $: upTo = sizeSource === 'package_max' ? 'up to ' : '';
   $: spaceText = [
-    sizeBytes != null ? `downloads ~${gb(sizeBytes)} GB` : null,
-    installedBytes != null ? `occupies ~${gb(installedBytes)} GB` : null,
+    sizeBytes != null ? `downloads ${upTo}~${gb(sizeBytes)} GB` : null,
+    installedBytes != null ? `occupies ${upTo}~${gb(installedBytes)} GB` : null,
     freeBytes != null ? `${gb(freeBytes)} GB free on ${volume}` : 'free space not checked'
   ].filter(Boolean).join(', ');
 
@@ -99,6 +106,9 @@
           <p><strong>Download Size:</strong> {sizeText}</p>
           <p><strong>Cache Location:</strong> <code>{cachePath}</code></p>
           <p class:space-short={shortOfSpace}><strong>Disk Space:</strong> {spaceText}{shortOfSpace ? ' — not enough; free some space first' : ''}</p>
+          {#if verdict === 'may_not_fit'}
+            <p class="space-warning">May not fit: depends on the package Strata picks for this card.</p>
+          {/if}
           {#if providerAlias}
             <p><strong>Provider:</strong> {providerAlias}</p>
           {/if}
@@ -255,6 +265,10 @@
 
   .info-box .space-short {
     color: #f48771;
+  }
+
+  .info-box .space-warning {
+    color: #e2c08d;
   }
 
   .info-box code {
