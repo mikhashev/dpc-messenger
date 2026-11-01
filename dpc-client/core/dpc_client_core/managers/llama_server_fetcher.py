@@ -15,21 +15,17 @@ tar.gz assets with known digests, so the fetch streams, hashes while writing,
 and refuses to leave a partial install behind.
 """
 
-import hashlib
-import json
-import logging
-import os
 import platform as _platform
-import shutil
 import sys
-import tarfile
-import tempfile
-import urllib.request
-import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+from .local_engine_pin_fetcher import (
+    DPC_HOME,
+    install_with_staging_swap,
+    marker_path,
+    read_marker,
+)
 
 LLAMA_CPP_TAG = "b11669"
 LLAMA_CPP_RELEASE_BASE = "https://github.com/ggml-org/llama.cpp/releases/download"
@@ -38,8 +34,6 @@ LLAMA_CPP_RELEASE_BASE = "https://github.com/ggml-org/llama.cpp/releases/downloa
 # `platform_tag()`'s return all name the same CUDA toolkit version; one
 # constant keeps them from drifting apart on the next bump.
 WIN_CUDA_FAMILY = "win-cuda-13.4-x64"
-
-DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 
 # One row per asset of the pin. `sha256` comes from the release API `digest`
 # field; `size` is the byte length the progress report is computed against.
@@ -107,10 +101,6 @@ def install_root(tag: str = LLAMA_CPP_TAG, plat: Optional[str] = None) -> Path:
     return DPC_HOME / "bin" / "llama.cpp" / tag / (plat or platform_tag())
 
 
-def _marker_path(root: Path) -> Path:
-    return root / ".dpc-pin.json"
-
-
 def resolve_binary(config: Dict[str, Any]) -> Optional[Path]:
     """Find a usable llama-server without touching the network.
 
@@ -130,13 +120,9 @@ def resolve_binary(config: Dict[str, Any]) -> Optional[Path]:
         return path
 
     root = install_root()
-    marker = _marker_path(root)
-    if marker.is_file() and (root / server_binary_name()).is_file():
-        try:
-            pinned = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if pinned.get("tag") == LLAMA_CPP_TAG:
+    if marker_path(root).is_file() and (root / server_binary_name()).is_file():
+        pinned = read_marker(root)
+        if pinned and pinned.get("tag") == LLAMA_CPP_TAG:
             return root / server_binary_name()
     return None
 
@@ -158,87 +144,36 @@ def find_cuda_backend(binary_dir: Path) -> Optional[Path]:
     return candidates[0] if candidates else None
 
 
-def _download_asset(
-    asset: Dict[str, Any], dest: Path, progress: Optional[Callable[[int, int], None]]
-) -> None:
-    """Stream one asset to dest.part, hashing as it lands; verify before rename."""
-    url = f"{LLAMA_CPP_RELEASE_BASE}/{LLAMA_CPP_TAG}/{asset['name']}"
-    part = dest.with_suffix(dest.suffix + ".part")
-    digest = hashlib.sha256()
-    received = 0
-    try:
-        with urllib.request.urlopen(url, timeout=60) as resp, open(part, "wb") as out:
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                out.write(chunk)
-                digest.update(chunk)
-                received += len(chunk)
-                if progress:
-                    progress(received, asset["size"])
-        actual = digest.hexdigest()
-        if actual != asset["sha256"]:
-            raise ValueError(
-                f"{asset['name']}: sha256 mismatch — expected {asset['sha256']}, got {actual}; "
-                "the download is not the bytes we pinned"
-            )
-        part.replace(dest)
-    finally:
-        part.unlink(missing_ok=True)
-
-
-def _extract(archive: Path, dest: Path) -> None:
-    """Extract with zip-slip / tar-slip refused, not just hoped away."""
-    if archive.suffix == ".zip":
-        with zipfile.ZipFile(archive) as zf:
-            for member in zf.infolist():
-                target = (dest / member.filename).resolve()
-                if not target.is_relative_to(dest.resolve()):
-                    raise ValueError(f"archive member escapes install dir: {member.filename}")
-            zf.extractall(dest)
-    else:
-        with tarfile.open(archive) as tf:
-            tf.extractall(dest, filter="data")
-
-
 def install_pin(progress: Optional[Callable[[int, int], None]] = None) -> Path:
     """Fetch and install the pinned release; atomic enough to leave no half state."""
     plat = platform_tag()
     assets = PLATFORM_ASSETS[plat]
     root = install_root(plat=plat)
-    if (root / server_binary_name()).is_file() and _marker_path(root).is_file():
+    if (root / server_binary_name()).is_file() and marker_path(root).is_file():
         return root / server_binary_name()
 
-    root.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="llama-pin-") as tmp:
-        tmp_dir = Path(tmp)
-        staging = root.with_name(root.name + ".staging")
-        shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True)
-        try:
-            for asset in assets:
-                archive = tmp_dir / asset["name"]
-                logger.info("Fetching %s (%d bytes)", asset["name"], asset["size"])
-                _download_asset(asset, archive, progress)
-                _extract(archive, staging)
-            if not (staging / server_binary_name()).is_file():
-                # Archives lay out files differently than this pin expects.
-                found = sorted(staging.rglob(server_binary_name()))
-                if not found:
-                    raise ValueError(
-                        f"{plat} assets of {LLAMA_CPP_TAG} contain no {server_binary_name()}"
-                    )
-            marker = {
-                "tag": LLAMA_CPP_TAG,
-                "platform": plat,
-                "assets": {a["name"]: a["sha256"] for a in assets},
-            }
-            _marker_path(staging).write_text(json.dumps(marker, indent=2), encoding="utf-8")
-            shutil.rmtree(root, ignore_errors=True)
-            staging.replace(root)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+    def _check(staging: Path) -> None:
+        if not (staging / server_binary_name()).is_file():
+            # Archives lay out files differently than this pin expects.
+            found = sorted(staging.rglob(server_binary_name()))
+            if not found:
+                raise ValueError(
+                    f"{plat} assets of {LLAMA_CPP_TAG} contain no {server_binary_name()}"
+                )
+
+    install_with_staging_swap(
+        root,
+        assets,
+        f"{LLAMA_CPP_RELEASE_BASE}/{LLAMA_CPP_TAG}",
+        {
+            "tag": LLAMA_CPP_TAG,
+            "platform": plat,
+            "assets": {a["name"]: a["sha256"] for a in assets},
+        },
+        check=_check,
+        progress=progress,
+        temp_prefix="llama-pin-",
+    )
     return root / server_binary_name()
 
 

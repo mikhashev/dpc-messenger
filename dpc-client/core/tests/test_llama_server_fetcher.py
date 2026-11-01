@@ -7,6 +7,7 @@ operator-supplied build is never silently replaced, and a broken download
 must leave nothing behind that a later start would mistake for an install.
 """
 
+import hashlib
 import io
 import json
 import zipfile
@@ -14,6 +15,7 @@ import zipfile
 import pytest
 
 from dpc_client_core.managers import llama_server_fetcher as fetcher
+from dpc_client_core.managers import local_engine_pin_fetcher as pin_fetcher
 
 
 class _FakeResponse:
@@ -28,21 +30,6 @@ class _FakeResponse:
 
     def __exit__(self, *exc):
         return False
-
-
-class _Chunked(_FakeResponse):
-    """A response that never hands over more than `step` bytes per read."""
-
-    def __init__(self, payload: bytes, step: int):
-        super().__init__(payload)
-        self._step = step
-
-    def read(self, n: int) -> bytes:
-        return super().read(min(n, self._step))
-
-
-def _asset_for_this_platform():
-    return fetcher.PLATFORM_ASSETS[fetcher.platform_tag()][0]
 
 
 def test_a_configured_binary_path_wins_and_no_fetch_happens(tmp_path, monkeypatch):
@@ -82,9 +69,8 @@ def test_an_installed_pin_resolves_only_when_the_marker_matches_the_tag(tmp_path
 
 def test_a_sha256_mismatch_aborts_and_leaves_no_install(tmp_path, monkeypatch):
     monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
-    asset = _asset_for_this_platform()
     monkeypatch.setattr(
-        fetcher.urllib.request,
+        pin_fetcher.urllib.request,
         "urlopen",
         lambda url, timeout: _FakeResponse(b"these are not the bytes we pinned"),
     )
@@ -92,27 +78,6 @@ def test_a_sha256_mismatch_aborts_and_leaves_no_install(tmp_path, monkeypatch):
         fetcher.install_pin()
     assert not fetcher.install_root().exists()
     assert not any(tmp_path.rglob("*.part"))
-
-
-def test_the_download_hashes_the_whole_stream_and_reports_progress(tmp_path, monkeypatch):
-    asset = {"name": "x.zip", "sha256": _sha(b"payload"), "size": 7}
-    dest = tmp_path / "x.zip"
-    # The fake server hands out the payload three bytes at a time; the hash
-    # must still be of the whole stream, and progress must see every byte.
-    monkeypatch.setattr(
-        fetcher.urllib.request, "urlopen", lambda url, timeout: _Chunked(b"payload", 3)
-    )
-    seen = []
-    fetcher._download_asset(asset, dest, lambda got, total: seen.append((got, total)))
-    assert dest.read_bytes() == b"payload"
-    assert seen[-1] == (7, 7) and seen[0] == (3, 7)
-    assert not dest.with_suffix(".zip.part").exists()
-
-
-def _sha(data: bytes) -> str:
-    import hashlib
-
-    return hashlib.sha256(data).hexdigest()
 
 
 def test_every_asset_name_carries_its_platform_key_and_the_pinned_tag():
@@ -134,10 +99,80 @@ def test_every_asset_name_carries_its_platform_key_and_the_pinned_tag():
             )
 
 
-def test_extraction_refuses_archive_members_that_escape(tmp_path):
-    archive = tmp_path / "evil.zip"
-    with zipfile.ZipFile(archive, "w") as zf:
-        zf.writestr("../outside.txt", "zip slip")
-    with pytest.raises(ValueError, match="escapes"):
-        fetcher._extract(archive, tmp_path / "dest")
-    assert not (tmp_path / "outside.txt").exists()
+def test_install_root_without_arguments_is_the_pinned_tag_and_this_platform(tmp_path, monkeypatch):
+    # The supervisor calls it bare, for the `.dpc-kv-fit.json` memo beside the binary.
+    monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
+    assert fetcher.install_root() == (
+        tmp_path / "bin" / "llama.cpp" / fetcher.LLAMA_CPP_TAG / fetcher.platform_tag()
+    )
+
+
+def test_an_unreadable_or_non_object_marker_resolves_to_no_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
+    root = fetcher.install_root()
+    root.mkdir(parents=True)
+    (root / fetcher.server_binary_name()).write_bytes(b"")
+    for text in ("[1, 2]", "not json", '"b11669"'):
+        (root / ".dpc-pin.json").write_text(text, encoding="utf-8")
+        assert fetcher.resolve_binary({}) is None
+
+
+def test_install_root_without_arguments_is_the_pinned_tag_and_this_platform(tmp_path, monkeypatch):
+    # The supervisor calls it bare, for the `.dpc-kv-fit.json` memo beside the binary.
+    monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
+    assert fetcher.install_root() == (
+        tmp_path / "bin" / "llama.cpp" / fetcher.LLAMA_CPP_TAG / fetcher.platform_tag()
+    )
+
+
+def test_an_unreadable_or_non_object_marker_resolves_to_no_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
+    root = fetcher.install_root()
+    root.mkdir(parents=True)
+    (root / fetcher.server_binary_name()).write_bytes(b"")
+    for text in ("[1, 2]", "not json", '"b11669"'):
+        (root / ".dpc-pin.json").write_text(text, encoding="utf-8")
+        assert fetcher.resolve_binary({}) is None
+
+
+def _serve_zip(monkeypatch, members):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    payload = buf.getvalue()
+    asset = {
+        "name": "llama-test.zip",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size": len(payload),
+    }
+    monkeypatch.setitem(fetcher.PLATFORM_ASSETS, fetcher.platform_tag(), [asset])
+    seen = []
+    monkeypatch.setattr(
+        pin_fetcher.urllib.request,
+        "urlopen",
+        lambda url, timeout: seen.append(url) or _FakeResponse(payload),
+    )
+    return seen
+
+
+def test_install_pin_installs_the_pinned_assets_and_writes_the_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
+    urls = _serve_zip(monkeypatch, {fetcher.server_binary_name(): b"bin"})
+    binary = fetcher.install_pin()
+    assert binary == fetcher.install_root() / fetcher.server_binary_name()
+    assert binary.read_bytes() == b"bin"
+    assert urls == [f"{fetcher.LLAMA_CPP_RELEASE_BASE}/{fetcher.LLAMA_CPP_TAG}/llama-test.zip"]
+    marker = json.loads((fetcher.install_root() / ".dpc-pin.json").read_text(encoding="utf-8"))
+    assert marker["tag"] == fetcher.LLAMA_CPP_TAG and marker["platform"] == fetcher.platform_tag()
+    assert fetcher.resolve_binary({}) == binary
+
+
+def test_assets_without_the_server_binary_install_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetcher, "DPC_HOME", tmp_path)
+    _serve_zip(monkeypatch, {"readme.txt": b"no server here"})
+    with pytest.raises(ValueError, match="contain no"):
+        fetcher.install_pin()
+    root = fetcher.install_root()
+    assert not root.exists()
+    assert not root.with_name(root.name + ".staging").exists()
