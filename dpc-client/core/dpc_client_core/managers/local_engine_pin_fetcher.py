@@ -2,7 +2,7 @@
 Local Engine Pin Fetcher — the generic half of a pinned download under `~/.dpc/bin/`.
 
 `llama_server_fetcher.py` (llama.cpp) and, next, `strata_fetcher.py` (Strata)
-install a pinned release the same way: stream each asset into a temporary file,
+install a pinned release the same way: stream each asset into `<root>.download`,
 hash it as it lands, extract it into `<root>.staging`, let the caller check what
 came out, write the `.dpc-pin.json` marker, then swap staging into place. What
 differs per engine (the asset table, the check, the marker's extra fields)
@@ -41,6 +41,44 @@ def read_marker(root: Path) -> Optional[Dict[str, Any]]:
     except (OSError, ValueError):
         return None
     return pinned if isinstance(pinned, dict) else None
+
+
+def refusal_text(
+    download_name: str,
+    alias: str,
+    size_bytes: Optional[int],
+    reason: str,
+    *,
+    percent: Optional[float] = None,
+) -> str:
+    """The sentence a start returns instead of fetching a missing pin, after the
+    pattern of `camoufox_binary.refusal_text`. `reason` is `asked`, `downloading`,
+    `declined` or `peer`. It names the app, never a dialog: it reaches Telegram
+    and peers too."""
+    size = f"about {size_bytes / 1e9:.1f} GB" if size_bytes else "unknown size"
+    head = (
+        f"⚠️ The {download_name} engine is not downloaded on this node, so "
+        f"'{alias}' was not started for this call."
+    )
+    if reason == "downloading":
+        done = f"{percent:.0f}% of {size}" if percent is not None else size
+        tail = f" It is being downloaded now ({done}); try again after it finishes."
+    elif reason == "declined":
+        tail = (
+            f" It is a one-time download of {size}, which the owner has declined; "
+            f"it can be started from the D-PC Messenger app."
+        )
+    elif reason == "peer":
+        tail = (
+            f" It is a one-time download of {size}, and a peer's request does not "
+            f"fetch it."
+        )
+    else:
+        tail = (
+            f" It is a one-time download of {size}; the owner has been asked to "
+            f"confirm it in the D-PC Messenger app. Do not retry until it has finished."
+        )
+    return head + tail
 
 
 def download_asset(
@@ -96,68 +134,72 @@ def install_with_staging_swap(
     marker: Dict[str, Any],
     check: Optional[Callable[[Path], Optional[Dict[str, Any]]]] = None,
     progress: Optional[Callable[[int, int], None]] = None,
-    temp_prefix: str = "pin-",
 ) -> None:
     """Download `assets` from `url_base`, extract into `<root>.staging`, swap it into `root`.
 
-    `check(staging)` runs on the extracted tree and may raise to abort; the dict it
-    returns is merged into the marker. Nothing is left behind on a failure, and an
-    install already at `root` survives any failure before or during the swap.
+    Archives land in `<root>.download`, beside the root on its volume (never the
+    system temp folder), and each is deleted once extracted. `check(staging)` runs
+    on the extracted tree and may raise to abort; the dict it returns is merged
+    into the marker. Nothing is left behind on a failure, and an install already
+    at `root` survives any failure before or during the swap.
     """
     root.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=temp_prefix) as tmp:
-        tmp_dir = Path(tmp)
-        staging = root.with_name(root.name + ".staging")
-        shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True)
-        # Progress is one bar across all assets: bytes landed so far against their sum.
-        total = sum(int(a["size"]) for a in assets)
-        done = 0
-        try:
-            for asset in assets:
-                archive = tmp_dir / asset["name"]
-                logger.info("Fetching %s (%d bytes)", asset["name"], asset["size"])
-                landed = [0]
+    downloads = root.with_name(root.name + ".download")
+    staging = root.with_name(root.name + ".staging")
+    shutil.rmtree(downloads, ignore_errors=True)
+    shutil.rmtree(staging, ignore_errors=True)
+    downloads.mkdir(parents=True)
+    staging.mkdir(parents=True)
+    # Progress is one bar across all assets: bytes landed so far against their sum.
+    total = sum(int(a["size"]) for a in assets)
+    done = 0
+    try:
+        for asset in assets:
+            archive = downloads / asset["name"]
+            logger.info("Fetching %s (%d bytes)", asset["name"], asset["size"])
+            landed = [0]
 
-                def _report(got: int, _size: int, base: int = done) -> None:
-                    landed[0] = got
-                    progress(base + got, total)
+            def _report(got: int, _size: int, base: int = done) -> None:
+                landed[0] = got
+                progress(base + got, total)
 
-                download_asset(
-                    f"{url_base}/{asset['name']}", asset, archive, _report if progress else None
-                )
-                done += landed[0]
-                extract_archive(archive, staging)
-            extra = check(staging) if check else None
-            marker_path(staging).write_text(
-                json.dumps({**marker, **(extra or {})}, indent=2), encoding="utf-8"
+            download_asset(
+                f"{url_base}/{asset['name']}", asset, archive, _report if progress else None
             )
-            # Never pass through "no install": the old root is renamed aside, not deleted,
-            # until the new one is in place (the rename can fail on Windows, e.g. antivirus).
-            old = root.with_name(root.name + ".old")
+            done += landed[0]
+            extract_archive(archive, staging)
+            archive.unlink()
+        extra = check(staging) if check else None
+        marker_path(staging).write_text(
+            json.dumps({**marker, **(extra or {})}, indent=2), encoding="utf-8"
+        )
+        # Never pass through "no install": the old root is renamed aside, not deleted,
+        # until the new one is in place (the rename can fail on Windows, e.g. antivirus).
+        old = root.with_name(root.name + ".old")
+        shutil.rmtree(old, ignore_errors=True)
+        had_old = root.exists()
+        if had_old:
+            root.replace(old)
+        try:
+            staging.replace(root)
+        except BaseException:
+            if had_old:
+                try:
+                    old.replace(root)
+                except OSError:
+                    logger.error("Could not restore %s from %s", root, old)
+            raise
+        if had_old:
             shutil.rmtree(old, ignore_errors=True)
-            had_old = root.exists()
-            if had_old:
-                root.replace(old)
-            try:
-                staging.replace(root)
-            except BaseException:
-                if had_old:
-                    try:
-                        old.replace(root)
-                    except OSError:
-                        logger.error("Could not restore %s from %s", root, old)
-                raise
-            if had_old:
-                shutil.rmtree(old, ignore_errors=True)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(downloads, ignore_errors=True)
 
 
 # --- installed pins: the retained one and the rest ---------------------------------------
 # Each engine keeps `<pins_dir>/<tag>/<platform>/`. A folder is a pin only when its marker
 # names that same tag and platform; anything else there (a hand-made build, a folder from
-# before markers, a `.staging` or `.old` leftover) is not DPC's to run or to remove.
+# before markers, a `.staging`, `.download` or `.old` leftover) is not DPC's to run or to remove.
 
 
 def installed_pins(pins_dir: Path) -> List[Dict[str, Any]]:

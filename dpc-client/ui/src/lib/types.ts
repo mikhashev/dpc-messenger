@@ -437,6 +437,10 @@ export interface ModelDownloadRequiredEvent {
     size_bytes: number | null;
     size_source: 'measured' | 'hf_api' | null;
     cache_path: string;
+    // Bytes it occupies once unpacked; null = not stated, never 0.
+    installed_bytes?: number | null;
+    // Free bytes on cache_path's volume; null when unknown or not checked.
+    free_bytes?: number | null;
     provider_alias: string | null;
 }
 

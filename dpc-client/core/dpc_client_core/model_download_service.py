@@ -16,11 +16,13 @@ import contextlib
 import importlib.util
 import logging
 import os
+import shutil
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
 from . import camoufox_binary
+from .managers import llama_server_fetcher
 from .providers.model_sizes import (
     hf_cache_path,
     is_model_cached,
@@ -35,6 +37,50 @@ logger = logging.getLogger(__name__)
 # lost that socket at ~13 events a second (file_transfer_manager.py,
 # PREPARATION_PROGRESS_MIN_INTERVAL_S), so the same time limit applies here.
 PROGRESS_MIN_INTERVAL_S = 0.5
+
+# A non-Hugging-Face download starts only with this much more free space than the
+# archives plus their unpacked tree, both on the destination's volume (team
+# consensus, 2026-11-01).
+_FREE_SPACE_MARGIN = 1.1
+
+
+def _free_bytes(path: str) -> Optional[int]:
+    """Free bytes on the volume `path` is (or will be) on: asked of its nearest
+    existing ancestor. None when nothing can be asked."""
+    if not path:
+        return None
+    probe = os.path.abspath(path)
+    while not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    try:
+        return shutil.disk_usage(probe).free
+    except OSError:
+        return None
+
+
+def _stated_installed_bytes(other: Any) -> Optional[int]:
+    """The unpacked size a download module states; None when it states none (camoufox)."""
+    read = getattr(other, "installed_bytes", None)
+    return read() if read else None
+
+
+def _needed_bytes(size_bytes: Optional[int], installed_bytes: Optional[int]) -> Optional[float]:
+    """Free space a download needs; None when its size is unknown. An unstated
+    installed size adds nothing, it is not read as a known 0."""
+    if not size_bytes:
+        return None
+    return (size_bytes + (installed_bytes or 0)) * _FREE_SPACE_MARGIN
+
+
+def _short_of_space(
+    size_bytes: Optional[int], installed_bytes: Optional[int], free_bytes: Optional[int]
+) -> bool:
+    """Unknown free space is not refused here (the dialog does not call it enough)."""
+    needed = _needed_bytes(size_bytes, installed_bytes)
+    return needed is not None and free_bytes is not None and free_bytes < needed
 
 
 def _hf_repo_bytes(folder: str) -> int:
@@ -80,6 +126,12 @@ _KNOWN_CONSENT_MODELS: Dict[str, Dict[str, str]] = {
         "consequence_if_declined": camoufox_binary.CONSEQUENCE_IF_DECLINED,
         "on_decline": "degrade",
     },
+    # The engine pin is missing only for a start that then refuses: "block".
+    llama_server_fetcher.DOWNLOAD_NAME: {
+        "purpose": llama_server_fetcher.PURPOSE,
+        "consequence_if_declined": llama_server_fetcher.CONSEQUENCE_IF_DECLINED,
+        "on_decline": "block",
+    },
 }
 
 # Downloads that are not Hugging Face repositories, by the name the events
@@ -88,6 +140,7 @@ _KNOWN_CONSENT_MODELS: Dict[str, Dict[str, str]] = {
 # hf_cache_path and the Whisper or embedding executor.
 _OTHER_DOWNLOADS: Dict[str, Any] = {
     camoufox_binary.DOWNLOAD_NAME: camoufox_binary,
+    llama_server_fetcher.DOWNLOAD_NAME: llama_server_fetcher,
 }
 
 
@@ -237,16 +290,21 @@ class ModelDownloadService:
         if other is not None:
             # The size is the one GitHub lists for the asset the package
             # would fetch: a network read, kept off the event loop.
-            size_bytes = await asyncio.to_thread(other.size_bytes)
+            size_bytes, installed_bytes = await asyncio.to_thread(
+                lambda: (other.size_bytes(), _stated_installed_bytes(other))
+            )
             size_source = None
             measured_on = None
             cache_path = other.location()
+            free_bytes = await asyncio.to_thread(_free_bytes, cache_path)
         else:
             # A model with no measured row is sized by a Hugging Face API read:
             # off the event loop too, as the download's own size read is.
             size_bytes, size_source = await asyncio.to_thread(model_size_bytes, model_name, revision)
             measured_on = model_size_measured_on(model_name, revision)
             cache_path = hf_cache_path()
+            installed_bytes = None
+            free_bytes = None
         payload = {
             "model_name": model_name,
             "revision": revision,
@@ -259,6 +317,12 @@ class ModelDownloadService:
             # read this field is unaffected, it only gains one (finding F).
             "size_measured_on": measured_on,
             "cache_path": cache_path,
+            # Bytes the download occupies once unpacked, or null = not stated
+            # (never 0). Free bytes on cache_path's volume, or null = not checked.
+            # A download needs (size_bytes + installed_bytes) x _FREE_SPACE_MARGIN
+            # of it; download_other refuses less.
+            "installed_bytes": installed_bytes,
+            "free_bytes": free_bytes,
             "provider_alias": provider_alias,
         }
         self._last_required_payload[model_name] = payload
@@ -417,6 +481,25 @@ class ModelDownloadService:
         """Run a non-Hugging-Face download in a thread, with the same
         started/completed/failed events the model executors send."""
         other = _OTHER_DOWNLOADS[model_name]
+        # The sizes the owner was shown: a second size_bytes() can be a network
+        # read (camoufox's sets its offline-retry timer). Free space is read anew.
+        asked = self._last_required_payload.get(model_name)
+        if asked is not None:
+            size, installed = asked.get("size_bytes"), asked.get("installed_bytes")
+            free = await asyncio.to_thread(_free_bytes, other.location())
+        else:
+            size, installed, free = await asyncio.to_thread(
+                lambda: (other.size_bytes(), _stated_installed_bytes(other), _free_bytes(other.location()))
+            )
+        if _short_of_space(size, installed, free):
+            error = (
+                f"not enough free disk space for {model_name}: it needs about "
+                f"{_needed_bytes(size, installed) / 1e9:.1f} GB and {free / 1e9:.1f} GB is free "
+                f"where it goes ({other.location()})"
+            )
+            logger.warning("Download of %s refused: %s", model_name, error)
+            await self.emit_failed(model_name, error)
+            return {"status": "error", "error": error}
         logger.info("Download of %s confirmed by the owner, starting", model_name)
         await self.emit_started(model_name)
         try:

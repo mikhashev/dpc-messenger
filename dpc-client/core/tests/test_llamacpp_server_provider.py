@@ -235,11 +235,11 @@ class TestDrainingBeforeReplacement:
     async def test_the_successor_does_not_start_until_the_predecessor_let_go(self, monkeypatch):
         # The card cannot hold two copies of the model, so "drain the old one"
         # is only safe if the new one waits for the card.
-        # `_launch`/`_launch_auto_kv` are faked below, but `ensure_running` calls
-        # `ensure_binary` first — real, that fetches ~570MB from GitHub on an
-        # empty DPC_HOME (measured: 124s, fills the dir). Stub it here too.
+        # `_launch`/`_launch_auto_kv` are faked below, but `ensure_running` looks
+        # for the pin first, and with no consent service bound installs it in a
+        # thread — ~570MB from GitHub on an empty DPC_HOME. Stub it here too.
         monkeypatch.setattr(
-            "dpc_client_core.managers.llama_server_supervisor.ensure_binary",
+            "dpc_client_core.managers.llama_server_supervisor.resolve_binary",
             lambda config: Path("dummy-llama-server"),
         )
         released = asyncio.Event()

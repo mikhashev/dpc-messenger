@@ -104,7 +104,7 @@ class _Rig:
         monkeypatch.setattr(base_mod, "DPC_HOME", tmp_path / "dpc-home")
         # The KV-fit memo lives beside the pins: keep it out of the real ~/.dpc.
         monkeypatch.setattr(fetcher_mod, "DPC_HOME", tmp_path / "dpc-home")
-        monkeypatch.setattr(base_mod, "ensure_binary", lambda config: Path(sys.executable))
+        monkeypatch.setattr(base_mod, "resolve_binary", lambda config: Path(sys.executable))
         monkeypatch.setattr(base_mod, "find_cuda_backend", lambda path: None)
         monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: None)
         monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)

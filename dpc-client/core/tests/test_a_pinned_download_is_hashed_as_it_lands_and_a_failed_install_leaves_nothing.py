@@ -267,3 +267,71 @@ def test_a_staging_rename_that_fails_leaves_the_old_install_intact(tmp_path, mon
     assert (root / "engine.bin").read_bytes() == b"old engine"
     assert pin.marker_path(root).read_text(encoding="utf-8") == old_marker
     assert _siblings(root) == ["plat"]
+
+
+# --- archives land beside the root, never in the system temp folder ---------------------
+
+
+def _no_system_temp(monkeypatch):
+    def _refuse(*a, **kw):
+        raise AssertionError("an archive went to the system temp folder")
+
+    monkeypatch.setattr(pin.tempfile, "TemporaryDirectory", _refuse)
+
+
+def test_archives_land_in_the_download_folder_beside_the_root(tmp_path, monkeypatch):
+    root = tmp_path / "plat"
+    _no_system_temp(monkeypatch)
+    real_download = pin.download_asset
+    dests = []
+
+    def _record(url, asset, dest, progress):
+        dests.append(dest)
+        real_download(url, asset, dest, progress)
+
+    monkeypatch.setattr(pin, "download_asset", _record)
+    _install(monkeypatch, root)
+    assert dests == [tmp_path / "plat.download" / "pkg.zip"]
+    assert (root / "engine.bin").read_bytes() == b"new engine"
+    assert _siblings(root) == ["plat"]
+
+
+def test_a_failed_install_removes_the_download_folder(tmp_path, monkeypatch):
+    root = tmp_path / "plat"
+    _no_system_temp(monkeypatch)
+    stale = tmp_path / "plat.download"
+    stale.mkdir()
+    (stale / "half.zip.part").write_bytes(b"from an earlier crash")
+
+    def _refuse(staging):
+        assert not (stale / "half.zip.part").exists()
+        raise ValueError("refused")
+
+    with pytest.raises(ValueError, match="refused"):
+        _install(monkeypatch, root, check=_refuse)
+    assert _siblings(root) == []
+
+
+def test_each_archive_is_deleted_once_extracted(tmp_path, monkeypatch):
+    # Disk holds one archive at a time: the second download finds the first gone.
+    root = tmp_path / "plat"
+    _no_system_temp(monkeypatch)
+    first, second = _zip({"a.bin": b"a"}), _zip({"b.bin": b"b"})
+    assets = [
+        {"name": "one.zip", "sha256": _sha(first), "size": len(first)},
+        {"name": "two.zip", "sha256": _sha(second), "size": len(second)},
+    ]
+    _serve(monkeypatch, {"one.zip": first, "two.zip": second})
+    real_download = pin.download_asset
+    present_at_second = []
+
+    def _observe(url, asset, dest, progress):
+        if asset["name"] == "two.zip":
+            present_at_second.append((dest.parent / "one.zip").exists())
+        real_download(url, asset, dest, progress)
+
+    monkeypatch.setattr(pin, "download_asset", _observe)
+    pin.install_with_staging_swap(root, assets, "https://example.test/rel", {"tag": "v1"})
+    assert present_at_second == [False]
+    assert sorted(p.name for p in root.iterdir()) == [".dpc-pin.json", "a.bin", "b.bin"]
+    assert _siblings(root) == ["plat"]

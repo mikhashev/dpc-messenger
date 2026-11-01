@@ -84,6 +84,17 @@ PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
     ],
 }
 
+# Bytes the pin occupies once unpacked, per platform: what the consent dialog
+# says it "occupies". Windows: the installed folder's files, DPC's marker files
+# excluded; the others: regular-file member sizes of the sha256-verified
+# tarballs. Re-measure on every pin move.
+INSTALLED_BYTES: Dict[str, int] = {
+    WIN_CUDA_FAMILY: 747_386_477,
+    "macos-arm64": 32_243_798,
+    "ubuntu-x64": 46_118_030,
+}
+INSTALLED_BYTES_MEASURED_ON = "2026-11-01"
+
 
 def platform_tag() -> str:
     """The pin's asset family for this machine."""
@@ -180,9 +191,44 @@ def install_pin(progress: Optional[Callable[[int, int], None]] = None) -> Path:
             },
             check=_check,
             progress=progress,
-            temp_prefix="llama-pin-",
         )
         return root / server_binary_name()
+
+
+# --- the pin as a download the owner consents to -----------------------------
+# After the pattern of `camoufox_binary`: `ModelDownloadService` offers and runs
+# it through the `model_download_*` flow; a start only refuses while it is missing.
+
+DOWNLOAD_NAME = "llama.cpp"
+PURPOSE = "Running local GGUF models through DPC's own llama-server (llamacpp_server aliases)"
+CONSEQUENCE_IF_DECLINED = (
+    "llamacpp_server aliases cannot start until it is downloaded; "
+    "other providers are not affected."
+)
+
+
+def is_present() -> bool:
+    """The pin is installed (a configured `binary_path` is not the pin)."""
+    return resolve_binary({}) is not None
+
+
+def size_bytes() -> int:
+    """Exact: the sum of this platform's asset rows."""
+    return sum(int(a["size"]) for a in PLATFORM_ASSETS[platform_tag()])
+
+
+def installed_bytes() -> Optional[int]:
+    """Measured, not exact: see `INSTALLED_BYTES`."""
+    return INSTALLED_BYTES.get(platform_tag())
+
+
+def location() -> str:
+    return str(install_root())
+
+
+def download(on_progress: Optional[Callable[[int, int], None]] = None) -> str:
+    """Install the pin; blocking, run it in a thread. Returns the binary's path."""
+    return str(install_pin(on_progress))
 
 
 def ensure_binary(

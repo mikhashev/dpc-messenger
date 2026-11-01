@@ -1055,9 +1055,11 @@ class CoreService:
         self._start_device_context_refresh()
 
         # Local engines (llama-server, Strata) live on this loop; a start reached
-        # from an agent tool's per-call loop is forwarded here.
-        from .managers.llama_server_supervisor import bind_owner_loop
+        # from an agent tool's per-call loop is forwarded here. A missing pin is
+        # offered to the owner through the consent service, never fetched by a start.
+        from .managers.llama_server_supervisor import bind_model_download_service, bind_owner_loop
         bind_owner_loop(asyncio.get_running_loop())
+        bind_model_download_service(self.model_download_service)
 
         # Run knowledge integrity check
         logger.info("Running knowledge integrity check")
@@ -1457,8 +1459,9 @@ class CoreService:
         finally:
             # The supervisors are stopped: a late call from a tool's loop must not
             # be forwarded into a loop that is about to close.
-            from .managers.llama_server_supervisor import bind_owner_loop
+            from .managers.llama_server_supervisor import bind_model_download_service, bind_owner_loop
             bind_owner_loop(None)
+            bind_model_download_service(None)
 
         # S144 SHUTDOWN-PIPE-DRAIN: close any AuthBrowser (Camoufox)
         # subprocesses still alive. Without this they keep stdin/stdout

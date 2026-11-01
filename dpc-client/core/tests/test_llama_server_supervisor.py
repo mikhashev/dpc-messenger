@@ -105,7 +105,7 @@ class TestTheKvLadder:
         # free-VRAM level it was earned at.
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 31200)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([
@@ -126,7 +126,7 @@ class TestTheKvLadder:
     async def test_a_non_oom_failure_is_not_stepped_down(self, monkeypatch):
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 31200)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([
@@ -142,7 +142,7 @@ class TestTheKvLadder:
     async def test_the_fit_memo_short_circuits_the_ladder(self, monkeypatch):
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 31200)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([{"total_slots": 4}])
@@ -159,7 +159,7 @@ class TestTheKvLadder:
     async def test_a_busier_card_re_runs_the_ladder_instead_of_trusting_the_memo(self, monkeypatch):
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 20000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 10000)
@@ -178,7 +178,7 @@ class TestTheKvLadder:
     async def test_an_alias_that_names_a_type_gets_exactly_one_attempt(self, monkeypatch):
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([{"total_slots": 4}])
         sup.config["cache_type_k"] = "q4_0"
@@ -191,7 +191,7 @@ class TestTheKvLadder:
     async def test_a_card_that_cannot_hold_even_the_model_fails_fast(self, monkeypatch):
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 8000)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 17000)
         sup, attempts = self._sup_with_launch([])
@@ -441,7 +441,7 @@ class TestStart:
         from dpc_client_core.managers import llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "DPC_HOME", tmp_path)
-        monkeypatch.setattr(mod, "ensure_binary", lambda config: Path(BINARY))
+        monkeypatch.setattr(mod, "resolve_binary", lambda config: Path(BINARY))
         sup = _sup(start_timeout_s=0.3)
         monkeypatch.setattr(sup, "_spawn", lambda cmd, env: _ret(_FakeProc()))
         monkeypatch.setattr(sup, "_health_ok", lambda: _ret(False))
@@ -464,7 +464,7 @@ class TestStart:
         from dpc_client_core.managers import llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "DPC_HOME", tmp_path)
-        monkeypatch.setattr(mod, "ensure_binary", lambda config: Path(BINARY))
+        monkeypatch.setattr(mod, "resolve_binary", lambda config: Path(BINARY))
         sup = _sup(start_timeout_s=30.0)
         dead = _FakeProc()
         dead.returncode = 127
@@ -565,7 +565,7 @@ class TestTheAdmissionArithmetic:
         # what does not fit.
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 26000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 16031)
@@ -589,7 +589,7 @@ class TestTheAdmissionArithmetic:
         # clears the arithmetic. It must not be trusted into a launch.
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 30000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 16031)
@@ -608,7 +608,7 @@ class TestTheAdmissionArithmetic:
     async def test_a_card_that_cannot_hold_any_rung_fails_without_launching(self, monkeypatch):
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 26000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 20000)
@@ -625,7 +625,7 @@ class TestTheAdmissionArithmetic:
         # still loaded when named explicitly, and the log says so.
         import dpc_client_core.managers.llama_server_supervisor as mod
 
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 30000)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 16031)
@@ -801,7 +801,7 @@ class TestTheFitMemoIsPerBuild:
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         self._with_pins_in(monkeypatch, tmp_path)
-        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "resolve_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda **_: 31200)
         monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         monkeypatch.setattr(mod, "LLAMA_CPP_TAG", "b11669")

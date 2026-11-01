@@ -35,7 +35,7 @@ def card(tmp_path, monkeypatch):
     home = tmp_path / "dpc-home"
     home.mkdir()
     monkeypatch.setattr(base_mod, "DPC_HOME", home)
-    monkeypatch.setattr(base_mod, "ensure_binary", lambda config: Path("llama-server.exe"))
+    monkeypatch.setattr(base_mod, "resolve_binary", lambda config: Path("llama-server.exe"))
     monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
     # Constant, so a Strata stop finds the card released at once.
     monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: 30000)

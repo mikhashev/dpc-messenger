@@ -18,6 +18,8 @@ than remembered:
 """
 
 import asyncio
+import contextlib
+import contextvars
 import functools
 import json
 import logging
@@ -31,16 +33,19 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, NoReturn, Optional, Tuple
 
 from .. import process_registry as _procreg
+from . import llama_server_fetcher as _fetcher
 from .llama_server_fetcher import (
     DPC_HOME,
     LLAMA_CPP_TAG,
-    ensure_binary,
     find_cuda_backend,
+    install_pin,
     pins_dir,
+    resolve_binary,
 )
+from .local_engine_pin_fetcher import refusal_text
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +153,40 @@ def bind_owner_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
     _OWNER_LOOP = loop
 
 
+# The consent service a missing pin is asked for through (`ModelDownloadService`).
+# Unbound (tests, scripts): the owner's start installs the pin itself, in a thread.
+_MODEL_DOWNLOAD_SERVICE: Optional[Any] = None
+
+
+def bind_model_download_service(service: Optional[Any]) -> None:
+    """Make `service` the one a missing pin is offered through; None unbinds."""
+    global _MODEL_DOWNLOAD_SERVICE
+    _MODEL_DOWNLOAD_SERVICE = service
+
+
+# ADR-044 point 9: set while a call is served to a peer, holding its node id.
+# A ContextVar because the mark has to reach `ensure_running` and `call_slot`
+# through LLMManager and the provider without a parameter on every signature;
+# it follows the awaits of the task that set it and nothing else. Read by both
+# local engines; `strata_supervisor` re-exports it.
+_PEER_CALL: contextvars.ContextVar = contextvars.ContextVar("dpc_strata_peer_call", default=None)
+
+
+@contextlib.contextmanager
+def serving_a_peer(peer_id: str):
+    """Mark the calls made inside as served to `peer_id`."""
+    token = _PEER_CALL.set(peer_id or "peer")
+    try:
+        yield
+    finally:
+        _PEER_CALL.reset(token)
+
+
+def peer_being_served() -> Optional[str]:
+    """The peer the current call is served to, or None for the owner's own call."""
+    return _PEER_CALL.get()
+
+
 def _foreign_owner_loop() -> Optional[asyncio.AbstractEventLoop]:
     """The owner loop when the caller runs on another one and the owner is alive."""
     owner = _OWNER_LOOP
@@ -198,6 +237,15 @@ class CardHeldError(LlamaServerError):
         super().__init__(message)
         self.holder_alias = holder_alias
         self.holder_engine = holder_engine
+
+
+class PinNotInstalledError(LlamaServerError):
+    """The engine's pin is not on disk and this start did not fetch it: the owner
+    is asked through the model-download consent flow, a peer is not. Never retried."""
+
+    def __init__(self, message: str, download_name: str):
+        super().__init__(message)
+        self.download_name = download_name
 
 
 # Supervisors holding the card, from the decision to start a child until its stop
@@ -955,13 +1003,23 @@ class LlamaServerSupervisor:
                 raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
             if self._proc and self._proc.returncode is None and self.props:
                 return self.props
+            # Before the card is claimed, and never a fetch on this loop: a missing
+            # pin is offered to the owner and refused, or installed in a thread when
+            # no consent service is bound.
+            binary = await asyncio.to_thread(resolve_binary, self.config)
+            if binary is None:
+                if peer_being_served() is None and _MODEL_DOWNLOAD_SERVICE is None:
+                    binary = await asyncio.to_thread(install_pin)
+                else:
+                    await self._refuse_missing_pin()
+            if self._draining:
+                raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
             await self._clear_unfinished_start()
             await self._await_predecessor()
             # Before the ladder: its free-VRAM refusal would otherwise name the
             # model's size instead of the engine that holds the card.
             self._claim_card()
             try:
-                binary = ensure_binary(self.config)
                 self.port = self.port or _free_port()
                 if self.config.get("cache_type_k") is not None or self.config.get("cache_type_v") is not None:
                     self._warn_if_explicit_type_exceeds_budget()
@@ -970,6 +1028,34 @@ class LlamaServerSupervisor:
             except BaseException:
                 self._release_card_unless_live()
                 raise
+
+    async def _refuse_missing_pin(self) -> NoReturn:
+        """Raise `PinNotInstalledError` for a start with no pin to run. A peer's call
+        neither asks nor fetches; the owner's asks once per session through the
+        consent service and is worded by what that service now knows."""
+        name = _fetcher.DOWNLOAD_NAME
+        size = _fetcher.size_bytes()
+        if peer_being_served() is not None:
+            reason, percent = "peer", None
+        else:
+            service = _MODEL_DOWNLOAD_SERVICE
+            try:
+                await service.maybe_emit_required(
+                    name,
+                    purpose=_fetcher.PURPOSE,
+                    consequence_if_declined=_fetcher.CONSEQUENCE_IF_DECLINED,
+                    on_decline="block",
+                    provider_alias=self.alias,
+                )
+            except Exception:
+                logger.warning("could not offer the %s download", name, exc_info=True)
+            status = service.get_status(name)
+            state = status.get("state")
+            reason = state if state in ("downloading", "declined") else "asked"
+            percent = status.get("progress_percent")
+        logger.info("%s[%s]: not started, the %s pin %s is not installed (%s)",
+                    self.ENGINE, self.alias, name, LLAMA_CPP_TAG, reason)
+        raise PinNotInstalledError(refusal_text(name, self.alias, size, reason, percent=percent), name)
 
     # --- the KV ladder --------------------------------------------------------
 

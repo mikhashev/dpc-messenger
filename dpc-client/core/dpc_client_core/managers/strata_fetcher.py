@@ -417,7 +417,6 @@ def install_pin(progress: Optional[Callable[[int, int], None]] = None) -> Path:
             {"tag": STRATA_RELEASE_TAG, "platform": plat, "assets": {row["name"]: row["sha256"]}},
             check=_install_engine,
             progress=progress,
-            temp_prefix="strata-pin-",
         )
         return root
 

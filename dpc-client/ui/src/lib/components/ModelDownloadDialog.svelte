@@ -12,6 +12,10 @@
   export let sizeBytes: number | null = null;
   export let sizeSource: 'measured' | 'hf_api' | null = null;
   export let cachePath: string = '';
+  // Bytes it occupies once unpacked; null = not stated (never read as 0).
+  export let installedBytes: number | null = null;
+  // Free bytes on cachePath's volume; null = not checked.
+  export let freeBytes: number | null = null;
   export let providerAlias: string | null = null;
   export let downloading: boolean = false;
   // From model_download_progress; null until the first report arrives.
@@ -31,6 +35,18 @@
   $: sizeText = sizeBytes == null
     ? 'Size unknown'
     : `~${(sizeBytes / 1e9).toFixed(1)}GB${sizeSource === 'hf_api' ? ' (approximate, from Hugging Face)' : ''}`;
+
+  // The backend refuses a download below (size + installed) x 1.1 free; the
+  // dialog says so first. Unknown free space is never shown as enough.
+  const FREE_SPACE_MARGIN = 1.1;
+  $: neededBytes = !sizeBytes ? null : (sizeBytes + (installedBytes ?? 0)) * FREE_SPACE_MARGIN;
+  $: volume = (cachePath.match(/^[A-Za-z]:/) || [cachePath])[0];
+  $: shortOfSpace = neededBytes != null && freeBytes != null && freeBytes < neededBytes;
+  $: spaceText = [
+    sizeBytes != null ? `downloads ~${gb(sizeBytes)} GB` : null,
+    installedBytes != null ? `occupies ~${gb(installedBytes)} GB` : null,
+    freeBytes != null ? `${gb(freeBytes)} GB free on ${volume}` : 'free space not checked'
+  ].filter(Boolean).join(', ');
 
   function handleDownload() {
     dispatch('download', {
@@ -82,6 +98,7 @@
         <div class="section info-box">
           <p><strong>Download Size:</strong> {sizeText}</p>
           <p><strong>Cache Location:</strong> <code>{cachePath}</code></p>
+          <p class:space-short={shortOfSpace}><strong>Disk Space:</strong> {spaceText}{shortOfSpace ? ' — not enough; free some space first' : ''}</p>
           {#if providerAlias}
             <p><strong>Provider:</strong> {providerAlias}</p>
           {/if}
@@ -128,7 +145,7 @@
         <button
           class="btn-download"
           on:click={handleDownload}
-          disabled={downloading}
+          disabled={downloading || shortOfSpace}
         >
           {downloading ? '⏳ Downloading...' : '📥 Download'}
         </button>
@@ -234,6 +251,10 @@
     margin: 6px 0;
     color: #d0d0d0;
     font-size: 0.9rem;
+  }
+
+  .info-box .space-short {
+    color: #f48771;
   }
 
   .info-box code {

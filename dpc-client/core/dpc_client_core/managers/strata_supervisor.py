@@ -52,7 +52,6 @@ What differs, by ADR-044 point:
 
 import asyncio
 import concurrent.futures
-import contextlib
 import contextvars
 import json
 import logging
@@ -72,26 +71,11 @@ from .strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG, strata_pi
 
 logger = logging.getLogger(__name__)
 
-# ADR-044 point 9: set while a call is served to a peer, holding its node id.
-# A ContextVar because the mark has to reach `ensure_running` and `call_slot`
-# through LLMManager and the provider without a parameter on every signature;
-# it follows the awaits of the task that set it and nothing else.
-_PEER_CALL: contextvars.ContextVar = contextvars.ContextVar("dpc_strata_peer_call", default=None)
-
-
-@contextlib.contextmanager
-def serving_a_peer(peer_id: str):
-    """Mark the calls made inside as served to `peer_id`."""
-    token = _PEER_CALL.set(peer_id or "peer")
-    try:
-        yield
-    finally:
-        _PEER_CALL.reset(token)
-
-
-def peer_being_served() -> Optional[str]:
-    """The peer the current call is served to, or None for the owner's own call."""
-    return _PEER_CALL.get()
+# ADR-044 point 9: the peer mark lives beside the llama-server supervisor, which
+# reads it too; re-exported here for the imports that name this module.
+_PEER_CALL = _base._PEER_CALL
+serving_a_peer = _base.serving_a_peer
+peer_being_served = _base.peer_being_served
 
 
 class PeerCallRefused(LlamaServerError):

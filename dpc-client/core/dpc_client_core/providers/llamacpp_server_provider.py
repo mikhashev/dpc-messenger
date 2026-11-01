@@ -38,7 +38,7 @@ from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_ba
 from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
-from ..managers.llama_server_supervisor import CardHeldError, LlamaServerSupervisor, card_holders
+from ..managers.llama_server_supervisor import CardHeldError, LlamaServerSupervisor, PinNotInstalledError, card_holders
 from ..managers.llama_server_supervisor import gguf_effort_dictionary, gguf_integer_keys
 from ..managers.llama_server_supervisor import on_the_owner_loop
 
@@ -581,8 +581,9 @@ class LlamaServerProvider(DeepSeekProvider):
         unknown effort word arrives as HTTP 500 with a deterministic jinja
         exception, and retrying it just burns the backoff budget to hear the
         same refusal again. A card held by the other engine is the same: it
-        stays held until a person acts (ADR-044 point 4)."""
-        if isinstance(error, CardHeldError):
+        stays held until a person acts (ADR-044 point 4), and so is a pin that
+        is not installed: only the owner's download brings it."""
+        if isinstance(error, (CardHeldError, PinNotInstalledError)):
             return False
         code = cls._error_status_code(error)
         if code == 500:

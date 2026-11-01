@@ -233,7 +233,7 @@ class TestACancelledLlamaServerStart:
         monkeypatch.setattr(base_mod, "DPC_HOME", tmp_path)
         # The KV-fit memo lives beside the pins: keep it out of the real ~/.dpc.
         monkeypatch.setattr(fetcher_mod, "DPC_HOME", tmp_path)
-        monkeypatch.setattr(base_mod, "ensure_binary", lambda config: Path("C:/bin/llama-server.exe"))
+        monkeypatch.setattr(base_mod, "resolve_binary", lambda config: Path("C:/bin/llama-server.exe"))
         monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: None)
         monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: None)
         sup = LlamaServerSupervisor("local_qwen38", {"gguf_path": "D:/m.gguf", "start_timeout_s": 30.0})
