@@ -8411,6 +8411,7 @@ class CoreService:
             return self._unblock_first(target_node_id)
         await self.p2p_coordinator.connect_via_uri(uri)
 
+    @slow_command
     async def test_port(self, uri: str) -> dict:
         """
         Test port connectivity before attempting full connection.
