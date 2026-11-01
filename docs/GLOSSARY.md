@@ -92,7 +92,7 @@ has, grep before you coin.
 
 | Term | Met in | Meaning | Defined in |
 |---|---|---|---|
-| **node** | code, rules, screen, wire | One running D-PC client with its own cryptographic identity: a human and their agents on one machine. Not the XML or DOM sense of the word used in other codebases. | [specs/dptp_v1.md §4](../specs/dptp_v1.md#4-node-identity-system) |
+| **node** | code, rules, screen, wire | One running D-PC client with its own cryptographic identity: a human and their agents on one machine. A container does not change that: one machine runs one node, and a container is a way to run it, never a way to run several (Mike's call, 2026-11-01). Not the XML or DOM sense of the word used in other codebases. | [specs/dptp_v1.md §4](../specs/dptp_v1.md#4-node-identity-system) |
 | **node_id** | code, rules, screen, wire | `dpc-node-` plus the first 32 hex characters of the SHA-256 of the node's RSA public key; the certificate's Common Name and the key to everything that names a node. | [specs/dptp_v1.md §4](../specs/dptp_v1.md#node-id-format) |
 | **peer** | code, rules, screen, wire | Another node this node talks to over DPTP; its certificate is stored only after its key re-hashes to its claimed `node_id`. | [specs/dptp_v1.md §4](../specs/dptp_v1.md#identity-storage) |
 | **DPTP** | code, rules, wire | D-PC Transfer Protocol: a 10-byte ASCII length header plus a JSON payload, carried over TLS, WebRTC data channels or DTLS. | [specs/dptp_v1.md §1–2](../specs/dptp_v1.md#1-overview) |
