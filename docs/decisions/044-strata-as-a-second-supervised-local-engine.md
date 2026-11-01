@@ -423,8 +423,8 @@ nothing above.)*
   its `components/` folder; LOCALAPPDATA is not redirected for the launcher, so its
   leftover cleanup is shared with a checkout's. The base config is read as before and,
   before any typed field, `StrataSupervisor._base_config_for_the_pin` makes `exe`
-  `component:strata-engine`, the vision exe the pinned engine folder's
-  `strata-vision.exe`, `cwd` the Control root, drops `lib_dirs`, and moves every absolute
+  `component:strata-engine`, the vision exe the reader the base names (`strata-vision`,
+  `.exe` on Windows, `-hip` on AMD) in the pinned engine folder, `cwd` the Control root, drops `lib_dirs`, and moves every absolute
   path inside the base's original `cwd` (the checkout: `args` tokens, the file part of
   `--control-vector-scaled`, `tokenizer`, the vision `mmproj` and `model`) to the same
   place under the Control root, refusing one that is not there. "Inside" is a path

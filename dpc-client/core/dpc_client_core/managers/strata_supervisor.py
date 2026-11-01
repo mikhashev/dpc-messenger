@@ -1096,7 +1096,11 @@ class StrataSupervisor(LlamaServerSupervisor):
         if block is not None:
             folder = strata_fetcher.engine_folder(root)
             if folder is not None:
-                block["exe"] = str(folder / "strata-vision.exe")
+                # The base's own reader name (strata-vision, .exe on Windows, -hip on AMD),
+                # in the pinned engine folder.
+                default = "strata-vision.exe" if sys.platform == "win32" else "strata-vision"
+                name = Path(str(block.get("exe") or default)).name or default
+                block["exe"] = str(folder / name)
             out["vision"] = block
         out["cwd"] = str(root)
         out.pop("lib_dirs", None)

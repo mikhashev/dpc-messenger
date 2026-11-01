@@ -180,6 +180,17 @@ class TestTheRuntimeEnvironment:
 
 
 class TestTheBaseConfigForThePin:
+    @pytest.mark.parametrize("reader", ["strata-vision", "strata-vision-hip.exe"])
+    def test_the_reader_keeps_the_bases_own_name_in_the_engine_folder(self, world, reader):
+        # Off Windows the reader has no .exe, and an AMD base names the HIP reader.
+        native = str(world.data / "models" / "IQ3_XXS" / "flash-next-00001-of-00002.gguf")
+        world.write_base(vision={"exe": str(world.checkout / "engine" / reader),
+                                 "mmproj": str(world.data / "models" / "mmproj-BF16.gguf"),
+                                 "model": native, "gpu": True})
+        root = world.control()
+        cfg = world.sup().build_start_config(5000)
+        assert cfg["vision"]["exe"] == str(root / "components" / "engine" / FOLDER / reader)
+
     def test_the_owners_base_moves_exactly_what_lies_in_the_checkout(self, world):
         root = world.control()
         cfg = world.sup().build_start_config(5000)
