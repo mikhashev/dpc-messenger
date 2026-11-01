@@ -174,6 +174,13 @@ _UPDATER_EXIT_MEANING = {5: "refused", 6: "failed", 7: "an engine is serving"}
 # Strata's own free-space refusal (updater.py `_free_space_check`, exit 6): the exact
 # package's download plus its unpacked size, checked before it downloads.
 _NO_SPACE = re.compile(r"not enough free space on (?P<drive>.+?): (?P<free>\d+) MiB free, (?P<needed>\d+) MiB needed")
+# What to re-read when the pin moves. Each of these reads Strata's own words, which are
+# not a contract and can change between releases:
+# - the `_NO_SPACE` message above (updater.py `_free_space_check`);
+# - setup.py's progress lines, parsed in the install step that follows this one (coming);
+# - `strata_models_probe.py`'s use of `Strata(...)`, `hardware()` and the `model_table()`
+#   fields in tools/strata_mcp.py (`installed`, `on_this_pc`, `download_gb`, `ram_needed_gb`,
+#   ...): Strata's internal API, passed through by `list_strata_models` as they are.
 _INSTALL_LOCK = threading.Lock()
 # The alias of a live Strata launcher running DPC's own install, or None; set by
 # strata_supervisor, which owns the launchers. Replacing the install under one is refused.

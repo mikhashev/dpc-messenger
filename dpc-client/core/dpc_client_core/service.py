@@ -10958,6 +10958,71 @@ class CoreService:
             "run_configs": run_configs,
         }
 
+    @slow_command
+    async def list_strata_models(self) -> Dict[str, Any]:
+        """The Strata models that can be installed, with Strata's own verdict for this PC.
+
+        `families` is the `model_table` of the pinned Strata Control, passed through as it
+        is (its field names, its GB units, its `on_this_pc` words); `on_this_pc` is
+        advice and gates nothing. It runs `managers/strata_models_probe.py` under
+        Control's own Python in a process of its own, with no `STRATA_*` of ours, and
+        writes nothing: `installed` is read from `<model files folder>/strata/run-configs`,
+        which is not created. Control missing, or the probe failing, is an error reply
+        naming the reason.
+        """
+        import os
+        from .dpc_agent.tools import process as _process
+        from .managers import strata_fetcher
+
+        folder = self.settings.get_model_files_dir()
+        probe = Path(__file__).resolve().parent / "managers" / "strata_models_probe.py"
+        try:
+            root = strata_fetcher.install_root()
+            python = strata_fetcher.control_python_path(root)
+            if not python.is_file() or not (root / "tools" / "strata_mcp.py").is_file():
+                return {"status": "error", "message": (
+                    f"Strata Control {strata_fetcher.STRATA_RELEASE_TAG} is not installed at {root}; "
+                    "download it first, then the list of Strata models can be read")}
+            run_configs = folder / "strata" / "run-configs"
+            # No STRATA_* of ours. Two are set on purpose: the engine folder is DPC's own
+            # (the way the launcher is started), and the settings file is one that does
+            # not exist, so the owner's own Strata data folder does not move the disk
+            # figure, which is then the free space where the model files folder is.
+            env = {
+                k: v for k, v in os.environ.items()
+                if not k.upper().startswith("STRATA_") and k.upper() not in ("PYTHONHOME", "PYTHONPATH")
+            }
+            env.update({
+                "STRATA_COMPONENTS_DIR": str(strata_fetcher.components_dir(root)),
+                "STRATA_SETTINGS_FILE": str(folder / "strata" / "no-strata-settings.json"),
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONUTF8": "1",
+                "PYTHONIOENCODING": "utf-8",
+            })
+            run = await asyncio.to_thread(
+                _process.run_supervised,
+                [str(python), "-I", str(probe), str(root), str(run_configs)],
+                launcher="strata",
+                launcher_kind="subsystem",
+                timeout=120,
+                cwd=str(root),
+                env=env,
+            )
+        except Exception as e:
+            logger.error("list_strata_models failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e) or type(e).__name__}
+        if run.timed_out:
+            return {"status": "error", "message": "reading Strata's model list ran past 120 s and was stopped"}
+        if run.exceeded_mb:
+            return {"status": "error", "message": (
+                f"reading Strata's model list went over the {run.ceiling_mb} MB ceiling and was stopped")}
+        report = strata_fetcher._last_json_line(run.stdout) if run.returncode == 0 else None
+        if not isinstance(report, dict) or not isinstance(report.get("families"), list):
+            tail = (run.stderr or "").strip()[-600:] or "no message"
+            return {"status": "error", "message": (
+                f"Strata's model list could not be read (exit {run.returncode}): {tail}")}
+        return {"status": "success", "families": report["families"]}
+
     async def list_processes(self, since: str = None, until: str = None) -> Dict[str, Any]:
         """What runs now and what ended recently (ADR-046 point 8): the process
         registry's kept entries with `commit_mb` read at this request, the daily
