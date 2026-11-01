@@ -73,6 +73,24 @@ def _no_card_claims_cross_tests():
     llama_server_supervisor._CARD_CLAIMS.clear()
 
 
+@pytest.fixture(autouse=True)
+def _engine_pins_in_tmp(tmp_path, monkeypatch):
+    """A passed start writes its pin's marker and may prune the older pins (B2 step 3).
+    The pins folders default to this machine's ~/.dpc/bin, so every test gets its own
+    under tmp_path, and starts with no rollback or pass recorded by another test."""
+    from dpc_client_core.managers import (
+        llama_server_fetcher, llama_server_supervisor, local_engine_pin_fetcher, strata_fetcher,
+    )
+
+    for mod in (local_engine_pin_fetcher, llama_server_fetcher, strata_fetcher):
+        monkeypatch.setattr(mod, "DPC_HOME", tmp_path / "dpc-pins-home")
+    llama_server_supervisor._ROLLBACKS.clear()
+    llama_server_supervisor._PASSES_NOTED.clear()
+    yield
+    llama_server_supervisor._ROLLBACKS.clear()
+    llama_server_supervisor._PASSES_NOTED.clear()
+
+
 class ConnectedUi:
     """A UI client at the other end of `local_api`, recording what it is sent.
 

@@ -32,8 +32,9 @@ import struct
 import subprocess
 import sys
 import time
+import weakref
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, NoReturn, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, NoReturn, Optional, Tuple
 
 from .. import process_registry as _procreg
 from . import llama_server_fetcher as _fetcher
@@ -44,8 +45,19 @@ from .llama_server_fetcher import (
     install_pin,
     pins_dir,
     resolve_binary,
+    server_binary_name,
 )
-from .local_engine_pin_fetcher import refusal_text
+from .local_engine_pin_fetcher import (
+    _is_pin,
+    _same_path,
+    _start_passed_at,
+    installed_pins,
+    note_start_passed,
+    prune_pins,
+    read_marker,
+    refusal_text,
+    retained_pin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +258,95 @@ class PinNotInstalledError(LlamaServerError):
     def __init__(self, message: str, download_name: str):
         super().__init__(message)
         self.download_name = download_name
+
+
+# --- the retained pin (B2 step 3) --------------------------------------------
+# `pin` is the constant a build names (LLAMA_CPP_TAG, STRATA_RELEASE_TAG); the
+# running pin is the folder a child was actually started from (`_pin_root`), which
+# is the retained pin while the new one is not downloaded, or after it failed its
+# first start. The rollback is DPC's own rule, not Strata's `--rollback-engine`.
+
+
+def _build_fault(error: BaseException) -> BaseException:
+    """Mark `error` as the build's own failure at start (the child died or never
+    answered /health or /props, the version check refused, the smoke failed): only
+    such a failure of a new pin's first start rolls back to the retained pin."""
+    error._build_fault = True
+    return error
+
+
+# The pin a first start rolled back from -> {"engine", "from", "to", "reason", "at",
+# "to_root"}, keyed by `_same_path` of the failed root. In memory: later starts run
+# `to_root` until a backend restart, or Strata's Reset (`reset_failure`).
+_ROLLBACKS: Dict[str, Dict[str, Any]] = {}
+# Roots whose passed start this process has already recorded (and pruned after).
+_PASSES_NOTED: set = set()
+# Every supervisor made, for the roots that must survive a prune.
+_SUPERVISORS: "weakref.WeakSet[LlamaServerSupervisor]" = weakref.WeakSet()
+
+
+def _roots_in_use() -> List[Path]:
+    """Pin roots a live child runs from, and the folder of every configured binary."""
+    roots: List[Path] = []
+    for sup in list(_SUPERVISORS):
+        proc = sup._proc
+        if sup._pin_root is not None and proc is not None and proc.returncode is None:
+            roots.append(sup._pin_root)
+        configured = sup.config.get("binary_path")
+        if configured:
+            roots.append(Path(str(configured)).parent)
+    return roots
+
+
+async def _toast(title: str, message: str) -> None:
+    """The existing `error_toast` event, through the local API the consent service
+    holds (bound by the service); nothing when none is bound."""
+    api = getattr(_MODEL_DOWNLOAD_SERVICE, "local_api", None)
+    if api is None:
+        return
+    try:
+        await api.broadcast_event("error_toast", {"title": title, "message": message, "duration": 10000})
+    except Exception:
+        logger.debug("broadcast_event(error_toast) failed", exc_info=True)
+
+
+def _pins_of(fetcher: Any, tag: str, engine: str) -> Dict[str, Any]:
+    """One engine's block of `local_engine_status` `pins`. Reads the pin markers: run it in a thread.
+    `rolled_back_to` is the latest rollback on this engine and `running_pin` one live
+    child's folder, whichever alias: with two aliases on one engine they name one of them."""
+    folder = fetcher.pins_dir()
+    retained = retained_pin(folder, tag)
+    running = next((
+        sup._pin_root.parent.name for sup in list(_SUPERVISORS)
+        if sup.ENGINE == engine and sup._pin_root is not None
+        and sup._proc is not None and sup._proc.returncode is None
+    ), None)
+    rolled = [r for r in _ROLLBACKS.values() if r["engine"] == engine]
+    last = max(rolled, key=lambda r: r["at"]) if rolled else None
+    installed = []
+    for p in installed_pins(folder):
+        when = _start_passed_at(p["marker"])
+        installed.append({
+            "tag": p["tag"], "platform": p["platform"],
+            "start_passed_at": when.isoformat() if when else None,
+        })
+    return {
+        "pin": tag,
+        "retained_pin": retained["tag"] if retained else None,
+        "running_pin": running,
+        "rolled_back_to": {k: last[k] for k in ("from", "to", "reason", "at")} if last else None,
+        "installed_pins": installed,
+    }
+
+
+def _pins_status() -> Dict[str, Any]:
+    """`local_engine_status` `pins`: per engine, its installed pins and which runs."""
+    from . import strata_fetcher
+
+    return {
+        _fetcher.DOWNLOAD_NAME: _pins_of(_fetcher, LLAMA_CPP_TAG, "llama-server"),
+        strata_fetcher.DOWNLOAD_NAME: _pins_of(strata_fetcher, strata_fetcher.STRATA_RELEASE_TAG, "strata"),
+    }
 
 
 # Supervisors holding the card, from the decision to start a child until its stop
@@ -855,6 +956,12 @@ class LlamaServerSupervisor:
         # the rewind that lets a straddling anchor complete cannot also make a
         # whole one arrive twice.
         self._reported_refusals: set = set()
+        # The pin folder the child runs from (its running pin), or None for a
+        # configured binary or install; set by each start.
+        self._pin_root: Optional[Path] = None
+        # The prune after the current pin's first pass this process, while it runs.
+        self._prune_task: Optional["asyncio.Future"] = None
+        _SUPERVISORS.add(self)
 
     # --- command assembly, pure and table-testable -------------------------
 
@@ -1005,13 +1112,30 @@ class LlamaServerSupervisor:
                 return self.props
             # Before the card is claimed, and never a fetch on this loop: a missing
             # pin is offered to the owner and refused, or installed in a thread when
-            # no consent service is bound.
+            # no consent service is bound. A retained pin that passed a start runs
+            # meanwhile (Mike's call, 2026-11-01): the owner is asked with "degrade".
+            self._pin_root = None
             binary = await asyncio.to_thread(resolve_binary, self.config)
-            if binary is None:
-                if peer_being_served() is None and _MODEL_DOWNLOAD_SERVICE is None:
-                    binary = await asyncio.to_thread(install_pin)
-                else:
-                    await self._refuse_missing_pin()
+            fallback: Optional[Path] = None
+            if not self.config.get("binary_path"):
+                plan = await asyncio.to_thread(
+                    self._plan_pin_start, Path(binary).parent if binary is not None else None
+                )
+                if binary is None and plan["start"] is not None and not (
+                    peer_being_served() is None and _MODEL_DOWNLOAD_SERVICE is None
+                ):
+                    if peer_being_served() is None:
+                        await self._offer_new_pin(_fetcher, plan["start"])
+                elif binary is None:
+                    if peer_being_served() is None and _MODEL_DOWNLOAD_SERVICE is None:
+                        binary = await asyncio.to_thread(install_pin)
+                        plan = {"start": Path(binary).parent, "fallback": plan["retained"]}
+                    else:
+                        await self._refuse_missing_pin()
+                fallback = plan["fallback"]
+                if plan["start"] is not None and _is_pin(plan["start"]):
+                    self._pin_root = plan["start"]
+                    binary = plan["start"] / server_binary_name()
             if self._draining:
                 raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
             await self._clear_unfinished_start()
@@ -1021,13 +1145,163 @@ class LlamaServerSupervisor:
             self._claim_card()
             try:
                 self.port = self.port or _free_port()
-                if self.config.get("cache_type_k") is not None or self.config.get("cache_type_v") is not None:
-                    self._warn_if_explicit_type_exceeds_budget()
-                    return await self._launch(binary)
-                return await self._launch_auto_kv(binary)
+
+                async def launch() -> Dict[str, Any]:
+                    child = self._pin_root / server_binary_name() if self._pin_root is not None else binary
+                    if self.config.get("cache_type_k") is not None or self.config.get("cache_type_v") is not None:
+                        self._warn_if_explicit_type_exceeds_budget()
+                        return await self._launch(child)
+                    return await self._launch_auto_kv(child)
+
+                return await self._launch_pin(launch, fallback)
             except BaseException:
                 self._release_card_unless_live()
                 raise
+
+    # --- the running pin: retained, rolled back to, passed (B2 step 3) ---------
+
+    def _pin_fetcher(self) -> Any:
+        return _fetcher
+
+    def _pin_tag(self) -> str:
+        return LLAMA_CPP_TAG
+
+    def _pin_usable(self, root: Path) -> bool:
+        """A pin other than the current one this start may run (no network)."""
+        return _is_pin(root) and (root / server_binary_name()).is_file()
+
+    def _plan_pin_start(self, current: Optional[Path]) -> Dict[str, Optional[Path]]:
+        """What a pin-mode start runs. `current` is the current pin's root when it is
+        installed. Returns {"start", "retained", "fallback"}: the root to start (the
+        retained pin while the current is missing or after a rollback), the retained
+        pin, and the root a failed first start rolls back to — only the retained pin,
+        never an older one, and only for a pin that never passed a start. Blocking."""
+        found = retained_pin(self._pin_fetcher().pins_dir(), self._pin_tag())
+        retained = found["root"] if found and self._pin_usable(found["root"]) else None
+        if current is None:
+            return {"start": retained, "retained": retained, "fallback": None}
+        record = _ROLLBACKS.get(_same_path(current))
+        if record is not None and self._pin_usable(record["to_root"]):
+            return {"start": record["to_root"], "retained": retained, "fallback": None}
+        marker = read_marker(current) or {}
+        first = _is_pin(current) and _start_passed_at(marker) is None
+        return {"start": current, "retained": retained, "fallback": retained if first else None}
+
+    async def _offer_new_pin(self, fetcher: Any, running: Path) -> None:
+        """Ask the owner for the current pin while the retained one runs: never a
+        refusal, so the dialog's decline only degrades (Mike's call, 2026-11-01)."""
+        logger.info("%s[%s]: the pin %s is not installed; running the retained pin %s meanwhile",
+                    self.ENGINE, self.alias, self._pin_tag(), running.parent.name)
+        service = _MODEL_DOWNLOAD_SERVICE
+        if service is None:
+            return
+        try:
+            await service.maybe_emit_required(
+                fetcher.DOWNLOAD_NAME,
+                purpose=fetcher.PURPOSE,
+                consequence_if_declined=(
+                    f"{self.ENGINE} keeps running the retained pin {running.parent.name}, which "
+                    f"passed a start on this node, instead of {self._pin_tag()}."
+                ),
+                on_decline="degrade",
+                provider_alias=self.alias,
+            )
+        except Exception:
+            logger.warning("could not offer the %s download", fetcher.DOWNLOAD_NAME, exc_info=True)
+
+    def _fault_is_oom(self, error: BaseException) -> bool:
+        return _looks_like_oom(getattr(error, "log_lines", None) or [])
+
+    def _rollback_due(self, error: BaseException) -> bool:
+        """Whether `error` is the build's fault, and not one of the failures a
+        retained pin would meet too: the card held, an admission refusal, a config
+        error, out of memory, a cancellation (not an Exception) or a drain."""
+        if not getattr(error, "_build_fault", False):
+            return False
+        if isinstance(error, (CardHeldError, PinNotInstalledError)):
+            return False
+        return not self._fault_is_oom(error) and not self._draining
+
+    def _rollback_lasts(self) -> str:
+        return "until the backend restarts"
+
+    async def _roll_back(self, error: BaseException, to_root: Path) -> None:
+        """Record the rollback, say it once (ERROR log, `error_toast`), switch to `to_root`."""
+        from_root = self._pin_root
+        reason = (str(error).splitlines() or [type(error).__name__])[0][:300]
+        record = {
+            "engine": self.ENGINE, "from": from_root.parent.name, "to": to_root.parent.name,
+            "reason": reason, "at": time.time(), "to_root": to_root,
+        }
+        _ROLLBACKS[_same_path(from_root)] = record
+        lasts = self._rollback_lasts()
+        logger.error(
+            "%s[%s]: the new pin %s failed its first start (%s); starting the retained pin %s "
+            "once instead, and later starts run it %s",
+            self.ENGINE, self.alias, record["from"], reason, record["to"], lasts,
+        )
+        await _toast(
+            "Local engine rolled back",
+            f"{self.ENGINE} pin {record['from']} failed its first start for '{self.alias}': {reason}. "
+            f"Running the retained pin {record['to']} instead, {lasts}.",
+        )
+        self._pin_root = to_root
+
+    async def _launch_pin(
+        self, launch: Callable[[], Awaitable[Dict[str, Any]]], fallback: Optional[Path]
+    ) -> Dict[str, Any]:
+        """`launch()`, and once more on `fallback` when a new pin's first start failed
+        for the build's fault; then the pass is recorded. Under the start lock, with
+        the card claimed."""
+        try:
+            props = await launch()
+        except Exception as e:
+            if fallback is None or self._pin_root is None or not self._rollback_due(e):
+                raise
+            await self._roll_back(e, fallback)
+            self._release_card_unless_live()
+            if self._draining:
+                raise LlamaServerError(f"{self.ENGINE}[{self.alias}] is draining; new calls refused") from e
+            self._claim_card()
+            props = await launch()
+        await self._note_pass()
+        return props
+
+    def _is_current_pin(self, root: Path) -> bool:
+        try:
+            return _same_path(root) == _same_path(self._pin_fetcher().install_root())
+        except ValueError:
+            return False
+
+    async def _note_pass(self) -> None:
+        """Mark the running pin's passed start, once per root per process, off the
+        loop; after the current pin's, prune the others in a thread."""
+        root = self._pin_root
+        if root is None or _same_path(root) in _PASSES_NOTED:
+            return
+        _PASSES_NOTED.add(_same_path(root))
+        try:
+            await asyncio.to_thread(note_start_passed, root)
+        except Exception as e:
+            logger.warning("%s[%s]: could not record the passed start in %s: %s", self.ENGINE, self.alias, root, e)
+            return
+        if self._is_current_pin(root):
+            self._prune_task = asyncio.ensure_future(asyncio.to_thread(self._prune_after_pass, root))
+
+    def _prune_after_pass(self, current: Path) -> List[Dict[str, Any]]:
+        """Keep the current pin and the retained one; remove the other pins. Nothing
+        goes while no other pin has passed a start: the old pins wait for a retained
+        one to exist (Mike's call, 2026-11-01). Blocking; never raises."""
+        try:
+            folder = self._pin_fetcher().pins_dir()
+            retained = retained_pin(folder, self._pin_tag())
+            if retained is None:
+                logger.info("%s: no other pin has passed a start; every older pin is kept", self.ENGINE)
+                return []
+            return prune_pins(folder, keep=[current, retained["root"]], in_use=_roots_in_use())
+        except Exception:
+            logger.warning("%s: pruning the older pins failed", self.ENGINE, exc_info=True)
+            return []
 
     async def _refuse_missing_pin(
         self, fetcher: Any = None, tag: str = LLAMA_CPP_TAG, for_peer: Optional[str] = None,
@@ -1047,7 +1321,7 @@ class LlamaServerSupervisor:
             size = fetcher.size_bytes()
             at_most = getattr(fetcher, "SIZE_SOURCE", None) is not None
         if for_peer is not None or peer_being_served() is not None:
-            reason, percent = "peer", None
+            reason, percent, error = "peer", None, None
         else:
             service = _MODEL_DOWNLOAD_SERVICE
             try:
@@ -1062,12 +1336,14 @@ class LlamaServerSupervisor:
                 logger.warning("could not offer the %s download", name, exc_info=True)
             status = service.get_status(name)
             state = status.get("state")
-            reason = state if state in ("downloading", "declined") else "asked"
+            reason = state if state in ("downloading", "declined", "failed") else "asked"
             percent = status.get("progress_percent")
+            error = status.get("error")
         logger.info("%s[%s]: not started, the %s pin %s is not installed (%s)",
                     self.ENGINE, self.alias, name, tag, reason)
         raise PinNotInstalledError(
-            refusal_text(name, self.alias, size, reason, percent=percent, at_most=at_most), name
+            refusal_text(name, self.alias, size, reason, percent=percent, at_most=at_most,
+                         error=error if reason == "failed" else None), name
         )
 
     # --- the KV ladder --------------------------------------------------------
@@ -1078,7 +1354,7 @@ class LlamaServerSupervisor:
         path with size and mtime, so a rebuild in place re-runs the ladder once."""
         configured = self.config.get("binary_path")
         if not configured:
-            return LLAMA_CPP_TAG
+            return self._pin_root.parent.name if self._pin_root is not None else LLAMA_CPP_TAG
         path = Path(configured).resolve()
         try:
             st = path.stat()
@@ -1334,9 +1610,13 @@ class LlamaServerSupervisor:
         try:
             await self._wait_healthy()
             self._answered_by(proc, "/health")
-            props = await self._get("/props")
+            try:
+                props = await self._get("/props")
+            except Exception as e:
+                raise _build_fault(e)
             _reraise_a_swallowed_cancel()
             self._answered_by(proc, "/props")
+            self._check_build_info(props)
             self.props = props
             return self.props
         except BaseException:
@@ -1345,6 +1625,29 @@ class LlamaServerSupervisor:
             # the child running with no props and nobody holding it.
             await self._stop_the_spawned(proc)
             raise
+
+    def _check_build_info(self, props: Any) -> None:
+        """llama.cpp's version check (Mike's call, 2026-11-01): the running pin's build
+        number is a whole token of `/props` `build_info` (`b11669`, `build 11669`); a
+        configured binary is never checked. The raw text is logged on every start."""
+        build = props.get("build_info") if isinstance(props, dict) else None
+        logger.info("%s[%s]: /props build_info %r", self.ENGINE, self.alias, build)
+        root = self._pin_root
+        if root is None:
+            return
+        tag = root.parent.name
+        number = tag[1:] if tag[:1] == "b" and tag[1:].isdigit() else None
+        if number is None:
+            logger.warning("%s[%s]: pin tag %s carries no build number; build_info not checked",
+                           self.ENGINE, self.alias, tag)
+            return
+        if isinstance(build, str) and re.search(rf"(?<![0-9A-Za-z])b?{number}(?![0-9A-Za-z])", build):
+            return
+        raise _build_fault(LlamaServerError(
+            f"{self.ENGINE}[{self.alias}]: /props build_info {build!r} does not name build "
+            f"{number}, the pin {tag} this child was started from",
+            self.tail_log(),
+        ))
 
     def _answered_by(self, proc: Any, path: str) -> None:
         """Refuse an answer `proc` cannot have given: /health and /props are read
@@ -1501,21 +1804,21 @@ class LlamaServerSupervisor:
         while time.monotonic() < deadline:
             if self._proc and self._proc.returncode is not None:
                 self._end_child(self._proc)
-                raise LlamaServerError(
+                raise _build_fault(LlamaServerError(
                     f"{self.ENGINE}[{self.alias}] exited with {self._proc.returncode} before "
                     f"becoming healthy",
                     self.tail_log(),
-                )
+                ))
             healthy = await self._health_ok()
             _reraise_a_swallowed_cancel()
             if healthy:
                 return
             await asyncio.sleep(0.5)
-        raise LlamaServerError(
+        raise _build_fault(LlamaServerError(
             f"{self.ENGINE}[{self.alias}] did not become healthy within "
             f"{self.config['start_timeout_s']}s",
             self.tail_log(),
-        )
+        ))
 
     async def _health_ok(self) -> bool:
         try:

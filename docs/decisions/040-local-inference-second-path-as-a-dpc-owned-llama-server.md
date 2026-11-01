@@ -1238,3 +1238,27 @@ record; this note says what it changes here and what it leaves.)*
   reason) is unchanged and reads the same facts.
 - **Not changed:** residency, the admission arithmetic, the card-holder check, pinned
   builds. This note adds no figure.
+
+## Amendment, 2026-11-01 — a version check, the retained pin and the rollback (B2, step 3)
+
+Mike's answers to the step-3 questions, agreed in the DPC Project chat, 2026-11-01; the
+shared rules are written out in ADR-044's amendment of the same date.
+
+- **A version check.** After /props, the running pin's build number must be a whole token
+  of `/props` `build_info` (`b11669` or `build 11669`; `b116690` is not). A configured
+  `binary_path` is never checked, nor is a pin whose tag carries no build number (a
+  warning says so). Reaching /health and /props is the start smoke; no
+  completion is sent. The raw `build_info` is logged at INFO on every start, because its
+  exact text on b11669 has not been read yet (the binary's `--version` prints
+  `version: 0.7.0-dev (build 11669, commit 620d2225c)`).
+- **The retained pin and the rollback** follow ADR-044's amendment: a passed start writes
+  `start_passed_at` into the pin's marker; a pin not downloaded yet runs the retained one
+  while the owner is asked with `degrade` (a peer's call runs it without asking); a first
+  start that fails for the build's fault — the child died or never answered /health or
+  /props, or the version check refused — falls back once to the retained pin. llama.cpp's
+  exclusions add an out-of-memory start (`_looks_like_oom`), which a retained pin would meet
+  too. There is no Reset for llama-server: a rollback lasts until the backend restarts.
+- **Retention** after the current pin's first pass this process keeps it and the retained
+  pin under `~/.dpc/bin/llama.cpp/` and removes the other marker-carrying pins; `b10684`
+  (no marker) and `prism-…` are never touched. The KV-fit memo's key carries the running
+  pin's tag, so a rung that fit one build is no word about another.

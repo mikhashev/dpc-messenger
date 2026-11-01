@@ -51,11 +51,14 @@ def refusal_text(
     *,
     percent: Optional[float] = None,
     at_most: bool = False,
+    error: Optional[str] = None,
 ) -> str:
     """The sentence a start returns instead of fetching a missing pin, after the
-    pattern of `camoufox_binary.refusal_text`. `reason` is `asked`, `downloading`,
-    `declined` or `peer`; `at_most` when `size_bytes` is an upper bound. It names
-    the app, never a dialog: it reaches Telegram and peers too."""
+    pattern of `camoufox_binary.refusal_text` — the pattern, not its signature: the
+    browser tool calls that one with its own arguments. `reason` is `asked`, `downloading`,
+    `declined`, `failed` (with the download's `error`) or `peer`; `at_most` when
+    `size_bytes` is an upper bound. It names the app, never a dialog: it reaches
+    Telegram and peers too."""
     size = (f"{'up to' if at_most else 'about'} {size_bytes / 1e9:.1f} GB"
             if size_bytes else "unknown size")
     head = (
@@ -69,6 +72,11 @@ def refusal_text(
         tail = (
             f" It is a one-time download of {size}, which the owner has declined; "
             f"it can be started from the D-PC Messenger app."
+        )
+    elif reason == "failed":
+        tail = (
+            f" It is a one-time download of {size}; the download failed: "
+            f"{error or 'no reason recorded'}; it can be started again from the D-PC Messenger app."
         )
     elif reason == "peer":
         tail = (
@@ -202,6 +210,13 @@ def install_with_staging_swap(
 # Each engine keeps `<pins_dir>/<tag>/<platform>/`. A folder is a pin only when its marker
 # names that same tag and platform; anything else there (a hand-made build, a folder from
 # before markers, a `.staging`, `.download` or `.old` leftover) is not DPC's to run or to remove.
+
+
+def _is_pin(root: Path) -> bool:
+    """Whether `root` is `<tag>/<platform>/` with a marker naming both, as `installed_pins` reads it."""
+    root = Path(root)
+    marker = read_marker(root)
+    return bool(marker) and marker.get("tag") == root.parent.name and marker.get("platform") == root.name
 
 
 def installed_pins(pins_dir: Path) -> List[Dict[str, Any]]:

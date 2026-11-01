@@ -497,3 +497,44 @@ step-2 rule "the fetch comes before the card".
   for an empty choice the largest and smallest of the platform. DPC refuses a download only
   when even the smallest package cannot fit; Strata's own check, exact and before its
   download, reports an exact shortfall (exit 6).
+
+## Amendment, 2026-11-01 — the retained pin and the rollback (B2, step 3)
+
+Mike's answers to the step-3 questions, agreed in the DPC Project chat, 2026-11-01. The same
+rules hold for llama-server (ADR-040, amendment of the same date); what is Strata's own is
+named here.
+
+- **The retained pin.** No second constant: the retained pin is the other installed pin
+  (a folder whose `.dpc-pin.json` names its own tag and platform) whose marker carries the
+  newest `start_passed_at`. That field is written, atomically and off the loop, at the first
+  start of a pin that passed (here: the version check and the start smoke), once per pin
+  folder per backend process. A retained Strata pin is run on its marker's word — the engine
+  manifest's bytes as the marker recorded them, its id, version and platform, the alias's
+  `strata_engine_backend`, one engine of its family — and is not re-signed, since the key may
+  move with a bump. Its version check compares with its own marker's engine version.
+- **A pin bumped but not downloaded yet.** The owner's start runs the retained pin and asks
+  for the new one with `on_decline` `degrade`, never refusing; a start begun for a peer may run
+  the retained pin too, and never asks or fetches. With no retained pin the step-3 consent
+  refusal stands.
+- **Rollback once.** A first start of the current pin (no `start_passed_at`) that fails for the
+  build's fault — the launcher died or never answered /health or /props, the version check
+  refused, the smoke failed — with a retained pin present, falls back once inside the same
+  `ensure_running`: the refusal's latched `failure` is cleared, one ERROR line and one
+  `error_toast` say so, and the retained pin is started. If it fails too, the start latches
+  as before. Later starts go straight to the retained pin until the alias's Reset
+  (`reset_failure`) or a backend restart; the record is in memory. Never to an older pin, and
+  not for a card held by the other engine, an admission refusal before the spawn, a config
+  error, a cancellation, a drain, or a pin that has ever passed. This is DPC's rule, not
+  Strata's `--rollback-engine`, and Strata's `.updates/state.json` is still never written.
+- **Retention.** After the current pin's pass, the other marker-carrying pins are removed in a
+  thread, keeping the retained one, skipping a folder a live child runs from or a configured
+  binary sits in, each removal logged at INFO with its size. Nothing is removed while no other
+  pin has passed: the pins installed before `start_passed_at` existed stay until the next new
+  pin passes, and a folder without a matching marker is never touched.
+- **Status.** `local_engine_status` gains `pins`, per engine (`llama.cpp`, `strata`): `pin`,
+  `installed_pins` (tag, platform, `start_passed_at`), `retained_pin`, `running_pin` and
+  `rolled_back_to` {from, to, reason, at}; each Strata row gains `running_pin`. The block is
+  per engine: `rolled_back_to` is the engine's latest rollback and `running_pin` one live
+  child's folder, whichever alias. No size rides it: nothing reads one, and walking a
+  Strata install costs about 50 ms a status. The Local
+  engines block shows one line per engine and a warning line after a rollback.

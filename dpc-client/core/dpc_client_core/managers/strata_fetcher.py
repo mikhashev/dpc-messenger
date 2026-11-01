@@ -719,6 +719,40 @@ def resolve_install(config: Dict[str, Any]) -> Optional[Path]:
     return root
 
 
+def _retained_install_ok(root: Path, config: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether the retained pin at `root` (another tag than this build's) can run for
+    the alias `config`, on its marker's word: Control complete, the engine manifest's
+    bytes the ones the marker recorded, its id, version and platform the marker's, the
+    alias's backend, one engine of its family. Not re-signed: the key may move with a
+    bump, and the marker was written after the install checked the signature."""
+    root = Path(root)
+    pinned = read_marker(root)
+    if not pinned or pinned.get("tag") != root.parent.name or pinned.get("platform") != root.name:
+        return False
+    if not control_python_path(root).is_file() or not (root / "serve" / "server.py").is_file():
+        return False
+    engine = pinned.get("engine")
+    folder = engine_folder(root)
+    if folder is None or not isinstance(engine, dict):
+        return False
+    try:
+        raw = (folder / _ENGINE_MANIFEST).read_bytes()
+        manifest = json.loads(raw.decode("utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    if hashlib.sha256(raw).hexdigest() != engine.get("manifest_sha256") or not isinstance(manifest, dict):
+        return False
+    if (manifest.get("id") != "strata-engine" or manifest.get("version") != engine.get("version")
+            or manifest.get("platform") != root.name):
+        return False
+    try:
+        _check_chosen({"backend": manifest.get("backend"), "variant": manifest.get("variant")},
+                      resolve_engine_backend(config, root.name), folder)
+    except ValueError:
+        return False
+    return not _engines_of_family(folder.parent, manifest.get("backend"), folder.name)
+
+
 def install_pin(
     progress: Optional[Callable[[int, int], None]] = None, config: Optional[Dict[str, Any]] = None
 ) -> Path:

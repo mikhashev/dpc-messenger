@@ -866,11 +866,14 @@ class StrataSupervisor(LlamaServerSupervisor):
         return not self.config.get("strata_install_dir")
 
     def install_dir(self) -> Path:
-        """The owner's checkout when `strata_install_dir` is set, else where the pin
-        lives (`strata_fetcher.install_root`, no network)."""
+        """The owner's checkout when `strata_install_dir` is set, else the pin folder the
+        last start chose (`_pin_root`), else where the pin lives
+        (`strata_fetcher.install_root`, no network)."""
         value = self.config.get("strata_install_dir")
         if value:
             return Path(str(value))
+        if self._pin_root is not None:
+            return self._pin_root  # the running pin: the retained one, or the current
         try:
             return strata_fetcher.install_root()
         except ValueError as e:
@@ -1396,22 +1399,35 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"{peer} does not start it"
                 )
             install_here = False
+            fallback: Optional[Path] = None
+            self._pin_root = None
             if self.install_is_the_pin():
                 # Before the card is claimed, and never a fetch on this loop: a missing
                 # pin is offered to the owner and refused, and neither asked for nor
                 # fetched for a peer. An installed engine of another backend than
-                # `strata_engine_backend` is missing.
+                # `strata_engine_backend` is missing. A retained pin that passed a
+                # start runs meanwhile; only the owner is asked, with "degrade".
                 try:
                     installed = await asyncio.to_thread(strata_fetcher.resolve_install, self.config)
                 except (ValueError, OSError) as e:
                     raise self._install_not_ready(e) from None
+                plan = await asyncio.to_thread(self._plan_pin_start, installed)
+                fallback = plan["fallback"]
                 if installed is None:
                     for_peer = _STARTED_FOR_PEER.get()
-                    if for_peer is not None or _base._MODEL_DOWNLOAD_SERVICE is not None:
+                    asks = for_peer is not None or _base._MODEL_DOWNLOAD_SERVICE is not None
+                    if asks and plan["start"] is not None:
+                        if for_peer is None:
+                            await self._offer_new_pin(strata_fetcher, plan["start"])
+                    elif asks:
                         await self._refuse_missing_pin(
                             strata_fetcher, STRATA_RELEASE_TAG, for_peer, sized_by_alias=True,
                         )
-                    install_here = True
+                    else:
+                        install_here = True
+                        fallback = plan["retained"]
+                if not install_here and plan["start"] is not None and _base._is_pin(plan["start"]):
+                    self._pin_root = plan["start"]
                 if self._draining:
                     raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
             await self._clear_unfinished_start()
@@ -1425,24 +1441,66 @@ class StrataSupervisor(LlamaServerSupervisor):
                     # backend replaces the whole install; with the card held and the
                     # superseded launcher gone, no launcher runs from what it replaces.
                     try:
-                        await asyncio.to_thread(strata_fetcher.ensure_install, self.config)
+                        root = await asyncio.to_thread(strata_fetcher.ensure_install, self.config)
                     except (ValueError, OSError, RuntimeError) as e:
                         raise self._install_not_ready(e) from None
+                    if isinstance(root, Path) and _base._is_pin(root):
+                        self._pin_root = root
                     if self._draining:
                         raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
-                python = self.python_path()
-                script = self.server_script()
-                for needed in (python, script):
-                    if not needed.exists():
-                        raise LlamaServerError(
-                            f"strata[{self.alias}]: {needed} does not exist — is "
-                            f"{self.install_dir()} a Strata install with its venv set up?"
-                        )
                 self.port = self.port or _free_port()
-                return await self._launch(python)
+
+                async def launch() -> Dict[str, Any]:
+                    python = self.python_path()
+                    script = self.server_script()
+                    for needed in (python, script):
+                        if not needed.exists():
+                            raise LlamaServerError(
+                                f"strata[{self.alias}]: {needed} does not exist — is "
+                                f"{self.install_dir()} a Strata install with its venv set up?"
+                            )
+                    return await self._launch(python)
+
+                return await self._launch_pin(launch, fallback)
             except BaseException:
                 self._release_card_unless_live()
                 raise
+
+    # --- the running pin (B2 step 3) -------------------------------------------------
+
+    def _pin_fetcher(self) -> Any:
+        return strata_fetcher
+
+    def _pin_tag(self) -> str:
+        return STRATA_RELEASE_TAG
+
+    def _pin_usable(self, root: Path) -> bool:
+        """A retained Strata pin runs on its marker's word, not re-signed (the key may
+        move with a bump): `strata_fetcher._retained_install_ok`."""
+        return strata_fetcher._retained_install_ok(root, self.config)
+
+    def _fault_is_oom(self, error: BaseException) -> bool:
+        return False  # the OOM reading of a log tail is llama-server's
+
+    def _rollback_lasts(self) -> str:
+        return "until the alias is Reset or the backend restarts"
+
+    async def _roll_back(self, error: BaseException, to_root: Path) -> None:
+        # The refusal latched `failure`; the retained pin is tried once, and latches it
+        # again as today if it fails too.
+        self.failure = None
+        await super()._roll_back(error, to_root)
+
+    def _check_build_info(self, props: Any) -> None:
+        """Strata's version check is `_check_version`, from /metrics."""
+
+    def _expected_engine_version(self) -> str:
+        """The engine version of the running pin: its marker's, else the pinned constant."""
+        if self._pin_root is None or not self.install_is_the_pin():
+            return STRATA_ENGINE_VERSION
+        engine = (strata_fetcher.read_marker(self._pin_root) or {}).get("engine")
+        version = engine.get("version") if isinstance(engine, dict) else None
+        return str(version) if version else STRATA_ENGINE_VERSION
 
     def _install_not_ready(self, error: BaseException) -> LlamaServerError:
         return LlamaServerError(
@@ -1507,7 +1565,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                 # one. No version is refused like an engine death: stopped, and
                 # not started again until a person resets it.
                 await self._fail_closed(NO_ENGINE_VERSION, note=_NO_VERSION_NOTE, refused_start=True)
-                raise self._refusal()
+                raise _base._build_fault(self._refusal())
             failed = await self._smoke()
             if failed is not None:
                 body = failed if exit_code_words(failed) else None
@@ -1515,7 +1573,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"{SMOKE_FAILED}: {failed}", body=body, note=None if body else _SMOKE_NOTE,
                     refused_start=True,
                 )
-                raise self._refusal()
+                raise _base._build_fault(self._refusal())
         except BaseException:
             # Interrupted after /props (a cancelled caller during the version
             # check or the smoke): the launcher answers /props but was neither
@@ -1548,6 +1606,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                 if version.lower().startswith("strata "):
                     version = version[len("strata "):].strip()
         self.engine_version = version
+        expected = self._expected_engine_version()
         if version is None:
             logger.error(
                 "strata[%s]: the launcher reports no engine version (/metrics engine.version "
@@ -1557,12 +1616,12 @@ class StrataSupervisor(LlamaServerSupervisor):
                 self.alias,
             )
             return None
-        if version != STRATA_ENGINE_VERSION and self.install_is_the_pin():
+        if version != expected and self.install_is_the_pin():
             await self._fail_closed(
                 f"the engine reports version {version}, and DPC's own install runs only the pin",
                 note=self._pin_fingerprints(version), refused_start=True,
             )
-            raise self._refusal()
+            raise _base._build_fault(self._refusal())
         if version != STRATA_ENGINE_VERSION:
             logger.warning(
                 "strata[%s]: engine version %s is not the pinned engine %s (Strata %s) — "
@@ -1821,6 +1880,14 @@ class StrataSupervisor(LlamaServerSupervisor):
         if previous is not None:
             logger.warning("strata[%s]: engine-death failure reset by hand (was: %s)",
                            self.alias, previous.get("reason"))
+        # A rollback to the retained pin ends here too: the next start tries the new pin.
+        try:
+            rolled = _base._ROLLBACKS.pop(_base._same_path(strata_fetcher.install_root()), None)
+        except ValueError:
+            rolled = None
+        if rolled is not None:
+            logger.warning("strata[%s]: the rollback from %s to %s reset by hand; the next start "
+                           "tries %s again", self.alias, rolled["from"], rolled["to"], rolled["from"])
         return previous
 
     def _note_cache_evictions(self, metrics: Any) -> None:

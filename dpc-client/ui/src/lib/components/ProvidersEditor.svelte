@@ -10,6 +10,7 @@
     accountLevel, balanceErrorText, providerTypeLabel, type AccountRow,
   } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
+  import { enginePinLines, runsRetainedPin, type EnginePins } from '$lib/utils/enginePins';
   import { trackRename } from '$lib/utils/aliasRenames';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
   import { envNameOrUndefined, looksLikeKey } from '$lib/utils/apiKeyEnv';
@@ -443,7 +444,10 @@
 
   // The local engines' state (local_engine_status): the card holder and each
   // strata alias's supervisor. Read only; loading it never starts an engine.
-  let engineStatus: { card_holder: any; strata: any[]; free_commit: FreeCommitReading | null; engine_backends: string[] } | null = null;
+  let engineStatus: {
+    card_holder: any; strata: any[]; free_commit: FreeCommitReading | null; engine_backends: string[];
+    pins: Record<string, EnginePins> | null;
+  } | null = null;
   let engineStatusError = '';
   let engineStatusLoading = false;
   let engineActionBusy = '';
@@ -455,7 +459,7 @@
       if (r?.status === 'success') {
         engineStatus = {
           card_holder: r.card_holder ?? null, strata: r.strata ?? [], free_commit: r.free_commit ?? null,
-          engine_backends: r.engine_backends ?? [],
+          engine_backends: r.engine_backends ?? [], pins: r.pins ?? null,
         };
         engineStatusError = '';
       } else {
@@ -1407,7 +1411,11 @@
       <p>
         <strong>Engine version:</strong> {row.engine_version ?? 'not read yet'}
         {#if row.pin}
-          {#if versionDiffers(row.engine_version, row.pin.engine_version)}
+          {#if runsRetainedPin(row)}
+            <span class="help-text" title="The pin is not downloaded yet, or failed its first start">
+              the retained pin {row.running_pin}, not the pin Strata {row.pin.release_tag} (engine {row.pin.engine_version})
+            </span>
+          {:else if versionDiffers(row.engine_version, row.pin.engine_version)}
             <span class="strata-badge-warn" title="Starting anyway; this install is not the one DPC was tested against">
               not the pin: Strata {row.pin.release_tag} (engine {row.pin.engine_version})
             </span>
@@ -1424,6 +1432,14 @@
         <button type="button" class="btn-fetch" disabled={!!engineActionBusy}
           on:click={() => engineAction('strata_reset_failure', alias)}
           title="DPC never restarts Strata after an engine death; this lets the next call start it">Reset</button>
+      {:else if engineStatus?.pins?.strata?.rolled_back_to}
+        <p class="help-text warn">
+          Running the retained pin {engineStatus.pins.strata.rolled_back_to.to}: {engineStatus.pins.strata.rolled_back_to.from}
+          failed its first start.
+        </p>
+        <button type="button" class="btn-fetch" disabled={!!engineActionBusy}
+          on:click={() => engineAction('strata_reset_failure', alias)}
+          title="The next call starts the new pin again instead of the retained one">Reset</button>
       {/if}
       {#if row.vram_released === false}
         <p class="help-text warn">
@@ -1477,6 +1493,9 @@
         none — the card is free
       {/if}
     </p>
+    {#each enginePinLines(engineStatus?.pins) as line}
+      <p class="help-text" class:warn={line.warn}>{line.text}</p>
+    {/each}
     {#if engineStatus?.free_commit}
       <p class="help-text">{freeCommitLine(engineStatus.free_commit)}</p>
     {/if}

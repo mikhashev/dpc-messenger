@@ -274,7 +274,10 @@ class StrataProvider(LlamaServerProvider):
                 installed = await asyncio.to_thread(_strata_fetcher.resolve_install, sup.config)
             except (ValueError, OSError) as e:
                 return f"'{self.alias}' is not running: DPC's own install of Strata {STRATA_RELEASE_TAG} is unusable ({e})"
+            retained = None
             if installed is None:
+                retained = (await asyncio.to_thread(sup._plan_pin_start, None))["start"]
+            if installed is None and retained is None:
                 return (
                     f"'{self.alias}' is not running: Strata {STRATA_RELEASE_TAG} is not installed on "
                     "this node yet, and a peer's request does not fetch it"
@@ -386,11 +389,15 @@ async def strata_status(sup: StrataSupervisor, metrics_timeout_s: float = 3.0) -
         "port": sup.port if state in ("running", "draining", "starting") else None,
         "engine_version": version,
         "pin": strata_pin(),
-        "version_matches": None if not version else version == STRATA_ENGINE_VERSION,
+        # Against the running pin's own engine version: a retained pin is not a mismatch.
+        "version_matches": None if not version else version == sup._expected_engine_version(),
         "failure": failure,
         "vram_released": sup.vram_released,
         "last_stop_vram": dict(sup.last_stop_vram),
         "start_config": str(sup.start_config_used) if sup.start_config_used else None,
+        # The pin folder the launcher runs from (the retained one after a rollback).
+        "running_pin": (sup._pin_root.parent.name if sup._pin_root is not None
+                        and state in ("running", "draining", "starting") else None),
         # The five cache flags as the start config that launch used writes them.
         "start_cache_flags": sup.start_cache_flags(),
         "metrics": None,
@@ -411,7 +418,9 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
     `free_commit` is the host's GlobalMemoryStatusEx reading (commit_memory),
     None off Windows: the conversation cache's hint names it (ADR-044).
     `engine_backends` are the `strata_engine_backend` values this machine may
-    take (the editor's choices), empty on a machine with no Strata Control."""
+    take (the editor's choices), empty on a machine with no Strata Control.
+    `pins` is per engine (`llama.cpp`, `strata`): the pin, the installed pins, the
+    retained pin, the running pin, and `rolled_back_to` after a rollback."""
     strata = [
         await strata_status(sup, metrics_timeout_s)
         for sup in list(_ACTIVE_SUPERVISORS.values())
@@ -421,8 +430,13 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
         backends = _strata_fetcher.engine_backends()
     except ValueError:
         backends = []
+    try:
+        pins = await asyncio.to_thread(_base._pins_status)
+    except Exception as e:  # a status read must not fail the panel
+        logger.warning("local engine pins unreadable: %s", e)
+        pins = None
     return {"card_holder": card_holder(), "strata": strata, "free_commit": read_free_commit(),
-            "engine_backends": backends}
+            "engine_backends": backends, "pins": pins}
 
 
 def strata_supervisor_of(alias: str) -> Optional[StrataSupervisor]:
