@@ -435,8 +435,9 @@ export interface ModelDownloadRequiredEvent {
     consequence_if_declined: string;
     on_decline: 'degrade' | 'block';
     size_bytes: number | null;
-    // 'package_max': an upper bound (Strata's engine package depends on the card).
-    size_source: 'measured' | 'hf_api' | 'package_max' | null;
+    // 'package_max': an upper bound (Strata's engine package depends on the card);
+    // 'package': the exact package the alias's strata_engine_backend names.
+    size_source: 'measured' | 'hf_api' | 'package_max' | 'package' | null;
     cache_path: string;
     // Bytes it occupies once unpacked; null = not stated, never 0.
     installed_bytes?: number | null;

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import importlib.util
+import inspect
 import logging
 import os
 import shutil
@@ -61,17 +63,32 @@ def _free_bytes(path: str) -> Optional[int]:
         return None
 
 
-def _stated_installed_bytes(other: Any) -> Optional[int]:
+def _for_alias(read: Callable[..., Any], config: Optional[Dict[str, Any]]) -> Any:
+    """`read(config)` when the module's answer depends on the alias that asked (a read
+    that takes `config`: Strata's chosen engine backend), else `read()`."""
+    if config is not None and "config" in inspect.signature(read).parameters:
+        return read(config)
+    return read()
+
+
+def _stated_installed_bytes(other: Any, config: Optional[Dict[str, Any]] = None) -> Optional[int]:
     """The unpacked size a download module states; None when it states none (camoufox)."""
     read = getattr(other, "installed_bytes", None)
-    return read() if read else None
+    return _for_alias(read, config) if read else None
 
 
-def _stated_minima(other: Any) -> tuple:
+def _stated_minima(other: Any, config: Optional[Dict[str, Any]] = None) -> tuple:
     """(size, installed) of the smallest variant a download module may fetch when its
     size is a range (Strata's engine package); (None, None) when it is one size."""
     size, installed = getattr(other, "size_bytes_min", None), getattr(other, "installed_bytes_min", None)
-    return (size() if size else None, installed() if installed else None)
+    return (_for_alias(size, config) if size else None, _for_alias(installed, config) if installed else None)
+
+
+def _stated_size_source(other: Any, config: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """How a download module's size is meant: its `size_source(config)` when it has one
+    (Strata: "package" for an alias whose engine choice is one package), else SIZE_SOURCE."""
+    read = getattr(other, "size_source", None)
+    return _for_alias(read, config) if read else getattr(other, "SIZE_SOURCE", None)
 
 
 def _needed_bytes(size_bytes: Optional[int], installed_bytes: Optional[int]) -> Optional[float]:
@@ -304,10 +321,18 @@ class ModelDownloadService:
         if other is not None:
             # The size is the one GitHub lists for the asset the package
             # would fetch: a network read, kept off the event loop.
-            size_bytes, installed_bytes, (size_min, installed_min) = await asyncio.to_thread(
-                lambda: (other.size_bytes(), _stated_installed_bytes(other), _stated_minima(other))
-            )
-            size_source = getattr(other, "SIZE_SOURCE", None)
+            # The alias that asked carries its own sizes (Strata's chosen engine).
+            config = self._alias_config(provider_alias)
+            try:
+                size_bytes, installed_bytes, (size_min, installed_min), size_source = await asyncio.to_thread(
+                    lambda: (_for_alias(other.size_bytes, config), _stated_installed_bytes(other, config),
+                             _stated_minima(other, config), _stated_size_source(other, config))
+                )
+            except ValueError as e:
+                # The alias asks for what this machine cannot take (a config carried from
+                # another one): no dialog, the reason as the failed event.
+                await self._refuse_alias(model_name, str(e))
+                return False
             measured_on = None
             cache_path = other.location()
             free_bytes = await asyncio.to_thread(_free_bytes, cache_path)
@@ -328,7 +353,8 @@ class ModelDownloadService:
             "on_decline": on_decline,
             "size_bytes": size_bytes,
             # "measured" / "hf_api" for a model; for a download module its
-            # SIZE_SOURCE (Strata's "package_max": an upper bound), else null = exact.
+            # SIZE_SOURCE (Strata's "package_max": an upper bound, or "package":
+            # the one package the alias chose, exact), else null = exact.
             "size_source": size_source,
             # ISO date the size row was measured, or null — a UI that does not
             # read this field is unaffected, it only gains one (finding F).
@@ -376,6 +402,19 @@ class ModelDownloadService:
                 return alias
         return None
 
+    async def _refuse_alias(self, model_name: str, reason: str) -> None:
+        logger.warning("Not offering the %s download: %s", model_name, reason)
+        await self.emit_failed(model_name, reason)
+
+    def _alias_config(self, provider_alias: Optional[str]) -> Optional[Dict[str, Any]]:
+        """The config of the provider `provider_alias` names, or None."""
+        if not provider_alias or self.llm_manager is None:
+            return None
+        providers = getattr(self.llm_manager, "providers", None)
+        provider = providers.get(provider_alias) if isinstance(providers, dict) else None
+        config = getattr(provider, "config", None)
+        return config if isinstance(config, dict) else None
+
     def _known_payload(self, model_name: str) -> Optional[Dict[str, Any]]:
         """The re-ask payload for `model_name` from the registry of models this
         service knows how to ask about, rather than from `_last_required_payload`
@@ -397,11 +436,11 @@ class ModelDownloadService:
     async def reset_decline(self, model_name: str) -> bool:
         self.settings.clear_model_download_declined(model_name)
         self._emitted_this_session.discard(model_name)
-        if self._is_present(model_name):
+        payload = self._last_required_payload.get(model_name) or self._known_payload(model_name)
+        if self._is_present(model_name, self._alias_config((payload or {}).get("provider_alias"))):
             self._set_status(model_name, "cached")
             return False
         self._set_status(model_name, "missing")
-        payload = self._last_required_payload.get(model_name) or self._known_payload(model_name)
         if payload is None:
             return False
         return await self.maybe_emit_required(
@@ -414,10 +453,10 @@ class ModelDownloadService:
         )
 
     @staticmethod
-    def _is_present(model_name: str) -> bool:
+    def _is_present(model_name: str, config: Optional[Dict[str, Any]] = None) -> bool:
         other = _OTHER_DOWNLOADS.get(model_name)
         if other is not None:
-            return other.is_present()
+            return _for_alias(other.is_present, config)
         return is_model_cached(model_name)
 
     def progress_reporter(self, model_name: str) -> Callable[[int, Optional[int]], None]:
@@ -497,22 +536,30 @@ class ModelDownloadService:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
-    async def download_other(self, model_name: str) -> Dict[str, Any]:
+    async def download_other(self, model_name: str, provider_alias: Optional[str] = None) -> Dict[str, Any]:
         """Run a non-Hugging-Face download in a thread, with the same
-        started/completed/failed events the model executors send."""
+        started/completed/failed events the model executors send. The alias the
+        dialog carried, else the one that asked, chooses what a per-alias download
+        fetches (Strata's engine backend)."""
         other = _OTHER_DOWNLOADS[model_name]
         # The sizes the owner was shown: a second size_bytes() can be a network
         # read (camoufox's sets its offline-retry timer). Free space is read anew.
         asked = self._last_required_payload.get(model_name)
-        if asked is not None:
+        alias = provider_alias or (asked or {}).get("provider_alias")
+        config = self._alias_config(alias)
+        if asked is not None and asked.get("provider_alias") == alias:
             size, installed = asked.get("size_bytes"), asked.get("installed_bytes")
             size_min, installed_min = asked.get("size_bytes_min"), asked.get("installed_bytes_min")
             free = await asyncio.to_thread(_free_bytes, other.location())
         else:
-            size, installed, (size_min, installed_min), free = await asyncio.to_thread(
-                lambda: (other.size_bytes(), _stated_installed_bytes(other), _stated_minima(other),
-                         _free_bytes(other.location()))
-            )
+            try:
+                size, installed, (size_min, installed_min), free = await asyncio.to_thread(
+                    lambda: (_for_alias(other.size_bytes, config), _stated_installed_bytes(other, config),
+                             _stated_minima(other, config), _free_bytes(other.location()))
+                )
+            except ValueError as e:
+                await self._refuse_alias(model_name, str(e))
+                return {"status": "error", "error": str(e)}
         # A range is refused only when even its smallest variant cannot fit; the
         # install checks again once the updater names the exact one.
         if size_min:
@@ -529,7 +576,8 @@ class ModelDownloadService:
         logger.info("Download of %s confirmed by the owner, starting", model_name)
         await self.emit_started(model_name)
         try:
-            await asyncio.to_thread(other.download, self.progress_reporter(model_name))
+            fetch = functools.partial(other.download, self.progress_reporter(model_name))
+            await asyncio.to_thread(_for_alias, fetch, config)
         except Exception as e:
             logger.error("Download of %s failed: %s", model_name, e, exc_info=True)
             await self.emit_failed(model_name, str(e))
@@ -631,7 +679,7 @@ class ModelDownloadService:
 
     async def _download_model(self, model_name: str, provider_alias: Optional[str]) -> Dict[str, Any]:
         if model_name in _OTHER_DOWNLOADS:
-            return await self.download_other(model_name)
+            return await self.download_other(model_name, provider_alias)
 
         target_provider = None
         if provider_alias and self.llm_manager and provider_alias in self.llm_manager.providers:

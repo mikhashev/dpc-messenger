@@ -18,7 +18,7 @@
     STRATA_MODEL_PARAMS, parseModelParam, modelParamText, basePlaceholder, pleAfterNativeChange,
     versionDiffers, cacheSummaryLine, freeCommitLine, type StrataParamSpec,
     type FreeCommitReading, STRATA_CACHE_ADMISSION, admissionPlaceholder, cacheFlagsLine,
-    engineAdmissionLine,
+    engineAdmissionLine, ENGINE_BACKEND_HELP, ENGINE_BACKEND_OWN_FOLDER, engineBackendOptions,
   } from '$lib/utils/strataFields';
 
   export let open: boolean = false;
@@ -86,6 +86,7 @@
     // base run config and these fields override it; unset keeps the base value.
     strata_install_dir?: string;
     strata_base_config?: string;
+    strata_engine_backend?: string; // Strata's --backend word; empty = Strata picks by the card
     native_gguf?: string;        // --native, the first shard
     ple_gguf?: string;           // --ple-gguf, suggested from the first shard
     pack_dir?: string;           // --pack
@@ -304,6 +305,14 @@
     if (key === 'strata_install_dir' || key === 'strata_base_config') inspectStrataBase(i);
   }
 
+  /** The engine backend select: a value from the backend's list, or empty for Strata's own pick. */
+  function setStrataEngineBackend(i: number, value: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    if (value === '') delete p.strata_engine_backend; else p.strata_engine_backend = value;
+    editedConfig = editedConfig;
+  }
+
   async function pickStrataPath(i: number, key: StrataPathKey) {
     if (!editedConfig || !canBrowse) return;
     const p = editedConfig.providers[i] as any;
@@ -434,7 +443,7 @@
 
   // The local engines' state (local_engine_status): the card holder and each
   // strata alias's supervisor. Read only; loading it never starts an engine.
-  let engineStatus: { card_holder: any; strata: any[]; free_commit: FreeCommitReading | null } | null = null;
+  let engineStatus: { card_holder: any; strata: any[]; free_commit: FreeCommitReading | null; engine_backends: string[] } | null = null;
   let engineStatusError = '';
   let engineStatusLoading = false;
   let engineActionBusy = '';
@@ -444,7 +453,10 @@
     try {
       const r = await sendCommand('local_engine_status', {});
       if (r?.status === 'success') {
-        engineStatus = { card_holder: r.card_holder ?? null, strata: r.strata ?? [], free_commit: r.free_commit ?? null };
+        engineStatus = {
+          card_holder: r.card_holder ?? null, strata: r.strata ?? [], free_commit: r.free_commit ?? null,
+          engine_backends: r.engine_backends ?? [],
+        };
         engineStatusError = '';
       } else {
         engineStatusError = r?.message || 'Could not read the local engines';
@@ -2542,6 +2554,22 @@
                           flags come from it, and the fields below override it. Strata's own page edits that file
                           for its own starts; DPC only reads it.
                         </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="strata-engine-backend-{i}">Engine backend</label>
+                        <select id="strata-engine-backend-{i}" value={sp.strata_engine_backend ?? ''}
+                          disabled={!!sp.strata_install_dir}
+                          on:change={(e) => setStrataEngineBackend(i, e.currentTarget.value)}>
+                          {#each engineBackendOptions(engineStatus?.engine_backends, sp.strata_engine_backend) as o}
+                            <option value={o.value}>{o.label}</option>
+                          {/each}
+                        </select>
+                        {#if sp.strata_install_dir}
+                          <p class="help-text">{ENGINE_BACKEND_OWN_FOLDER}</p>
+                        {:else}
+                          <p class="help-text">{ENGINE_BACKEND_HELP}</p>
+                        {/if}
                       </div>
 
                       <h4 class="strata-subhead">Model files (paths chosen directly)</h4>

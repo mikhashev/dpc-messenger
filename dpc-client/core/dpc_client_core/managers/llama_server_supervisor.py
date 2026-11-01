@@ -1030,16 +1030,22 @@ class LlamaServerSupervisor:
                 raise
 
     async def _refuse_missing_pin(
-        self, fetcher: Any = None, tag: str = LLAMA_CPP_TAG, for_peer: Optional[str] = None
+        self, fetcher: Any = None, tag: str = LLAMA_CPP_TAG, for_peer: Optional[str] = None,
+        sized_by_alias: bool = False,
     ) -> NoReturn:
         """Raise `PinNotInstalledError` for a start with no pin to run. A peer's call
         (or a start begun `for_peer`) neither asks nor fetches; the owner's asks once
         per session through the consent service and is worded by what that service
-        now knows. `fetcher` is the engine's fetcher module, llama.cpp's by default."""
+        now knows. `fetcher` is the engine's fetcher module, llama.cpp's by default;
+        `sized_by_alias` when its sizes depend on this alias's config (Strata's engine)."""
         fetcher = fetcher or _fetcher
         name = fetcher.DOWNLOAD_NAME
-        size = fetcher.size_bytes()
-        at_most = getattr(fetcher, "SIZE_SOURCE", None) is not None
+        if sized_by_alias:
+            size = fetcher.size_bytes(self.config)
+            at_most = fetcher.size_source(self.config) != "package"
+        else:
+            size = fetcher.size_bytes()
+            at_most = getattr(fetcher, "SIZE_SOURCE", None) is not None
         if for_peer is not None or peer_being_served() is not None:
             reason, percent = "peer", None
         else:

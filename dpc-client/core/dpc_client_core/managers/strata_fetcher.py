@@ -36,6 +36,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import os
 import platform as _platform
 import re
@@ -43,7 +44,7 @@ import shutil
 import sys
 import threading
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -53,6 +54,8 @@ from .local_engine_pin_fetcher import (
     install_with_staging_swap,
     read_marker,
 )
+
+logger = logging.getLogger(__name__)
 
 STRATA_RELEASE_TAG = "v0.2.9"
 STRATA_ENGINE_VERSION = "0.1.55"
@@ -99,36 +102,63 @@ PLATFORM_ASSETS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# Strata's updater picks the engine package by the card, so before it runs only the range
-# is known, by the pair strata-feed.json declares per package: download `size` and
+# Every engine package of the pinned feed, per platform: (backend, variant, size,
+# installed_bytes), the pair strata-feed.json declares per package: download `size` and
 # `installed_bytes` (two figures on purpose, not to be folded into one). From the signed
 # strata-feed.json of v0.2.9 (-linux-aarch64 for that platform); re-read at every pin
 # move. The rows: tests/fixtures/strata_v0.2.9_feed_packages.json, tied by a test.
-# The one package of the platform with the largest size + installed_bytes, both figures from it.
-ENGINE_SIZE_MAX: Dict[str, int] = {
-    "windows-x86_64": 904_164_080,   # cuda12
-    "linux-x86_64": 935_156_308,     # cuda12
-    "linux-aarch64": 656_111_027,    # cuda13, the only one
-    "macos-arm64": 5_304_303,        # metal, the only one
+_ENGINE_PACKAGES: Dict[str, Tuple[Tuple[str, str, int, int], ...]] = {
+    "windows-x86_64": (
+        ("cuda", "cuda12", 904_164_080, 1_444_237_804),
+        ("cuda", "cuda13", 621_585_315, 949_389_792),
+        ("hip", "rdna2", 172_708_267, 577_773_839),
+        ("hip", "rdna3", 277_761_345, 884_731_110),
+        ("hip", "rx9070", 568_281_872, 1_002_533_527),
+    ),
+    "linux-x86_64": (
+        ("cuda", "cuda12", 935_156_308, 1_546_437_671),
+        ("cuda", "cuda13", 647_149_266, 1_043_689_345),
+        ("hip", "halo", 171_940_773, 738_621_707),
+        ("hip", "rx6000", 203_505_232, 1_019_905_738),
+        ("hip", "rx7900", 250_890_402, 1_048_301_839),
+        ("hip", "rx9070", 409_437_119, 1_433_032_433),
+        ("sycl", "", 186_756_682, 685_939_381),
+    ),
+    "linux-aarch64": (
+        ("cuda", "cuda13", 656_111_027, 928_127_879),
+    ),
+    "macos-arm64": (
+        ("metal", "", 5_304_303, 14_743_181),
+    ),
 }
-ENGINE_INSTALLED_BYTES_MAX: Dict[str, int] = {
-    "windows-x86_64": 1_444_237_804,
-    "linux-x86_64": 1_546_437_671,
-    "linux-aarch64": 928_127_879,
-    "macos-arm64": 14_743_181,
-}
-# The one package of the platform with the smallest size + installed_bytes, both figures from it.
-ENGINE_SIZE_MIN: Dict[str, int] = {
-    "windows-x86_64": 172_708_267,   # hip rdna2
-    "linux-x86_64": 186_756_682,     # sycl
-    "linux-aarch64": 656_111_027,    # the only one
-    "macos-arm64": 5_304_303,        # the only one
-}
-ENGINE_INSTALLED_BYTES_MIN: Dict[str, int] = {
-    "windows-x86_64": 577_773_839,   # hip rdna2
-    "linux-x86_64": 685_939_381,     # sycl
-    "linux-aarch64": 928_127_879,
-    "macos-arm64": 14_743_181,
+
+
+def _largest(rows) -> Tuple[str, str, int, int]:
+    return max(rows, key=lambda r: r[2] + r[3])
+
+
+def _smallest(rows) -> Tuple[str, str, int, int]:
+    return min(rows, key=lambda r: r[2] + r[3])
+
+
+# Strata's updater picks the engine package by the card, so before it runs only the range
+# is known. The one package of the platform with the largest size + installed_bytes, both
+# figures from it (cuda12 on Windows and Linux x86_64).
+ENGINE_SIZE_MAX: Dict[str, int] = {p: _largest(r)[2] for p, r in _ENGINE_PACKAGES.items()}
+ENGINE_INSTALLED_BYTES_MAX: Dict[str, int] = {p: _largest(r)[3] for p, r in _ENGINE_PACKAGES.items()}
+# The one package with the smallest size + installed_bytes (hip rdna2 on Windows, sycl on Linux x86_64).
+ENGINE_SIZE_MIN: Dict[str, int] = {p: _smallest(r)[2] for p, r in _ENGINE_PACKAGES.items()}
+ENGINE_INSTALLED_BYTES_MIN: Dict[str, int] = {p: _smallest(r)[3] for p, r in _ENGINE_PACKAGES.items()}
+
+# Strata's BACKEND_MATRIX (strata_control/targets.py of v0.2.9): the families Strata
+# commits to per platform. Strata's set, not DPC's; a family is offered only where the
+# pinned feed also has a package of it (v0.2.9 has no cpu package anywhere).
+_BACKEND_MATRIX: Dict[str, Tuple[str, ...]] = {
+    "metal": ("macos-arm64",),
+    "cuda": ("windows-x86_64", "linux-x86_64", "linux-aarch64"),
+    "hip": ("windows-x86_64", "linux-x86_64"),
+    "sycl": ("linux-x86_64",),
+    "cpu": ("macos-arm64", "macos-x86_64", "windows-x86_64", "linux-x86_64"),
 }
 
 # The ed25519 entry of `keys[]` in Control's strata_control/update_keys.json (NOT
@@ -145,6 +175,25 @@ _UPDATER_EXIT_MEANING = {5: "refused", 6: "failed", 7: "an engine is serving"}
 # package's download plus its unpacked size, checked before it downloads.
 _NO_SPACE = re.compile(r"not enough free space on (?P<drive>.+?): (?P<free>\d+) MiB free, (?P<needed>\d+) MiB needed")
 _INSTALL_LOCK = threading.Lock()
+# The alias of a live Strata launcher running DPC's own install, or None; set by
+# strata_supervisor, which owns the launchers. Replacing the install under one is refused.
+# One engine per install, because families cannot stay side by side across updates in
+# Strata v0.2.9: after an install its updater prunes every engine folder but the new one
+# and the "previous" one (strata_control/updater.py:1023-1035, :1136-1137), and the previous
+# is what a start of the *requested* family would have picked (:1069, :1129), so an engine
+# of another family is deleted. A start also picks within a family by newest, not by build
+# (engine_component.py:985-996). So a different backend replaces the install, and only
+# while no launcher runs from it.
+_launcher_running: Callable[[], Optional[str]] = lambda: None
+
+
+def _refuse_if_running(root: Path) -> None:
+    alias = _launcher_running()
+    if alias is not None and read_marker(root):
+        raise RuntimeError(
+            f"Strata alias '{alias}' is running from {root}; stop it, then download again: "
+            "the install holds one engine and is not replaced under a running launcher"
+        )
 
 
 def _update_key_id() -> str:
@@ -202,6 +251,134 @@ def engine_folder(root: Optional[Path] = None) -> Optional[Path]:
     return components_dir(root) / "engine" / folder
 
 
+# --- the alias's engine backend (`strata_engine_backend`) -----------------------
+# The word Strata's updater takes as `--backend`: a family of Strata's BACKEND_MATRIX, or for
+# AMD `hip-<build>`. Empty: Strata picks by the card. CUDA 12 or 13 is not a choice: Strata
+# picks it from the driver, so only AMD builds can be named.
+
+
+def _split_backend(value: Any) -> Tuple[str, str]:
+    """(family, build) as Strata's engine_component.split_backend reads a typed name."""
+    name = str(value or "").strip().lower()
+    if name not in _BACKEND_MATRIX and name.startswith("hip-") and len(name) > 4:
+        return "hip", name[4:]
+    return name, ""
+
+
+def engine_backends(plat: Optional[str] = None) -> List[str]:
+    """The values `strata_engine_backend` may take on `plat`: each family Strata commits to
+    there that the pinned feed has a package of, and `hip-<build>` per AMD package."""
+    plat = plat or platform_tag()
+    rows = _ENGINE_PACKAGES.get(plat, ())
+    out: List[str] = []
+    for family, platforms in _BACKEND_MATRIX.items():
+        builds = [r[1] for r in rows if r[0] == family]
+        if plat not in platforms or not builds:
+            continue
+        out.append(family)
+        if family == "hip":
+            out.extend(f"hip-{b}" for b in builds if b)
+    return out
+
+
+def resolve_engine_backend(config: Optional[Dict[str, Any]] = None, plat: Optional[str] = None) -> str:
+    """The alias's `strata_engine_backend`, normalised as Strata does (`strip().lower()`),
+    "" when unset; a value this platform cannot take raises ValueError with the reason."""
+    name = str((config or {}).get("strata_engine_backend") or "").strip().lower()
+    if not name:
+        return ""
+    plat = plat or platform_tag()
+    allowed = engine_backends(plat)
+    if name in allowed:
+        return name
+    family, _build = _split_backend(name)
+    if family not in _BACKEND_MATRIX:
+        reason = f"unknown backend family {family!r}"
+    elif plat not in _BACKEND_MATRIX[family]:
+        reason = (f"{family} is not a supported combination on {plat}; it is supported on "
+                  f"{', '.join(_BACKEND_MATRIX[family])}. Unsupported combinations are not attempted")
+    else:
+        reason = f"Strata {STRATA_RELEASE_TAG} publishes no {name} engine package for {plat}"
+    if name.startswith("cuda"):
+        reason += "; CUDA 12 or 13 is picked by Strata from the driver"
+    choose = (f"; choose one of {', '.join(allowed)}, or leave it empty for Strata to pick"
+              if allowed else "; leave it empty")
+    raise ValueError(f"strata_engine_backend {name!r}: {reason}{choose}")
+
+
+def _chosen_rows(config: Optional[Dict[str, Any]], plat: str) -> Tuple[Tuple[str, str, int, int], ...]:
+    """The pinned feed's packages the alias's choice can install: all of the platform when empty."""
+    rows = _ENGINE_PACKAGES[plat]
+    family, build = _split_backend(resolve_engine_backend(config, plat))
+    if not family:
+        return rows
+    chosen = tuple(r for r in rows if r[0] == family and (not build or r[1] == build))
+    if not chosen:  # unreachable while the check above holds; never a max() of nothing
+        raise ValueError(f"strata_engine_backend {family}: no package of it for {plat}")
+    return chosen
+
+
+class _NotTheChosenEngine(ValueError):
+    """The engine is the pinned one, but not of the backend the alias chose."""
+
+
+def _check_chosen(identity: Dict[str, Any], backend: str, folder: Path) -> None:
+    """Strata's rule: `hip-<build>` names the family and the build, any other word the family only."""
+    family, build = _split_backend(backend)
+    if not family:
+        return
+    if identity.get("backend") != family or (build and identity.get("variant") != build):
+        found = identity.get("backend") or "no backend"
+        if identity.get("variant"):
+            found += f" ({identity['variant']})"
+        raise _NotTheChosenEngine(
+            f"the Strata engine at {folder} is {found}, not the chosen strata_engine_backend {backend}"
+        )
+
+
+# --- one engine of a family: Strata's start cannot be told a build ------------------------
+# A start resolves `component:strata-engine` with the family alone (engine_component.py
+# expand, :1007-1016) and picks among that family's folders by its own order: a rollback pin,
+# then version, driver, AMD preference, arch (resolve, :985-996). The updater keeps the new
+# engine and the previous one of the same family (updater.py:1136-1137), so hip-rdna2 could
+# outrank a chosen hip-rdna3. The install therefore holds one folder per family, and a start
+# refuses an install with two. DPC's retained pin is the rollback, not Strata's "previous";
+# Strata's own state (`.updates/state.json`) is never written.
+
+
+def _engines_of_family(engine_dir: Path, family: Any, keep: str) -> List[Path]:
+    """The engine folders of `family` under `engine_dir` other than `keep`. A dot folder is
+    not one: Strata's scan skips it (engine_component.py:836)."""
+    out: List[Path] = []
+    if not engine_dir.is_dir():
+        return out
+    for entry in sorted(engine_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith(".") or entry.name == keep:
+            continue
+        try:
+            manifest = json.loads((entry / _ENGINE_MANIFEST).read_bytes().decode("utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(manifest, dict) and manifest.get("backend") == family:
+            out.append(entry)
+    return out
+
+
+def _prune_family(engine_dir: Path, family: Any, keep: str) -> None:
+    """Remove the other engines of `family`: rename aside to a dot name Strata does not
+    scan, then delete; a folder that cannot be moved (in use) is kept and logged."""
+    for entry in _engines_of_family(engine_dir, family, keep):
+        aside = entry.with_name(f".{entry.name}.old")
+        shutil.rmtree(aside, ignore_errors=True)
+        try:
+            entry.replace(aside)
+        except OSError as exc:
+            logger.warning("Kept Strata engine %s beside %s: it could not be moved aside (%s)", entry, keep, exc)
+            continue
+        shutil.rmtree(aside, ignore_errors=True)
+        logger.info("Removed Strata engine %s: %s is the one %s engine of this install", entry.name, keep, family)
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -220,12 +397,14 @@ def _plain_relative(name: Any) -> bool:
 
 
 def check_engine_identity(
-    folder: Path, manifest_sha256: Optional[str] = None, files: bool = False
+    folder: Path, manifest_sha256: Optional[str] = None, files: bool = False, backend: str = ""
 ) -> Dict[str, Any]:
     """Refuse an engine that is not the pinned one, signed by the key held here.
 
     `manifest_sha256` also pins the manifest's bytes (the marker's record); `files`
-    hashes every file the manifest lists (at install; Strata does it at every start).
+    hashes every file the manifest lists (at install; Strata does it at every start);
+    a set `backend` (the alias's `strata_engine_backend`) must be the engine's
+    (`_NotTheChosenEngine`, a ValueError).
     """
     folder = Path(folder)
     root = folder.parents[2] if len(folder.parents) > 2 else folder
@@ -282,6 +461,7 @@ def check_engine_identity(
     token = rf"(?<![0-9a-fA-F]){re.escape(commit)}(?![0-9a-fA-F])"
     if not isinstance(build_id, str) or not re.search(token, build_id):
         raise refuse("build_id", found, pinned)
+    _check_chosen({"backend": manifest.get("backend"), "variant": variant}, backend, folder)
 
     if files:
         listed = manifest.get("files")
@@ -378,7 +558,7 @@ def _engine_progress(line: str) -> Optional[Tuple[int, int]]:
 
 class _InstallBar:
     """One cumulative bar for the pin: Control's bytes, then the engine's `done`,
-    against Control plus the engine's total: `ENGINE_SIZE_MAX` until the first
+    against Control plus the engine's total: the largest package the alias may get until the first
     progress line gives the exact one. Shown bytes never go back (a download
     Strata restarts from 0 holds the bar)."""
 
@@ -414,12 +594,14 @@ def _install_engine(
     staging: Path,
     root: Optional[Path] = None,
     on_stdout: Optional[Callable[[str], None]] = None,
+    backend: str = "",
 ) -> Dict[str, Any]:
     """Install the pinned engine into staging's components by Strata's own updater, then check it.
 
     The updater's throwaway home is a folder inside `<root>.download`, beside the pin
     on DPC's volume and never the system temp folder, removed when the updater ends.
-    `on_stdout` gets the updater's `--output jsonl` lines as they arrive."""
+    `on_stdout` gets the updater's `--output jsonl` lines as they arrive. A set
+    `backend` reaches the updater as `--backend` (its env carries no STRATA_*)."""
     from ..dpc_agent.tools import process as _process
 
     if root is None:
@@ -437,6 +619,8 @@ def _install_engine(
         "--components-dir", str(components),
         "--output", "jsonl",
     ]
+    if backend:
+        cmd += ["--backend", backend]
     home = root.with_name(root.name + ".download") / "updater-home"
     shutil.rmtree(home, ignore_errors=True)
     try:
@@ -482,7 +666,9 @@ def _install_engine(
             f"Strata's updater installed no engine (status {engine.get('status')!r}): "
             f"{engine.get('note') or engine.get('reasons') or 'no reason given'}"
         )
-    identity = check_engine_identity(components / "engine" / folder, files=True)
+    identity = check_engine_identity(components / "engine" / folder, files=True, backend=backend)
+    # In staging, before the swap: no launcher runs from it.
+    _prune_family(components / "engine", identity["backend"], folder)
     return {"engine": identity}
 
 
@@ -492,7 +678,9 @@ def resolve_install(config: Dict[str, Any]) -> Optional[Path]:
     A set `strata_install_dir` wins; set but missing is an error, not a reason to
     fetch. Otherwise the pin's install counts when its marker is this tag and
     platform and Control is complete; its engine is then checked against the
-    marker, and a mismatch is refused, never refetched silently.
+    marker, and a mismatch is refused, never refetched silently. An engine that is
+    not the alias's `strata_engine_backend` is not its install (None): it is offered
+    for download like a missing pin, never run.
     """
     configured = config.get("strata_install_dir")
     if configured:
@@ -504,6 +692,7 @@ def resolve_install(config: Dict[str, Any]) -> Optional[Path]:
             )
         return path
 
+    backend = resolve_engine_backend(config)
     root = install_root()
     pinned = read_marker(root)
     if not pinned or pinned.get("tag") != STRATA_RELEASE_TAG or pinned.get("platform") != platform_tag():
@@ -514,27 +703,49 @@ def resolve_install(config: Dict[str, Any]) -> Optional[Path]:
     folder = engine_folder(root)
     if folder is None or not isinstance(engine, dict):
         raise ValueError(f"the marker at {root} names no engine; delete {root} to fetch it again")
-    check_engine_identity(folder, manifest_sha256=engine.get("manifest_sha256") or "")
+    try:
+        identity = check_engine_identity(folder, manifest_sha256=engine.get("manifest_sha256") or "", backend=backend)
+    except _NotTheChosenEngine:
+        return None
+    others = _engines_of_family(folder.parent, identity["backend"], folder.name)
+    if others:
+        # Refused, not refetched: a second engine of the family means Strata's start may
+        # run it instead of the checked one, and a fetch would not loop round it.
+        raise ValueError(
+            f"the Strata install at {root} holds more than one {identity['backend']} engine "
+            f"({', '.join(sorted([folder.name] + [p.name for p in others]))}); Strata's start picks "
+            f"among them by its own order, not by the pin; delete {root} to fetch it again"
+        )
     return root
 
 
-def install_pin(progress: Optional[Callable[[int, int], None]] = None) -> Path:
+def install_pin(
+    progress: Optional[Callable[[int, int], None]] = None, config: Optional[Dict[str, Any]] = None
+) -> Path:
     """Fetch Control, install the engine through it, check it; one install at a time.
 
-    `progress(done, total)` is one bar across both (`_InstallBar`)."""
+    `progress(done, total)` is one bar across both (`_InstallBar`). The engine is
+    the one the alias `config` chooses (`strata_engine_backend`); an installed pin
+    with another engine is replaced by the staging swap, never while a launcher runs
+    from it (one engine per install: Strata's updater prunes to the new and the
+    previous engine, and its start picks the newest of a family, not a build)."""
     with _INSTALL_LOCK:
-        found = resolve_install({})
+        backend = resolve_engine_backend(config)
+        found = resolve_install({"strata_engine_backend": backend})
         if found:
             return found
         plat = platform_tag()
         row = PLATFORM_ASSETS[plat]
         root = install_root(plat=plat)
-        bar = _InstallBar(row["size"], ENGINE_SIZE_MAX[plat], progress) if progress else None
+        engine_max = _largest(_chosen_rows(config, plat))[2]
+        bar = _InstallBar(row["size"], engine_max, progress) if progress else None
+        _refuse_if_running(root)
 
         def _check(staging: Path) -> Dict[str, Any]:
-            extra = _install_engine(staging, root, bar.engine_line if bar else None)
+            extra = _install_engine(staging, root, bar.engine_line if bar else None, backend)
             if bar:
                 bar.finished()
+            _refuse_if_running(root)  # a launcher may have started while it downloaded
             return extra
 
         install_with_staging_swap(
@@ -559,57 +770,77 @@ CONSEQUENCE_IF_DECLINED = (
     "other providers are not affected."
 )
 # The `size_source` of the consent payload: the engine part of the size is the largest
-# package of this platform, an upper bound (`size_bytes_min` is the lower one).
+# package the alias may get, an upper bound (`size_bytes_min` is the lower one). An alias
+# whose `strata_engine_backend` names one package (hip-<build>, metal, sycl) has its exact
+# size, "package" (`size_source`). Each size reader takes the alias config; None or no
+# choice is the platform's whole range.
 SIZE_SOURCE = "package_max"
 
 
-def is_present() -> bool:
-    """The pin resolves (a configured `strata_install_dir` is not the pin). An install
-    that does not check out is not present; its download then names why."""
+def size_source(config: Optional[Dict[str, Any]] = None) -> str:
+    """"package" when the alias's choice names exactly one package, else `SIZE_SOURCE`."""
+    if resolve_engine_backend(config) and len(_chosen_rows(config, platform_tag())) == 1:
+        return "package"
+    return SIZE_SOURCE
+
+
+def is_present(config: Optional[Dict[str, Any]] = None) -> bool:
+    """The pin resolves with the alias's chosen engine (a configured `strata_install_dir`
+    is not the pin). An install that does not check out is not present; its download
+    then names why."""
     try:
-        return resolve_install({}) is not None
+        return resolve_install({"strata_engine_backend": (config or {}).get("strata_engine_backend")}) is not None
     except (ValueError, OSError):
         return False
 
 
-def size_bytes() -> int:
-    """Control plus the largest engine package of this platform (`SIZE_SOURCE`)."""
+def size_bytes(config: Optional[Dict[str, Any]] = None) -> int:
+    """Control plus the largest engine package the alias may get (`size_source`)."""
     plat = platform_tag()
-    return int(PLATFORM_ASSETS[plat]["size"]) + ENGINE_SIZE_MAX[plat]
+    return int(PLATFORM_ASSETS[plat]["size"]) + _largest(_chosen_rows(config, plat))[2]
 
 
-def installed_bytes() -> int:
-    """Control unpacked plus the largest unpacked engine of this platform."""
+def installed_bytes(config: Optional[Dict[str, Any]] = None) -> int:
+    """Control unpacked plus the largest unpacked engine the alias may get."""
     plat = platform_tag()
-    return int(PLATFORM_ASSETS[plat]["installed_bytes"]) + ENGINE_INSTALLED_BYTES_MAX[plat]
+    return int(PLATFORM_ASSETS[plat]["installed_bytes"]) + _largest(_chosen_rows(config, plat))[3]
 
 
-def size_bytes_min() -> int:
-    """Control plus the smallest engine package of this platform."""
+def size_bytes_min(config: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    """Control plus the smallest engine package the alias may get; None when the size is exact."""
+    if size_source(config) == "package":
+        return None
     plat = platform_tag()
-    return int(PLATFORM_ASSETS[plat]["size"]) + ENGINE_SIZE_MIN[plat]
+    return int(PLATFORM_ASSETS[plat]["size"]) + _smallest(_chosen_rows(config, plat))[2]
 
 
-def installed_bytes_min() -> int:
-    """Control unpacked plus the smallest unpacked engine of this platform."""
+def installed_bytes_min(config: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    """Control unpacked plus the smallest unpacked engine the alias may get; None when exact."""
+    if size_source(config) == "package":
+        return None
     plat = platform_tag()
-    return int(PLATFORM_ASSETS[plat]["installed_bytes"]) + ENGINE_INSTALLED_BYTES_MIN[plat]
+    return int(PLATFORM_ASSETS[plat]["installed_bytes"]) + _smallest(_chosen_rows(config, plat))[3]
 
 
 def location() -> str:
     return str(install_root())
 
 
-def download(on_progress: Optional[Callable[[int, int], None]] = None) -> str:
-    """Install the pin; blocking, run it in a thread. Returns the install's root."""
-    return str(install_pin(on_progress))
+def download(
+    on_progress: Optional[Callable[[int, int], None]] = None, config: Optional[Dict[str, Any]] = None
+) -> str:
+    """Install the pin with the alias's chosen engine; blocking, run it in a thread.
+    Returns the install's root."""
+    if config is None:
+        return str(install_pin(on_progress))
+    return str(install_pin(on_progress, config))
 
 
 def ensure_install(
     config: Optional[Dict[str, Any]] = None, progress: Optional[Callable[[int, int], None]] = None
 ) -> Path:
     """The Strata root to run, fetching the pin only if nothing resolves."""
-    return resolve_install(config or {}) or install_pin(progress)
+    return resolve_install(config or {}) or install_pin(progress, config)
 
 
 def strata_pin() -> dict:

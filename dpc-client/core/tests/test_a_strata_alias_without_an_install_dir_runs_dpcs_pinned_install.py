@@ -334,7 +334,7 @@ def test_a_checkout_alias_builds_the_start_config_it_built_before(tmp_path, monk
     assert json.dumps(sup.build_start_config(5555), indent=1) == json.dumps(_checkout_golden(t), indent=1)
 
 
-class TestTheFetchComesBeforeTheCard:
+class TestTheFetchRunsWithTheCardHeld:
     def _fake_launch(self, sup, launches):
         async def fake_launch(binary, cache_type=None):
             launches.append(binary)
@@ -344,7 +344,8 @@ class TestTheFetchComesBeforeTheCard:
         return fake_launch
 
     @pytest.mark.asyncio
-    async def test_the_pin_is_fetched_in_a_thread_before_the_card_is_claimed(self, world, monkeypatch):
+    async def test_the_pin_is_fetched_in_a_thread_after_the_card_is_claimed(self, world, monkeypatch):
+        # B2 step 3, 3b: a fetch may replace the install, so no launcher may run from it.
         sup = world.sup()
         fetched, launches = [], []
 
@@ -359,7 +360,7 @@ class TestTheFetchComesBeforeTheCard:
         monkeypatch.setattr(sf, "ensure_install", fake_ensure)
         monkeypatch.setattr(sup, "_launch", self._fake_launch(sup, launches))
         await sup.ensure_running()
-        assert fetched == [{"thread": True, "card_held": False, "config": sup.config}]
+        assert fetched == [{"thread": True, "card_held": True, "config": sup.config}]
         assert launches == [world.root / "python" / ("python.exe" if sys.platform == "win32" else "bin/python3")]
         assert sup in base_mod._CARD_CLAIMS
 

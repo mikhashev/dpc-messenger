@@ -455,3 +455,45 @@ nothing above.)*
 - **Deferred.** A consent dialog and progress for the download (step 3); retention of an
   older pin's folder and a way back to the previous pin; a base config for a user with no
   checkout and no Strata-data.
+
+## Amendment, 2026-11-01 — consent, progress and the engine backend (B2, step 3)
+
+Agreed in the DPC Project chat, 2026-11-01 (Mike, Zcode, Johnny, Ark). It narrows the
+step-2 rule "the fetch comes before the card".
+
+- **The fetch asks first.** A pin-mode start with no install, or with an installed engine
+  that is not the one the alias chose, asks the owner once through the model download
+  consent flow (name `strata`) and refuses with `PinNotInstalledError`; nothing downloads
+  inside a start. A peer's call, or a start begun for a peer, neither asks nor fetches and
+  meets `provider_unavailable`.
+- **The fetch before the card holds for the consent path only.** The owner's download runs
+  outside any start, so the card stays with whoever holds it. Where no consent service is
+  bound (tests, scripts) the start installs inline, and since step 3 it does so *after*
+  it has waited for the predecessor and claimed the card, `_draining` read again after it:
+  an inline install may replace the engine, and the engine must not be replaced under a
+  running launcher.
+- **One engine per install, replaced only when no launcher of it runs.** The alias key
+  `strata_engine_backend` names the word Strata's updater takes as `--backend`; the
+  rebased start config carries its family as `backend`. Engines of several families could
+  sit side by side in `components/engine/`, but Strata's updater keeps only the new engine
+  and the previous one of the requested family after an install (`updater.py` 1023-1035,
+  1069, 1129, 1136-1137), and a start picks within a family by its own order, never by the
+  build (`engine_component.py` 985-996, 1007-1016). Strata's own refusal to update a
+  serving engine does not see a launcher of ours, because the updater runs with a
+  throwaway home and no `STRATA_*` variables, so the rule is DPC's: an install that would
+  replace the engine is refused while a launcher of this install runs, and checked again
+  just before the swap. Two Strata aliases of different families on one node therefore
+  take turns, each start replacing the engine; separate component folders per family
+  would end that and are not built.
+- **One engine per family, too.** A chosen build (`hip-rdna3`) reaches only the install:
+  the start passes the family alone, and Strata picks among that family's folders by its
+  own order. So the install, still in staging, removes every other engine folder of the
+  chosen family (renamed aside under a dot name, which Strata's scan skips, then deleted),
+  and an install that still holds two of one family refuses its start with the reason
+  instead of refetching. DPC's retained pin is the way back, not Strata's "previous";
+  Strata's `.updates/state.json` is never written.
+- **Sizes.** The consent shows the chosen package's size when one package matches
+  (`size_source` `package`), the largest matching package otherwise (`package_max`), and
+  for an empty choice the largest and smallest of the platform. DPC refuses a download only
+  when even the smallest package cannot fit; Strata's own check, exact and before its
+  download, reports an exact shortfall (exit 6).

@@ -50,6 +50,8 @@ _STRATA_FLAG_KEYS = (
     # Model-file overrides (ADR-044 point 7): each replaces a base config value.
     "native_gguf", "ple_gguf", "pack_dir", "mtp_dir", "expert_profile", "mmproj",
     "control_vector_file",
+    # The engine DPC's own install runs (`strata_fetcher.resolve_engine_backend`).
+    "strata_engine_backend",
 )
 
 
@@ -407,13 +409,20 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
     """Who holds the card, and every Strata alias's supervisor state. Read-only.
 
     `free_commit` is the host's GlobalMemoryStatusEx reading (commit_memory),
-    None off Windows: the conversation cache's hint names it (ADR-044)."""
+    None off Windows: the conversation cache's hint names it (ADR-044).
+    `engine_backends` are the `strata_engine_backend` values this machine may
+    take (the editor's choices), empty on a machine with no Strata Control."""
     strata = [
         await strata_status(sup, metrics_timeout_s)
         for sup in list(_ACTIVE_SUPERVISORS.values())
         if isinstance(sup, StrataSupervisor)
     ]
-    return {"card_holder": card_holder(), "strata": strata, "free_commit": read_free_commit()}
+    try:
+        backends = _strata_fetcher.engine_backends()
+    except ValueError:
+        backends = []
+    return {"card_holder": card_holder(), "strata": strata, "free_commit": read_free_commit(),
+            "engine_backends": backends}
 
 
 def strata_supervisor_of(alias: str) -> Optional[StrataSupervisor]:

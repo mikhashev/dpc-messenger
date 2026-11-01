@@ -11,8 +11,8 @@
   export let purpose: string = '';
   export let consequenceIfDeclined: string = '';
   export let sizeBytes: number | null = null;
-  // 'package_max': sizeBytes and installedBytes are upper bounds.
-  export let sizeSource: 'measured' | 'hf_api' | 'package_max' | null = null;
+  // 'package_max': sizeBytes and installedBytes are upper bounds; 'package': exact.
+  export let sizeSource: 'measured' | 'hf_api' | 'package_max' | 'package' | null = null;
   export let cachePath: string = '';
   // Bytes it occupies once unpacked; null = not stated (never read as 0).
   export let installedBytes: number | null = null;

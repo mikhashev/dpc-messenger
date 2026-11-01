@@ -19,7 +19,9 @@ What differs, by ADR-044 point:
   `--engine strata` and `--port` always explicit — the launcher defaults to
   the mock engine and to a port of its own. An alias with no
   `strata_install_dir` runs DPC's own install of the pin instead (B2 step 2):
-  Control's python and launcher, fetched before the card is claimed, with the
+  Control's python and launcher, offered for download through the consent
+  flow (or, with no consent service bound, fetched once this start holds the
+  card, since a fetch may replace the install a launcher runs from), with the
   base config's checkout paths moved by `_base_config_for_the_pin`.
 - 3. An engine death is fail-closed. The launcher restarts a dead engine on
   the next request, so a watcher reads `/metrics` while the launcher runs; a
@@ -347,9 +349,11 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
     The required keys, the cache budget's type and the model parameters always;
     with `check_paths`, also that every path the alias sets exists (a relative
     base config is read against the install dir, as the supervisor reads it),
-    and that `reasoning_effort` is a word the chat template accepts. Both read
-    the disk, so both are the save's checks only: the load calls this without
-    `check_paths`, and an alias saved before the word check is not dropped
+    that `reasoning_effort` is a word the chat template accepts, and that
+    `strata_engine_backend` is one this machine's platform can take. The first two
+    read the disk and the third this machine, so all are the save's checks only
+    (an alias carried to another machine loads, and its start refuses): the load
+    calls this without `check_paths`, and an alias saved before the word check is not dropped
     from the loaded set — its provider warns instead (`StrataProvider`)."""
     errors: List[str] = []
     if not config.get("strata_base_config"):
@@ -408,6 +412,10 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
         word_error = reasoning_effort_error(config)
         if word_error:
             errors.append(word_error)
+        try:
+            strata_fetcher.resolve_engine_backend(config)
+        except ValueError as e:
+            errors.append(str(e))
     return errors
 
 
@@ -1081,6 +1089,16 @@ class StrataSupervisor(LlamaServerSupervisor):
         root = self.install_dir()
         out = dict(cfg)
         out["exe"] = "component:strata-engine"
+        # Strata resolves that reference with the config's `backend`, a family, else by
+        # the card (engine_component.expand): the alias's family, or none for Strata's pick.
+        try:
+            choice = strata_fetcher.resolve_engine_backend(c)
+        except ValueError as e:
+            raise LlamaServerError(f"strata[{self.alias}]: {e}") from None
+        if choice:
+            out["backend"] = choice.split("-", 1)[0]
+        else:
+            out.pop("backend", None)
         block = dict(cfg["vision"]) if isinstance(cfg.get("vision"), dict) else None
         if block is not None:
             folder = strata_fetcher.engine_folder(root)
@@ -1377,10 +1395,12 @@ class StrataSupervisor(LlamaServerSupervisor):
                     f"strata[{self.alias}] is not running, and a call served to peer "
                     f"{peer} does not start it"
                 )
+            install_here = False
             if self.install_is_the_pin():
                 # Before the card is claimed, and never a fetch on this loop: a missing
-                # pin is offered to the owner and refused, installed in a thread when no
-                # consent service is bound, and neither asked for nor fetched for a peer.
+                # pin is offered to the owner and refused, and neither asked for nor
+                # fetched for a peer. An installed engine of another backend than
+                # `strata_engine_backend` is missing.
                 try:
                     installed = await asyncio.to_thread(strata_fetcher.resolve_install, self.config)
                 except (ValueError, OSError) as e:
@@ -1388,19 +1408,28 @@ class StrataSupervisor(LlamaServerSupervisor):
                 if installed is None:
                     for_peer = _STARTED_FOR_PEER.get()
                     if for_peer is not None or _base._MODEL_DOWNLOAD_SERVICE is not None:
-                        await self._refuse_missing_pin(strata_fetcher, STRATA_RELEASE_TAG, for_peer)
-                    if self._draining:
-                        raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
-                    try:
-                        await asyncio.to_thread(strata_fetcher.ensure_install, self.config)
-                    except (ValueError, OSError, RuntimeError) as e:
-                        raise self._install_not_ready(e) from None
+                        await self._refuse_missing_pin(
+                            strata_fetcher, STRATA_RELEASE_TAG, for_peer, sized_by_alias=True,
+                        )
+                    install_here = True
                 if self._draining:
                     raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
             await self._clear_unfinished_start()
             await self._await_predecessor()
             self._claim_card()
             try:
+                if install_here:
+                    # No consent service bound: installed in a thread, and only now. The
+                    # install holds one engine (Strata's updater keeps only the new and the
+                    # previous one, and a start cannot be told a build), so a different
+                    # backend replaces the whole install; with the card held and the
+                    # superseded launcher gone, no launcher runs from what it replaces.
+                    try:
+                        await asyncio.to_thread(strata_fetcher.ensure_install, self.config)
+                    except (ValueError, OSError, RuntimeError) as e:
+                        raise self._install_not_ready(e) from None
+                    if self._draining:
+                        raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
                 python = self.python_path()
                 script = self.server_script()
                 for needed in (python, script):
@@ -1990,6 +2019,19 @@ class StrataSupervisor(LlamaServerSupervisor):
         elif self.vram_released is None:
             logger.warning("strata[%s]: VRAM unreadable after the stop; release unknown", self.alias)
         return self.vram_released
+
+
+def _pin_launcher_running() -> Optional[str]:
+    """The alias of a live Strata launcher that runs DPC's own install, or None."""
+    for sup, _state in _base._live_claims():
+        proc = sup._proc
+        if isinstance(sup, StrataSupervisor) and sup.install_is_the_pin() and proc is not None and proc.returncode is None:
+            return sup.alias
+    return None
+
+
+# The install refuses to replace itself under a running launcher, whoever asks for it.
+strata_fetcher._launcher_running = _pin_launcher_running
 
 
 def _base_status_code(error: BaseException) -> Optional[int]:

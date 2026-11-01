@@ -262,3 +262,22 @@ export function freeCommitLine(r: FreeCommitReading | null | undefined): string 
     + `${n(r.total_page_file_mib)} MiB; free physical (ullAvailPhys) ${n(r.avail_phys_mib)} of `
     + `${n(r.total_phys_mib)} MiB`;
 }
+
+/** The engine backend select (`strata_engine_backend`): its one-line help. */
+export const ENGINE_BACKEND_HELP = 'Only AMD builds can be chosen; CUDA 12 or 13 is picked by Strata from the driver.';
+/** In its place when a Strata folder is set: the choice applies only to DPC's own install. */
+export const ENGINE_BACKEND_OWN_FOLDER = "Applies only to DPC's own install: your Strata folder installs its own engine.";
+
+/** The select's options: Strata's own pick first (empty), then the values this
+ *  machine may take (local_engine_status `engine_backends`, the backend's one
+ *  list). A saved value not among them stays listed, so the save can name why
+ *  it is refused instead of the form dropping it. */
+export function engineBackendOptions(
+  allowed: string[] | null | undefined,
+  current?: string | null
+): { value: string; label: string }[] {
+  const values = [...(allowed ?? [])];
+  const saved = (current ?? '').trim();
+  if (saved && !values.includes(saved)) values.push(saved);
+  return [{ value: '', label: 'Strata picks for this card (default)' }, ...values.map((v) => ({ value: v, label: v }))];
+}
