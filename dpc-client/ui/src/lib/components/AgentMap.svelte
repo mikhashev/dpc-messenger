@@ -36,6 +36,7 @@
     memoryLimitInputText,
     memoryLimitView,
     memoryLimitWarning,
+    MEMORY_LIMIT_MEASURES,
     parseMemoryLimitInput,
   } from '$lib/utils/shellMemoryLimit';
   import {
@@ -382,7 +383,7 @@
             {#if limit}
               <div class="limit-line">
                 {#if limitEditing}
-                  <label class="small" for="memory-limit-input">Memory limit per process:</label>
+                  <label class="small" for="memory-limit-input">RAM limit per process:</label>
                   <input
                     id="memory-limit-input"
                     class="limit-input"
@@ -405,6 +406,7 @@
                   {/if}
                 {/if}
               </div>
+              <div class="muted small">{MEMORY_LIMIT_MEASURES}</div>
               {#if limitWarning}<div class="limit-warning small" role="status">{limitWarning}</div>{/if}
               {#if limitError}<div class="limit-error small" role="alert">{limitError}</div>{/if}
             {/if}

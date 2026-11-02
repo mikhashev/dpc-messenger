@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     MEMORY_LIMIT_ENV_NAMES,
+    MEMORY_LIMIT_MEASURES,
     MEMORY_LIMIT_WARN_BELOW_MIB,
     formatMemoryLimit,
     memoryLimitInputText,
@@ -77,7 +78,7 @@ describe('memoryLimitView', () => {
     });
     it('words the line from the number', () => {
         const v = memoryLimitView({ shell_memory_limit_mb: 32768, shell_memory_limit_source: 'config' })!;
-        expect(v.line).toBe('Memory limit per process: 32,768 MiB');
+        expect(v.line).toBe('RAM limit per process: 32,768 MiB');
         expect(v.suffix).toBe('');
         expect(v.editable).toBe(true);
         expect(v.envNote).toBe('');
@@ -85,7 +86,7 @@ describe('memoryLimitView', () => {
     });
     it('labels 0 as no limit', () => {
         const v = memoryLimitView({ shell_memory_limit_mb: 0, shell_memory_limit_source: 'config' })!;
-        expect(v.line).toBe('Memory limit per process: no limit');
+        expect(v.line).toBe('RAM limit per process: no limit');
         expect(v.warning).toBe('');
     });
     it('marks the default, and an unknown source reads as the default', () => {
@@ -104,5 +105,14 @@ describe('memoryLimitView', () => {
         const v = memoryLimitView({ shell_memory_limit_mb: 512, shell_memory_limit_source: 'config' })!;
         expect(v.warning).toBe(memoryLimitWarning(512));
         expect(v.warning).not.toBe('');
+    });
+});
+
+describe('the line says which memory it limits', () => {
+    // Mike, 2026-11-02: "Memory limit" did not say RAM or VRAM.
+    it('names host RAM, the whole command tree and not VRAM', () => {
+        expect(MEMORY_LIMIT_MEASURES).toContain('Host RAM');
+        expect(MEMORY_LIMIT_MEASURES).toContain('child processes');
+        expect(MEMORY_LIMIT_MEASURES).toContain('not VRAM');
     });
 });

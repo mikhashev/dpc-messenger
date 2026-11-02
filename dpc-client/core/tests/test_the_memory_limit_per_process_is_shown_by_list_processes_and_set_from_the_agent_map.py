@@ -131,7 +131,7 @@ class TestTheReaderSaysWhereTheLimitComesFrom:
         assert process_mod._read_memory_ceiling() == process_mod.read_memory_limit()[0]
 
     def test_the_hint_a_refusal_carries_points_at_the_agent_map_field(self):
-        assert "Memory limit per process" in process_mod.CEILING_HINT
+        assert "RAM limit per process" in process_mod.CEILING_HINT
         assert "shell_memory_limit_mb" in process_mod.CEILING_HINT
         assert ENV_OLD in process_mod.CEILING_HINT
 

@@ -1,5 +1,5 @@
 /**
- * The "Memory limit per process" line of the Agent map's D-PC backend card: what
+ * The "RAM limit per process" line of the Agent map's D-PC backend card: what
  * `list_processes` says (`shell_memory_limit_mb`, `shell_memory_limit_source`),
  * how it is worded, what a typed value means, and when to warn. The backend owns
  * the rules (`set_shell_memory_limit` refuses a negative or non-integer value and
@@ -9,6 +9,11 @@
  * The unit is MiB on screen and `mb` in the command: one unit, 2^20 bytes (GLOSSARY,
  * "resource peaks").
  */
+
+/** What the limit measures, said under the line: host memory of one agent command's whole
+ *  process tree (dpc_agent/tools/process.py, the larger of resident and committed), never VRAM. */
+export const MEMORY_LIMIT_MEASURES =
+    "Host RAM of one agent command and its child processes (resident or committed, whichever is larger); not VRAM. A command that grows past it is stopped.";
 
 /** Below this (and not 0) every agent command that grows past it is stopped. */
 export const MEMORY_LIMIT_WARN_BELOW_MIB = 1024;
@@ -32,7 +37,7 @@ export interface MemoryLimitView {
     /** The limit in MiB; 0 (or less) is no limit. */
     mb: number;
     source: MemoryLimitSource;
-    /** "Memory limit per process: 32,768 MiB", or "... no limit". */
+    /** "RAM limit per process: 32,768 MiB", or "... no limit". */
     line: string;
     /** "(default)" when the number is the built-in one, else empty. */
     suffix: string;
@@ -68,7 +73,7 @@ export function memoryLimitView(listing: MemoryLimitFields | null | undefined): 
     return {
         mb,
         source,
-        line: `Memory limit per process: ${formatMemoryLimit(mb)}`,
+        line: `RAM limit per process: ${formatMemoryLimit(mb)}`,
         suffix: source === 'default' ? '(default)' : '',
         // The backend says "env" for either name and the screen cannot tell which, so both are named.
         envNote: fromEnvironment ? `set by ${MEMORY_LIMIT_ENV_NAMES.join(' or ')} in the environment` : '',

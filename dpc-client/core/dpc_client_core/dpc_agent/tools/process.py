@@ -51,7 +51,7 @@ _CEILING_SECTION, _CEILING_KEY = "system", "shell_memory_limit_mb"
 # What a refusal tells the agent, kept in one place for every caller.
 CEILING_HINT = (
     f"Raise {_CEILING_KEY} in [{_CEILING_SECTION}] of config.ini (the next "
-    f"command reads it, no restart; the Agent map's \"Memory limit per process\" "
+    f"command reads it, no restart; the Agent map's \"RAM limit per process\" "
     f"field sets it too; {_CEILING_ENV} in the environment overrides it)"
 )
 
