@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { effectiveAgentVisionModel } from "./agentVisionModel";
+import { effectiveAgentVisionModel, visionFollowingText } from "./agentVisionModel";
 
 const rows = [
   { alias: "bonsai-2", model: "gemma-3-27b", supports_vision: true },
@@ -98,5 +98,26 @@ describe("effectiveAgentVisionModel with the text model on a peer", () => {
       peerRows([{ alias: "strata flash-next", supports_vision: true }])
     );
     expect(r.isGlobal).toBe(true);
+  });
+});
+
+describe('visionFollowingText (plain AI chat)', () => {
+  const rows = [{ uniqueId: 'local:strata_iq3_s' }, { uniqueId: 'local:gemma' }];
+  it('takes the text provider when it reads images', () => {
+    expect(visionFollowingText('local:strata_iq3_s', rows, 'gemma')).toBe('local:strata_iq3_s');
+  });
+  it('falls back to the global vision provider when the text one does not', () => {
+    expect(visionFollowingText('local:deepseek_flash', rows, 'gemma')).toBe('local:gemma');
+  });
+  it('is empty when there is neither', () => {
+    expect(visionFollowingText('local:deepseek_flash', rows, '')).toBe('');
+  });
+});
+
+describe('the AI chat header wires the rule', () => {
+  it('sets Vision from Text on change and at start', async () => {
+    const src = (await import('./ProviderSelector.svelte?raw')).default as string;
+    expect(src).toContain("selectedVisionProvider = visionFollowingText(chosen, mergedVisionProviders()");
+    expect(src).toContain("selectedVisionProvider = visionFollowingText(selectedTextProvider, mergedVisionProviders()");
   });
 });

@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { menuSummary, priceLine, settingsLines, vendorLine, type MenuRow } from './peerMenu';
-  import { effectiveAgentVisionModel } from './agentVisionModel';
+  import { effectiveAgentVisionModel, visionFollowingText } from './agentVisionModel';
   import { agentHostDisplay } from './agentComputeHost';
 
   // Provider type definition: one row of PROVIDERS_RESPONSE (DPTP §3.5), which
@@ -172,7 +172,7 @@
         selectedTextProvider = `local:${defaultProviders.default_provider}`;
       }
       if (!selectedVisionProvider) {
-        selectedVisionProvider = `local:${defaultProviders.vision_provider}`;
+        selectedVisionProvider = visionFollowingText(selectedTextProvider, mergedVisionProviders(), defaultProviders.vision_provider || '');
       }
       if (!selectedVoiceProvider && defaultProviders.voice_provider) {
         selectedVoiceProvider = `local:${defaultProviders.voice_provider}`;
@@ -226,7 +226,12 @@
         <select
           id="text-provider-header"
           bind:value={selectedTextProvider}
-          onchange={(e) => onTextProviderChange?.((e.currentTarget as HTMLSelectElement).value)}
+          onchange={(e) => {
+            const chosen = (e.currentTarget as HTMLSelectElement).value;
+            // A text model that reads images takes them too; else the global default.
+            selectedVisionProvider = visionFollowingText(chosen, mergedVisionProviders(), defaultProviders?.vision_provider || '');
+            onTextProviderChange?.(chosen);
+          }}
         >
           {#each mergedTextProviders() as provider}
             <option value={provider.uniqueId}>

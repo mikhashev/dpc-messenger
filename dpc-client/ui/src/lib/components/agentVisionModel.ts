@@ -63,3 +63,19 @@ export function effectiveAgentVisionModel(
     isGlobal: true
   };
 }
+
+/**
+ * The Vision choice of a plain AI chat when its Text choice changes: the same
+ * rule as an agent's (Mike, 2026-11-02, extending 2026-09-18). If the text
+ * provider supports vision, images go to it; otherwise to the global
+ * vision_provider. Both sides are the header's unique ids (`local:<alias>`,
+ * `remote:<node>:<alias>`); `visionRows` are the rows the Vision list offers.
+ */
+export function visionFollowingText(
+  textUniqueId: string,
+  visionRows: { uniqueId: string }[],
+  globalVisionProvider: string
+): string {
+  if (textUniqueId && (visionRows || []).some((r) => r.uniqueId === textUniqueId)) return textUniqueId;
+  return globalVisionProvider ? `local:${globalVisionProvider}` : "";
+}
