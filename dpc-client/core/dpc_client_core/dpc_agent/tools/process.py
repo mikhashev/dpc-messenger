@@ -51,8 +51,12 @@ _CEILING_SECTION, _CEILING_KEY = "system", "shell_memory_limit_mb"
 # What a refusal tells the agent, kept in one place for every caller.
 CEILING_HINT = (
     f"Raise {_CEILING_KEY} in [{_CEILING_SECTION}] of config.ini (the next "
-    f"command reads it, no restart; {_CEILING_ENV} in the environment overrides it)"
+    f"command reads it, no restart; the Agent map's \"Memory limit per process\" "
+    f"field sets it too; {_CEILING_ENV} in the environment overrides it)"
 )
+
+# Where the limit in force comes from, as `list_processes` and the UI name it.
+LIMIT_SOURCE_ENV, LIMIT_SOURCE_CONFIG, LIMIT_SOURCE_DEFAULT = "env", "config", "default"
 
 # (path, mtime_ns, size) -> the raw value, so a command costs one stat().
 _config_cache: tuple = (None, None)
@@ -94,35 +98,67 @@ def _config_ceiling_raw() -> Optional[str]:
     return raw
 
 
-def _read_memory_ceiling() -> int:
-    """The ceiling for the next command: environment, config.ini, then 8192.
+def forget_config_cache() -> None:
+    """Drop the remembered config.ini value, so the next read opens the file.
 
+    The stamp (mtime_ns, size) is what makes a read cost one stat(); two writes
+    of the same length within one clock tick share it. A writer that knows it
+    has just written (`set_shell_memory_limit`) calls this rather than hope.
+    """
+    global _config_cache
+    _config_cache = (None, None)
+
+
+def memory_limit_env_name() -> Optional[str]:
+    """The environment variable that decides the limit, or None when none is set.
+
+    Set means present, even empty or not a number: such a value still shadows
+    config.ini (the reader falls back to the default, not to the file).
+    """
+    for name in (_CEILING_ENV, _CEILING_ENV_GENERIC):
+        if os.environ.get(name) is not None:
+            return name
+    return None
+
+
+def read_memory_limit() -> tuple[int, str]:
+    """The limit for the next command and where it comes from: (MB, source).
+
+    Source is `env` (either variable), `config` (the key in config.ini) or
+    `default` (the key is absent, or its value is not a number). 0 means no
+    limit. A non-numeric environment value reports `env` with the default
+    number: the variable is still the thing in force, and editing config.ini
+    would change nothing while it is set. A non-numeric config value reports
+    `default`, because that is what runs and a new value in the file fixes it.
     Read at every command, so a change to config.ini applies at once. It never
     raises: a bad value used to raise at module scope, which takes the whole
     tools package — every agent tool — down for a misconfigured limit.
     """
-    for source, raw in (
-        (_CEILING_ENV, os.environ.get(_CEILING_ENV)),
-        (_CEILING_ENV_GENERIC, os.environ.get(_CEILING_ENV_GENERIC)),
-    ):
-        if raw is not None:
-            break
+    env_name = memory_limit_env_name()
+    if env_name is not None:
+        raw, label, good = os.environ.get(env_name), env_name, LIMIT_SOURCE_ENV
     else:
-        source = f"[{_CEILING_SECTION}] {_CEILING_KEY}"
         raw = _config_ceiling_raw()
         if raw is None:
-            return _DEFAULT_MEMORY_CEILING_MB
+            return _DEFAULT_MEMORY_CEILING_MB, LIMIT_SOURCE_DEFAULT
+        label, good = f"[{_CEILING_SECTION}] {_CEILING_KEY}", LIMIT_SOURCE_CONFIG
     try:
-        return int(raw)
+        return int(raw), good
     except (TypeError, ValueError):
         # Once per value: this runs at every command.
-        if (source, raw) not in _bad_ceilings_announced:
-            _bad_ceilings_announced.add((source, raw))
+        if (label, raw) not in _bad_ceilings_announced:
+            _bad_ceilings_announced.add((label, raw))
             log.warning(
                 "%s is %r, which is not a number — using the default %s MB",
-                source, raw, _DEFAULT_MEMORY_CEILING_MB,
+                label, raw, _DEFAULT_MEMORY_CEILING_MB,
             )
-        return _DEFAULT_MEMORY_CEILING_MB
+        source = LIMIT_SOURCE_ENV if env_name is not None else LIMIT_SOURCE_DEFAULT
+        return _DEFAULT_MEMORY_CEILING_MB, source
+
+
+def _read_memory_ceiling() -> int:
+    """The ceiling for the next command: environment, config.ini, then 8192."""
+    return read_memory_limit()[0]
 
 
 # A pin for tests; None in service, where the ceiling is read at each command.

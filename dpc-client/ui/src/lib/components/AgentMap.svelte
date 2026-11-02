@@ -33,6 +33,12 @@
   import { copyText } from '$lib/utils/clipboard';
   import { freeCommitLine } from '$lib/utils/strataFields';
   import {
+    memoryLimitInputText,
+    memoryLimitView,
+    memoryLimitWarning,
+    parseMemoryLimitInput,
+  } from '$lib/utils/shellMemoryLimit';
+  import {
     HEADER_HEIGHT,
     clampRect,
     isClick,
@@ -113,6 +119,8 @@
           free_commit: r.free_commit ?? null,
           vram_free_mib: r.vram_free_mib ?? null,
           vram_total_mib: r.vram_total_mib ?? null,
+          shell_memory_limit_mb: r.shell_memory_limit_mb ?? null,
+          shell_memory_limit_source: r.shell_memory_limit_source ?? null,
         };
         error = '';
       } else if (r && typeof r === 'object') {
@@ -169,6 +177,71 @@
     nowMs: now,
   }));
   let selected = $derived(map.agents.find(a => a.agent_id === pickSelected(map, selectedId)) ?? null);
+
+  // The memory limit per process: the line, and its inline edit (a number, Save / Cancel).
+  let limit = $derived(memoryLimitView(listing));
+  let limitEditing = $state(false);
+  let limitDraft = $state('');
+  let limitError = $state('');
+  let limitBusy = $state(false);
+  // The warning follows what is typed while editing, else the value in force.
+  let limitTyped = $derived(parseMemoryLimitInput(limitDraft));
+  let limitWarning = $derived(
+    limitEditing ? ('mb' in limitTyped ? memoryLimitWarning(limitTyped.mb) : '') : (limit?.warning ?? ''),
+  );
+
+  function editLimit() {
+    if (!limit?.editable) return;
+    limitDraft = memoryLimitInputText(limit.mb);
+    limitError = '';
+    limitEditing = true;
+  }
+
+  function cancelLimit() {
+    limitEditing = false;
+    limitError = '';
+  }
+
+  async function saveLimit() {
+    if (limitBusy) return;
+    const typed = parseMemoryLimitInput(limitDraft);
+    if ('error' in typed) {
+      limitError = typed.error;
+      return;
+    }
+    limitBusy = true;
+    limitError = '';
+    try {
+      const r: any = await sendCommand('set_shell_memory_limit', { mb: typed.mb });
+      if (r?.status === 'success') {
+        if (listing) {
+          listing = {
+            ...listing,
+            shell_memory_limit_mb: r.shell_memory_limit_mb ?? typed.mb,
+            shell_memory_limit_source: r.shell_memory_limit_source ?? 'config',
+          };
+        }
+        limitEditing = false;
+        untrack(refresh);
+      } else {
+        limitError = r?.message || 'Could not set the memory limit';
+      }
+    } catch (e) {
+      limitError = `Could not set the memory limit: ${e}`;
+    } finally {
+      limitBusy = false;
+    }
+  }
+
+  function limitKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveLimit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelLimit();
+    }
+  }
 
   function close() {
     open = false;
@@ -306,6 +379,35 @@
           <div class="root-node">
             <span class="node-title">D-PC backend</span>
             {#if map.backendLine}<span class="muted small">{map.backendLine}</span>{/if}
+            {#if limit}
+              <div class="limit-line">
+                {#if limitEditing}
+                  <label class="small" for="memory-limit-input">Memory limit per process:</label>
+                  <input
+                    id="memory-limit-input"
+                    class="limit-input"
+                    type="text"
+                    inputmode="numeric"
+                    placeholder="8192 (default)"
+                    bind:value={limitDraft}
+                    onkeydown={limitKeydown}
+                    disabled={limitBusy}
+                  />
+                  <span class="small">MiB (0 = no limit, empty = back to the default 8,192 MiB)</span>
+                  <button type="button" class="limit-button" onclick={saveLimit} disabled={limitBusy}>Save</button>
+                  <button type="button" class="limit-button" onclick={cancelLimit} disabled={limitBusy}>Cancel</button>
+                {:else}
+                  <span class="small">{limit.line}{#if limit.suffix} <span class="muted">{limit.suffix}</span>{/if}</span>
+                  {#if limit.editable}
+                    <button type="button" class="limit-button" onclick={editLimit}>Edit</button>
+                  {:else}
+                    <span class="muted small">{limit.envNote}</span>
+                  {/if}
+                {/if}
+              </div>
+              {#if limitWarning}<div class="limit-warning small" role="status">{limitWarning}</div>{/if}
+              {#if limitError}<div class="limit-error small" role="alert">{limitError}</div>{/if}
+            {/if}
           </div>
           <div class="branch">
             {#each map.agents as a (a.agent_id)}
@@ -623,6 +725,30 @@
     border-radius: 10px;
   }
   .node-title { font-size: 16px; font-weight: 600; }
+  .limit-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+  .limit-input {
+    width: 110px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color, #2c3036);
+    background: var(--bg-primary, #14161a);
+    color: var(--text-primary, #e8eaed);
+    font: inherit;
+    font-size: 13px;
+  }
+  .limit-button {
+    padding: 2px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color, #2c3036);
+    background: transparent;
+    color: var(--text-primary, #e8eaed);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .limit-button:disabled { opacity: 0.5; cursor: default; }
+  .limit-warning { color: #d29922; }
+  .limit-error { color: #f5a5a5; }
 
   .branch {
     margin-left: 22px;

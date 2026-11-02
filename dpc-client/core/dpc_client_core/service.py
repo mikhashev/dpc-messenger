@@ -11021,21 +11021,60 @@ class CoreService:
             return {"status": "error", "message": str(e) or type(e).__name__}
         return {"status": "success", "asked": asked}
 
+    async def set_shell_memory_limit(self, mb: int) -> Dict[str, Any]:
+        """Set the memory limit per agent process (`[system] shell_memory_limit_mb`), in MiB.
+
+        0 means no limit; a negative or non-integer `mb` is refused with its reason, and so
+        is any change while an environment variable (either name) decides the limit, because
+        editing config.ini would then change nothing. The next command reads the new value,
+        no restart. The answer carries the effective value and its source as read back, the
+        same two figures `list_processes` reports.
+        """
+        from .dpc_agent.tools import process as shell_process
+
+        if isinstance(mb, bool) or not isinstance(mb, int):
+            return {"status": "error", "message": f"mb must be a whole number of MiB (0 = no limit), not {mb!r}"}
+        if mb < 0:
+            return {"status": "error", "message": f"mb must be 0 (no limit) or more, not {mb}"}
+        env_name = shell_process.memory_limit_env_name()
+        if env_name is not None:
+            return {
+                "status": "error",
+                "message": (
+                    f"The limit is set by {env_name} in the environment, so a change in config.ini "
+                    f"would have no effect; unset {env_name} and restart DPC to edit it here"
+                ),
+            }
+        try:
+            self.settings.set(shell_process._CEILING_SECTION, shell_process._CEILING_KEY, str(mb))
+        except OSError as e:
+            logger.error("set_shell_memory_limit failed: %s", e, exc_info=True)
+            return {"status": "error", "message": f"config.ini could not be written: {e}"}
+        # The reader keys its cache on the file's mtime and size; a same-length value
+        # written within one clock tick would keep both, so it is told outright.
+        shell_process.forget_config_cache()
+        effective, source = shell_process.read_memory_limit()
+        return {"status": "success", "shell_memory_limit_mb": effective, "shell_memory_limit_source": source}
+
     async def list_processes(self, since: str = None, until: str = None) -> Dict[str, Any]:
         """What runs now and what ended recently (ADR-046 point 8): the process
         registry's kept entries with `commit_mb` read at this request, the daily
         history's in `since`/`until` (optional ISO bounds) added, the backend's
         own pid and start time, `free_commit` as `read_free_commit_or_physical`
         reads it, and the card's `vram_free_mib` / `vram_total_mib` (None without
-        an NVIDIA signal; `read_vram_mib` reuses a reading for 30 s). The psutil
-        walk and the nvidia-smi reads run off the event loop."""
+        an NVIDIA signal; `read_vram_mib` reuses a reading for 30 s). Beside them
+        `shell_memory_limit_mb` (0 = no limit) and `shell_memory_limit_source`
+        (`env`, `config` or `default`), as `read_memory_limit` reads them for the
+        next command. The psutil walk and the nvidia-smi reads run off the event loop."""
         import os
         from dpc_client_core import process_registry
+        from dpc_client_core.dpc_agent.tools.process import read_memory_limit
         from dpc_client_core.managers.commit_memory import read_free_commit_or_physical, read_vram_mib
 
         def read() -> Dict[str, Any]:
             registry = process_registry.get_registry()
             vram_free_mib, vram_total_mib = read_vram_mib()
+            limit_mb, limit_source = read_memory_limit()
             return {
                 "processes": registry.list_processes(since, until),
                 "backend_pid": os.getpid(),
@@ -11043,6 +11082,8 @@ class CoreService:
                 "free_commit": read_free_commit_or_physical(),
                 "vram_free_mib": vram_free_mib,
                 "vram_total_mib": vram_total_mib,
+                "shell_memory_limit_mb": limit_mb,
+                "shell_memory_limit_source": limit_source,
             }
 
         try:

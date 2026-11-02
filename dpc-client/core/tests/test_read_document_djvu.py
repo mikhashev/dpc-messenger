@@ -252,7 +252,8 @@ def test_a_tree_killed_by_the_memory_ceiling_names_the_ceiling_and_the_usage(mon
     assert "descendants were killed" in err
     assert (
         "Raise shell_memory_limit_mb in [system] of config.ini (the next command "
-        "reads it, no restart; DPC_SHELL_MEMORY_LIMIT_MB in the environment overrides it)."
+        "reads it, no restart; the Agent map's \"Memory limit per process\" field sets it too; "
+        "DPC_SHELL_MEMORY_LIMIT_MB in the environment overrides it)."
     ) in err
 
 

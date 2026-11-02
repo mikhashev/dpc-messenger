@@ -100,7 +100,7 @@ class TestTheCommand:
 
         ok = next(m for m in ws.sent if m.get("id") == "ok")["payload"]
         assert set(ok) == {"status", "processes", "backend_pid", "backend_start_time", "free_commit",
-                          "vram_free_mib", "vram_total_mib"}
+                          "vram_free_mib", "vram_total_mib", "shell_memory_limit_mb", "shell_memory_limit_source"}
         assert ok["status"] == "success" and ok["backend_pid"] == os.getpid()
         assert ok["backend_start_time"] == pr.create_time_of(os.getpid())
         assert ok["free_commit"] == reading
