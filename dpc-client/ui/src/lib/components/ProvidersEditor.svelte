@@ -2,8 +2,8 @@
 <!-- View and manage AI provider configuration -->
 
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
-  import { nodeStatus, sendCommand, peerProviders, providerAccounts, getProviderBalances } from '$lib/coreService';
+  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { nodeStatus, sendCommand, peerProviders, providerAccounts, getProviderBalances, modelDownloadCompleted } from '$lib/coreService';
   import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
   import {
     blockedModelLine, formatQuotaLine, formatQuotaLineTitle, quotaHasWarning,
@@ -15,6 +15,11 @@
   import {
     groupModelFiles, modelFileLabel, mmprojAfterChoosing, projectorsBeside, type ModelFileRow,
   } from '$lib/utils/modelFiles';
+  import {
+    runConfigOptions, sizeForRunConfig, strataSizeLine, suggestedConversationCacheMib, suggestionMarkText, cacheSuggestionMayNotFit,
+    freeCommitMibOf, STRATA_ESTIMATE_LABEL, type StrataModelFamily, type StrataModelSize,
+  } from '$lib/utils/strataInstall';
+  import { STRATA_MODEL_DOWNLOAD } from '$lib/utils/strataModelDownload';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
   import { envNameOrUndefined, looksLikeKey } from '$lib/utils/apiKeyEnv';
   import { isProviderDraftFilled, validateProviderDraftForAdd, suggestProviderAlias } from '$lib/utils/providerDraft';
@@ -497,6 +502,7 @@
   // The GGUFs in that folder (list_model_files), for the "From the model files
   // folder" selects of the Add Provider and Edit forms. Read only; it creates nothing.
   let modelFiles: ModelFileRow[] = [];
+  let modelRunConfigs: string[] = [];   // absolute paths of strata-*.json in <folder>/strata/run-configs
   let modelFilesError = '';
   let modelFilesLoading = false;
 
@@ -506,6 +512,7 @@
       const r = await sendCommand('list_model_files', {});
       if (r?.status === 'success') {
         modelFiles = r.model_files ?? [];
+        modelRunConfigs = r.run_configs ?? [];
         modelFilesError = '';
       } else {
         modelFilesError = r?.message || 'Could not list the model files folder';
@@ -546,6 +553,185 @@
     provider.gguf_path = path;
     provider.mmproj = mmprojAfterChoosing(modelFiles, path, provider.mmproj);
     editedConfig = editedConfig;
+  }
+
+  // --- Add Provider, type strata: the run config, the install, the cache suggestion ---
+
+  // list_strata_models: Strata's own model_table (families -> sizes). `on_this_pc` is
+  // Strata's advice and gates nothing in this form.
+  let strataFamilies: StrataModelFamily[] = [];
+  let strataModelsError = '';
+  let strataModelsLoading = false;
+
+  async function loadStrataModels() {
+    if (strataModelsLoading) return;
+    strataModelsLoading = true;
+    try {
+      const r = await sendCommand('list_strata_models', {});
+      if (r?.status === 'success') {
+        strataFamilies = r.families ?? [];
+        strataModelsError = '';
+      } else {
+        strataModelsError = r?.message || r?.error || 'Could not read the list of Strata models';
+      }
+    } catch (error) {
+      strataModelsError = `Error: ${error}`;
+    } finally {
+      strataModelsLoading = false;
+    }
+  }
+
+  let strataModelsLoadedForForm = false;
+  $: wantsStrataModels = open && selectedTab === 'add' && newProvider.type === 'strata';
+  $: if (wantsStrataModels && !strataModelsLoadedForForm) {
+    strataModelsLoadedForForm = true;
+    loadStrataModels();
+  }
+  $: if (!wantsStrataModels) strataModelsLoadedForForm = false;
+
+  // The run configs of the model files folder, for the Add form's select.
+  $: newRunConfigs = runConfigOptions(modelRunConfigs);
+
+  // While the cache budget in the Add form holds a suggestion rather than a typed value:
+  // the time it was made. The "suggested from free commit memory" mark shows while set.
+  let newCacheSuggestedAt: Date | null = null;
+  // The suggestion was held up to the floor of 1024: free commit may not fit the model.
+  let newCacheMayNotFit = false;
+
+  /** Prefill the empty cache budget (or replace an earlier suggestion, never a typed value)
+   *  from the free commit memory read now. No size known or no reading: nothing. */
+  async function offerCacheSuggestion(ramNeededGb: number | null | undefined) {
+    if (ramNeededGb == null) return;
+    const typedByHand = () => newProvider.conversation_cache_mib != null && !newCacheSuggestedAt;
+    if (typedByHand()) return;
+    await loadEngineStatus();
+    if (typedByHand()) return;
+    const free = freeCommitMibOf(engineStatus?.free_commit);
+    const suggested = suggestedConversationCacheMib(free, ramNeededGb);
+    if (suggested == null) return;
+    newProvider.conversation_cache_mib = suggested;
+    newCacheSuggestedAt = new Date();
+    newCacheMayNotFit = cacheSuggestionMayNotFit(free, ramNeededGb);
+    newProvider = newProvider;
+  }
+
+  function setNewCacheMib(raw: string) {
+    const n = parseInt(raw);
+    newProvider.conversation_cache_mib = raw === '' || isNaN(n) ? undefined : n;
+    newCacheSuggestedAt = null;
+    newCacheMayNotFit = false;
+    newProvider = newProvider;
+  }
+
+  // A run config chosen from the select, typed, browsed for, or just installed fills the
+  // new alias's strata_base_config; the size it is named for (or the one just asked for)
+  // sizes the cache suggestion.
+  function chooseNewStrataConfig(path: string, fallbackRamGb?: number | null) {
+    const value = path.trim();
+    newProvider.strata_base_config = value || undefined;
+    newProvider = newProvider;
+    if (!value) return;
+    fillModelNameFromRunConfig(value);
+    offerCacheSuggestion(sizeForRunConfig(strataFamilies, value)?.ram_needed_gb ?? fallbackRamGb ?? null);
+  }
+
+  // The Model name the new alias is served under defaults to the run config's model_name
+  // (strata_inspect_base_config, as the Edit form reads it), so Add enables without typing.
+  // It fills an empty field or one still holding an earlier fill of this kind, never a typed value.
+  let newModelFilledFromConfig: string | null = null;
+
+  async function fillModelNameFromRunConfig(path: string) {
+    const mayFill = () => !newProvider.model || newProvider.model === newModelFilledFromConfig;
+    if (!mayFill()) return;
+    try {
+      const r = await sendCommand('strata_inspect_base_config', { path, install_dir: '' });
+      if (r?.status !== 'success' || !r.model_name) return;
+      if (newProvider.strata_base_config !== path || !mayFill()) return;   // moved on while reading
+      newProvider.model = r.model_name;
+      newModelFilledFromConfig = r.model_name;
+      newProvider = newProvider;
+    } catch (error) {
+      console.error('[ProvidersEditor] reading the run config failed:', error);
+    }
+  }
+
+  async function pickNewStrataConfig() {
+    if (!canBrowse) return;
+    try {
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const current = newProvider.strata_base_config || '';
+      const picked = await openDialog({
+        multiple: false,
+        directory: false,
+        defaultPath: current ? current.replace(/[\\/][^\\/]*$/, '') : (engineStatus?.model_files_dir || undefined),
+        title: 'Select a Strata run config (strata-<model>.json)',
+        filters: [{ name: 'json', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }],
+      });
+      if (typeof picked !== 'string' || !picked) return;
+      chooseNewStrataConfig(picked);
+    } catch (err) {
+      console.error('[ProvidersEditor] strata run config dialog failed:', err);
+    }
+  }
+
+  let strataInstallBusy = false;
+  let strataInstallError = '';
+  let strataInstallNote = '';
+  // The RAM figure of the size last asked for, for a run config that names no listed size.
+  let strataInstallRamGb: number | null = null;
+
+  /** Ask for a Strata model: the backend raises the consent dialog and the install starts
+   *  at the owner's yes. `ggufDir` takes the owner's own catalog files in place. */
+  async function installNewStrataModel(family: StrataModelFamily, size: StrataModelSize, ggufDir?: string) {
+    strataInstallBusy = true;
+    strataInstallError = '';
+    strataInstallNote = '';
+    strataInstallRamGb = size.ram_needed_gb ?? null;
+    try {
+      const params: Record<string, unknown> = { family: family.family, model: size.model, images: size.images ?? true };
+      if (ggufDir) params.gguf_dir = ggufDir;
+      const r = await sendCommand('install_strata_model', params);
+      if (r?.status !== 'success') {
+        strataInstallError = r?.message || r?.error || 'Could not start the install';
+      } else if (r.run_config) {
+        strataInstallNote = r.message || 'Already installed.';
+        await useInstalledStrataConfig(r.run_config);
+      } else {
+        strataInstallNote = r.asked
+          ? 'Waiting for your answer in the download dialog.'
+          : 'Nothing was started: no download dialog was raised.';
+        offerCacheSuggestion(size.ram_needed_gb);
+      }
+    } catch (error) {
+      strataInstallError = `Error: ${error}`;
+    } finally {
+      strataInstallBusy = false;
+    }
+  }
+
+  async function installNewStrataModelFromMyFiles(family: StrataModelFamily, size: StrataModelSize) {
+    if (!canBrowse) return;
+    try {
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const picked = await openDialog({
+        multiple: false,
+        directory: true,
+        defaultPath: engineStatus?.model_files_dir || undefined,
+        title: `Select the folder holding the files of ${family.title || family.family} ${size.model}`,
+      });
+      if (typeof picked !== 'string' || !picked) return;   // cancelled
+      await installNewStrataModel(family, size, picked);
+    } catch (err) {
+      strataInstallError = `Error: ${err}`;
+    }
+  }
+
+  // An install ended (model_download_completed for 'strata-model', carrying run_config)
+  // while this form is open for strata: read the folder again and take the new run config.
+  async function useInstalledStrataConfig(runConfig: string) {
+    await loadModelFiles();
+    chooseNewStrataConfig(runConfig, strataInstallRamGb);
+    loadStrataModels();   // refreshes the "installed" marks
   }
 
   async function pickModelFilesDir() {
@@ -1266,7 +1452,24 @@
       think: false, // Reasoning is opt-in on a new provider — see the form's help text
     };
     aliasTouched = false;
+    newCacheSuggestedAt = null;
+    newCacheMayNotFit = false;
+    newModelFilledFromConfig = null;
+    strataInstallError = '';
+    strataInstallNote = '';
+    strataInstallRamGb = null;
   }
+
+  // An install of a Strata model ends (model_download_completed with run_config): when this
+  // Add form is open for strata, take the run config it wrote. The store is read through
+  // a subscription, not `$modelDownloadCompleted`: the download panel clears it right after
+  // it handles the event, and a subscriber is told at the set, before the clear.
+  const stopWatchingStrataInstall = modelDownloadCompleted.subscribe((done) => {
+    if (!done || done.model_name !== STRATA_MODEL_DOWNLOAD || !done.run_config) return;
+    if (!(open && selectedTab === 'add' && newProvider.type === 'strata')) return;
+    useInstalledStrataConfig(done.run_config);
+  });
+  onDestroy(stopWatchingStrataInstall);
 
   // Add new provider
   function addNewProvider() {
@@ -1321,10 +1524,12 @@
       provider.top_p = 0.95;
       provider.top_k = 20;
     } else if (newProvider.type === 'strata') {
-      // Nothing to default: the model files come from the base config chosen
-      // in Edit, and the cache budget is a measurement, never a default
-      // (ADR-044 point 7). Save refuses the alias until the base config and
-      // conversation_cache_mib are set; an empty install dir is DPC's own install.
+      // Nothing to default: the base config is the one chosen or installed in this
+      // form (or later in Edit), and the cache budget is a measurement or the form's
+      // marked suggestion, never a default (ADR-044 point 7). Save refuses the alias
+      // until both are set; an empty install dir is DPC's own install.
+      if (newProvider.strata_base_config) provider.strata_base_config = newProvider.strata_base_config;
+      if (newProvider.conversation_cache_mib != null) provider.conversation_cache_mib = newProvider.conversation_cache_mib;
     } else if (newProvider.type === 'local_whisper') {
       provider.device = 'auto';
       provider.compile_model = true;
@@ -1636,6 +1841,123 @@
       </p>
     </div>
   {/if}
+{/snippet}
+
+<!-- Add Provider, type strata: the run config of the new alias. "From the model files
+     folder" lists the folder's strata-*.json (list_model_files); a path can be typed or browsed
+     for as in Edit. Either way it fills strata_base_config. -->
+{#snippet strataRunConfigFields()}
+  <div class="form-group">
+    <label for="new-strata-base">Base config</label>
+    <div class="path-row">
+      <input
+        id="new-strata-base"
+        type="text"
+        value={newProvider.strata_base_config ?? ''}
+        on:change={(e) => chooseNewStrataConfig(e.currentTarget.value)}
+        placeholder="strata-<model>.json (absolute)"
+        autocomplete="off"
+      />
+      {#if canBrowse}
+        <button type="button" class="btn btn-browse" on:click={pickNewStrataConfig}
+          title="Pick a Strata run config">Browse…</button>
+      {/if}
+    </div>
+    <div class="model-file-picker">
+      <label for="new-strata-run-config">From the model files folder</label>
+      <select
+        id="new-strata-run-config"
+        value={newRunConfigs.some((o) => o.path === newProvider.strata_base_config) ? newProvider.strata_base_config : ''}
+        on:change={(e) => chooseNewStrataConfig(e.currentTarget.value)}
+        disabled={!newRunConfigs.length}
+      >
+        <option value="">{modelFilesLoading ? 'Loading…' : newRunConfigs.length ? 'Pick a run config' : 'No run configs in the folder'}</option>
+        {#each newRunConfigs as o (o.path)}
+          <option value={o.path}>{o.label}</option>
+        {/each}
+      </select>
+      <p class="help-text">
+        The run configs Strata's setup wrote under <code>strata/run-configs</code> in the model files
+        folder. Install a model below to get one.
+      </p>
+    </div>
+  </div>
+{/snippet}
+
+<!-- Add Provider, type strata: the Strata models that can be installed (list_strata_models),
+     Strata's own table. Its words for this PC are advice only; nothing here is disabled by them. -->
+{#snippet strataInstallBlock()}
+  <div class="form-group strata-install">
+    <h4 class="strata-subhead">Install a Strata model</h4>
+    {#if strataModelsLoading}
+      <p class="help-text">Reading Strata's model list…</p>
+    {:else if strataModelsError}
+      <p class="help-text warn">{strataModelsError}</p>
+    {:else if !strataFamilies.length}
+      <p class="help-text">Strata offers no model to install.</p>
+    {/if}
+    {#each strataFamilies as family (family.family)}
+      <div class="strata-family">
+        <strong>{family.title || family.family}</strong>
+        {#if family.about}<span class="help-text"> {family.about}</span>{/if}
+        {#each family.sizes ?? [] as size (size.model)}
+          <div class="strata-size">
+            <span class="strata-size-name" title={size.about ?? ''}>{size.model}</span>
+            <span class="help-text">{strataSizeLine(size)}</span>
+            {#if size.installed}
+              <span class="strata-installed">installed</span>
+            {:else}
+              <button type="button" class="btn btn-browse" disabled={strataInstallBusy}
+                on:click={() => installNewStrataModel(family, size)}
+                title="Ask to download this model with Strata's own setup">Install</button>
+              <button type="button" class="btn btn-browse" disabled={strataInstallBusy || !canBrowse}
+                on:click={() => installNewStrataModelFromMyFiles(family, size)}
+                title={canBrowse ? 'Take the exact catalog files from a folder of yours, where they are' : 'Needs the desktop app to pick a folder'}>Use my files…</button>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/each}
+    {#if strataInstallError}
+      <p class="help-text warn">{strataInstallError}</p>
+    {:else if strataInstallNote}
+      <p class="help-text success">{strataInstallNote}</p>
+    {/if}
+    <button type="button" class="btn btn-browse" disabled={strataModelsLoading}
+      on:click={loadStrataModels} title="Read Strata's model list again">Refresh</button>
+    <p class="help-text">
+      {STRATA_ESTIMATE_LABEL} is Strata's own verdict for this PC. It is advice: it blocks nothing here.
+      Install asks for your consent first; Use my files… takes the model's files from a folder of yours
+      where they are.
+    </p>
+  </div>
+{/snippet}
+
+<!-- Add Provider, type strata: the cache budget. Empty until a size or run config is chosen;
+     then a suggestion from free commit memory, marked until it is typed over. -->
+{#snippet strataCacheBudgetField()}
+  <div class="form-group">
+    <label for="new-strata-cc-mib">Cache budget, MiB (--conversation-cache-mib)</label>
+    <input
+      id="new-strata-cc-mib"
+      type="number"
+      min="1"
+      step="1024"
+      value={newProvider.conversation_cache_mib ?? ''}
+      on:input={(e) => setNewCacheMib(e.currentTarget.value)}
+      placeholder="required, no default"
+    />
+    {#if newCacheSuggestedAt && newProvider.conversation_cache_mib != null}
+      <p class="help-text">{suggestionMarkText(newCacheSuggestedAt)}</p>
+      {#if newCacheMayNotFit}
+        <p class="help-text warn">Free commit memory is short for this model: the rule came out below 1,024 MiB and was raised to it. The model may not fit while other programs run.</p>
+      {/if}
+    {/if}
+    <p class="help-text">
+      Host RAM the launcher parks whole conversations in. There is no default: measure it on this
+      machine (see the provider's form after adding).
+    </p>
+  </div>
 {/snippet}
 
 <!-- The state of the one card both local engines share (local_engine_status). -->
@@ -3845,10 +4167,14 @@
                 {#if newProvider.type === 'strata'}
                   <p class="help-text">
                     The model name requests are sent under, e.g. the base config's model_name. After
-                    adding, fill the base config and the conversation-cache budget in the provider's form:
-                    Save refuses a strata alias without them, and there is no default budget (ADR-044).
-                    The Strata folder is optional: empty runs DPC's own install of the pinned release.
+                    adding, fill the base config and the conversation-cache budget (below, or later in the
+                    provider's form): Save refuses a strata alias without them, and there is no default
+                    budget (ADR-044). The Strata folder is optional: empty runs DPC's own install of the
+                    pinned release.
                   </p>
+                  {@render strataRunConfigFields()}
+                  {@render strataInstallBlock()}
+                  {@render strataCacheBudgetField()}
                 {/if}
               </div>
             {/if}
@@ -4600,6 +4926,10 @@
     flex-direction: column;
   }
 
+  .strata-family { margin: 0.5rem 0; }
+  .strata-size { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0.25rem 0 0.25rem 1rem; }
+  .strata-size-name { font-family: monospace; }
+  .strata-installed { font-weight: 600; }
   .path-row {
     display: flex;
     gap: 6px;
