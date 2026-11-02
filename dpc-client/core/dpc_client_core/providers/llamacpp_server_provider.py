@@ -37,10 +37,11 @@ from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_ba
                    image_blocks_in_turns, positive_ceiling, with_tool_call_blocks)
 from .deepseek_provider import DeepSeekProvider
 
+from ..managers import llama_server_supervisor as _llama_server_supervisor_module
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
 from ..managers.llama_server_supervisor import CardHeldError, LlamaServerSupervisor, PinNotInstalledError, card_holders
 from ..managers.llama_server_supervisor import gguf_effort_dictionary, gguf_integer_keys
-from ..managers.llama_server_supervisor import on_the_owner_loop
+from ..managers.llama_server_supervisor import on_the_owner_loop, stop_by_hand
 
 logger = logging.getLogger(__name__)
 
@@ -1253,6 +1254,15 @@ class LlamaServerProvider(DeepSeekProvider):
 _RETIRING: Dict[str, Tuple[LlamaServerSupervisor, "asyncio.Task"]] = {}
 
 
+def _is_configured(supervisor: LlamaServerSupervisor) -> bool:
+    """The supervisor is the one its alias runs now: neither replaced nor retired."""
+    retiring = (_RETIRING.get(supervisor.alias) or (None, None))[0]
+    return retiring is not supervisor and _ACTIVE_SUPERVISORS.get(supervisor.alias, supervisor) is supervisor
+
+
+_llama_server_supervisor_module._still_configured = _is_configured
+
+
 async def _watch_without_owning(tasks: List["asyncio.Task"]) -> None:
     """Wait for drains that belong to somebody else, and never cancel them.
 
@@ -1374,9 +1384,7 @@ async def stop_local_engine(alias: str, timeout: Optional[float] = None) -> bool
         supervisor = (_RETIRING.get(alias) or (None, None))[0]
     if supervisor is None:
         return False
-    async with supervisor._start_lock:
-        await supervisor.drain(timeout=timeout)
-        if not retired and _ACTIVE_SUPERVISORS.get(alias) is supervisor:
-            supervisor.reopen()
+    # Whether it is still the configured one is asked after the drain (`_still_configured`).
+    await stop_by_hand(supervisor, timeout=timeout, reopen=not retired)
     logger.info("local engine '%s' (%s) stopped by hand", alias, supervisor.ENGINE)
     return True

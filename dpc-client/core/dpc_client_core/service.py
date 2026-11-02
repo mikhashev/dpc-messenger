@@ -1057,9 +1057,13 @@ class CoreService:
         # Local engines (llama-server, Strata) live on this loop; a start reached
         # from an agent tool's per-call loop is forwarded here. A missing pin is
         # offered to the owner through the consent service, never fetched by a start.
-        from .managers.llama_server_supervisor import bind_model_download_service, bind_owner_loop
+        from .managers.llama_server_supervisor import (
+            bind_local_engine_settings, bind_model_download_service, bind_owner_loop,
+        )
         bind_owner_loop(asyncio.get_running_loop())
         bind_model_download_service(self.model_download_service)
+        # The idle swap reads its two settings at each start, so a change needs no restart.
+        bind_local_engine_settings(self.settings)
 
         # Run knowledge integrity check
         logger.info("Running knowledge integrity check")
@@ -1459,9 +1463,12 @@ class CoreService:
         finally:
             # The supervisors are stopped: a late call from a tool's loop must not
             # be forwarded into a loop that is about to close.
-            from .managers.llama_server_supervisor import bind_model_download_service, bind_owner_loop
+            from .managers.llama_server_supervisor import (
+                bind_local_engine_settings, bind_model_download_service, bind_owner_loop,
+            )
             bind_owner_loop(None)
             bind_model_download_service(None)
+            bind_local_engine_settings(None)
 
         # S144 SHUTDOWN-PIPE-DRAIN: close any AuthBrowser (Camoufox)
         # subprocesses still alive. Without this they keep stdin/stdout
@@ -10909,7 +10916,8 @@ class CoreService:
 
         `model_files_dir` is the resolved model files folder as a string (the default
         substituted). It is read from the settings here, since the provider module has
-        no settings; the read creates nothing.
+        no settings; the read creates nothing. `swap_when_idle` and `swap_wait_s` are the
+        idle-swap settings as stored (ADR-044, amendment 2026-11-02).
         """
         from dpc_client_core.providers.strata_provider import local_engine_status
         try:
@@ -10917,6 +10925,8 @@ class CoreService:
                 "status": "success",
                 **(await local_engine_status()),
                 "model_files_dir": str(self.settings.get_model_files_dir()),
+                "swap_when_idle": self.settings.get_swap_when_idle(),
+                "swap_wait_s": self.settings.get_swap_wait_s(),
             }
         except Exception as e:
             logger.error("local_engine_status failed: %s", e, exc_info=True)
@@ -10933,6 +10943,23 @@ class CoreService:
         except ValueError as e:
             return {"status": "error", "message": str(e)}
         return {"status": "success", "model_files_dir": str(resolved)}
+
+    async def set_local_engine_swap(self, enabled: Any = None, wait_s: Any = None) -> Dict[str, Any]:
+        """Set the idle swap of local engines (`[local_engines] swap_when_idle`, `swap_wait_s`).
+
+        `enabled` must be a bool and `wait_s` a whole number of seconds, 0 or more; a
+        refusal writes nothing. The supervisors read both at each start. Answers the
+        stored values.
+        """
+        try:
+            self.settings.set_local_engine_swap(enabled, wait_s)
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+        return {
+            "status": "success",
+            "swap_when_idle": self.settings.get_swap_when_idle(),
+            "swap_wait_s": self.settings.get_swap_wait_s(),
+        }
 
     @slow_command
     async def list_model_files(self) -> Dict[str, Any]:

@@ -142,7 +142,9 @@ class Settings:
         # is <DPC home>/models: the getter substitutes it, so a config that never
         # had the key and one that has it empty read alike.
         self._config['local_engines'] = {
-            'model_files_dir': ''  # Empty = ~/.dpc/models. Set from the Providers editor ("Model files folder"); must be an absolute path to a writable folder
+            'model_files_dir': '',  # Empty = ~/.dpc/models. Set from the Providers editor ("Model files folder"); must be an absolute path to a writable folder
+            'swap_when_idle': 'true',  # An owner's start of a local alias stops an idle card holder that excludes it (ADR-044 amendment 2026-11-02)
+            'swap_wait_s': '300'  # How long a swap waits for a busy holder before refusing; 0 = do not wait
         }
 
         # A fresh config ships with no TURN relay at all: empty here means the same
@@ -869,6 +871,49 @@ class Settings:
         # '%' is configparser's interpolation mark: a literal one is written doubled.
         self.set('local_engines', 'model_files_dir', str(folder).replace('%', '%%'))
         return self.get_model_files_dir()
+
+    def get_swap_when_idle(self) -> bool:
+        """`[local_engines] swap_when_idle`: whether an owner's start of a local alias stops
+        an idle card holder that excludes it. Default true; read at each start."""
+        try:
+            raw = self.get('local_engines', 'swap_when_idle', 'true').strip().lower()
+        except configparser.Error as e:
+            logger.warning("[local_engines] swap_when_idle is unreadable (%s); using the default", e)
+            return True
+        if raw in ('true', '1', 'yes', 'on'):
+            return True
+        if raw in ('false', '0', 'no', 'off'):
+            return False
+        logger.warning("[local_engines] swap_when_idle %r is not a boolean; using the default", raw)
+        return True
+
+    def get_swap_wait_s(self) -> int:
+        """`[local_engines] swap_wait_s`: seconds a swap waits for a busy holder (0 = do not
+        wait). Default 300; a hand-edited value that is not a whole number >= 0 reads as the default."""
+        try:
+            raw = self.get('local_engines', 'swap_wait_s', '300').strip()
+        except configparser.Error as e:
+            logger.warning("[local_engines] swap_wait_s is unreadable (%s); using the default", e)
+            return 300
+        try:
+            value = int(raw)
+        except ValueError:
+            value = -1
+        if value < 0:
+            logger.warning("[local_engines] swap_wait_s %r is not a whole number >= 0; using the default", raw)
+            return 300
+        return value
+
+    def set_local_engine_swap(self, enabled: bool, wait_s: int) -> None:
+        """Write `[local_engines] swap_when_idle` and `swap_wait_s`. ValueError, one
+        sentence, and nothing written, unless `enabled` is a bool and `wait_s` a whole
+        number >= 0 (a bool is not one)."""
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be true or false.")
+        if isinstance(wait_s, bool) or not isinstance(wait_s, int) or wait_s < 0:
+            raise ValueError("wait_s must be a whole number of seconds, 0 or more.")
+        self.set('local_engines', 'swap_when_idle', 'true' if enabled else 'false')
+        self.set('local_engines', 'swap_wait_s', str(wait_s))
 
     def get_dht_enabled(self) -> bool:
         """Check if DHT peer discovery is enabled."""

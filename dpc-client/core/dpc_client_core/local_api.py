@@ -135,6 +135,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "strata_reset_failure",
     # The model files folder: where the local engines keep their model files
     "set_model_files_dir",
+    # The idle swap of local engines: whether it is on, and how long it waits for a busy holder
+    "set_local_engine_swap",
     "list_model_files",
     "list_strata_models",
     "install_strata_model",

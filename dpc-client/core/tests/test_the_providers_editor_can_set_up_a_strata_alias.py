@@ -29,8 +29,13 @@ from dpc_client_core.service import CoreService
 from tests.test_strata_supervisor import BASE_ARGS, _FakeProc, _install, _sup, _value
 
 NATIVE = "D:/models/flash-next-00001-of-00002.gguf"
-# local_engine_status also reports the model files folder, read from the service's settings.
-_HOST = SimpleNamespace(settings=SimpleNamespace(get_model_files_dir=lambda: Path("/models")))
+# local_engine_status also reports the model files folder and the idle-swap settings, read
+# from the service's settings.
+_HOST = SimpleNamespace(settings=SimpleNamespace(
+    get_model_files_dir=lambda: Path("/models"),
+    get_swap_when_idle=lambda: True,
+    get_swap_wait_s=lambda: 300,
+))
 UI_FIELDS = Path(__file__).resolve().parents[2] / "ui" / "src" / "lib" / "utils" / "strataFields.ts"
 
 

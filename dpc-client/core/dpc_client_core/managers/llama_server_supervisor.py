@@ -176,6 +176,31 @@ def bind_model_download_service(service: Optional[Any]) -> None:
     _MODEL_DOWNLOAD_SERVICE = service
 
 
+# The settings the idle swap reads at the moment of a start (`[local_engines]
+# swap_when_idle`, `swap_wait_s`). Unbound (tests, scripts that run no service): no
+# swap, today's refusal. Bound by the service at start, as the consent service is.
+_LOCAL_ENGINE_SETTINGS: Optional[Any] = None
+
+
+def bind_local_engine_settings(settings: Optional[Any]) -> None:
+    """Make `settings` the one the idle swap is read from; None unbinds."""
+    global _LOCAL_ENGINE_SETTINGS
+    _LOCAL_ENGINE_SETTINGS = settings
+
+
+def swap_policy() -> Tuple[bool, int]:
+    """(swap_when_idle, swap_wait_s) as the settings hold them now; (False, 0) unbound
+    or unreadable. Read at each start, so a change needs no restart."""
+    settings = _LOCAL_ENGINE_SETTINGS
+    if settings is None:
+        return False, 0
+    try:
+        return bool(settings.get_swap_when_idle()), int(settings.get_swap_wait_s())
+    except Exception:
+        logger.warning("the idle-swap settings are unreadable; no swap", exc_info=True)
+        return False, 0
+
+
 # ADR-044 point 9: set while a call is served to a peer, holding its node id.
 # A ContextVar because the mark has to reach `ensure_running` and `call_slot`
 # through LLMManager and the provider without a parameter on every signature;
@@ -349,6 +374,32 @@ def _pins_status() -> Dict[str, Any]:
     }
 
 
+# The idle swap (ADR-044, amendment 2026-11-02). The last one this process made, in
+# `local_engine_status` as `last_swap`: {"from", "to", "from_engine", "to_engine",
+# "at", "parked_dropped"}. In memory, as `_ROLLBACKS` is.
+_LAST_SWAP: Optional[Dict[str, Any]] = None
+# How often a swap looks at a busy holder's in-flight count, and how many holders one
+# start swaps out before it gives up and takes the refusal (a holder that comes back
+# each time the card is let go is a ping-pong, not a swap).
+_SWAP_POLL_S = 0.1
+
+# Whether a supervisor is still the one its alias is configured with: a settings save
+# can retire it while a stop drains, and a retired supervisor must not be reopened,
+# or a late provider could start a child nobody tracks. The provider module, which
+# owns the registry, sets this when it loads; without it (tests that build bare
+# supervisors) every supervisor counts as configured.
+_still_configured: Callable[["LlamaServerSupervisor"], bool] = lambda _supervisor: True
+_MAX_SWAP_ROUNDS = 4
+_swap_clock = time.monotonic
+# The toasts of swaps, held until sent: a task nobody references can be collected.
+_SWAP_TOASTS: "set[asyncio.Future]" = set()
+
+
+def last_swap() -> Optional[Dict[str, Any]]:
+    """The last idle swap this process made, or None."""
+    return dict(_LAST_SWAP) if _LAST_SWAP else None
+
+
 # Supervisors holding the card, from the decision to start a child until its stop
 # has finished: "claimed" or "stopping". Keyed by supervisor, not alias, because a
 # retired child still draining has left `_ACTIVE_SUPERVISORS` and holds the card.
@@ -385,6 +436,22 @@ def card_holders() -> List[Dict[str, Any]]:
         {"alias": sup.alias, "engine": sup.ENGINE, "state": state, "port": sup.port}
         for sup, state in _live_claims()
     ]
+
+
+async def stop_by_hand(supervisor: "LlamaServerSupervisor", timeout: Optional[float] = None,
+                       reopen: bool = True) -> None:
+    """The Stop engine command's path (`stop_local_engine`) and the idle swap's.
+
+    Behind the supervisor's start lock, so a start in progress finishes first rather
+    than spawning after the stop; then the existing drain-then-stop. `timeout=None`
+    lets a running generation finish. `reopen` makes the alias accept calls again:
+    it stays configured, and its next call starts the child again. The registry is
+    asked after the drain, not before it: a save that retired the supervisor while
+    it drained leaves it closed."""
+    async with supervisor._start_lock:
+        await supervisor.drain(timeout=timeout)
+        if reopen and _still_configured(supervisor):
+            supervisor.reopen()
 
 
 def _positive_int(name: str, value: Any) -> int:
@@ -1073,6 +1140,10 @@ class LlamaServerSupervisor:
         self._log_path = DPC_HOME / "logs" / f"llama-server-{alias}.log"
         self._log_fh = None
         self._draining = False
+        # Set with `_draining` while an owner's start of a rival alias is freeing the
+        # card (the idle swap): the alias that start is for. New calls are then refused
+        # with that reason, and the mark is cleared if the swap gives up.
+        self._swap_for: Optional[str] = None
         # A superseded child holds the whole model until it has finished
         # draining, and this card cannot hold two. Set by the provider when this
         # supervisor replaces a live one; `ensure_running` waits on it before
@@ -1208,23 +1279,145 @@ class LlamaServerSupervisor:
             raise held
         _CARD_CLAIMS[self] = "claimed"
 
-    def _card_held_error(self) -> Optional[CardHeldError]:
-        """The refusal `_claim_card` would raise now, or None. Claims nothing,
-        so a policy can ask before it decides to start (ADR-044 point 9)."""
+    def _blocking_holder(self) -> Optional[Tuple["LlamaServerSupervisor", str]]:
+        """(supervisor, state) of the first live claim that excludes this one, or None."""
         if not self.on_the_card():
             return None
         for other, state in _live_claims():
             if other is self or other.alias == self.alias or not self._excludes(other):
                 continue
+            return other, state
+        return None
+
+    def _card_held_error(self) -> Optional[CardHeldError]:
+        """The refusal `_claim_card` would raise now, or None. Claims nothing,
+        so a policy can ask before it decides to start (ADR-044 point 9)."""
+        found = self._blocking_holder()
+        if found is not None:
+            other, state = found
             return CardHeldError(
                 f"{self.ENGINE}[{self.alias}] cannot load: the card is held by "
                 f"{other.ENGINE} alias '{other.alias}' ({state}). "
                 f"{self.ENGINE} and {other.ENGINE} cannot hold the card together and "
-                f"DPC does not swap them. Stop '{other.alias}' from the providers "
+                f"DPC did not swap them here (swapping is off, the start serves a peer, "
+                f"or '{other.alias}' is already stopping). Stop '{other.alias}' from the providers "
                 f"settings to free the card, or switch this agent to '{other.alias}'",
                 other.alias, other.ENGINE,
             )
         return None
+
+    # --- the idle swap (ADR-044, amendment 2026-11-02) --------------------------
+
+    # Whether stopping this engine drops what it parked for conversations.
+    DROPS_PARKED_ON_STOP = False
+
+    def _start_is_for_a_peer(self) -> bool:
+        """A call served to a peer never swaps (ADR-044 amendment, rule 2)."""
+        return peer_being_served() is not None
+
+    def _draining_error(self) -> LlamaServerError:
+        """The refusal of a new call or start while this supervisor drains."""
+        if self._swap_for is not None:
+            return LlamaServerError(f"'{self.alias}' is stopping to free the card for '{self._swap_for}'")
+        return LlamaServerError(f"{self.ENGINE}[{self.alias}] is draining; new calls refused")
+
+    def _begin_swap_drain(self, new: "LlamaServerSupervisor") -> None:
+        """Mark this holder as draining for `new`. Synchronous, and called in the same
+        stretch as the idle check that decided to swap: a call arriving after it is
+        refused, not started under a stopping engine."""
+        self._swap_for = new.alias
+        self._draining = True
+
+    def _end_swap_drain(self) -> None:
+        """The swap gave up: the holder serves again."""
+        self._swap_for = None
+        self._draining = False
+
+    def _swap_busy_refusal(self, holder: "LlamaServerSupervisor", waited: float) -> CardHeldError:
+        wait_s = swap_policy()[1]
+        return CardHeldError(
+            f"{self.ENGINE}[{self.alias}] cannot load: the card is held by {holder.ENGINE} alias "
+            f"'{holder.alias}', busy for {int(round(waited))} s; a swap waits for a busy holder "
+            f"at most {wait_s} s (Settings: Wait for a busy holder). '{holder.alias}' serves as before",
+            holder.alias, holder.ENGINE,
+        )
+
+    async def _free_the_card(self) -> None:
+        """The owner's start of this alias, with an excluding holder on the card: stop
+        the holder when it is idle, or when it has finished within `swap_wait_s`
+        (ADR-044 amendment, rules 1-5). Returns when no excluding holder is left, or
+        when the rules say no swap (the caller's `_claim_card` then raises today's
+        refusal); raises the busy refusal on a timeout.
+
+        Called right before `_claim_card`. The holder check, the idle test and the
+        drain mark are one synchronous stretch, and so are the last check and the
+        return: nothing awaits between this method's end and the claim."""
+        for _ in range(_MAX_SWAP_ROUNDS):
+            found = self._blocking_holder()
+            if found is None:
+                return
+            holder, state = found
+            enabled, wait_s = swap_policy()
+            if (not enabled or self._start_is_for_a_peer() or state == "stopping"
+                    or (holder._draining and holder._swap_for is None)):
+                return
+            started = _swap_clock()
+            if holder._swap_for is not None:
+                # Another start is freeing the card: wait for it to be let go, then
+                # follow the same rule against whoever holds it next.
+                while holder in _CARD_CLAIMS:
+                    waited = _swap_clock() - started
+                    if waited >= wait_s:
+                        raise self._swap_busy_refusal(holder, waited)
+                    await asyncio.sleep(min(_SWAP_POLL_S, wait_s - waited))
+                continue
+            busy = holder._in_flight > 0
+            if busy and wait_s <= 0:
+                raise self._swap_busy_refusal(holder, 0.0)
+            holder._begin_swap_drain(self)  # no await since the check above
+            done = False
+            try:
+                if busy:
+                    logger.info(
+                        "%s[%s]: '%s' (%s) is busy; waiting up to %d s for it to finish before "
+                        "stopping it to free the card", self.ENGINE, self.alias, holder.alias,
+                        holder.ENGINE, wait_s,
+                    )
+                while holder._in_flight > 0:
+                    waited = _swap_clock() - started
+                    if waited >= wait_s:
+                        raise self._swap_busy_refusal(holder, waited)
+                    await asyncio.sleep(min(_SWAP_POLL_S, wait_s - waited))
+                if holder not in _CARD_CLAIMS:
+                    # Freed meanwhile by someone else's stop: not this swap's doing.
+                    continue
+                await stop_by_hand(holder)
+                done = True
+            finally:
+                if not done:
+                    holder._end_swap_drain()
+            self._note_swap(holder)
+        # Out of rounds: `_claim_card` names whoever holds the card now.
+
+    def _note_swap(self, holder: "LlamaServerSupervisor") -> None:
+        """Say a swap happened: the INFO line, `last_swap`, one toast. Nothing awaits
+        here, so the card is claimed in the stretch that follows."""
+        global _LAST_SWAP
+        dropped = holder.DROPS_PARKED_ON_STOP
+        tail = "; its parked conversations are dropped" if dropped else ""
+        message = f"swapped '{holder.alias}' out for '{self.alias}'{tail}"
+        logger.info("%s", message)
+        _LAST_SWAP = {
+            "from": holder.alias, "to": self.alias,
+            "from_engine": holder.ENGINE, "to_engine": self.ENGINE,
+            "at": time.time(), "parked_dropped": dropped,
+        }
+        try:
+            task = asyncio.get_running_loop().create_task(_toast("Local engine swapped", message))
+        except RuntimeError:
+            return
+        _SWAP_TOASTS.add(task)
+        task.add_done_callback(_SWAP_TOASTS.discard)
 
     def _release_card_unless_live(self) -> None:
         """A start that failed before leaving a live child holds nothing. A child
@@ -1238,6 +1431,7 @@ class LlamaServerSupervisor:
         """Accept calls again after a manual stop: the alias is still configured,
         unlike a retired one, and its next call may start the child again."""
         self._draining = False
+        self._swap_for = None
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -1248,9 +1442,12 @@ class LlamaServerSupervisor:
         A cache type the alias set explicitly is started once, as configured.
         Without one, the KV ladder in `_launch_auto_kv` picks the rung that
         fits the free VRAM the card has right now."""
+        if self._swap_for is not None:
+            # Refused at once, not queued behind the stop that is freeing the card.
+            raise self._draining_error()
         async with self._start_lock:
             if self._draining:
-                raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
+                raise self._draining_error()
             if self._proc and self._proc.returncode is None and self.props:
                 return self.props
             # Before the card is claimed, and never a fetch on this loop: a missing
@@ -1280,11 +1477,12 @@ class LlamaServerSupervisor:
                     self._pin_root = plan["start"]
                     binary = plan["start"] / server_binary_name()
             if self._draining:
-                raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
+                raise self._draining_error()
             await self._clear_unfinished_start()
             await self._await_predecessor()
             # Before the ladder: its free-VRAM refusal would otherwise name the
             # model's size instead of the engine that holds the card.
+            await self._free_the_card()
             self._claim_card()
             try:
                 self.port = self.port or _free_port()
@@ -1404,7 +1602,7 @@ class LlamaServerSupervisor:
             await self._roll_back(e, fallback)
             self._release_card_unless_live()
             if self._draining:
-                raise LlamaServerError(f"{self.ENGINE}[{self.alias}] is draining; new calls refused") from e
+                raise self._draining_error() from e
             self._claim_card()
             props = await launch()
         await self._note_pass()
@@ -2162,7 +2360,7 @@ class LlamaServerSupervisor:
         every test missed because the fakes had the right shape and the one
         real-supervisor test awaited the coroutine instead."""
         if self._draining:
-            raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
+            raise self._draining_error()
         self._in_flight += 1
         self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
         return self._Slot(self)

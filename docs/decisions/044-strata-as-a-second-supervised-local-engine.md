@@ -108,7 +108,9 @@ card.** Every point is Mike's call, 2026-10-18.
    inherited `ensure_running` so DPC itself never relaunches after such a stop; a person
    does.
 4. **The owner assigns the card.** Each agent is set to Strata or to the `llama-server`
-   child in settings; there is no automatic swap today. The launcher's
+   child in settings; there is no automatic swap today (replaced for the owner's own starts
+   by the idle swap, see the amendment of 2026-11-02 below; a peer's call still never
+   swaps). The launcher's
    `--min-free-vram-mib`, `--before-load` and `--idle-unload` are the named way to relax
    this later. An agent whose engine cannot load because the other holds the card gets an
    error naming the other engine. The **card-holder check** (b97b2beb) does that: before a
@@ -538,3 +540,68 @@ named here.
   child's folder, whichever alias. No size rides it: nothing reads one, and walking a
   Strata install costs about 50 ms a status. The Local
   engines block shows one line per engine and a warning line after a rollback.
+
+## Amendment, 2026-11-02 — the idle swap
+
+Mike's call, team chat 2026-11-02; refinements by the reviewer. It replaces point 4's "there is
+no automatic swap" for the owner's own starts. The reason is the second local alias: with a
+card holder that excludes it (any pair: Strata and Strata, Strata and `llama-server`,
+`llama-server` and Strata), the alias's first message would fail with `CardHeldError` until
+the owner found Stop engine, although nothing was using the holder.
+
+A start of a local alias that an excluding card holder blocks (the check of point 4,
+`_card_held_error`) goes by these rules:
+
+1. **The setting is off: today's refusal.** `[local_engines] swap_when_idle` (default `true`)
+   off gives `CardHeldError`, unchanged. The default is on because the alternative is the
+   failed first message. With no settings bound (tests, a script that runs no service) there
+   is no swap either.
+2. **A peer never swaps.** A call served to a peer (`peer_being_served()`), and the start
+   begun for a peer's request (`start_for_peer`, `_STARTED_FOR_PEER`), meet today's
+   `CardHeldError` even when the holder is idle: an engine of the owner's is not stopped for
+   someone else's request. The policy of point 9 still asks `_card_held_error` first, so a
+   peer's request does not start a stopped launcher over a holder.
+3. **The owner's start, the holder idle** (`_in_flight == 0`): the holder is stopped by the
+   Stop engine command's own path (`stop_by_hand`: behind the holder's start lock, drain,
+   stop, reopen), and then the new alias starts. The idle check and the decision to stop run
+   in one synchronous stretch, with no `await` between them, and so does the claim of the
+   card that follows the swap, on the same owner loop as the claim of point 4 (no new lock:
+   the discipline is the claim's own). In that stretch the holder is marked
+   draining-for-swap. A request that arrives after the check, a new call or a start of the
+   holder, is refused at once with "'<holder>' is stopping to free the card for '<new>'"
+   and does not queue behind the stop and does not run on a stopping engine.
+4. **The owner's start, the holder busy:** the holder is marked draining-for-swap the same
+   way (new requests refused at once with the same reason, never a silent queue), and the
+   start waits until the holder's in-flight count reaches 0, at most `[local_engines]
+   swap_wait_s` seconds (default 300, whole seconds, 0 or more; 0 means do not wait and
+   refuse a busy holder). Then the holder is stopped and the new alias starts. On the timeout
+   the mark is cleared, the holder serves again, and the start fails with a `CardHeldError`
+   that names both and the seconds: "the card is held by <engine> alias '<holder>', busy for
+   N s". A start cancelled while it waits clears the mark too. A holder that is already
+   draining or stopping for another reason (a settings save retiring it, a Stop) is not
+   swapped: today's refusal names its state.
+5. **A swap is said once.** An INFO line "swapped '<holder>' out for '<new>'" with "; its
+   parked conversations are dropped" when the holder was Strata (a stop drops what the
+   launcher parked in host RAM; `llama-server` parks nothing), one `error_toast` carrying the
+   same sentence (the rollback notice's mechanism), and `last_swap` {from, to, from_engine,
+   to_engine, at, parked_dropped} in `local_engine_status`, in memory until the backend
+   restarts.
+
+Two owner starts racing for the card: one claims it; the other sees the claim as a holder and
+follows the same rules against it (a claim whose child is still starting counts as idle, and
+its stop waits for that start to finish). A holder another start is already swapping out is
+waited for, within `swap_wait_s`, and the rules then apply against whoever holds the card
+next. One start swaps out at most four holders before it takes the refusal, so a holder that
+comes back each time is a refusal and not a loop.
+
+The settings are read at the moment of each start (a module-level binding made at service
+start, as the consent service is), so a change needs no restart. They are set from the
+Providers editor's Local engines block, under "Model files folder", through the command
+`set_local_engine_swap` (`enabled`, `wait_s`), and `local_engine_status` reports them as
+`swap_when_idle` and `swap_wait_s`.
+
+What a swap does not do: it does not park or hand over the stopped holder's conversations
+(Strata's are dropped), and it does not stop a holder on the strength of a peer's request. A
+call that had already got past the holder's start when the swap began runs to its end (the
+busy case) or meets the refusal at the slot (the idle case); the stopped alias stays
+configured and its next owner call starts it again, swapping the new one out if that is idle.

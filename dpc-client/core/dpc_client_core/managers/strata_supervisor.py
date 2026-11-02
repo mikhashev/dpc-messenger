@@ -812,6 +812,13 @@ class StrataSupervisor(LlamaServerSupervisor):
     # Strata takes most of the card, so no other alias shares it (ADR-044 point 4).
     EXCLUSIVE_ON_THE_CARD = True
     PROCESS_LAUNCHER = "strata"
+    # A stop drops every conversation the launcher parked in host RAM.
+    DROPS_PARKED_ON_STOP = True
+
+    def _start_is_for_a_peer(self) -> bool:
+        """A peer's call, or the owner's own start begun for a peer's request
+        (`start_for_peer`, which runs unmarked): neither swaps another engine out."""
+        return super()._start_is_for_a_peer() or _STARTED_FOR_PEER.get() is not None
 
     def on_the_card(self) -> bool:
         return True
@@ -1366,11 +1373,14 @@ class StrataSupervisor(LlamaServerSupervisor):
         died inside its own start is that start's failure, not a death of the
         engine the next caller asks for (2026-10-22: a stale exit from 09:16 was
         charged to a peer's start at 10:16)."""
+        if self._swap_for is not None:
+            # Refused at once, not queued behind the stop that is freeing the card.
+            raise self._draining_error()
         async with self._start_lock:
             if self.failure is not None:
                 raise self._refusal()
             if self._draining:
-                raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
+                raise self._draining_error()
             proc = self._proc
             if proc is not None and proc.returncode is None and self.props:
                 return self.props
@@ -1429,9 +1439,10 @@ class StrataSupervisor(LlamaServerSupervisor):
                 if not install_here and plan["start"] is not None and _base._is_pin(plan["start"]):
                     self._pin_root = plan["start"]
                 if self._draining:
-                    raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
+                    raise self._draining_error()
             await self._clear_unfinished_start()
             await self._await_predecessor()
+            await self._free_the_card()
             self._claim_card()
             try:
                 if install_here:
@@ -1447,7 +1458,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                     if isinstance(root, Path) and _base._is_pin(root):
                         self._pin_root = root
                     if self._draining:
-                        raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
+                        raise self._draining_error()
                 self.port = self.port or _free_port()
 
                 async def launch() -> Dict[str, Any]:
@@ -2011,7 +2022,7 @@ class StrataSupervisor(LlamaServerSupervisor):
 
     def call_slot(self):
         if self._draining:
-            raise LlamaServerError(f"strata[{self.alias}] is draining; new calls refused")
+            raise self._draining_error()
         self._in_flight += 1
         self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
         return self._StrataSlot(self)

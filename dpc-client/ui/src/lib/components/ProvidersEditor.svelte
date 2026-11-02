@@ -22,6 +22,7 @@
   import { STRATA_MODEL_DOWNLOAD } from '$lib/utils/strataModelDownload';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
   import { envNameOrUndefined, looksLikeKey } from '$lib/utils/apiKeyEnv';
+  import { parseSwapWait, SWAP_WAIT_REFUSAL } from '$lib/utils/swapWait';
   import { isProviderDraftFilled, validateProviderDraftForAdd, suggestProviderAlias } from '$lib/utils/providerDraft';
   import {
     STRATA_MODEL_PARAMS, parseModelParam, modelParamText, basePlaceholder, pleAfterNativeChange,
@@ -455,6 +456,7 @@
   let engineStatus: {
     card_holder: any; strata: any[]; free_commit: FreeCommitReading | null; engine_backends: string[];
     pins: Record<string, EnginePins> | null; model_files_dir: string;
+    swap_when_idle: boolean; swap_wait_s: number;
   } | null = null;
   let engineStatusError = '';
   let engineStatusLoading = false;
@@ -469,6 +471,7 @@
           card_holder: r.card_holder ?? null, strata: r.strata ?? [], free_commit: r.free_commit ?? null,
           engine_backends: r.engine_backends ?? [], pins: r.pins ?? null,
           model_files_dir: r.model_files_dir ?? '',
+          swap_when_idle: r.swap_when_idle ?? true, swap_wait_s: r.swap_wait_s ?? 300,
         };
         engineStatusError = '';
       } else {
@@ -478,6 +481,30 @@
       engineStatusError = `Error: ${error}`;
     } finally {
       engineStatusLoading = false;
+    }
+  }
+
+  // The idle swap of local engines (ADR-044, amendment 2026-11-02): both settings come
+  // from local_engine_status and a change goes to set_local_engine_swap, which answers
+  // a refusal as an error shown inline; the status is read again either way.
+  let swapBusy = false;
+
+  async function setLocalEngineSwap(enabled: boolean, waitText: string | number) {
+    const wait = parseSwapWait(waitText);
+    if (wait === null) {
+      engineStatusError = SWAP_WAIT_REFUSAL;
+      await loadEngineStatus();
+      return;
+    }
+    swapBusy = true;
+    try {
+      const r = await sendCommand('set_local_engine_swap', { enabled, wait_s: wait });
+      if (r?.status !== 'success') engineStatusError = r?.message || 'Could not set the idle swap';
+    } catch (error) {
+      engineStatusError = `Error: ${error}`;
+    } finally {
+      swapBusy = false;
+      await loadEngineStatus();
     }
   }
 
@@ -1973,6 +2000,27 @@
       <p class="help-text warn">{engineStatusError}</p>
     {/if}
     {@render modelFilesFolderRow()}
+    <div class="form-group">
+      <label for="swap-when-idle">
+        <input id="swap-when-idle" type="checkbox" checked={engineStatus?.swap_when_idle ?? true}
+          disabled={swapBusy || !engineStatus}
+          on:change={(e) => setLocalEngineSwap(e.currentTarget.checked, engineStatus?.swap_wait_s ?? 300)} />
+        Swap local models when the card holder is idle
+      </label>
+      <label for="swap-wait-s">Wait for a busy holder, s</label>
+      <input id="swap-wait-s" type="number" min="0" step="1" value={engineStatus?.swap_wait_s ?? ''}
+        disabled={swapBusy || !engineStatus}
+        on:change={async (e) => {
+          const field = e.currentTarget;
+          await setLocalEngineSwap(engineStatus?.swap_when_idle ?? true, field.value);
+          field.value = String(engineStatus?.swap_wait_s ?? '');   // a refused entry does not stay typed
+        }} />
+      <p class="help-text">
+        Starting a local model stops the other engine that holds the card, if it is idle or finishes
+        within this many seconds (0 = do not wait). A stopped Strata drops its parked conversations.
+        A peer's request never stops anything. Off: you stop the holder yourself with Stop engine.
+      </p>
+    </div>
     <p>
       <strong>Card holder:</strong>
       {#if !engineStatus}
