@@ -177,7 +177,13 @@ _NO_SPACE = re.compile(r"not enough free space on (?P<drive>.+?): (?P<free>\d+) 
 # What to re-read when the pin moves. Each of these reads Strata's own words, which are
 # not a contract and can change between releases:
 # - the `_NO_SPACE` message above (updater.py `_free_space_check`);
-# - setup.py's progress lines, parsed in the install step that follows this one (coming);
+# - setup.py's output, read by `strata_model_fetcher.py`: `_STEP_HEADING` (`step()`),
+#   `_FETCH_LINE` and `_CHECKING_LABEL` (the redrawn `label: x / y GB (p%)` lines of
+#   `download()`, mtp_fetch.py's `Progress` and `_hash_file`), `_FAILED_LINE` / `_HINT_INDENT`
+#   (`fail()`), `_ARGPARSE_ERROR`, the run config name `strata-<id>.json` (`id` of the
+#   `model_table` row = `setup.py` `tag.lower()`), and the flags it passes (`--yes --no-start
+#   --family --model --vision --data-dir --gguf-dir`, env `STRATA_CONTROL_INSTALL`,
+#   `STRATA_INSTALL_DIR`, `STRATA_SETTINGS_FILE`);
 # - `strata_models_probe.py`'s use of `Strata(...)`, `hardware()` and the `model_table()`
 #   fields in tools/strata_mcp.py (`installed`, `on_this_pc`, `download_gb`, `ram_needed_gb`,
 #   ...): Strata's internal API, passed through by `list_strata_models` as they are.
@@ -528,6 +534,71 @@ def _updater_env(root: Path, home: Path) -> Dict[str, str]:
         place.mkdir(parents=True, exist_ok=True)
         env[name] = str(place)
     return env
+
+
+def _control_env(root: Path, settings_file: Path, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """The environment a Strata script runs in under Control's own Python. Isolated by:
+    every STRATA_* of ours dropped, PYTHONHOME / PYTHONPATH / VIRTUAL_ENV dropped,
+    PYTHONNOUSERSITE set (no user site-packages), DPC's own engine folder, and the
+    settings file the caller names, so the owner's own Strata settings are not read.
+    `extra` is applied last."""
+    env = {
+        k: v for k, v in os.environ.items()
+        if not k.upper().startswith("STRATA_") and k.upper() not in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV")
+    }
+    env.update({
+        "STRATA_COMPONENTS_DIR": str(components_dir(root)),
+        "STRATA_SETTINGS_FILE": str(settings_file),
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+    })
+    env.update(extra or {})
+    return env
+
+
+def _control_python(root: Path, script: str) -> Path:
+    """Control's interpreter, after checking that Control (with `script` in it) is installed at `root`."""
+    python = control_python_path(root)
+    if not python.is_file() or not (root / script).is_file():
+        raise RuntimeError(
+            f"Strata Control {STRATA_RELEASE_TAG} is not installed at {root}; download it first (the strata download)"
+        )
+    return python
+
+
+_MODELS_TABLE_TIMEOUT_S = 120
+
+
+def _strata_models_table(folder: Path) -> List[Dict[str, Any]]:
+    """Strata's own `model_table` for the model files folder `folder`, as `list_strata_models`
+    passes it on (families -> sizes). Runs `strata_models_probe.py` under Control's Python
+    in a process of its own, with a settings file that does not exist so the owner's own
+    Strata data folder does not move the disk figure; writes nothing, and `<folder>/strata/
+    run-configs` is not created. Raises RuntimeError naming the reason."""
+    from ..dpc_agent.tools import process as _process
+
+    root = install_root()
+    python = _control_python(root, "tools/strata_mcp.py")
+    probe = Path(__file__).resolve().parent / "strata_models_probe.py"
+    env = _control_env(root, folder / "strata" / "no-strata-settings.json")
+    run = _process.run_supervised(
+        [str(python), "-I", str(probe), str(root), str(folder / "strata" / "run-configs")],
+        launcher="strata",
+        launcher_kind="subsystem",
+        timeout=_MODELS_TABLE_TIMEOUT_S,
+        cwd=str(root),
+        env=env,
+    )
+    if run.timed_out:
+        raise RuntimeError(f"reading Strata's model list ran past {_MODELS_TABLE_TIMEOUT_S} s and was stopped")
+    if run.exceeded_mb:
+        raise RuntimeError(f"reading Strata's model list went over the {run.ceiling_mb} MB ceiling and was stopped")
+    report = _last_json_line(run.stdout) if run.returncode == 0 else None
+    if not isinstance(report, dict) or not isinstance(report.get("families"), list):
+        tail = (run.stderr or "").strip()[-600:] or "no message"
+        raise RuntimeError(f"Strata's model list could not be read (exit {run.returncode}): {tail}")
+    return report["families"]
 
 
 def _last_json_line(text: str) -> Optional[Dict[str, Any]]:

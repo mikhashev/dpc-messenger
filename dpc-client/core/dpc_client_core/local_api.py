@@ -137,6 +137,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "set_model_files_dir",
     "list_model_files",
     "list_strata_models",
+    "install_strata_model",
     # The process registry (ADR-046 point 8): what runs now, who started it
     "list_processes",
     # The peer cache by name, for the sidebar's cached-peers list (never the address)

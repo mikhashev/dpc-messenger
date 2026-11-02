@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { spaceVerdict } from '$lib/utils/downloadSpace';
+  import { modelTableSizeText, modelTableSpaceText, strataModelExtrasLine } from '$lib/utils/strataModelDownload';
 
   // Props — generic across any download (Whisper, bge-m3, the Camoufox
   // browser binary, ...), so no text below names one source. No numeric
@@ -12,7 +13,8 @@
   export let consequenceIfDeclined: string = '';
   export let sizeBytes: number | null = null;
   // 'package_max': sizeBytes and installedBytes are upper bounds; 'package': exact.
-  export let sizeSource: 'measured' | 'hf_api' | 'package_max' | 'package' | null = null;
+  // 'model_table': Strata's rounded figure for a Strata model, shown "about".
+  export let sizeSource: 'measured' | 'hf_api' | 'package_max' | 'package' | 'model_table' | null = null;
   export let cachePath: string = '';
   // Bytes it occupies once unpacked; null = not stated (never read as 0).
   export let installedBytes: number | null = null;
@@ -39,6 +41,8 @@
 
   $: sizeText = sizeBytes == null
     ? 'Size unknown'
+    : sizeSource === 'model_table'
+      ? modelTableSizeText(sizeBytes)
     : sizeSource === 'package_max'
       ? `up to ~${(sizeBytes / 1e9).toFixed(1)} GB (the exact size depends on this machine's card)`
       : `~${(sizeBytes / 1e9).toFixed(1)}GB${sizeSource === 'hf_api' ? ' (approximate, from Hugging Face)' : ''}`;
@@ -49,8 +53,9 @@
   $: volume = (cachePath.match(/^[A-Za-z]:/) || [cachePath])[0];
   $: shortOfSpace = verdict === 'short';
   $: upTo = sizeSource === 'package_max' ? 'up to ' : '';
+  $: extrasLine = strataModelExtrasLine(modelName);
   $: spaceText = [
-    sizeBytes != null ? `downloads ${upTo}~${gb(sizeBytes)} GB` : null,
+    sizeBytes != null ? (sizeSource === 'model_table' ? modelTableSpaceText(sizeBytes) : `downloads ${upTo}~${gb(sizeBytes)} GB`) : null,
     installedBytes != null ? `occupies ${upTo}~${gb(installedBytes)} GB` : null,
     freeBytes != null ? `${gb(freeBytes)} GB free on ${volume}` : 'free space not checked'
   ].filter(Boolean).join(', ');
@@ -104,6 +109,9 @@
         <!-- Download Size Info -->
         <div class="section info-box">
           <p><strong>Download Size:</strong> {sizeText}</p>
+          {#if extrasLine}
+            <p class="space-warning">{extrasLine}</p>
+          {/if}
           <p><strong>Cache Location:</strong> <code>{cachePath}</code></p>
           <p class:space-short={shortOfSpace}><strong>Disk Space:</strong> {spaceText}{shortOfSpace ? ' — not enough; free some space first' : ''}</p>
           {#if verdict === 'may_not_fit'}

@@ -23,6 +23,11 @@
     getModelDownloadStatus,
   } from '$lib/services/modelDownload';
   import type { ModelDownloadRequiredEvent, ModelDownloadStatusEntry, ModelDownloadProgressEvent } from '$lib/types';
+  import {
+    STRATA_MODEL_DOWNLOAD,
+    completedToastText,
+    withoutSupersededStrataModel,
+  } from '$lib/utils/strataModelDownload';
   import ModelDownloadDialog from '$lib/components/ModelDownloadDialog.svelte';
   import Toast from '$lib/components/Toast.svelte';
 
@@ -36,6 +41,9 @@
   // `model_download_required` sets on the same store (defensive; the backend
   // itself only emits once per session per model).
   let seenModels = new Set<string>();
+  // The last payload taken in, by identity: a Strata model is asked again for every
+  // choice (even the same one), so it is not deduped by name, only by being the same event.
+  let lastHandled: ModelDownloadRequiredEvent | null = null;
   // Remembered payloads, keyed by model_name — used to build toast text and
   // to re-open the dialog for "ask again" without another round trip.
   let rememberedInfo: Record<string, ModelDownloadRequiredEvent> = {};
@@ -99,11 +107,19 @@
   // Enqueue newly-required models
   $effect(() => {
     const payload = $modelDownloadRequired;
-    if (payload && !seenModels.has(payload.model_name)) {
-      console.log('[ModelDownload] Model download required:', payload);
-      seenModels.add(payload.model_name);
-      rememberedInfo[payload.model_name] = payload;
-      queue = [...queue, payload];
+    if (!payload || payload === lastHandled) return;
+    const isStrataModel = payload.model_name === STRATA_MODEL_DOWNLOAD;
+    if (!isStrataModel && seenModels.has(payload.model_name)) return;
+    console.log('[ModelDownload] Model download required:', payload);
+    lastHandled = payload;
+    seenModels.add(payload.model_name);
+    rememberedInfo[payload.model_name] = payload;
+    // The confirm carries no choice: the backend runs the last one asked, so an older
+    // Strata model request still waiting for an answer gives way to this one.
+    queue = [...withoutSupersededStrataModel(queue, payload), payload];
+    if (isStrataModel && current?.model_name === STRATA_MODEL_DOWNLOAD && !isDownloadingModel) {
+      current = null;
+      showModelDownloadDialog = false;
     }
   });
 
@@ -157,7 +173,7 @@
         showModelDownloadDialog = false;
         current = null;
       }
-      modelDownloadToastMessage = `✅ ${payload.model_name} downloaded. ${info?.purpose || 'It'} is now available.`;
+      modelDownloadToastMessage = completedToastText(info, payload);
       modelDownloadToastType = 'info';
       showModelDownloadToast = true;
       modelDownloadCompleted.set(null);
@@ -243,6 +259,7 @@
   let askAgainModels = $derived(
     Object.entries(statusMap).filter(([name, entry]) =>
       (entry.state === 'declined' || entry.state === 'missing') &&
+      name !== STRATA_MODEL_DOWNLOAD &&
       current?.model_name !== name &&
       !runningModels.includes(name) &&
       !queue.some((p) => p.model_name === name)

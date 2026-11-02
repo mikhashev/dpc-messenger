@@ -442,7 +442,8 @@ class _OutputReader:
     `on_stdout`, when given, gets each complete stdout line as it arrives (UTF-8,
     `errors="replace"`, line ending stripped), from the stdout reader's thread;
     a last line with no newline is given at the pipe's end. What it raises is
-    ignored, as `on_output`'s is.
+    ignored, as `on_output`'s is. `on_stderr` is the same for stderr; with
+    `cr_ends_line` a bare carriage return ends a line too and empty lines are not given.
     """
 
     def __init__(
@@ -451,10 +452,13 @@ class _OutputReader:
         on_output: Callable[[float], None],
         decode: Callable[[Sequence[bytes]], Any] = _decode_output,
         on_stdout: Optional[Callable[[str], None]] = None,
+        on_stderr: Optional[Callable[[str], None]] = None,
+        cr_ends_line: bool = False,
     ):
         self._decode = decode
-        self._on_stdout = on_stdout
-        self._partial_line = b""
+        self._on_line = {"stdout": on_stdout, "stderr": on_stderr}
+        self._cr_ends_line = cr_ends_line
+        self._partial_line = {"stdout": b"", "stderr": b""}
         self._chunks: dict = {"stdout": [], "stderr": []}
         # Each pipe's last chunk, wall clock, written only by its own reader.
         self._last_chunk_at: dict = {"stdout": None, "stderr": None}
@@ -482,8 +486,8 @@ class _OutputReader:
                 if not chunk or self._abandoned:
                     break
                 sink.append(chunk)
-                if name == "stdout" and self._on_stdout is not None:
-                    self._give_lines(chunk)
+                if self._on_line[name] is not None:
+                    self._give_lines(name, chunk)
                 self._last_chunk_at[name] = at = time.time()
                 now = time.monotonic()
                 if now - self._noted_at >= _OUTPUT_NOTE_MIN_INTERVAL_S:
@@ -495,21 +499,26 @@ class _OutputReader:
         except (OSError, ValueError):
             pass  # the pipe was closed under the read
         finally:
-            if name == "stdout" and self._on_stdout is not None and self._partial_line and not self._abandoned:
-                self._give_line(self._partial_line)
+            if self._on_line[name] is not None and self._partial_line[name] and not self._abandoned:
+                self._give_line(name, self._partial_line[name])
             try:
                 stream.close()
             except Exception:
                 pass
 
-    def _give_lines(self, chunk: bytes) -> None:
-        *lines, self._partial_line = (self._partial_line + chunk).split(b"\n")
+    def _give_lines(self, name: str, chunk: bytes) -> None:
+        data = self._partial_line[name] + chunk
+        if self._cr_ends_line:
+            *lines, self._partial_line[name] = re.split(rb"[\r\n]", data)
+            lines = [line for line in lines if line]
+        else:
+            *lines, self._partial_line[name] = data.split(b"\n")
         for line in lines:
-            self._give_line(line)
+            self._give_line(name, line)
 
-    def _give_line(self, line: bytes) -> None:
+    def _give_line(self, name: str, line: bytes) -> None:
         try:
-            self._on_stdout(line.decode("utf-8", errors="replace").rstrip("\r"))
+            self._on_line[name](line.decode("utf-8", errors="replace").rstrip("\r"))
         except Exception:
             pass  # a caller's parser must never cost the output
 
@@ -723,6 +732,8 @@ def run_supervised(
     output_bytes: bool = False,
     while_stopping: bool = False,
     on_stdout: Optional[Callable[[str], None]] = None,
+    on_stderr: Optional[Callable[[str], None]] = None,
+    cr_ends_line: bool = False,
 ) -> SupervisedRun:
     """Spawn, watch, and never wait unbounded on anything.
 
@@ -749,6 +760,7 @@ def run_supervised(
     `while_stopping` is the registry's `check_open` argument (`run_probe`'s).
     `on_stdout` gets each stdout line as it arrives (`_OutputReader`), for a
     caller that reads a child's progress live; `stdout` still holds all of it.
+    `on_stderr` and `cr_ends_line` are `_OutputReader`'s.
     """
     ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
     if ceiling is None:
@@ -831,7 +843,10 @@ def run_supervised(
         if registry is not None:
             registry.note_output(process.pid, at)
 
-    output = _OutputReader(process, _noted, _join_bytes if output_bytes else _decode_output, on_stdout)
+    output = _OutputReader(
+        process, _noted, _join_bytes if output_bytes else _decode_output, on_stdout,
+        on_stderr=on_stderr, cr_ends_line=cr_ends_line,
+    )
     run = SupervisedRun(ceiling_mb=ceiling)
     try:
         _wait_for_output(process, output, timeout)

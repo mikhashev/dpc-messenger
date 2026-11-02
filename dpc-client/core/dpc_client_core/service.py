@@ -10970,58 +10970,56 @@ class CoreService:
         which is not created. Control missing, or the probe failing, is an error reply
         naming the reason.
         """
-        import os
-        from .dpc_agent.tools import process as _process
         from .managers import strata_fetcher
 
         folder = self.settings.get_model_files_dir()
-        probe = Path(__file__).resolve().parent / "managers" / "strata_models_probe.py"
         try:
-            root = strata_fetcher.install_root()
-            python = strata_fetcher.control_python_path(root)
-            if not python.is_file() or not (root / "tools" / "strata_mcp.py").is_file():
-                return {"status": "error", "message": (
-                    f"Strata Control {strata_fetcher.STRATA_RELEASE_TAG} is not installed at {root}; "
-                    "download it first, then the list of Strata models can be read")}
-            run_configs = folder / "strata" / "run-configs"
-            # No STRATA_* of ours. Two are set on purpose: the engine folder is DPC's own
-            # (the way the launcher is started), and the settings file is one that does
-            # not exist, so the owner's own Strata data folder does not move the disk
-            # figure, which is then the free space where the model files folder is.
-            env = {
-                k: v for k, v in os.environ.items()
-                if not k.upper().startswith("STRATA_") and k.upper() not in ("PYTHONHOME", "PYTHONPATH")
-            }
-            env.update({
-                "STRATA_COMPONENTS_DIR": str(strata_fetcher.components_dir(root)),
-                "STRATA_SETTINGS_FILE": str(folder / "strata" / "no-strata-settings.json"),
-                "PYTHONNOUSERSITE": "1",
-                "PYTHONUTF8": "1",
-                "PYTHONIOENCODING": "utf-8",
-            })
-            run = await asyncio.to_thread(
-                _process.run_supervised,
-                [str(python), "-I", str(probe), str(root), str(run_configs)],
-                launcher="strata",
-                launcher_kind="subsystem",
-                timeout=120,
-                cwd=str(root),
-                env=env,
-            )
+            families = await asyncio.to_thread(strata_fetcher._strata_models_table, folder)
         except Exception as e:
             logger.error("list_strata_models failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e) or type(e).__name__}
-        if run.timed_out:
-            return {"status": "error", "message": "reading Strata's model list ran past 120 s and was stopped"}
-        if run.exceeded_mb:
-            return {"status": "error", "message": (
-                f"reading Strata's model list went over the {run.ceiling_mb} MB ceiling and was stopped")}
-        report = strata_fetcher._last_json_line(run.stdout) if run.returncode == 0 else None
-        if not isinstance(report, dict) or not isinstance(report.get("families"), list):
-            tail = (run.stderr or "").strip()[-600:] or "no message"
-            return {"status": "error", "message": (
-                f"Strata's model list could not be read (exit {run.returncode}): {tail}")}
-        return {"status": "success", "families": report["families"]}
+        return {"status": "success", "families": families}
+
+    @slow_command
+    async def install_strata_model(
+        self, family: str, model: str, images: bool, gguf_dir: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Ask the owner to install a Strata model; the install itself starts at their confirm.
+
+        This raises the model download consent dialog (`model_download_required` for
+        `strata-model`, its payload carrying `strata_model` = {family, model, images, gguf_dir}
+        and Strata's own `download_gb` as the size). The confirm (`download_model`) runs Control's
+        `setup.py`, with progress, and ends in `model_download_completed` with `run_config`.
+        `gguf_dir` names a folder holding the exact catalog files, which Strata takes in place.
+        A model whose run config is already in the model files folder is answered at once, with
+        no dialog; a second install while one runs gets the "already downloading" answer.
+        """
+        from .managers import strata_model_fetcher
+
+        name = strata_model_fetcher.DOWNLOAD_NAME
+        service = self.model_download_service
+        if not service.claim(name):
+            return service.already_downloading(name)
+        service.release(name)
+        choice = {"family": family, "model": model, "images": images, "gguf_dir": gguf_dir or None}
+        config = {"strata_model": choice, "model_files_dir": str(self.settings.get_model_files_dir())}
+        try:
+            if await asyncio.to_thread(strata_model_fetcher.is_present, config):
+                return {
+                    "status": "success",
+                    "message": f"{family} {model} is already installed",
+                    "run_config": str(strata_model_fetcher.run_config_path(config)),
+                }
+            asked = await service.maybe_emit_required(
+                name,
+                purpose=strata_model_fetcher.PURPOSE,
+                consequence_if_declined=strata_model_fetcher.CONSEQUENCE_IF_DECLINED,
+                strata_model=choice,
+            )
+        except Exception as e:
+            logger.error("install_strata_model failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e) or type(e).__name__}
+        return {"status": "success", "asked": asked}
 
     async def list_processes(self, since: str = None, until: str = None) -> Dict[str, Any]:
         """What runs now and what ended recently (ADR-046 point 8): the process

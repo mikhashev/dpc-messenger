@@ -24,7 +24,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from . import camoufox_binary
-from .managers import llama_server_fetcher, strata_fetcher
+from .managers import llama_server_fetcher, strata_fetcher, strata_model_fetcher
 from .providers.model_sizes import (
     hf_cache_path,
     is_model_cached,
@@ -172,6 +172,7 @@ _OTHER_DOWNLOADS: Dict[str, Any] = {
     camoufox_binary.DOWNLOAD_NAME: camoufox_binary,
     llama_server_fetcher.DOWNLOAD_NAME: llama_server_fetcher,
     strata_fetcher.DOWNLOAD_NAME: strata_fetcher,
+    strata_model_fetcher.DOWNLOAD_NAME: strata_model_fetcher,
 }
 
 
@@ -301,6 +302,7 @@ class ModelDownloadService:
         consequence_if_declined: str,
         on_decline: str = "degrade",
         provider_alias: Optional[str] = None,
+        strata_model: Optional[Dict[str, Any]] = None,
     ) -> bool:
         # Before any size read and before the dialog: nobody is asked to consent
         # to gigabytes that the missing package then cannot load. The reason
@@ -322,7 +324,7 @@ class ModelDownloadService:
             # The size is the one GitHub lists for the asset the package
             # would fetch: a network read, kept off the event loop.
             # The alias that asked carries its own sizes (Strata's chosen engine).
-            config = self._alias_config(provider_alias)
+            config = self._download_config(model_name, provider_alias, strata_model)
             try:
                 size_bytes, installed_bytes, (size_min, installed_min), size_source = await asyncio.to_thread(
                     lambda: (_for_alias(other.size_bytes, config), _stated_installed_bytes(other, config),
@@ -334,7 +336,7 @@ class ModelDownloadService:
                 await self._refuse_alias(model_name, str(e))
                 return False
             measured_on = None
-            cache_path = other.location()
+            cache_path = _for_alias(other.location, config)
             free_bytes = await asyncio.to_thread(_free_bytes, cache_path)
         else:
             # A model with no measured row is sized by a Hugging Face API read:
@@ -374,13 +376,20 @@ class ModelDownloadService:
             "installed_bytes_min": installed_min,
             "provider_alias": provider_alias,
         }
+        if strata_model is not None:
+            # What the owner asked for; the confirm carries only model_name and provider_alias,
+            # so download_other reads the choice back from _last_required_payload.
+            payload["strata_model"] = dict(strata_model)
         self._last_required_payload[model_name] = payload
 
-        if self.settings.get_model_download_declined(model_name):
-            self._set_status(model_name, "declined")
-            return False
-        if model_name in self._emitted_this_session:
-            return False
+        # A strata_model request is the owner's own command, asked again for every choice:
+        # neither "once per session" nor an earlier "don't remind me" applies to it.
+        if strata_model is None:
+            if self.settings.get_model_download_declined(model_name):
+                self._set_status(model_name, "declined")
+                return False
+            if model_name in self._emitted_this_session:
+                return False
 
         self._emitted_this_session.add(model_name)
         self._set_status(model_name, "missing")
@@ -418,6 +427,17 @@ class ModelDownloadService:
         config = getattr(provider, "config", None)
         return config if isinstance(config, dict) else None
 
+    def _download_config(
+        self, model_name: str, provider_alias: Optional[str], strata_model: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """What a download module's reads and its download get as `config`: the alias's provider
+        config, and for `strata-model` the owner's choice (the one asked for now, else the one the
+        last consent payload carried) with the model files folder it goes to."""
+        if model_name != strata_model_fetcher.DOWNLOAD_NAME:
+            return self._alias_config(provider_alias)
+        choice = strata_model or (self._last_required_payload.get(model_name) or {}).get("strata_model")
+        return {"strata_model": choice, "model_files_dir": str(self.settings.get_model_files_dir())}
+
     def _known_payload(self, model_name: str) -> Optional[Dict[str, Any]]:
         """The re-ask payload for `model_name` from the registry of models this
         service knows how to ask about, rather than from `_last_required_payload`
@@ -440,7 +460,9 @@ class ModelDownloadService:
         self.settings.clear_model_download_declined(model_name)
         self._emitted_this_session.discard(model_name)
         payload = self._last_required_payload.get(model_name) or self._known_payload(model_name)
-        if self._is_present(model_name, self._alias_config((payload or {}).get("provider_alias"))):
+        config = self._download_config(
+            model_name, (payload or {}).get("provider_alias"), (payload or {}).get("strata_model"))
+        if self._is_present(model_name, config):
             self._set_status(model_name, "cached")
             return False
         self._set_status(model_name, "missing")
@@ -453,6 +475,7 @@ class ModelDownloadService:
             consequence_if_declined=payload.get("consequence_if_declined", ""),
             on_decline=payload.get("on_decline", "degrade"),
             provider_alias=payload.get("provider_alias"),
+            strata_model=payload.get("strata_model"),
         )
 
     @staticmethod
@@ -549,16 +572,16 @@ class ModelDownloadService:
         # read (camoufox's sets its offline-retry timer). Free space is read anew.
         asked = self._last_required_payload.get(model_name)
         alias = provider_alias or (asked or {}).get("provider_alias")
-        config = self._alias_config(alias)
+        config = self._download_config(model_name, alias)
         if asked is not None and asked.get("provider_alias") == alias:
             size, installed = asked.get("size_bytes"), asked.get("installed_bytes")
             size_min, installed_min = asked.get("size_bytes_min"), asked.get("installed_bytes_min")
-            free = await asyncio.to_thread(_free_bytes, other.location())
+            free = await asyncio.to_thread(_free_bytes, _for_alias(other.location, config))
         else:
             try:
                 size, installed, (size_min, installed_min), free = await asyncio.to_thread(
                     lambda: (_for_alias(other.size_bytes, config), _stated_installed_bytes(other, config),
-                             _stated_minima(other, config), _free_bytes(other.location()))
+                             _stated_minima(other, config), _free_bytes(_for_alias(other.location, config)))
                 )
             except ValueError as e:
                 await self._refuse_alias(model_name, str(e))
@@ -571,7 +594,7 @@ class ModelDownloadService:
             error = (
                 f"not enough free disk space for {model_name}: it needs about "
                 f"{_needed_bytes(size, installed) / 1e9:.1f} GB and {free / 1e9:.1f} GB is free "
-                f"where it goes ({other.location()})"
+                f"where it goes ({_for_alias(other.location, config)})"
             )
             logger.warning("Download of %s refused: %s", model_name, error)
             await self.emit_failed(model_name, error)
@@ -580,12 +603,15 @@ class ModelDownloadService:
         await self.emit_started(model_name)
         try:
             fetch = functools.partial(other.download, self.progress_reporter(model_name))
-            await asyncio.to_thread(_for_alias, fetch, config)
+            result = await asyncio.to_thread(_for_alias, fetch, config)
         except Exception as e:
             logger.error("Download of %s failed: %s", model_name, e, exc_info=True)
             await self.emit_failed(model_name, str(e))
             return {"status": "error", "error": str(e)}
-        await self.emit_completed(model_name)
+        if model_name == strata_model_fetcher.DOWNLOAD_NAME:
+            await self.emit_completed(model_name, run_config=result)
+        else:
+            await self.emit_completed(model_name)
         return {"status": "success", "model_name": model_name}
 
     async def emit_started(self, model_name: str) -> None:
@@ -595,10 +621,10 @@ class ModelDownloadService:
         except Exception:
             logger.debug("broadcast_event(model_download_started) failed", exc_info=True)
 
-    async def emit_completed(self, model_name: str) -> None:
+    async def emit_completed(self, model_name: str, **extra: Any) -> None:
         self._set_status(model_name, "cached")
         try:
-            await self.local_api.broadcast_event("model_download_completed", {"model_name": model_name})
+            await self.local_api.broadcast_event("model_download_completed", {"model_name": model_name, **extra})
         except Exception:
             logger.debug("broadcast_event(model_download_completed) failed", exc_info=True)
 

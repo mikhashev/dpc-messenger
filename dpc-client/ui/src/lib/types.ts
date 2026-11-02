@@ -437,7 +437,8 @@ export interface ModelDownloadRequiredEvent {
     size_bytes: number | null;
     // 'package_max': an upper bound (Strata's engine package depends on the card);
     // 'package': the exact package the alias's strata_engine_backend names.
-    size_source: 'measured' | 'hf_api' | 'package_max' | 'package' | null;
+    // 'model_table': Strata's own rounded download_gb for a Strata model (0 with files in place).
+    size_source: 'measured' | 'hf_api' | 'package_max' | 'package' | 'model_table' | null;
     cache_path: string;
     // Bytes it occupies once unpacked; null = not stated, never 0.
     installed_bytes?: number | null;
@@ -447,6 +448,9 @@ export interface ModelDownloadRequiredEvent {
     size_bytes_min?: number | null;
     installed_bytes_min?: number | null;
     provider_alias: string | null;
+    // 'strata-model' only: the owner's choice, which the confirm does not carry back
+    // (the backend keeps the last one asked); gguf_dir is null when absent.
+    strata_model?: { family: string; model: string; images: boolean; gguf_dir: string | null } | null;
 }
 
 export interface ModelDownloadStartedEvent {
@@ -455,6 +459,8 @@ export interface ModelDownloadStartedEvent {
 
 export interface ModelDownloadCompletedEvent {
     model_name: string;
+    // 'strata-model' only: the absolute path of the run config setup wrote.
+    run_config?: string;
 }
 
 export interface ModelDownloadFailedEvent {
