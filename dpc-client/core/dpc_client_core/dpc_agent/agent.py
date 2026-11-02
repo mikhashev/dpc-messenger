@@ -25,7 +25,8 @@ import pathlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from .llm_adapter import DpcLlmAdapter
+from ..managers.llama_server_supervisor import card_held_for
+from .llm_adapter import DpcLlmAdapter, local_alias_of
 from .run_gate import RunGate, hold as hold_run_gate, turn_title
 from .tools.registry import ToolRegistry, ToolContext
 from .memory import Memory, generate_smart_index
@@ -574,28 +575,32 @@ class DpcAgent:
             "text_preview": message[:200] if message else "",
         })
 
-        # Run LLM loop
-        response, usage, trace = await run_llm_loop(
-            messages=messages,
-            tools=self.tools,
-            llm=self.llm,
-            agent_root=self.agent_root,
-            emit_progress=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None, speed=None: None),
-            task_id=conversation_id,
-            budget_remaining_usd=None if self.config.billing_model == "subscription" else self.config.budget_usd,
-            max_rounds=self.config.max_rounds,
-            on_stream_chunk=on_stream_chunk,
-            conversation_id=conversation_id,
-            stop_event=stop_event,
-            kill_event=kill_event,
-            reasoning_effort=reasoning_effort,
-            # The live strip carries the same pair this guard has just decided
-            # on: the window every round is measured against, and the headroom
-            # below which the next round is refused. Until now those two numbers
-            # existed only in a DEBUG line nobody watching the agent can see.
-            context_window=_ctx_window,
-            context_reserve=_reserve,
-        )
+        # Run LLM loop. The request stands on its local alias from the first round to the
+        # last, so its holder is busy between them too (ADR-044, amendment 2026-11-02, the
+        # card queue, rule 1); the loop moves the hold when a switch lands between rounds.
+        async with card_held_for(local_alias_of(self.llm), "accepted_request",
+                                 agent_id=self.agent_root.name, conversation_id=conversation_id):
+            response, usage, trace = await run_llm_loop(
+                messages=messages,
+                tools=self.tools,
+                llm=self.llm,
+                agent_root=self.agent_root,
+                emit_progress=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None, speed=None: None),
+                task_id=conversation_id,
+                budget_remaining_usd=None if self.config.billing_model == "subscription" else self.config.budget_usd,
+                max_rounds=self.config.max_rounds,
+                on_stream_chunk=on_stream_chunk,
+                conversation_id=conversation_id,
+                stop_event=stop_event,
+                kill_event=kill_event,
+                reasoning_effort=reasoning_effort,
+                # The live strip carries the same pair this guard has just decided
+                # on: the window every round is measured against, and the headroom
+                # below which the next round is refused. Until now those two numbers
+                # existed only in a DEBUG line nobody watching the agent can see.
+                context_window=_ctx_window,
+                context_reserve=_reserve,
+            )
 
         # Store last usage and trace for session state access by agent_manager
         self._last_usage = usage

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, REFUSAL_TOOLS_UNSUPPORTED, PeerRefused
 
+from ..managers.llama_server_supervisor import runs_on_a_local_engine
 from ..node_ledger import (
     ENGINE_FIELDS,
     TARIFF_FIELDS,
@@ -255,6 +256,12 @@ def _image_of_url_part(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"base64": data, "mime_type": mime_type}
 
 
+def local_alias_of(llm: Any) -> Optional[str]:
+    """`DpcLlmAdapter.local_alias` of whatever runs the loop; a test's double has no card."""
+    alias_of = getattr(llm, "local_alias", None)
+    return alias_of() if alias_of is not None else None
+
+
 class DpcLlmAdapter:
     """
     Adapts DPC's LLMManager to the interface expected by the Ouroboros agent loop.
@@ -365,6 +372,22 @@ class DpcLlmAdapter:
             return default_provider
 
         return None
+
+    def local_alias(self) -> Optional[str]:
+        """The local alias this loop's own calls run on, the one a hold on the card goes on;
+        re-read per call. An auxiliary call chooses its own. None on a peer route, asked
+        first: an agent with a compute_host never uses what `_get_agent_provider_alias` falls
+        back to, and must not mark it busy. None too for a vendor's alias, which has no
+        supervisor; `provider_facts._resolve_local_alias` walks provider_alias, agent_provider
+        and default_provider with no such check, so it can return a vendor's alias."""
+        try:
+            providers = self._llm_manager.providers
+            if self._compute_host or getattr(providers.get("dpc_agent"), "peer_id", None):
+                return None
+            alias = self._get_agent_provider_alias()
+            return alias if alias and runs_on_a_local_engine(providers.get(alias)) else None
+        except Exception:
+            return None  # as `chat` reads the alias: a call that cannot route will say so itself
 
     def _get_agent_provider(self) -> Optional[Any]:
         """Get the agent's provider instance."""

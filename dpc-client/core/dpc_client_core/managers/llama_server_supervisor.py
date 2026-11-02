@@ -438,6 +438,140 @@ def card_holders() -> List[Dict[str, Any]]:
     ]
 
 
+# What stands on an alias, so that its holder is busy between its calls too (ADR-044,
+# amendment 2026-11-02, the card queue, rules 1 and 14). Keyed by alias, not supervisor as
+# `_CARD_CLAIMS` is: that one records which child is on the card, this one who still needs
+# the alias, and a settings save replacing the supervisor changes the first and not the
+# second. A hold makes a claim busy; it creates no claim, and a dead child holds nothing.
+# Written only on the owner loop (`_now_on_the_owner_loop`).
+_CARD_HOLD_KINDS = ("accepted_request",)  # `caller_window` lands with its own code
+_CARD_HOLDS: Dict[str, List["_CardHold"]] = {}
+
+
+class _CardHold:
+    """One stand on one alias at a time: an `accepted_request` today, a `caller_window`
+    when that lands. `alias` None stands on nothing (a peer route or a vendor alias, for
+    now). `live` goes false when the hold ends, so a tool thread or a task that outlives it
+    cannot put this hold back on an alias."""
+
+    __slots__ = ("kind", "agent_id", "conversation_id", "alias", "live")
+
+    def __init__(self, kind: str, agent_id: Optional[str], conversation_id: Optional[str]):
+        self.kind = kind
+        self.agent_id = agent_id
+        self.conversation_id = conversation_id
+        self.alias: Optional[str] = None
+        self.live = True
+
+
+# The hold of the request this code runs for. It follows the awaits of the task that set
+# it, and a mark from a tool thread reaches `ensure_running` the way the peer mark does.
+# A `_DaemonToolPool` thread inherits nothing, so it is carried there (`carrying_card_hold`).
+_CARD_HOLD: contextvars.ContextVar = contextvars.ContextVar("dpc_card_hold", default=None)
+
+
+def _now_on_the_owner_loop(fn: Callable[..., None], *args: Any) -> None:
+    """Run the synchronous `fn` on the owner loop: here when this is that loop or none is
+    bound, else handed over in call order, ahead of whatever this caller sends there next.
+    It awaits nothing, so a Kill or a cancel cannot stop a request from letting go."""
+    owner = _foreign_owner_loop()
+    if owner is None:
+        fn(*args)
+        return
+    try:
+        owner.call_soon_threadsafe(fn, *args)
+    except RuntimeError:  # the loop closed between the check and the call
+        fn(*args)
+
+
+def _hold_moves_to(hold: _CardHold, alias: Optional[str]) -> None:
+    """Let go of the old alias and take the new one, in one synchronous stretch."""
+    if not hold.live or hold.alias == alias:
+        return
+    holds = _CARD_HOLDS.get(hold.alias, [])
+    if hold in holds:
+        holds.remove(hold)
+        if not holds:
+            del _CARD_HOLDS[hold.alias]
+    hold.alias = alias
+    if alias is not None:
+        _CARD_HOLDS.setdefault(alias, []).append(hold)
+
+
+def _hold_ends(hold: _CardHold) -> None:
+    _hold_moves_to(hold, None)
+    hold.live = False
+
+
+@contextlib.asynccontextmanager
+async def card_held_for(alias: Optional[str], kind: str, *, agent_id: Optional[str] = None,
+                        conversation_id: Optional[str] = None):
+    """Stand on `alias` for the body: its holder is busy until the body ends, however it
+    ends. `agent_id` and `conversation_id`, where there are any, are what the busy refusal
+    names."""
+    if kind not in _CARD_HOLD_KINDS:
+        raise ValueError(f"unknown kind of card hold: {kind!r}")
+    hold = _CardHold(kind, agent_id, conversation_id)
+    _now_on_the_owner_loop(_hold_moves_to, hold, alias)
+    token = _CARD_HOLD.set(hold)
+    try:
+        yield hold
+    finally:
+        # Letting go first: `reset` raises when a dying task is closed from another context.
+        _now_on_the_owner_loop(_hold_ends, hold)
+        _CARD_HOLD.reset(token)
+
+
+def card_hold_follows(alias: Optional[str]) -> None:
+    """The request this code runs for now runs on `alias`, or on no local alias: a switch
+    between rounds moves its hold. Nothing without a hold."""
+    hold = _CARD_HOLD.get()
+    if hold is not None:
+        _now_on_the_owner_loop(_hold_moves_to, hold, alias)
+
+
+def current_card_hold() -> Optional[_CardHold]:
+    """The hold to hand to a thread that does not inherit this context."""
+    return _CARD_HOLD.get()
+
+
+@contextlib.contextmanager
+def carrying_card_hold(hold: Optional[_CardHold]):
+    """Make `hold` this thread's for the body; the previous value comes back, so a pool
+    worker carries nothing from one call to the next."""
+    token = _CARD_HOLD.set(hold)
+    try:
+        yield
+    finally:
+        _CARD_HOLD.reset(token)
+
+
+def _this_request_holds(alias: str) -> bool:
+    """Whether the request this code runs for stands on `alias`: it would wait on itself.
+    A hold that has ended stands on nothing."""
+    hold = _CARD_HOLD.get()
+    return hold is not None and hold.alias == alias
+
+
+def _who_stands_on(alias: str) -> str:
+    """Who holds `alias`, for a refusal: agent and conversation, where set; "" for no one
+    named."""
+    names = []
+    for hold in _CARD_HOLDS.get(alias, []):
+        parts = [f"agent '{hold.agent_id}'"] if hold.agent_id else []
+        if hold.conversation_id:
+            parts.append(f"conversation '{hold.conversation_id}'")
+        if parts:
+            names.append(", ".join(parts))
+    return f" In use by {'; '.join(names)}." if names else ""
+
+
+def runs_on_a_local_engine(provider: Any) -> bool:
+    """Whether this provider's alias is a local engine's, so that a hold on it means
+    something: a peer route or a vendor has no supervisor and no card to hold."""
+    return isinstance(getattr(provider, "supervisor", None), LlamaServerSupervisor)
+
+
 async def stop_by_hand(supervisor: "LlamaServerSupervisor", timeout: Optional[float] = None,
                        reopen: bool = True) -> None:
     """The Stop engine command's path (`stop_local_engine`) and the idle swap's.
@@ -1296,15 +1430,18 @@ class LlamaServerSupervisor:
         if found is not None:
             other, state = found
             # Said where it hurts (Mike, 2026-11-02): the switch that would have swapped.
-            hint = ("" if swap_policy()[0] else
+            swap_on = swap_policy()[0]
+            hint = ("" if swap_on else
                     " Or tick 'Swap local models when the card holder is idle' in Providers > "
                     "Local engines, and DPC stops an idle holder for you.")
+            why = (f"this request is running on '{other.alias}' and would wait on itself"
+                   if swap_on and _this_request_holds(other.alias) else
+                   f"swapping is off, the start serves a peer, or '{other.alias}' is already stopping")
             return CardHeldError(
                 f"{self.ENGINE}[{self.alias}] cannot load: the card is held by "
                 f"{other.ENGINE} alias '{other.alias}' ({state}). "
                 f"{self.ENGINE} and {other.ENGINE} cannot hold the card together and "
-                f"DPC did not swap them here (swapping is off, the start serves a peer, "
-                f"or '{other.alias}' is already stopping). Stop '{other.alias}' from the providers "
+                f"DPC did not swap them here ({why}). Stop '{other.alias}' from the providers "
                 f"settings to free the card, or switch this agent to '{other.alias}'.{hint}",
                 other.alias, other.ENGINE,
             )
@@ -1325,9 +1462,14 @@ class LlamaServerSupervisor:
             return LlamaServerError(f"'{self.alias}' is stopping to free the card for '{self._swap_for}'")
         return LlamaServerError(f"{self.ENGINE}[{self.alias}] is draining; new calls refused")
 
+    def _busy_for_the_card(self, state: str) -> bool:
+        """The card queue's rule 1: a child is starting, a call is in flight, or a request
+        stands on this alias. `state` is this claim's in `_live_claims`."""
+        return state == "starting" or self._in_flight > 0 or bool(_CARD_HOLDS.get(self.alias))
+
     def _begin_swap_drain(self, new: "LlamaServerSupervisor") -> None:
         """Mark this holder as draining for `new`. Synchronous, and called in the same
-        stretch as the idle check that decided to swap: a call arriving after it is
+        stretch as the last check that it is not busy: a call arriving after it is
         refused, not started under a stopping engine."""
         self._swap_for = new.alias
         self._draining = True
@@ -1342,59 +1484,58 @@ class LlamaServerSupervisor:
         return CardHeldError(
             f"{self.ENGINE}[{self.alias}] cannot load: the card is held by {holder.ENGINE} alias "
             f"'{holder.alias}', busy for {int(round(waited))} s; a swap waits for a busy holder "
-            f"at most {wait_s} s (Settings: Wait for a busy holder). '{holder.alias}' serves as before",
+            f"at most {wait_s} s (Settings: Wait for a busy holder). '{holder.alias}' serves as before."
+            f"{_who_stands_on(holder.alias)}",
             holder.alias, holder.ENGINE,
         )
 
     async def _free_the_card(self) -> None:
         """The owner's start of this alias, with an excluding holder on the card: stop
-        the holder when it is idle, or when it has finished within `swap_wait_s`
-        (ADR-044 amendment, rules 1-5). Returns when no excluding holder is left, or
-        when the rules say no swap (the caller's `_claim_card` then raises today's
-        refusal); raises the busy refusal on a timeout.
+        the holder once it is no longer busy, within `swap_wait_s` (ADR-044, amendments of
+        2026-11-02: the idle swap, and the card queue's rules 1, 2 and 9). A busy holder is
+        not marked and not stopped: it serves what it has. Returns when no excluding holder
+        is left, or when the rules say no swap (the caller's `_claim_card` then raises
+        today's refusal); raises the busy refusal on a timeout.
 
-        Called right before `_claim_card`. The holder check, the idle test and the
+        Called right before `_claim_card`. The last holder check, the busy test and the
         drain mark are one synchronous stretch, and so are the last check and the
         return: nothing awaits between this method's end and the claim."""
         for _ in range(_MAX_SWAP_ROUNDS):
-            found = self._blocking_holder()
-            if found is None:
-                return
-            holder, state = found
             enabled, wait_s = swap_policy()
-            if (not enabled or self._start_is_for_a_peer() or state == "stopping"
-                    or (holder._draining and holder._swap_for is None)):
+            if not enabled or self._start_is_for_a_peer():
                 return
             started = _swap_clock()
-            if holder._swap_for is not None:
-                # Another start is freeing the card: wait for it to be let go, then
-                # follow the same rule against whoever holds it next.
-                while holder in _CARD_CLAIMS:
-                    waited = _swap_clock() - started
-                    if waited >= wait_s:
-                        raise self._swap_busy_refusal(holder, waited)
-                    await asyncio.sleep(min(_SWAP_POLL_S, wait_s - waited))
-                continue
-            busy = holder._in_flight > 0
-            if busy and wait_s <= 0:
-                raise self._swap_busy_refusal(holder, 0.0)
-            holder._begin_swap_drain(self)  # no await since the check above
-            done = False
-            try:
-                if busy:
+            waited_for: Optional["LlamaServerSupervisor"] = None
+            while True:
+                found = self._blocking_holder()
+                if found is None:
+                    return  # freed, by us or by someone else's stop: not this swap's doing
+                holder, state = found
+                stopping = state == "stopping" or holder._draining
+                if _this_request_holds(holder.alias):
+                    return  # rule 9: it would wait on itself
+                if (holder is not waited_for and stopping
+                        and (state == "stopping" or holder._swap_for is None)):
+                    # Stopping for another reason when this start met it: its state is named.
+                    return
+                if not stopping and not holder._busy_for_the_card(state):
+                    break
+                # Busy, or being freed by a stop that began once this start was waiting or
+                # by another start: then the same rule against whoever holds the card next.
+                waited = _swap_clock() - started
+                if waited >= wait_s:
+                    raise self._swap_busy_refusal(holder, waited)
+                if holder is not waited_for:
+                    waited_for = holder
                     logger.info(
                         "%s[%s]: '%s' (%s) is busy; waiting up to %d s for it to finish before "
                         "stopping it to free the card", self.ENGINE, self.alias, holder.alias,
                         holder.ENGINE, wait_s,
                     )
-                while holder._in_flight > 0:
-                    waited = _swap_clock() - started
-                    if waited >= wait_s:
-                        raise self._swap_busy_refusal(holder, waited)
-                    await asyncio.sleep(min(_SWAP_POLL_S, wait_s - waited))
-                if holder not in _CARD_CLAIMS:
-                    # Freed meanwhile by someone else's stop: not this swap's doing.
-                    continue
+                await asyncio.sleep(min(_SWAP_POLL_S, wait_s - waited))
+            holder._begin_swap_drain(self)  # no await since the last check above
+            done = False
+            try:
                 await stop_by_hand(holder)
                 done = True
             finally:

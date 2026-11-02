@@ -35,7 +35,8 @@ from . import prompt_divergence
 from .tool_ledger import record_attempt, sweep_unfinished
 from dpc_protocol.protocol import PeerRefused
 
-from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading, _llm_manager_for_agent
+from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading, _llm_manager_for_agent, local_alias_of
+from ..managers.llama_server_supervisor import card_hold_follows, carrying_card_hold, current_card_hold
 from ..process_registry import SpawnOrigin, get_registry, spawn_origin
 from .run_gate import note_turn
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
@@ -978,15 +979,18 @@ def _execute_single_tool(
     }
 
 
-def _execute_single_tool_for(origin: SpawnOrigin, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+def _execute_single_tool_for(origin: SpawnOrigin, *args: Any, card_hold: Any = None,
+                             **kwargs: Any) -> Dict[str, Any]:
     """`_execute_single_tool` with `SPAWN_ORIGIN` set for the duration (ADR-046 point 3).
 
     Runs in the pool thread and sets the variable there: a `_DaemonToolPool`
     thread does not inherit the dispatcher's context, so a variable set before
     `run_in_executor` would not arrive, and every process the tool starts would
     be a lost attribution. The previous value is restored, so a worker carries
-    nothing from one call to the next."""
-    with spawn_origin(origin):
+    nothing from one call to the next. `card_hold` crosses the same way, so that
+    a tool asking for another local alias is known as this request (ADR-044,
+    amendment 2026-11-02, the card queue, rule 9)."""
+    with spawn_origin(origin), carrying_card_hold(card_hold):
         return _execute_single_tool(*args, **kwargs)
 
 
@@ -1047,6 +1051,7 @@ async def _execute_with_timeout(
 
     t0 = time.monotonic()
     note_turn(tool=fn_name)
+    card_hold = current_card_hold()
     try:
         # Use run_in_executor to avoid blocking the event loop
         result = await asyncio.wait_for(
@@ -1054,6 +1059,7 @@ async def _execute_with_timeout(
                 executor,
                 lambda: _execute_single_tool_for(
                     origin, tools, tc, logs_dir, task_id, round_number, session_id, ctx=ctx,
+                    card_hold=card_hold,
                 ),
             ),
             timeout=timeout_sec
@@ -1225,6 +1231,7 @@ async def _one_finalising_call(
     seen = observe_request(messages, tools_sent, reasoning_effort) if observe_request else None
     row_id = None
     extra = {"tool_choice": tool_choice} if tool_choice else {}
+    card_hold_follows(local_alias_of(llm))
     try:
         chat_task = asyncio.ensure_future(llm.chat(
             messages,
@@ -1815,6 +1822,11 @@ async def run_llm_loop(
             # this round's progress line. Set before the call's task exists,
             # so the task copies it.
             _progress_token = CALL_PROGRESS.set(lambda m: emit_progress(m, None, round_idx))
+            # The alias is re-read per call, so a switch lands on a round boundary, and
+            # this request's hold on the card goes with it. Only this loop's own adapter
+            # moves it: an auxiliary model's call does not take the request off its alias,
+            # and `note_turn`, which only writes the turn's fields, does not move it.
+            card_hold_follows(local_alias_of(llm))
             try:
                 msg, usage = await _chat_unless_killed(
                     llm.chat(

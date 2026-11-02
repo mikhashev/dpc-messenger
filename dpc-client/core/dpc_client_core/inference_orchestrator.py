@@ -9,6 +9,8 @@ orchestration of contexts, conversation history, and token tracking.
 import logging
 from typing import Dict, Any, Optional
 
+from .managers.llama_server_supervisor import card_held_for, runs_on_a_local_engine
+
 logger = logging.getLogger(__name__)
 
 
@@ -104,24 +106,40 @@ class InferenceOrchestrator:
             RuntimeError: If local inference fails
         """
         try:
-            result = await self.llm_manager.query(
-                prompt,
-                provider_alias=provider,
-                images=images,
-                return_metadata=True,
-                conversation_id=conversation_id,
-                agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
-                # The level the caller asked for. `query` hands its extra kwargs to
-                # the provider, and since a266259c every provider names the parameter
-                # — so a chat without an agent can finally set a depth. Absent stays
-                # absent: None leaves the alias configuration deciding, as before.
-                reasoning_effort=reasoning_effort,
-            )
+            # The owner's request stands on its alias until it is answered (ADR-044,
+            # amendment 2026-11-02, the card queue, rule 1).
+            async with card_held_for(self._local_alias(provider, images), "accepted_request",
+                                     conversation_id=conversation_id):
+                result = await self.llm_manager.query(
+                    prompt,
+                    provider_alias=provider,
+                    images=images,
+                    return_metadata=True,
+                    conversation_id=conversation_id,
+                    agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
+                    # The level the caller asked for. `query` hands its extra kwargs to
+                    # the provider, and since a266259c every provider names the parameter
+                    # — so a chat without an agent can finally set a depth. Absent stays
+                    # absent: None leaves the alias configuration deciding, as before.
+                    reasoning_effort=reasoning_effort,
+                )
             result['compute_host'] = 'local'
             return result
         except Exception as e:
             logger.error("Local inference failed: %s", e, exc_info=True)
             raise RuntimeError(f"Local inference failed: {e}") from e
+
+    def _local_alias(self, provider: Optional[str], images: Optional[list]) -> Optional[str]:
+        """The local alias `query` will run this call on, or None: a vendor's or a peer's
+        has no card to hold. An alias `query` will refuse is `query`'s to report."""
+        alias_for_query = getattr(self.llm_manager, "_alias_for_query", None)
+        if alias_for_query is None:
+            return None
+        try:
+            alias = alias_for_query(provider, bool(images))
+        except ValueError:
+            return None
+        return alias if runs_on_a_local_engine(self.llm_manager.providers.get(alias)) else None
 
     async def _execute_remote_inference(
         self,

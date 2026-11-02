@@ -609,11 +609,26 @@ call that had already got past the holder's start when the swap began runs to it
 busy case) or meets the refusal at the slot (the idle case); the stopped alias stays
 configured and its next owner call starts it again, swapping the new one out if that is idle.
 
+**A busy holder, since the card queue's rules 1 and 2 were built** (Mike's call, 2026-11-02;
+the rules above stand as first written). Busy is now a child starting, a call in flight or a
+request standing on the alias, so a claim whose child is still starting no longer counts as
+idle. A busy holder is not marked and keeps serving, new requests included; the start waits, at
+most `swap_wait_s`, and the mark and the stop come only once the holder is no longer busy. On
+the timeout the holder was never touched, and the refusal also names who stands on the alias. A
+start already waiting when a stop for another reason lands goes on waiting for it. The refusal
+"'<holder>' is stopping to free the card for '<new>'" now comes only after a mark, which falls
+only on a holder that is not busy. A start that first meets a holder stopping for another
+reason still gets today's refusal.
+
 ## Amendment, 2026-11-02 — the card queue
 
-Mike's call, team chat 2026-11-02, after review by Ark, Johnny and Zcode. **Decided, not
-built:** at `e4e955cb` none of the mechanisms below is in the code, and `swap_when_idle` stays
-off by default until they are live-checked. The work is the epic
+Mike's call, team chat 2026-11-02, after review by Ark, Johnny and Zcode. **Decided, partly
+built.** In the code: rule 1, with `accepted_request` as the only kind of hold, at the two doors
+it names; rule 2, no mark while busy; and rule 9, the from-inside refusal. Not in the code: the
+queue and its cancel (rules 3 and 12), the order (rule 4), the single deadline (rule 5),
+`caller_window` (rule 6), the gateway and peer doors (rules 7, 8 and 15), background calls
+(rule 10), the status key `card_queue` and `wait_reason: card_queue`. `swap_when_idle` stays off
+by default until all of it is live-checked. The work is the epic
 `THE-CARD-HAS-NO-QUEUE-SO-A-SWAP-CAN-CUT-AN-AGENT-LOOP-AND-TWO-ALIASES-PING-PONG` (gitignored
 `backlog.md`). This note replaces the parts of the idle swap amendment it names below and
 rewrites nothing above. **Nothing is ever forced.**
@@ -628,11 +643,18 @@ One call in flight is too short a measure of busy, and two aliases trade the car
 
 1. **Busy.** A holder is busy while a child is starting or a call is in flight, or while an
    `accepted_request` or a `caller_window` stands on its alias. An `accepted_request` runs
-   from acceptance to its answer, its wait in the queue included. A **turn** stays the
-   glossary's span (run gate held to released) and lies inside the accepted request; they are
-   not two kinds of busy. A turn waiting for a person's approval counts as busy: that is the
-   honest cost of "never forced". A contender waits to its deadline and is refused with the
-   holder and its `wait_reason` named.
+   from acceptance to its answer, its wait in the queue included. **Acceptance is per door**
+   (Mike's call, variant A, 2026-11-02). An agent turn is accepted on entry into
+   `DpcAgent.process`, and the hold is taken around `run_llm_loop`; waiting at the run gate
+   stays a **waiting** item and holds nothing. An owner's chat is accepted in
+   `InferenceOrchestrator._execute_local_inference`. The cost: a holder freed while a request
+   waits at the gate can lose the card before that request starts; the request then queues, it
+   does not fail (until the queue is built, its start follows the swap rules). This is inferred
+   from the code, not observed. A **turn** stays the glossary's span (run gate held to released),
+   so an agent's accepted request lies inside its turn; they are not two kinds of busy. A turn
+   waiting for a person's approval counts as busy: that is the honest cost of "never forced". A
+   contender waits to its deadline and is refused with the holder named and who stands on its
+   alias; its `wait_reason` joins them with the queue.
 2. **No mark while busy.** A busy holder is not marked draining and not stopped; it serves what
    it has. The mark and the stop come only once it is no longer busy, with no await between the
    last check and the claim (the discipline `_free_the_card` already states).
@@ -703,7 +725,7 @@ One call in flight is too short a measure of busy, and two aliases trade the car
     stopping" refusal is replaced by queueing, and it asserts the request's total time.
 
 **Names.** The kinds are `accepted_request` and `caller_window`, registered through
-`card_held_for(alias, kind, **who)` in `_CARD_HELD_BY`; `caller_idle_s` is read by
+`card_held_for(alias, kind, *, agent_id=None, conversation_id=None)` in `_CARD_HOLDS`; `caller_idle_s` is read by
 `get_caller_idle_s()`; `note_caller_call` and `_last_caller_call_at` take the place of the
 draft's peer-named pair. The status key is `card_queue` (`queued_at`, `give_up_at`, ordered by
 position with no position field, as on **waiting**), and the holder is named by the existing

@@ -130,6 +130,9 @@ class RunGate:
         The task already holding the gate passes straight through: no entry,
         no wait, the turn stays the outer hold's. Another task, even one
         created inside the run, still waits.
+
+        Not the card hold of `llama_server_supervisor.card_held_for`: that one
+        stands on an alias, this one on a gate.
         """
         task = asyncio.current_task()
         if task is not None and self._holder_task is task:
@@ -321,6 +324,9 @@ async def hold(gate: Any, entry: Dict[str, Any], stoppable: bool = False):
 
     The plain lock is what a test double hands an agent built without the
     manager; it serialises the same way and registers nothing.
+
+    Not the card hold of `llama_server_supervisor.card_held_for`: that one
+    stands on an alias, this one on a gate.
     """
     if isinstance(gate, RunGate):
         async with gate.hold(entry, stoppable=stoppable):
