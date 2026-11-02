@@ -143,7 +143,7 @@ class Settings:
         # had the key and one that has it empty read alike.
         self._config['local_engines'] = {
             'model_files_dir': '',  # Empty = ~/.dpc/models. Set from the Providers editor ("Model files folder"); must be an absolute path to a writable folder
-            'swap_when_idle': 'true',  # An owner's start of a local alias stops an idle card holder that excludes it (ADR-044 amendment 2026-11-02)
+            'swap_when_idle': 'false',  # Off until the card queue is live-checked: an idle-by-call holder was swapped out mid agent loop (ADR-044 amendment 2026-11-02)
             'swap_wait_s': '300'  # How long a swap waits for a busy holder before refusing; 0 = do not wait
         }
 
@@ -874,18 +874,19 @@ class Settings:
 
     def get_swap_when_idle(self) -> bool:
         """`[local_engines] swap_when_idle`: whether an owner's start of a local alias stops
-        an idle card holder that excludes it. Default true; read at each start."""
+        an idle card holder that excludes it. Default false (Mike's call, 2026-11-02, after the
+        live check cut an agent's loop); read at each start."""
         try:
-            raw = self.get('local_engines', 'swap_when_idle', 'true').strip().lower()
+            raw = self.get('local_engines', 'swap_when_idle', 'false').strip().lower()
         except configparser.Error as e:
             logger.warning("[local_engines] swap_when_idle is unreadable (%s); using the default", e)
-            return True
+            return False
         if raw in ('true', '1', 'yes', 'on'):
             return True
         if raw in ('false', '0', 'no', 'off'):
             return False
         logger.warning("[local_engines] swap_when_idle %r is not a boolean; using the default", raw)
-        return True
+        return False
 
     def get_swap_wait_s(self) -> int:
         """`[local_engines] swap_wait_s`: seconds a swap waits for a busy holder (0 = do not

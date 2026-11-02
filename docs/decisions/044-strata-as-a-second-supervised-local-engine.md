@@ -552,9 +552,12 @@ the owner found Stop engine, although nothing was using the holder.
 A start of a local alias that an excluding card holder blocks (the check of point 4,
 `_card_held_error`) goes by these rules:
 
-1. **The setting is off: today's refusal.** `[local_engines] swap_when_idle` (default `true`)
-   off gives `CardHeldError`, unchanged. The default is on because the alternative is the
-   failed first message. With no settings bound (tests, a script that runs no service) there
+1. **The setting is off: today's refusal.** `[local_engines] swap_when_idle` off gives
+   `CardHeldError`, unchanged, and the refusal names the switch. The default was first on (the
+   alternative is the failed first message) and is **off since the same day's live check**:
+   a holder idle between two calls of an agent's loop was swapped out mid-task, and the two
+   aliases traded the card. It goes back on once the card queue (busy for a whole loop, FIFO)
+   is live-checked — Mike's call and the reviewer's, team chat 2026-11-02. With no settings bound (tests, a script that runs no service) there
    is no swap either.
 2. **A peer never swaps.** A call served to a peer (`peer_being_served()`), and the start
    begun for a peer's request (`start_for_peer`, `_STARTED_FOR_PEER`), meet today's

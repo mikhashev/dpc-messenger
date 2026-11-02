@@ -1295,13 +1295,17 @@ class LlamaServerSupervisor:
         found = self._blocking_holder()
         if found is not None:
             other, state = found
+            # Said where it hurts (Mike, 2026-11-02): the switch that would have swapped.
+            hint = ("" if swap_policy()[0] else
+                    " Or tick 'Swap local models when the card holder is idle' in Providers > "
+                    "Local engines, and DPC stops an idle holder for you.")
             return CardHeldError(
                 f"{self.ENGINE}[{self.alias}] cannot load: the card is held by "
                 f"{other.ENGINE} alias '{other.alias}' ({state}). "
                 f"{self.ENGINE} and {other.ENGINE} cannot hold the card together and "
                 f"DPC did not swap them here (swapping is off, the start serves a peer, "
                 f"or '{other.alias}' is already stopping). Stop '{other.alias}' from the providers "
-                f"settings to free the card, or switch this agent to '{other.alias}'",
+                f"settings to free the card, or switch this agent to '{other.alias}'.{hint}",
                 other.alias, other.ENGINE,
             )
         return None

@@ -37,7 +37,9 @@ def settings(tmp_path):
 
 @pytest.fixture(autouse=True)
 def swap_on(settings, monkeypatch):
-    """The service's binding: the settings object, read at each start. Quick polling."""
+    """The service's binding: the settings object, read at each start, with the swap
+    switched on (the default is off since 2026-11-02). Quick polling."""
+    settings.set_local_engine_swap(True, 300)
     base_mod.bind_local_engine_settings(settings)
     monkeypatch.setattr(base_mod, "_LAST_SWAP", None)
     monkeypatch.setattr(base_mod, "_SWAP_POLL_S", 0.01)
@@ -381,16 +383,17 @@ class TestTheRace:
 
 
 class TestTheSettings:
-    def test_the_defaults_are_on_and_three_hundred_seconds(self, tmp_path):
+    def test_the_defaults_are_off_and_three_hundred_seconds(self, tmp_path):
+        # Off since the live check of 2026-11-02 cut an agent's loop; on again after the card queue.
         s = Settings(tmp_path / "h")
-        assert s.get_swap_when_idle() is True and s.get_swap_wait_s() == 300
+        assert s.get_swap_when_idle() is False and s.get_swap_wait_s() == 300
 
     def test_a_config_without_the_keys_reads_the_same_defaults(self, tmp_path):
         home = tmp_path / "h"
         home.mkdir()
         (home / "config.ini").write_text("[hub]\nurl = http://localhost:8000\n", encoding="utf-8")
         s = Settings(home)
-        assert s.get_swap_when_idle() is True and s.get_swap_wait_s() == 300
+        assert s.get_swap_when_idle() is False and s.get_swap_wait_s() == 300
 
     def test_a_choice_round_trips_and_survives_a_reload(self, tmp_path):
         home = tmp_path / "h"
@@ -421,7 +424,7 @@ class TestTheSettings:
         home = tmp_path / "h"
         home.mkdir()
         (home / "config.ini").write_text("[local_engines]\nswap_when_idle = maybe\n", encoding="utf-8")
-        assert Settings(home).get_swap_when_idle() is True
+        assert Settings(home).get_swap_when_idle() is False
 
 
 def _host(settings):
@@ -511,3 +514,26 @@ class TestTheReviewFixes:
 
         assert not [r for r in caplog.records if r.getMessage().startswith("swapped ")]
         assert base_mod._LAST_SWAP is None
+
+
+class TestTheRefusalNamesTheSwitch:
+    """Mike, 2026-11-02: when a second local model is asked for and the swap is off, the
+    refusal says the switch exists and where it is."""
+
+    @pytest.mark.asyncio
+    async def test_with_the_swap_off_the_refusal_names_the_checkbox(self, tmp_path, settings):
+        settings.set_local_engine_swap(False, 300)
+        holder, new = await _running_pair(tmp_path, "llama")
+        with pytest.raises(CardHeldError) as refused:
+            await new.ensure_running()
+        assert "Swap local models when the card holder is idle" in str(refused.value)
+        assert "Local engines" in str(refused.value)
+
+    def test_with_the_swap_on_the_refusal_does_not_offer_it(self, tmp_path, settings):
+        holder = _llama("qwen27")
+        base_mod._CARD_CLAIMS[holder] = "running"
+        try:
+            err = _strata(tmp_path, "flash")._card_held_error()
+        finally:
+            base_mod._CARD_CLAIMS.pop(holder, None)
+        assert err is not None and "Swap local models" not in str(err)
