@@ -107,11 +107,41 @@ both written only by a persistent registry:
 - `<DPC_HOME>/process_registry/YYYY-MM-DD.jsonl` receives every finished entry as one
   JSON line, in the file of the UTC date of its end (the history the graph reads).
   Appended as the node ledger appends (a `.lock` sibling, `O_APPEND`, a torn last
-  line healed by the next append); files whose date is more than `HISTORY_DAYS` (7)
-  days old are removed at start. A failed append is logged once and never takes a
+  line healed by the next append). A failed append is logged once and never takes a
   spawn or an end down. The history begins with the first start of this code
   (2026-10-26 12:08 +07); the entries of 2026-10-25 exist only in the state file,
   without resources, and are not backfilled.
+
+**How large they can get.** The measured days are 151-361 KB; these limits are for a
+process respawned in a loop or a field nobody expected, and are constants like their
+neighbours.
+
+- A daily file rotates before a row would take it past `HISTORY_FILE_MAX_BYTES`
+  (10 MiB, the client log's figure): under its lock it is renamed `YYYY-MM-DD.N.jsonl`
+  and the day goes on in a fresh file. N counts up from 1 and a rotated file is never
+  renamed again, so `.1` is the day's oldest, unlike the client log's backups, where
+  `.1` is the newest and every rotation renames them all.
+- A rename fails on Windows while any handle holds the file. That is logged once and
+  tried again by every append, so a reader's moment costs nothing. Meanwhile the file
+  grows to twice its limit, and past that the rows are dropped with one WARNING and
+  counted at the rotation that ends it: a spawn or an end never fails over this, and the
+  state file still has the newest entries.
+- Over all history, `HISTORY_TOTAL_MAX_BYTES` (50 MiB) with room held for a whole current
+  file: the oldest files go first, a day's rotated files before its current one. Today's
+  current file is never removed and never cut, whatever the limits; today's rotated
+  files go by the same rule as any other. A file goes by age when its date is more than
+  `HISTORY_DAYS` (7) days old, rotated or not. Both limits are applied at start, at a
+  rotation and at the first row of a new day, and each removal is one INFO line naming
+  what went (at start through the outcome `run_service.py` logs once logging exists).
+- A name that is not `YYYY-MM-DD.jsonl` or `YYYY-MM-DD.N.jsonl` is neither read, nor
+  removed, nor counted.
+- An entry is bounded by its fields: `ProcessEntry` cuts `command` to
+  `COMMAND_MAX_CHARS` (120) and the launcher and the spawn origin's four strings to
+  `FIELD_MAX_CHARS` (255) however it is built, read from an older file included. So
+  the worst entry is 1395 characters, at most about 17.5 KB in the state file (its JSON
+  is ASCII, twelve bytes for a character outside the BMP) and 8.9 KB as a history line;
+  the state file holds at most (200 + the open entries) of them. The measured entry
+  is about 880 bytes there and 744 here.
 
 The state-file write runs under the registry lock. Measured 2026-10-26 on the
 owner's Windows machine with a full file (200 finished entries, 156 KB): `register`
@@ -201,8 +231,20 @@ COMMAND_MAX_CHARS = 120
 KEEP_FINISHED_MAX = 200
 KEEP_FINISHED_DAYS = 7
 HISTORY_DAYS = 7
+HISTORY_FILE_MAX_BYTES = 10 * 1024 * 1024
+HISTORY_TOTAL_MAX_BYTES = 50 * 1024 * 1024
+# Where a file that cannot be rotated stops growing: this many times its limit.
+HISTORY_STUCK_FACTOR = 2
+# A read starts over when the files moved under it; `_read_history_files` says why.
+HISTORY_READ_TRIES = 5
+HISTORY_READ_RETRY_S = 0.02
+# The launcher and the spawn origin's strings. Not 120 like the command: `agent_id` is
+# the name of the agent's folder and the file systems allow 255 for that, so no real
+# id is ever cut and compares unequal. The widest measured is 25 (2026-11-03).
+FIELD_MAX_CHARS = 255
 SCHEMA_VERSION = 1
 REGISTRY_FILE = "process_registry.json"
+_HISTORY_NAME = re.compile(r"(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d*))?\.jsonl", re.ASCII)
 LOCK_TIMEOUT_S = 2.0
 LOCK_STALE_S = 10.0
 LOCK_SLEEP_S = 0.01
@@ -325,6 +367,14 @@ def is_abnormal_exit(returncode: Optional[int], platform: Optional[str] = None) 
 
 # --- the entry ------------------------------------------------------------------
 
+def _bounded(text: Any, limit: int = FIELD_MAX_CHARS) -> Any:
+    """`text` cut to `limit` characters; what is not a string is not this cut's business."""
+    return text[:limit] if isinstance(text, str) and len(text) > limit else text
+
+
+_BOUNDED_FIELDS = ("launcher", "agent_id", "conversation_id", "tool", "turn_id")
+
+
 @dataclass
 class ProcessEntry:
     """One process. Persisted as written here; the field names are the API's."""
@@ -356,6 +406,12 @@ class ProcessEntry:
     io_read_bytes: Optional[int] = None
     io_write_bytes: Optional[int] = None
     last_output_at: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        # Every other string of an entry is a closed word or a time this module wrote.
+        for name in _BOUNDED_FIELDS:
+            setattr(self, name, _bounded(getattr(self, name)))
+        self.command = _bounded(self.command, COMMAND_MAX_CHARS)
 
     @property
     def is_open(self) -> bool:
@@ -489,6 +545,19 @@ def _is_later(epoch: float, iso: Optional[str]) -> bool:
     return held is None or epoch > held
 
 
+def _history_name(name: str) -> Optional[Tuple[date, float]]:
+    """(the day, the place in that day's writing order) of a daily file's name: the
+    rotated files by their number, the current file after them. None for any other name."""
+    match = _HISTORY_NAME.fullmatch(name)
+    if match is None:
+        return None
+    try:
+        day = date.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+    return day, float(match.group(2)) if match.group(2) else float("inf")
+
+
 def _ends_mid_line(path: Path) -> bool:
     """True when the last byte is not a newline: the mark a killed writer leaves."""
     try:
@@ -507,7 +576,10 @@ def _history_lock(path: Path) -> Iterator[None]:
     """The `.lock` sibling, taken as `node_ledger._partition_lock` takes it (exclusive
     create, stale after 10 s, after 2 s of waiting the append goes ahead without it).
     Copied, not imported: the ledger's module pulls in the firewall, and this one
-    imports nothing but the standard library."""
+    imports nothing but the standard library. On Windows a lock another process is
+    deleting at this moment refuses the create with access denied rather than "exists":
+    the same contention, and a row was lost to it under two writers (measured
+    2026-11-03). On POSIX that error is a real one and is not waited out."""
     lock_path = path.with_name(path.name + ".lock")
     fd = None
     deadline = time.monotonic() + LOCK_TIMEOUT_S
@@ -522,10 +594,13 @@ def _history_lock(path: Path) -> Iterator[None]:
                     continue
             except OSError:
                 pass
-            if time.monotonic() >= deadline:
-                logger.warning("process registry: lock %s held for over %.0fs; appending without it", lock_path, LOCK_TIMEOUT_S)
-                break
-            time.sleep(LOCK_SLEEP_S)
+        except PermissionError:
+            if sys.platform != "win32":
+                raise
+        if time.monotonic() >= deadline:
+            logger.warning("process registry: lock %s held for over %.0fs; appending without it", lock_path, LOCK_TIMEOUT_S)
+            break
+        time.sleep(LOCK_SLEEP_S)
     try:
         yield
     finally:
@@ -619,6 +694,8 @@ class ProcessRegistry:
         keep_finished_days: float = KEEP_FINISHED_DAYS,
         history_dir: Optional[Path] = None,
         history_days: float = HISTORY_DAYS,
+        history_file_max_bytes: int = HISTORY_FILE_MAX_BYTES,
+        history_total_max_bytes: int = HISTORY_TOTAL_MAX_BYTES,
     ):
         self.path = Path(path) if path is not None else None
         # The daily files sit beside the state file under its own name without the
@@ -631,7 +708,11 @@ class ProcessRegistry:
                 beside = self.path.with_suffix("")
                 self.history_dir = beside if beside != self.path else self.path.with_name(self.path.name + ".days")
         self._history_days = history_days
+        self._history_file_max = history_file_max_bytes
+        self._history_total_max = history_total_max_bytes
         self._last_history_error: Optional[str] = None
+        self._last_rotation_error: Optional[str] = None
+        self._history_rows_dropped = 0
         self._clock = clock
         self._create_time = create_time
         self._platform = platform
@@ -803,6 +884,15 @@ class ProcessRegistry:
             self.history_dir.mkdir(parents=True, exist_ok=True)
             data = (json.dumps(entry.to_dict(), ensure_ascii=False) + "\n").encode("utf-8")
             with _history_lock(path):
+                sweep = not path.exists()  # the first row of a new day
+                size = 0 if sweep else path.stat().st_size
+                after = size + len(data) + 1  # the newline that heals a torn last line
+                if size and after > self._history_file_max:
+                    if self._rotate_history(path, day):
+                        sweep = True
+                    elif after > self._history_file_max * HISTORY_STUCK_FACTOR:
+                        self._drop_history_row(entry, path)
+                        return
                 if _ends_mid_line(path):
                     data = b"\n" + data  # a killed writer's torn last line must not swallow this one
                 # O_BINARY where it exists: the Windows CRT would turn the newline into CRLF.
@@ -813,6 +903,8 @@ class ProcessRegistry:
                 finally:
                     os.close(fd)
             self._last_history_error = None
+            if sweep:
+                self.prune_history()
         except Exception as exc:
             said = f"{type(exc).__name__}: {exc}"
             if said != self._last_history_error:
@@ -822,27 +914,118 @@ class ProcessRegistry:
                     entry.pid, self.history_dir, said,
                 )
 
-    def prune_history(self) -> List[Path]:
-        """Remove the daily files dated more than `history_days` before today (UTC).
-        Called once at start; files whose names are not a date are left alone.
-        Never raises; returns what it removed."""
+    def _rotate_history(self, path: Path, day: str) -> bool:
+        """Under the day's lock: rename the current file to the day's next number, so
+        the next row starts a fresh one. False when the rename failed (Windows, while
+        a handle holds the file); said once, and the next append tries again."""
+        try:
+            numbers = [place for held, place, _ in self._history_files()
+                       if held.isoformat() == day and place != float("inf")]
+            target = path.with_name(f"{day}.{int(max(numbers, default=0)) + 1}.jsonl")
+            os.rename(path, target)
+        except OSError as exc:
+            said = f"{type(exc).__name__}: {exc}"
+            if said != self._last_rotation_error:
+                self._last_rotation_error = said
+                logger.warning(
+                    "process registry: could not rotate %s (%s); every append tries again, the file "
+                    "grows up to %d bytes meanwhile and rows past that are dropped",
+                    path, said, self._history_file_max * HISTORY_STUCK_FACTOR,
+                )
+            return False
+        self._last_rotation_error = None
+        dropped, self._history_rows_dropped = self._history_rows_dropped, 0
+        lost = f"; {dropped} rows were dropped while it could not rotate" if dropped else ""
+        logger.info("process registry: rotated %s to %s%s", path.name, target.name, lost)
+        return True
+
+    def _drop_history_row(self, entry: ProcessEntry, path: Path) -> None:
+        """The row has nowhere to go: its file cannot rotate and is at its ceiling."""
+        self._history_rows_dropped += 1
+        if self._history_rows_dropped == 1:
+            logger.warning(
+                "process registry: %s cannot rotate and has reached %d bytes; history rows are "
+                "dropped from pid %s on, until it rotates", path, self._history_file_max * HISTORY_STUCK_FACTOR, entry.pid,
+            )
+
+    def _history_files(self) -> List[Tuple[date, float, Path]]:
+        """Every daily file, in the order it was written: by day, then within the day
+        as `_history_name` places it. A name that is not a daily file's is left out."""
+        found = []
+        for path in self.history_dir.glob("????-??-??*.jsonl"):
+            parsed = _history_name(path.name)
+            if parsed is not None:
+                found.append((parsed[0], parsed[1], path))
+        found.sort(key=lambda item: item[:2])
+        return found
+
+    def _remove_history_file(self, path: Path) -> Optional[int]:
+        """The size of `path` once it is removed, or None when it was not."""
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            return size
+        except FileNotFoundError:  # another backend's sweep got there first
+            return None
+        except OSError as exc:
+            logger.warning("process registry: could not remove %s (%s)", path, exc)
+            return None
+
+    def prune_history(self, *, notes: Optional[List[Tuple[int, str]]] = None) -> List[Path]:
+        """Remove the daily files dated more than `history_days` before today (UTC),
+        rotated ones with them, then the oldest while the rest is over the total limit
+        (the module docstring has the rule). Files whose names are not a daily file's
+        are left alone. Each kind of removal is one INFO line, into `notes` when given
+        (the start, before logging exists). Never raises; returns what it removed."""
         removed: List[Path] = []
         if self.history_dir is None:
             return removed
+
+        def said(why: str, gone: List[Tuple[Path, int]]) -> None:
+            if not gone:
+                return
+            removed.extend(path for path, _ in gone)
+            message = "process registry: removed %d history file(s), %.1f MB, %s: %s" % (
+                len(gone), sum(size for _, size in gone) / _MB, why, ", ".join(path.name for path, _ in gone))
+            if notes is not None:
+                notes.append((logging.INFO, message))
+            else:
+                logger.info("%s", message)
+
         try:
             today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
             cutoff = today - timedelta(days=self._history_days)
-            for path in sorted(self.history_dir.glob("????-??-??.jsonl")):
-                try:
-                    dated = date.fromisoformat(path.stem)
-                    if dated < cutoff:
-                        path.unlink()
-                        removed.append(path)
-                except (ValueError, OSError) as exc:
-                    logger.warning("process registry: could not prune %s (%s)", path, exc)
+            aged = []
+            for day, _place, path in self._history_files():
+                if day < cutoff:
+                    size = self._remove_history_file(path)
+                    if size is not None:
+                        aged.append((path, size))
+            said(f"older than {self._history_days:g} days", aged)
+            said(f"over the {self._history_total_max / _MB:g} MB limit of the history", self._remove_over_total(today))
         except OSError as exc:
             logger.warning("process registry: could not list %s (%s)", self.history_dir, exc)
         return removed
+
+    def _remove_over_total(self, today: date) -> List[Tuple[Path, int]]:
+        """The oldest first, until the rest leaves room for a whole current file under
+        the total limit, so that the limit holds until the next sweep. Today's current
+        file is the one thing never removed."""
+        rest = []
+        for day, place, path in self._history_files():
+            if day == today and place == float("inf"):
+                continue
+            with contextlib.suppress(OSError):
+                rest.append((path, path.stat().st_size))
+        held = sum(size for _, size in rest)
+        gone: List[Tuple[Path, int]] = []
+        for path, size in rest:
+            if held <= self._history_total_max - self._history_file_max:
+                break
+            if self._remove_history_file(path) is not None:
+                held -= size
+                gone.append((path, size))
+        return gone
 
     def _own_start_time(self) -> Optional[float]:
         if self._backend_start_time is None:
@@ -1122,25 +1305,10 @@ class ProcessRegistry:
         first_day = since.astimezone(timezone.utc).date() if since is not None else None
         last_day = until.astimezone(timezone.utc).date()
         found: List[ProcessEntry] = []
-        try:
-            paths = sorted(self.history_dir.glob("????-??-??.jsonl"))
-        except OSError as exc:
-            logger.warning("process registry: could not list %s (%s)", self.history_dir, exc)
-            return []
-        for path in paths:
-            try:
-                day = date.fromisoformat(path.stem)
-            except ValueError:
-                continue
-            if (first_day is not None and day < first_day) or day > last_day:
-                continue
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except OSError as exc:
-                logger.warning("process registry: could not read %s (%s)", path, exc)
-                continue
-            for line in lines:
+        for raw in self._read_history_files(first_day, last_day):
+            for line in raw.splitlines():
                 try:
+                    # Bytes, line by line: a tear inside a character costs that line alone.
                     entry = ProcessEntry.from_dict(json.loads(line))
                 except (ValueError, TypeError):
                     continue
@@ -1150,6 +1318,41 @@ class ProcessRegistry:
                 found.append(entry)
         found.sort(key=lambda e: _epoch(e.ended_at) or 0.0)
         return found
+
+    def _read_history_files(self, first_day: Optional[date], last_day: date) -> List[bytes]:
+        """The bytes of the daily files of those days, in writing order, as one
+        consistent look. The lock is not taken, because a read must not hold up a spawn
+        or an end. Instead the listing is taken again after the read and the read starts
+        over if it changed: a rotation between the two can leave a listed name on a
+        fresh file while the rows it had went to a new number, which no read error shows."""
+
+        def wanted() -> List[Path]:
+            return [path for day, _place, path in self._history_files()
+                    if (first_day is None or day >= first_day) and day <= last_day]
+
+        contents: List[bytes] = []
+        for attempt in range(HISTORY_READ_TRIES):
+            last_try = attempt == HISTORY_READ_TRIES - 1
+            try:
+                listed = wanted()
+                contents = []
+                whole = True
+                for path in listed:
+                    try:
+                        contents.append(path.read_bytes())
+                    except FileNotFoundError:
+                        whole = False  # moved or removed since the listing
+                    except OSError as exc:  # Windows: a rename in progress, or a real failure
+                        whole = False
+                        if last_try:
+                            logger.warning("process registry: could not read %s (%s)", path, exc)
+                if last_try or (whole and wanted() == listed):
+                    return contents
+            except OSError as exc:
+                logger.warning("process registry: could not list %s (%s)", self.history_dir, exc)
+                return []
+            time.sleep(HISTORY_READ_RETRY_S)
+        return contents
 
     def _commit_now(
         self,
@@ -1194,6 +1397,7 @@ class ProcessRegistry:
         Returns (the entry as ended, the kill's verdict) or (None, the refusal)."""
         if not isinstance(pid, int) or isinstance(pid, bool):
             return None, f"{pid!r} is not a pid"
+        agent_id = _bounded(agent_id)  # compared with the entry's, which is cut
         if pid in own_and_ancestor_pids():
             return None, f"pid {pid} is the backend's own process or one of its ancestors; it is never a target"
         with self._lock:
@@ -1356,7 +1560,7 @@ class ProcessRegistry:
             kill_tree = _kill_tree_of
         shielded = own_and_ancestor_pids()
         ended: List[ProcessEntry] = []
-        turn = (origin.agent_id, origin.conversation_id, origin.turn_id)
+        turn = (_bounded(origin.agent_id), _bounded(origin.conversation_id), _bounded(origin.turn_id))
         for entry in self.open_entries("tool"):
             if (entry.agent_id, entry.conversation_id, entry.turn_id) != turn or entry.pid in shielded:
                 continue
@@ -2190,7 +2394,7 @@ def start_persistent(path: Optional[Path] = None) -> SweepOutcome:
     try:
         registry = ProcessRegistry(path if path is not None else registry_path())
         registry.load()
-        registry.prune_history()
+        registry.prune_history(notes=registry.load_notes)  # logging does not exist yet
         outcome = registry.sweep_orphans()
         set_registry(registry)
         with registry._lock:
