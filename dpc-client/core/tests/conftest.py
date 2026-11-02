@@ -66,14 +66,17 @@ def _no_card_claims_cross_tests():
     """The card-holder registry is module state (ADR-044 point 4). A test whose
     fake launch returns without a child leaves its claim behind, and the next
     test's start would be refused by an alias that only existed in the last one.
-    The holds on an alias are module state beside it, cleared for the same reason."""
+    The holds on an alias and the callers' last calls are module state beside it, cleared
+    for the same reason."""
     from dpc_client_core.managers import llama_server_supervisor
 
     llama_server_supervisor._CARD_CLAIMS.clear()
     llama_server_supervisor._CARD_HOLDS.clear()
+    llama_server_supervisor._last_caller_call_at.clear()
     yield
     llama_server_supervisor._CARD_CLAIMS.clear()
     llama_server_supervisor._CARD_HOLDS.clear()
+    llama_server_supervisor._last_caller_call_at.clear()
 
 
 @pytest.fixture(autouse=True)

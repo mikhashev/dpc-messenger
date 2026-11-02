@@ -439,7 +439,7 @@ class TestCommandAndStatus:
     @pytest.mark.asyncio
     async def test_the_command_writes_through_the_settings_and_answers_the_stored_values(self, settings):
         out = await CoreService.set_local_engine_swap(_host(settings), enabled=False, wait_s=45)
-        assert out == {"status": "success", "swap_when_idle": False, "swap_wait_s": 45}
+        assert out == {"status": "success", "swap_when_idle": False, "swap_wait_s": 45, "caller_idle_s": 120}
         assert (settings.get_swap_when_idle(), settings.get_swap_wait_s()) == (False, 45)
         # and a supervisor reading the bound settings sees it at once
         assert base_mod.swap_policy() == (False, 45)

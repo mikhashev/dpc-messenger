@@ -128,6 +128,7 @@ from .dpc_agent.pricing import get_billing_model, price_call, vendor_ceiling_cur
 from .firewall import ServingLists
 from .guest_vendor_quota import guest_vendor_quota_refusal
 from .llm_manager import accepts_reasoning_effort, entry_point_for, flatten_messages
+from .managers.llama_server_supervisor import card_held_for, note_caller_call, runs_on_a_local_engine
 from .node_ledger import (
     ENGINE_FIELDS,
     TARIFF_FIELDS,
@@ -1002,10 +1003,21 @@ class Gateway:
                 "([connection] remote_inference_timeout)",
                 "card_busy",
             )
+        # The call stands on its local alias until it is answered, and a served one leaves
+        # the client's window behind it (ADR-044, the card queue, rules 1 and 6). Inside the
+        # semaphore until the queue's order lands (rule 8): the start happens in here, so a
+        # hold taken before the wait would have that start waiting for a client that waits
+        # for this semaphore. A client waiting here stands on nothing, as a turn at the run
+        # gate does.
+        local_alias = alias if runs_on_a_local_engine(providers[alias]) else None
         try:
-            return await self._call(alias, owner, prompt, ledger, caller, request_id,
-                                    messages=messages, system=system, tools=tools, on_chunk=on_chunk,
-                                    images=images, reasoning_effort=reasoning_effort)
+            async with card_held_for(local_alias, "accepted_request"):
+                completion = await self._call(alias, owner, prompt, ledger, caller, request_id,
+                                              messages=messages, system=system, tools=tools, on_chunk=on_chunk,
+                                              images=images, reasoning_effort=reasoning_effort)
+                if local_alias is not None:
+                    note_caller_call(local_alias, caller)
+                return completion
         finally:
             self._inference_lock.release()
 

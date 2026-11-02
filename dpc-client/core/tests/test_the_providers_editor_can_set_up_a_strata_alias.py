@@ -35,6 +35,7 @@ _HOST = SimpleNamespace(settings=SimpleNamespace(
     get_model_files_dir=lambda: Path("/models"),
     get_swap_when_idle=lambda: True,
     get_swap_wait_s=lambda: 300,
+    get_caller_idle_s=lambda: 120,
 ))
 UI_FIELDS = Path(__file__).resolve().parents[2] / "ui" / "src" / "lib" / "utils" / "strataFields.ts"
 

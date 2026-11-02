@@ -10916,8 +10916,8 @@ class CoreService:
 
         `model_files_dir` is the resolved model files folder as a string (the default
         substituted). It is read from the settings here, since the provider module has
-        no settings; the read creates nothing. `swap_when_idle` and `swap_wait_s` are the
-        idle-swap settings as stored (ADR-044, amendment 2026-11-02).
+        no settings; the read creates nothing. `swap_when_idle`, `swap_wait_s` and
+        `caller_idle_s` are the idle-swap settings as stored (ADR-044, amendments 2026-11-02).
         """
         from dpc_client_core.providers.strata_provider import local_engine_status
         try:
@@ -10927,6 +10927,7 @@ class CoreService:
                 "model_files_dir": str(self.settings.get_model_files_dir()),
                 "swap_when_idle": self.settings.get_swap_when_idle(),
                 "swap_wait_s": self.settings.get_swap_wait_s(),
+                "caller_idle_s": self.settings.get_caller_idle_s(),
             }
         except Exception as e:
             logger.error("local_engine_status failed: %s", e, exc_info=True)
@@ -10944,21 +10945,25 @@ class CoreService:
             return {"status": "error", "message": str(e)}
         return {"status": "success", "model_files_dir": str(resolved)}
 
-    async def set_local_engine_swap(self, enabled: Any = None, wait_s: Any = None) -> Dict[str, Any]:
-        """Set the idle swap of local engines (`[local_engines] swap_when_idle`, `swap_wait_s`).
+    async def set_local_engine_swap(self, enabled: Any = None, wait_s: Any = None,
+                                    caller_idle_s: Any = None) -> Dict[str, Any]:
+        """Set the idle swap of local engines (`[local_engines] swap_when_idle`, `swap_wait_s`,
+        `caller_idle_s`).
 
-        `enabled` must be a bool and `wait_s` a whole number of seconds, 0 or more; a
-        refusal writes nothing. The supervisors read both at each start. Answers the
-        stored values.
+        `enabled` must be a bool and `wait_s` a whole number of seconds, 0 or more, and so
+        must `caller_idle_s` when sent: left out, the stored value stays, which is what the
+        editor sends today. A refusal writes nothing. The supervisors read them as they
+        need them. Answers the stored values.
         """
         try:
-            self.settings.set_local_engine_swap(enabled, wait_s)
+            self.settings.set_local_engine_swap(enabled, wait_s, caller_idle_s)
         except ValueError as e:
             return {"status": "error", "message": str(e)}
         return {
             "status": "success",
             "swap_when_idle": self.settings.get_swap_when_idle(),
             "swap_wait_s": self.settings.get_swap_wait_s(),
+            "caller_idle_s": self.settings.get_caller_idle_s(),
         }
 
     @slow_command

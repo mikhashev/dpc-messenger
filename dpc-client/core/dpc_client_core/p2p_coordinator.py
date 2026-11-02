@@ -1024,6 +1024,7 @@ class P2PCoordinator:
             queue = (
                 contextlib.nullcontext() if owner == "vendor" else self._peer_inference_lock
             )
+            from .managers.llama_server_supervisor import note_caller_call, runs_on_a_local_engine
             from .managers.strata_supervisor import serving_a_peer
 
             async with queue:
@@ -1061,6 +1062,11 @@ class P2PCoordinator:
                             prompt, provider_alias=serving_alias, images=images,
                             return_metadata=True, **query_kwargs,
                         )
+                # A served call, the one that leaves a row below, opens or renews this
+                # peer's window on a local alias (ADR-044, the card queue, rule 6). A refused
+                # or failed one does not, and neither does a vendor's: it has no card.
+                if runs_on_a_local_engine(self._provider_for_alias(serving_alias)):
+                    note_caller_call(serving_alias, peer_id)
             duration_s = time.monotonic() - clock
             logger.info("Inference completed successfully for %s", peer_id)
 

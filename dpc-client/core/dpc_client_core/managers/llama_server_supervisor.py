@@ -201,6 +201,19 @@ def swap_policy() -> Tuple[bool, int]:
         return False, 0
 
 
+def _caller_idle_s() -> int:
+    """`caller_idle_s` as the settings hold it now; 0, no window, unbound or unreadable.
+    Read at each use, so a change needs no restart."""
+    settings = _LOCAL_ENGINE_SETTINGS
+    if settings is None:
+        return 0
+    try:
+        return int(settings.get_caller_idle_s())
+    except Exception:
+        logger.warning("the caller window setting is unreadable; no window", exc_info=True)
+        return 0
+
+
 # ADR-044 point 9: set while a call is served to a peer, holding its node id.
 # A ContextVar because the mark has to reach `ensure_running` and `call_slot`
 # through LLMManager and the provider without a parameter on every signature;
@@ -444,15 +457,14 @@ def card_holders() -> List[Dict[str, Any]]:
 # the alias, and a settings save replacing the supervisor changes the first and not the
 # second. A hold makes a claim busy; it creates no claim, and a dead child holds nothing.
 # Written only on the owner loop (`_now_on_the_owner_loop`).
-_CARD_HOLD_KINDS = ("accepted_request",)  # `caller_window` lands with its own code
+_CARD_HOLD_KINDS = ("accepted_request",)
 _CARD_HOLDS: Dict[str, List["_CardHold"]] = {}
 
 
 class _CardHold:
-    """One stand on one alias at a time: an `accepted_request` today, a `caller_window`
-    when that lands. `alias` None stands on nothing (a peer route or a vendor alias, for
-    now). `live` goes false when the hold ends, so a tool thread or a task that outlives it
-    cannot put this hold back on an alias."""
+    """One stand on one alias at a time: an `accepted_request`. `alias` None stands on
+    nothing (a peer route or a vendor alias, for now). `live` goes false when the hold ends,
+    so a tool thread or a task that outlives it cannot put this hold back on an alias."""
 
     __slots__ = ("kind", "agent_id", "conversation_id", "alias", "live")
 
@@ -553,9 +565,47 @@ def _this_request_holds(alias: str) -> bool:
     return hold is not None and hold.alias == alias
 
 
+# When each caller last had a call served on an alias: alias, then caller, then `_swap_clock`
+# time (ADR-044, amendment 2026-11-02, the card queue, rule 6). A peer's and a gateway client's
+# run of calls has no end DPC can see, so its `caller_window` is a test of this clock and not a
+# `_CardHold`: a hold is entered and left around a body, a window has no body to leave, and a
+# timer to end one could only outlive what it stood for. By alias, as `_CARD_HOLDS` is, and on
+# the same footing: it makes a claim busy, creates none, and a dead child holds nothing, because
+# only a live claim is asked. Written only on the owner loop. Each note and each look drop every
+# ended window, so it holds one entry per caller with a call inside the window, never more.
+_last_caller_call_at: Dict[str, Dict[str, float]] = {}
+
+
+def _drop_ended_windows() -> None:
+    window, now = _caller_idle_s(), _swap_clock()
+    for alias, callers in list(_last_caller_call_at.items()):
+        for caller, at in list(callers.items()):
+            if now - at >= window:
+                del callers[caller]
+        if not callers:
+            del _last_caller_call_at[alias]
+
+
+def _caller_call_noted(alias: str, caller: str, at: float) -> None:
+    _last_caller_call_at.setdefault(alias, {})[caller] = at
+    _drop_ended_windows()
+
+
+def note_caller_call(alias: str, caller: str) -> None:
+    """`caller` has just had a call served on the local alias `alias`: it counts as busy there
+    for `caller_idle_s` seconds after this, and a later call inside them renews it."""
+    _now_on_the_owner_loop(_caller_call_noted, alias, caller, _swap_clock())
+
+
+def _callers_in_their_window(alias: str) -> List[str]:
+    """Who counts as busy on `alias` for its last call. Asked on the owner loop."""
+    _drop_ended_windows()
+    return list(_last_caller_call_at.get(alias, ()))
+
+
 def _who_stands_on(alias: str) -> str:
-    """Who holds `alias`, for a refusal: agent and conversation, where set; "" for no one
-    named."""
+    """Who holds `alias`, for a refusal: agent and conversation, where set, and the callers
+    in their window; "" for no one named."""
     names = []
     for hold in _CARD_HOLDS.get(alias, []):
         parts = [f"agent '{hold.agent_id}'"] if hold.agent_id else []
@@ -563,6 +613,7 @@ def _who_stands_on(alias: str) -> str:
             parts.append(f"conversation '{hold.conversation_id}'")
         if parts:
             names.append(", ".join(parts))
+    names.extend(f"caller '{caller}'" for caller in _callers_in_their_window(alias))
     return f" In use by {'; '.join(names)}." if names else ""
 
 
@@ -1463,9 +1514,11 @@ class LlamaServerSupervisor:
         return LlamaServerError(f"{self.ENGINE}[{self.alias}] is draining; new calls refused")
 
     def _busy_for_the_card(self, state: str) -> bool:
-        """The card queue's rule 1: a child is starting, a call is in flight, or a request
-        stands on this alias. `state` is this claim's in `_live_claims`."""
-        return state == "starting" or self._in_flight > 0 or bool(_CARD_HOLDS.get(self.alias))
+        """The card queue's rule 1: a child is starting, a call is in flight, a request
+        stands on this alias, or a caller is in its window there. `state` is this claim's in
+        `_live_claims`."""
+        return (state == "starting" or self._in_flight > 0 or bool(_CARD_HOLDS.get(self.alias))
+                or bool(_callers_in_their_window(self.alias)))
 
     def _begin_swap_drain(self, new: "LlamaServerSupervisor") -> None:
         """Mark this holder as draining for `new`. Synchronous, and called in the same

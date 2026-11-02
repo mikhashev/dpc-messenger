@@ -144,7 +144,8 @@ class Settings:
         self._config['local_engines'] = {
             'model_files_dir': '',  # Empty = ~/.dpc/models. Set from the Providers editor ("Model files folder"); must be an absolute path to a writable folder
             'swap_when_idle': 'false',  # Off until the card queue is live-checked: an idle-by-call holder was swapped out mid agent loop (ADR-044 amendment 2026-11-02)
-            'swap_wait_s': '300'  # How long a swap waits for a busy holder before refusing; 0 = do not wait
+            'swap_wait_s': '300',  # How long a swap waits for a busy holder before refusing; 0 = do not wait
+            'caller_idle_s': '120'  # A peer or gateway client counts as busy this long after its last call; 0 = no window
         }
 
         # A fresh config ships with no TURN relay at all: empty here means the same
@@ -905,16 +906,39 @@ class Settings:
             return 300
         return value
 
-    def set_local_engine_swap(self, enabled: bool, wait_s: int) -> None:
-        """Write `[local_engines] swap_when_idle` and `swap_wait_s`. ValueError, one
-        sentence, and nothing written, unless `enabled` is a bool and `wait_s` a whole
-        number >= 0 (a bool is not one)."""
+    def get_caller_idle_s(self) -> int:
+        """`[local_engines] caller_idle_s`: seconds a peer or a gateway client counts as busy
+        on an alias after its last call there (0 = no window). Default 120; a hand-edited value
+        that is not a whole number >= 0 reads as the default."""
+        try:
+            raw = self.get('local_engines', 'caller_idle_s', '120').strip()
+        except configparser.Error as e:
+            logger.warning("[local_engines] caller_idle_s is unreadable (%s); using the default", e)
+            return 120
+        try:
+            value = int(raw)
+        except ValueError:
+            value = -1
+        if value < 0:
+            logger.warning("[local_engines] caller_idle_s %r is not a whole number >= 0; using the default", raw)
+            return 120
+        return value
+
+    def set_local_engine_swap(self, enabled: bool, wait_s: int, caller_idle_s: Optional[int] = None) -> None:
+        """Write `[local_engines] swap_when_idle`, `swap_wait_s` and, when given, `caller_idle_s`.
+        ValueError, one sentence, and nothing written, unless `enabled` is a bool and `wait_s`
+        and a given `caller_idle_s` whole numbers >= 0 (a bool is not one)."""
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be true or false.")
         if isinstance(wait_s, bool) or not isinstance(wait_s, int) or wait_s < 0:
             raise ValueError("wait_s must be a whole number of seconds, 0 or more.")
+        if caller_idle_s is not None and (
+                isinstance(caller_idle_s, bool) or not isinstance(caller_idle_s, int) or caller_idle_s < 0):
+            raise ValueError("caller_idle_s must be a whole number of seconds, 0 or more.")
         self.set('local_engines', 'swap_when_idle', 'true' if enabled else 'false')
         self.set('local_engines', 'swap_wait_s', str(wait_s))
+        if caller_idle_s is not None:
+            self.set('local_engines', 'caller_idle_s', str(caller_idle_s))
 
     def get_dht_enabled(self) -> bool:
         """Check if DHT peer discovery is enabled."""

@@ -624,10 +624,11 @@ reason still gets today's refusal.
 
 Mike's call, team chat 2026-11-02, after review by Ark, Johnny and Zcode. **Decided, partly
 built.** In the code: rule 1, with `accepted_request` as the only kind of hold, at the two doors
-it names; rule 2, no mark while busy; and rule 9, the from-inside refusal. Not in the code: the
-queue and its cancel (rules 3 and 12), the order (rule 4), the single deadline (rule 5),
-`caller_window` (rule 6), the gateway and peer doors (rules 7, 8 and 15), background calls
-(rule 10), the status key `card_queue` and `wait_reason: card_queue`. `swap_when_idle` stays off
+it names and on a gateway call; rule 2, no mark while busy; rule 6, the `caller_window`, as built
+there; and rule 9, the from-inside refusal. Not in the code: the queue and its cancel (rules 3
+and 12), the order (rule 4), the single deadline (rule 5), the rest of the gateway and peer doors
+(rules 7, 8 and 15), background calls (rule 10), the status key `card_queue` and `wait_reason:
+card_queue`. `swap_when_idle` stays off
 by default until all of it is live-checked. The work is the epic
 `THE-CARD-HAS-NO-QUEUE-SO-A-SWAP-CAN-CUT-AN-AGENT-LOOP-AND-TWO-ALIASES-PING-PONG` (gitignored
 `backlog.md`). This note replaces the parts of the idle swap amendment it names below and
@@ -683,6 +684,20 @@ One call in flight is too short a measure of busy, and two aliases trade the car
    calls. The trade-off is written down: a gap longer than the window still cuts that caller's
    loop. `[connection] remote_inference_timeout` (default 1200 s) is a door limit and not this
    window; the two numbers answer different questions.
+   **As built**, where the rule left a choice to the code, and open to its review. A window
+   is a test of `_swap_clock` against `_last_caller_call_at` at the busy test, not a hold in
+   `_CARD_HOLDS`: a hold is entered and left around a body, a window has no body to leave, and it
+   needs no timer. `card_held_for` therefore refuses the word. Each note and each look drop every
+   ended window, so the record holds one entry per caller with a call inside its window. What
+   opens or renews a window is a served call on a local alias, the one that leaves a usage row; a
+   refused or failed call does not, and a vendor's has no card. A busy refusal names a caller in
+   its window as "caller '<id>'"; a gateway call in progress is named by nobody, because a hold
+   names an agent and a conversation and it has neither. The gateway's hold is taken inside
+   `_peer_inference_lock`, around `_call`, until rule 8's order lands: the start happens in there,
+   so a hold taken before that wait would have the start waiting for a client that waits for the
+   same semaphore. A client waiting on it stands on nothing, as a turn at the run gate does, and
+   the queue commit moves the hold out to acceptance. Until then a peer's next call that waits
+   behind a gateway's start in the semaphore can outlast its window, the case rule 8 closes.
 7. **Peers and the gateway.** A peer never swaps and never takes a place. A new peer while a
    place waits is refused `provider_unavailable`, with no `retry_after_sec`; the **refusal
    code** row's "retryable later but not by a short wait" stays true, and so does DPTP §3.4. A
@@ -724,8 +739,9 @@ One call in flight is too short a measure of busy, and two aliases trade the car
     with `swap_when_idle=True` forced, not the default-off state; it asserts that the "is
     stopping" refusal is replaced by queueing, and it asserts the request's total time.
 
-**Names.** The kinds are `accepted_request` and `caller_window`, registered through
-`card_held_for(alias, kind, *, agent_id=None, conversation_id=None)` in `_CARD_HOLDS`; `caller_idle_s` is read by
+**Names.** The kind of hold is `accepted_request`, registered through
+`card_held_for(alias, kind, *, agent_id=None, conversation_id=None)` in `_CARD_HOLDS`; `caller_window`,
+decided as a second kind, is a test of the clock as built (rule 6); `caller_idle_s` is read by
 `get_caller_idle_s()`; `note_caller_call` and `_last_caller_call_at` take the place of the
 draft's peer-named pair. The status key is `card_queue` (`queued_at`, `give_up_at`, ordered by
 position with no position field, as on **waiting**), and the holder is named by the existing
