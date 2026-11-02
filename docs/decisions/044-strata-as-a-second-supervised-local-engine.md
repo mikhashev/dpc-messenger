@@ -608,3 +608,129 @@ What a swap does not do: it does not park or hand over the stopped holder's conv
 call that had already got past the holder's start when the swap began runs to its end (the
 busy case) or meets the refusal at the slot (the idle case); the stopped alias stays
 configured and its next owner call starts it again, swapping the new one out if that is idle.
+
+## Amendment, 2026-11-02 — the card queue
+
+Mike's call, team chat 2026-11-02, after review by Ark, Johnny and Zcode. **Decided, not
+built:** at `e4e955cb` none of the mechanisms below is in the code, and `swap_when_idle` stays
+off by default until they are live-checked. The work is the epic
+`THE-CARD-HAS-NO-QUEUE-SO-A-SWAP-CAN-CUT-AN-AGENT-LOOP-AND-TWO-ALIASES-PING-PONG` (gitignored
+`backlog.md`). This note replaces the parts of the idle swap amendment it names below and
+rewrites nothing above. **Nothing is ever forced.**
+
+The case, from `dpc-client.log` and the node ledger, local time, with the swap switched on: at
+16:23:06 `qwen3.8-flash-next-iq3_s Strata` was swapped out for `strata flash-next`; Johnny's
+agent made calls on `strata flash-next` from 16:24:04 to 16:24:29; at 16:24:34, between two
+calls of that loop, `strata flash-next` was swapped out for the other alias; the loop's next
+call began at 16:24:51; at 16:25:06 an owner's request on the other alias was refused with
+"is stopping to free the card for 'strata flash-next'"; at 16:25:10 the card was swapped back.
+One call in flight is too short a measure of busy, and two aliases trade the card.
+
+1. **Busy.** A holder is busy while a child is starting or a call is in flight, or while an
+   `accepted_request` or a `caller_window` stands on its alias. An `accepted_request` runs
+   from acceptance to its answer, its wait in the queue included. A **turn** stays the
+   glossary's span (run gate held to released) and lies inside the accepted request; they are
+   not two kinds of busy. A turn waiting for a person's approval counts as busy: that is the
+   honest cost of "never forced". A contender waits to its deadline and is refused with the
+   holder and its `wait_reason` named.
+2. **No mark while busy.** A busy holder is not marked draining and not stopped; it serves what
+   it has. The mark and the stop come only once it is no longer busy, with no await between the
+   last check and the claim (the discipline `_free_the_card` already states).
+3. **The queue.** One `_CARD_QUEUE`, at the level of `ensure_running` (the base supervisor's and
+   the Strata override's), entered before `_start_lock`, oldest first. A request whose alias
+   already has a place joins it. A place belongs to the alias's oldest live request; when that
+   request leaves (deadline, cancel) the place stays with the next oldest live one of that
+   alias, and is gone only when empty. Only the first place acts.
+4. **Order.** A request accepted after a place was taken waits behind it, also on the holder's
+   own alias. Later rounds of a running request and calls of an open window are not new and are
+   served. A waiting start waits for what stood there when it queued, no more. The first code
+   commit is therefore a registry of accepted requests, because `_draining` is a plain flag and
+   cannot express this.
+5. **One deadline per request.** `swap_wait_s` (the default stays 300) is fixed at acceptance
+   and read once, counted from acceptance, and covers the wait and the stop phase;
+   `stop_by_hand` gets the remainder. This replaces two things: `_free_the_card` starts its
+   clock again on each round, so one start can wait `_MAX_SWAP_ROUNDS` times `swap_wait_s`, and
+   it calls `stop_by_hand` with no timeout. On expiry the request leaves the queue with a
+   refusal naming the holder, why it is busy and the setting; the holder is untouched. The
+   refusal does not promise that waiting was right; it promises not to hold a person for 20
+   minutes.
+6. **`caller_window`.** One setting, `[local_engines] caller_idle_s` (default 120, 0 = no
+   window), covers a peer's and a gateway client's run of calls, both invisible to DPC. A
+   caller counts as busy for that many seconds after its last call, and calls inside the window
+   renew it. A gateway call is an `accepted_request`; the window only extends busy between
+   calls. The trade-off is written down: a gap longer than the window still cuts that caller's
+   loop. `[connection] remote_inference_timeout` (default 1200 s) is a door limit and not this
+   window; the two numbers answer different questions.
+7. **Peers and the gateway.** A peer never swaps and never takes a place. A new peer while a
+   place waits is refused `provider_unavailable`, with no `retry_after_sec`; the **refusal
+   code** row's "retryable later but not by a short wait" stays true, and so does DPTP §3.4. A
+   gateway client is the owner's own user and queues like any owner start.
+8. **The semaphore is not the queue.** `P2PCoordinator._peer_inference_lock`, shared by the peer
+   door and the gateway, is bypassed by owner chat, agent turns, sleep and background calls. It
+   stays the line of guest calls on an already loaded alias, with the door limit. The gateway's
+   order for a local alias becomes card queue, then semaphore, then the call (today the
+   semaphore comes first and the start happens inside it), so the gateway no longer waits for
+   the card while holding it and a live peer does not lose its window. Peers do not queue, so
+   there is no cycle.
+9. **From inside.** A request holding an excluding alias that asks for another is refused at
+   once, in the `_card_held_error` form; otherwise it would wait on itself. On this node the
+   real route is `describe_image` to `vision_provider`. A request holding no alias (a cloud
+   agent) queues as a normal request.
+10. **Background calls** (the self-reflection check, knowledge extraction, skill reflection and
+    the like) never swap and never queue. They run only if their alias is on the card; otherwise
+    a named skip goes into a record with a reader, on the model of `last_swap`, never silently,
+    and they retry next cycle. The reason is `DROPS_PARKED_ON_STOP = True` on Strata.
+11. **No `sleep` kind and no `preemptible` class.** Sleep is a request like others; on this node
+    it runs on the agent's own alias or a cloud one. `preemptible` is parked until a stop stops
+    dropping parked conversations.
+12. **Death and Stop engine.** A holder's death and Stop engine free the card and advance the
+    queue; it never waits for the dead. Queue cancel is its own command beside `_CARD_QUEUE`, not
+    an extension of `stop_waiting`, which only takes a chat out of the agent's run-gate line.
+13. **The switch and the safety net.** `_MAX_SWAP_ROUNDS` stays as a safety net, with a WARNING
+    it does not print today; FIFO is what closes the ping-pong. The queue lives only when
+    `swap_when_idle` is true; when false, today's immediate refusal.
+14. **Storage.** Accepted requests and the queue are keyed by alias, so they survive a settings
+    save replacing the supervisor. `_CARD_CLAIMS` stays keyed by supervisor object, because it
+    records which child is physically on the card, and a retired predecessor keeps its claim
+    until its `stop()`. These are two facts, not two keys for one. This is inferred from the
+    code, not observed.
+15. **The gateway's refusal.** `card_busy` stays the semaphore's word. A queue refusal is
+    `provider_unavailable`, not today's 502 `upstream_error`. `_draining_error` must reach
+    `_engine_unavailable_cause`, so that a guest stops reading it as `peer_refused`. The refusal
+    count stays the same: no twelfth code.
+16. **Evidence and test.** The log sequence above is the evidence. The replay test targets HEAD
+    with `swap_when_idle=True` forced, not the default-off state; it asserts that the "is
+    stopping" refusal is replaced by queueing, and it asserts the request's total time.
+
+**Names.** The kinds are `accepted_request` and `caller_window`, registered through
+`card_held_for(alias, kind, **who)` in `_CARD_HELD_BY`; `caller_idle_s` is read by
+`get_caller_idle_s()`; `note_caller_call` and `_last_caller_call_at` take the place of the
+draft's peer-named pair. The status key is `card_queue` (`queued_at`, `give_up_at`, ordered by
+position with no position field, as on **waiting**), and the holder is named by the existing
+`card_holders()`. `held_by` is not reused. `wait_reason` gains `card_queue` in
+`TURN_WAIT_REASONS` (ADR-046 point 8). The bare word `lease` is not used.
+
+**What this does to the idle swap amendment above.**
+
+- **Replaced:** rule 3's idle test (`_in_flight == 0`), by rule 1 here; rule 3's "refused at once
+  and does not queue behind the stop", by rule 4 here; rule 4's mark on a busy holder, its timeout
+  that clears the mark and its clock, by rules 2 and 5 here; in the paragraph on two owner starts,
+  "a claim whose child is still starting counts as idle" and the wait for a holder another start
+  is swapping out, by rules 1 and 3 here.
+- **Narrowed:** the settings paragraph's "read at the moment of each start" no longer covers
+  `swap_wait_s`, read once at acceptance; "at most four holders" stays only as rule 13's safety
+  net; in the last paragraph, a later round of a running request is served instead of meeting the
+  refusal at the slot, and a stopped alias's next owner call queues instead of swapping.
+- **Stands:** rule 1 (the setting off, and the default until the live check); rule 2 (a peer never
+  swaps), which rule 7 here extends; rule 5 (a swap is said once, `last_swap`); the stop by
+  `stop_by_hand`; and what a swap does not do.
+
+**Left open by the decision, for the code's review.** Rule 4's last sentence above (a holder
+already draining or stopping for another reason is not swapped, and today's refusal names its
+state) is not restated: rule 12 says a place advances when such a stop ends, and nothing says
+whether a request arriving during that stop takes a place or meets the refusal. Rule 5's "the
+holder is untouched" describes a deadline met while waiting; a deadline that passes after the
+mark finds a holder already stopping. And `drain` reads its `timeout` as how long to wait before
+it stops the child anyway, with `_start_lock` taken outside that bound and the child's own stop
+bounded separately, so the remainder cannot simply be passed through `stop_by_hand` as that
+argument.
