@@ -21,6 +21,7 @@ from .providers import (
 from .node_ledger import ENGINE_FIELDS, OUTPUT_INCLUDES_THINKING, THINKING_SOURCES, prompt_cache_split
 from .dpc_agent.pricing import COST_FIELDS
 from .providers.base import image_blocks_in_turns, image_pixel_limit_of, normalize_reasoning_effort
+from .managers.llama_server_supervisor import runs_on_a_local_engine
 from .utils.image_utils import normalise_flat_images, normalise_turn_images
 
 logger = logging.getLogger(__name__)
@@ -656,6 +657,16 @@ class LLMManager:
                 except Exception as cb_err:
                     logger.warning("Error in providers reload callback: %s", cb_err)
 
+            # A saved edit may have moved an alias's window under a running agent.
+            for managers in preserved_managers.values():
+                for manager in managers.values():
+                    refresh = getattr(manager, "refresh_context_window", None)
+                    if callable(refresh):
+                        try:
+                            refresh()
+                        except Exception as refresh_err:
+                            logger.warning("Window refresh failed after a providers reload: %s", refresh_err)
+
         except Exception as e:
             logger.error("Error saving provider config: %s", e, exc_info=True)
             raise
@@ -729,29 +740,51 @@ class LLMManager:
         """
         return self.token_count_manager.count_tokens(text, model)
 
-    def lookup_context_window(self, model: str) -> Optional[int]:
+    def alias_context_window(self, alias: str) -> Optional[int]:
         """
-        Strict context window lookup: returns None when the model is unknown
-        (no provider config override and no MODEL_CONTEXT_WINDOWS match),
-        so callers can distinguish "unknown" from a real window size.
+        What one conversation may occupy on this alias, or None when nobody knows.
+
+        A caller that holds an alias asks here: two aliases may serve one model
+        name, and `lookup_context_window` goes by the name.
 
         Priority:
-        1. Check provider config (providers.toml) for context_window field
-        2. Check hardcoded MODEL_CONTEXT_WINDOWS dict (exact, then partial match)
+        1. The alias's own context_window
+        2. The engine behind it (`server_window`): a running child's report, else
+           the start it would make
+        3. MODEL_CONTEXT_WINDOWS, for an alias with no engine of its own. A local
+           engine's window is what its child was started with, which no table of
+           model names knows, so such an alias stops at None
         """
-        # Phase 6: Check provider config first (providers.toml can override)
-        for alias, provider in self.providers.items():
-            if provider.model == model:
-                # Check if provider config has context_window field
-                context_window_config = provider.config.get('context_window')
-                if context_window_config:
-                    try:
-                        return int(context_window_config)
-                    except (ValueError, TypeError):
-                        logger.warning("Invalid context_window value in provider '%s' config: %s",
-                                     alias, context_window_config)
+        provider = self.providers.get(alias)
+        if provider is None:
+            return None
+        window = self._configured_window(alias, provider) or self._server_window_of(provider)
+        if window or runs_on_a_local_engine(provider):
+            return window or None
+        return self._table_window(provider.model)
 
-        # Check direct match in hardcoded defaults
+    @staticmethod
+    def _configured_window(alias: str, provider: AIProvider) -> Optional[int]:
+        """The alias's own `context_window`; a value that is not a number is reported and skipped."""
+        configured = provider.config.get('context_window')
+        if not configured:
+            return None
+        try:
+            return int(configured)
+        except (ValueError, TypeError):
+            logger.warning("Invalid context_window value in provider '%s' config: %s", alias, configured)
+            return None
+
+    @staticmethod
+    def _server_window_of(provider: AIProvider) -> Optional[int]:
+        read = getattr(provider, "server_window", None)
+        return read() if callable(read) else None
+
+    @staticmethod
+    def _table_window(model: str) -> Optional[int]:
+        """MODEL_CONTEXT_WINDOWS: exact, then partial match."""
+        if not model:
+            return None
         if model in MODEL_CONTEXT_WINDOWS:
             return MODEL_CONTEXT_WINDOWS[model]
 
@@ -762,13 +795,43 @@ class LLMManager:
 
         return None
 
+    def _aliases_of_model(self, model: str) -> List[Tuple[str, AIProvider]]:
+        return [(alias, provider) for alias, provider in self.providers.items() if provider.model == model]
+
+    def lookup_context_window(self, model: str) -> Optional[int]:
+        """
+        Strict context window lookup by model name: returns None when the model
+        is unknown, so callers can distinguish "unknown" from a real window size.
+        With two aliases of one model the first that knows answers, whichever
+        alias the caller meant: a caller holding an alias uses `alias_context_window`.
+
+        Priority:
+        1. Check provider config (providers.toml) for context_window field
+        2. The engine behind an alias of this model (`server_window`)
+        3. Check hardcoded MODEL_CONTEXT_WINDOWS dict (exact, then partial match),
+           unless a local engine serves the name: see `alias_context_window`
+        """
+        aliases = self._aliases_of_model(model)
+        for alias, provider in aliases:
+            window = self._configured_window(alias, provider)
+            if window:
+                return window
+        for _alias, provider in aliases:
+            window = self._server_window_of(provider)
+            if window:
+                return window
+        if any(runs_on_a_local_engine(provider) for _alias, provider in aliases):
+            return None
+        return self._table_window(model)
+
     def get_context_window(self, model: str) -> int:
         """
         Get the context window size for a given model.
 
         Priority:
-        1. Check provider config (providers.toml) for context_window field
-        2. Check hardcoded MODEL_CONTEXT_WINDOWS dict
+        1. `lookup_context_window`
+        2. 0 for a model a local engine serves, when that engine's window is not
+           known: a window is not guessed for a child DPC starts
         3. Return default if not found
 
         Args:
@@ -780,6 +843,11 @@ class LLMManager:
         window = self.lookup_context_window(model)
         if window is not None:
             return window
+
+        if any(runs_on_a_local_engine(provider) for _alias, provider in self._aliases_of_model(model)):
+            logger.warning("Context window size not known for local model '%s' - neither its alias "
+                           "nor its engine names one", model)
+            return 0
 
         logger.warning("Context window size unknown for model '%s' - using default: %d",
                       model, MODEL_CONTEXT_WINDOWS['default'])
@@ -926,7 +994,7 @@ class LLMManager:
             total_tokens = prompt_tokens + response_tokens
 
             # Get model's context window
-            context_window = self.get_context_window(provider.model)
+            context_window = self.alias_context_window(alias_to_use) or self.get_context_window(provider.model)
 
             return {
                 "response": response,
@@ -1117,7 +1185,7 @@ class LLMManager:
                 "tokens_used": prompt_tokens + response_tokens,
                 "prompt_tokens": prompt_tokens,
                 "response_tokens": response_tokens,
-                "model_max_tokens": self.get_context_window(provider.model),
+                "model_max_tokens": self.alias_context_window(alias_to_use) or self.get_context_window(provider.model),
                 "vision_used": image_count > 0,  # a refusal above leaves no other way here
                 "image_notes": image_notes,
                 "thinking": thinking_content,

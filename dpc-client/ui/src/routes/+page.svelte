@@ -182,7 +182,7 @@
   // showGroupInviteDialog + pendingGroupInvite moved to GroupPanel.svelte (Step 7)
   let showGroupSettingsDialog = $state(false);  // v0.19.0: group settings/members panel
   // Token tracking state (Phase 2)
-  let tokenUsageMap = $state(new Map<string, {used: number, limit: number, historyTokens?: number, tokensAfterLastResponse?: number, tokensAfterLastResponseAt?: string | null, contextBreakdown?: Array<{name: string, tokens: number}> | null, contextAgent?: string, contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null}>());
+  let tokenUsageMap = $state(new Map<string, {used: number, limit: number, windowUnknown?: boolean, historyTokens?: number, tokensAfterLastResponse?: number, tokensAfterLastResponseAt?: string | null, contextBreakdown?: Array<{name: string, tokens: number}> | null, contextAgent?: string, contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null}>());
   let showTokenWarning = $state(false);
   let tokenWarningMessage = $state("");
 
@@ -1045,7 +1045,7 @@
       onUnlinkAgentTelegram={handleUnlinkAgentTelegram}
       onSetAgentTelegramEnabled={handleSetAgentTelegramEnabled}
       onGetAgentModelConfig={async (agentId) => await sendCommand('get_agent_model_config', { agent_id: agentId })}
-      onSaveAgentModelConfig={async (agentId, config) => { const res = await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); if (res?.status === 'error') throw new Error(res.message || 'Failed to save the agent model config'); const r = await listAgents(); if (r?.status === 'success' && r.agents) agentsList.set(r.agents); const chosenAlias = config.provider_alias; if (chosenAlias) aiChats.update(m => { const e = m.get(agentId); if (e) { e.llm_provider = chosenAlias; } return new Map(m); }); if (config.provider_alias && res?.context_window) { tokenUsageMap = new Map(tokenUsageMap); const cur = tokenUsageMap.get(agentId); tokenUsageMap.set(agentId, { ...cur, used: cur?.used ?? 0, limit: Number(res.context_window) }); } }}
+      onSaveAgentModelConfig={async (agentId, config) => { const res = await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); if (res?.status === 'error') throw new Error(res.message || 'Failed to save the agent model config'); const r = await listAgents(); if (r?.status === 'success' && r.agents) agentsList.set(r.agents); const chosenAlias = config.provider_alias; if (chosenAlias) { aiChats.update(m => { const e = m.get(agentId); if (e) { e.llm_provider = chosenAlias; } return new Map(m); }); chatProviders.update(m => m.has(agentId) ? new Map(m).set(agentId, 'dpc_agent') : m); } if (config.provider_alias) { tokenUsageMap = new Map(tokenUsageMap); const cur = tokenUsageMap.get(agentId); const answered = Number(res?.context_window) || 0; tokenUsageMap.set(agentId, { ...cur, used: cur?.used ?? 0, limit: answered, windowUnknown: answered === 0 }); } }}
     />
 
 
@@ -1205,6 +1205,7 @@
             isTelegramChat={isTelegramChat}
             tokenUsed={effectiveTokenUsage.used}
             tokenLimit={effectiveTokenUsage.limit}
+            windowUnknown={currentTokenUsage.windowUnknown ?? false}
             estimatedTokens={estimatedUsage.estimated}
             showEstimation={estimatedUsage.isEstimated}
             historyTokens={effectiveTokenUsage.historyTokens ?? 0}

@@ -319,7 +319,7 @@
       "alias": "User-friendly name for the provider (must be unique)",
       "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'llamacpp_server', 'local_whisper', 'dpc_agent', 'gemini', or 'gigachat'",
       "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7', 'openai/whisper-large-v3')",
-      "context_window": "Optional: Override default context window size in tokens",
+      "context_window": "Optional: the window one conversation may take, in tokens. Left out, a local engine answers (the running child's report, else the start config) and any other type goes by its model name",
       "temperature": "Optional: Model creativity/randomness (0.0-2.0). Leave it out unless you have chosen a value: on Ollama the model's own default applies, on DeepSeek the API's 1.0 does -- and DeepSeek ignores the field entirely while thinking is enabled (measured 2026-08-15)"
     },
     "ollama_fields": {

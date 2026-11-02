@@ -857,8 +857,7 @@ class AgentService:
                 return int(stored_cw)
             provider_alias = agent_cfg.get("provider_alias", "")
             if provider_alias and provider_alias in self.llm_manager.providers:
-                model = self.llm_manager.providers[provider_alias].model
-                return self.llm_manager.get_context_window(model) or 0
+                return self.llm_manager.alias_context_window(provider_alias) or 0
             compute_host = agent_cfg.get("compute_host", "")
             if compute_host and provider_alias:
                 peer_providers = self.peer_metadata.get(compute_host, {}).get("providers", [])
@@ -868,7 +867,7 @@ class AgentService:
                         if cw:
                             return int(cw)
                         if p.get("model"):
-                            return self.llm_manager.get_context_window(p["model"]) or 0
+                            return self.llm_manager.lookup_context_window(p["model"]) or 0
                         break
             _model = self.llm_manager.get_active_model_name()
             return self.llm_manager.get_context_window(_model) or 0
@@ -998,6 +997,9 @@ class AgentService:
                     cw = self._peer_provider_context_window(resolved_peer, provider_alias)
                     if cw:
                         config["context_window"] = cw
+                    else:
+                        # The number on record was the previous alias's.
+                        config.pop("context_window", None)
                     registry.update_agent(agent_id, {"compute_host": resolved_peer})
                 else:
                     config["compute_host"] = ""
@@ -1027,7 +1029,9 @@ class AgentService:
                 else:
                     config.pop("reasoning_effort", None)
             save_agent_config(agent_id, config)
-            context_window = await self._refresh_live_agent_manager(agent_id, config)
+            # An agent with no live manager has a window too, and the chat header wants it.
+            context_window = (await self._refresh_live_agent_manager(agent_id, config)
+                              or self._resolve_agent_token_limit(agent_id) or None)
             providers_data = await providers_getter() if providers_getter else {"providers": [], "default_provider": ""}
             return {
                 "status": "ok",

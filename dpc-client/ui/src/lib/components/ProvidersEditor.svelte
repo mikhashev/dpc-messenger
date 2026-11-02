@@ -29,6 +29,7 @@
     versionDiffers, cacheSummaryLine, freeCommitLine, type StrataParamSpec,
     type FreeCommitReading, STRATA_CACHE_ADMISSION, admissionPlaceholder, cacheFlagsLine,
     engineAdmissionLine, ENGINE_BACKEND_HELP, ENGINE_BACKEND_OWN_FOLDER, engineBackendOptions,
+    strataWindowHint,
   } from '$lib/utils/strataFields';
 
   export let open: boolean = false;
@@ -657,8 +658,10 @@
     const value = path.trim();
     newProvider.strata_base_config = value || undefined;
     newProvider = newProvider;
+    newStrataMaxContext = undefined;
     if (!value) return;
     fillModelNameFromRunConfig(value);
+    readNewStrataWindow(value);
     offerCacheSuggestion(sizeForRunConfig(strataFamilies, value)?.ram_needed_gb ?? fallbackRamGb ?? null);
   }
 
@@ -677,6 +680,20 @@
       newProvider.model = r.model_name;
       newModelFilledFromConfig = r.model_name;
       newProvider = newProvider;
+    } catch (error) {
+      console.error('[ProvidersEditor] reading the run config failed:', error);
+    }
+  }
+
+  // The chosen run config's --max-context for the note under Context Window: undefined
+  // until read, null when it names none.
+  let newStrataMaxContext: unknown = undefined;
+
+  async function readNewStrataWindow(path: string) {
+    try {
+      const r = await sendCommand('strata_inspect_base_config', { path, install_dir: '' });
+      if (r?.status !== 'success' || newProvider.strata_base_config !== path) return;
+      newStrataMaxContext = r.values?.max_context ?? null;
     } catch (error) {
       console.error('[ProvidersEditor] reading the run config failed:', error);
     }
@@ -1482,6 +1499,7 @@
     newCacheSuggestedAt = null;
     newCacheMayNotFit = false;
     newModelFilledFromConfig = null;
+    newStrataMaxContext = undefined;
     strataInstallError = '';
     strataInstallNote = '';
     strataInstallRamGb = null;
@@ -3864,6 +3882,9 @@
                           set it to the conversation size parking was measured at, so a conversation that fits
                           here also fits the cache budget.
                         </p>
+                        {#if !editedConfig.providers[i].context_window}
+                          <p class="help-text">{strataWindowHint(editedConfig.providers[i].max_context ?? strataBase(strataInspect, i, 'max_context'))}</p>
+                        {/if}
                       {/if}
                     </div>
 
@@ -4299,6 +4320,9 @@
                   placeholder="Or enter exact value (tokens)"
                   class="custom-context-input"
                 />
+                {#if newProvider.type === 'strata' && !newProvider.context_window}
+                  <p class="help-text">{strataWindowHint(newStrataMaxContext)}</p>
+                {/if}
               </div>
             {/if}
 

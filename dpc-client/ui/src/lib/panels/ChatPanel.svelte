@@ -46,6 +46,7 @@
   import { confirmAsync } from '$lib/utils/dialog';
   import { appendToChatDraft, switchChatDraft } from '$lib/utils/chatDraftInputs';
   import { chatInstructionSet } from '$lib/utils/aiChatStore';
+  import { agentAliasToSend } from '$lib/utils/rememberedProvider';
   import { applyUserMessageConfirmed, unconfirmedUserBubbles } from '$lib/utils/liveMessageIdentity';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
 
@@ -754,9 +755,8 @@
     if (chatSpecificProvider) {
       payload.provider = chatSpecificProvider;
       if (chatMeta?.compute_host) payload.compute_host = chatMeta.compute_host;
-      if (chatSpecificProvider === 'dpc_agent' && chatMeta?.llm_provider) {
-        payload.agent_llm_provider = chatMeta.llm_provider;
-      }
+      const agentAlias = agentAliasToSend(chatSpecificProvider, chatMeta?.llm_provider, isAgentChat);
+      if (agentAlias) payload.agent_llm_provider = agentAlias;
     } else {
       const textProvider = parseProviderSelection(selectedTextProvider);
       if (textProvider.source === 'remote' && textProvider.nodeId) {

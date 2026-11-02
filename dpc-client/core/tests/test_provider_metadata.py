@@ -180,6 +180,7 @@ class TestSaveAgentModelConfigComputeHost:
             lambda host, alias: AgentService._peer_provider_context_window(stub, host, alias)
         )
         stub._refresh_live_agent_manager = AsyncMock(return_value=None)
+        stub._resolve_agent_token_limit = lambda agent_id: 0
         saved = {}
         reg = MagicMock()
         reg.get_agent.return_value = {"id": "agent_x"}

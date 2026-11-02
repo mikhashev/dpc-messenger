@@ -156,6 +156,9 @@ class _Manager:
     def get_context_window(self, model):
         return 128000
 
+    def alias_context_window(self, alias):
+        return 128000
+
     async def query(self, prompt, provider_alias=None, images=None, return_metadata=False, **_):
         alias = self._alias_for_query(provider_alias, bool(images))
         text = await self.providers[alias].generate_response(prompt)

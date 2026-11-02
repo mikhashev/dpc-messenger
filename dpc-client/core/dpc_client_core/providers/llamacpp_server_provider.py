@@ -827,6 +827,32 @@ class LlamaServerProvider(DeepSeekProvider):
                 return True
         return bool(self._mmproj)
 
+    def server_window(self) -> Optional[int]:
+        """`/props` `default_generation_settings.n_ctx` of a running child; otherwise
+        what the start it would make holds. None when neither says."""
+        return self._reported_window() or self._start_window()
+
+    def _reported_window(self) -> Optional[int]:
+        """The live child's own `n_ctx`, or None: no child, no /props yet, or no such key."""
+        sup = self.supervisor
+        proc = getattr(sup, "_proc", None)
+        if sup is None or proc is None or proc.returncode is not None or not sup.props:
+            return None
+        settings = sup.props.get("default_generation_settings")
+        n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
+        return n_ctx if isinstance(n_ctx, int) and n_ctx > 0 else None
+
+    def _start_window(self) -> Optional[int]:
+        """`n_ctx` the start config would pass; split among the slots unless the pool is
+        unified, which is what the child reports per slot (`window_outgrows_pool`)."""
+        config = self.supervisor.config if self.supervisor is not None else {}
+        try:
+            n_ctx = int(config["n_ctx"])
+            slots = 1 if config.get("kv_unified") else max(1, int(config.get("n_parallel") or 1))
+        except (KeyError, TypeError, ValueError):
+            return None
+        return n_ctx // slots if n_ctx > 0 else None
+
     def image_pixel_limit(self) -> Optional[int]:
         """image_max_tokens x (patch_size x spatial_merge_size)^2, or None.
 

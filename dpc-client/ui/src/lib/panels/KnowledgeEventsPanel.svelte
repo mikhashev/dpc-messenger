@@ -31,7 +31,7 @@
     onUpdatePeerContextHash,
   }: {
     onOpenCommitDialog: (conversationId: string | null) => void;
-    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
+    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; windowUnknown?: boolean; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
     onShowTokenWarning: (message: string) => void;
     onShowExtractionFailure: (message: string, conversationId: string | null) => void;
     onShowExtractionFallback: (message: string, conversationId: string | null) => void;
@@ -89,6 +89,7 @@
       onUpdateTokenUsage(conversation_id, {
         used: tokens_used,
         limit: token_limit,
+        windowUnknown: token_limit === 0,
         historyTokens: history_tokens ?? 0,
         tokensAfterLastResponse: tokens_after_last_response ?? 0,
         tokensAfterLastResponseAt: tokens_after_last_response_at ?? null,

@@ -21,7 +21,7 @@ from ..managers.llama_server_supervisor import effort_dictionary_of
 from ..managers import strata_fetcher as _strata_fetcher
 from ..managers.strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG, strata_pin
 from ..managers.strata_supervisor import (
-    StrataSupervisor, peer_being_served, reasoning_effort_error, strata_chat_template,
+    StrataSupervisor, _flag_value, peer_being_served, reasoning_effort_error, strata_chat_template,
     strata_config_errors,
 )
 from .llamacpp_server_provider import _ACTIVE_SUPERVISORS, LlamaServerProvider, card_holder
@@ -82,6 +82,8 @@ class StrataProvider(LlamaServerProvider):
         self._no_effort_word_warned = False
         # Whether an owner's word the template refuses has been reported.
         self._dropped_word_warned = False
+        # (key, answer) of the last `_start_window`.
+        self._start_window_cache: Optional[tuple] = None
         super().__init__(alias, config)
         # The save refuses such a word (`strata_config_errors`); an alias saved
         # before that check still loads, and says so here.
@@ -203,6 +205,33 @@ class StrataProvider(LlamaServerProvider):
             modal = sup.props.get("modalities") or {}
             return bool(isinstance(modal, dict) and modal.get("vision"))
         return sup.start_reads_images()
+
+    def _start_window(self) -> Optional[int]:
+        """`--max-context` of the start this alias would make, `build_start_config`'s own
+        result as vision's is. None when it names none (the engine's default is its own and
+        is only known from the engine) or when no start config can be built.
+
+        Cached on the base config file's mtime and size and the alias config: the
+        window is read at every turn and every status."""
+        sup = self.supervisor
+        if sup is None:
+            return None
+        try:
+            base = sup.base_config_path()
+            st = base.stat()
+        except (_base.LlamaServerError, OSError):
+            return None
+        key = (str(base), st.st_mtime_ns, st.st_size, json.dumps(sup.config, sort_keys=True, default=str))
+        if self._start_window_cache is not None and self._start_window_cache[0] == key:
+            return self._start_window_cache[1]
+        try:
+            raw = _flag_value(sup.build_start_config(0)["args"], "--max-context")
+        except (_base.LlamaServerError, OSError, ValueError) as e:
+            logger.info("strata[%s]: no start config to read the window from: %s", self.alias, e)
+            raw = None
+        answer = int(raw) if raw is not None and raw.isdigit() and int(raw) > 0 else None
+        self._start_window_cache = (key, answer)
+        return answer
 
     def _model_name(self) -> str:
         return self.model or "strata"

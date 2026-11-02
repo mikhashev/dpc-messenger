@@ -281,3 +281,24 @@ export function engineBackendOptions(
   if (saved && !values.includes(saved)) values.push(saved);
   return [{ value: '', label: 'Strata picks for this card (default)' }, ...values.map((v) => ({ value: v, label: v }))];
 }
+
+/**
+ * The note under Context Window on a strata alias left unset. The backend then takes the
+ * running engine's report, and until one runs the start config's --max-context.
+ *
+ * @param maxContext the alias's max_context or the run config's value; undefined until read
+ */
+export function strataWindowHint(maxContext: unknown): string {
+  if (maxContext === undefined) return '';
+  const tokens = typeof maxContext === 'number' ? maxContext : parseInt(String(maxContext), 10);
+  if (!Number.isInteger(tokens) || tokens <= 0 || String(tokens) !== String(maxContext)) {
+    return (
+      'This run config names no --max-context, so the window is not known until the engine has started: ' +
+      'an agent on this alias refuses its messages until then. Set one here, or start the engine once in an AI chat.'
+    );
+  }
+  return (
+    `Left on Auto-detected, an agent's window is ${tokens.toLocaleString()} tokens from --max-context, ` +
+    'and once the engine runs, what the engine reports.'
+  );
+}

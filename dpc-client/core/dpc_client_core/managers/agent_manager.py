@@ -96,6 +96,8 @@ class DpcAgentManager:
         # Agent instances (Phase 3: per-provider agents)
         # Key: provider_alias, Value: DpcAgent instance
         self._agents: Dict[str, DpcAgent] = {}
+        # A chat whose messages name an alias other than the configured one: chat -> alias.
+        self._chat_aliases: Dict[str, str] = {}
         # Default agent for backward compatibility
         self._agent: Optional[DpcAgent] = None
         # Last agent that processed a message (for cap_info retrieval)
@@ -162,7 +164,9 @@ class DpcAgentManager:
             return self._agents[provider_alias]
 
         # If no provider specified or same as default, use default agent
-        if not provider_alias or (self._agent and provider_alias == "dpc_agent"):
+        # `_execute_agent_query` passes the conversation id, which is the agent's own,
+        # when the chat names no alias.
+        if not provider_alias or (self._agent and provider_alias in ("dpc_agent", self.agent_id)):
             if self._agent is None:
                 raise RuntimeError("Default agent not initialized. Call start() first.")
             return self._agent
@@ -192,7 +196,7 @@ class DpcAgentManager:
             provider_alias=provider_alias,   # Phase 3: Use specific provider
             firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
             service=self.service,            # For tools that need service access
-            compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
+            compute_host=self._host_of_alias(provider_alias),  # Remote peer for LLM inference
             run_gate=self._run_gate,          # Same gate as process_message — the queue is the second door
         )
 
@@ -1221,12 +1225,14 @@ class DpcAgentManager:
                 # Note: We do NOT call on_stream_chunk here to avoid callback chain issues
                 # The broadcast above is sufficient for UI updates
 
-            # Get session state for agent context (token usage, context window)
-            session_state = self.get_session_state(conversation_id)
-
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
             self._last_used_agent = agent
+            self._remember_chat_alias(conversation_id, agent_llm_provider)
+
+            # Get session state for agent context (token usage, context window), measured on
+            # the alias just chosen
+            session_state = self.get_session_state(conversation_id)
 
             # ADR-022 Task 07: per-agent daily quota check
             quota_limit = self.config.get("quota_tokens_per_day", 0)
@@ -1238,25 +1244,15 @@ class DpcAgentManager:
                     self._daily_tokens_date = today
                 if self._daily_tokens_used >= quota_limit:
                     notice = f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
-                    # No run: what the agent holds is the previous turn's, and
-                    # the caller reads it as this one's. The quota is a budget
-                    # guard; its record closes the turn the message opened.
-                    agent._last_usage = {}
-                    agent._last_trace = {"turn_end": "guard"}
-                    if not is_group:
-                        monitor.add_message(
-                            role="assistant",
-                            content=notice,
-                            timestamp=utc_now_iso(),
-                            sender_node_id=conversation_id,
-                            sender_name=agent_display_name,
-                            turn_end="guard",
-                        )
-                        monitor.save_history()
-                    # The thinking line went up above; the turn ends the way
-                    # any other does, or it stays on with no TASK_COMPLETED.
-                    await self._complete_turn(emitter, task_id, conversation_id, notice)
+                    await self._end_turn_by_guard(agent, monitor, emitter, task_id, conversation_id, notice)
                     return notice
+
+            # No window, no measure: the guard in agent.py would fall back on a number of
+            # its own and call the model against it.
+            if session_state.get("window_unknown"):
+                notice = f"⚠️ {session_state['window_unknown']}"
+                await self._end_turn_by_guard(agent, monitor, emitter, task_id, conversation_id, notice)
+                return notice
 
             reasoning_effort, effort_source = self._resolve_reasoning_effort(
                 conversation_id, reasoning_effort
@@ -1363,7 +1359,7 @@ class DpcAgentManager:
             else:
                 conversation_tokens = len(_history_text) // 4
             if conversation_tokens:
-                context_window = self._resolve_context_window()
+                context_window = self._window_of_chat(conversation_id)
                 if context_window:
                     monitor.set_token_limit(context_window)
                 monitor.set_token_count(conversation_tokens)
@@ -1372,7 +1368,7 @@ class DpcAgentManager:
             # own window — the shared monitor limit would print the group's
             # largest against every agent's usage.
             agent_token_limit = (
-                self._resolve_context_window()
+                self._window_of_chat(conversation_id)
                 or monitor.get_token_usage().get("token_limit")
                 or 0
             )
@@ -1399,6 +1395,27 @@ class DpcAgentManager:
             # Clear progress indicator on failure too
             self._emit_progress_clear(conversation_id)
             raise
+
+    async def _end_turn_by_guard(self, agent: Any, monitor: ConversationMonitor, emitter, task_id: str,
+                                 conversation_id: str, notice: str) -> None:
+        """A turn a guard here refuses before any model call: its notice is the answer."""
+        # No run: what the agent holds is the previous turn's, and the caller reads it
+        # as this one's. The record closes the turn the message opened.
+        agent._last_usage = {}
+        agent._last_trace = {"turn_end": "guard"}
+        if not conversation_id.startswith("group-"):
+            monitor.add_message(
+                role="assistant",
+                content=notice,
+                timestamp=utc_now_iso(),
+                sender_node_id=conversation_id,
+                sender_name=self._current_agent_display_name,
+                turn_end="guard",
+            )
+            monitor.save_history()
+        # The thinking line went up above; the turn ends the way any other does, or
+        # it stays on with no TASK_COMPLETED.
+        await self._complete_turn(emitter, task_id, conversation_id, notice)
 
     def _record_prompt(self, monitor: ConversationMonitor, message: str, sender_name: str,
                        attachments: Optional[List[Dict[str, Any]]] = None,
@@ -1629,67 +1646,160 @@ class DpcAgentManager:
                 # in-memory session and miss all historical context.
                 monitor.rebuild_extraction_buffers_from_history()
 
-            cw = self._resolve_context_window()
-            if cw:
-                monitor.set_token_limit(cw)
+            self._set_monitor_window(conversation_id, monitor)
 
             self._agent_monitors[conversation_id] = monitor
             log.debug(f"Created ConversationMonitor for agent conversation: {conversation_id}")
 
         return self._agent_monitors[conversation_id]
 
-    def _resolve_context_window(self) -> Optional[int]:
-        """Resolve this agent's context window from its current config (override -> local provider -> peer metadata -> active model)."""
+    def _resolve_context_window(self, chat_alias: Optional[str] = None) -> Optional[int]:
+        """Resolve this agent's context window, on the alias a chat names or else from its current config (override -> peer metadata -> the alias -> the alias the adapter falls back on); None when nobody knows."""
+        return self._window_and_gap(chat_alias)[0]
+
+    def _window_and_gap(self, chat_alias: Optional[str] = None) -> tuple:
+        """(the window, None), or (None, the sentence saying why it is not known)."""
         llm_manager = getattr(self.service, "llm_manager", None)
         if not llm_manager:
-            return None
+            return None, None
         stored_cw = self.config.get("context_window")
-        if stored_cw:
-            return int(stored_cw)
-        provider_alias = self.config.get("provider_alias", "")
-        compute_host = self.config.get("compute_host", "")
-        if provider_alias and provider_alias in llm_manager.providers:
-            return llm_manager.get_context_window(llm_manager.providers[provider_alias].model)
+        if stored_cw and not chat_alias:
+            return int(stored_cw), None
+        provider_alias = chat_alias or self.config.get("provider_alias", "")
+        compute_host = "" if chat_alias else self.config.get("compute_host", "")
+        # The order the adapter routes in: a host set goes first (`llm_adapter.chat`).
         if compute_host and provider_alias:
             peer_providers = getattr(self.service, "peer_metadata", {}).get(compute_host, {}).get("providers", [])
             for p in peer_providers:
                 if p.get("alias") == provider_alias:
                     cw = p.get("context_window")
                     if cw:
-                        return int(cw)
-                    if p.get("model"):
-                        return llm_manager.get_context_window(p["model"])
-                    break
-        return llm_manager.get_context_window(llm_manager.get_active_model_name())
+                        return int(cw), None
+                    window = llm_manager.lookup_context_window(p["model"]) if p.get("model") else None
+                    if window:
+                        return window, None
+                    return None, (f"The context window of '{provider_alias}' is not known: its host "
+                                  "states none, so this message was not sent.")
+        providers = getattr(llm_manager, "providers", None) or {}
+        if provider_alias not in providers:
+            fallbacks = (getattr(llm_manager, "agent_provider", None), getattr(llm_manager, "default_provider", None))
+            provider_alias = next((alias for alias in fallbacks if alias in providers), None)
+        if provider_alias:
+            window = llm_manager.alias_context_window(provider_alias)
+            if window:
+                return window, None
+            return None, (f"The context window of '{provider_alias}' is not known: the alias sets no "
+                          "Context Window and its engine has not said, so this message was not sent. "
+                          "Set Context Window on the alias, or start its engine once in an AI chat.")
+        model = llm_manager.get_active_model_name()
+        return (llm_manager.get_context_window(model) if model else None), None
+
+    def _chat_alias(self, conversation_id: str) -> Optional[str]:
+        return getattr(self, "_chat_aliases", {}).get(conversation_id)
+
+    def _window_of_chat(self, conversation_id: str) -> Optional[int]:
+        """This chat's window: on the alias its messages name, or else the configured one."""
+        alias = self._chat_alias(conversation_id)
+        return self._resolve_context_window(alias) if alias else self._resolve_context_window()
+
+    def _set_monitor_window(self, conversation_id: str, monitor: ConversationMonitor) -> None:
+        """The monitor's limit from the chat's window. Unknown is 0, the limit nothing
+        measures against; a number a history file remembers is not kept in its place."""
+        window = self._window_of_chat(conversation_id)
+        if window:
+            monitor.set_token_limit(window)
+        elif self._window_and_gap(self._chat_alias(conversation_id))[1]:
+            monitor.set_token_limit(0)
+
+    def _remember_chat_alias(self, conversation_id: str, requested: Optional[str]) -> None:
+        """Note the alias this turn's agent runs on, when it is a provider and not the configured one."""
+        providers = getattr(getattr(self.service, "llm_manager", None), "providers", None) or {}
+        if requested and requested in providers and requested != self.config.get("provider_alias"):
+            self._chat_aliases[conversation_id] = requested
+        else:
+            getattr(self, "_chat_aliases", {}).pop(conversation_id, None)
+
+    def _host_of_alias(self, alias: str) -> str:
+        """The peer a per-alias agent dials: the agent's own, unless a chat picked a local alias of another name."""
+        providers = getattr(getattr(self.service, "llm_manager", None), "providers", None) or {}
+        if alias in providers and alias != self.config.get("provider_alias"):
+            return ""
+        return self.config.get("compute_host", "")
 
     def apply_model_config(self, new_config: Dict[str, Any]) -> Optional[int]:
         """Apply an updated config to this live manager and re-resolve every active monitor's window so a model switch needs no restart; returns the window."""
         self.config = new_config
+        # The configured alias is the one chosen last; a chat's own pick from before it ends.
+        getattr(self, "_chat_aliases", {}).clear()
         if self._agent is not None:
             self._agent.set_provider_alias(new_config.get("provider_alias"))
             # The pin travels with the alias. Pushing only the alias is what
             # made a switch away from a peer model unfixable from the UI: the
             # config said «no peer» while the live adapter kept dialling one.
             self._agent.set_compute_host(new_config.get("compute_host", ""))
+        for alias, cached in getattr(self, "_agents", {}).items():
+            cached.set_compute_host(self._host_of_alias(alias))
+        for conversation_id, monitor in self._agent_monitors.items():
+            self._set_monitor_window(conversation_id, monitor)
+        return self._resolve_context_window()
+
+    def refresh_context_window(self) -> None:
+        """Re-resolve every live monitor's window after the provider list changed, and
+        push a change to the chat headers."""
+        changed = []
+        for conversation_id, monitor in self._agent_monitors.items():
+            before = monitor.token_limit
+            self._set_monitor_window(conversation_id, monitor)
+            if monitor.token_limit != before:
+                changed.append(conversation_id)
+        if not changed:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.ensure_future(self._push_window_to_ui(changed))
+
+    async def _push_window_to_ui(self, conversation_ids: List[str]) -> None:
+        """Tell the chat headers and the group counters the window these chats just moved to."""
         window = self._resolve_context_window()
         if window:
-            for monitor in self._agent_monitors.values():
-                monitor.set_token_limit(window)
-        return window
+            await self._push_window_to_group_counters(window)
+        broadcast = getattr(getattr(self.service, "local_api", None), "broadcast_event", None)
+        if broadcast is None:
+            return
+        for conversation_id in conversation_ids:
+            monitor = self._agent_monitors.get(conversation_id)
+            if monitor is None or conversation_id.startswith("group-"):
+                continue
+            await broadcast("token_usage_updated", {
+                "conversation_id": conversation_id,
+                "tokens_used": monitor.current_token_count,
+                "token_limit": monitor.token_limit,
+                "history_tokens": monitor.current_token_count,
+                "tokens_after_last_response": monitor._tokens_after_last_response,
+                "tokens_after_last_response_at": monitor._tokens_after_last_response_at,
+            })
 
     async def apply_model_config_live(self, new_config: Dict[str, Any]) -> Optional[int]:
         """apply_model_config plus an immediate push of the new window to every group counter this agent appears in, so a switch updates 1:1 and group UIs without a restart."""
         window = self.apply_model_config(new_config)
-        if window and self.service and self.agent_id:
-            ctx = getattr(self.service, "_group_agent_context", {})
-            affected = [gid for gid, agents in ctx.items() if self.agent_id in agents]
-            broadcast = getattr(self.service, "broadcast_group_token_usage", None)
-            for gid in affected:
-                prompt_tokens, _old_limit, ts, name = ctx[gid][self.agent_id]
-                ctx[gid][self.agent_id] = (prompt_tokens, window, ts, name)
-                if broadcast:
-                    await broadcast(gid)
+        if window:
+            await self._push_window_to_group_counters(window)
         return window
+
+    async def _push_window_to_group_counters(self, window: int) -> None:
+        """The new window on every group counter this agent appears in."""
+        if not (self.service and self.agent_id):
+            return
+        ctx = getattr(self.service, "_group_agent_context", {})
+        affected = [gid for gid, agents in ctx.items() if self.agent_id in agents]
+        broadcast = getattr(self.service, "broadcast_group_token_usage", None)
+        for gid in affected:
+            prompt_tokens, _old_limit, ts, name = ctx[gid][self.agent_id]
+            ctx[gid][self.agent_id] = (prompt_tokens, window, ts, name)
+            if broadcast:
+                await broadcast(gid)
 
     def _billing_kwargs(self) -> Dict[str, Any]:
         """billing_model for AgentConfig, and whether the config named it or it is the default."""
@@ -1729,17 +1839,22 @@ class DpcAgentManager:
         # only a wrong figure on screen: the same number calibrates the overflow
         # guard (agent.py, AGENT-CTX-1) and its reserve, so the guard stopped
         # refusing anything long before the model itself ran out.
-        own_window = self._resolve_context_window() or 0
+        own_window = self._window_of_chat(conversation_id) or 0
+        # A window nobody knows is said, and no number stands in for it: 204800 below is
+        # a default, and what a monitor holds may be the previous alias's.
+        window_unknown = None if own_window else self._window_and_gap(self._chat_alias(conversation_id))[1]
+        said = {"window_unknown": window_unknown} if window_unknown else {}
         if not monitor:
             return {
                 "tokens_used": 0,
-                "tokens_limit": own_window or config_cw or 204800,
+                "tokens_limit": 0 if window_unknown else own_window or config_cw or 204800,
                 "usage_percent": 0,
                 "messages_count": 0,
+                **said,
             }
 
         usage = monitor.get_token_usage()
-        token_limit = own_window or usage.get("token_limit") or config_cw or 204800
+        token_limit = 0 if window_unknown else own_window or usage.get("token_limit") or config_cw or 204800
         history_tokens = usage.get("tokens_used", 0)
         tokens_after_last_response = monitor._tokens_after_last_response
         tokens_after_last_response_at = monitor._tokens_after_last_response_at
@@ -1777,6 +1892,7 @@ class DpcAgentManager:
             "messages_count": len(monitor.message_history),
             "context_breakdown": context_breakdown,
             "serving_provider_alias": serving_provider_alias,
+            **said,
         }
 
     def reset_conversation(self, conversation_id: str) -> bool:

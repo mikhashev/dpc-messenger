@@ -12,6 +12,7 @@
     isTelegramChat = false,
     tokenUsed = 0,
     tokenLimit = 0,
+    windowUnknown = false,
     estimatedTokens = 0,
     showEstimation = false,
     historyTokens = 0,
@@ -39,6 +40,7 @@
     isTelegramChat?: boolean;
     tokenUsed?: number;
     tokenLimit?: number;
+    windowUnknown?: boolean;
     estimatedTokens?: number;
     showEstimation?: boolean;
     historyTokens?: number;
@@ -65,6 +67,8 @@
   // Use default limit of 16,384 tokens if not yet set (before first message)
   const DEFAULT_TOKEN_LIMIT = 16384;
   let effectiveLimit = $derived(tokenLimit > 0 ? tokenLimit : DEFAULT_TOKEN_LIMIT);
+  // Said in words: the default above is for a new chat, not for an alias nobody can measure.
+  let limitText = $derived(windowUnknown ? 'window not known' : effectiveLimit.toLocaleString());
 
   let totalTokens = $derived(
     tokenUsed + (showEstimation ? estimatedTokens : 0)
@@ -98,7 +102,7 @@
   let totalContextPercentWithInput = $derived(effectiveLimit > 0 ? totalWithInput / effectiveLimit : 0);
 
   let showWarning = $derived(
-    showThreeMetrics ? totalContextPercentWithInput >= 0.8 : tokenUsagePercent >= 0.8
+    !windowUnknown && (showThreeMetrics ? totalContextPercentWithInput >= 0.8 : tokenUsagePercent >= 0.8)
   );
 
   // End session is disabled only for P2P chats when peer is offline
@@ -139,7 +143,7 @@
       </div>
       <div class="token-row" title={agentsTooltip}>
         <span class="token-label">Total</span>
-        <span class="token-value">{tokensAfterLastResponse.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}{#if contextAgent} — {contextAgent}{/if}</span>
+        <span class="token-value">{tokensAfterLastResponse.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {limitText}{#if contextAgent} — {contextAgent}{/if}</span>
         <span class="token-percentage" class:warning={totalContextPercentWithInput >= 0.8}>({Math.round(totalContextPercentWithInput * 100)}%)</span>
       </div>
       <div class="token-row token-row--muted" title={staticTitle}>
@@ -160,15 +164,19 @@
           ? "Estimate includes current input (4 chars ≈ 1 token, excludes contexts)"
           : ""}
       >
-        {#if showEstimation && estimatedTokens > 0}
+        {#if windowUnknown}
+          {tokenUsed.toLocaleString()} tokens · window not known
+        {:else if showEstimation && estimatedTokens > 0}
           {tokenUsed.toLocaleString()} + ~{estimatedTokens.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
         {:else}
           {tokenUsed.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
         {/if}
       </span>
-      <span class="token-percentage" class:warning={showWarning}>
-        ({Math.round(tokenUsagePercent * 100)}%)
-      </span>
+      {#if !windowUnknown}
+        <span class="token-percentage" class:warning={showWarning}>
+          ({Math.round(tokenUsagePercent * 100)}%)
+        </span>
+      {/if}
     {/if}
     {#if showWarning}
       <span class="warning-label">

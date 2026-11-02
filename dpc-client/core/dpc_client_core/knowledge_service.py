@@ -492,8 +492,7 @@ class KnowledgeService:
                         if not ctx:
                             pa = cfg.get("provider_alias")
                             if pa and pa in self.llm_manager.providers:
-                                model = self.llm_manager.providers[pa].model
-                                ctx = self.llm_manager.get_context_window(model) or 0
+                                ctx = self.llm_manager.alias_context_window(pa) or 0
                         max_ctx = max(max_ctx, ctx)
                     except Exception:
                         pass

@@ -950,9 +950,8 @@ async def run_sleep(
         target_provider = llm_manager.providers.get(target_alias) if target_alias else None
         target_model = target_provider.model if target_provider else None
 
-        if target_model:
-            context_window = llm_manager.get_context_window(target_model)
-        else:
+        context_window = llm_manager.get_context_window(target_model) if target_model else 0
+        if not context_window:
             context_window = 128000  # safe default for unknown providers
             log.warning(
                 "Sleep synthesis: target model unknown (alias=%s), using default context_window=%d",

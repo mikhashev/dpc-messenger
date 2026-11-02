@@ -958,6 +958,12 @@ class AIProvider:
         """Returns True if this provider supports vision API (multimodal queries)."""
         return False
 
+    def server_window(self) -> Optional[int]:
+        """The window of the engine behind this alias, in tokens, or None when this
+        provider has no engine of its own to ask. `LLMManager.alias_context_window`
+        reads it for an alias whose config names no `context_window`."""
+        return None
+
     def image_pixel_limit(self) -> Optional[int]:
         """The most pixels (width x height) one image may carry to this model, or None.
 

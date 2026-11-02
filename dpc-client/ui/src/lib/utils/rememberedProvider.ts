@@ -21,6 +21,23 @@
 const LOCAL_PREFIX = 'local:';
 
 /**
+ * The alias a message in this chat asks its agent to run on, or `null`. The Agent row
+ * means the agent's configured alias; any other row in an agent chat is what the message
+ * runs on, for this chat only. Without it the backend has no alias to go by.
+ *
+ * @param chatProvider what the map holds for this chat
+ * @param configuredAlias the chat's record of the agent's alias
+ */
+export function agentAliasToSend(
+    chatProvider: string,
+    configuredAlias: string | null | undefined,
+    isAgentChat: boolean,
+): string | null {
+    if (chatProvider === 'dpc_agent') return configuredAlias || null;
+    return isAgentChat ? chatProvider : null;
+}
+
+/**
  * The alias to store for this chat, or `null` when nothing should be written.
  *
  * @param uniqueId the dropdown's value

@@ -226,6 +226,7 @@ def _manager(monitor, *, provider_alias="llama.cpp", window=262144, config=None)
     llm_manager = SimpleNamespace(
         providers={provider_alias: SimpleNamespace(model="qwen 3.8 27b")},
         get_context_window=lambda model: window,
+        alias_context_window=lambda alias: window,
         get_active_model_name=lambda: "qwen 3.8 27b",
     )
     mgr.service = SimpleNamespace(
