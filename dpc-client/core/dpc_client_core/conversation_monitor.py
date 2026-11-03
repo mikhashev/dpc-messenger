@@ -3674,7 +3674,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             token_stats = data.get("token_stats", {})
             if token_stats:
                 self.current_token_count = token_stats.get("current_token_count", self.current_token_count)
-                self.token_limit = token_stats.get("token_limit", self.token_limit)
+                # An explicit null is unknown too, and `.get`'s default covers only an absent key.
+                self.token_limit = token_stats.get("token_limit", self.token_limit) or 0
                 self._tokens_after_last_response = token_stats.get("tokens_after_last_response", 0)
                 self._tokens_after_last_response_at = token_stats.get("tokens_after_last_response_at")
 

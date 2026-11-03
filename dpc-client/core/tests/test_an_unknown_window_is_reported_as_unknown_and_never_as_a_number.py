@@ -324,9 +324,9 @@ def _remembered_on_disk(monitor, limit=REMEMBERED):
     assert monitor.save_history()
 
 
-def _ai_chat_restart(llm, record):
+def _ai_chat_restart(llm, record, limit=REMEMBERED):
     ai_chats.write_record(AI_CHAT, record)
-    _remembered_on_disk(_knowledge_service(llm)._get_or_create_conversation_monitor(AI_CHAT))
+    _remembered_on_disk(_knowledge_service(llm)._get_or_create_conversation_monitor(AI_CHAT), limit)
     return _knowledge_service(llm)._get_or_create_conversation_monitor(AI_CHAT)
 
 
@@ -348,6 +348,33 @@ def test_an_ai_chat_a_peer_serves_keeps_the_last_reply_until_the_next(tmp_path):
     monitor = _ai_chat_restart(llm, {"name": "c", "provider": "big", "compute_host": "dpc-node-a"})
 
     assert monitor.token_limit == REMEMBERED
+
+
+def test_a_null_limit_on_disk_reads_as_unknown_and_no_reader_trips_on_it(tmp_path):
+    """A peer's chat, because nothing sets its limit after the read: what the file says stands."""
+    llm = _llm(tmp_path, _vendor("big", context_window=250000))
+
+    monitor = _ai_chat_restart(llm, {"name": "c", "provider": "big", "compute_host": "dpc-node-a"}, limit=None)
+
+    assert monitor.token_limit == 0
+    assert monitor.get_token_usage()["usage_percent"] == 0.0
+    assert monitor.should_suggest_extraction() is False
+
+
+def test_a_file_with_no_limit_keeps_the_limit_the_monitor_holds(tmp_path):
+    """The key absent is not the key null: this default stays what `.get` had."""
+    llm = _llm(tmp_path, _vendor("big", context_window=250000))
+    ai_chats.write_record(AI_CHAT, {"name": "c", "provider": "big", "compute_host": "dpc-node-a"})
+    first = _knowledge_service(llm)._get_or_create_conversation_monitor(AI_CHAT)
+    held = first.token_limit
+    first.add_message("user", "one")
+    assert first.save_history()
+    path = next(Path(first._get_conversation_dir()).glob("history.json"))
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    del saved["token_stats"]["token_limit"]
+    path.write_text(json.dumps(saved), encoding="utf-8")
+
+    assert _knowledge_service(llm)._get_or_create_conversation_monitor(AI_CHAT).token_limit == held
 
 
 def _group_restart(llm):
