@@ -389,10 +389,10 @@ async def test_the_tool_announces_through_the_service_not_the_socket(tmp_path):
     entry = shell_tool._pending_approvals[request_id]
     assert entry["agent_id"] == "agent_007"
     entry["decision"] = "rejected"
-    entry["result"] = "❌ Command rejected by user."
+    entry["result"] = "Command manually rejected by Mike"
     entry["event"].set()
 
-    assert await task == "❌ Command rejected by user."
+    assert await task == "Command manually rejected by Mike"
 
 
 # --- where the button may appear (2026-08-16) ---

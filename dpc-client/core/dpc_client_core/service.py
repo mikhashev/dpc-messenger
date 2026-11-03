@@ -5702,7 +5702,12 @@ class CoreService:
             return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
 
         entry["decision"] = "rejected"
-        entry["result"] = "❌ Command rejected by user."
+        # The node owner's name; a Telegram press comes from a whitelisted chat
+        # and is not told apart from the desktop one.
+        # A rejection must not fail over a name, so a missing manager reads "User".
+        p2p = getattr(self, "p2p_manager", None)
+        owner = (p2p.get_display_name() if p2p else None) or "User"
+        entry["result"] = f"Command manually rejected by {owner}"
         event = entry.get("event")
         if event:
             event.set()

@@ -2443,10 +2443,18 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                 ))
             except Exception as e:
                 log.warning("Failed to announce shell_approval_closed: %s", e)
-        return f"⏳ Command approval timed out after {APPROVAL_TTL_SECONDS}s: `{command}`"
+        # The owner is named, and the sentence says "not focused", not "refused":
+        # nobody decided, so the agent should go on with something else rather
+        # than ask again at once. The command is kept so it knows which one.
+        owner = getattr(getattr(dpc_service, "p2p_manager", None), "get_display_name", lambda: "")() or ""
+        who = f"User ({owner})" if owner else "User"
+        return (
+            f"⏳ Command approval timed out after {APPROVAL_TTL_SECONDS}s: "
+            f"{who} is not focused on current task now. Not run: `{command}`"
+        )
 
     if entry.get("decision") == "rejected":
-        return entry.get("result") or "❌ Command rejected by user."
+        return entry.get("result") or "Command manually rejected by User"
 
     log.info("Shell approval granted: %s — executing %r", request_id, command)
     return _execute_shell_command(
