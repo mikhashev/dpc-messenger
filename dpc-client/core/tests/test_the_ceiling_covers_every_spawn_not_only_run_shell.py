@@ -19,33 +19,19 @@ import pytest
 
 from dpc_client_core.dpc_agent.tools import git as git_tool
 from dpc_client_core.dpc_agent.tools.process import run_supervised
+from tests.bounded_allocator import TIMEOUT_S, allocator
 
-# 20 MB every 0.2 s: past a 200 MB ceiling in about two seconds, and small
-# enough that a machine notices nothing if the kill ever regresses.
-ALLOCATOR = (
-    "import time\n"
-    "b = []\n"
-    "while True:\n"
-    "    b.append(bytearray(20 * 1024 * 1024))\n"
-    "    time.sleep(0.2)\n"
-)
-
-
-# The same allocator with no newlines in it. An escaped newline does not
-# survive the trip through a git alias into `python -c`, and the version
-# that does survive is the one the git test below has to use.
-ALLOCATOR_ONE_LINE = (
-    "import time, itertools; b = []; "
-    "[(b.append(bytearray(20 * 1024 * 1024)), time.sleep(0.2)) "
-    "for _ in itertools.count()]"
-)
+# 20 MB every 0.2 s: past a 200 MB ceiling in about two seconds, and it stops at
+# 1 GiB by itself if the kill ever regresses. One line, because an escaped newline
+# does not survive the trip through a git alias into `python -c`.
+ALLOCATOR = allocator()
 
 
 def test_an_allocator_outside_run_shell_is_killed_at_the_ceiling():
     run = run_supervised(
         [sys.executable, "-c", ALLOCATOR],
         launcher="test(direct spawn)",
-        timeout=60,          # far past the kill: the ceiling must be what stops it
+        timeout=TIMEOUT_S,   # far past the kill: the ceiling must be what stops it
         ceiling_mb=200,
     )
 
@@ -100,12 +86,11 @@ def test_an_allocator_under_git_dies_at_the_ceiling(monkeypatch):
     from dpc_client_core.dpc_agent.tools import process as process_mod
 
     monkeypatch.setattr(process_mod, "_MEMORY_CEILING_MB", 200)
-    escaped = ALLOCATOR_ONE_LINE.replace(chr(34), chr(92) + chr(34))
-    alias = f'!"{sys.executable}" -c "{escaped}"'
+    alias = f'!"{sys.executable}" -c "{ALLOCATOR}"'
 
     repo = pathlib.Path(__file__).resolve().parents[3]
     result = git_tool._run_git_external(
-        str(repo), ["-c", f"alias.boom={alias}", "boom"], timeout=60
+        str(repo), ["-c", f"alias.boom={alias}", "boom"], timeout=TIMEOUT_S
     )
 
     assert result["success"] is False
@@ -167,7 +152,7 @@ def test_a_partial_kill_verdict_reaches_run_killed_not_an_assumed_full_kill(monk
     run = run_supervised(
         [sys.executable, "-c", ALLOCATOR],
         launcher="test(partial kill)",
-        timeout=60,
+        timeout=TIMEOUT_S,
         ceiling_mb=200,
     )
 

@@ -22,26 +22,22 @@ from dpc_client_core.dpc_agent.tools.shell import (
     _execute_shell_command,
     _process_memory_mb,
 )
+from tests.bounded_allocator import TIMEOUT_S, hungry_grandchild
 
 # A grandchild that grows steadily — the shape of the incident, and the shape a
-# parent-only watcher cannot see.
-HUNGRY_GRANDCHILD = (
-    'python -c "import subprocess, sys, time; '
-    "subprocess.Popen([sys.executable, '-c', "
-    "'import time\\nb=[]\\nwhile True:\\n    b.append(bytearray(20*1024*1024))\\n    time.sleep(0.2)']); "
-    'time.sleep(300)"'
-)
+# parent-only watcher cannot see. It stops at 1 GiB whatever happens here.
+HUNGRY_GRANDCHILD = hungry_grandchild()
 
 
 def test_a_growing_command_is_killed_at_the_ceiling(monkeypatch):
     monkeypatch.setattr(shell_tool, "_MEMORY_CEILING_MB", 200)
     started = time.time()
 
-    result = _execute_shell_command(HUNGRY_GRANDCHILD, None, 120)
+    result = _execute_shell_command(HUNGRY_GRANDCHILD, None, TIMEOUT_S)
 
     elapsed = time.time() - started
     assert "ceiling" in result, result[:200]
-    assert elapsed < 60, (
+    assert elapsed < TIMEOUT_S, (
         f"took {elapsed:.0f}s — the ceiling must bite long before the timeout, "
         "which is what 9.5 hours of runaway looked like"
     )
@@ -51,7 +47,7 @@ def test_the_refusal_tells_the_agent_the_number_and_how_to_raise_it(monkeypatch)
     """A refusal the agent cannot act on gets retried verbatim."""
     monkeypatch.setattr(shell_tool, "_MEMORY_CEILING_MB", 200)
 
-    result = _execute_shell_command(HUNGRY_GRANDCHILD, None, 120)
+    result = _execute_shell_command(HUNGRY_GRANDCHILD, None, TIMEOUT_S)
 
     assert "200 MB ceiling" in result
     assert "shell_memory_limit_mb in [system] of config.ini" in result, "say which knob moves it"
@@ -65,7 +61,7 @@ def test_the_watcher_measures_the_whole_tree_not_just_the_shell(monkeypatch):
     an innocent shell while the machine fills up."""
     monkeypatch.setattr(shell_tool, "_MEMORY_CEILING_MB", 200)
 
-    result = _execute_shell_command(HUNGRY_GRANDCHILD, None, 120)
+    result = _execute_shell_command(HUNGRY_GRANDCHILD, None, TIMEOUT_S)
 
     assert "ceiling" in result, (
         "the shell itself never grows; only its child does, and it was killed"

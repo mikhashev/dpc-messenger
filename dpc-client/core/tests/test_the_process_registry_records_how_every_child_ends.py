@@ -678,9 +678,9 @@ class TestRunSupervisedEndsItsChildWithAWord:
 
     def test_the_memory_ceiling_kill_is_memory_ceiling(self, registry, monkeypatch):
         monkeypatch.setattr(process_mod, "_MEMORY_POLL_SECONDS", 0.1)
-        allocator = ("import time\nb = []\nwhile True:\n"
-                     "    b.append(bytearray(20 * 1024 * 1024))\n    time.sleep(0.1)\n")
-        run = run_supervised([sys.executable, "-c", allocator], launcher="test(ceiling)", timeout=60, ceiling_mb=150)
+        from tests.bounded_allocator import TIMEOUT_S, allocator
+
+        run = run_supervised([sys.executable, "-c", allocator()], launcher="test(ceiling)", timeout=TIMEOUT_S, ceiling_mb=150)
         (entry,) = registry.entries()
         assert run.exceeded_mb and not run.timed_out
         assert entry.exit_reason == "memory_ceiling" and run.exit_reason == "memory_ceiling"

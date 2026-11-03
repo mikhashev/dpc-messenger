@@ -190,14 +190,10 @@ class TestTheAgentIsToldWhyItsCommandDied:
 
     def test_the_timeout_branch_reports_the_ceiling_when_the_ceiling_killed_it(self, monkeypatch):
         from dpc_client_core.dpc_agent.tools import shell as shell_tool
+        from tests.bounded_allocator import hungry_grandchild
 
         monkeypatch.setattr(shell_tool, "_MEMORY_CEILING_MB", 200)
-        hungry = (
-            'python -c "import subprocess, sys, time; '
-            "subprocess.Popen([sys.executable, '-c', "
-            "'import time\\nb=[]\\nwhile True:\\n    b.append(bytearray(20*1024*1024))\\n    time.sleep(0.2)']); "
-            'time.sleep(300)"'
-        )
+        hungry = hungry_grandchild()
         # Make every kill fail, so the watcher fires, nothing dies, and the
         # command runs into its own timeout — the shape the report was wrong for.
         monkeypatch.setattr(shell_tool, "_kill_process_tree",

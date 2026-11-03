@@ -336,6 +336,9 @@ def _kill_process_tree(process: "subprocess.Popen") -> str:
             done = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
+                # A console of its own: with this process's console host gone, an
+                # inheriting child dies at start (0xC0000142) and nothing is killed.
+                creationflags=CREATE_NO_WINDOW,
             )
             # Read the exit code before claiming the tree died: taskkill is
             # denied access to some children, and the sentence was asserted

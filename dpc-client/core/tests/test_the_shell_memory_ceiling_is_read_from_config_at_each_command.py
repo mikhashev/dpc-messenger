@@ -19,16 +19,12 @@ import pytest
 
 from dpc_client_core.dpc_agent.tools import process as process_mod
 from dpc_client_core.dpc_agent.tools import shell as shell_tool
+from tests.bounded_allocator import TIMEOUT_S, hungry_grandchild
 
 PROCESS_LOGGER = "dpc_client_core.dpc_agent.tools.process"
 
-# The grandchild shape the ceiling exists for; 20 MB every 0.2 s.
-HUNGRY_GRANDCHILD = (
-    'python -c "import subprocess, sys, time; '
-    "subprocess.Popen([sys.executable, '-c', "
-    "'import time\\nb=[]\\nwhile True:\\n    b.append(bytearray(20*1024*1024))\\n    time.sleep(0.2)']); "
-    'time.sleep(300)"'
-)
+# The grandchild shape the ceiling exists for; 20 MB every 0.2 s, 1 GiB at most.
+HUNGRY_GRANDCHILD = hungry_grandchild()
 
 
 @pytest.fixture
@@ -163,6 +159,6 @@ def test_a_file_caught_mid_write_keeps_the_last_value(home):
 def test_run_shell_obeys_a_ceiling_set_only_in_config(home):
     """End to end through the shell tool, with nothing patched but the home."""
     write_config(home, 200)
-    result = shell_tool._execute_shell_command(HUNGRY_GRANDCHILD, None, 120)
+    result = shell_tool._execute_shell_command(HUNGRY_GRANDCHILD, None, TIMEOUT_S)
     assert "over the 200 MB ceiling" in result, result[:300]
     assert "shell_memory_limit_mb in [system] of config.ini" in result
