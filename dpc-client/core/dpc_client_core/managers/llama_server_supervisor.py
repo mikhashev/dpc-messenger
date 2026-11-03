@@ -896,16 +896,28 @@ def take_card_queue_place(alias: str) -> None:
             request.leaves()
 
 
-def card_queue_refusal_in(error: Optional[BaseException]) -> Optional[CardQueueRefusal]:
-    """The queue's refusal behind `error`, or None: read through the provider's
+def _first_cause_of(error: Optional[BaseException], kinds: Any) -> Optional[Any]:
+    """The first of `kinds` behind `error`, or None: read through the provider's
     `RuntimeError(...) from e` wrap and the router's above it, as the peer door reads."""
     seen: set = set()
     while error is not None and id(error) not in seen:
         seen.add(id(error))
-        if isinstance(error, CardQueueRefusal):
+        if isinstance(error, kinds):
             return error
         error = error.__cause__
     return None
+
+
+def card_queue_refusal_in(error: Optional[BaseException]) -> Optional[CardQueueRefusal]:
+    """The queue's refusal behind `error`, or None."""
+    return _first_cause_of(error, CardQueueRefusal)
+
+
+def engine_refusal_in(error: Optional[BaseException]) -> Optional[LlamaServerError]:
+    """A local engine's refusal behind `error`, or None: the queue's, the `CardHeldError` of the
+    swap off, or `EngineDrainingError`. No model was asked, so its own text says what happened,
+    and the wrap's words about a provider that failed are not true of it."""
+    return _first_cause_of(error, (CardHeldError, EngineDrainingError))
 
 
 async def stop_by_hand(supervisor: "LlamaServerSupervisor", timeout: Optional[float] = None,

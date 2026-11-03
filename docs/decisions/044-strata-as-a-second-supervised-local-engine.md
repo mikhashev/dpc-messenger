@@ -869,13 +869,16 @@ position with no position field, as on **waiting**), and the holder is named by 
   is called from `stop_local_engine` and not from `stop_by_hand`, so a swap stopping a holder leaves
   a place that alias has further back. `DpcLlmAdapter._chat` does not fall back to its text path on a
   queue refusal, which would stand in the same line again past a Stop or a deadline.
-- **A refusal in an agent turn: `failed` is the accepted word.** Any other `CardQueueRefusal` ends the
-  turn with `turn_end` `failed`, so there is no new wire value and the UI mirrors stay as they are.
-  No model failed, so the chat text is the refusal itself, without the "LLM error" label and with no
-  traceback. `refused` is not used: it is the host's refusal of a peer call, and a group post keeps
-  a `refused` turn's text, where a `failed` turn posts `FAILED_TURN_NOTICE` and sends its text to the
-  owner as a toast; this text names the owner's agents and chats. `EngineDrainingError` and the
-  `CardHeldError` of the swap off still read "LLM error".
+- **A refusal in an agent turn: `failed` is the accepted word.** Any other `CardQueueRefusal`, the
+  `CardHeldError` of the swap off and `EngineDrainingError` (`engine_refusal_in`, read through the
+  provider's `RuntimeError(...) from e`) end the turn with `turn_end` `failed`, so there is no new
+  wire value and the UI mirrors stay as they are. No model failed, so the chat text is the refusal
+  itself, without the "LLM error" label, without the wrap's "llamacpp_server streaming provider ...
+  failed: CardHeldError:" and with no traceback from the loop, and `DpcLlmAdapter._chat` takes none of
+  them to its text path. `refused` is not used: it is the host's refusal of a peer call, and a group
+  post keeps a `refused` turn's text, where a `failed` turn posts `FAILED_TURN_NOTICE` and sends its
+  text to the owner as a toast; this text names the owner's agents and chats. Any other
+  `LlamaServerError`, a start that failed above all, is a failure and reads "LLM error".
 - **Said once, whoever is left (rule 5 of the idle swap).** The swap is said by the stop's own task.
   A request that left during the stop gets "stopped '<holder>' to free the card for '<new>', which
   stopped waiting" in the same three places, because a stopped Strata's parked conversations are gone

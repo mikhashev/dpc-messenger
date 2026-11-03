@@ -39,9 +39,9 @@ from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading, _llm_ma
 from ..managers.llama_server_supervisor import (
     TakenOutOfTheCardQueue,
     card_hold_follows,
-    card_queue_refusal_in,
     carrying_card_hold,
     current_card_hold,
+    engine_refusal_in,
 )
 from ..process_registry import SpawnOrigin, get_registry, spawn_origin
 from .run_gate import note_turn
@@ -1890,8 +1890,8 @@ async def run_llm_loop(
                 llm_trace["turn_end"] = "refused"
                 return notice, accumulated_usage, llm_trace
             except Exception as e:
-                card_refusal = card_queue_refusal_in(e)
-                if isinstance(card_refusal, TakenOutOfTheCardQueue):
+                engine_refusal = engine_refusal_in(e)
+                if isinstance(engine_refusal, TakenOutOfTheCardQueue):
                     # A first Stop on a turn in the queue for the card (ADR-044, the card queue,
                     # rule 12). No model call was made and the card is not to be had, so no
                     # closing call is asked for either.
@@ -1904,13 +1904,15 @@ async def run_llm_loop(
                         f"(no model call was made).",
                         accumulated_usage, llm_trace,
                     )
-                if card_refusal is not None:
-                    # No model failed, so no "LLM error" and no traceback. `failed` is the accepted
-                    # word (ADR-044, the card queue): in a group that keeps this text, which names
-                    # the owner's agents and chats, off the post, as `refused` would not.
-                    log.warning("Round %d ended on the card queue's refusal: %s", round_idx, card_refusal)
+                if engine_refusal is not None:
+                    # The queue's, the card held with the swap off, or an engine draining. No model
+                    # failed, so no "LLM error" and no traceback, and the text is the refusal's and
+                    # not the provider's wrap of it. `failed` is the accepted word (ADR-044, the card
+                    # queue): in a group that keeps this text, which names the owner's agents and
+                    # chats, off the post, as `refused` would not.
+                    log.warning("Round %d ended on the local engine's refusal: %s", round_idx, engine_refusal)
                     llm_trace["turn_end"] = "failed"
-                    return f"⚠️ {card_refusal}", accumulated_usage, llm_trace
+                    return f"⚠️ {engine_refusal}", accumulated_usage, llm_trace
                 log.error(f"LLM error: {e}", exc_info=True)
                 llm_trace["turn_end"] = "failed"
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace
