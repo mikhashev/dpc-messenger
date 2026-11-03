@@ -1294,6 +1294,12 @@ async def _finalize_after_user_stop(
     if kill_event is not None and kill_event.is_set():
         llm_trace["turn_end"] = "killed"
         return stopped_text, accumulated_usage, llm_trace
+    card_hold = current_card_hold()
+    if card_hold is not None and card_hold.taken_out:
+        # The Stop took a tool's call out of the queue for the card (ADR-044, the card queue, rule
+        # 12): as in the round's own case, the card is not to be had for one more call.
+        llm_trace["turn_end"] = "stopped"
+        return stopped_text, accumulated_usage, llm_trace
     messages.append({"role": "user", "content": USER_STOP_SUMMARY_REQUEST})
     try:
         final_msg = await _one_finalising_call(

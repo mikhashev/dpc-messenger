@@ -822,6 +822,17 @@ class StrataSupervisor(LlamaServerSupervisor):
     # A stop drops every conversation the launcher parked in host RAM.
     DROPS_PARKED_ON_STOP = True
 
+    async def _parked_conversations(self) -> Optional[int]:
+        """The launcher's own count (`/metrics`, as `strata_status` reads it); None when it does
+        not answer within what a status read allows, which the swap's notice reads as "some"."""
+        try:
+            metrics = await asyncio.wait_for(self._get("/metrics"), 3.0)
+            parked = metrics["conversation_cache"]["parked"]
+        except Exception:
+            logger.debug("strata[%s]: the parked count could not be read", self.alias, exc_info=True)
+            return None
+        return parked if isinstance(parked, int) else None
+
     def _start_is_for_a_peer(self) -> bool:
         """A peer's call, or the owner's own start begun for a peer's request
         (`start_for_peer`, which runs unmarked): neither swaps another engine out."""

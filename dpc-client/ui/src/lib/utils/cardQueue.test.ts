@@ -22,6 +22,14 @@ describe('cardQueueLines', () => {
         ]);
     });
 
+    it('names no time for a turn on its way back to its own alias, until its bound starts', () => {
+        expect(cardQueueLines([
+            { alias: 'qwen', agent_id: 'agent_1', conversation_id: null, queued_at: QUEUED, give_up_at: null },
+        ])).toEqual([
+            `qwen (agent agent_1): in line since ${time(QUEUED)}, coming back from a description`,
+        ]);
+    });
+
     it('is empty with nobody in line and on a backend that has no such key', () => {
         expect(cardQueueLines([])).toEqual([]);
         expect(cardQueueLines(undefined)).toEqual([]);

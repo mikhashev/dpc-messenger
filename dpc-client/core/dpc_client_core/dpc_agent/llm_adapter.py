@@ -30,9 +30,14 @@ from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, REFUSAL_TOOLS_UNSUPP
 
 from ..managers.llama_server_supervisor import (
     BackgroundCallSkipped,
+    TakenOutOfTheCardQueue,
+    a_card_borrow,
     card_queue_refusal_in,
+    description_key,
     engine_refusal_in,
+    keep_turn_description,
     runs_on_a_local_engine,
+    turn_description,
 )
 from ..node_ledger import (
     ENGINE_FIELDS,
@@ -1603,7 +1608,16 @@ class DpcLlmAdapter:
 
         Returns:
             (description, None) on success, (None, reason) on failure.
+
+        Asked once per turn while the swap is on (ADR-044, the card queue, rule 9): each round
+        carries the image again, and with a card-borrow each ask would be two swaps. The key leaves
+        out the user's text, which only guides the same look at the same picture.
         """
+        key = description_key(images, "pre_analysis", provider_alias)
+        kept = turn_description(key)
+        if kept is not None:
+            log.info("Image already described in this turn; using that outcome")
+            return kept
         try:
             # Build analysis prompt
             analysis_prompt = (
@@ -1619,19 +1633,25 @@ class DpcLlmAdapter:
                      f"{provider_alias or 'the auto-selected vision provider'}")
 
             # LLMManager.query() with images; no alias auto-selects the vision provider
-            response_metadata = await self._llm_manager.query(
-                prompt=analysis_prompt,
-                provider_alias=provider_alias,
-                images=images,
-                return_metadata=True,
-            )
+            with a_card_borrow():
+                response_metadata = await self._llm_manager.query(
+                    prompt=analysis_prompt,
+                    provider_alias=provider_alias,
+                    images=images,
+                    return_metadata=True,
+                )
 
             description = response_metadata.get("response", "")
             log.debug(f"Image analysis complete ({len(description)} chars)")
+            keep_turn_description(key, (description, None))
             return description, None
 
         except Exception as e:
+            # A person's Stop is no failed look: the loop ends the turn on it, with no model call.
+            if isinstance(engine_refusal_in(e), TakenOutOfTheCardQueue):
+                raise
             log.error(f"Image pre-analysis failed: {e}")
+            keep_turn_description(key, (None, str(e)), failure=e)
             return None, str(e)
 
     def _inject_image_description_into_messages(

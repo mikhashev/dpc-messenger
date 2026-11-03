@@ -808,33 +808,34 @@ class TestAPictureOnATurnOnAnotherAlias:
         _untouched(a)
 
     @pytest.mark.asyncio
-    async def test_every_round_asks_again_and_every_round_is_refused(self, tmp_path):
+    async def test_the_refusal_is_asked_once_and_every_round_reads_it(self, tmp_path):
+        # A is Strata here, so its description does not borrow the card (rule 9), and the refusal
+        # is kept for the turn as a description would be.
         a, _b, blind, eyes, manager = _picture_pair(tmp_path, rounds=3)
         await a.ensure_running()
 
         _agent_, answer = await _a_picture_turn(tmp_path, manager)
 
         assert answer == "the answer"
-        assert eyes.looks == 3
+        assert eyes.looks == 1
         assert all("The visual analysis failed (" in sent for sent in blind.saw)
         _untouched(a)
 
     @pytest.mark.asyncio
-    async def test_with_the_agent_off_the_card_the_first_round_sees_and_the_next_is_told_it_has_not(self, tmp_path):
+    async def test_with_the_agent_off_the_card_the_first_round_sees_and_the_next_keeps_it(self, tmp_path):
         # The first look starts B, as nothing holds the card; A's own start then swaps the
-        # idle B out; from round 2 A is on the card, and the same question meets rule 9. The
-        # description of round 1 is not kept: round 2 reads that the look failed.
+        # idle B out; from round 2 A is on the card. The description of round 1 is kept for the
+        # turn (rule 9), so round 2 does not ask, and does not meet the refusal.
         a, b, blind, eyes, manager = _picture_pair(tmp_path, rounds=2)
 
         _agent_, answer = await _a_picture_turn(tmp_path, manager)
 
         assert answer == "the answer"
-        assert "a cat on a keyboard" in blind.saw[0]
-        assert "a cat on a keyboard" not in blind.saw[1]
-        assert "The visual analysis failed (" in blind.saw[1]
+        assert all("a cat on a keyboard" in sent for sent in blind.saw)
+        assert not any("The visual analysis failed (" in sent for sent in blind.saw)
         swap = base_mod.last_swap()
         assert (swap["from"], swap["to"]) == (B, A)
-        assert eyes.looks == 2 and _alive(a) and not _alive(b)
+        assert eyes.looks == 1 and _alive(a) and not _alive(b)
 
     @pytest.mark.asyncio
     async def test_with_the_swap_off_the_look_meets_today_s_refusal_word_for_word(self, tmp_path, settings):

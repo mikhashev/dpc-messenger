@@ -23,6 +23,13 @@ import mimetypes
 from pathlib import Path
 from typing import List, Optional
 
+from ...managers.llama_server_supervisor import (
+    a_card_borrow,
+    description_key,
+    keep_turn_description,
+    turn_description,
+    waiting_for_the_card_at_most,
+)
 from .core import _resolve_file_path
 from .registry import ToolEntry, ToolContext
 
@@ -32,6 +39,7 @@ log = logging.getLogger(__name__)
 # NOT guard decode memory (a 60 MP JPEG can weigh ~1 MB): that is guarded by pixels
 # in utils/image_utils.py (MAX_DECODE_PIXELS).
 _MAX_READ_AND_SEND_MB = 20
+_TOOL_TIMEOUT_S = 300
 _SUPPORTED_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 
@@ -157,16 +165,30 @@ async def describe_image(
     # An explicit `model` is the caller's override; without one, 2026-09-18's rule applies.
     alias = model if model else _resolve_vision_alias(ctx, llm_manager)
 
+    # Asked once per turn while the swap is on (ADR-044, the card queue, rule 9). By the picture's
+    # bytes and the question: another question is another look, and a re-rendered file a new picture.
+    images = [{"base64": image_b64, "mime_type": mime_type}]
+    key = description_key(images, "describe_image", alias, str(source), prompt)
+    kept = turn_description(key)
+    if kept is not None:
+        log.info("describe_image: %s already answered in this turn", source)
+        return kept
+
     try:
-        meta = await llm_manager.query(
-            prompt=prompt,
-            provider_alias=alias,  # None → auto-select the global vision provider
-            images=[{"base64": image_b64, "mime_type": mime_type}],
-            return_metadata=True,
-        )
+        # The wait for the card ends before the tool times out, so that no thread is left in line
+        # with this turn's hold after the turn has gone on without it.
+        with a_card_borrow(), waiting_for_the_card_at_most(_TOOL_TIMEOUT_S, "the tool's own timeout"):
+            meta = await llm_manager.query(
+                prompt=prompt,
+                provider_alias=alias,  # None → auto-select the global vision provider
+                images=images,
+                return_metadata=True,
+            )
     except Exception as e:
         log.error("describe_image failed for %s: %s", source, e, exc_info=True)
-        return f"⚠️ Vision query failed: {e}"
+        failed = f"⚠️ Vision query failed: {e}"
+        keep_turn_description(key, failed, failure=e)
+        return failed
 
     if isinstance(meta, dict):
         description = meta.get("response", "") or ""
@@ -176,7 +198,9 @@ async def describe_image(
         used_model = "unknown"
 
     if not description.strip():
-        return "⚠️ Vision model returned no description."
+        nothing = "⚠️ Vision model returned no description."
+        keep_turn_description(key, nothing)
+        return nothing
 
     answer = {
         "image_path": str(source),
@@ -189,7 +213,9 @@ async def describe_image(
         # What was done to the picture before the model saw it: the answer is
         # about that picture, not about the file on disk.
         answer["image_notes"] = [str(n) for n in image_notes]
-    return json.dumps(answer, ensure_ascii=False)
+    described = json.dumps(answer, ensure_ascii=False)
+    keep_turn_description(key, described)
+    return described
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +270,7 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             handler=describe_image,
-            timeout_sec=300,
+            timeout_sec=_TOOL_TIMEOUT_S,
             default_enabled=False,
         ),
     ]

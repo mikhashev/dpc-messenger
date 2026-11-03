@@ -15,7 +15,8 @@ export interface CardQueueRow {
     agent_id: string | null;
     conversation_id: string | null;
     queued_at: number;
-    give_up_at: number;
+    /** null on a card-borrow's way back until its next round asks, when its own bound starts. */
+    give_up_at: number | null;
 }
 
 export interface BackgroundSkipRow {
@@ -42,7 +43,7 @@ export function cardQueueLines(rows: CardQueueRow[] | null | undefined): string[
             row.conversation_id ? `chat ${row.conversation_id}` : '',
         ].filter(Boolean).join(', ');
         return `${row.alias}${who ? ` (${who})` : ''}: in line since ${clock(row.queued_at)}, `
-            + `gives up at ${clock(row.give_up_at)}`;
+            + (row.give_up_at === null ? 'coming back from a description' : `gives up at ${clock(row.give_up_at)}`);
     });
 }
 

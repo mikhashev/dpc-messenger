@@ -624,14 +624,14 @@ reason still gets today's refusal.
 
 ## Amendment, 2026-11-02 — the card queue
 
-Mike's call, team chat 2026-11-02, after review by Ark, Johnny and Zcode. **Decided, partly
-built.** In the code: rule 1, with `accepted_request` as the only kind of hold, at the two doors
-it names and on a gateway call; rule 2, no mark while busy; the queue and its cancel (rules 3 and
-12); the order (rule 4); the single deadline (rule 5); rule 6, the `caller_window`, as built
-there; the gateway and peer doors (rules 7, 8 and 15); rule 9, the from-inside refusal; rule 10,
-as built below; rule 13's switch and safety net; `wait_reason: card_queue`; and the status key
-`card_queue`. Not in the code: rule 9's second sentence. `swap_when_idle` stays off by default until
-all of it is live-checked. The work is the epic
+Mike's call, team chat 2026-11-02, after review by Ark, Johnny and Zcode. **Decided and built.** In
+the code: rule 1, with `accepted_request` as the only kind of hold, at the two doors it names and
+on a gateway call; rule 2, no mark while busy; the queue and its cancel (rules 3 and 12); the order
+(rule 4); the single deadline (rule 5); rule 6, the `caller_window`, as built there; the gateway and
+peer doors (rules 7, 8 and 15); rule 9, the from-inside refusal and the card-borrow, as built there;
+rule 10, as built below; rule 13's switch and safety net; `wait_reason: card_queue`; and the status
+key `card_queue`. `swap_when_idle` stays off by default until all of it is live-checked. The work is
+the epic
 `THE-CARD-HAS-NO-QUEUE-SO-A-SWAP-CAN-CUT-AN-AGENT-LOOP-AND-TWO-ALIASES-PING-PONG` (gitignored
 `backlog.md`). This note replaces the parts of the idle swap amendment it names below and
 rewrites nothing above. **Nothing is ever forced.**
@@ -723,12 +723,105 @@ One call in flight is too short a measure of busy, and two aliases trade the car
 9. **From inside.** A request holding an excluding alias that asks for another is refused at
    once, in the `_card_held_error` form; otherwise it would wait on itself. On this node the
    real route is `describe_image` to `vision_provider`. A request holding no alias (a cloud
-   agent) queues as a normal request. **Decided, not built** (Mike's call, variant B, 2026-11-02):
+   agent) queues as a normal request. **The card-borrow** (Mike's call, variant B, 2026-11-02):
    a request's auxiliary call may give up its own alias, through the queue, within its one
    deadline, on a stop that loses no parked conversations (`DROPS_PARKED_ON_STOP` false on the
    stopped engine; that direction confirmed as the default, Mike's call, 2026-11-03), with the
-   description cached once per turn; background calls never. Until that is built the refusal above
-   stands.
+   description cached once per turn; background calls never. Wherever these conditions fail, the
+   refusal above stands.
+   **As built**, where the rule left a choice to the code, and open to its review. The marked calls
+   are the two that describe: `_pre_analyze_image_for_agent` and the `describe_image` tool, each
+   inside `a_card_borrow()`. Nothing else borrows: `read_document`'s page look and a compaction on
+   another alias meet the refusal. A llama-server child is the only holder that can be given up
+   and, since two of them do not exclude each other, a Strata vision alias the only thing it is
+   given up for. So the first swap stops a child that parks nothing, and the way back stops Strata.
+   - **The sentence's own limit.** It speaks of a request giving up *its own* alias. A description
+     whose request stands on no alias on the card (a cloud agent, or a turn whose alias has no child
+     now) is not a borrow: it queues as a normal request, as the sentence before says, so an idle
+     Strata holder is swapped out for it and what it parked goes, said as `parked_dropped` true.
+     That is what happens today; whether it should is still open with Mike, 2026-11-04.
+   - **The first swap.** The request takes a place for the vision alias, on the deadline of its
+     hold, and acts as any first place does; its own hold does not make its alias busy
+     (`_busy_for_the_card`'s `but_for`), and every other stand does: a second request on the alias,
+     a call in flight, a caller in its window. Those are waited for within the deadline and never
+     forced, and on its expiry the holder is untouched. The request keeps standing on its alias
+     through that wait, so nothing can take the alias from under it for nothing. Refused at once,
+     with nobody stopped: a Strata holder, another child on the card beside the request's alias, any
+     place already in line (it may be waiting for this very hold, so behind it the description would
+     wait on itself, and ahead of it two swaps would be spent on someone else's wait; whether an
+     older request's description should go ahead of a younger place is open), a request past its
+     deadline (so `swap_wait_s` 0 never borrows, and neither does a long turn's late
+     `describe_image`). `_blocking_holder` asks about the request's own stand first, so no other
+     holder is stopped for a request that is then refused.
+   - **The way back** (`_CardBorrow`). In the stretch of the mark the request starts to stand on the
+     vision alias too, and takes a place of its own for its own alias right behind the acting place,
+     so that what came later stands behind it. Nobody joins that place, and a request that joined the
+     description's place while it waited goes behind it when the description leaves. Its next round's
+     `ensure_running` takes that place, which reads as a row of `card_queue` with `give_up_at` null
+     from the mark until then. **It gets a fresh bound, and the refusal at its end is the one way a
+     borrow can cost a turn** (Mike's call, DPC Project chat, 2026-11-04): `swap_wait_s` as it stands
+     when the next round asks, counted from then and not from acceptance, so rule 9's "within its one
+     deadline" covers the first swap and this bound the way back. What it can wait for is the
+     description's own call still in flight after a tool timeout, an older request on the vision alias
+     with no child when the borrow began (served under rule 4), and a caller in its window. At the end
+     of the bound the refusal names the holder and who stands on it, not the request itself, and says
+     the request gave up its alias for a description; the turn ends `failed`, in those words. With
+     `swap_wait_s` 0 no borrow begins; one set to 0 during a borrow makes the way back a request with no
+     time left, which a busy child refuses at once and an idle one does not. Once it has marked the
+     vision alias, its own stop is bounded by `_STOP_WITH_NO_WAIT_LEFT_S` (60 s from the mark, whatever
+     is left of the bound), because a launcher can take longer to go than a short `swap_wait_s`; a stop
+     slower than that refuses it too, naming that limit, and the stop goes on. `wait_reason` reads
+     `card_queue`. A person's Stop ends the wait at once, and Stop engine on the alias ends it with its
+     own refusal. The switch does not: a borrow begun with the swap on finishes with it off, its row
+     included. Stopping the vision alias is an ordinary mark on an alias not busy but for this request.
+     The first swap does wait for a busy alias within the deadline, as above (Mike's call, 2026-11-04).
+   - **A failure leaves the turn working.** A description refused, or failed on the vision alias
+     after the stop, goes into the turn as a failed analysis as the refusal did; the next round's
+     way back then finds the card empty and starts its alias again. The way back's refusal above is
+     not a description failing, and it is the exception. A person's Stop that takes the
+     request out of the line, a description's wait or a way back, is no failure and is not kept: the
+     turn ends `stopped` with "Stopped by user" and no further model call. On the pre-analyser's route
+     `TakenOutOfTheCardQueue` reaches the loop as the round's own. A tool cannot raise it there, since
+     `ToolRegistry.execute` turns any exception into the tool's failure text, so the hold says so
+     (`taken_out`) and `_finalize_after_user_stop` asks for no closing call; a Stop with nothing of
+     this request in line keeps that call, which is the loop's rule for any Stop between rounds.
+   - **A borrow cut short leaves the vision alias's child up** (a turn that ended before its way back:
+     a Stop, a Kill, or a last round that needed none). Nothing stops it and nothing starts the
+     request's alias again: the card stays with it until a person's Stop engine or the next local
+     start. That start reads the card as with any idle holder: with the swap on it takes its place
+     and swaps the child out, and with the swap off it meets the card-held refusal naming the vision
+     alias and the switch. A peer and a background call read it as they would any holder. This costs
+     a Strata child idle on the card, against a stop nobody asked for; it is written down here as
+     decided by the code, and open to review.
+   - **What outlives its request.** `describe_image` waits for the card at most the tool's own
+     timeout from the request's acceptance (`waiting_for_the_card_at_most`), so no thread is left in
+     line after the turn has gone on: such a thread's stand would not count, and it would stop the
+     alias under the turn. A thread that outlives its request (a Kill) is refused with no stop and
+     no load, whether it stands in line by then or only asks. Past the first swap a thread that
+     outlives the tool's timeout finishes on the vision alias, and the way back waits for it within
+     its bound. On the
+     tool route the wait shows no `wait_reason`, because a pool thread does not carry the turn's mark;
+     a cloud agent's tool has the same gap.
+   - **Once per turn** (`description_key`, `turn_description`, `keep_turn_description`). Kept on the
+     hold, so the end of the request drops it; by the images' bytes and the asker: the pre-analyser
+     by its alias, `describe_image` by alias, path and prompt, so another question is another look.
+     An outcome is kept, and so is a failure that a retry would only repeat or pay two swaps for: a
+     local engine's refusal, or anything met while a borrow stands, a vendor's error included, since
+     the code does not tell them apart by then. A vendor's passing error with no borrow standing is
+     asked again next round, as before. With the swap off nothing is kept and every round asks, as
+     before.
+   - **What is said.** Two swaps, each said once with its toast and `last_swap`. Whether "its parked
+     conversations are dropped" is said, here and on any swap, comes from the engine's own count just
+     before the stop (`_parked_conversations`, the launcher's `/metrics`): zero is not said and is
+     `parked_dropped` false, and a count that cannot be read within 3 s is said as if some went. So
+     a child that served one description should say nothing on the way back, nor at the next start's
+     swap after a turn that ended during a borrow; that a real launcher reports zero there is
+     inferred, not measured. This narrows point 5 of the idle swap amendment, which said it of every
+     Strata stop.
+   - **What it costs elsewhere.** While the vision alias is up a compaction on an alias that normally
+     sits beside the request's own is refused at once; `apply_compaction` absorbs that as any
+     summariser failure (it keeps more verbatim and tells the user) and the next compaction goes
+     ahead. Only the tool route meets this: the pre-analyser's way back is taken in the same round.
 10. **Background calls** (the self-reflection confirmation, skill reflection and the like) never
     swap and never queue. They run only if their alias is on the card; otherwise a named skip goes
     into a record with a reader, on the model of `last_swap`, never silently. Nothing tries a skip
