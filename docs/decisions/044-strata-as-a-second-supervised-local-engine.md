@@ -1023,7 +1023,8 @@ Nothing below has been run live: acceptance is a live start with no budget, shor
    - **The floor** is setup's `max(8, ...)`: a budget it would never write is not suggested.
    - **The 9 GiB** come from one worked example and from no rule. A budget of 24 started at 30.4,
      31.5 and 34.1 GiB available on the smaller IQ3_XXS (`strata-strata_flash-next-engine.log`,
-     2026-10-25); on IQ3_S it has only been seen at 40.2 GiB and above. At those three figures the hint
+     2026-10-25); on IQ3_S the lowest seen is 36.76 GiB, at the load of the 17:46 start on 2026-11-03
+     (its engine log, line 389; Johnny's correction). At those three figures the hint
      gives 21, 22 and 25, and a budget of 31 started there too, at 30.8 to 33.7 GiB where it gives 21
      to 24. So it mostly comes out below what ran, slower and not proved safer, and it is not to change
      without a live measurement (Zcode).
