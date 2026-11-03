@@ -922,8 +922,17 @@ position with no position field, as on **waiting**), and the holder is named by 
   image are requests too.** `_ai_agent_vote_on_proposal` waits within `swap_wait_s`, and a refusal is one
   WARNING naming it and the alias, with no vote cast: it is not an error, and not "could not evaluate".
   `_describe_image_for_agents` carries a refusal to `vl_error` and `warnings` in its own words, without
-  the provider's "vision failed"; how long a person's group message may wait for it is with the owner
-  (Johnny's objection, 2026-11-03). Sleep is rule 11's.
+  the provider's "vision failed". **A person's group image waits for the card about 30 s** (Mike's call,
+  2026-11-03, on Johnny's objection), because the description goes into the message and the message
+  waits for it: `VL_DESCRIPTION_CARD_WAIT_S`, a constant, passed by `waiting_for_the_card_at_most` to
+  the deadline `_QueuedRequest` sets; a `swap_wait_s` that is less still wins, and a refusal names
+  whichever decided (`wait_limit`). The message then goes with its warning and no description, and a
+  stop that request began runs on (decision 2). Other requests keep `swap_wait_s`, and the swap off
+  changes nothing. By rule 5 this bounds waiting and no work: a description running on the card is not
+  cut, nor is a start past the claim, nor a start of the same alias it waits behind. So a message can
+  still hang through an engine's load (`start_timeout_s`: 300 s on `llama-server` and 600 s on Strata,
+  which then runs its smoke) and through the description. Whether a start can be left to finish in the
+  background while the message goes on is open, with the owner. Sleep is rule 11's.
 - **The status.** `local_engine_status` reports `card_queue` from `card_queue()`: one row per request
   in position order, with no position field, as **waiting** does, each `alias`, `agent_id`,
   `conversation_id` (null where the hold has none), `queued_at` and `give_up_at`, both wall-clock

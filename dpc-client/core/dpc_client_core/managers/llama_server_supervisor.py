@@ -263,6 +263,24 @@ def a_background_call(what: str):
         _BACKGROUND_CALL.reset(token)
 
 
+# A request somebody is waiting on with less patience for the card than the setting gives:
+# (seconds, why). A ContextVar for the reason `_PEER_CALL` is one. Read only where a request gets
+# its deadline, `_QueuedRequest`, so it bounds waiting and no work, and with the swap off, where no
+# request stands in line, it does nothing.
+_CARD_WAIT_LIMIT: contextvars.ContextVar = contextvars.ContextVar("dpc_card_wait_limit", default=None)
+
+
+@contextlib.contextmanager
+def waiting_for_the_card_at_most(wait_s: float, why: str):
+    """A call made inside waits in the card queue at most `wait_s`, or `swap_wait_s` where that
+    is less. `why` is what its refusal names in place of the setting."""
+    token = _CARD_WAIT_LIMIT.set((wait_s, why))
+    try:
+        yield
+    finally:
+        _CARD_WAIT_LIMIT.reset(token)
+
+
 def _foreign_owner_loop() -> Optional[asyncio.AbstractEventLoop]:
     """The owner loop when the caller runs on another one and the owner is alive."""
     owner = _OWNER_LOOP
@@ -785,7 +803,7 @@ class _QueuedRequest:
     holder at once, and a holder that is not busy asks it for no wait. `queued_at` is the time it
     took its place, read only by `card_queue`; the clock of the wait is `accepted_at`."""
 
-    __slots__ = ("place", "hold", "accepted_at", "queued_at", "wait_s", "give_up_at", "came_late",
+    __slots__ = ("place", "hold", "accepted_at", "queued_at", "wait_s", "wait_why", "give_up_at", "came_late",
                  "stop_bound", "out", "_turn_mark")
 
     def __init__(self, place: _CardPlace):
@@ -797,6 +815,10 @@ class _QueuedRequest:
             self.accepted_at, self.wait_s = self.hold.accepted_at, self.hold.wait_s
         else:
             self.accepted_at, self.wait_s = now, swap_policy()[1]
+        self.wait_why = "Settings: Wait for a busy holder"
+        limit = _CARD_WAIT_LIMIT.get()
+        if limit is not None and limit[0] < self.wait_s:
+            self.wait_s, self.wait_why = limit
         self.give_up_at = self.accepted_at + self.wait_s
         self.came_late = self.give_up_at <= now
         self.stop_bound = now + _STOP_WITH_NO_WAIT_LEFT_S if self.came_late else self.give_up_at
@@ -815,6 +837,10 @@ class _QueuedRequest:
 
     def waited(self) -> int:
         return int(round(_swap_clock() - self.accepted_at))
+
+    def wait_limit(self) -> str:
+        """What a refusal names as this request's bound: the setting, or what took its place."""
+        return f"{self.wait_s:g} s ({self.wait_why})"
 
     def stop_limit(self) -> str:
         """What a refusal names when `stop_bound` of a `came_late` request ran out: it is not the
@@ -1879,7 +1905,7 @@ class LlamaServerSupervisor:
         """Rule 5: the deadline passed before any mark. It names the holder, why it is busy and
         the setting; the holder is untouched. Decision 1's wait for a stop that never ended
         names the holder's state instead."""
-        setting = f"at most {request.wait_s} s (Settings: Wait for a busy holder)"
+        setting = f"at most {request.wait_limit()}"
         if stopping:
             return CardQueueRefusal(
                 f"{self.ENGINE}[{self.alias}] cannot load: the card is held by {holder.ENGINE} alias "
@@ -1907,8 +1933,7 @@ class LlamaServerSupervisor:
                   if request.came_late else f"it waited {request.waited()} s for the card")
         return CardQueueRefusal(
             f"{self.ENGINE}[{self.alias}] cannot load: {waited} behind "
-            f"'{ahead}', and a request waits at most {request.wait_s} s (Settings: Wait for a busy "
-            f"holder).{holder}",
+            f"'{ahead}', and this request waits at most {request.wait_limit()}.{holder}",
             found[0].alias if found is not None else ahead,
             found[0].ENGINE if found is not None else self.ENGINE,
         )
@@ -1924,8 +1949,7 @@ class LlamaServerSupervisor:
             )
         return CardQueueRefusal(
             f"{self.ENGINE}[{self.alias}] cannot load: it waited {request.waited()} s for this alias's "
-            f"earlier child to let go, and a request waits at most {request.wait_s} s (Settings: Wait "
-            "for a busy holder).",
+            f"earlier child to let go, and this request waits at most {request.wait_limit()}.",
             self.alias, self.ENGINE,
         )
 
@@ -2151,7 +2175,7 @@ class LlamaServerSupervisor:
             request.check_still_in_line()
             if _swap_clock() >= request.stop_bound:
                 ran_out = (request.stop_limit() if request.came_late
-                           else f"the wait of {request.wait_s} s (Settings: Wait for a busy holder)")
+                           else f"the wait of {request.wait_limit()}")
                 raise CardQueueRefusal(
                     f"{self.ENGINE}[{self.alias}] cannot load: '{holder.alias}' is already stopping to "
                     f"free the card for it, and {ran_out} ran out. The stop goes on, and the card goes "

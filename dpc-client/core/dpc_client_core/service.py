@@ -303,6 +303,12 @@ LOCAL_IPS_TTL_S = 30.0
 #: `ip addr` on Linux), so it gives up on this one instead of waiting for it.
 HOSTNAME_LOOKUP_DEADLINE_S = 3.0
 
+#: How long a group image's description waits for the card, a person's message waiting on it
+#: (Mike's call, 2026-11-03): after this the message goes with its warning and no description.
+#: On waiting and not on work: a description running on the card is not cut, and neither is a
+#: start past the claim (ADR-044, the card queue). `swap_wait_s` still wins where it is less.
+VL_DESCRIPTION_CARD_WAIT_S = 30
+
 #: The scan's own single worker. The loop's default executor is shared with
 #: every `loop.getaddrinfo` (STUN discovery logs its timeouts, and each one
 #: leaves its thread busy until the resolver gives up), so a dead resolver could
@@ -8035,12 +8041,16 @@ class CoreService:
             "- Layout and structure if it's a screenshot\n"
             "- Any other relevant details for understanding the image"
         )
-        meta = await self.llm_manager.query(
-            prompt=analysis_prompt,
-            provider_alias=None,  # auto-select vision provider
-            images=[{"base64": image_b64, "mime_type": mime_type}],
-            return_metadata=True,
-        )
+        from .managers.llama_server_supervisor import waiting_for_the_card_at_most
+
+        with waiting_for_the_card_at_most(VL_DESCRIPTION_CARD_WAIT_S,
+                                          "a person's group message waits on this description"):
+            meta = await self.llm_manager.query(
+                prompt=analysis_prompt,
+                provider_alias=None,  # auto-select vision provider
+                images=[{"base64": image_b64, "mime_type": mime_type}],
+                return_metadata=True,
+            )
         return meta.get("response", "") if isinstance(meta, dict) else str(meta)
 
     async def send_group_voice_message(
