@@ -211,7 +211,7 @@ class TestAnIdleHolderIsSwappedOut:
         await new.ensure_running()
         await asyncio.gather(*list(base_mod._SWAP_TOASTS))
 
-        assert [n for n, _ in sent] == ["error_toast"]
+        assert [n for n, _ in sent] == ["notice_toast"]
         assert sent[0][1]["message"] == "swapped 'qwen27' out for 'flash'"
 
     @pytest.mark.asyncio

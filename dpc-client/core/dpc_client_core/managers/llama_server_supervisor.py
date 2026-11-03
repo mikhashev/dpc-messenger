@@ -403,16 +403,17 @@ def _roots_in_use() -> List[Path]:
     return roots
 
 
-async def _toast(title: str, message: str) -> None:
-    """The existing `error_toast` event, through the local API the consent service
-    holds (bound by the service); nothing when none is bound."""
+async def _toast(title: str, message: str, event: str = "error_toast") -> None:
+    """A toast event (`error_toast`, which the UI shows as a blocking alert, unless `event`
+    says `notice_toast`), through the local API the consent service holds (bound by the
+    service); nothing when none is bound."""
     api = getattr(_MODEL_DOWNLOAD_SERVICE, "local_api", None)
     if api is None:
         return
     try:
-        await api.broadcast_event("error_toast", {"title": title, "message": message, "duration": 10000})
+        await api.broadcast_event(event, {"title": title, "message": message, "duration": 10000})
     except Exception:
-        logger.debug("broadcast_event(error_toast) failed", exc_info=True)
+        logger.debug("broadcast_event(%s) failed", event, exc_info=True)
 
 
 def _pins_of(fetcher: Any, tag: str, engine: str) -> Dict[str, Any]:
@@ -2217,7 +2218,8 @@ class LlamaServerSupervisor:
             "at": time.time(), "parked_dropped": dropped,
         }
         try:
-            task = asyncio.get_running_loop().create_task(_toast("Local engine swapped", message))
+            task = asyncio.get_running_loop().create_task(
+                _toast("Local engine swapped", message, event="notice_toast"))
         except RuntimeError:
             return
         _SWAP_TOASTS.add(task)

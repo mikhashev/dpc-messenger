@@ -69,3 +69,8 @@ export interface ProviderRetry {
 }
 
 export const providerRetries = writable<Map<string, ProviderRetry>>(new Map());
+
+/** The last `notice_toast`: a notice that is not an error (a local engine swap). The page
+ *  shows it as a toast that goes away by itself; `error_toast` stays a blocking alert. */
+export type NoticeToast = { title: string; message: string; duration?: number };
+export const noticeToast = writable<NoticeToast | null>(null);

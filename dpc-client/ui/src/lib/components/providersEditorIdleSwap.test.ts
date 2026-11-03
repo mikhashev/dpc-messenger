@@ -14,7 +14,7 @@ describe('the Local engines block carries the idle-swap settings under the Model
     const top = snippet('cardStatus');
     expect(top).toContain('Swap local models when the card holder is idle');
     expect(top).toContain('Wait for a busy holder, s');
-    expect(top).toContain('checked={engineStatus?.swap_when_idle ?? true}');
+    expect(top).toContain('checked={engineStatus?.swap_when_idle ?? false}');
     expect(top).toContain('value={engineStatus?.swap_wait_s ?? \'\'}');
     const folder = top.indexOf('{@render modelFilesFolderRow()}');
     expect(folder).toBeGreaterThan(0);
@@ -41,6 +41,6 @@ describe('the Local engines block carries the idle-swap settings under the Model
   });
 
   it('local_engine_status feeds both settings into the status', () => {
-    expect(src).toContain('swap_when_idle: r.swap_when_idle ?? true, swap_wait_s: r.swap_wait_s ?? 300');
+    expect(src).toContain('swap_when_idle: r.swap_when_idle ?? false, swap_wait_s: r.swap_wait_s ?? 300');
   });
 });

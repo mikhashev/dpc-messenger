@@ -586,8 +586,9 @@ A start of a local alias that an excluding card holder blocks (the check of poin
    swapped: today's refusal names its state.
 5. **A swap is said once.** An INFO line "swapped '<holder>' out for '<new>'" with "; its
    parked conversations are dropped" when the holder was Strata (a stop drops what the
-   launcher parked in host RAM; `llama-server` parks nothing), one `error_toast` carrying the
-   same sentence (the rollback notice's mechanism), and `last_swap` {from, to, from_engine,
+   launcher parked in host RAM; `llama-server` parks nothing), one `notice_toast` (a non-blocking
+   toast; the rollback notice stays an `error_toast`) carrying the
+   same sentence, and `last_swap` {from, to, from_engine,
    to_engine, at, parked_dropped} in `local_engine_status`, in memory until the backend
    restarts.
 

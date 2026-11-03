@@ -123,7 +123,7 @@ export type {
 
 import { connectionStatus, nodeStatus, coreMessages } from './services/connection';
 import { p2pMessages, unreadMessageCounts } from './services/messaging';
-import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries } from './services/providers';
+import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries, noticeToast } from './services/providers';
 import { accountRowsFromBalances, accountLevel, balanceErrorText, providerTypeLabel, type AccountRow } from './components/inferenceSharing';
 import { blockedNodeIds, loadBlockedNodes } from './services/blockedPeers';
 import { blockedIdsFromRules } from './utils/blockedPeers';
@@ -149,7 +149,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
 export { blockedNodeIds };
-export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries };
+export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries, noticeToast };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded };
 export { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress };
@@ -889,6 +889,10 @@ export async function connectToCoreService() {
 
                     // Set telegramFileReceived store for +page.svelte to update chatHistories
                     telegramFileReceived.set(message.payload);
+                }
+                // A notice, not an error: the page shows it as a toast, nothing blocks.
+                else if (message.event === "notice_toast") {
+                    noticeToast.set(message.payload);
                 }
                 // Error toast notifications (v0.14.1+ - VRAM OOM warnings, etc.)
                 else if (message.event === "error_toast") {

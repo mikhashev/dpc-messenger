@@ -479,7 +479,7 @@
           card_holder: r.card_holder ?? null, strata: r.strata ?? [], free_commit: r.free_commit ?? null,
           engine_backends: r.engine_backends ?? [], pins: r.pins ?? null,
           model_files_dir: r.model_files_dir ?? '',
-          swap_when_idle: r.swap_when_idle ?? true, swap_wait_s: r.swap_wait_s ?? 300,
+          swap_when_idle: r.swap_when_idle ?? false, swap_wait_s: r.swap_wait_s ?? 300,
           card_holders: r.card_holders ?? [], card_queue: r.card_queue ?? [],
           last_background_skip: r.last_background_skip ?? {},
         };
@@ -2099,7 +2099,7 @@
     {@render modelFilesFolderRow()}
     <div class="form-group">
       <label for="swap-when-idle">
-        <input id="swap-when-idle" type="checkbox" checked={engineStatus?.swap_when_idle ?? true}
+        <input id="swap-when-idle" type="checkbox" checked={engineStatus?.swap_when_idle ?? false}
           disabled={swapBusy || !engineStatus}
           on:change={(e) => setLocalEngineSwap(e.currentTarget.checked, engineStatus?.swap_wait_s ?? 300)} />
         Swap local models when the card holder is idle
@@ -2109,7 +2109,7 @@
         disabled={swapBusy || !engineStatus}
         on:change={async (e) => {
           const field = e.currentTarget;
-          await setLocalEngineSwap(engineStatus?.swap_when_idle ?? true, field.value);
+          await setLocalEngineSwap(engineStatus?.swap_when_idle ?? false, field.value);
           field.value = String(engineStatus?.swap_wait_s ?? '');   // a refused entry does not stay typed
         }} />
       <p class="help-text">
@@ -2141,6 +2141,8 @@
       {#each cardQueueLines(engineStatus?.card_queue) as line}
         <p class="help-text">{line}</p>
       {/each}
+    {:else if engineStatus?.card_queue}
+      <p class="help-text"><strong>Waiting for the card:</strong> nobody (as of the last Refresh)</p>
     {/if}
     {#each backgroundSkipLines(engineStatus?.last_background_skip) as line}
       <p class="help-text">{line}</p>

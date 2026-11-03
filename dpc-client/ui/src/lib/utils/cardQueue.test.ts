@@ -86,6 +86,12 @@ describe('the Local engines block shows them', () => {
         }
     });
 
+    it('says nobody waits, so an empty line does not read as a missing feature', () => {
+        const empty = block.indexOf('{:else if engineStatus?.card_queue}');
+        expect(empty).toBeGreaterThan(block.indexOf('cardQueueLines(engineStatus?.card_queue)'));
+        expect(block.slice(empty)).toContain('<strong>Waiting for the card:</strong> nobody');
+    });
+
     it('feeds the three keys from local_engine_status', () => {
         expect(src).toContain('card_holders: r.card_holders ?? []');
         expect(src).toContain('card_queue: r.card_queue ?? []');

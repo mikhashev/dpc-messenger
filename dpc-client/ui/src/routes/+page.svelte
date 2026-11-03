@@ -8,7 +8,7 @@
   import { voteStatusAppliesTo } from '$lib/utils/voteStatusIdentity';
   import { writable } from "svelte/store";
   import { voiceMemoryNote } from "$lib/utils/voiceMemoryExtra";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig, blockedNodeIds, loadGroups } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig, blockedNodeIds, loadGroups, noticeToast } from "$lib/coreService";
   import { loadBlockedNodes, resetBlockedNodesLoad, blockPeer, unblockPeer } from "$lib/services/blockedPeers";
   import { blockConfirmQuestion, blockedNotice, unblockedNotice, groupsWithMember, peerLabel } from "$lib/utils/blockedPeers";
   import { confirmAsync } from "$lib/utils/dialog";
@@ -208,6 +208,8 @@
   let showAgentToast = $state(false);
   let agentToastMessage = $state("");
   let agentToastType = $state<"info" | "error" | "warning">("info");
+  // Set only by a `notice_toast` (how long it stays); null means the per-type default.
+  let agentToastDuration = $state<number | null>(null);
 
   // Add AI Chat dialog state moved to AddAIChatPanel.svelte
 
@@ -741,6 +743,18 @@
     } else {
       resetBlockedNodesLoad();
     }
+  });
+
+  // A `notice_toast` (a local engine swap): non-blocking, gone after the backend's duration.
+  $effect(() => {
+    const n = $noticeToast;
+    if (!n) return;
+    const ms = n.duration && n.duration > 0 ? n.duration : 10000;
+    agentToastMessage = n.message;
+    agentToastType = 'info';
+    agentToastDuration = ms;
+    showAgentToast = true;
+    setTimeout(() => { showAgentToast = false; agentToastDuration = null; }, ms);
   });
 
   function showBlockToast(message: string, type: 'info' | 'warning' | 'error') {
@@ -1609,7 +1623,7 @@
   <Toast
     message={agentToastMessage}
     type={agentToastType}
-    duration={agentToastType === 'error' ? 5000 : 3000}
+    duration={agentToastDuration ?? (agentToastType === 'error' ? 5000 : 3000)}
   />
 {/if}
 
