@@ -19,7 +19,7 @@ dependencies = [
     "tiktoken>=0.5.1,<0.15",
     "httpx>=0.27.0,<0.28.0",
     "aiortc>=1.6.0,<2.0.0",
-    "certifi>=2024.0.0",
+    "certifi>=2026.10.18",  # floor for a security advisory (Dependabot alert #223)
     "psutil>=5.9.0,<6.0.0",
     # No ceiling, for the reason tiktoken's says: <11 held 10.4.0, which has no
     # cp314 wheel, so from 2026-10-29 CI's 3.14 could not install the client.
@@ -42,6 +42,9 @@ dependencies = [
     "aiohttp>=3.14,<4",  # the gateway's HTTP server; declared, not inherited from discord.py (ADR-041 D6)
     "keyring>=24.0",
     "cryptography>=50.0.0",
+    # A floor for a security advisory (Dependabot alerts #164/#165), not a direct
+    # use: anyio arrives through httpx, openai and anthropic.
+    "anyio>=4.14.2",
 ]
 
 [project.optional-dependencies]
