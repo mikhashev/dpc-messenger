@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from ..dpc_agent.agent import DpcAgent, AgentConfig
 from ..dpc_agent.run_gate import RunGate, StoppedWhileWaiting, _RUN_GATES, get_run_gate, hold, turn_title  # noqa: F401
 from ..providers.base import ModelNotCachedError
+from .llama_server_supervisor import leave_card_queue
 from ..dpc_agent.utils import get_agent_root, ensure_agent_dirs, utc_now_iso
 from ..dpc_agent.events import get_event_emitter, EventType
 from ..conversation_monitor import ConversationMonitor, TURN_END_VALUES
@@ -996,6 +997,8 @@ class DpcAgentManager:
         ev = self._interrupt_events.get(conversation_id)
         if ev:
             ev.set()
+            # A turn in the queue for the card makes no model call to finish: it leaves now.
+            leave_card_queue(conversation_id)
             if kill:
                 kev = self._kill_events.get(conversation_id)
                 if kev:

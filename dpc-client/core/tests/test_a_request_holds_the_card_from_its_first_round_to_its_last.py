@@ -1,5 +1,6 @@
 """A request holds the card from its first round to its last (ADR-044, amendment 2026-11-02,
-the card queue: rules 1, 2, 9 and 14; the registry only, no queue yet).
+the card queue: rules 1, 2, 9, 14 and 16; the queue itself is in
+`test_requests_wanting_the_card_wait_in_one_line_and_nothing_is_forced.py`).
 
 The replay is the 16:23-16:25 sequence of that amendment, with `swap_when_idle` forced true.
 Real `DpcAgent.process`, `run_llm_loop` and adapter, real tool threads, real supervisors with
@@ -282,10 +283,56 @@ class TestTheReplay:
             gap.go_on.set()
             await _finish(*[t for t in (request, other) if t is not None])
 
-    @pytest.mark.skip(reason="the queue commit: rule 16's other two assertions, that the 'is stopping' "
-                             "refusal gives way to queueing and the request's total time")
-    def test_the_is_stopping_refusal_gives_way_to_queueing_and_the_total_time_is_bounded(self):
-        """Not faked here: no `_CARD_QUEUE` and no single deadline exist in this commit."""
+    @pytest.mark.asyncio
+    async def test_the_is_stopping_refusal_gives_way_to_queueing_and_the_total_time_is_bounded(
+        self, tmp_path, monkeypatch,
+    ):
+        # Rule 16's other two assertions, on the log's own turn of events: S is being stopped to
+        # free the card for F when the owner's request on S arrives (16:25:06). It is queued and
+        # not refused, F's loop runs to its end, and the card goes back once: two swaps in all.
+        f, s, engines, manager = _pair(tmp_path, rounds=3)
+        swaps = []
+        real_note = type(f)._note_swap
+
+        def noting(self, holder, *args, **kwargs):
+            swaps.append((holder.alias, self.alias))
+            real_note(self, holder, *args, **kwargs)
+
+        monkeypatch.setattr(type(f), "_note_swap", noting)
+        await s.ensure_running()
+        real_stop = s._stop_child
+        in_the_stop, let_it_stop = asyncio.Event(), asyncio.Event()
+
+        async def slow_stop():
+            in_the_stop.set()
+            await let_it_stop.wait()
+            await real_stop()
+
+        s._stop_child = slow_stop
+        request = asyncio.ensure_future(_agent(tmp_path, manager).process("a task", "johnny-chat"))
+        other = None
+        try:
+            await asyncio.wait_for(in_the_stop.wait(), 30)
+            assert s._swap_for == F
+
+            started = time.monotonic()
+            other = asyncio.ensure_future(_orchestrator(manager).execute_inference("hello", provider=S))
+            await asyncio.sleep(0.05)
+            assert not other.done(), "queued, and not refused with 'is stopping'"
+
+            let_it_stop.set()
+            assert await asyncio.wait_for(request, 30) == "the answer"
+            answer = await asyncio.wait_for(other, 30)
+            total = time.monotonic() - started
+        finally:
+            let_it_stop.set()
+            await _finish(*[t for t in (request, other) if t is not None])
+
+        assert answer["response"] == "described" and answer["provider"] == S
+        assert swaps == [(S, F), (F, S)], "exactly two swaps: nothing traded the card back and forth"
+        assert engines[F].round == 3
+        assert total < 60, "within the request's one deadline (swap_wait_s is 60 here)"
+        assert _alive(s) and not _alive(f)
 
 
 class TestAHoldEndsHoweverTheRequestEnds:
@@ -471,7 +518,9 @@ class TestWhatAHoldIs:
         assert at_the_mark == [(F, 0, {})]
 
     @pytest.mark.asyncio
-    async def test_a_hold_taken_while_a_start_waits_keeps_it_waiting(self, tmp_path):
+    async def test_a_hold_taken_while_a_start_waits_does_not_keep_it_waiting(self, tmp_path):
+        # Turned over by the card queue's rule 4: a waiting start waits for what stood there when
+        # it queued, no more. It read "keeps it waiting" until the queue landed.
         f, s, _engines, _manager = _pair(tmp_path)
         await f.ensure_running()
         first = asyncio.Event()
@@ -486,20 +535,19 @@ class TestWhatAHoldIs:
         await first.wait()
         start = asyncio.ensure_future(s.ensure_running())
         await asyncio.sleep(0.03)
+        assert not start.done()
         two = asyncio.ensure_future(a_request(end_second))
         await asyncio.sleep(0.03)
         assert _held() == {F: 2}
+        assert not start.done(), "the first request still stands there"
 
         end_first.set()
         await one
-        await asyncio.sleep(0.05)
-        assert not start.done()
-        _untouched(f)
+        assert await asyncio.wait_for(start, 10) == {"total_slots": 1}
+        assert not _alive(f), "the later hold did not extend the holder's busy"
 
         end_second.set()
         await two
-        assert await asyncio.wait_for(start, 10) == {"total_slots": 1}
-        assert not _alive(f)
 
     @pytest.mark.asyncio
     async def test_a_holder_still_starting_is_busy_and_is_not_marked(self, tmp_path):

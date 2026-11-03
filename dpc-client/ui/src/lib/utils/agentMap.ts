@@ -343,6 +343,14 @@ function turnWords(state: AgentTurnState | undefined, chatOf: (id: string | null
             nowDetail: detail(turn.provider_alias ? `${turn.provider_alias} is answering` : '', round, started, forWait),
         };
     }
+    if (phrase && turn.wait_reason === 'card_queue') {
+        return {
+            dot: 'waiting',
+            stateLine: `${cap(phrase)} · ${chat} · ${forWait}`,
+            nowLine: `${cap(phrase)} in ${chat}`,
+            nowDetail: detail(turn.provider_alias ? `${turn.provider_alias} waits in the queue` : '', round, started, forWait),
+        };
+    }
     if (phrase) {
         return {
             dot: 'waiting',

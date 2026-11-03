@@ -523,9 +523,10 @@ holds on Windows only.
      null, on a waiting item `other_chat` (the agent is in another chat's turn) or
      `room_busy` (the room's lock is held by another agent's turn). *(Amended 2026-11-02,
      Mike's call: the list on a turn gains `card_queue`, the turn waiting in the card queue
-     of ADR-044's amendment of that date, which makes five. It lands with the
-     queue code; until then `TURN_WAIT_REASONS` in `dpc_agent/run_gate.py` and the UI hold
-     the four.)* `held_by` is
+     of ADR-044's amendment of that date, which makes five. In the code since the queue
+     landed: `TURN_WAIT_REASONS` in `dpc_agent/run_gate.py` and the UI hold it, set from a
+     request's first real wait in line, and the turn reads `model_call` again after it.)*
+     `held_by` is
      `{conversation_id, wait_reason}` of the turn holding the lock, one level, with
      `agent_id` for `room_busy`. Both locks, the agent's run gate and the room's, are a
      `RunGate`: a lock with a registry of its waiters beside it, an entry put in before

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, REFUSAL_TOOLS_UNSUPPORTED, PeerRefused
 
-from ..managers.llama_server_supervisor import runs_on_a_local_engine
+from ..managers.llama_server_supervisor import card_queue_refusal_in, runs_on_a_local_engine
 from ..node_ledger import (
     ENGINE_FIELDS,
     TARIFF_FIELDS,
@@ -887,6 +887,10 @@ class DpcLlmAdapter:
                     tool_choice=tool_choice, with_images=images_in_turns,
                 )
             except Exception as e:
+                # The queue's answer is about the card and not the path: the text path would
+                # only stand in the same line, past a Stop or a deadline that already spoke.
+                if card_queue_refusal_in(e) is not None:
+                    raise
                 log.warning(
                     "Native tool calling failed (%s), falling back to text injection path", e
                 )

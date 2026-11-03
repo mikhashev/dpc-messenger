@@ -624,11 +624,11 @@ reason still gets today's refusal.
 
 Mike's call, team chat 2026-11-02, after review by Ark, Johnny and Zcode. **Decided, partly
 built.** In the code: rule 1, with `accepted_request` as the only kind of hold, at the two doors
-it names and on a gateway call; rule 2, no mark while busy; rule 6, the `caller_window`, as built
-there; and rule 9, the from-inside refusal. Not in the code: the queue and its cancel (rules 3
-and 12), the order (rule 4), the single deadline (rule 5), the rest of the gateway and peer doors
-(rules 7, 8 and 15), background calls (rule 10), the status key `card_queue` and `wait_reason:
-card_queue`. `swap_when_idle` stays off
+it names and on a gateway call; rule 2, no mark while busy; the queue and its cancel (rules 3 and
+12); the order (rule 4); the single deadline (rule 5); rule 6, the `caller_window`, as built
+there; the gateway and peer doors (rules 7, 8 and 15); rule 9, the from-inside refusal; rule 13's
+switch and safety net; and `wait_reason: card_queue`. Not in the code: background calls (rule 10),
+the status key `card_queue`, and rule 9's second sentence. `swap_when_idle` stays off
 by default until all of it is live-checked. The work is the epic
 `THE-CARD-HAS-NO-QUEUE-SO-A-SWAP-CAN-CUT-AN-AGENT-LOOP-AND-TWO-ALIASES-PING-PONG` (gitignored
 `backlog.md`). This note replaces the parts of the idle swap amendment it names below and
@@ -650,8 +650,7 @@ One call in flight is too short a measure of busy, and two aliases trade the car
    stays a **waiting** item and holds nothing. An owner's chat is accepted in
    `InferenceOrchestrator._execute_local_inference`. The cost: a holder freed while a request
    waits at the gate can lose the card before that request starts; the request then queues, it
-   does not fail (until the queue is built, its start follows the swap rules). This is inferred
-   from the code, not observed. A **turn** stays the glossary's span (run gate held to released),
+   does not fail. This is inferred from the code, not observed. A **turn** stays the glossary's span (run gate held to released),
    so an agent's accepted request lies inside its turn; they are not two kinds of busy. A turn
    waiting for a person's approval counts as busy: that is the honest cost of "never forced". A
    contender waits to its deadline and is refused with the holder named and who stands on its
@@ -692,12 +691,11 @@ One call in flight is too short a measure of busy, and two aliases trade the car
    opens or renews a window is a served call on a local alias, the one that leaves a usage row; a
    refused or failed call does not, and a vendor's has no card. A busy refusal names a caller in
    its window as "caller '<id>'"; a gateway call in progress is named by nobody, because a hold
-   names an agent and a conversation and it has neither. The gateway's hold is taken inside
-   `_peer_inference_lock`, around `_call`, until rule 8's order lands: the start happens in there,
-   so a hold taken before that wait would have the start waiting for a client that waits for the
-   same semaphore. A client waiting on it stands on nothing, as a turn at the run gate does, and
-   the queue commit moves the hold out to acceptance. Until then a peer's next call that waits
-   behind a gateway's start in the semaphore can outlast its window, the case rule 8 closes.
+   names an agent and a conversation and it has neither. The gateway's hold stands from acceptance
+   since rule 8's order landed; it stood inside `_peer_inference_lock` before that, because the
+   start happened in there and a hold outside would have had the start waiting for a client
+   waiting for the same semaphore. A call of a client's open window is not new (rule 4): the hold
+   says so at acceptance, by the caller's name, and a peer's is asked by name at `ensure_running`.
 7. **Peers and the gateway.** A peer never swaps and never takes a place. A new peer while a
    place waits is refused `provider_unavailable`, with no `retry_after_sec`; the **refusal
    code** row's "retryable later but not by a short wait" stays true, and so does DPTP §3.4. A
@@ -709,10 +707,25 @@ One call in flight is too short a measure of busy, and two aliases trade the car
    semaphore comes first and the start happens inside it), so the gateway no longer waits for
    the card while holding it and a live peer does not lose its window. Peers do not queue, so
    there is no cycle.
+   **As built.** `Gateway.complete` takes its hold at acceptance; with the swap on it asks
+   `ensure_running` before the semaphore, which is the place in line and, for a child that is down,
+   the start; then it takes the semaphore with its door limit, then `_call`, whose own
+   `ensure_running` passes on the admitted hold. With the swap off there is no first step and a
+   start happens inside `_call` as before. A start that fails in the first step answers what it
+   answers inside `_call`, 502. Johnny's objection, that two gateway starts and a peer's would
+   converge in one wait loop on the semaphore, is answered by the queue: gateway starts wait in line
+   holding no semaphore and only the first place acts, and a peer takes no place and is refused,
+   so whoever sits on the semaphore waits for nothing behind it. A client's total wait is the two
+   added, `swap_wait_s` in the line and `[connection] remote_inference_timeout` on the semaphore,
+   with no limit over both: that sum is what this order costs, and it is taken on purpose.
 9. **From inside.** A request holding an excluding alias that asks for another is refused at
    once, in the `_card_held_error` form; otherwise it would wait on itself. On this node the
    real route is `describe_image` to `vision_provider`. A request holding no alias (a cloud
-   agent) queues as a normal request.
+   agent) queues as a normal request. **Decided, not built** (Mike's call, variant B, 2026-11-02):
+   a request's auxiliary call may give up its own alias, through the queue, within its one
+   deadline, on a stop that loses no parked conversations (`DROPS_PARKED_ON_STOP` false on the
+   stopped engine), with the description cached once per turn; background calls never. Until that
+   is built the refusal above stands.
 10. **Background calls** (the self-reflection check, knowledge extraction, skill reflection and
     the like) never swap and never queue. They run only if their alias is on the card; otherwise
     a named skip goes into a record with a reader, on the model of `last_swap`, never silently,
@@ -763,12 +776,102 @@ position with no position field, as on **waiting**), and the holder is named by 
   swaps), which rule 7 here extends; rule 5 (a swap is said once, `last_swap`); the stop by
   `stop_by_hand`; and what a swap does not do.
 
-**Left open by the decision, for the code's review.** Rule 4's last sentence above (a holder
-already draining or stopping for another reason is not swapped, and today's refusal names its
-state) is not restated: rule 12 says a place advances when such a stop ends, and nothing says
-whether a request arriving during that stop takes a place or meets the refusal. Rule 5's "the
-holder is untouched" describes a deadline met while waiting; a deadline that passes after the
-mark finds a holder already stopping. And `drain` reads its `timeout` as how long to wait before
-it stops the child anyway, with `_start_lock` taken outside that bound and the child's own stop
-bounded separately, so the remainder cannot simply be passed through `stop_by_hand` as that
-argument.
+**What the rules left open, decided** (Mike's call, team chat 2026-11-02).
+
+1. **A holder stopping for another reason.** A request arriving while a holder is draining or
+   stopping for a reason of its own (a settings save retiring it, a Stop) takes a place and waits.
+   There is no refusal. This replaces the idle swap amendment's rule 4, last sentence, and the
+   paragraph after it, while the queue is on; the refusal that names the state stays with the swap
+   off and for a peer.
+2. **A deadline that passes after the mark.** The stop is not cancelled and runs to its end. The
+   request leaves with a refusal saying the holder is already stopping, and the next in the queue
+   takes the card. Rule 5's "the holder is untouched" applies to a deadline met before the mark.
+3. **The remainder is not `drain`'s timeout.** `drain(timeout)` reads a timeout as how long to wait
+   before it stops the child anyway, so the remainder is not passed into `stop_by_hand`. The stop
+   runs as its own task and the request waits for it on its own side, bounded by the remainder,
+   so that neither the deadline nor a cancel reaches the stop; by rule 2 nothing is in flight by
+   then. A refusal leaves no half-stopped mark behind on any path: the stop clears the mark when it
+   ends, a stop that fails clears it and the holder serves again, and a holder a settings save
+   retired stays closed with no mark naming anybody.
+
+**As built, where the rules left a choice to the code, and open to its review.**
+
+- **Who takes a place.** Any start that needs a claim, on an empty line too, so that two starts
+  racing need no second path. A child already up with an empty line takes none. Places stand in the
+  order they were taken, and a place's requests in the order they came, so "oldest" is the oldest
+  in the place: a later round joining its own alias's place stands behind the requests already
+  there. `_CardPlace` is a place, `_QueuedRequest` one request in it.
+- **What is not new (rule 4).** A hold on this alias that stands before the line
+  (`_stands_before_the_line`: older than the first place, or `admitted`, which a request becomes by
+  passing through the line or at acceptance as a call of its caller's open window), with this
+  alias's child on the card, a child still starting included. A not-new request whose child is gone
+  needs the card, and takes a place. A request accepted after the first place was taken is not
+  counted by the holder's busy test (`_busy_for_the_card`) or named by the refusal, so it cannot
+  extend the wait it stands behind; a call already in flight always counts.
+- **A wait on itself that is not rule 9's.** A request whose hold is on another alias with a child
+  on the card, asking for an alias that does not exclude that one, does not queue while a place
+  waits, because that place may be waiting for its hold; it meets the refusal of `_card_held_error`
+  at once.
+- **`_card_held_error` and strangers (rule 7).** While a place waits it refuses a supervisor holding
+  no claim whose alias is not the first place's, with `CardQueueRefusal` and text that names nobody.
+  The swap off skips this check. `_launch`'s second claim is skipped by the claim it holds.
+- **The deadline's edges (rule 5).** A request with no hold, and a cloud agent's call on a local
+  alias, are accepted at the place; a hold on the alias keeps its acceptance. A request with time
+  left is refused at its deadline rather than marking a holder that just became idle. A request
+  that came with no time left, which is one of `swap_wait_s` 0 or an old request that lost its
+  alias between two rounds, is refused at once by a busy holder, and a holder that is not busy
+  asks it for no wait: it swaps, bounded by `_STOP_WITH_NO_WAIT_LEFT_S` (60 s, a constant, since
+  `_stop_child` asks a child for 20 s and then kills it). This keeps `swap_wait_s` 0 meaning "do not
+  wait for a busy holder". The cost is on purpose: an agent turn older than `swap_wait_s` whose
+  alias was stopped under it, and which finds the card busy, ends with the refusal at once.
+- **What the 60 s limits.** `_STOP_WITH_NO_WAIT_LEFT_S` reaches the code only as `stop_bound`, which
+  is the deadline for a request with time left and arrival plus 60 s for one that came with none.
+  `stop_bound` applies in three places: `_within`, around `_clear_unfinished_start` and
+  `_await_predecessor`; `_start_lock_for`, only while the alias is draining; and
+  `_wait_for_the_stop`, for the stop this same request marked. So it is what lets go of whatever
+  stands between a first place and its claim, not a wait for somebody else's stop: a request with
+  no time left does not wait for a holder someone else is already stopping, and `_free_the_card`
+  refuses it at once, as it refuses a busy holder and as `_wait_to_be_first` refuses it behind a
+  place. In those refusals the setting is the bound and is what they name. A refusal at `stop_bound`
+  in this phase names the 60 s and says it is the limit on waiting for a stop, not `swap_wait_s`.
+- **One deadline on waiting, not on work (rule 5).** The deadline bounds what a request waits for
+  and no more. `_start_lock_for`, when the lock is held and the alias is not draining, waits with no
+  bound, apart from the in-line check and a supervisor that will not reopen. `resolve_binary` and
+  `_plan_pin_start`, in threads under that lock, do not check it, and neither does anything after
+  the claim. A request that takes longer than `swap_wait_s` from acceptance to its answer is
+  therefore not a defect of this rule.
+- **The waits between a first place and its claim.** The superseded child's drain and an unfinished
+  start's stop are bounded by the same deadline, as is a stop of the alias's own child behind its
+  `_start_lock`. A start of the same alias holding that lock is what the request wants and is
+  bounded by `start_timeout_s`. A supervisor retired while its request waits raises the draining
+  refusal and starts no child. A request on a supervisor that will not reopen (`_will_not_reopen`:
+  draining and retired by a settings save, or draining with its provider closed) meets that refusal
+  at once, on arrival and in any of these waits, instead of waiting out its deadline. One that a
+  `stop_by_hand` or a swap's mark is on its way to reopening is waited for, by decision 1.
+- **Stop (rule 12).** `leave_card_queue(conversation_id)` is called from
+  `DpcAgentManager._interrupt_loop`, the seam the UI's Stop and Telegram's `/stop` share, and raises
+  `TakenOutOfTheCardQueue` in the waiter; the agent loop ends the turn as `stopped`, with no closing
+  model call. That seam is synchronous, and Telegram's handler runs on the loop its bridge was
+  started on, so the line is changed through `_now_on_the_owner_loop`, as a hold is; a call that may
+  be handed over answers nothing, so it returns nothing. A Kill cancels the wait through
+  `_chat_unless_killed`. `take_card_queue_place(alias)`
+  is called from `stop_local_engine` and not from `stop_by_hand`, so a swap stopping a holder leaves
+  a place that alias has further back. `DpcLlmAdapter._chat` does not fall back to its text path on a
+  queue refusal, which would stand in the same line again past a Stop or a deadline.
+- **A refusal in an agent turn: `failed` is the accepted word.** Any other `CardQueueRefusal` ends the
+  turn with `turn_end` `failed`, so there is no new wire value and the UI mirrors stay as they are.
+  No model failed, so the chat text is the refusal itself, without the "LLM error" label and with no
+  traceback. `refused` is not used: it is the host's refusal of a peer call, and a group post keeps
+  a `refused` turn's text, where a `failed` turn posts `FAILED_TURN_NOTICE` and sends its text to the
+  owner as a toast; this text names the owner's agents and chats. `EngineDrainingError` and the
+  `CardHeldError` of the swap off still read "LLM error".
+- **Said once, whoever is left (rule 5 of the idle swap).** The swap is said by the stop's own task.
+  A request that left during the stop gets "stopped '<holder>' to free the card for '<new>', which
+  stopped waiting" in the same three places, because a stopped Strata's parked conversations are gone
+  all the same.
+- **The doors' words (rule 15).** A queue refusal is `CardQueueRefusal`, a `CardHeldError`, so the
+  peer door already read it as `provider_unavailable`; the gateway answers 503 `provider_unavailable`
+  with no `Retry-After`, from the first step and from inside `_call`. `_draining_error` raises
+  `EngineDrainingError`, which `_engine_unavailable_cause` reads. At the gateway a draining refusal
+  stays 502, which rule 15 does not name. `_who_stands_on` is only called for a request in the queue
+  and a peer never is one, so agent and conversation ids do not reach a peer.

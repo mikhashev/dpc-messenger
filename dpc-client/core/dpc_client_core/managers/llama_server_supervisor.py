@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import contextvars
 import functools
+import itertools
 import json
 import logging
 import os
@@ -176,9 +177,9 @@ def bind_model_download_service(service: Optional[Any]) -> None:
     _MODEL_DOWNLOAD_SERVICE = service
 
 
-# The settings the idle swap reads at the moment of a start (`[local_engines]
-# swap_when_idle`, `swap_wait_s`). Unbound (tests, scripts that run no service): no
-# swap, today's refusal. Bound by the service at start, as the consent service is.
+# The settings the idle swap reads (`[local_engines] swap_when_idle`, read at each look, and
+# `swap_wait_s`, read once at a request's acceptance). Unbound (tests, scripts that run no
+# service): no swap, today's refusal. Bound by the service at start, as the consent service is.
 _LOCAL_ENGINE_SETTINGS: Optional[Any] = None
 
 
@@ -190,7 +191,7 @@ def bind_local_engine_settings(settings: Optional[Any]) -> None:
 
 def swap_policy() -> Tuple[bool, int]:
     """(swap_when_idle, swap_wait_s) as the settings hold them now; (False, 0) unbound
-    or unreadable. Read at each start, so a change needs no restart."""
+    or unreadable. A change needs no restart: it reaches the next request."""
     settings = _LOCAL_ENGINE_SETTINGS
     if settings is None:
         return False, 0
@@ -287,6 +288,23 @@ class CardHeldError(LlamaServerError):
         super().__init__(message)
         self.holder_alias = holder_alias
         self.holder_engine = holder_engine
+
+
+class CardQueueRefusal(CardHeldError):
+    """The card queue let this request go without the card (ADR-044, amendment 2026-11-02, the
+    card queue, rules 5, 7 and 12): its deadline passed, a peer met a waiting place, or its place
+    was taken away. `provider_unavailable` at both doors; never retried and never tried again by
+    another path, which would only stand in the same line."""
+
+
+class TakenOutOfTheCardQueue(CardQueueRefusal):
+    """A person's Stop took this request out of the line (rule 12): a stopped turn, not a
+    failed one."""
+
+
+class EngineDrainingError(LlamaServerError):
+    """A new call or start met a supervisor that is draining. Its own class so that the peer door
+    reads it as `provider_unavailable` (rule 15) and not as a failure mid-call."""
 
 
 class PinNotInstalledError(LlamaServerError):
@@ -413,6 +431,16 @@ def last_swap() -> Optional[Dict[str, Any]]:
     return dict(_LAST_SWAP) if _LAST_SWAP else None
 
 
+# The stops of holders being swapped out, held until done. Each runs as its own task so that a
+# request's deadline or cancel leaves it running to its end (ADR-044, the card queue, decisions
+# 2 and 3); a task nobody references can be collected.
+_SWAP_STOPS: "set[asyncio.Future]" = set()
+# How long a request with no time left waits for what stands between it and the claim once
+# nothing is busy: `_stop_child` asks a child for 20 s and then kills it. A request that came with
+# no time left is one of `swap_wait_s` 0, or an old one that lost its alias between two rounds.
+_STOP_WITH_NO_WAIT_LEFT_S = 60.0
+
+
 # Supervisors holding the card, from the decision to start a child until its stop
 # has finished: "claimed" or "stopping". Keyed by supervisor, not alias, because a
 # retired child still draining has left `_ACTIVE_SUPERVISORS` and holds the card.
@@ -459,14 +487,21 @@ def card_holders() -> List[Dict[str, Any]]:
 # Written only on the owner loop (`_now_on_the_owner_loop`).
 _CARD_HOLD_KINDS = ("accepted_request",)
 _CARD_HOLDS: Dict[str, List["_CardHold"]] = {}
+# Which came first, a request or a place (rule 4); across aliases, so one counter.
+_CARD_ARRIVAL = itertools.count(1)
 
 
 class _CardHold:
     """One stand on one alias at a time: an `accepted_request`. `alias` None stands on
     nothing (a peer route or a vendor alias, for now). `live` goes false when the hold ends,
-    so a tool thread or a task that outlives it cannot put this hold back on an alias."""
+    so a tool thread or a task that outlives it cannot put this hold back on an alias.
 
-    __slots__ = ("kind", "agent_id", "conversation_id", "alias", "live")
+    Acceptance fixes the request's one deadline: `swap_wait_s` is read here, once (rule 5).
+    `admitted` says it is not new to any place: it has been through the line, or it is a call
+    of a caller's open window."""
+
+    __slots__ = ("kind", "agent_id", "conversation_id", "alias", "live", "arrival", "accepted_at", "wait_s",
+                 "admitted")
 
     def __init__(self, kind: str, agent_id: Optional[str], conversation_id: Optional[str]):
         self.kind = kind
@@ -474,6 +509,10 @@ class _CardHold:
         self.conversation_id = conversation_id
         self.alias: Optional[str] = None
         self.live = True
+        self.arrival = next(_CARD_ARRIVAL)
+        self.accepted_at = _swap_clock()
+        self.wait_s = swap_policy()[1]
+        self.admitted = False
 
 
 # The hold of the request this code runs for. It follows the awaits of the task that set
@@ -515,16 +554,23 @@ def _hold_ends(hold: _CardHold) -> None:
     hold.live = False
 
 
+def _hold_enters(hold: _CardHold, alias: Optional[str], caller: Optional[str]) -> None:
+    """The request stands on `alias`. A call of `caller`'s open window there is not new."""
+    _hold_moves_to(hold, alias)
+    if alias is not None and caller is not None and caller in _callers_in_their_window(alias):
+        hold.admitted = True
+
+
 @contextlib.asynccontextmanager
 async def card_held_for(alias: Optional[str], kind: str, *, agent_id: Optional[str] = None,
-                        conversation_id: Optional[str] = None):
+                        conversation_id: Optional[str] = None, caller: Optional[str] = None):
     """Stand on `alias` for the body: its holder is busy until the body ends, however it
     ends. `agent_id` and `conversation_id`, where there are any, are what the busy refusal
-    names."""
+    names. `caller` is a gateway client's name, whose open window makes this call not new."""
     if kind not in _CARD_HOLD_KINDS:
         raise ValueError(f"unknown kind of card hold: {kind!r}")
     hold = _CardHold(kind, agent_id, conversation_id)
-    _now_on_the_owner_loop(_hold_moves_to, hold, alias)
+    _now_on_the_owner_loop(_hold_enters, hold, alias, caller)
     token = _CARD_HOLD.set(hold)
     try:
         yield hold
@@ -603,14 +649,34 @@ def _callers_in_their_window(alias: str) -> List[str]:
     return list(_last_caller_call_at.get(alias, ()))
 
 
+def _wait_reason_of(hold: _CardHold) -> Optional[str]:
+    """The `wait_reason` of the turn this hold lies inside, or None (rule 1). A hold of an owner's
+    chat or of a gateway client has no agent, and so no turn to ask."""
+    if not hold.agent_id:
+        return None
+    from ..dpc_agent.run_gate import agent_turn_snapshot
+
+    turn = agent_turn_snapshot(hold.agent_id)["turn"]
+    if turn is None or turn.get("conversation_id") != hold.conversation_id:
+        return None
+    return turn.get("wait_reason")
+
+
 def _who_stands_on(alias: str) -> str:
-    """Who holds `alias`, for a refusal: agent and conversation, where set, and the callers
-    in their window; "" for no one named."""
+    """Who holds `alias`, for a refusal to the owner's own request: agent and conversation, where
+    set, what that agent's turn is waiting for, and the callers in their window; "" for no one
+    named. Never for a peer: these are ids of the owner's agents and chats. No refusal a peer
+    meets calls this, because a peer never waits in the card queue (rule 7)."""
     names = []
     for hold in _CARD_HOLDS.get(alias, []):
+        if not _stands_before_the_line(hold):
+            continue
         parts = [f"agent '{hold.agent_id}'"] if hold.agent_id else []
         if hold.conversation_id:
             parts.append(f"conversation '{hold.conversation_id}'")
+        reason = _wait_reason_of(hold)
+        if reason:
+            parts.append(f"wait_reason '{reason}'")
         if parts:
             names.append(", ".join(parts))
     names.extend(f"caller '{caller}'" for caller in _callers_in_their_window(alias))
@@ -621,6 +687,161 @@ def runs_on_a_local_engine(provider: Any) -> bool:
     """Whether this provider's alias is a local engine's, so that a hold on it means
     something: a peer route or a vendor has no supervisor and no card to hold."""
     return isinstance(getattr(provider, "supervisor", None), LlamaServerSupervisor)
+
+
+# --- the card queue (ADR-044, amendment 2026-11-02, rules 3, 4, 5, 7, 12 and 13) -----------------
+#
+# The line of requests waiting for the card, nothing being forced. One place per alias, oldest
+# first; by alias and not by supervisor, so that a settings save replacing one leaves the line as
+# it stood (rule 14). A place is taken before the alias's `_start_lock`, because a later request
+# on the holder's own alias holding that lock would keep the first place's stop of it waiting.
+# Only the first place acts, through its oldest request; the place passes to the next oldest when
+# that one leaves, and is gone only when empty. Lives only while `swap_when_idle` is true. Written
+# only on the owner loop, where `ensure_running` runs.
+
+
+class _CardPlace:
+    """One alias's place in the line. `arrival` says what came before it, and does not change
+    when the request it was taken for leaves."""
+
+    __slots__ = ("alias", "arrival", "requests")
+
+    def __init__(self, alias: str):
+        self.alias = alias
+        self.arrival = next(_CARD_ARRIVAL)
+        self.requests: List["_QueuedRequest"] = []
+
+
+_CARD_QUEUE: List[_CardPlace] = []
+
+
+class _QueuedRequest:
+    """A request in a place: its one deadline (rule 5), and `out`, the refusal it meets when it
+    is taken out of the line (rule 12). A request with a hold on this alias has the deadline it
+    was accepted with; any other (a call with no hold, a cloud agent's call on a local alias) is
+    accepted here. `came_late` is a request that had no time left when it came: it refuses a busy
+    holder at once, and a holder that is not busy asks it for no wait."""
+
+    __slots__ = ("place", "hold", "accepted_at", "wait_s", "give_up_at", "came_late", "stop_bound",
+                 "out", "_turn_mark")
+
+    def __init__(self, place: _CardPlace):
+        self.place = place
+        self.hold: Optional[_CardHold] = _CARD_HOLD.get()
+        now = _swap_clock()
+        if self.hold is not None and self.hold.alias == place.alias:
+            self.accepted_at, self.wait_s = self.hold.accepted_at, self.hold.wait_s
+        else:
+            self.accepted_at, self.wait_s = now, swap_policy()[1]
+        self.give_up_at = self.accepted_at + self.wait_s
+        self.came_late = self.give_up_at <= now
+        self.stop_bound = now + _STOP_WITH_NO_WAIT_LEFT_S if self.came_late else self.give_up_at
+        self.out: Optional[CardQueueRefusal] = None
+        self._turn_mark: Any = None
+
+    def is_first(self) -> bool:
+        return bool(_CARD_QUEUE) and _CARD_QUEUE[0] is self.place and self.place.requests[0] is self
+
+    def in_line(self) -> bool:
+        return self in self.place.requests
+
+    def check_still_in_line(self) -> None:
+        if self.out is not None:
+            raise self.out
+
+    def waited(self) -> int:
+        return int(round(_swap_clock() - self.accepted_at))
+
+    def stop_limit(self) -> str:
+        """What a refusal names when `stop_bound` of a `came_late` request ran out: it is not the
+        setting, which that request had already used up."""
+        return (f"the limit of {_STOP_WITH_NO_WAIT_LEFT_S:.0f} s on waiting for a stop (a request with no time "
+                f"left has it in place of the Wait for a busy holder setting, {self.wait_s} s)")
+
+    def says_it_waits(self) -> None:
+        """The turn this request runs in reads `card_queue`, from the first real wait on: a
+        start that passes straight through never shows it."""
+        if self._turn_mark is None:
+            from ..dpc_agent.run_gate import turn_waits_for
+
+            self._turn_mark = turn_waits_for("card_queue")
+            self._turn_mark.__enter__()
+
+    def leaves(self) -> None:
+        """Out of the line, however it ended, in one synchronous stretch."""
+        if self.in_line():
+            self.place.requests.remove(self)
+            if not self.place.requests and self.place in _CARD_QUEUE:
+                _CARD_QUEUE.remove(self.place)
+        mark, self._turn_mark = self._turn_mark, None
+        if mark is not None:
+            mark.__exit__(None, None, None)
+
+    def passes(self) -> None:
+        """Through the line: from here on it stands on its alias for every place behind."""
+        if self.hold is not None and self.hold.alias == self.place.alias:
+            self.hold.admitted = True
+        self.leaves()
+
+
+def _stands_before_the_line(hold: _CardHold) -> bool:
+    """Whether a hold counts for the place that acts: it was there first, or it has been let
+    through. A waiting start waits for what stood there when it queued, no more (rule 4)."""
+    return hold.admitted or not _CARD_QUEUE or hold.arrival < _CARD_QUEUE[0].arrival
+
+
+def _chat_leaves_the_line(conversation_id: str) -> None:
+    taken = 0
+    for place in list(_CARD_QUEUE):
+        for request in list(place.requests):
+            hold = request.hold
+            if hold is None or not conversation_id or hold.conversation_id != conversation_id:
+                continue
+            request.out = TakenOutOfTheCardQueue(
+                f"'{place.alias}': a person's Stop took this request out of the queue for the card",
+                place.alias, "",
+            )
+            request.leaves()
+            taken += 1
+    if taken:
+        logger.info("Stop took %d request(s) out of the queue for the card in %s", taken, conversation_id)
+
+
+def leave_card_queue(conversation_id: str) -> None:
+    """A person's Stop in this chat: its requests leave the line, and each meets
+    `TakenOutOfTheCardQueue`. Beside `_CARD_QUEUE` and not in `run_gate.stop_waiting`, which only
+    takes a chat out of the agent's own line (rule 12). `_interrupt_loop` is synchronous, and the
+    Telegram `/stop` that reaches it runs on the loop its bridge was started on, so the line is
+    changed on the owner loop, which is also why this answers nothing."""
+    _now_on_the_owner_loop(_chat_leaves_the_line, conversation_id)
+
+
+def take_card_queue_place(alias: str) -> None:
+    """Stop engine on `alias`: a person has said it should not run, so its place goes, and its
+    requests are refused (rule 12). Only the command does this. A swap stopping a holder that has
+    a place of its own, further back in the line, leaves that place where it is."""
+    for place in list(_CARD_QUEUE):
+        if place.alias != alias:
+            continue
+        for request in list(place.requests):
+            request.out = CardQueueRefusal(
+                f"'{alias}' was stopped by hand (Stop engine), and that took its place in the "
+                "queue for the card",
+                alias, "",
+            )
+            request.leaves()
+
+
+def card_queue_refusal_in(error: Optional[BaseException]) -> Optional[CardQueueRefusal]:
+    """The queue's refusal behind `error`, or None: read through the provider's
+    `RuntimeError(...) from e` wrap and the router's above it, as the peer door reads."""
+    seen: set = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, CardQueueRefusal):
+            return error
+        error = error.__cause__
+    return None
 
 
 async def stop_by_hand(supervisor: "LlamaServerSupervisor", timeout: Optional[float] = None,
@@ -1496,7 +1717,23 @@ class LlamaServerSupervisor:
                 f"settings to free the card, or switch this agent to '{other.alias}'.{hint}",
                 other.alias, other.ENGINE,
             )
+        if self.on_the_card() and self not in _CARD_CLAIMS and swap_policy()[0]:
+            # The rule 7 check of a start that has no place: the card may be empty mid-swap, and
+            # a start begun for a peer must not take it. `_launch` claims again, so a supervisor
+            # holding a claim is no stranger; nor is the first place's own alias, which is here
+            # to claim.
+            if _CARD_QUEUE and _CARD_QUEUE[0].alias != self.alias:
+                return self._a_place_waits_refusal()
         return None
+
+    def _a_place_waits_refusal(self) -> CardQueueRefusal:
+        """What a start with no place meets while one waits, a peer's above all. It names no
+        alias of the place and nobody who stands anywhere: a peer reads this."""
+        return CardQueueRefusal(
+            f"{self.ENGINE}[{self.alias}] cannot take this now: a request on this node is waiting "
+            "for the card, and this does not go ahead of it",
+            self.alias, self.ENGINE,
+        )
 
     # --- the idle swap (ADR-044, amendment 2026-11-02) --------------------------
 
@@ -1507,17 +1744,19 @@ class LlamaServerSupervisor:
         """A call served to a peer never swaps (ADR-044 amendment, rule 2)."""
         return peer_being_served() is not None
 
-    def _draining_error(self) -> LlamaServerError:
+    def _draining_error(self) -> EngineDrainingError:
         """The refusal of a new call or start while this supervisor drains."""
         if self._swap_for is not None:
-            return LlamaServerError(f"'{self.alias}' is stopping to free the card for '{self._swap_for}'")
-        return LlamaServerError(f"{self.ENGINE}[{self.alias}] is draining; new calls refused")
+            return EngineDrainingError(f"'{self.alias}' is stopping to free the card for '{self._swap_for}'")
+        return EngineDrainingError(f"{self.ENGINE}[{self.alias}] is draining; new calls refused")
 
     def _busy_for_the_card(self, state: str) -> bool:
         """The card queue's rule 1: a child is starting, a call is in flight, a request
-        stands on this alias, or a caller is in its window there. `state` is this claim's in
-        `_live_claims`."""
-        return (state == "starting" or self._in_flight > 0 or bool(_CARD_HOLDS.get(self.alias))
+        stands on this alias, or a caller is in its window there. A request that came after the
+        acting place was taken does not count, by rule 4: it waits behind that place, and it
+        must not keep the holder busy for it. `state` is this claim's in `_live_claims`."""
+        return (state == "starting" or self._in_flight > 0
+                or any(_stands_before_the_line(hold) for hold in _CARD_HOLDS.get(self.alias, ()))
                 or bool(_callers_in_their_window(self.alias)))
 
     def _begin_swap_drain(self, new: "LlamaServerSupervisor") -> None:
@@ -1532,78 +1771,311 @@ class LlamaServerSupervisor:
         self._swap_for = None
         self._draining = False
 
-    def _swap_busy_refusal(self, holder: "LlamaServerSupervisor", waited: float) -> CardHeldError:
-        wait_s = swap_policy()[1]
-        return CardHeldError(
+    def _swap_busy_refusal(self, holder: "LlamaServerSupervisor", state: str, stopping: bool,
+                           request: _QueuedRequest) -> CardQueueRefusal:
+        """Rule 5: the deadline passed before any mark. It names the holder, why it is busy and
+        the setting; the holder is untouched. Decision 1's wait for a stop that never ended
+        names the holder's state instead."""
+        setting = f"at most {request.wait_s} s (Settings: Wait for a busy holder)"
+        if stopping:
+            return CardQueueRefusal(
+                f"{self.ENGINE}[{self.alias}] cannot load: the card is held by {holder.ENGINE} alias "
+                f"'{holder.alias}' ({state}), which has not let go after {request.waited()} s; a request "
+                f"waits for the card {setting}.",
+                holder.alias, holder.ENGINE,
+            )
+        return CardQueueRefusal(
             f"{self.ENGINE}[{self.alias}] cannot load: the card is held by {holder.ENGINE} alias "
-            f"'{holder.alias}', busy for {int(round(waited))} s; a swap waits for a busy holder "
-            f"at most {wait_s} s (Settings: Wait for a busy holder). '{holder.alias}' serves as before."
+            f"'{holder.alias}', busy for {request.waited()} s; a swap waits for a busy holder "
+            f"{setting}. '{holder.alias}' serves as before."
             f"{_who_stands_on(holder.alias)}",
             holder.alias, holder.ENGINE,
         )
 
-    async def _free_the_card(self) -> None:
-        """The owner's start of this alias, with an excluding holder on the card: stop
-        the holder once it is no longer busy, within `swap_wait_s` (ADR-044, amendments of
-        2026-11-02: the idle swap, and the card queue's rules 1, 2 and 9). A busy holder is
-        not marked and not stopped: it serves what it has. Returns when no excluding holder
-        is left, or when the rules say no swap (the caller's `_claim_card` then raises
-        today's refusal); raises the busy refusal on a timeout.
+    def _behind_a_place_refusal(self, request: _QueuedRequest) -> CardQueueRefusal:
+        """The deadline passed before this request was first in line."""
+        ahead = _CARD_QUEUE[0].alias if _CARD_QUEUE else "nobody"
+        found = self._blocking_holder()
+        holder = (f" The card is held by {found[0].ENGINE} alias '{found[0].alias}'."
+                  f"{_who_stands_on(found[0].alias)}" if found is not None else "")
+        # A `came_late` request is refused here as it comes: it waited for nothing, and its age is
+        # no wait. The bound here is the setting in both cases; `stop_bound` plays no part.
+        waited = (f"it came {request.waited()} s after its acceptance, with no time left to wait for the card"
+                  if request.came_late else f"it waited {request.waited()} s for the card")
+        return CardQueueRefusal(
+            f"{self.ENGINE}[{self.alias}] cannot load: {waited} behind "
+            f"'{ahead}', and a request waits at most {request.wait_s} s (Settings: Wait for a busy "
+            f"holder).{holder}",
+            found[0].alias if found is not None else ahead,
+            found[0].ENGINE if found is not None else self.ENGINE,
+        )
+
+    def _ran_out_refusal(self, request: _QueuedRequest) -> CardQueueRefusal:
+        """The deadline passed with nothing busy in the way: this alias's own stop, or the
+        child a settings save superseded, had not ended."""
+        if request.came_late:
+            return CardQueueRefusal(
+                f"{self.ENGINE}[{self.alias}] cannot load: this alias's earlier child did not let go within "
+                f"{request.stop_limit()}.",
+                self.alias, self.ENGINE,
+            )
+        return CardQueueRefusal(
+            f"{self.ENGINE}[{self.alias}] cannot load: it waited {request.waited()} s for this alias's "
+            f"earlier child to let go, and a request waits at most {request.wait_s} s (Settings: Wait "
+            "for a busy holder).",
+            self.alias, self.ENGINE,
+        )
+
+    def _child_is_up(self) -> bool:
+        """The fast path of a start: a child that answers and is not being stopped."""
+        return (self._proc is not None and self._proc.returncode is None and bool(self.props)
+                and not self._draining)
+
+    def _this_request_is_not_new(self) -> bool:
+        """Rule 4: a later round of a running request, or one accepted before the place that now
+        acts, on this alias with a child on the card, starting included: a request that waited
+        behind a place would be waiting for its own hold. A call of an open window is `admitted`
+        at acceptance at the gateway and asked by name at the peer door."""
+        hold = _CARD_HOLD.get()
+        return (hold is not None and hold.alias == self.alias and _stands_before_the_line(hold)
+                and self in _CARD_CLAIMS and not self._draining)
+
+    def _this_request_stands_elsewhere_on_the_card(self) -> bool:
+        """Its hold is on another alias that has a child on the card. A place that acts may be
+        waiting for exactly that hold, so a wait in line would be a wait on itself, rule 9's
+        reasoning for an alias that does not exclude its own."""
+        hold = _CARD_HOLD.get()
+        return (hold is not None and hold.alias is not None and hold.alias != self.alias
+                and any(sup.alias == hold.alias for sup in list(_CARD_CLAIMS)))
+
+    def _will_not_reopen(self) -> bool:
+        """Draining, with no stop on its way to `reopen`: retired by a settings save, or its
+        provider closed. `stop_by_hand` holds the start lock through to its `reopen`, and a swap's
+        mark says one is coming, and those are waited for (decision 1); this one no wait ends."""
+        return self._draining and (not _still_configured(self)
+                                   or (self._swap_for is None and not self._start_lock.locked()))
+
+    def _check_a_wait_can_end(self, request: _QueuedRequest) -> None:
+        request.check_still_in_line()
+        if self._will_not_reopen():
+            raise self._draining_error()
+
+    async def _wait_in_the_card_queue(self) -> Optional[_QueuedRequest]:
+        """Take a place and wait to be first in line (rules 3, 4, 5, 7 and 13), before anything
+        of this alias is locked. None when this request goes on without one, and the start's own
+        path then says the rest: the swap off (today's refusal), a child that takes no card, a
+        peer's call on an open window, a start begun for a peer and rule 9, whose claims refuse,
+        and what rule 4 says is not new."""
+        if not swap_policy()[0] or not self.on_the_card():
+            return None
+        peer = peer_being_served()
+        if peer is not None:
+            # A peer never takes a place, and a new one does not go ahead of one (rule 7).
+            if _CARD_QUEUE and not (self._child_is_up() and peer in _callers_in_their_window(self.alias)):
+                raise self._a_place_waits_refusal()
+            return None
+        if self._start_is_for_a_peer():
+            return None
+        found = self._blocking_holder()
+        if found is not None and _this_request_holds(found[0].alias):
+            return None
+        if _CARD_QUEUE:
+            if self._this_request_is_not_new() or self._this_request_stands_elsewhere_on_the_card():
+                return None
+        elif self._child_is_up():
+            return None
+        if self._will_not_reopen():
+            raise self._draining_error()
+        place = next((p for p in _CARD_QUEUE if p.alias == self.alias), None)
+        if place is None:
+            place = _CardPlace(self.alias)
+            _CARD_QUEUE.append(place)
+        request = _QueuedRequest(place)
+        place.requests.append(request)
+        try:
+            await self._wait_to_be_first(request)
+        except BaseException:
+            request.leaves()
+            raise
+        return request if request.in_line() else None
+
+    async def _wait_to_be_first(self, request: _QueuedRequest) -> None:
+        """Wait until this request is first in line, or leave. Only the first place acts."""
+        told = False
+        while True:
+            self._check_a_wait_can_end(request)
+            if not swap_policy()[0]:
+                # The switch was thrown during the wait: the claim says today's refusal.
+                request.leaves()
+                return
+            if request.is_first():
+                return
+            now = _swap_clock()
+            if now >= request.give_up_at:
+                raise self._behind_a_place_refusal(request)
+            if not told:
+                told = True
+                logger.info(
+                    "%s[%s]: waiting behind '%s' in the queue for the card, up to %d s from acceptance",
+                    self.ENGINE, self.alias, _CARD_QUEUE[0].alias, request.wait_s,
+                )
+                request.says_it_waits()
+            await asyncio.sleep(min(_SWAP_POLL_S, request.give_up_at - now))
+
+    async def _within(self, request: Optional[_QueuedRequest], what: Awaitable[Any]) -> Any:
+        """`what`, which stands between a first place and its claim, bounded for the request:
+        it leaves when taken out of the line or out of time, and `what` is cancelled. None is a
+        start with no place, which waits as it always did."""
+        if request is None:
+            return await what
+        task = asyncio.ensure_future(what)
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=_SWAP_POLL_S)
+                if done:
+                    return task.result()
+                self._check_a_wait_can_end(request)
+                if _swap_clock() >= request.stop_bound:
+                    raise self._ran_out_refusal(request)
+        except BaseException:
+            task.cancel()
+            raise
+
+    @contextlib.asynccontextmanager
+    async def _start_lock_for(self, request: Optional[_QueuedRequest]):
+        """`_start_lock` for a start, taken for a first place so that it can still leave. Only a
+        stop on the other side of the lock counts against its deadline: a start of its own alias
+        that holds the lock is bounded by `start_timeout_s`, and it is what this request wants."""
+        lock = self._start_lock
+        if request is None or not lock.locked():
+            await lock.acquire()
+        else:
+            task = asyncio.ensure_future(lock.acquire())
+            try:
+                while True:
+                    done, _ = await asyncio.wait({task}, timeout=_SWAP_POLL_S)
+                    if done:
+                        task.result()
+                        break
+                    self._check_a_wait_can_end(request)
+                    if self._draining and _swap_clock() >= request.stop_bound:
+                        raise self._ran_out_refusal(request)
+            except BaseException:
+                if task.done() and not task.cancelled() and task.exception() is None:
+                    lock.release()
+                else:
+                    task.cancel()
+                raise
+        try:
+            yield
+        finally:
+            lock.release()
+
+    async def _free_the_card(self, request: Optional[_QueuedRequest]) -> None:
+        """This alias's start, first in line, with an excluding holder on the card: stop the
+        holder once it is no longer busy, within the request's one deadline (ADR-044, amendments
+        of 2026-11-02: the idle swap, and the card queue's rules 1, 2, 5, 9 and 13). A busy
+        holder is not marked and not stopped: it serves what it has. Returns when no excluding
+        holder is left, or when the rules say no swap (the caller's `_claim_card` then raises
+        today's refusal); raises the busy refusal when the deadline passes.
 
         Called right before `_claim_card`. The last holder check, the busy test and the
         drain mark are one synchronous stretch, and so are the last check and the
-        return: nothing awaits between this method's end and the claim."""
+        return: nothing awaits between this method's end and the claim, and nothing can come
+        ahead of this request in line in that stretch, because places only join at the back."""
+        if request is None:
+            return
         for _ in range(_MAX_SWAP_ROUNDS):
-            enabled, wait_s = swap_policy()
-            if not enabled or self._start_is_for_a_peer():
-                return
-            started = _swap_clock()
-            waited_for: Optional["LlamaServerSupervisor"] = None
+            told_about = None
             while True:
+                request.check_still_in_line()
+                if self._draining:
+                    raise self._draining_error()  # retired while it waited: no child nobody holds
+                if not swap_policy()[0]:
+                    return  # the switch was thrown during the wait: the claim says today's refusal
                 found = self._blocking_holder()
                 if found is None:
                     return  # freed, by us or by someone else's stop: not this swap's doing
                 holder, state = found
-                stopping = state == "stopping" or holder._draining
                 if _this_request_holds(holder.alias):
                     return  # rule 9: it would wait on itself
-                if (holder is not waited_for and stopping
-                        and (state == "stopping" or holder._swap_for is None)):
-                    # Stopping for another reason when this start met it: its state is named.
-                    return
-                if not stopping and not holder._busy_for_the_card(state):
+                now = _swap_clock()
+                # A holder stopping for another reason is waited for like a busy one (decision 1).
+                stopping = state == "stopping" or holder._draining
+                in_time = now < request.give_up_at or request.came_late
+                if not stopping and in_time and not holder._busy_for_the_card(state):
                     break
-                # Busy, or being freed by a stop that began once this start was waiting or
-                # by another start: then the same rule against whoever holds the card next.
-                waited = _swap_clock() - started
-                if waited >= wait_s:
-                    raise self._swap_busy_refusal(holder, waited)
-                if holder is not waited_for:
-                    waited_for = holder
+                if now >= request.give_up_at:
+                    raise self._swap_busy_refusal(holder, state, stopping, request)
+                if holder is not told_about:
+                    told_about = holder
                     logger.info(
-                        "%s[%s]: '%s' (%s) is busy; waiting up to %d s for it to finish before "
+                        "%s[%s]: '%s' (%s) is %s; waiting up to %d s from acceptance before "
                         "stopping it to free the card", self.ENGINE, self.alias, holder.alias,
-                        holder.ENGINE, wait_s,
+                        holder.ENGINE, state if stopping else "busy", request.wait_s,
                     )
-                await asyncio.sleep(min(_SWAP_POLL_S, wait_s - waited))
+                request.says_it_waits()
+                await asyncio.sleep(min(_SWAP_POLL_S, request.give_up_at - now))
             holder._begin_swap_drain(self)  # no await since the last check above
-            done = False
-            try:
-                await stop_by_hand(holder)
-                done = True
-            finally:
-                if not done:
-                    holder._end_swap_drain()
-            self._note_swap(holder)
-        # Out of rounds: `_claim_card` names whoever holds the card now.
+            request.says_it_waits()
+            await self._wait_for_the_stop(holder, request)
+        if self._blocking_holder() is not None:
+            # Out of rounds: `_claim_card` names whoever holds the card now. FIFO is what closes
+            # the ping-pong, so reaching this means a holder keeps coming back past the line.
+            logger.warning(
+                "%s[%s]: the safety net of %d holders swapped out for one start was reached; "
+                "'%s' holds the card now", self.ENGINE, self.alias, _MAX_SWAP_ROUNDS,
+                self._blocking_holder()[0].alias,
+            )
 
-    def _note_swap(self, holder: "LlamaServerSupervisor") -> None:
+    async def _wait_for_the_stop(self, holder: "LlamaServerSupervisor", request: _QueuedRequest) -> None:
+        """The stop of a marked holder, as its own task, and this request's wait for it, bounded
+        by what is left of its deadline (decisions 2 and 3). The remainder is not `drain`'s
+        timeout, which reads a timeout as how long to wait before it stops the child anyway; by
+        rule 2 nothing is in flight here, and a stop is never hurried. So a request that runs out
+        of time, is cancelled or is taken out leaves the stop running to its end, and that stop
+        clears the mark."""
+        stop = asyncio.ensure_future(self._stop_for_the_swap(holder, request))
+        _SWAP_STOPS.add(stop)
+        stop.add_done_callback(_SWAP_STOPS.discard)
+        # Retrieved here too, for the request that left before it ended.
+        stop.add_done_callback(lambda task: task.cancelled() or task.exception())
+        while not stop.done():
+            request.check_still_in_line()
+            if _swap_clock() >= request.stop_bound:
+                ran_out = (request.stop_limit() if request.came_late
+                           else f"the wait of {request.wait_s} s (Settings: Wait for a busy holder)")
+                raise CardQueueRefusal(
+                    f"{self.ENGINE}[{self.alias}] cannot load: '{holder.alias}' is already stopping to "
+                    f"free the card for it, and {ran_out} ran out. The stop goes on, and the card goes "
+                    "to the next in line.",
+                    holder.alias, holder.ENGINE,
+                )
+            await asyncio.wait({stop}, timeout=_SWAP_POLL_S)
+        stop.result()
+
+    async def _stop_for_the_swap(self, holder: "LlamaServerSupervisor", request: _QueuedRequest) -> None:
+        """`stop_by_hand`, and the mark gone however it ended: a stop that failed leaves the holder
+        serving, and a retired one closed but marked for nobody. The swap is said here, as it is
+        done whoever is still waiting for it."""
+        try:
+            await stop_by_hand(holder)
+        except BaseException:
+            holder._end_swap_drain()
+            raise
+        holder._swap_for = None
+        self._note_swap(holder, gave_up=not request.in_line())
+
+    def _note_swap(self, holder: "LlamaServerSupervisor", gave_up: bool = False) -> None:
         """Say a swap happened: the INFO line, `last_swap`, one toast. Nothing awaits
-        here, so the card is claimed in the stretch that follows."""
+        here, so the card is claimed in the stretch that follows. `gave_up`: the request it was
+        for left during the stop, which ran to its end, and a stopped Strata's parked
+        conversations are gone all the same, so it is said in those words."""
         global _LAST_SWAP
         dropped = holder.DROPS_PARKED_ON_STOP
         tail = "; its parked conversations are dropped" if dropped else ""
-        message = f"swapped '{holder.alias}' out for '{self.alias}'{tail}"
+        message = (f"stopped '{holder.alias}' to free the card for '{self.alias}', which stopped waiting{tail}"
+                   if gave_up else f"swapped '{holder.alias}' out for '{self.alias}'{tail}")
         logger.info("%s", message)
         _LAST_SWAP = {
             "from": holder.alias, "to": self.alias,
@@ -1635,15 +2107,26 @@ class LlamaServerSupervisor:
 
     @on_the_owner_loop
     async def ensure_running(self) -> Dict[str, Any]:
-        """The server is up and its /props are returned; starts it if needed.
+        """The server is up and its /props are returned; starts it if needed, in its turn at
+        the card (ADR-044, amendment 2026-11-02, the card queue, rule 3)."""
+        request = await self._wait_in_the_card_queue()
+        try:
+            props = await self._start_if_needed(request)
+        except BaseException:
+            if request is not None:
+                request.leaves()
+            raise
+        if request is not None:
+            request.passes()
+        return props
+
+    async def _start_if_needed(self, request: Optional[_QueuedRequest]) -> Dict[str, Any]:
+        """What `ensure_running` does in its turn; each engine has its own (the Strata override).
 
         A cache type the alias set explicitly is started once, as configured.
         Without one, the KV ladder in `_launch_auto_kv` picks the rung that
         fits the free VRAM the card has right now."""
-        if self._swap_for is not None:
-            # Refused at once, not queued behind the stop that is freeing the card.
-            raise self._draining_error()
-        async with self._start_lock:
+        async with self._start_lock_for(request):
             if self._draining:
                 raise self._draining_error()
             if self._proc and self._proc.returncode is None and self.props:
@@ -1676,12 +2159,14 @@ class LlamaServerSupervisor:
                     binary = plan["start"] / server_binary_name()
             if self._draining:
                 raise self._draining_error()
-            await self._clear_unfinished_start()
-            await self._await_predecessor()
+            await self._within(request, self._clear_unfinished_start())
+            await self._within(request, self._await_predecessor())
             # Before the ladder: its free-VRAM refusal would otherwise name the
             # model's size instead of the engine that holds the card.
-            await self._free_the_card()
+            await self._free_the_card(request)
             self._claim_card()
+            if request is not None:
+                request.passes()  # in the stretch of the claim: the next place reads it as busy
             try:
                 self.port = self.port or _free_port()
 

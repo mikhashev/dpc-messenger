@@ -43,6 +43,12 @@ describe('chatHasTurnOrWaits', () => {
         expect(chatHasTurnOrWaits(states('agent_001'), 'agent_001')).toBe(true);
     });
 
+    it('sees a turn waiting in the queue for the card, which emits nothing either', () => {
+        const waiting = states('agent_001');
+        waiting.agent_001.turn!.wait_reason = 'card_queue';
+        expect(chatHasTurnOrWaits(waiting, 'agent_001')).toBe(true);
+    });
+
     it('sees the chat waiting while the agent works in another one', () => {
         expect(chatHasTurnOrWaits(states('telegram-5', ['agent_001']), 'agent_001')).toBe(true);
     });

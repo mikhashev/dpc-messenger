@@ -128,7 +128,14 @@ from .dpc_agent.pricing import get_billing_model, price_call, vendor_ceiling_cur
 from .firewall import ServingLists
 from .guest_vendor_quota import guest_vendor_quota_refusal
 from .llm_manager import accepts_reasoning_effort, entry_point_for, flatten_messages
-from .managers.llama_server_supervisor import card_held_for, note_caller_call, runs_on_a_local_engine
+from .managers.llama_server_supervisor import (
+    CardQueueRefusal,
+    card_held_for,
+    card_queue_refusal_in,
+    note_caller_call,
+    runs_on_a_local_engine,
+    swap_policy,
+)
 from .node_ledger import (
     ENGINE_FIELDS,
     TARIFF_FIELDS,
@@ -993,33 +1000,50 @@ class Gateway:
                                     messages=messages, system=system, tools=tools, on_chunk=on_chunk,
                                     images=images, reasoning_effort=reasoning_effort)
 
-        timeout = float(self._core.settings.get_remote_inference_timeout())
-        try:
-            await asyncio.wait_for(self._inference_lock.acquire(), timeout=timeout)
-        except asyncio.TimeoutError:
-            raise GatewayError(
-                503,
-                f"the card is busy: model '{alias}' did not become free within {timeout:.0f}s "
-                "([connection] remote_inference_timeout)",
-                "card_busy",
-            )
-        # The call stands on its local alias until it is answered, and a served one leaves
-        # the client's window behind it (ADR-044, the card queue, rules 1 and 6). Inside the
-        # semaphore until the queue's order lands (rule 8): the start happens in here, so a
-        # hold taken before the wait would have that start waiting for a client that waits
-        # for this semaphore. A client waiting here stands on nothing, as a turn at the run
-        # gate does.
+        # The call stands on its local alias from acceptance until it is answered, and a served
+        # one leaves the client's window behind it (ADR-044, the card queue, rules 1 and 6). Its
+        # order is the card queue, then the semaphore, then the call (rule 8), so a client does
+        # not wait for the card while it sits on the semaphore a peer's next call needs. Peers
+        # never wait in that queue, so nothing on the semaphore waits for anything behind it.
         local_alias = alias if runs_on_a_local_engine(providers[alias]) else None
-        try:
-            async with card_held_for(local_alias, "accepted_request"):
+        async with card_held_for(local_alias, "accepted_request", caller=caller):
+            if local_alias is not None and swap_policy()[0]:
+                await self._wait_for_the_card(alias, providers[alias])
+            timeout = float(self._core.settings.get_remote_inference_timeout())
+            try:
+                await asyncio.wait_for(self._inference_lock.acquire(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise GatewayError(
+                    503,
+                    f"the card is busy: model '{alias}' did not become free within {timeout:.0f}s "
+                    "([connection] remote_inference_timeout)",
+                    "card_busy",
+                )
+            try:
                 completion = await self._call(alias, owner, prompt, ledger, caller, request_id,
                                               messages=messages, system=system, tools=tools, on_chunk=on_chunk,
                                               images=images, reasoning_effort=reasoning_effort)
                 if local_alias is not None:
                     note_caller_call(local_alias, caller)
                 return completion
-        finally:
-            self._inference_lock.release()
+            finally:
+                self._inference_lock.release()
+
+    async def _wait_for_the_card(self, alias: str, provider: Any) -> None:
+        """The alias on the card and this call through its queue, before the semaphore (rule 8).
+        A start that fails here says what it says inside `_call`; a refusal of the queue is the
+        503 of a state that ends by itself (rule 15), not an upstream failure."""
+        try:
+            await provider.supervisor.ensure_running()
+        except CardQueueRefusal as e:
+            raise self._provider_unavailable(alias, e)
+        except Exception as e:
+            logger.warning("Gateway start of '%s' failed: %s", alias, e)
+            raise GatewayError(502, f"provider '{alias}' failed: {e}", "upstream_error")
+
+    @staticmethod
+    def _provider_unavailable(alias: str, refusal: CardQueueRefusal) -> GatewayError:
+        return GatewayError(503, f"model '{alias}' is refused: {refusal}", "provider_unavailable")
 
     def _refuse_an_unpriced_vendor_alias(self, alias: str, provider: Any) -> str:
         """The currency a vendor alias's ceiling is counted in; an alias this
@@ -1218,6 +1242,10 @@ class Gateway:
                 )
         except Exception as e:
             logger.warning("Gateway call on '%s' failed: %s", alias, e)
+            refusal = card_queue_refusal_in(e)
+            if refusal is not None:
+                # The child went away while the client sat on the semaphore (rule 15).
+                raise self._provider_unavailable(alias, refusal)
             raise GatewayError(502, f"provider '{alias}' failed: {e}", "upstream_error")
         duration_s = time.monotonic() - clock
 

@@ -317,6 +317,8 @@ class StrataProvider(LlamaServerProvider):
             held = sup._card_held_error()
             if held is None:
                 return None
+            if isinstance(held, _base.CardQueueRefusal):
+                return f"{not_started}: a request on this node is waiting for the card"
             return f"{not_started}: the card is held by {held.holder_engine} alias '{held.holder_alias}'"
 
         refusal = card_refusal()

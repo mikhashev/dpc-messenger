@@ -8,7 +8,7 @@
 /** A turn with no event from its agent for this long is shown unconfirmed, not working. */
 export const TURN_UNCONFIRMED_AFTER_S = 120;
 
-export type TurnWaitReason = 'model_call' | 'approval';
+export type TurnWaitReason = 'model_call' | 'approval' | 'card_queue';
 export type WaitingWaitReason = 'other_chat' | 'room_busy';
 
 export interface AgentTurn {
@@ -151,10 +151,11 @@ export function since(iso: string | null | undefined, nowMs: number): string {
 // The phrases the waiting chat's line and the Agent map share, so the two never
 // say the same state in two wordings.
 
-/** What a turn's wait_reason says: `waiting for the model`, `waiting for an approval`, or null. */
+/** What a turn's wait_reason says: `waiting for the model`, `waiting for an approval`, `waiting for the card`, or null. */
 export function turnWaitPhrase(reason: TurnWaitReason | null | undefined): string | null {
     if (reason === 'model_call') return 'waiting for the model';
     if (reason === 'approval') return 'waiting for an approval';
+    if (reason === 'card_queue') return 'waiting for the card';
     return null;
 }
 

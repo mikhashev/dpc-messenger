@@ -1360,8 +1360,13 @@ class StrataSupervisor(LlamaServerSupervisor):
             f.get("log_tail"),
         )
 
-    @_base.on_the_owner_loop
-    async def ensure_running(self) -> Dict[str, Any]:
+    async def _wait_in_the_card_queue(self):
+        """A latched engine failure is refused at once: no wait in line ends it (ADR-044 point 3)."""
+        if self.failure is not None:
+            raise self._refusal()
+        return await super()._wait_in_the_card_queue()
+
+    async def _start_if_needed(self, request) -> Dict[str, Any]:
         """The launcher is up and its /props are returned; started if needed.
 
         Overrides the inherited one, which relaunches whenever the child's
@@ -1373,10 +1378,7 @@ class StrataSupervisor(LlamaServerSupervisor):
         died inside its own start is that start's failure, not a death of the
         engine the next caller asks for (2026-10-22: a stale exit from 09:16 was
         charged to a peer's start at 10:16)."""
-        if self._swap_for is not None:
-            # Refused at once, not queued behind the stop that is freeing the card.
-            raise self._draining_error()
-        async with self._start_lock:
+        async with self._start_lock_for(request):
             if self.failure is not None:
                 raise self._refusal()
             if self._draining:
@@ -1440,10 +1442,12 @@ class StrataSupervisor(LlamaServerSupervisor):
                     self._pin_root = plan["start"]
                 if self._draining:
                     raise self._draining_error()
-            await self._clear_unfinished_start()
-            await self._await_predecessor()
-            await self._free_the_card()
+            await self._within(request, self._clear_unfinished_start())
+            await self._within(request, self._await_predecessor())
+            await self._free_the_card(request)
             self._claim_card()
+            if request is not None:
+                request.passes()  # in the stretch of the claim: the next place reads it as busy
             try:
                 if install_here:
                     # No consent service bound: installed in a thread, and only now. The

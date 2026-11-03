@@ -36,7 +36,13 @@ from .tool_ledger import record_attempt, sweep_unfinished
 from dpc_protocol.protocol import PeerRefused
 
 from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading, _llm_manager_for_agent, local_alias_of
-from ..managers.llama_server_supervisor import card_hold_follows, carrying_card_hold, current_card_hold
+from ..managers.llama_server_supervisor import (
+    TakenOutOfTheCardQueue,
+    card_hold_follows,
+    card_queue_refusal_in,
+    carrying_card_hold,
+    current_card_hold,
+)
 from ..process_registry import SpawnOrigin, get_registry, spawn_origin
 from .run_gate import note_turn
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
@@ -1884,6 +1890,27 @@ async def run_llm_loop(
                 llm_trace["turn_end"] = "refused"
                 return notice, accumulated_usage, llm_trace
             except Exception as e:
+                card_refusal = card_queue_refusal_in(e)
+                if isinstance(card_refusal, TakenOutOfTheCardQueue):
+                    # A first Stop on a turn in the queue for the card (ADR-044, the card queue,
+                    # rule 12). No model call was made and the card is not to be had, so no
+                    # closing call is asked for either.
+                    log.info("Agent stopped by user in the queue for the card, round %d", round_idx)
+                    llm_trace["stopped_by_user"] = True
+                    llm_trace["turn_end"] = _user_stop_end(kill_event)
+                    llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
+                    return (
+                        f"⚠️ Stopped by user: taken out of the queue for the card in round {round_idx} "
+                        f"(no model call was made).",
+                        accumulated_usage, llm_trace,
+                    )
+                if card_refusal is not None:
+                    # No model failed, so no "LLM error" and no traceback. `failed` is the accepted
+                    # word (ADR-044, the card queue): in a group that keeps this text, which names
+                    # the owner's agents and chats, off the post, as `refused` would not.
+                    log.warning("Round %d ended on the card queue's refusal: %s", round_idx, card_refusal)
+                    llm_trace["turn_end"] = "failed"
+                    return f"⚠️ {card_refusal}", accumulated_usage, llm_trace
                 log.error(f"LLM error: {e}", exc_info=True)
                 llm_trace["turn_end"] = "failed"
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace

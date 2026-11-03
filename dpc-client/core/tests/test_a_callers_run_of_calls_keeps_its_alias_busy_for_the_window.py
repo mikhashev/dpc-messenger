@@ -1,5 +1,5 @@
 """A caller's run of calls keeps its alias busy for the window (ADR-044, amendment 2026-11-02,
-the card queue: rule 6 and the door half of rule 1; no queue yet).
+the card queue: rule 6 and the door half of rule 1).
 
 A peer's and a gateway client's calls arrive one by one and DPC cannot see where their loop
 ends, so a holder counts as busy for `[local_engines] caller_idle_s` seconds after the last one.
@@ -490,12 +490,11 @@ class TestAGatewayClientsRunOfCalls:
         _swapped(F, S)
 
     @pytest.mark.asyncio
-    async def test_a_client_waiting_on_the_semaphore_stands_on_nothing_until_the_queue_lands(
+    async def test_a_client_waiting_on_the_semaphore_stands_on_its_alias_from_acceptance(
         self, tmp_path, clock,
     ):
-        # The order against the semaphore is rule 8's, for the queue commit. Until then a start
-        # happens inside it, so a hold taken outside it would make a cycle: the start waits for the
-        # alias, the alias's client waits for the semaphore the start is sitting in.
+        # Turned over by rule 8: the hold moved out to acceptance when the start moved out of the
+        # semaphore, so the cycle it used to make is gone. It read "stands on nothing".
         _f, _s, engines = _pair(tmp_path)
         lock = asyncio.Semaphore(1)
         gateway = _gateway(tmp_path, engines, inference_lock=lock)
@@ -503,7 +502,7 @@ class TestAGatewayClientsRunOfCalls:
         call = asyncio.create_task(gateway.complete(F, "ping"))
         try:
             await asyncio.sleep(0.02)
-            assert not call.done() and _held() == {}
+            assert not call.done() and _held() == {F: 1}
             lock.release()
             assert (await asyncio.wait_for(call, 30)).text == "described"
         finally:
@@ -568,12 +567,14 @@ class TestAGatewayClientsRunOfCalls:
         assert base_mod._last_caller_call_at == {}
 
 
-class TestUntilTheQueueLands:
+class TestTheGatewayAndAPeersWindow:
     @pytest.mark.asyncio
-    async def test_a_gateway_start_inside_the_semaphore_lets_a_peers_window_lapse(self, tmp_path, clock):
-        # Rule 8 names this and the queue commit closes it: the gateway waits for the card while
-        # holding the semaphore, so a peer's next call waits behind it and its window runs out.
-        # Written down so that that commit has a test to turn over.
+    async def test_a_gateway_start_outside_the_semaphore_lets_a_peers_next_call_renew_its_window(
+        self, tmp_path, clock,
+    ):
+        # Turned over by rule 8. It read "inside the semaphore lets a peer's window lapse": the
+        # gateway waited for the card sitting on the semaphore, and the peer's next call waited
+        # behind it until its window ran out. Now that call is served and renews the window.
         f, s, engines = _pair(tmp_path)
         coord, svc = _peer_door(tmp_path, engines)
         gateway = _gateway(tmp_path, engines, inference_lock=coord._peer_inference_lock)
@@ -589,16 +590,18 @@ class TestUntilTheQueueLands:
             assert await looks.next() is True
             clock.now = last + 110
             next_call = asyncio.create_task(_peer_call(coord, svc))
-            await asyncio.sleep(0.02)
-            assert not next_call.done()  # behind the semaphore
+            assert (await asyncio.wait_for(next_call, 5)).get("response") == "described"
 
-            clock.now = last + 121
+            clock.now = last + 121  # the first call's window has ended, the renewed one has not
+            assert await looks.next() is True
+            _untouched(f)
+            assert not on_s.done()
+
+            clock.now = last + 110 + 121
             assert (await asyncio.wait_for(on_s, 30)).text == "described"
-            answer = await asyncio.wait_for(next_call, 30)
         finally:
             await _finish(*[t for t in (on_s, next_call) if t is not None])
         _swapped(F, S)
-        assert answer["code"] == "provider_unavailable"
 
 
 class TestWithTheSwapOff:

@@ -8,7 +8,8 @@
 // the screen saw a turn in that chat (the `agent_turn_updated` snapshots and the
 // `list_agents` rows, held in `agentTurns`), not from the send. The snapshot is
 // sent on every change and a turn in one long model call is a turn with
-// `wait_reason: model_call`, so a model call that emits nothing does not look idle.
+// `wait_reason: model_call`, so a model call that emits nothing does not look idle;
+// nor does one waiting in the queue for the card, `wait_reason: card_queue`.
 //
 // Pure: coreService holds the pending command and reads the clock.
 

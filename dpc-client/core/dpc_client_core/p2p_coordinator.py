@@ -63,19 +63,20 @@ def _engine_unavailable_cause(error: BaseException, strata: bool) -> bool:
     """Whether a failed peer call failed on the local engine being unavailable.
 
     For any local engine: the card is held by the other engine
-    (`CardHeldError`, ADR-044 point 4), its pin is not installed and a peer's
-    call does not fetch it (`PinNotInstalledError`), or the Strata supervisor
+    (`CardHeldError`, ADR-044 point 4, which a refusal of the card queue is too), it is
+    stopping (`EngineDrainingError`, the card queue's rule 15), its pin is not installed and
+    a peer's call does not fetch it (`PinNotInstalledError`), or the Strata supervisor
     refused the peer itself (`PeerCallRefused`, which `PeerStartRefused` is). For a Strata
     alias (`strata` true) also an HTTP 503 from its launcher. Read through the
     provider's `RuntimeError(...) from e` wrap and the router's above it."""
-    from .managers.llama_server_supervisor import CardHeldError, PinNotInstalledError
+    from .managers.llama_server_supervisor import CardHeldError, EngineDrainingError, PinNotInstalledError
     from .managers.strata_supervisor import PeerCallRefused
 
     seen = error
     for _ in range(5):
         if seen is None:
             return False
-        if isinstance(seen, (CardHeldError, PinNotInstalledError, PeerCallRefused)):
+        if isinstance(seen, (CardHeldError, EngineDrainingError, PinNotInstalledError, PeerCallRefused)):
             return True
         if strata:
             code = getattr(seen, "status_code", None)

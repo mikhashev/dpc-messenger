@@ -41,7 +41,7 @@ from ..managers import llama_server_supervisor as _llama_server_supervisor_modul
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
 from ..managers.llama_server_supervisor import CardHeldError, LlamaServerSupervisor, PinNotInstalledError, card_holders
 from ..managers.llama_server_supervisor import gguf_effort_dictionary, gguf_integer_keys
-from ..managers.llama_server_supervisor import on_the_owner_loop, stop_by_hand
+from ..managers.llama_server_supervisor import on_the_owner_loop, stop_by_hand, take_card_queue_place
 
 logger = logging.getLogger(__name__)
 
@@ -1403,7 +1403,10 @@ async def stop_local_engine(alias: str, timeout: Optional[float] = None) -> bool
     in progress finishes first rather than spawning after the stop. `timeout=None`
     lets a running generation finish, as a settings save does. The alias stays
     configured: its next call starts the child again, so a switch reassigns the
-    agent before stopping. False when the alias has no supervisor."""
+    agent before stopping. A place the alias has in the queue for the card goes first
+    (ADR-044, the card queue, rule 12): a first place holds the start lock while it
+    waits for the holder. False when the alias has no supervisor."""
+    take_card_queue_place(alias)
     supervisor = _ACTIVE_SUPERVISORS.get(alias)
     retired = supervisor is None
     if retired:

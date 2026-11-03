@@ -4,13 +4,15 @@ An owner's start of a local alias that an excluding card holder blocks stops the
 by the Stop engine command's path and starts the new one, when `swap_when_idle` is on and
 the holder is idle or finishes within `swap_wait_s`; a busy holder is not marked and serves
 on (the card queue's rule 2; the holds on an alias are in
-`test_a_request_holds_the_card_from_its_first_round_to_its_last.py`). A peer's call never
+`test_a_request_holds_the_card_from_its_first_round_to_its_last.py`, and the queue in
+`test_requests_wanting_the_card_wait_in_one_line_and_nothing_is_forced.py`). A peer's call never
 swaps, and with the setting off the refusal is today's. Real supervisors and their real `ensure_running`;
 the child, the health and props reads are faked at the supervisors' own seams, as in
 `test_one_local_engine_holds_the_card.py`. Every home is under tmp_path.
 """
 
 import asyncio
+import contextvars
 import logging
 from types import SimpleNamespace
 
@@ -116,12 +118,17 @@ class TestWhereTheRefusalStaysAsToday:
         _holder_untouched(holder)
 
     @pytest.mark.asyncio
-    async def test_a_holder_already_stopping_for_some_other_reason_is_not_swapped(self, tmp_path):
+    async def test_a_holder_already_stopping_for_some_other_reason_is_waited_for_and_never_marked(
+        self, tmp_path, settings,
+    ):
+        # The card queue's decision 1 replaced the refusal this test used to hold: the start takes
+        # a place and waits, and only its own deadline ends that, with the holder's state named.
+        settings.set_local_engine_swap(True, 1)
         holder, new = await _running_pair(tmp_path, "llama")
         holder._draining = True  # a settings save retiring it, say
 
         with pytest.raises(CardHeldError, match=r"'qwen27' \(draining\)"):
-            await new.ensure_running()
+            await asyncio.wait_for(new.ensure_running(), 10)
         assert holder._swap_for is None
 
 
@@ -233,18 +240,21 @@ class TestABusyHolder:
         settings.set_local_engine_swap(True, 60)
         holder, new = await _running_pair(tmp_path, "llama")
         slot = holder.call_slot()  # a generation in flight
-        start = asyncio.ensure_future(new.ensure_running())
-        await asyncio.sleep(0.05)
+        # A request that was there first; one accepted later waits behind the place (rule 4).
+        async with base_mod.card_held_for(holder.alias, "accepted_request", conversation_id="c"):
+            # A request of its own: a task made here would inherit this hold and be taken for it.
+            start = asyncio.get_running_loop().create_task(new.ensure_running(), context=contextvars.Context())
+            await asyncio.sleep(0.05)
 
-        assert not start.done()
-        assert holder._draining is False and holder._swap_for is None
-        assert await holder.ensure_running() == {"total_slots": 1}
-        second = holder.call_slot()
-        assert holder._in_flight == 2, "it serves what it has"
-        assert holder._proc.returncode is None, "the running generation is not cut"
+            assert not start.done()
+            assert holder._draining is False and holder._swap_for is None
+            assert await holder.ensure_running() == {"total_slots": 1}
+            second = holder.call_slot()
+            assert holder._in_flight == 2, "it serves what it has"
+            assert holder._proc.returncode is None, "the running generation is not cut"
 
-        async with second:
-            pass
+            async with second:
+                pass
         async with slot:  # the generations end
             pass
         assert await asyncio.wait_for(start, 5) == {"total_slots": 1}
@@ -315,7 +325,11 @@ class TestABusyHolder:
 
 class TestTheRace:
     @pytest.mark.asyncio
-    async def test_a_request_arriving_between_the_check_and_the_stop_is_refused_not_run(self, tmp_path):
+    async def test_a_request_arriving_between_the_check_and_the_stop_waits_and_nothing_runs_on_the_stopping_engine(
+        self, tmp_path,
+    ):
+        # A call at the slot still meets the refusal; a start takes a place now (the card
+        # queue's rule 4 replaced "refused at once, not queued").
         holder, new = await _running_pair(tmp_path, "llama")
         in_the_stop = asyncio.Event()
         let_it_stop = asyncio.Event()
@@ -336,14 +350,15 @@ class TestTheRace:
         with pytest.raises(LlamaServerError) as call:
             holder.call_slot()
         assert str(call.value) == reason
-        with pytest.raises(LlamaServerError) as begun:
-            await holder.ensure_running()
-        assert str(begun.value) == reason
+        begun = asyncio.ensure_future(holder.ensure_running())
+        await asyncio.sleep(0.03)
+        assert not begun.done(), "behind the place of the start that is stopping it"
         assert holder._in_flight == 0 and holder._peak_in_flight == 0, "nothing ran on the stopping engine"
 
         let_it_stop.set()
         assert await asyncio.wait_for(start, 5) == {"total_slots": 1}
-        assert holder._proc is None
+        assert await asyncio.wait_for(begun, 5) == {"total_slots": 1}
+        assert holder._proc is not None and new._proc is None, "its turn came: the card went back"
 
     @pytest.mark.asyncio
     async def test_the_idle_check_and_the_drain_mark_have_no_await_between_them(self, tmp_path, monkeypatch):

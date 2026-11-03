@@ -21,8 +21,9 @@ What the screen reads is the agent's snapshot, `agent_turn_snapshot`:
   `conversation_id`, `conversation_title`, `waiting_since`, `wait_reason` and
   `held_by`.
 
-`wait_reason` is a closed list of four. On a turn only `model_call` (waiting for
-the model) or `approval` (waiting for a person's approval of a tool), or None.
+`wait_reason` is a closed list of five. On a turn only `model_call` (waiting for
+the model), `approval` (waiting for a person's approval of a tool) or `card_queue`
+(the model call waiting in the queue for the card, ADR-044), or None.
 On a waiting item only `other_chat` (the agent is in another chat's turn) or
 `room_busy` (the group's room lock is held by another agent's turn). `held_by`
 names the turn that holds the lock, one level and no further: its
@@ -55,7 +56,7 @@ from .utils import utc_now_iso
 log = logging.getLogger(__name__)
 
 #: The closed list. Which place carries which is in the module docstring.
-TURN_WAIT_REASONS = ("model_call", "approval")
+TURN_WAIT_REASONS = ("model_call", "approval", "card_queue")
 WAITING_WAIT_REASONS = ("other_chat", "room_busy")
 
 # The fields of `turn` as the snapshot gives them; anything else on the record
@@ -466,7 +467,8 @@ def note_turn(**fields: Any) -> None:
 @contextlib.contextmanager
 def turn_waits_for(reason: str, *, gate: Any = None,
                    conversation_id: Optional[str] = None, **fields: Any) -> Iterator[None]:
-    """The turn's `wait_reason` is `reason` for the duration, then None again.
+    """The turn's `wait_reason` is `reason` for the duration, then what it was before:
+    None, or `model_call` for a wait inside the model call (`card_queue`).
 
     Inside the run's own task the gate is found by itself. A tool waiting on
     an executor thread passes its agent's `gate` and the `conversation_id` it
@@ -483,7 +485,9 @@ def turn_waits_for(reason: str, *, gate: Any = None,
     if not isinstance(gate, RunGate):
         yield
         return
+    before = None
     if turn is not None and gate._on_loop_thread():
+        before = turn.get("wait_reason")
         gate._apply(None, None, dict(fields, wait_reason=reason), turn)
     else:
         gate.update_turn(conversation_id=conversation_id, wait_reason=reason, **fields)
@@ -491,7 +495,7 @@ def turn_waits_for(reason: str, *, gate: Any = None,
         yield
     finally:
         if turn is not None and gate._on_loop_thread():
-            gate._apply(None, ("wait_reason", reason), {"wait_reason": None}, turn)
+            gate._apply(None, ("wait_reason", reason), {"wait_reason": before}, turn)
         else:
             gate.update_turn(conversation_id=conversation_id,
                              only_if=("wait_reason", reason), wait_reason=None)
