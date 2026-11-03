@@ -348,7 +348,7 @@ def _menu_row(provider, alias="qwen"):
     from dpc_client_core.service import CoreService
 
     stub = SimpleNamespace(
-        llm_manager=SimpleNamespace(lookup_context_window=lambda _model: None),
+        llm_manager=SimpleNamespace(alias_context_window=lambda alias: None),
         _provider_supports_voice=lambda _p: False,
     )
     return CoreService.build_p2p_provider_info(stub, alias, provider)

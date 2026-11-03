@@ -478,9 +478,9 @@ tests use synthetic records only.
     harness stopped, not a failure of either arm. `--task-timeout-minutes`
     raises it.
   - *The window comes from the alias.* Without `context_window` on the copied
-    alias the manager falls back to 4096 tokens for a model it does not know
-    (`LLMManager.get_context_window`), and the compaction trigger and session
-    limit would follow it in silence. The dry run refuses such an alias on every
+    alias the window of a model nobody has a size for is unknown
+    (`LLMManager.alias_context_window`), and the compaction trigger and session
+    limit would run on the loop's default in silence. The dry run refuses such an alias on every
     tier, and a long-tier run refuses it before loading anything.
 - The predecessor `dpc-client/core/tests/perf/run_reasoning_carry_ab.py` stays
   until this has run; its metric code lives on in `loop/round_metrics.py`.

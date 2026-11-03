@@ -146,7 +146,7 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # written explicitly (CACHE_ADMISSION_FLAGS).
     **{key: default for key, (_flag, default, _hi) in CACHE_ADMISSION_FLAGS.items()},
     # The server's window (`--max-context`), not the agent's: that one is
-    # `context_window`, a config field nothing derives.
+    # `context_window`, a config field nothing derives; unset, the engine answers.
     "max_context": None,
     # `--resident-budget-gib` (GiB of host RAM the engine may pin for the experts
     # the GPU cache does not hold) and `--vram-reserve-mib` (VRAM left free for

@@ -47,7 +47,7 @@
     currentContextHash: string;
     aiChats: Writable<Map<string, any>>;
     onSetChatLoading: (chatId: string, loading: boolean) => void;
-    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextBreakdown?: Array<{name: string, tokens: number}> | null }) => void;
+    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; windowUnknown?: boolean; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextBreakdown?: Array<{name: string, tokens: number}> | null }) => void;
     onUpdateContextBreakdown: (chatId: string, breakdown: Array<{name: string, tokens: number}>) => void;
     onMarkContextSent: (chatId: string, hash: string) => void;
     onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
@@ -414,10 +414,11 @@
           });
 
           // Update token usage map with data from response (Phase 2)
-          if (message.status === 'OK' && message.payload.tokens_used !== undefined && message.payload.token_limit) {
+          if (message.status === 'OK' && message.payload.tokens_used !== undefined && message.payload.token_limit !== undefined) {
             onUpdateTokenUsage(chatId, {
               used: message.payload.tokens_used,
               limit: message.payload.token_limit,
+              windowUnknown: message.payload.token_limit === 0,
               historyTokens: message.payload.history_tokens ?? 0,
               tokensAfterLastResponse: message.payload.tokens_after_last_response ?? 0,
               tokensAfterLastResponseAt: message.payload.tokens_after_last_response_at ?? null,

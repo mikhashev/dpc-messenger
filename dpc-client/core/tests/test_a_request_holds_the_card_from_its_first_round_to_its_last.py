@@ -154,9 +154,6 @@ class _Manager:
         self.providers = providers
         self.default_provider = default_provider
 
-    def get_context_window(self, model):
-        return 128000
-
     def alias_context_window(self, alias):
         return 128000
 

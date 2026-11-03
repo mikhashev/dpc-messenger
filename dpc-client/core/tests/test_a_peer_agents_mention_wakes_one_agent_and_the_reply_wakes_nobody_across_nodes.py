@@ -94,7 +94,7 @@ class _Sender:
         self._processed_message_ids = set()
         self._max_processed_ids = 1000
         self.monitor = _monitor(node_id, signer)
-        self.llm_manager = SimpleNamespace(get_context_window=lambda _: 128000,
+        self.llm_manager = SimpleNamespace(alias_context_window=lambda alias: 128000,
                                            get_active_model_name=lambda: "m")
 
     def get_group(self, group_id):

@@ -1102,7 +1102,8 @@ class P2PCoordinator:
                 tokens_used=result.get("tokens_used"),
                 prompt_tokens=result.get("prompt_tokens"),
                 response_tokens=result.get("response_tokens"),
-                model_max_tokens=result.get("model_max_tokens"),
+                # Optional on the wire; 0 here is "nobody knows", not a size.
+                model_max_tokens=result.get("model_max_tokens") or None,
                 model=actual_model,
                 provider=result.get("provider"),
                 thinking=result.get("thinking"),

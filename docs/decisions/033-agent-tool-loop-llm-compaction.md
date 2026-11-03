@@ -193,7 +193,7 @@ losing data — before finally falling back to lossy prefix truncation.
 ## Open Questions — resolved
 
 - **Q1 (resolved, @CC):** the trigger denominator is the **agent's model context window**. In the
-  compaction loop it is resolved in `loop.py` from the agent's provider (`get_context_window(model)`)
+  compaction loop it is resolved in `loop.py` from the agent's provider (`alias_context_window(alias)`)
   when `config.json` leaves `context_window` null — local models do (fallback 204800); this mirrors
   `agent_manager._resolve_context_window()`. The numerator is the round's real prompt size
   (`last_prompt_tokens`), which the provider reports over the **full** prompt — system prompt,

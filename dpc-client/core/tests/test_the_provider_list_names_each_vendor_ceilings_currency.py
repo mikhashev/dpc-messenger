@@ -41,7 +41,7 @@ def _fake_service(providers: dict):
             vision_provider="",
             voice_provider="",
             agent_provider="",
-            get_context_window=lambda model: 4096,
+            alias_context_window=lambda alias: 4096,
         ),
         _provider_supports_voice=lambda provider: False,
     )

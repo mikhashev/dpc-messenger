@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from ..dpc_agent.agent import DpcAgent, AgentConfig
 from ..dpc_agent.run_gate import RunGate, StoppedWhileWaiting, _RUN_GATES, get_run_gate, hold, turn_title  # noqa: F401
 from ..providers.base import ModelNotCachedError
-from .llama_server_supervisor import leave_card_queue
+from .llama_server_supervisor import leave_card_queue, runs_on_a_local_engine
 from ..dpc_agent.utils import get_agent_root, ensure_agent_dirs, utc_now_iso
 from ..dpc_agent.events import get_event_emitter, EventType
 from ..conversation_monitor import ConversationMonitor, TURN_END_VALUES
@@ -1691,11 +1691,15 @@ class DpcAgentManager:
             window = llm_manager.alias_context_window(provider_alias)
             if window:
                 return window, None
+            if runs_on_a_local_engine(providers[provider_alias]):
+                return None, (f"The context window of '{provider_alias}' is not known: the alias sets no "
+                              "Context Window and its engine has not said, so this message was not sent. "
+                              "Set Context Window on the alias, or start its engine once in an AI chat.")
             return None, (f"The context window of '{provider_alias}' is not known: the alias sets no "
-                          "Context Window and its engine has not said, so this message was not sent. "
-                          "Set Context Window on the alias, or start its engine once in an AI chat.")
-        model = llm_manager.get_active_model_name()
-        return (llm_manager.get_context_window(model) if model else None), None
+                          "Context Window and its model is not one this node has a size for, so this "
+                          "message was not sent. Set Context Window on the alias.")
+        # No alias at all: nothing to measure on, and the call has nowhere to go either.
+        return None, None
 
     def _chat_alias(self, conversation_id: str) -> Optional[str]:
         return getattr(self, "_chat_aliases", {}).get(conversation_id)

@@ -85,7 +85,7 @@ def _service(tmp_path: Path, firewall: ContextFirewall, *, providers=None,
         firewall=firewall,
         llm_manager=SimpleNamespace(
             providers=providers if providers is not None else {LOCAL: _Provider("ollama", "gemma3:27b")},
-            lookup_context_window=lambda model: None,
+            alias_context_window=lambda alias: None,
         ),
         p2p_manager=SimpleNamespace(
             peers=dict(peers or {}),
@@ -560,10 +560,10 @@ PEER_WINDOW = 131072
 
 def _with_windows(tmp_path, *, local=LOCAL_WINDOW, peer=PEER_WINDOW):
     """The two halves of the menu with a window stated on each: this node
-    resolves its own through `lookup_context_window`, the peer states its own
+    resolves its own through `alias_context_window`, the peer states its own
     on the row it sent."""
     service = _with_a_proved_peer(tmp_path)
-    service.llm_manager.lookup_context_window = lambda model: local
+    service.llm_manager.alias_context_window = lambda alias: local
     service.peer_metadata = {PEER: {"name": "the Linux node", "providers": [
         {**row, **({"context_window": peer} if peer is not None else {})}
         for row in PEER_ROWS

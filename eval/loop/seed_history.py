@@ -367,7 +367,7 @@ class _NoModel:
     providers: Dict[str, Any] = {}
     token_count_manager = None
 
-    def get_context_window(self, model: str) -> int:  # pragma: no cover - not reached
+    def alias_context_window(self, alias: str) -> int:  # pragma: no cover - not reached
         return 0
 
 

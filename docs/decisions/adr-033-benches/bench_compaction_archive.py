@@ -98,7 +98,7 @@ async def main():
     if FLASH_ALIAS not in lm.providers:
         print(f"[FATAL] provider '{FLASH_ALIAS}' not loaded")
         return
-    win = lm.get_context_window(FLASH_MODEL)
+    win = lm.alias_context_window(FLASH_ALIAS)
 
     calls = load_rounds(ARCHIVE)
     round_ids = sorted({c["round"] for c in calls})

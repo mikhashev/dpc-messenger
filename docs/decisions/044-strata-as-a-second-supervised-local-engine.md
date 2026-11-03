@@ -171,7 +171,8 @@ card.** Every point is Mike's call, 2026-10-18.
    **not a default**, and the first supervised start uses a measured budget, never the
    on-disk Strata value. `--max-context` labelled as the **server** window. The agent's
    window is `context_window`, a config field nothing derives: for a `strata` alias it is
-   set to the conversation size parking was measured at, not to `--max-context`. Vision
+   set to the conversation size parking was measured at, not to `--max-context`; left
+   unset, the engine answers (amendment of 2026-11-03). Vision
    on/off; control vector on/off. A *model parameters* block of Strata's `/config` keys
    (sampling defaults, `reasoning_budget_tokens`, …) written into the start config and
    read back after start. Every other flag through `extra_args`. Read-only status from
@@ -875,3 +876,39 @@ position with no position field, as on **waiting**), and the holder is named by 
   `EngineDrainingError`, which `_engine_unavailable_cause` reads. At the gateway a draining refusal
   stays 502, which rule 15 does not name. `_who_stands_on` is only called for a request in the queue
   and a peer never is one, so agent and conversation ids do not reach a peer.
+
+## Amendment, 2026-11-03 — where an alias's window comes from
+
+Mike's order, 2026-11-02: when an agent's model is switched, everything must work. The case:
+an agent switched to a `strata` alias Add Provider had made from the model files folder
+answered its first message with a full context, 33,533 of 4,096 tokens, and called no model.
+The alias had no `context_window`, its model name was in no table, and the engine it would
+start held 131072. Zcode's review then found the refusal held only for local aliases, so the
+guess was removed everywhere. This note replaces what point 7 says of an unset field and
+rewrites nothing above.
+
+1. **One reader per alias.** `LLMManager.alias_context_window(alias)` answers, in this order:
+   the alias's own `context_window`; the engine behind it (`server_window`), which is the
+   running child's `n_ctx` from `/props`, else the start the alias would make (`--max-context`
+   for `strata`, `n_ctx` over the slots unless the pool is unified for `llamacpp_server`);
+   and, for an alias with no engine of its own, `MODEL_CONTEXT_WINDOWS`. A caller that holds
+   an alias asks here, because two aliases may serve one model name. A local alias never
+   reads the table: what its child was started with is known to no list of model names.
+2. **Point 7 stands for a value that is set.** The owner still sets `context_window` to the
+   conversation size parking was measured at, it wins over the engine, and nothing writes it.
+   Left unset, the engine answers, and `strataWindowHint` says so under the field.
+3. **A window nobody knows has no number.** The table's `default` row and
+   `get_context_window`, which answered 4096 for a model it did not know, are gone. An agent
+   turn is refused by a sentence naming the alias and the way out (`window_unknown`). A monitor
+   holds 0, the limit nothing measures against, so an AI chat goes to the model and the engine
+   decides. A display says "window not known" and shows no percentage. A `PROVIDERS_RESPONSE`
+   row carries `context_window: null`, as DPTP requires, a `/v1/models` row leaves the key out,
+   and `model_max_tokens` stays off the wire.
+4. **A number on disk is not a window.** `history.json`'s `token_limit` is what was true for
+   the alias and the code that wrote it. The header of an agent chat, an AI chat read back from
+   disk and a group read back from disk all read the alias; a chat its record sends to a peer
+   keeps the last reply's number until the next reply.
+
+Two named defaults stay and are not a window of this kind: the agent loop's 204800 for a run
+with no session behind it, and sleep's 128000 for the synthesis budget. Whether they should
+stand is the owner's question.

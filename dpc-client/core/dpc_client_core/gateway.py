@@ -840,16 +840,15 @@ class Gateway:
     def local_context_window(self, alias: str) -> Optional[int]:
         """What one conversation may occupy on one of this node's aliases.
 
-        `lookup_context_window(provider.model)`, the same resolution a
-        `PROVIDERS_RESPONSE` row is built from, so the menu row, the
-        `/v1/models` row and the peer's row cannot state three numbers. None
-        for an alias no provider answers for and for a model nothing knows.
+        `alias_context_window`, the same resolution a `PROVIDERS_RESPONSE` row is
+        built from, so the menu row, the `/v1/models` row and the peer's row
+        cannot state three numbers. None for an alias no provider answers for
+        and for a window nobody knows.
         """
         llm_manager = getattr(self._core, "llm_manager", None)
-        provider = (getattr(llm_manager, "providers", None) or {}).get(alias)
-        if provider is None:
+        if alias not in (getattr(llm_manager, "providers", None) or {}):
             return None
-        return llm_manager.lookup_context_window(provider.model)
+        return llm_manager.alias_context_window(alias)
 
     def max_image_bytes(self) -> int:
         """The most one image may weigh, decoded — `[vision] max_image_size_mb`.

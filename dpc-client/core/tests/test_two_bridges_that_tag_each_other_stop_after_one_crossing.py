@@ -94,7 +94,7 @@ class _Node:
         self._processed_message_ids = set()
         self._max_processed_ids = 1000
         self._group_agent_locks = {}
-        self.llm_manager = SimpleNamespace(get_context_window=lambda _: 128000,
+        self.llm_manager = SimpleNamespace(alias_context_window=lambda alias: 128000,
                                            get_active_model_name=lambda: "m")
         self.agents = {node_id: [f"ext:{tag}"], **{o: [f"ext:{t}"] for o, t in others.items()}}
         monitor = ConversationMonitor(

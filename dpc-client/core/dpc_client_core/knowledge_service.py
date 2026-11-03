@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
-from . import conversation_paths
+from . import ai_chats, conversation_paths
 from dpc_protocol.pcm_core import PCMCore
 
 logger = logging.getLogger(__name__)
@@ -497,15 +497,15 @@ class KnowledgeService:
                     except Exception:
                         pass
                 if not max_ctx:
-                    model = self.llm_manager.get_active_model_name()
-                    max_ctx = self.llm_manager.get_context_window(model) or 0
-                if max_ctx > 0:
-                    self.conversation_monitors[conversation_id].set_token_limit(max_ctx)
-                    logger.info("Group %s token_limit set to %d (max agent context)", conversation_id, max_ctx)
+                    max_ctx = self.llm_manager.alias_context_window(self.llm_manager.default_provider) or 0
+                # Unknown is 0: the number the history file remembers does not stay in its place.
+                self.conversation_monitors[conversation_id].set_token_limit(max_ctx)
+                logger.info("Group %s token_limit set to %d (max agent context)", conversation_id, max_ctx)
         elif self.conversation_monitors[conversation_id].persist_history and conversation_id.startswith("ai_"):
             # An AI chat keeps its history in its folder (2026-10-19). A monitor
             # born empty would overwrite that file with the first new message.
             self.conversation_monitors[conversation_id].load_history()
+            self._measure_ai_chat_on_its_alias(conversation_id)
 
         logger.info(
             "Created conversation monitor for %s with %d participant(s) "
@@ -516,6 +516,17 @@ class KnowledgeService:
         )
 
         return self.conversation_monitors[conversation_id]
+
+    def _measure_ai_chat_on_its_alias(self, conversation_id: str) -> None:
+        """The limit of an AI chat read back from disk: the window of the local alias its
+        record names, not the one its history file remembers. A chat its record sends to a
+        peer, or to an alias this node does not have, keeps the file's until a reply says."""
+        providers = getattr(self.llm_manager, "providers", None) or {}
+        record = ai_chats.read_record(conversation_id) or {}
+        alias = record.get("provider")
+        if alias in providers and not record.get("compute_host"):
+            self.conversation_monitors[conversation_id].set_token_limit(
+                self.llm_manager.alias_context_window(alias) or 0)
 
     # ─────────────────────────────────────────────────────────────
     # Knowledge commit voting flow

@@ -62,6 +62,7 @@
   type TokenUsage = {
     used: number;
     limit: number;
+    windowUnknown?: boolean;
     historyTokens?: number;
     tokensAfterLastResponse?: number;
     tokensAfterLastResponseAt?: string | null;
@@ -221,7 +222,7 @@
   });
   let estimatedUsage = $derived(estimateConversationUsage(effectiveTokenUsage, currentInput));
   let tokenWarningLevel = $derived(
-    !$aiChats.has(activeChatId)
+    !$aiChats.has(activeChatId) || currentTokenUsage.windowUnknown
       ? 'none'
       : estimatedUsage.percentage >= 1.0
         ? 'critical'
@@ -242,7 +243,8 @@
   let isTelegramChat = $derived(activeChatId.startsWith('telegram-'));
   let isActuallyAIChat = $derived($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-'));
   let isGroupChat = $derived(activeChatId.startsWith('group-'));
-  let isContextWindowFull = $derived(isActuallyAIChat && estimatedUsage.percentage >= 1.0);
+  // Measured against the default limit when the window is unknown: nothing to be full of.
+  let isContextWindowFull = $derived(isActuallyAIChat && !currentTokenUsage.windowUnknown && estimatedUsage.percentage >= 1.0);
 
   let localContextUpdated = $derived(
     currentContextHash && lastSentContextHash.get(activeChatId) !== currentContextHash

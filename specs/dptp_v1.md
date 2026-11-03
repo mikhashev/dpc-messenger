@@ -545,7 +545,7 @@ Returns the result of a remote inference request. When the request asked for `st
 - `tokens_used` (integer, optional): Total tokens consumed
 - `prompt_tokens` (integer, optional): Tokens in prompt, as the host's engine reported them where it reported any — its count is the one the host is billed on and the one that sees the chat template and an image's tokens — and as the host's own count over the prompt text otherwise
 - `response_tokens` (integer, optional): Tokens in response, from the same source as `prompt_tokens`; `output_includes_thinking` says what is inside it
-- `model_max_tokens` (integer, optional): Model's context window size
+- `model_max_tokens` (integer, optional): Context window of the alias that served the call; absent when the host does not know it, which a receiver reads as unknown and never as a size
 - `thinking` (string, optional): Thinking/reasoning content from models with extended reasoning (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
 - `thinking_tokens` (integer, optional): Tokens used for thinking/reasoning
 - `output_includes_thinking` (string, optional, v1.7+): Whether `response_tokens` already has `thinking_tokens` inside it — `includes`, `excludes` or `unknown` — as the node that produced the count knows it, so the requester can check the arithmetic on the numbers beside it rather than assume a convention. Absent from an older host, which the requester reads as `unknown`. Never sent on an error. Under `includes` the reasoning is inside the output count and never larger than it: `thinking_tokens <= response_tokens`. A count that breaks the invariant is an estimate that overflowed the total it sits inside, and a receiver writes the row with `thinking_tokens` clamped to `response_tokens` and `thinking_source` set to `estimated` rather than refusing a record of a call that was made.
@@ -795,8 +795,8 @@ Returns a list of AI providers available on the peer's system.
     predates the field may take image blocks beside tools to a path that drops the
     pictures without a word, and a guest must not send them there. Like `supports_tools`, an
     optimisation over the host's refusal (§3.4), not a permission
-  - `context_window` (integer or null, required): Context window in tokens; `null` when
-    the model is unknown to the sender, which a receiver must distinguish from a real size
+  - `context_window` (integer or null, required): Context window of this alias in tokens;
+    `null` when the sender does not know it, which a receiver must distinguish from a real size
   - `reasoning_words` (array of strings, optional): The reasoning-effort words this alias
     accepts — the words its provider can put on the wire, never a table the sender fell
     back to. Present when the sender read them from the model's own chat template, and

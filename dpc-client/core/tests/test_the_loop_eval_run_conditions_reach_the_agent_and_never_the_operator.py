@@ -100,7 +100,7 @@ class _FakeLLM:
         self.shut = False
         _FakeLLM.instances.append(self)
 
-    def get_context_window(self, model):
+    def alias_context_window(self, alias):
         return 215040
 
     async def query(self, *a, **k):

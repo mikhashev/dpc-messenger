@@ -228,9 +228,9 @@ def resolve_max_rounds(tier: str, rounds: Optional[int]) -> int:
 def require_context_window(entry: Dict[str, Any]) -> int:
     """Refuse an alias without `context_window`.
 
-    Without it the manager falls back to 4096 for a model it does not know
-    (`LLMManager.get_context_window`), and the long tier would run its
-    compaction trigger and session limit on that number in silence.
+    Without it the window of a model nobody has a size for is unknown
+    (`LLMManager.alias_context_window`), and the long tier would run its
+    compaction trigger and session limit on the loop's default in silence.
     """
     raw = entry.get("context_window")
     try:
@@ -287,7 +287,7 @@ def long_compaction_config(alias: str, mode: str, threshold: float) -> Dict[str,
     """The config.json a long-tier root is given (see `harness_agent_configs`).
 
     `provider_alias` without `context_window`, as in Johnny's config, so the loop
-    resolves the window itself through `get_context_window` — the production path
+    resolves the window itself through `alias_context_window` — the production path
     (`loop.py:1074-1097`). `mode="off"` leaves compaction disabled, which is the
     throwaway default: deterministic truncation of tool history after round 8.
     """
@@ -1119,7 +1119,7 @@ async def main_async(args) -> int:
     session_state = None
     timeout_s = None
     if long_tier:
-        window = llm.get_context_window(provider.model) if provider is not None else None
+        window = llm.alias_context_window(alias) if provider is not None else None
         session_state = {"tokens_limit": window} if window else None
         timeout_s = args.task_timeout_minutes * 60
 

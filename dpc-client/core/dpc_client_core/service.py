@@ -2824,7 +2824,8 @@ class CoreService:
                 "model": provider.model,
                 "type": provider.config.get("type", "unknown"),
                 "supports_vision": provider.supports_vision(),
-                "context_window": self.llm_manager.get_context_window(provider.model),
+                # None when nobody knows it.
+                "context_window": self.llm_manager.alias_context_window(alias),
             }
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)
@@ -2871,8 +2872,8 @@ class CoreService:
     ) -> Dict[str, Any]:
         """Single source for the provider dict sent to peers in PROVIDERS_RESPONSE.
 
-        context_window is None when the model is unknown locally, so peers can
-        distinguish "unknown" from a real window size.
+        context_window is this alias's, or None when nobody here knows it, so peers
+        can distinguish "unknown" from a real window size.
 
         reasoning_words/reasoning_default are absent unless this model's own
         template named them — same guard as _provider_rows, so that a fallback
@@ -2928,7 +2929,7 @@ class CoreService:
             "serves_images_with_tools": entry_point_for(
                 provider, tools=True, streaming=False, images=True,
             )[1] is not None,
-            "context_window": self.llm_manager.lookup_context_window(provider.model),
+            "context_window": self.llm_manager.alias_context_window(alias),
         }
 
         words, _ = declared_reasoning_words(provider)
@@ -6044,7 +6045,9 @@ class CoreService:
                         logger.info("Loaded %d of %d messages from disk for %s", len(messages), len(records), conversation_id)
                         token_stats = data.get("token_stats", {})
                         history_tokens = sum(len(msg.get("content", "") or "") for msg in records) // 4
-                        token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
+                        # Not the file's token_limit: it is the window of the alias and the
+                        # code that wrote it, and 0 here says nobody knows the window now.
+                        token_limit = self._resolve_agent_token_limit(conversation_id)
                         tokens_after_last_response = token_stats.get("tokens_after_last_response", 0)
                         tokens_after_last_response_at = token_stats.get("tokens_after_last_response_at")
                         return {
@@ -6145,8 +6148,7 @@ class CoreService:
                         history_tokens = sum(len(msg.get("content", "") or "") for msg in records) // 4
                         token_limit = 0
                         if hasattr(self, 'llm_manager') and self.llm_manager:
-                            model = self.llm_manager.get_active_model_name()
-                            token_limit = self.llm_manager.get_context_window(model) or 0
+                            token_limit = self.llm_manager.alias_context_window(self.llm_manager.default_provider) or 0
                         logger.info("Loaded %d of %d messages from disk for %s (%s)", len(messages), len(records), conversation_id, conv_dir.name)
                         return {
                             "status": "success",
@@ -6402,7 +6404,7 @@ class CoreService:
                     # Broadcast token limit so UI shows correct value after reset
                     monitor = self.knowledge_service._get_or_create_conversation_monitor(conversation_id)
                     token_usage = monitor.get_token_usage()
-                    token_limit = token_usage.get("token_limit", 0) or 128000
+                    token_limit = token_usage.get("token_limit", 0)
                     await self.local_api.broadcast_event("token_usage_updated", {
                         "conversation_id": conversation_id,
                         "tokens_used": 0,
@@ -6907,7 +6909,7 @@ class CoreService:
             history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
             monitor.set_token_count(history_tokens)
             token_usage = monitor.get_token_usage()
-            token_limit = token_usage.get("token_limit", 0) or 128000
+            token_limit = token_usage.get("token_limit", 0)
             await self.local_api.broadcast_event("token_usage_updated", {
                 "conversation_id": group_id,
                 "tokens_used": history_tokens,
@@ -7393,8 +7395,7 @@ class CoreService:
         token_usage = monitor.get_token_usage()
         token_limit = token_usage.get("token_limit", 0)
         if not token_limit:
-            token_limit = self.llm_manager.get_context_window(
-                self.llm_manager.get_active_model_name())
+            token_limit = self.llm_manager.alias_context_window(self.llm_manager.default_provider) or 0
         context_agent = ""
         worst = self._worst_group_agent_context(group_id)
         if worst:
@@ -9942,6 +9943,13 @@ class CoreService:
         # after a delete during the call that fetch makes a fresh one.
         history_monitor = monitor
 
+        # The alias this message goes to, not the number the monitor holds: that one is
+        # the previous alias's, or what the history file remembered. Unknown is 0, and
+        # nothing below measures against 0.
+        if not compute_host:
+            monitor.set_token_limit(
+                self.llm_manager.alias_context_window(provider or self.llm_manager.default_provider) or 0)
+
         # Phase 7: Check if context window is full (hard limit enforcement)
         if monitor.token_limit > 0:
             usage_percent = monitor.current_token_count / monitor.token_limit
@@ -10188,9 +10196,9 @@ class CoreService:
                 conversation_id = kwargs.get("conversation_id", "local_ai")
                 monitor = self._get_or_create_conversation_monitor(conversation_id)
 
-                # Set token limit based on model
+                # A peer may state no window: None is unknown here, and arithmetic reads the limit.
                 if "model_max_tokens" in result:
-                    monitor.set_token_limit(result["model_max_tokens"])
+                    monitor.set_token_limit(result["model_max_tokens"] or 0)
 
                 # Update token count
                 # IMPORTANT: Use set_token_count() with prompt_tokens, NOT update_token_count() with tokens_used!
@@ -10211,7 +10219,7 @@ class CoreService:
                 if monitor.should_suggest_extraction():
                     # Use the current model's max tokens (not the monitor's cached value)
                     # to ensure consistency with what the UI displays
-                    current_limit = result.get("model_max_tokens", monitor.token_limit)
+                    current_limit = result.get("model_max_tokens") or monitor.token_limit
                     current_usage_percent = monitor.current_token_count / current_limit if current_limit > 0 else 0.0
 
                     await self.local_api.broadcast_event("token_limit_warning", {
@@ -10229,7 +10237,7 @@ class CoreService:
 
                 # Include token info in response (send cumulative conversation tokens, not per-query)
                 response_payload["tokens_used"] = monitor.current_token_count  # Cumulative conversation tokens
-                response_payload["token_limit"] = result.get("model_max_tokens", 0)
+                response_payload["token_limit"] = result.get("model_max_tokens") or 0
                 response_payload["this_query_tokens"] = result["tokens_used"]  # Per-query tokens (for debugging)
                 response_payload["history_tokens"] = _history_tokens
                 response_payload["tokens_after_last_response"] = _tokens_after_last_response

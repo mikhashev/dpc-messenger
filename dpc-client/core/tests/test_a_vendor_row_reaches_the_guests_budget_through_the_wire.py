@@ -66,8 +66,7 @@ def _host_service(tmp_path: Path, *, tariff: bool):
         firewall=ContextFirewall(rules),
         llm_manager=SimpleNamespace(
             providers={OA: _OpenAICompatibleVendor()},
-            lookup_context_window=lambda model: None,
-            get_context_window=lambda model: None,
+            alias_context_window=lambda alias: None,
         ),
         _provider_supports_voice=lambda provider: False,
     )

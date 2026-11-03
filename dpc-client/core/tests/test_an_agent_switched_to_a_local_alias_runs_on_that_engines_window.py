@@ -3,8 +3,8 @@
 On 2026-11-02 agent Forge was switched in the Agent Configuration to a Strata alias
 Add Provider had made from the model files folder. Its first message answered
 "Context window full (33,533 / 4,096 tokens, 819%)" and no model was called. The alias
-had no `context_window`, its model name is in no table, and `get_context_window` answers
-4096 for a name it does not know. The engine that alias starts holds 131072.
+had no `context_window`, its model name is in no table, and `get_context_window` answered
+4096 for a name it did not know. The engine that alias starts holds 131072.
 
 Every test here drives the real switch (`AgentService.save_agent_model_config`), a real
 `LLMManager` loading a real `StrataProvider` from `providers.json`, the real manager and
@@ -327,16 +327,15 @@ def test_a_local_alias_never_reads_the_model_name_table(tmp_path, monkeypatch, h
 
     assert llm.lookup_context_window("my-gpt-4-finetune") is None
     assert llm.alias_context_window(ALIAS) is None
-    assert llm.get_context_window("my-gpt-4-finetune") == 0
 
 
-def test_a_name_nobody_serves_still_gets_the_table_and_its_default(tmp_path):
+def test_a_name_nobody_serves_still_gets_the_table_and_no_default(tmp_path):
     path = tmp_path / "providers.json"
     path.write_text(json.dumps({"providers": []}), encoding="utf-8")
     llm = LLMManager(path)
 
     assert llm.lookup_context_window("gpt-4o") == MODEL_CONTEXT_WINDOWS["gpt-4o"]
-    assert llm.get_context_window("no-such-model-here") == MODEL_CONTEXT_WINDOWS["default"]
+    assert llm.lookup_context_window("no-such-model-here") is None
 
 
 # --- Which alias is asked --------------------------------------------------------

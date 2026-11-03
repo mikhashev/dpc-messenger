@@ -98,8 +98,7 @@ def _menu_service(firewall, providers):
         firewall=firewall,
         llm_manager=SimpleNamespace(
             providers=providers,
-            lookup_context_window=lambda model: None,
-            get_context_window=lambda model: None,
+            alias_context_window=lambda alias: None,
         ),
         p2p_manager=SimpleNamespace(peers={}, node_id="dpc-node-" + "a" * 32,
                                     send_message_to_peer=AsyncMock()),

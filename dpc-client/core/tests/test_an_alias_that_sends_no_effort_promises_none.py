@@ -217,7 +217,7 @@ def test_a_silent_class_reports_no_word_on_its_usage_row(monkeypatch):
 def _menu_row(alias, provider):
     stub = SimpleNamespace(
         llm_manager=SimpleNamespace(providers={alias: provider},
-                                    lookup_context_window=lambda model: None),
+                                    alias_context_window=lambda alias: None),
         _provider_supports_voice=lambda p: False,
         firewall=None,
     )

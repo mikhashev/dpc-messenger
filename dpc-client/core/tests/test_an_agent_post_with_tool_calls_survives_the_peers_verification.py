@@ -113,7 +113,7 @@ class _Service:
 
     # Token-meter and mention plumbing after the broadcast; not under test.
     llm_manager = type("LLM", (), {
-        "get_context_window": lambda self, _: 128000,
+        "alias_context_window": lambda self, _: 128000,
         "get_active_model_name": lambda self: "m",
     })()
 

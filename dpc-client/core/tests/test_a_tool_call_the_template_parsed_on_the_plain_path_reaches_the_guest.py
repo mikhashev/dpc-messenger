@@ -166,7 +166,7 @@ async def test_a_strata_alias_serves_the_call_to_a_guest_through_the_hosts_query
     manager.provider_configs = {}
     manager.token_count_manager = None
     manager.count_tokens = lambda text, model: len(text or "") // 4
-    manager.get_context_window = lambda model: 200000
+    manager.alias_context_window = lambda alias: 200000
 
     async def _request(**kwargs):
         served = await manager.query(kwargs["prompt"], provider_alias="strata flash-next",

@@ -138,13 +138,13 @@
     {#if showThreeMetrics}
       <div class="token-row">
         <span class="token-label">Dialog</span>
-        <span class="token-value">{historyTokens.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {dialogAvailable.toLocaleString()}</span>
-        <span class="token-percentage" class:warning={dialogPercentWithInput >= 0.8}>({Math.round(dialogPercentWithInput * 100)}%)</span>
+        <span class="token-value">{historyTokens.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if}{#if !windowUnknown} / {dialogAvailable.toLocaleString()}{/if}</span>
+        <span class="token-percentage" class:warning={!windowUnknown && dialogPercentWithInput >= 0.8}>{#if !windowUnknown}({Math.round(dialogPercentWithInput * 100)}%){/if}</span>
       </div>
       <div class="token-row" title={agentsTooltip}>
         <span class="token-label">Total</span>
         <span class="token-value">{tokensAfterLastResponse.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {limitText}{#if contextAgent} — {contextAgent}{/if}</span>
-        <span class="token-percentage" class:warning={totalContextPercentWithInput >= 0.8}>({Math.round(totalContextPercentWithInput * 100)}%)</span>
+        <span class="token-percentage" class:warning={!windowUnknown && totalContextPercentWithInput >= 0.8}>{#if !windowUnknown}({Math.round(totalContextPercentWithInput * 100)}%){/if}</span>
       </div>
       <div class="token-row token-row--muted" title={staticTitle}>
         <span class="token-label">{nonDialogLabel(contextAgent, contextBreakdown)}</span>

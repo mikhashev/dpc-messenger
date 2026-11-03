@@ -40,7 +40,7 @@ class _ToolCalling(FakeProvider):
 class TestLookupContextWindow:
     def test_known_model_returns_value(self):
         lm = _llm_manager_with({})
-        known_model = next(k for k in MODEL_CONTEXT_WINDOWS if k != "default")
+        known_model = next(iter(MODEL_CONTEXT_WINDOWS))
         assert lm.lookup_context_window(known_model) == MODEL_CONTEXT_WINDOWS[known_model]
 
     def test_unknown_model_returns_none(self):
@@ -50,10 +50,6 @@ class TestLookupContextWindow:
     def test_provider_config_override_wins(self):
         lm = _llm_manager_with({"zai": FakeProvider("custom-glm", context_window=204800)})
         assert lm.lookup_context_window("custom-glm") == 204800
-
-    def test_get_context_window_unknown_falls_back_to_default(self):
-        lm = _llm_manager_with({})
-        assert lm.get_context_window("totally-custom-model-xyz") == MODEL_CONTEXT_WINDOWS["default"]
 
 
 class TestBuildP2PProviderInfo:

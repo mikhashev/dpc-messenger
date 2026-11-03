@@ -842,23 +842,28 @@ class AgentService:
         """Resolve the context window for an agent using its stored config.
 
         Priority:
-        1. config.json context_window (stored at creation time)
-        2. Local provider lookup via provider_alias
+        1. The live manager, which knows an alias a chat picked for itself
+        2. config.json context_window (stored at creation time)
         3. peer_metadata cache (for remote-host agents)
-        4. Active local model fallback
+        4. The alias, or the alias the adapter falls back on
+
+        0 when nobody knows.
         """
         if not self.llm_manager:
             return 0
         try:
+            dpc_provider = self.llm_manager.providers.get("dpc_agent")
+            manager = (getattr(dpc_provider, "_managers", None) or {}).get(agent_id)
+            if manager is not None:
+                return manager._window_of_chat(agent_id) or 0
             from .dpc_agent.utils import load_agent_config
             agent_cfg = load_agent_config(agent_id) or {}
             stored_cw = agent_cfg.get("context_window")
             if stored_cw:
                 return int(stored_cw)
             provider_alias = agent_cfg.get("provider_alias", "")
-            if provider_alias and provider_alias in self.llm_manager.providers:
-                return self.llm_manager.alias_context_window(provider_alias) or 0
             compute_host = agent_cfg.get("compute_host", "")
+            # The order the adapter routes in, as the manager reads it: a host set goes first.
             if compute_host and provider_alias:
                 peer_providers = self.peer_metadata.get(compute_host, {}).get("providers", [])
                 for p in peer_providers:
@@ -866,11 +871,12 @@ class AgentService:
                         cw = p.get("context_window")
                         if cw:
                             return int(cw)
-                        if p.get("model"):
-                            return self.llm_manager.lookup_context_window(p["model"]) or 0
-                        break
-            _model = self.llm_manager.get_active_model_name()
-            return self.llm_manager.get_context_window(_model) or 0
+                        return (self.llm_manager.lookup_context_window(p["model"]) or 0) if p.get("model") else 0
+            for alias in (provider_alias, getattr(self.llm_manager, "agent_provider", None),
+                          self.llm_manager.default_provider):
+                if alias and alias in self.llm_manager.providers:
+                    return self.llm_manager.alias_context_window(alias) or 0
+            return 0
         except Exception:
             return 0
 

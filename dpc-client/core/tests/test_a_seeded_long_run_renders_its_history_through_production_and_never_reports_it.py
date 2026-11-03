@@ -254,7 +254,7 @@ class _FakeLLM:
         doc = json.loads(Path(config_path).read_text(encoding="utf-8"))
         self.providers = {doc["default_provider"]: _FakeProvider()}
 
-    def get_context_window(self, model):
+    def alias_context_window(self, alias):
         return 215040
 
     async def query(self, *a, **k):

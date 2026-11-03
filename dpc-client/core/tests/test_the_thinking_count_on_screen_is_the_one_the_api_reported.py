@@ -26,7 +26,7 @@ class _Provider:
     def __init__(self, thinking: str, usage):
         self.model = "deepseek-v4-flash"   # no tokenizer matches this name
         self.alias = "deepseek_flash"
-        # `get_context_window` reads it for a per-alias override; empty means
+        # `alias_context_window` reads it for a per-alias override; empty means
         # «no override», which is the ordinary case.
         self.config = {}
         self._thinking = thinking

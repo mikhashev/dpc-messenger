@@ -262,8 +262,7 @@ def _menu_service(firewall, providers):
         firewall=firewall,
         llm_manager=SimpleNamespace(
             providers=providers,
-            lookup_context_window=lambda model: None,
-            get_context_window=lambda model: None,
+            alias_context_window=lambda alias: None,
         ),
         _provider_supports_voice=lambda provider: False,
     )

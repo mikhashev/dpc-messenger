@@ -950,9 +950,9 @@ def window_outgrows_pool(window: Any, n_ctx: int) -> bool:
     """Whether one conversation is allowed to outgrow the pool every slot shares.
 
     `n_ctx` is one pool for all slots (the engine reports `kv_unified = true`);
-    `context_window` is what a single conversation may occupy. Nothing derives
-    one from the other, so they can disagree — and only this direction is
-    silent, because the other merely wastes cells nobody fills.
+    `context_window`, when an alias sets it, is what a single conversation may
+    occupy. Nothing derives it from `n_ctx`, so they can disagree — and only this
+    direction is silent, because the other merely wastes cells nobody fills.
     """
     return bool(window) and window > n_ctx
 

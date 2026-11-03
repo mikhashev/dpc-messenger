@@ -84,7 +84,7 @@ class _Manager:
     def count_tokens(self, text, model):
         return len(text) // 4
 
-    def get_context_window(self, model):
+    def alias_context_window(self, alias):
         return 32000
 
 

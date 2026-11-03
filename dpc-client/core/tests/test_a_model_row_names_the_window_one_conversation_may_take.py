@@ -1,11 +1,11 @@
 """A `/v1/models` row carries `context_window`, and says nothing when nobody knows.
 
 The host already put the number on the wire — `CoreService.build_p2p_provider_info`
-writes `lookup_context_window(provider.model)` into every `PROVIDERS_RESPONSE`
+writes `alias_context_window(alias)` into every `PROVIDERS_RESPONSE`
 row (DPTP §3.5) — and the door dropped it: `_peer_row_extras` published `tariff`
 and `settings` and nothing else, so an IDE client that sizes its own history had
 to guess. Both halves of the menu now carry it, a peer's row off the host's own
-statement and this node's own off the same `lookup_context_window` the alias
+statement and this node's own off the same `alias_context_window` the alias
 config resolves through.
 
 Which number: `context_window` is what one conversation may occupy, and `n_ctx`
@@ -58,7 +58,7 @@ async def test_a_local_row_carries_the_window_its_own_lookup_answers(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_local_row_whose_window_is_unknown_carries_no_such_key(tmp_path):
-    """The vendor model is one `lookup_context_window` answers None for."""
+    """The vendor model is one `alias_context_window` answers None for."""
     async with _running(tmp_path, _service(tmp_path, BOTH_LISTS)) as (server, _):
         rows = await _rows(server, tmp_path)
         assert "context_window" not in rows[VENDOR], rows[VENDOR]

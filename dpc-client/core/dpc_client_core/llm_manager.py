@@ -135,9 +135,6 @@ MODEL_CONTEXT_WINDOWS = {
     "glm-5.1": 204800,
     "glm-5.2": 200000,
     "glm-5-turbo": 200000,
-
-    # Default fallback
-    "default": 4096
 }
 
 def flatten_messages(messages: List[Dict[str, Any]], system: Any = "") -> str:
@@ -824,35 +821,6 @@ class LLMManager:
             return None
         return self._table_window(model)
 
-    def get_context_window(self, model: str) -> int:
-        """
-        Get the context window size for a given model.
-
-        Priority:
-        1. `lookup_context_window`
-        2. 0 for a model a local engine serves, when that engine's window is not
-           known: a window is not guessed for a child DPC starts
-        3. Return default if not found
-
-        Args:
-            model: The model name (e.g., "gpt-4", "llama3.1:8b")
-
-        Returns:
-            Context window size in tokens
-        """
-        window = self.lookup_context_window(model)
-        if window is not None:
-            return window
-
-        if any(runs_on_a_local_engine(provider) for _alias, provider in self._aliases_of_model(model)):
-            logger.warning("Context window size not known for local model '%s' - neither its alias "
-                           "nor its engine names one", model)
-            return 0
-
-        logger.warning("Context window size unknown for model '%s' - using default: %d",
-                      model, MODEL_CONTEXT_WINDOWS['default'])
-        return MODEL_CONTEXT_WINDOWS["default"]
-
     def _alias_for_query(self, provider_alias: str | None, images: bool) -> str:
         """The alias `query` will use: the one named, else the vision provider or the
         first vision-capable one for images, else the default. Raises as `query` does."""
@@ -993,8 +961,8 @@ class LLMManager:
                 counts_source = "engine"
             total_tokens = prompt_tokens + response_tokens
 
-            # Get model's context window
-            context_window = self.alias_context_window(alias_to_use) or self.get_context_window(provider.model)
+            # 0 when nobody knows it: the limit nothing measures against
+            context_window = self.alias_context_window(alias_to_use) or 0
 
             return {
                 "response": response,
@@ -1185,7 +1153,7 @@ class LLMManager:
                 "tokens_used": prompt_tokens + response_tokens,
                 "prompt_tokens": prompt_tokens,
                 "response_tokens": response_tokens,
-                "model_max_tokens": self.alias_context_window(alias_to_use) or self.get_context_window(provider.model),
+                "model_max_tokens": self.alias_context_window(alias_to_use) or 0,
                 "vision_used": image_count > 0,  # a refusal above leaves no other way here
                 "image_notes": image_notes,
                 "thinking": thinking_content,

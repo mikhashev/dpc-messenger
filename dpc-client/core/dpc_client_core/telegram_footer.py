@@ -89,6 +89,14 @@ def build_stats_footer(
         else session_state.get("message_count") or 0
     )
 
+    if session_state.get("window_unknown"):
+        # No limit to divide by: the default below is for a chat with no answer yet.
+        return "\n".join((
+            f"DIALOG      ≈{_fmt_int(min(history_tokens, tokens_after))}",
+            f"TOTAL       {_fmt_int(tokens_after)} / window not known",
+            f"MESSAGES    {message_count}",
+        ))
+
     effective_limit = tokens_limit if tokens_limit > 0 else DEFAULT_TOKEN_LIMIT
     # Clamp so the chars/4 estimate never exceeds the measured total (same
     # comment as SessionControls.svelte's effectiveHistoryTokens).

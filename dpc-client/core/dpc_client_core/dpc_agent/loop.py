@@ -1606,14 +1606,14 @@ async def run_llm_loop(
     # larger than the real window and the threshold never fires before the model
     # overflows (observed: qwen3.6 = 131072, fallback = 204800).
     if not _compaction_cfg.get("context_window") and _compaction_llm is not None:
-        _prov = _compaction_cfg.get("provider_alias")
+        # The alias this loop runs on: a chat may have picked another than the config names.
+        _running = getattr(llm, "_provider_alias", None)
+        _prov = _running if isinstance(_running, str) and _running else _compaction_cfg.get("provider_alias")
         try:
             if _prov and _prov in _compaction_llm.providers:
                 _compaction_cfg = {
                     **_compaction_cfg,
-                    "context_window": _compaction_llm.get_context_window(
-                        _compaction_llm.providers[_prov].model
-                    ),
+                    "context_window": _compaction_llm.alias_context_window(_prov),
                 }
         except Exception:
             pass

@@ -50,6 +50,9 @@ class _Monitor:
         self.history = []
         self.cached = {}
 
+    def set_token_limit(self, limit):
+        self.token_limit = limit
+
     def add_message(self, role, content, **fields):
         self.history.append({"role": role, "content": content})
 
@@ -91,6 +94,9 @@ class _LLMManager:
         self.sent = sent
         self.providers = {}
         self.default_provider = None
+
+    def alias_context_window(self, alias):
+        return None
 
     async def query(self, prompt, provider_alias=None, **kwargs):
         chosen = self.providers.get(provider_alias or self.default_provider)

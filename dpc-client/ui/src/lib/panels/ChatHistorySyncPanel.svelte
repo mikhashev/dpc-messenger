@@ -34,7 +34,7 @@
     processedMessageIds: Set<string>;
     chatWindow: HTMLElement | undefined;
     getPeerDisplayName: (id: string) => string;
-    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
+    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; windowUnknown?: boolean; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
     hasTokenUsage: (chatId: string) => boolean;
     selfNodeId?: string;
   } = $props();
@@ -253,10 +253,12 @@
               setPager(reqChatId, { ...pageFacts(result), stopped: false, loading: false });
 
               // Update token counter with restored history token counts
-              if (result.tokens_used !== undefined && result.token_limit !== undefined && result.token_limit > 0) {
+              // 0 is the backend saying nobody knows the window, as on token_usage_updated.
+              if (result.tokens_used !== undefined && result.token_limit !== undefined) {
                 onUpdateTokenUsage(reqChatId, {
                   used: result.tokens_used,
                   limit: result.token_limit,
+                  windowUnknown: result.token_limit === 0,
                   historyTokens: result.history_tokens ?? 0,
                   tokensAfterLastResponse: result.tokens_after_last_response ?? 0,
                   tokensAfterLastResponseAt: result.tokens_after_last_response_at ?? null,
@@ -313,10 +315,11 @@
           try {
             // Only the token fields are read, and they describe the whole chat.
             const result = await sendCommand('get_conversation_history', { conversation_id: reqChatId, limit: 1 });
-            if (result.tokens_used !== undefined && result.token_limit !== undefined && result.token_limit > 0) {
+            if (result.tokens_used !== undefined && result.token_limit !== undefined) {
               onUpdateTokenUsage(reqChatId, {
                 used: result.tokens_used,
                 limit: result.token_limit,
+                windowUnknown: result.token_limit === 0,
                 historyTokens: result.history_tokens ?? 0,
                 tokensAfterLastResponse: result.tokens_after_last_response ?? 0,
                 tokensAfterLastResponseAt: result.tokens_after_last_response_at ?? null,

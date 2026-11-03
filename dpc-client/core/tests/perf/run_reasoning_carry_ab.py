@@ -234,7 +234,7 @@ def _adapter(provider: LlamaServerProvider, alias: str, window: int) -> DpcLlmAd
         token_count_manager=None,
         agent_provider=alias,
         default_provider=alias,
-        get_context_window=lambda _model: window,
+        alias_context_window=lambda alias: window,
         get_active_model_name=lambda: getattr(provider, "model", alias),
     )
     return DpcLlmAdapter(manager, provider_alias=alias, caller="ab-reasoning-carry")

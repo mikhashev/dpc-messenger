@@ -47,9 +47,9 @@ INFERENCE_TIMEOUT_S = 0.2
 # What `[vision] max_image_size_mb` ships as, which is the cap the gateway
 # reads off the settings for an image at either door.
 MAX_IMAGE_MB = 5
-# What `LLMManager.lookup_context_window` would answer for the models below.
-# The vendor model is absent on purpose: that is the «unknown» the real
-# lookup answers None for, and the row must then carry no window at all.
+# What `LLMManager.alias_context_window` would answer for aliases of the models
+# below. The vendor model is absent on purpose: that is the «unknown» the real
+# reader answers None for, and the row must then carry no window at all.
 LOCAL_WINDOW = 32768
 CONTEXT_WINDOWS = {"qwen3:8b": LOCAL_WINDOW}
 
@@ -137,7 +137,7 @@ def _service(tmp_path: Path, compute: dict, *, providers=None, fail=None, finish
         firewall=ContextFirewall(rules),
         llm_manager=types.SimpleNamespace(providers=providers, query=query,
                                           query_messages=query_messages,
-                                          lookup_context_window=lambda model: CONTEXT_WINDOWS.get(model)),
+                                          alias_context_window=lambda alias: CONTEXT_WINDOWS.get(providers[alias].model)),
         p2p_manager=types.SimpleNamespace(node_id=NODE_ID),
         settings=types.SimpleNamespace(
             get_remote_inference_timeout=lambda: INFERENCE_TIMEOUT_S,
