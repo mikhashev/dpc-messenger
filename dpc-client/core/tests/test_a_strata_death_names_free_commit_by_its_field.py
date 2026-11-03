@@ -141,6 +141,6 @@ class TestTheSupervisor:
 class TestTheStatus:
     @pytest.mark.asyncio
     async def test_the_engine_status_carries_the_reading_for_the_hint(self, monkeypatch):
-        monkeypatch.setattr(strata_provider, "read_free_commit", lambda: dict(READING))
+        monkeypatch.setattr(strata_provider, "read_free_commit_or_physical", lambda: dict(READING))
         out = await strata_provider.local_engine_status()
         assert out["free_commit"] == READING

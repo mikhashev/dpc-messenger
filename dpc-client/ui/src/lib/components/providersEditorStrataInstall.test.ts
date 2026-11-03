@@ -156,7 +156,8 @@ describe('the cache budget suggestion', () => {
     expect(offer).toContain('newCacheMayNotFit = cacheSuggestionMayNotFit(free, ramNeededGb);');
     expect(offer).toContain('newCacheSuggestedAt = new Date();');
     const choose = fn('chooseNewStrataConfig');
-    expect(choose).toContain('sizeForRunConfig(strataFamilies, value)?.ram_needed_gb ?? fallbackRamGb ?? null');
+    expect(choose).toContain('sizeForRunConfig(strataFamilies, value) ?? fallbackSize ?? null');
+    expect(choose).toContain('offerCacheSuggestion(size?.ram_needed_gb ?? null);');
     expect(fn('installNewStrataModel')).toContain('offerCacheSuggestion(size.ram_needed_gb)');
   });
 
@@ -176,6 +177,64 @@ describe('the cache budget suggestion', () => {
   });
 });
 
+describe('the resident budget suggestion in the Add form', () => {
+  it('is rendered after the cache budget, in the branch of the strata type', () => {
+    const add = addForm();
+    const resident = add.indexOf('{@render strataResidentBudgetField()}');
+    expect(resident).toBeGreaterThan(add.indexOf('{@render strataCacheBudgetField()}'));
+    expect(add.lastIndexOf("{#if newProvider.type === 'strata'}", resident)).toBeGreaterThan(add.lastIndexOf("{#if newProvider.type === 'llamacpp_server'}", resident));
+  });
+
+  it("comes from the status read now, for the chosen size, after the base config's own budget was read", () => {
+    const offer = fn('offerResidentSuggestion');
+    expect(offer).toContain('await loadEngineStatus();');
+    expect(offer).toContain('suggestedResidentBudget(engineStatus?.free_commit, size)');
+    const choose = fn('chooseNewStrataConfig');
+    expect(choose).toContain('sizeForRunConfig(strataFamilies, value) ?? fallbackSize ?? null');
+    expect(choose).toContain('baseRead.then(() => offerResidentSuggestion(value, size));');
+    expect(fn('readNewStrataWindow')).toContain('newStrataBaseResident = r.values?.resident_budget_gib ?? null;');
+  });
+
+  it('reaches an install too, with the whole size it asked for, once the install has a run config', () => {
+    expect(fn('installNewStrataModel')).toContain('strataInstallSize = size;');
+    expect(fn('useInstalledStrataConfig')).toContain('chooseNewStrataConfig(runConfig, strataInstallSize);');
+    expect(fn('resetNewProviderForm')).toContain('strataInstallSize = null;');
+  });
+
+  it('a budget the save would refuse is said beside the field, in the Add form and the Edit form', () => {
+    expect(snippet('strataResidentBudgetField')).toContain('<p class="help-text warn">{residentBudgetError(newProvider.resident_budget_gib)}</p>');
+    expect(src).toContain('<p class="help-text warn">{residentBudgetError(sp.resident_budget_gib)}</p>');
+  });
+
+  it('never replaces a typed value, a moved-on choice or a budget the base config names', () => {
+    const offer = fn('offerResidentSuggestion');
+    expect(offer).toContain('newProvider.resident_budget_gib != null && !newResidentSuggestedAt');
+    expect(offer).toContain('if (typedByHand() || newProvider.strata_base_config !== path) return;');
+    expect(offer).toContain('newStrataBaseResident === null');
+    expect(fn('chooseNewStrataConfig')).toContain('newStrataBaseResident = undefined;');
+  });
+
+  it('prefills the one field and no other', () => {
+    const offer = fn('offerResidentSuggestion');
+    expect(offer).toContain('newProvider.resident_budget_gib = suggestion?.gib ?? undefined;');
+    expect(offer).not.toMatch(/vram_reserve_mib|kv_resident/);
+    expect(src).not.toMatch(/newProvider\.(vram_reserve_mib|kv_resident)/);
+  });
+
+  it('typing drops the mark and the reading; both texts come from the util', () => {
+    const typed = fn('setNewResidentGib');
+    expect(typed).toContain('newResidentSuggestedAt = null;');
+    expect(typed).toContain('newResidentSuggestion = null;');
+    const field = snippet('strataResidentBudgetField');
+    expect(field).toContain('on:input={(e) => setNewResidentGib(e.currentTarget.value)}');
+    expect(field).toContain('{residentSuggestionMarkText(newResidentSuggestedAt)}');
+    expect(field).toContain('{residentSuggestionWhy(newResidentSuggestion)}');
+    expect(field).toContain("basePlaceholder(newStrataBaseResident, 'not in the base config')");
+    expect(field).toContain('--vram-reserve-mib and --kv-resident are other settings you may tune');
+    expect(field).toContain('this form derives no value for them');
+  });
+});
+
 describe('the new alias carries what the form collected', () => {
   it('addNewProvider copies strata_base_config and conversation_cache_mib for a strata alias', () => {
     const add = fn('addNewProvider');
@@ -183,11 +242,16 @@ describe('the new alias carries what the form collected', () => {
     expect(strata).toContain('if (newProvider.strata_base_config) provider.strata_base_config = newProvider.strata_base_config;');
     expect(strata).toContain('if (newProvider.conversation_cache_mib != null) provider.conversation_cache_mib = newProvider.conversation_cache_mib;');
     expect(strata.indexOf('provider.conversation_cache_mib')).toBeLessThan(strata.indexOf("newProvider.type === 'local_whisper'"));
+    expect(strata).toContain('if (newProvider.resident_budget_gib != null) provider.resident_budget_gib = newProvider.resident_budget_gib;');
+    expect(strata.indexOf('provider.resident_budget_gib')).toBeLessThan(strata.indexOf("newProvider.type === 'local_whisper'"));
   });
 
   it('a reset of the form forgets the suggestion mark and the install messages', () => {
     const reset = fn('resetNewProviderForm');
     expect(reset).toContain('newCacheSuggestedAt = null;');
+    expect(reset).toContain('newResidentSuggestedAt = null;');
+    expect(reset).toContain('newResidentSuggestion = null;');
+    expect(reset).toContain('newStrataBaseResident = undefined;');
     expect(reset).toContain("strataInstallError = '';");
   });
 

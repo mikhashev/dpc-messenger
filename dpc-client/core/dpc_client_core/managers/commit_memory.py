@@ -13,11 +13,11 @@ each is named by its field so a reader knows which number is which.
 Windows only, by the ADR's scope: on any other OS the reader returns None and
 the text says "not measured on this OS". It never raises.
 
-`read_free_commit_or_physical` is the reading `list_processes` answers with
-(ADR-046 point 8): the same on Windows; elsewhere physical memory by psutil
-under the same keys, the two commit fields None and `source` naming psutil.
-Commit is not read off Windows (decided with the names, 2026-10-26: null on
-Linux and macOS). The Strata callers keep `read_free_commit`.
+`read_free_commit_or_physical` is the reading `list_processes` (ADR-046 point 8)
+and the local engines' status answer with: the same on Windows; elsewhere physical
+memory by psutil under the same keys, the two commit fields None and `source`
+naming psutil. Commit is not read off Windows (decided with the names, 2026-10-26:
+null on Linux and macOS). The Strata supervisor keeps `read_free_commit`.
 
 `read_vram_mib` is the card's side of the same answer: the first NVIDIA GPU's free and
 total VRAM by nvidia-smi, cached 30 s. It lives here, with the other system-wide

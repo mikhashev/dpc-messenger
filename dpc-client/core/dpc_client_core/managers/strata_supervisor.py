@@ -678,6 +678,13 @@ def _commit_note(before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any
         "NTSTATUS code and no message: " + "; ".join(parts)
     )
 
+
+# The engine's warning that the expert arena does not fit (src/core/expert_source.cpp,
+# engine 0.1.55), and only that: its "waiting up to 20 s" lines say "and", not "but",
+# and a start can recover from those. Its words and not its numbers, so that an engine
+# update has fewer ways to turn the note off in silence.
+_ARENA_SHORT_RE = re.compile(r"the expert arena needs .+ but .+ short")
+
 # Strata's own words for an engine that died (serve/server.py: EngineDied,
 # engine_exit_words, and the restart line).
 _EXIT_CODE_RE = re.compile(r"exit code\s+(-?0x[0-9A-Fa-f]+|-?\d+|None)(?::\s*([^)\n;]+))?")
@@ -833,6 +840,8 @@ class StrataSupervisor(LlamaServerSupervisor):
         self._engine_log_path = _base.DPC_HOME / "logs" / f"strata-{safe}-engine.log"
         # Where the cache-loss scan stopped in that file; None until primed.
         self._engine_scan_offset: Optional[int] = None
+        # Where this launch began in that file: the failed start's text is read from here.
+        self._engine_start_offset: int = 0
         # The launcher's cumulative conversation_cache.evictions as the watcher
         # last read it, and as the last INFO record had it. The engine counts
         # every eviction, the budget and slot ones too, which have no log line.
@@ -1571,7 +1580,12 @@ class StrataSupervisor(LlamaServerSupervisor):
             self._vram_free_before = await asyncio.to_thread(_base._free_vram_mib)
         except Exception:
             self._vram_free_before = None
-        props = await super()._launch(binary)
+        try:
+            props = await super()._launch(binary)
+        except LlamaServerError as e:
+            if getattr(e, "_build_fault", False):
+                raise self._with_arena_short_note(e) from e
+            raise
         proc = self._proc
         try:
             if await self._check_version() is None:
@@ -1866,6 +1880,9 @@ class StrataSupervisor(LlamaServerSupervisor):
             )
             before, after = self.last_free_commit, read_free_commit()
             reason = f"{observed}; {words or 'no exit code reported'}; {_commit_note(before, after)}"
+        arena_note = self._arena_short_note() if refused_start else None
+        if arena_note is not None:
+            reason = f"{reason}. {arena_note}"
         self.failure = {
             "reason": reason,
             "exit_code": words,
@@ -1944,6 +1961,39 @@ class StrataSupervisor(LlamaServerSupervisor):
         except OSError:
             return []
 
+    def _arena_short_note(self) -> Optional[str]:
+        """The engine's arena warning of this launch and the field that answers it, or None.
+
+        It is a warning, the load goes on and may die later of something else: the note
+        quotes it and does not call it the cause. A launcher's last 12 lines usually miss
+        it, which is why it is read here. Not an earlier start's line: from this launch on.
+        One `_SCAN_CHUNK` (8 MiB) of it and no more: a warning past that is not seen, and no
+        note is the worst of it."""
+        try:
+            with open(self._engine_log_path, "rb") as f:
+                f.seek(0, 2)
+                start = 0 if self._engine_start_offset > f.tell() else self._engine_start_offset
+                f.seek(start)
+                text = f.read(self._SCAN_CHUNK).decode("utf-8", errors="replace")
+        except OSError:
+            return None
+        line = next((ln.strip() for ln in text.splitlines() if _ARENA_SHORT_RE.search(ln)), None)
+        if line is None:
+            return None
+        return (
+            f"At this start the engine wrote: \"{line}\". Those are the engine's numbers at that "
+            "moment, not the Add Provider form's reading. The field to change: Resident budget, GiB "
+            f"(resident_budget_gib, --resident-budget-gib) of alias '{self.alias}' in Providers"
+        )
+
+    def _with_arena_short_note(self, error: LlamaServerError) -> LlamaServerError:
+        """`error`, a failed start, with `_arena_short_note` ahead of its log lines when there is one."""
+        note = self._arena_short_note()
+        if note is None:
+            return error
+        head = str(error).split("\n", 1)[0]
+        return _base._build_fault(LlamaServerError(f"{head}. {note}", error.log_lines))
+
     # --- the conversation cache, read where Strata says it ----------------------
 
     def prime_restore_scan(self) -> None:
@@ -1959,6 +2009,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             self._engine_scan_offset = self._engine_log_path.stat().st_size
         except OSError:
             self._engine_scan_offset = 0
+        self._engine_start_offset = self._engine_scan_offset
 
     def new_cache_losses(self) -> List[str]:
         """Engine-log lines since the last scan where the cache gave a conversation up.

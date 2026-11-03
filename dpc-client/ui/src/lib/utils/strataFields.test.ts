@@ -106,7 +106,7 @@ describe('status formatting', () => {
       avail_phys_mib: 11305, total_phys_mib: 63168 }))
       .toBe('free commit (GlobalMemoryStatusEx ullAvailPageFile) 3,686 of 108,236 MiB; '
         + 'free physical (ullAvailPhys) 11,305 of 63,168 MiB');
-    expect(freeCommitLine(null)).toBe('free commit (GlobalMemoryStatusEx): not measured on this OS');
+    expect(freeCommitLine(null)).toBe('free commit and free physical memory unread (the reading failed)');
     expect(freeCommitLine(undefined)).toContain('not read yet');
   });
 

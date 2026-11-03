@@ -21,7 +21,8 @@
   } from '$lib/utils/modelFiles';
   import {
     runConfigOptions, sizeForRunConfig, strataSizeLine, suggestedConversationCacheMib, suggestionMarkText, cacheSuggestionMayNotFit,
-    freeCommitMibOf, STRATA_ESTIMATE_LABEL, type StrataModelFamily, type StrataModelSize,
+    freeCommitMibOf, STRATA_ESTIMATE_LABEL, suggestedResidentBudget, residentSuggestionMarkText, residentSuggestionWhy, residentBudgetError,
+    type ResidentSuggestion, type StrataModelFamily, type StrataModelSize,
   } from '$lib/utils/strataInstall';
   import { STRATA_MODEL_DOWNLOAD } from '$lib/utils/strataModelDownload';
   import { groupModels, modelOptionLabel, type ProviderModel } from '$lib/utils/providerModelOptions';
@@ -659,18 +660,52 @@
     newProvider = newProvider;
   }
 
+  // While the resident budget in the Add form holds a suggestion rather than a typed value:
+  // the time it was made. The reading behind it, or behind no suggestion, stays until it is typed over.
+  let newResidentSuggestedAt: Date | null = null;
+  let newResidentSuggestion: ResidentSuggestion | null = null;
+  // The chosen run config's --resident-budget-gib: undefined until read, null when it names none.
+  let newStrataBaseResident: unknown = undefined;
+
+  /** Prefill the empty resident budget (or replace an earlier suggestion, never a typed value)
+   *  when this size needs more RAM than is free now. A base config naming a budget keeps its own. */
+  async function offerResidentSuggestion(path: string, size: StrataModelSize | null) {
+    const typedByHand = () => newProvider.resident_budget_gib != null && !newResidentSuggestedAt;
+    if (typedByHand()) return;
+    await loadEngineStatus();
+    if (typedByHand() || newProvider.strata_base_config !== path) return;
+    const suggestion = newStrataBaseResident === null
+      ? suggestedResidentBudget(engineStatus?.free_commit, size)
+      : null;
+    newResidentSuggestion = suggestion;
+    newProvider.resident_budget_gib = suggestion?.gib ?? undefined;
+    newResidentSuggestedAt = suggestion?.gib != null ? new Date() : null;
+    newProvider = newProvider;
+  }
+
+  function setNewResidentGib(raw: string) {
+    const n = parseFloat(raw);
+    newProvider.resident_budget_gib = raw === '' || isNaN(n) ? undefined : n;
+    newResidentSuggestedAt = null;
+    newResidentSuggestion = null;
+    newProvider = newProvider;
+  }
+
   // A run config chosen from the select, typed, browsed for, or just installed fills the
   // new alias's strata_base_config; the size it is named for (or the one just asked for)
-  // sizes the cache suggestion.
-  function chooseNewStrataConfig(path: string, fallbackRamGb?: number | null) {
+  // sizes the cache and resident budget suggestions.
+  function chooseNewStrataConfig(path: string, fallbackSize?: StrataModelSize | null) {
     const value = path.trim();
     newProvider.strata_base_config = value || undefined;
     newProvider = newProvider;
     newStrataMaxContext = undefined;
+    newStrataBaseResident = undefined;
     if (!value) return;
+    const size = sizeForRunConfig(strataFamilies, value) ?? fallbackSize ?? null;
     fillModelNameFromRunConfig(value);
-    readNewStrataWindow(value);
-    offerCacheSuggestion(sizeForRunConfig(strataFamilies, value)?.ram_needed_gb ?? fallbackRamGb ?? null);
+    const baseRead = readNewStrataWindow(value);
+    baseRead.then(() => offerResidentSuggestion(value, size));
+    offerCacheSuggestion(size?.ram_needed_gb ?? null);
   }
 
   // The Model name the new alias is served under defaults to the run config's model_name
@@ -702,6 +737,7 @@
       const r = await sendCommand('strata_inspect_base_config', { path, install_dir: '' });
       if (r?.status !== 'success' || newProvider.strata_base_config !== path) return;
       newStrataMaxContext = r.values?.max_context ?? null;
+      newStrataBaseResident = r.values?.resident_budget_gib ?? null;
     } catch (error) {
       console.error('[ProvidersEditor] reading the run config failed:', error);
     }
@@ -729,8 +765,8 @@
   let strataInstallBusy = false;
   let strataInstallError = '';
   let strataInstallNote = '';
-  // The RAM figure of the size last asked for, for a run config that names no listed size.
-  let strataInstallRamGb: number | null = null;
+  // The size last asked for, for a run config that names no listed size.
+  let strataInstallSize: StrataModelSize | null = null;
 
   /** Ask for a Strata model: the backend raises the consent dialog and the install starts
    *  at the owner's yes. `ggufDir` takes the owner's own catalog files in place. */
@@ -738,7 +774,7 @@
     strataInstallBusy = true;
     strataInstallError = '';
     strataInstallNote = '';
-    strataInstallRamGb = size.ram_needed_gb ?? null;
+    strataInstallSize = size;
     try {
       const params: Record<string, unknown> = { family: family.family, model: size.model, images: size.images ?? true };
       if (ggufDir) params.gguf_dir = ggufDir;
@@ -782,7 +818,7 @@
   // while this form is open for strata: read the folder again and take the new run config.
   async function useInstalledStrataConfig(runConfig: string) {
     await loadModelFiles();
-    chooseNewStrataConfig(runConfig, strataInstallRamGb);
+    chooseNewStrataConfig(runConfig, strataInstallSize);
     loadStrataModels();   // refreshes the "installed" marks
   }
 
@@ -1506,11 +1542,14 @@
     aliasTouched = false;
     newCacheSuggestedAt = null;
     newCacheMayNotFit = false;
+    newResidentSuggestedAt = null;
+    newResidentSuggestion = null;
+    newStrataBaseResident = undefined;
     newModelFilledFromConfig = null;
     newStrataMaxContext = undefined;
     strataInstallError = '';
     strataInstallNote = '';
-    strataInstallRamGb = null;
+    strataInstallSize = null;
   }
 
   // An install of a Strata model ends (model_download_completed with run_config): when this
@@ -1583,6 +1622,7 @@
       // until both are set; an empty install dir is DPC's own install.
       if (newProvider.strata_base_config) provider.strata_base_config = newProvider.strata_base_config;
       if (newProvider.conversation_cache_mib != null) provider.conversation_cache_mib = newProvider.conversation_cache_mib;
+      if (newProvider.resident_budget_gib != null) provider.resident_budget_gib = newProvider.resident_budget_gib;
     } else if (newProvider.type === 'local_whisper') {
       provider.device = 'auto';
       provider.compile_model = true;
@@ -2009,6 +2049,37 @@
     <p class="help-text">
       Host RAM the launcher parks whole conversations in. There is no default: measure it on this
       machine (see the provider's form after adding).
+    </p>
+  </div>
+{/snippet}
+
+<!-- Add Provider, type strata: the resident budget. Empty unless the chosen size needs more RAM
+     than is free now; then a suggestion, marked until it is typed over. Nothing else is derived. -->
+{#snippet strataResidentBudgetField()}
+  <div class="form-group">
+    <label for="new-strata-resident-gib">Resident budget, GiB (--resident-budget-gib)</label>
+    <input
+      id="new-strata-resident-gib"
+      type="number"
+      min="0.5"
+      step="1"
+      value={newProvider.resident_budget_gib ?? ''}
+      on:input={(e) => setNewResidentGib(e.currentTarget.value)}
+      placeholder={basePlaceholder(newStrataBaseResident, 'not in the base config')}
+    />
+    {#if residentBudgetError(newProvider.resident_budget_gib)}
+      <p class="help-text warn">{residentBudgetError(newProvider.resident_budget_gib)}</p>
+    {/if}
+    {#if newResidentSuggestedAt && newProvider.resident_budget_gib != null}
+      <p class="help-text">{residentSuggestionMarkText(newResidentSuggestedAt)}</p>
+    {/if}
+    {#if newResidentSuggestion}
+      <p class="help-text warn">{residentSuggestionWhy(newResidentSuggestion)}</p>
+    {/if}
+    <p class="help-text">
+      Host RAM the engine keeps experts in; the rest are read from the model files. Empty keeps the
+      base config's value. --vram-reserve-mib and --kv-resident are other settings you may tune for a
+      low-RAM start; this form derives no value for them.
     </p>
   </div>
 {/snippet}
@@ -3335,6 +3406,9 @@
                             on:input={(e) => setNum(i, 'resident_budget_gib', e.currentTarget.value, true)}
                             placeholder={basePlaceholder(strataBase(strataInspect, i, 'resident_budget_gib'), 'not in the base config')}
                           />
+                          {#if residentBudgetError(sp.resident_budget_gib)}
+                            <p class="help-text warn">{residentBudgetError(sp.resident_budget_gib)}</p>
+                          {/if}
                           <p class="help-text">Host RAM the engine may pin for the experts the card does not hold.</p>
                         </div>
                         <div>
@@ -4264,6 +4338,7 @@
                   {@render strataRunConfigFields()}
                   {@render strataInstallBlock()}
                   {@render strataCacheBudgetField()}
+                  {@render strataResidentBudgetField()}
                 {/if}
               </div>
             {/if}

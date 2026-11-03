@@ -12,6 +12,7 @@
 
 import { looksLikeKey } from './apiKeyEnv';
 import { providerTypeLabel } from '../components/inferenceSharing';
+import { residentBudgetError } from './strataInstall';
 
 /** The subset of the new-provider form this module reasons about. */
 export interface ProviderDraft {
@@ -20,6 +21,7 @@ export interface ProviderDraft {
   model?: string;
   api_key?: string;
   api_key_env?: string;
+  resident_budget_gib?: number;
 }
 
 const isBlank = (v: string | undefined | null): boolean => (v ?? '').trim() === '';
@@ -57,8 +59,9 @@ export interface DraftValidation {
  * Whether the draft may become a provider via `addNewProvider()`. Mirrors the
  * existing "Add Provider" button's disabled condition (alias required, model
  * required unless dpc_agent, no raw key typed into the env-name field) and
- * adds the one check that button never had: the alias must not already name
- * a provider in this config, since `addNewProvider()` pushes unconditionally.
+ * adds the checks that button never had: the alias must not already name a
+ * provider in this config, since `addNewProvider()` pushes unconditionally,
+ * and a strata draft's resident budget must be one the save would take.
  */
 export function validateProviderDraftForAdd(
   draft: ProviderDraft,
@@ -77,6 +80,8 @@ export function validateProviderDraftForAdd(
       reason: 'The API Key field holds a key, not an environment variable name — fix it before adding.',
     };
   }
+  const budget = draft.type === 'strata' ? residentBudgetError(draft.resident_budget_gib) : null;
+  if (budget) return { valid: false, reason: budget };
   const normalized = normalizeAlias(alias);
   if (existingAliases.some((existing) => normalizeAlias(existing) === normalized)) {
     return { valid: false, reason: `A provider named "${alias}" already exists — pick a different alias.` };

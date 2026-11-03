@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING
 
 from ..managers import llama_server_supervisor as _base
-from ..managers.commit_memory import read_free_commit
+from ..managers.commit_memory import read_free_commit_or_physical
 from ..managers.llama_server_supervisor import effort_dictionary_of
 from ..managers import strata_fetcher as _strata_fetcher
 from ..managers.strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG, strata_pin
@@ -446,8 +446,9 @@ async def strata_status(sup: StrataSupervisor, metrics_timeout_s: float = 3.0) -
 async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
     """Who holds the card, and every Strata alias's supervisor state. Read-only.
 
-    `free_commit` is the host's GlobalMemoryStatusEx reading (commit_memory),
-    None off Windows: the conversation cache's hint names it (ADR-044).
+    `free_commit` is the host's GlobalMemoryStatusEx reading (commit_memory): the
+    conversation cache's hint names it (ADR-044). Off Windows it is physical memory
+    by psutil with both commit fields None, which the resident budget's hint reads.
     `engine_backends` are the `strata_engine_backend` values this machine may
     take (the editor's choices), empty on a machine with no Strata Control.
     `pins` is per engine (`llama.cpp`, `strata`): the pin, the installed pins, the
@@ -471,7 +472,7 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
     except Exception as e:  # a status read must not fail the panel
         logger.warning("local engine pins unreadable: %s", e)
         pins = None
-    return {"card_holder": card_holder(), "strata": strata, "free_commit": read_free_commit(),
+    return {"card_holder": card_holder(), "strata": strata, "free_commit": read_free_commit_or_physical(),
             "engine_backends": backends, "pins": pins, "last_swap": _base.last_swap(),
             "card_holders": _base.card_holders(), "card_queue": _base.card_queue(),
             "last_background_skip": _base.last_background_skip()}

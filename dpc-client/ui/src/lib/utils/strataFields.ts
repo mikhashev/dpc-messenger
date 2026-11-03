@@ -235,9 +235,9 @@ export function cacheSummaryLine(c: ConversationCacheSummary | null | undefined)
     + `parks ${c.parks ?? 0}, restores ${c.restores ?? 0}, evictions ${c.evictions ?? 0}`;
 }
 
-/** GlobalMemoryStatusEx as local_engine_status reports it (commit_memory.py); MiB.
- *  list_processes sends the same keys on every OS: off Windows `source` names the
- *  physical reading (psutil) and the two page-file (commit) fields are null. */
+/** GlobalMemoryStatusEx as local_engine_status and list_processes report it
+ *  (commit_memory.py); MiB. Both send the same keys on every OS: off Windows `source`
+ *  names the physical reading (psutil) and the two page-file (commit) fields are null. */
 export interface FreeCommitReading {
   avail_page_file_mib: number | null;
   total_page_file_mib: number | null;
@@ -249,10 +249,10 @@ export interface FreeCommitReading {
 /** The cache hint's measurement: free commit (ullAvailPageFile) first, the
  *  reference by Mike's call of 2026-10-19; free physical (ullAvailPhys) after it.
  *  Another source carries physical memory only, printed with its name.
- *  `undefined` is a status not read yet, `null` a backend that measured nothing. */
+ *  `undefined` is a status not read yet, `null` a reading that failed: every OS has one. */
 export function freeCommitLine(r: FreeCommitReading | null | undefined): string {
   if (r === undefined) return 'free commit (GlobalMemoryStatusEx): not read yet — Refresh the engine status';
-  if (!r) return 'free commit (GlobalMemoryStatusEx): not measured on this OS';
+  if (!r) return 'free commit and free physical memory unread (the reading failed)';
   const n = (v: number | null) => (v ?? 0).toLocaleString('en-US');
   if (r.source && r.source !== 'GlobalMemoryStatusEx') {
     return `free physical (${r.source}) ${n(r.avail_phys_mib)} of ${n(r.total_phys_mib)} MiB; `

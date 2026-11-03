@@ -298,7 +298,7 @@ class TestFreeCommit:
 
     def test_the_strata_reader_stays_windows_only(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "linux")
-        assert cm.read_free_commit() is None, "local_engine_status and the Strata supervisor keep None off Windows"
+        assert cm.read_free_commit() is None, "the Strata supervisor keeps None off Windows"
 
     @pytest.mark.asyncio
     async def test_the_command_carries_the_reading_off_windows_too(self, monkeypatch):

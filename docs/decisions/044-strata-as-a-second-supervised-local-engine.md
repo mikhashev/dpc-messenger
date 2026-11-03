@@ -924,15 +924,22 @@ position with no position field, as on **waiting**), and the holder is named by 
   `_describe_image_for_agents` carries a refusal to `vl_error` and `warnings` in its own words, without
   the provider's "vision failed". **A person's group image waits for the card about 30 s** (Mike's call,
   2026-11-03, on Johnny's objection), because the description goes into the message and the message
-  waits for it: `VL_DESCRIPTION_CARD_WAIT_S`, a constant, passed by `waiting_for_the_card_at_most` to
+  waits for it: `GROUP_IMAGE_CARD_WAIT_S`, a constant, passed by `waiting_for_the_card_at_most` to
   the deadline `_QueuedRequest` sets; a `swap_wait_s` that is less still wins, and a refusal names
   whichever decided (`wait_limit`). The message then goes with its warning and no description, and a
   stop that request began runs on (decision 2). Other requests keep `swap_wait_s`, and the swap off
-  changes nothing. By rule 5 this bounds waiting and no work: a description running on the card is not
-  cut, nor is a start past the claim, nor a start of the same alias it waits behind. So a message can
-  still hang through an engine's load (`start_timeout_s`: 300 s on `llama-server` and 600 s on Strata,
-  which then runs its smoke) and through the description. Whether a start can be left to finish in the
-  background while the message goes on is open, with the owner. Sleep is rule 11's.
+  changes nothing. The limit (`_CARD_WAIT_LIMIT`) is for a request with no hold, the only kind made
+  inside it today: `send_group_image` is a command of the local API, so its 30 s count from the moment
+  it joins the line. A request with a hold keeps its clock from acceptance, and a limit set over one
+  would shorten its wait from that acceptance and never start a new 30 s. By rule 5 this bounds waiting
+  and no work: a description running on the card is not cut, nor is a start past the claim, nor a start
+  of the same alias it waits behind. So the 30 s do not bound `start_timeout_s`, by default 300 s on
+  `llama-server` and 600 s on Strata, which then runs its smoke, and a message can still hang through
+  that load and through the description. One load can be followed by another: `llama-server` steps down
+  a KV rung after an out-of-memory start, and a new pin's failed first start rolls back to the retained
+  pin, each under a `start_timeout_s` of its own. The owner's choice, 2026-11-03: variant A, as built, so
+  the message waits for the work; a later "send now and attach the description" is left to a card. Sleep
+  is rule 11's.
 - **The status.** `local_engine_status` reports `card_queue` from `card_queue()`: one row per request
   in position order, with no position field, as **waiting** does, each `alias`, `agent_id`,
   `conversation_id` (null where the hold has none), `queued_at` and `give_up_at`, both wall-clock
@@ -984,3 +991,75 @@ rewrites nothing above.
 Two named defaults stay and are not a window of this kind: the agent loop's 204800 for a run
 with no session behind it, and sleep's 128000 for the synthesis budget. Whether they should
 stand is the owner's question.
+
+## Amendment, 2026-11-03 — a size short of RAM
+
+The owner's case, 2026-11-02: a new alias on IQ3_S, made by Add Provider from the run config
+Strata's setup wrote, died on its first start, and the form had suggested a cache budget and
+nothing else. Decided by Mike with Zcode and Ark; Johnny argued against the cap in point 2.
+Nothing below has been run live: acceptance is a live start with no budget, short of RAM.
+
+1. **One field is prefilled, `resident_budget_gib`.** It is host RAM, which is what the form's
+   reading measures, and the engine's own warning names it. `--vram-reserve-mib` and
+   `--kv-resident` are about the card, and a reading of free host memory says nothing of them. The
+   engine's words on the reserve also pull both ways in one file: a smaller one at the 13:37 start
+   below (line 36) and a larger one, 964 and then 1536, at the 13:59 start (lines 108-109). The form
+   names both and derives no value. The owner's own `strata-iq3_s-lowmem.json` carries all three
+   (24, 1536, 32768); the 13:59 start ran with the budget and a reserve of 700.
+2. **The rule.** When the size's `ram_needed_gb`, compared as GiB as Strata holds its `ram_gb`
+   against total RAM, is more than free memory now: the lower of free physical and free commit,
+   physical alone where commit is not measured, less 9 GiB, rounded down to a whole GiB, held to the
+   arena, and no value when under 8 GiB is left after the 9. It is a hint at overflow and not at
+   every start: a size that fits free memory gets none. It is marked not measured, and never replaces
+   a typed value or a budget the base config names. With 33.10 GiB free on IQ3_S it gives 24, and with
+   60 GiB free 51 held to 46.
+   - **The cap** is `experts_gb`, Strata's `arena_gb` as `list_strata_models` passes it
+     (`tools/strata_mcp.py`), decimal GB: divided by 1.073741824 and floored as `setup.py:3353` does,
+     50.3 is 46, beside the engine's "46.84 GiB". With no figure there is no cap. Add Provider writes
+     the alias past setup, so setup's own cap does not reach it, and past the arena the form's "the
+     rest" would not exist. Johnny's objection: `BUDGET_FLAGS` sets no upper bound because Strata
+     clamps the budget itself, so such a number is not refused.
+   - **The floor** is setup's `max(8, ...)`: a budget it would never write is not suggested.
+   - **The 9 GiB** come from one worked example and from no rule. A budget of 24 started at 30.4,
+     31.5 and 34.1 GiB available on the smaller IQ3_XXS (`strata-strata_flash-next-engine.log`,
+     2026-10-25); on IQ3_S it has only been seen at 40.2 GiB and above. At those three figures the hint
+     gives 21, 22 and 25, and a budget of 31 started there too, at 30.8 to 33.7 GiB where it gives 21
+     to 24. So it mostly comes out below what ran, slower and not proved safer, and it is not to change
+     without a live measurement (Zcode).
+3. **Counted from what is free now, as a stated choice.** Upstream counts from total RAM:
+   `resident_budget_gib` in `setup.py:3348-3353`, for Unsloth's files,
+   `max(8, min(round(ram) - 24 - ceil(kv_ram), arena_gib))`, which on this machine's 61.7 GiB is 38
+   before a KV cache in RAM, where this hint gives 24 at 33.10 GiB free. The base differs on purpose:
+   Add Provider knows what the other programs hold at that moment and upstream's setup does not ask.
+   So this is not the engine's formula with another number, and its numbers will not match setup's.
+4. **The engine's arena warning is quoted and not called the cause.** It is a warning, and the load
+   goes on. `_arena_short_note` reads the engine log of this launch, one 8 MiB chunk of it, and a
+   failed start's text carries the line and names the field, saying these are the engine's numbers.
+   In `~/.dpc/logs/strata-qwen3.8-flash-next-iq3_s_Strata-engine.log`, read 2026-11-03:
+   - The 13:37 start (line 7) had no budget. Memory guard: 34.3 GiB available (line 8). "the expert
+     arena needs 46.84 GiB of RAM but 33.10 GiB is available (13.74 GiB short, after waiting)" (line
+     27); it loaded them all (line 29); "expert cache auto: 0.00 GiB free" and "no VRAM is left for the
+     expert cache" (lines 35-36); "session is up" and "the embedding buffer failed" (lines 39-40), and
+     the launcher saw exit code 1.
+   - The 13:59 start (line 47) had `--resident-budget-gib 24`. Memory guard: 46.9 GiB available (line
+     48), and 45.44 GiB at line 79; "expert cache auto: 23.54 GiB free" (line 67); it came up.
+
+   The two differ in the budget, in 12.6 GiB of free RAM and in 23.54 GiB of free VRAM, and the last
+   words of the one that died are about VRAM. So this log cannot separate the budget's effect from the
+   freed memory, and the card may have mended a symptom. Only the live start says.
+5. **What the budget costs, in the engine's words.** At 24 the same file says "1413 of 1413 lendable
+   slots (100%) will read their experts from the pack during a long prompt", "Raise
+   --resident-budget-gib" (line 92), and "prompts can read ~3x slower than with --prefill auto" (line
+   93). So the hint is the slower way to run, and its text says so: "reads any others from the model
+   files, which can be slower".
+6. **`--mmap-experts` is one observation.** The warning advises it together with the budget. The 13:59
+   command carried no `--mmap-experts` and the engine logged "experts via mmap (--mmap-experts; the
+   GGUF shards in place, no experts.bin)" (line 60). DPC sets no such flag. The live start has to look
+   at this too.
+7. **The words when nothing is suggested.** "Close other programs" is said only where that can help.
+   Where the size needs more than this PC's total RAM, or Strata's `on_this_pc` opens with "does not
+   fit", the text says closing programs will not make it fit and asks for a typed budget.
+8. **Off Windows.** `local_engine_status` answers `free_commit` with `read_free_commit_or_physical`,
+   as `list_processes` does, because this hint needs physical memory there; the two commit fields stay
+   null. A null is then a reading that failed, on every OS. The Strata supervisor keeps
+   `read_free_commit`, which is None off Windows.

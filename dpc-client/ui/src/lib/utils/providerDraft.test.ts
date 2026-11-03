@@ -129,4 +129,11 @@ describe('a strata draft (ADR-044)', () => {
     expect(validateProviderDraftForAdd({ alias: 'flash', type: 'strata', model: '' }, []).valid).toBe(false);
     expect(validateProviderDraftForAdd({ alias: 'flash', type: 'strata', model: 'flash' }, []).valid).toBe(true);
   });
+
+  it('cannot be added with a resident budget the save would refuse', () => {
+    const zero = validateProviderDraftForAdd({ alias: 'flash', type: 'strata', model: 'flash', resident_budget_gib: 0 }, []);
+    expect(zero.valid).toBe(false);
+    expect(zero.reason).toContain('Resident budget');
+    expect(validateProviderDraftForAdd({ alias: 'flash', type: 'strata', model: 'flash', resident_budget_gib: 24 }, []).valid).toBe(true);
+  });
 });
