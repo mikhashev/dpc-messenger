@@ -307,7 +307,7 @@ HOSTNAME_LOOKUP_DEADLINE_S = 3.0
 #: (Mike's call, 2026-11-03): after this the message goes with its warning and no description.
 #: On waiting and not on work: a description running on the card is not cut, and neither is a
 #: start past the claim (ADR-044, the card queue). `swap_wait_s` still wins where it is less.
-VL_DESCRIPTION_CARD_WAIT_S = 30
+GROUP_IMAGE_CARD_WAIT_S = 30
 
 #: The scan's own single worker. The loop's default executor is shared with
 #: every `loop.getaddrinfo` (STUN discovery logs its timeouts, and each one
@@ -7865,10 +7865,10 @@ class CoreService:
                 try:
                     vl_description = await self._describe_image_for_agents(encoded_data, mime_type, text)
                 except Exception as e:
-                    from .managers.llama_server_supervisor import card_queue_refusal_in
+                    from .managers.llama_server_supervisor import engine_refusal_in
 
-                    # A queue refusal says it itself: the provider's wrap reads "vision failed".
-                    vl_error = str(card_queue_refusal_in(e) or e) or e.__class__.__name__
+                    # An engine's refusal says it itself: the provider's wrap reads "vision failed".
+                    vl_error = str(engine_refusal_in(e) or e) or e.__class__.__name__
                     logger.warning("describe_for_agents (VL) failed for group image: %s", vl_error)
                 if not vl_description and not vl_error:
                     # A provider that answers with nothing refuses just as squarely
@@ -8043,7 +8043,7 @@ class CoreService:
         )
         from .managers.llama_server_supervisor import waiting_for_the_card_at_most
 
-        with waiting_for_the_card_at_most(VL_DESCRIPTION_CARD_WAIT_S,
+        with waiting_for_the_card_at_most(GROUP_IMAGE_CARD_WAIT_S,
                                           "a person's group message waits on this description"):
             meta = await self.llm_manager.query(
                 prompt=analysis_prompt,

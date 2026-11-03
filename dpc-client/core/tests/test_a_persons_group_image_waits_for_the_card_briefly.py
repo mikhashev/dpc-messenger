@@ -103,6 +103,7 @@ def _went_without_a_description(result, monitor) -> str:
     assert warning.startswith("Image sent, but describe for agents (VL) produced no description:")
     assert monitor.add_message.call_count == 1
     assert "[VL]" not in str(monitor.add_message.call_args)
+    assert "vision failed" not in warning, "no model was asked: the provider's wrap is not true of it"
     return warning
 
 
@@ -285,7 +286,7 @@ class TestOtherRequestsKeepTheSetting:
         assert base_mod._QueuedRequest(place).wait_s == SWAP_WAIT_S
 
     def test_the_limit_is_the_owners_number(self):
-        assert service_mod.VL_DESCRIPTION_CARD_WAIT_S == 30
+        assert service_mod.GROUP_IMAGE_CARD_WAIT_S == 30
 
 
 class TestTheLimitIsOnWaitingNotOnWork:
@@ -293,7 +294,7 @@ class TestTheLimitIsOnWaitingNotOnWork:
 
     @pytest.fixture(autouse=True)
     def a_small_limit(self, monkeypatch):
-        monkeypatch.setattr(service_mod, "VL_DESCRIPTION_CARD_WAIT_S", 0.05)
+        monkeypatch.setattr(service_mod, "GROUP_IMAGE_CARD_WAIT_S", 0.05)
 
     @pytest.mark.asyncio
     async def test_a_description_running_on_the_card_is_not_cut(self, tmp_path):
@@ -352,9 +353,29 @@ class TestTheSwapOff:
         _untouched(f)
 
     @pytest.mark.asyncio
+    async def test_a_supervisor_draining_reads_its_own_words_too(self, tmp_path):
+        _f, s = _pair(tmp_path)
+        s._draining = True
+        task, monitor = _sent_with(_QueryThatNeedsTheEngine(s), tmp_path)
+        result = await asyncio.wait_for(task, 5)
+        warning = _went_without_a_description(result, monitor)
+        assert str(s._draining_error()) in warning
+
+    @pytest.mark.asyncio
+    async def test_a_failure_that_is_no_refusal_keeps_the_providers_words(self, tmp_path):
+        class _AModelThatFailed:
+            async def query(self, prompt=None, **_):
+                raise RuntimeError("llamacpp_server vision failed for 'x': the model is gone")
+
+        task, monitor = _sent_with(_AModelThatFailed(), tmp_path)
+        result = await asyncio.wait_for(task, 5)
+        [warning] = result["warnings"]
+        assert "vision failed for 'x': the model is gone" in warning
+
+    @pytest.mark.asyncio
     async def test_a_description_runs_past_the_limit_as_it_did(self, tmp_path, settings, monkeypatch):
         settings.set_local_engine_swap(False, SWAP_WAIT_S, 0)
-        monkeypatch.setattr(service_mod, "VL_DESCRIPTION_CARD_WAIT_S", 0.05)
+        monkeypatch.setattr(service_mod, "GROUP_IMAGE_CARD_WAIT_S", 0.05)
         _f, s = _pair(tmp_path)
         _fake_child(s, health_delay=0.2)
         task, _monitor = _sent_with(_ADescriptionThatTakesAWhile(s, seconds=0.2), tmp_path)

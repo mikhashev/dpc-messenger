@@ -935,14 +935,17 @@ def _first_cause_of(error: Optional[BaseException], kinds: Any) -> Optional[Any]
 
 
 def card_queue_refusal_in(error: Optional[BaseException]) -> Optional[CardQueueRefusal]:
-    """The queue's refusal behind `error`, or None."""
+    """The queue's refusal behind `error`, or None. Narrower than `engine_refusal_in`: a door that
+    answers the line's "never retried" asks here, and the swap off's `CardHeldError` and
+    `EngineDrainingError` are not it."""
     return _first_cause_of(error, CardQueueRefusal)
 
 
 def engine_refusal_in(error: Optional[BaseException]) -> Optional[LlamaServerError]:
     """A local engine's refusal behind `error`, or None: the queue's, the `CardHeldError` of the
     swap off, or `EngineDrainingError`. No model was asked, so its own text says what happened,
-    and the wrap's words about a provider that failed are not true of it."""
+    and the wrap's words about a provider that failed are not true of it. Wider than
+    `card_queue_refusal_in`, for a reader that only wants those words and not the line's rules."""
     return _first_cause_of(error, (CardHeldError, EngineDrainingError))
 
 
