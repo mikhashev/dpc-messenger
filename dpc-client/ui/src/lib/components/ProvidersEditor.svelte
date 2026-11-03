@@ -11,6 +11,10 @@
   } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
   import { enginePinLines, runsRetainedPin, type EnginePins } from '$lib/utils/enginePins';
+  import {
+    backgroundSkipLines, cardQueueLines, otherCardHolderLines,
+    type BackgroundSkipRow, type CardHolderRow, type CardQueueRow,
+  } from '$lib/utils/cardQueue';
   import { trackRename } from '$lib/utils/aliasRenames';
   import {
     groupModelFiles, modelFileLabel, mmprojAfterChoosing, projectorsBeside, type ModelFileRow,
@@ -458,6 +462,8 @@
     card_holder: any; strata: any[]; free_commit: FreeCommitReading | null; engine_backends: string[];
     pins: Record<string, EnginePins> | null; model_files_dir: string;
     swap_when_idle: boolean; swap_wait_s: number;
+    card_holders: CardHolderRow[]; card_queue: CardQueueRow[];
+    last_background_skip: Record<string, BackgroundSkipRow>;
   } | null = null;
   let engineStatusError = '';
   let engineStatusLoading = false;
@@ -473,6 +479,8 @@
           engine_backends: r.engine_backends ?? [], pins: r.pins ?? null,
           model_files_dir: r.model_files_dir ?? '',
           swap_when_idle: r.swap_when_idle ?? true, swap_wait_s: r.swap_wait_s ?? 300,
+          card_holders: r.card_holders ?? [], card_queue: r.card_queue ?? [],
+          last_background_skip: r.last_background_skip ?? {},
         };
         engineStatusError = '';
       } else {
@@ -2054,6 +2062,18 @@
         none — the card is free
       {/if}
     </p>
+    {#each otherCardHolderLines(engineStatus?.card_holders) as line}
+      <p class="help-text">{line}</p>
+    {/each}
+    {#if engineStatus?.card_queue?.length}
+      <p class="help-text"><strong>Waiting for the card, in order:</strong></p>
+      {#each cardQueueLines(engineStatus?.card_queue) as line}
+        <p class="help-text">{line}</p>
+      {/each}
+    {/if}
+    {#each backgroundSkipLines(engineStatus?.last_background_skip) as line}
+      <p class="help-text">{line}</p>
+    {/each}
     {#each enginePinLines(engineStatus?.pins) as line}
       <p class="help-text" class:warn={line.warn}>{line.text}</p>
     {/each}

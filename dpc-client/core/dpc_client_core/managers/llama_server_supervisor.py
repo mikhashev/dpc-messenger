@@ -238,6 +238,31 @@ def peer_being_served() -> Optional[str]:
     return _PEER_CALL.get()
 
 
+# ADR-044, the card queue, rule 10: set while a background call is made, holding its name. A
+# ContextVar for the reason `_PEER_CALL` is one. It is asked at `ensure_running`, and only while
+# `swap_when_idle` is on: such a call neither swaps nor queues, it runs on a child already on the
+# card, and otherwise it is skipped and `last_background_skip` says so. Nothing tries a skip again:
+# each name carries what follows it instead.
+_BACKGROUND_CALLS = {
+    "self_reflection_confirmation": "The extraction goes on and treats this conversation as general.",
+    "skill_reflection": "This reflection ends, and the next long task that uses a skill reflects.",
+}
+_BACKGROUND_CALL: contextvars.ContextVar = contextvars.ContextVar("dpc_background_call", default=None)
+
+
+@contextlib.contextmanager
+def a_background_call(what: str):
+    """Mark the calls made inside as the background call `what`. A skip raises
+    `BackgroundCallSkipped` out of the body, which the caller handles as any failed call."""
+    if what not in _BACKGROUND_CALLS:
+        raise ValueError(f"unknown background call: {what!r}")
+    token = _BACKGROUND_CALL.set(what)
+    try:
+        yield
+    finally:
+        _BACKGROUND_CALL.reset(token)
+
+
 def _foreign_owner_loop() -> Optional[asyncio.AbstractEventLoop]:
     """The owner loop when the caller runs on another one and the owner is alive."""
     owner = _OWNER_LOOP
@@ -300,6 +325,12 @@ class CardQueueRefusal(CardHeldError):
 class TakenOutOfTheCardQueue(CardQueueRefusal):
     """A person's Stop took this request out of the line (rule 12): a stopped turn, not a
     failed one."""
+
+
+class BackgroundCallSkipped(CardQueueRefusal):
+    """A background call found its alias not on the card, or a place waiting (rule 10). Nothing
+    was started, marked or queued, and it is in `last_background_skip`. A `CardQueueRefusal` for
+    its "never retried": it never stood in the queue, and nothing tries it again."""
 
 
 class EngineDrainingError(LlamaServerError):
@@ -429,6 +460,18 @@ _SWAP_TOASTS: "set[asyncio.Future]" = set()
 def last_swap() -> Optional[Dict[str, Any]]:
     """The last idle swap this process made, or None."""
     return dict(_LAST_SWAP) if _LAST_SWAP else None
+
+
+# The last skip of each background call (ADR-044, the card queue, rule 10), in
+# `local_engine_status` as `last_background_skip`: name, then {"alias", "reason", "what_follows",
+# "at"}. One row per name, so one that skips often does not hide another. In memory, as
+# `_LAST_SWAP` is.
+_LAST_BACKGROUND_SKIP: Dict[str, Dict[str, Any]] = {}
+
+
+def last_background_skip() -> Dict[str, Dict[str, Any]]:
+    """The last skip of each background call this process made; empty before one."""
+    return {what: dict(row) for what, row in _LAST_BACKGROUND_SKIP.items()}
 
 
 # The stops of holders being swapped out, held until done. Each runs as its own task so that a
@@ -715,19 +758,40 @@ class _CardPlace:
 _CARD_QUEUE: List[_CardPlace] = []
 
 
+def card_queue() -> List[Dict[str, Any]]:
+    """The line for `local_engine_status`, each request in position order (the position is the
+    order; there is no position field): its alias, who it runs for where set, `queued_at` and
+    `give_up_at`, both wall-clock seconds as `last_swap`'s `at` is. For the owner only: these are
+    ids of the owner's agents and chats, as in `_who_stands_on`."""
+    now, clock = time.time(), _swap_clock()
+    return [
+        {
+            "alias": place.alias,
+            "agent_id": request.hold.agent_id if request.hold is not None else None,
+            "conversation_id": request.hold.conversation_id if request.hold is not None else None,
+            "queued_at": request.queued_at,
+            "give_up_at": now + request.give_up_at - clock,
+        }
+        for place in _CARD_QUEUE
+        for request in place.requests
+    ]
+
+
 class _QueuedRequest:
     """A request in a place: its one deadline (rule 5), and `out`, the refusal it meets when it
     is taken out of the line (rule 12). A request with a hold on this alias has the deadline it
     was accepted with; any other (a call with no hold, a cloud agent's call on a local alias) is
     accepted here. `came_late` is a request that had no time left when it came: it refuses a busy
-    holder at once, and a holder that is not busy asks it for no wait."""
+    holder at once, and a holder that is not busy asks it for no wait. `queued_at` is the time it
+    took its place, read only by `card_queue`; the clock of the wait is `accepted_at`."""
 
-    __slots__ = ("place", "hold", "accepted_at", "wait_s", "give_up_at", "came_late", "stop_bound",
-                 "out", "_turn_mark")
+    __slots__ = ("place", "hold", "accepted_at", "queued_at", "wait_s", "give_up_at", "came_late",
+                 "stop_bound", "out", "_turn_mark")
 
     def __init__(self, place: _CardPlace):
         self.place = place
         self.hold: Optional[_CardHold] = _CARD_HOLD.get()
+        self.queued_at = time.time()
         now = _swap_clock()
         if self.hold is not None and self.hold.alias == place.alias:
             self.accepted_at, self.wait_s = self.hold.accepted_at, self.hold.wait_s
@@ -1680,6 +1744,10 @@ class LlamaServerSupervisor:
         otherwise hold it. Synchronous on purpose: see `_CARD_CLAIMS`."""
         if not self.on_the_card():
             return
+        what = _BACKGROUND_CALL.get()
+        if what is not None and swap_policy()[0]:
+            # Past the queue's door with a child up, which then went: it takes no card (rule 10).
+            raise self._background_call_skipped(what)
         held = self._card_held_error()
         if held is not None:
             raise held
@@ -1735,6 +1803,25 @@ class LlamaServerSupervisor:
             self.alias, self.ENGINE,
         )
 
+    def _background_call_skipped(self, what: str) -> "BackgroundCallSkipped":
+        """Rule 10's named skip: into the record with its reader and the log, and the refusal
+        that ends the call. Nothing here starts, marks or queues."""
+        if _CARD_QUEUE:
+            reason = f"a request is waiting in the queue for the card for '{_CARD_QUEUE[0].alias}'"
+        elif self._draining:
+            reason = f"'{self.alias}' is stopping"
+        else:
+            reason = f"'{self.alias}' is not on the card"
+        what_follows = _BACKGROUND_CALLS[what]
+        logger.info("%s[%s]: background call %s skipped: %s. %s",
+                    self.ENGINE, self.alias, what, reason, what_follows)
+        _LAST_BACKGROUND_SKIP[what] = {"alias": self.alias, "reason": reason, "what_follows": what_follows,
+                                       "at": time.time()}
+        return BackgroundCallSkipped(
+            f"{self.ENGINE}[{self.alias}]: background call {what} skipped: {reason}",
+            self.alias, self.ENGINE,
+        )
+
     # --- the idle swap (ADR-044, amendment 2026-11-02) --------------------------
 
     # Whether stopping this engine drops what it parked for conversations.
@@ -1744,8 +1831,12 @@ class LlamaServerSupervisor:
         """A call served to a peer never swaps (ADR-044 amendment, rule 2)."""
         return peer_being_served() is not None
 
-    def _draining_error(self) -> EngineDrainingError:
-        """The refusal of a new call or start while this supervisor drains."""
+    def _draining_error(self) -> LlamaServerError:
+        """The refusal of a new call or start while this supervisor drains. A background call
+        that passed the queue's door before the drain began meets its skip here (rule 10)."""
+        what = _BACKGROUND_CALL.get()
+        if what is not None and swap_policy()[0] and self.on_the_card():
+            return self._background_call_skipped(what)
         if self._swap_for is not None:
             return EngineDrainingError(f"'{self.alias}' is stopping to free the card for '{self._swap_for}'")
         return EngineDrainingError(f"{self.ENGINE}[{self.alias}] is draining; new calls refused")
@@ -1865,9 +1956,13 @@ class LlamaServerSupervisor:
         of this alias is locked. None when this request goes on without one, and the start's own
         path then says the rest: the swap off (today's refusal), a child that takes no card, a
         peer's call on an open window, a start begun for a peer and rule 9, whose claims refuse,
-        and what rule 4 says is not new."""
+        and what rule 4 says is not new. A background call never takes a place: it passes on a
+        child already up with nobody waiting, and is skipped otherwise (rule 10)."""
         if not swap_policy()[0] or not self.on_the_card():
             return None
+        what = _BACKGROUND_CALL.get()
+        if what is not None and (_CARD_QUEUE or not self._child_is_up()):
+            raise self._background_call_skipped(what)
         peer = peer_being_served()
         if peer is not None:
             # A peer never takes a place, and a new one does not go ahead of one (rule 7).

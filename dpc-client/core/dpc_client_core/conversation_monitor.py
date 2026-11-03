@@ -19,6 +19,7 @@ from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSour
 
 from . import knowledge_routing
 from . import conversation_paths
+from .managers.llama_server_supervisor import BackgroundCallSkipped, a_background_call, card_queue_refusal_in
 from .p2p_manager import peer_proof
 
 
@@ -1021,10 +1022,14 @@ Conversation:
 {messages_text}"""
 
         try:
-            result = await asyncio.wait_for(
-                self.llm_manager.query(prompt=prompt),
-                timeout=10.0  # Don't block extraction if LLM is slow
-            )
+            # A step of a person's extraction, on the default alias and with no hold: unmarked it
+            # could stop a holder and drop parked conversations for a 10 s classification. With
+            # the swap on it neither swaps nor queues (ADR-044, the card queue, rule 10).
+            with a_background_call("self_reflection_confirmation"):
+                result = await asyncio.wait_for(
+                    self.llm_manager.query(prompt=prompt),
+                    timeout=10.0  # Don't block extraction if LLM is slow
+                )
             confirmed = result.strip().lower().startswith("yes")
             logger.debug("Monitor %s: Self-reflection LLM confirmation: %s",
                          self.conversation_id, confirmed)
@@ -1034,8 +1039,10 @@ Conversation:
                            self.conversation_id)
             return False
         except Exception as e:
-            logger.warning("Monitor %s: Self-reflection LLM confirmation failed (%s) — falling back to general",
-                           self.conversation_id, e)
+            # A skip is no failure and the door has said it: general is the answer.
+            if not isinstance(card_queue_refusal_in(e), BackgroundCallSkipped):
+                logger.warning("Monitor %s: Self-reflection LLM confirmation failed (%s) — falling back to general",
+                               self.conversation_id, e)
             return False
 
     def _get_task_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:

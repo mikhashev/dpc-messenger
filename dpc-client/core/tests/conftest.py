@@ -76,6 +76,7 @@ def _no_card_claims_cross_tests():
         llama_server_supervisor._last_caller_call_at.clear()
         llama_server_supervisor._CARD_QUEUE.clear()
         llama_server_supervisor._LAST_SWAP = None
+        llama_server_supervisor._LAST_BACKGROUND_SKIP.clear()
         llama_server_supervisor._SWAP_STOPS.clear()
         llama_server_supervisor._SWAP_TOASTS.clear()
 

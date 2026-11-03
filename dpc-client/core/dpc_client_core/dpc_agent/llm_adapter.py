@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, REFUSAL_TOOLS_UNSUPPORTED, PeerRefused
 
-from ..managers.llama_server_supervisor import card_queue_refusal_in, runs_on_a_local_engine
+from ..managers.llama_server_supervisor import BackgroundCallSkipped, card_queue_refusal_in, runs_on_a_local_engine
 from ..node_ledger import (
     ENGINE_FIELDS,
     TARIFF_FIELDS,
@@ -995,7 +995,9 @@ class DpcLlmAdapter:
             return response_msg, usage
 
         except Exception as e:
-            log.error(f"DPC LLM error: {e}")
+            # A background call's skip is not an error: the door has said it (rule 10).
+            if not isinstance(card_queue_refusal_in(e), BackgroundCallSkipped):
+                log.error(f"DPC LLM error: {e}")
             raise
 
     async def _chat_native_tools(

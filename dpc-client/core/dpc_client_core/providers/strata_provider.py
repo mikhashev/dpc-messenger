@@ -453,7 +453,10 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
     `pins` is per engine (`llama.cpp`, `strata`): the pin, the installed pins, the
     retained pin, the running pin, and `rolled_back_to` after a rollback. `last_swap` is
     the last idle swap of one engine for another this process made (ADR-044, amendment
-    2026-11-02): from, to, their engines, `at`, and `parked_dropped`; None before one."""
+    2026-11-02): from, to, their engines, `at`, and `parked_dropped`; None before one.
+    `card_holders` is every holder, `card_queue` the line and `last_background_skip` each
+    background call's last skip (the card queue, rule 10). These last two name the owner's
+    agents and chats or aliases; this status goes to the owner's own UI and to no peer."""
     strata = [
         await strata_status(sup, metrics_timeout_s)
         for sup in list(_ACTIVE_SUPERVISORS.values())
@@ -469,7 +472,9 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
         logger.warning("local engine pins unreadable: %s", e)
         pins = None
     return {"card_holder": card_holder(), "strata": strata, "free_commit": read_free_commit(),
-            "engine_backends": backends, "pins": pins, "last_swap": _base.last_swap()}
+            "engine_backends": backends, "pins": pins, "last_swap": _base.last_swap(),
+            "card_holders": _base.card_holders(), "card_queue": _base.card_queue(),
+            "last_background_skip": _base.last_background_skip()}
 
 
 def strata_supervisor_of(alias: str) -> Optional[StrataSupervisor]:

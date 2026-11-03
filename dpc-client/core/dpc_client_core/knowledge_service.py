@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
+from .managers.llama_server_supervisor import card_queue_refusal_in
 from . import ai_chats, conversation_paths
 from dpc_protocol.pcm_core import PCMCore
 
@@ -1193,7 +1194,16 @@ class KnowledgeService:
                 self.consensus_manager.node_id = original_node_id
 
         except Exception as e:
-            logger.error("Error in AI agent voting: %s", e, exc_info=True)
+            refusal = card_queue_refusal_in(e)
+            if refusal is None:
+                logger.error("Error in AI agent voting: %s", e, exc_info=True)
+                return
+            # The vote is a request and may be refused the card; no model failed to judge anything.
+            logger.warning(
+                "AI agent %s abstains on proposal %s (no vote cast): the card queue refused alias '%s': %s",
+                ai_agent_node_id, proposal_id,
+                agent_provider_alias or self.llm_manager.default_provider, refusal,
+            )
 
     async def _evaluate_knowledge_proposal_for_ai_vote(
         self,
@@ -1300,6 +1310,8 @@ Respond in JSON format:
             )
             return None
         except Exception as e:
+            if card_queue_refusal_in(e) is not None:
+                raise  # the vote names it: not an evaluation that went wrong
             logger.error(
                 "Error in AI vote evaluation, agent will abstain: %s", e, exc_info=True
             )

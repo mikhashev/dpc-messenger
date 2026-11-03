@@ -21,6 +21,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from ..managers.llama_server_supervisor import a_background_call
 from .utils import utc_now_iso, append_jsonl, write_text
 
 log = logging.getLogger(__name__)
@@ -193,10 +194,14 @@ Only set needs_improvement=true when:
 Do NOT suggest improvements for: normal variance, minor wording, tasks that succeeded quickly, or topics already covered in existing sections."""
 
         try:
-            msg, _ = await self.llm.chat(
-                [{"role": "user", "content": reflection_prompt}],
-                tools=None,
-            )
+            # Started inside the turn once its hold has ended (`DpcAgent.process`), so with no
+            # hold: with the swap on it neither swaps nor queues (ADR-044, the card queue,
+            # rule 10). A skip ends this reflection; the next long task with a skill reflects.
+            with a_background_call("skill_reflection"):
+                msg, _ = await self.llm.chat(
+                    [{"role": "user", "content": reflection_prompt}],
+                    tools=None,
+                )
         except Exception as e:
             log.debug(f"Reflection LLM call failed for '{skill_name}': {e}")
             return

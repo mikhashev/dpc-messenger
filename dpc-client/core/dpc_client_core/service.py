@@ -7859,8 +7859,11 @@ class CoreService:
                 try:
                     vl_description = await self._describe_image_for_agents(encoded_data, mime_type, text)
                 except Exception as e:
-                    vl_error = str(e) or e.__class__.__name__
-                    logger.warning("describe_for_agents (VL) failed for group image: %s", e)
+                    from .managers.llama_server_supervisor import card_queue_refusal_in
+
+                    # A queue refusal says it itself: the provider's wrap reads "vision failed".
+                    vl_error = str(card_queue_refusal_in(e) or e) or e.__class__.__name__
+                    logger.warning("describe_for_agents (VL) failed for group image: %s", vl_error)
                 if not vl_description and not vl_error:
                     # A provider that answers with nothing refuses just as squarely
                     # as one that raises; both must reach the caller.

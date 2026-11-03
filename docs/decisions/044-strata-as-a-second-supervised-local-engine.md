@@ -627,10 +627,10 @@ Mike's call, team chat 2026-11-02, after review by Ark, Johnny and Zcode. **Deci
 built.** In the code: rule 1, with `accepted_request` as the only kind of hold, at the two doors
 it names and on a gateway call; rule 2, no mark while busy; the queue and its cancel (rules 3 and
 12); the order (rule 4); the single deadline (rule 5); rule 6, the `caller_window`, as built
-there; the gateway and peer doors (rules 7, 8 and 15); rule 9, the from-inside refusal; rule 13's
-switch and safety net; and `wait_reason: card_queue`. Not in the code: background calls (rule 10),
-the status key `card_queue`, and rule 9's second sentence. `swap_when_idle` stays off
-by default until all of it is live-checked. The work is the epic
+there; the gateway and peer doors (rules 7, 8 and 15); rule 9, the from-inside refusal; rule 10,
+as built below; rule 13's switch and safety net; `wait_reason: card_queue`; and the status key
+`card_queue`. Not in the code: rule 9's second sentence. `swap_when_idle` stays off by default until
+all of it is live-checked. The work is the epic
 `THE-CARD-HAS-NO-QUEUE-SO-A-SWAP-CAN-CUT-AN-AGENT-LOOP-AND-TWO-ALIASES-PING-PONG` (gitignored
 `backlog.md`). This note replaces the parts of the idle swap amendment it names below and
 rewrites nothing above. **Nothing is ever forced.**
@@ -728,10 +728,17 @@ One call in flight is too short a measure of busy, and two aliases trade the car
    stopped engine; that direction confirmed as the default, Mike's call, 2026-11-03), with the
    description cached once per turn; background calls never. Until that is built the refusal above
    stands.
-10. **Background calls** (the self-reflection check, knowledge extraction, skill reflection and
-    the like) never swap and never queue. They run only if their alias is on the card; otherwise
-    a named skip goes into a record with a reader, on the model of `last_swap`, never silently,
-    and they retry next cycle. The reason is `DROPS_PARKED_ON_STOP = True` on Strata.
+10. **Background calls** (the self-reflection confirmation, skill reflection and the like) never
+    swap and never queue. They run only if their alias is on the card; otherwise a named skip goes
+    into a record with a reader, on the model of `last_swap`, never silently. Nothing tries a skip
+    again; what follows is each call's own, as built below. The reason is
+    `DROPS_PARKED_ON_STOP = True` on Strata.
+    **Amended in place, 2026-11-03.** The list named knowledge extraction and the rule ended "and
+    they retry next cycle". Extraction is out by the owner's call, 2026-11-03: it starts at a
+    person's word (End Session, `/extract_knowledge`, Extract Knowledge) and is a request that
+    queues, not a background call. The retry is out after the review by Ark, Zcode and Johnny,
+    2026-11-03: no such cycle exists for either call that remains. "Check" became "confirmation" in
+    the same review (Ark): the call confirms a conversation's type and reflects on nothing.
 11. **No `sleep` kind and no `preemptible` class.** Sleep is a request like others; on this node
     it runs on the agent's own alias or a cloud one. `preemptible` is parked until a stop stops
     dropping parked conversations.
@@ -873,6 +880,56 @@ position with no position field, as on **waiting**), and the holder is named by 
   A request that left during the stop gets "stopped '<holder>' to free the card for '<new>', which
   stopped waiting" in the same three places, because a stopped Strata's parked conversations are gone
   all the same.
+- **Background calls (rule 10).** A call is one by its name, closed in `_BACKGROUND_CALLS`, each
+  with what follows its skip. `self_reflection_confirmation`
+  (`ConversationMonitor._is_self_reflection_conversation`, on the default alias with its 10 s
+  `wait_for`) is not a background job of its own: it is a step inside a person's extraction, deciding
+  `conversation_type`. It keeps the mark because it has no hold and its alias may not be the one on
+  the card: unmarked it could take a place and stop a holder, dropping parked conversations, for a
+  10 s classification. The mark says it neither swaps nor queues. A skip classifies the conversation
+  as general, and that is a result, not a gap: the extraction goes on with the general prompt, and
+  nothing recomputes the type in that pass. `skill_reflection` (`SkillReflector._do_reflect`) is
+  started inside the turn by `DpcAgent.process`, once the request's hold has ended, so it has no
+  hold; a skip ends that reflection, and the next long task with a used skill
+  (`REFLECTION_ROUNDS_THRESHOLD`) reflects. `a_background_call(what)` marks a call as `serving_a_peer`
+  marks a peer's, and `_wait_in_the_card_queue`, the queue's door, asks: a child already up with
+  nobody in line lets it run, and anything else raises `BackgroundCallSkipped`, into
+  `last_background_skip` {name: {alias, reason, what_follows, at}} in `local_engine_status`, in
+  memory, and an INFO line. That class is a `CardQueueRefusal` for its "never retried"; the call never
+  stood in the queue, so it is not to be read as a refusal of the line. The reason names the first
+  place's alias when one waits, which outranks a child that is down or stopping.
+  A place waiting skips it on its own alias as well, for two reasons: it would go ahead of one who
+  waits (rule 4), and its `_in_flight` would make the holder busy, so that the line could not stop
+  the very holder it waits for and that place's deadline would burn on a call nobody waits for. The
+  door checks once, so a call past it may run after a place was taken: that it neither swaps nor
+  queues holds always, and that the queue is empty at work is best effort. Past the door, `_claim_card`
+  refuses the mark for a child that went, and `_draining_error` turns into the skip for a supervisor
+  that began draining, at `call_slot` and behind `_start_lock` alike. One row per name, not one for
+  all as `last_swap` is, so that one that skips often does not hide another. It asks nothing of a
+  vendor's alias, a peer route or a model kept off the card (`on_the_card`), which have no card to be
+  on, and nothing with the swap off, where the call goes on as it did. A request with a hold is not
+  one, so rule 9 keeps the auxiliary calls inside a turn: `describe_image`,
+  `_pre_analyze_image_for_agent`, a PDF page's vision pass, the snapshot summary and compaction.
+  Holding an excluding alias such a call waits 0 s, by the refusal of rule 9; a cloud agent's, holding
+  none, queues within `swap_wait_s`, inside the 300 s `describe_image` has as a tool.
+  **Knowledge extraction is a request** (the owner's call, 2026-11-03): it starts at a person's word,
+  End Session, `/extract_knowledge` or Extract Knowledge, all through `end_conversation_session`, and
+  its main call, run locally, takes an `accepted_request` at `_execute_local_inference`. The automatic
+  branch in `on_message` is dead: `auto_detect` is always false since CLEAN-4. **The vote and the group
+  image are requests too.** `_ai_agent_vote_on_proposal` waits within `swap_wait_s`, and a refusal is one
+  WARNING naming it and the alias, with no vote cast: it is not an error, and not "could not evaluate".
+  `_describe_image_for_agents` carries a refusal to `vl_error` and `warnings` in its own words, without
+  the provider's "vision failed"; how long a person's group message may wait for it is with the owner
+  (Johnny's objection, 2026-11-03). Sleep is rule 11's.
+- **The status.** `local_engine_status` reports `card_queue` from `card_queue()`: one row per request
+  in position order, with no position field, as **waiting** does, each `alias`, `agent_id`,
+  `conversation_id` (null where the hold has none), `queued_at` and `give_up_at`, both wall-clock
+  seconds as `last_swap`'s `at` is. `queued_at` is the time the request took its place, which is not
+  its acceptance; `give_up_at` counts from the acceptance. `card_holders` beside it is every holder,
+  which `card_holder` is not when `llama-server` aliases share. The Providers editor's Local engines
+  block shows them under the card holder, read when it opens and on Refresh. It is a command of the
+  local API, on 127.0.0.1, and on no peer's path: nothing else reads it, so these ids of the owner's
+  agents and chats stay with the owner. Who stands on the holder's alias stays in the busy refusal.
 - **The doors' words (rule 15).** A queue refusal is `CardQueueRefusal`, a `CardHeldError`, so the
   peer door already read it as `provider_unavailable`; the gateway answers 503 `provider_unavailable`
   with no `Retry-After`, from the first step and from inside `_call`. `_draining_error` raises
