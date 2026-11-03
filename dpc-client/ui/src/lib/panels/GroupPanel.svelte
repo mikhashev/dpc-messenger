@@ -9,6 +9,7 @@
   import GroupInviteDialog from '$lib/components/GroupInviteDialog.svelte';
   import MentionAutocomplete from '$lib/components/MentionAutocomplete.svelte';
   import { confirmAsync } from '$lib/utils/dialog';
+  import { mentionableMembers, type MentionableMember } from '$lib/utils/mentionableMembers';
   import {
     groupChats,
     groupInviteReceived,
@@ -146,32 +147,14 @@
   // Mention autocomplete (moved from ChatPanel)
   // ---------------------------------------------------------------------------
 
-  function getMentionableMembers(): Array<{ node_id: string; name: string; mention_name: string }> {
+  function getMentionableMembers(): MentionableMember[] {
     if (!activeChatId.startsWith('group-')) return [];
-    const group = $groupChats.get(activeChatId);
-    if (!group) return [];
-    const selfId = $nodeStatus?.node_id || '';
-    const result: Array<{ node_id: string; name: string; mention_name: string }> = [];
-    if (group.members) {
-      for (const nodeId of group.members) {
-        if (nodeId !== selfId) {
-          const peerName = peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId;
-          result.push({ node_id: nodeId, name: peerName, mention_name: peerName });
-        }
-      }
-    }
-    const seenAgents = new Set<string>();
-    for (const [nodeId, agentIds] of Object.entries(group.agents || {})) {
-      const ownerName = nodeId === selfId ? 'You' : (peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId.substring(0, 12));
-      for (const agentId of (agentIds as string[])) {
-        if (seenAgents.has(agentId)) continue;
-        seenAgents.add(agentId);
-        const localAgent = $agentsList.find((a: any) => a.agent_id === agentId);
-        const agentName = localAgent?.name || (group.agent_names as any)?.[nodeId]?.[agentId] || agentId;
-        result.push({ node_id: agentId, name: `${agentName} (${ownerName})`, mention_name: agentName });
-      }
-    }
-    return result;
+    return mentionableMembers(
+      $groupChats.get(activeChatId),
+      $nodeStatus?.node_id || '',
+      peerDisplayNames,
+      (agentId) => $agentsList.find((a: any) => a.agent_id === agentId)?.name,
+    );
   }
 
   export function handleMentionInput(event: Event) {

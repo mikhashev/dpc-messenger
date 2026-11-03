@@ -7109,7 +7109,11 @@ class CoreService:
                 participants.append(f"{uname} (User)")
             else:
                 participants.append(f"{self._peer_name(nid)} (peer)")
+        # A node that left keeps its entries in the record (a re-add needs them), so
+        # the roster's `members` decides who is in the room, not the key of the map.
         for nid, names in group_meta.agent_names.items():
+            if nid not in group_meta.members:
+                continue
             where = "this node" if nid == own else f"peer {self._peer_name(nid)}"
             for aid, dname in names.items():
                 kind = "external agent" if str(aid).startswith("ext:") else "agent"
