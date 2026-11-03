@@ -725,8 +725,9 @@ One call in flight is too short a measure of busy, and two aliases trade the car
    agent) queues as a normal request. **Decided, not built** (Mike's call, variant B, 2026-11-02):
    a request's auxiliary call may give up its own alias, through the queue, within its one
    deadline, on a stop that loses no parked conversations (`DROPS_PARKED_ON_STOP` false on the
-   stopped engine), with the description cached once per turn; background calls never. Until that
-   is built the refusal above stands.
+   stopped engine; that direction confirmed as the default, Mike's call, 2026-11-03), with the
+   description cached once per turn; background calls never. Until that is built the refusal above
+   stands.
 10. **Background calls** (the self-reflection check, knowledge extraction, skill reflection and
     the like) never swap and never queue. They run only if their alias is on the card; otherwise
     a named skip goes into a record with a reader, on the model of `last_swap`, never silently,
@@ -824,7 +825,9 @@ position with no position field, as on **waiting**), and the holder is named by 
   asks it for no wait: it swaps, bounded by `_STOP_WITH_NO_WAIT_LEFT_S` (60 s, a constant, since
   `_stop_child` asks a child for 20 s and then kills it). This keeps `swap_wait_s` 0 meaning "do not
   wait for a busy holder". The cost is on purpose: an agent turn older than `swap_wait_s` whose
-  alias was stopped under it, and which finds the card busy, ends with the refusal at once.
+  alias was stopped under it, and which finds the card busy, ends with the refusal at once; finding
+  it idle, it stops the holder, and a Strata holder's parked conversations go with it. Both this and
+  the constant are Mike's call, 2026-11-03.
 - **What the 60 s limits.** `_STOP_WITH_NO_WAIT_LEFT_S` reaches the code only as `stop_bound`, which
   is the deadline for a request with time left and arrival plus 60 s for one that came with none.
   `stop_bound` applies in three places: `_within`, around `_clear_unfinished_start` and
