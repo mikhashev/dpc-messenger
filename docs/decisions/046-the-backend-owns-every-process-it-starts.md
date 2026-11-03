@@ -260,7 +260,13 @@ holds on Windows only.
      as one JSON line to `<DPC_HOME>/process_registry/YYYY-MM-DD.jsonl`, the UTC date of
      its end, the way the node ledger appends (a `.lock` sibling, `O_APPEND`, a torn last
      line healed by the next append); files dated more than 7 days back are removed at
-     start, and a failed append is logged once and never takes a spawn or an end down. The
+     start, and a failed append is logged once and never takes a spawn or an end down.
+     A daily file rotates past 10 MiB (`HISTORY_FILE_MAX_BYTES`) as `YYYY-MM-DD.N.jsonl`
+     (a failed rename is logged once and retried; at twice the limit rows are dropped with
+     a WARNING), and all history stays under 50 MiB (`HISTORY_TOTAL_MAX_BYTES`), oldest
+     first, today's current file never removed, at start, at a rotation and at the first
+     row of a new day; `command` keeps 120 characters, the launcher and origin strings 255
+     (`FIELD_MAX_CHARS`). Mike's order, 2026-11-03. The
      graph of point 8 reads the daily files: 200 entries would cut it to hours, and
      rewriting thousands of entries on every spawn and every end is too heavy. A line holds
      the entry as it was at its end; an `exit_code` that only a later report supplies is not
@@ -706,8 +712,9 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
   named as an example of `crashed` from recall; it is not measured here.
 - [x] **Storage.** The state file is fsynced before the swap; every finished entry is
   appended as one line to the daily file of its end's UTC date, and the state file keeps
-  only the newest 200; daily files dated more than 7 days back are removed at start; a
-  failed append is logged once and raises nothing; a torn last line and a stale lock are
+  only the newest 200; daily files dated more than 7 days back are removed at start, a
+  daily file rotates past 10 MiB and all history is held to 50 MiB, oldest first (Mike's
+  order, 2026-11-03); a failed append is logged once and raises nothing; a torn last line and a stale lock are
   survived. (Registry tests `TestTheStateFileAndTheDailyHistory`; the in-memory registry
   writes nothing.)
 - [x] **Resource peaks.** Tests in
@@ -864,6 +871,7 @@ files.**
 | Review fixes of the move: the structural test walks every script under `dpc-client/core` (`probe_rename_orphan.py` allow-listed), an entry's `due` is an ISO date or `None` and fails once passed (`comfyui`: `None`), the `explorer.exe` entry's reason; a device probe let through the stop only with `while_stopping` (Strata's release check alone passes it); git given `GIT_STOP_GRACE_S` (10 s, one budget) at steps 2 and 5 with the `index.lock` WARNING; `SupervisedRun.stdout`/`stderr` typed `str` or `bytes`; tests in the two files above and `tests/test_the_process_registry_records_how_every_child_ends.py` | Done 2026-10-26 | the commit that carries this row |
 | Local API command `list_processes` (`ProcessRegistry.list_processes`: the kept entries, the daily history for `since`/`until`, `commit_mb` read at the request on Windows; `free_commit` by `commit_memory.read_free_commit_or_physical`, physical memory by psutil and commit null off Windows); agent tools `list_my_processes` and `kill_my_process` (`ProcessRegistry.cancel_by_agent`, the orderly stop's announce-kill-end path with `cancelled_by_agent`); `FreeCommitReading` and `freeCommitLine` in the UI take a reading with no commit; tests in `tests/test_the_local_api_answers_which_processes_run_now.py` and `tests/test_an_agent_sees_and_ends_only_its_own_processes.py` | Done 2026-10-27 | the commit that carries this row |
 | The turn and the waiting chats (point 8, amended 2026-10-27): `RunGate` in `dpc_agent/run_gate.py` for the agent's run gate (both doors register the chat they answer in) and the room lock (`room_busy`); `model_call` around the adapter's call, `approval` around the run_shell and schedule_task waits (from the executor thread through `call_soon_threadsafe`), `round` and `tool` from the loop; `turn` and `waiting` on each `list_agents` row and `agent_turn_updated` at every change; the words for them (`utils/agentTurnNotice.ts`; the line in the waiting chat was removed on 2026-10-27, Mike's call: the sidebar's state line says it) with the 120 s rule (`TURN_UNCONFIRMED_AFTER_S`); tests in `tests/test_a_waiting_chat_is_on_the_run_gate_until_it_runs.py`, `tests/test_the_turn_says_when_it_waits_for_the_model_or_an_approval.py` and `src/lib/utils/agentTurnNotice.test.ts` | Done 2026-10-27 | the commit that carries this row |
+| Size limits of the history (Mike's order, 2026-11-03): a daily file rotates past 10 MiB (`HISTORY_FILE_MAX_BYTES`) as `YYYY-MM-DD.N.jsonl`, a failed rename is logged once and retried, at twice the limit (`HISTORY_STUCK_FACTOR`) rows are dropped with a WARNING; all history is held to 50 MiB (`HISTORY_TOTAL_MAX_BYTES`), oldest first, today's current file never removed, at start, at a rotation and at the first row of a new day; `command` keeps 120 characters, the launcher and origin strings 255 (`FIELD_MAX_CHARS`); tests in `tests/test_the_process_registrys_files_stay_under_a_limit_and_rotate.py` | Done 2026-11-03 | `fc01f2b5` |
 | UI: AGENTS row and the agent configuration dialog (own card) | Pending | — |
 
 ## Open Questions
@@ -901,7 +909,9 @@ files.**
   2026-10-25 (Mike's call, on the reviews).** The state file `process_registry.json` keeps
   the open entries and the newest 200 finished ones (none older than 7 days); every
   finished entry is also appended to `process_registry/YYYY-MM-DD.jsonl`, files older than
-  7 days removed at start (point 3, "Persisted in two places"). A single 200-entry window
+  7 days removed at start, and amended 2026-11-03 (Mike's order): a daily file rotates
+  past 10 MiB as `YYYY-MM-DD.N.jsonl` and all history is held to 50 MiB (point 3,
+  "Persisted in two places"). A single 200-entry window
   would have cut the graph to hours, and a whole-file rewrite of thousands of entries on
   every spawn and end was judged too heavy.
 - **Q8 — an engine stopped by its supervisor while the backend runs. Answered,
@@ -929,7 +939,7 @@ and is not used for the registry.
 
 | Word | Built from | Note |
 |---|---|---|
-| **process registry** (`ProcessRegistry`, a module `process_registry.py`, a state file `~/.dpc/process_registry.json` and daily files `~/.dpc/process_registry/YYYY-MM-DD.jsonl`) | `AgentRegistry` in `dpc_agent/utils.py`: a list the backend keeps and persists; the daily files follow the **node ledger**'s way of appending | "registry" is crowded (agents, tools); the qualifier carries it. "Ledger" was not used: the **node ledger** is the usage record. |
+| **process registry** (`ProcessRegistry`, a module `process_registry.py`, a state file `~/.dpc/process_registry.json` and daily files `~/.dpc/process_registry/YYYY-MM-DD.jsonl`, rotated past 10 MiB as `YYYY-MM-DD.N.jsonl`) | `AgentRegistry` in `dpc_agent/utils.py`: a list the backend keeps and persists; the daily files follow the **node ledger**'s way of appending | "registry" is crowded (agents, tools); the qualifier carries it. "Ledger" was not used: the **node ledger** is the usage record. |
 | **exit reason** (`exit_reason`), the eight values `exited`, `timeout`, `memory_ceiling`, `backend_stop`, `cancelled_by_agent`, `orphan_swept`, `crashed`, `stopped` | `timed_out`, `ceiling_mb`, `exceeded_mb`, `killed` on `SupervisedRun`; "stop" from `stop_all_supervisors`; "orphan" from `retire_orphan`; `stopped` from `provider_unavailable` ("stopped after an engine failure") | `crashed` has no earlier use; its meaning is Q2, answered in point 4. |
 | **`stop_kind`** with `idle_unload`, `ui_stop`, `engine_died`, `failed_start`, `browser_closed` | `launcher_kind` (a closed set that qualifies a broader word); `idle_unload_s` of ADR-044; `_clear_unfinished_start`; `_fail_closed` | Present only on `stopped`. Named `stop_kind` so as not to collide with the `stop_reason` the gateway writes on the wire (the Anthropic Messages API field; the browser tool's scroll loop and the file search have a `stop_reason` of their own too); a file written under the first spelling is read as `stop_kind`. Not `stop_cause`: beside `exit_reason` it would read as a synonym. |
 | **`exit_code`**, **`signal`** | `returncode` on `SupervisedRun`; POSIX signal names | Stored on every entry; `exit_code: null` means this backend did not see the end; `signal` is the signal's name (`SIGKILL`). |
@@ -963,7 +973,8 @@ and is not used for the registry.
   signal stored by name, the missing fsync, and the question of a subsystem started inside
   a tool call.
 - **CC** — the backend-in-the-job design, this record and its amendments of 2026-10-25;
-  the storage split (state file and daily history).
+  the storage split (state file and daily history); the size limits of 2026-11-03 on
+  Mike's order.
 
 ## References
 
