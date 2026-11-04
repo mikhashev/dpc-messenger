@@ -603,6 +603,8 @@ class Completion:
     # The calls the model made, as the Anthropic `tool_use` blocks the door
     # returns them in; the OpenAI form converts on its way out.
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    # The reasoning text `thinking_tokens` counts, or None where there is none.
+    thinking: Optional[str] = None
 
 
 def _finish_reason(reported: Optional[str], tool_calls: List[Dict[str, Any]]) -> Optional[str]:
@@ -612,6 +614,15 @@ def _finish_reason(reported: Optional[str], tool_calls: List[Dict[str, Any]]) ->
     if tool_calls and reported in (None, "stop"):
         return "tool_calls"
     return reported
+
+
+def _reasoning_text(value: Any, answer: Any) -> Optional[str]:
+    """Reasoning as the door hands it over: non-empty text or nothing, because on
+    the peer route the wire can carry anything and a client's parser is next; and
+    nothing where it is the answer, which a provider that got no answer returns."""
+    if not isinstance(value, str) or not value:
+        return None
+    return None if isinstance(answer, str) and value.strip() == answer.strip() else value
 
 
 def _wire_finish_reason(value: Any) -> Optional[str]:
@@ -881,6 +892,7 @@ class Gateway:
         reasoning_effort: Optional[str] = None,
         effort_field: str = "reasoning_effort",
         on_chunk: Optional[Callable[..., Any]] = None,
+        on_reasoning: Optional[Callable[..., Any]] = None,
         request_id: Optional[str] = None,
     ) -> Completion:
         """One call on one alias. `messages` is the conversation un-flattened,
@@ -911,7 +923,11 @@ class Gateway:
         only where the alias named no words of its own. What passes travels
         unchanged: to the provider on the local route, to the host on the peer
         route, which caps it and returns what it served. `effort_field` is what
-        the client called the field, so a refusal names it back."""
+        the client called the field, so a refusal names it back.
+
+        `on_reasoning` is handed the reasoning as the provider has it, on the
+        local route. On the peer route it is not called, because a chunk carries
+        text alone: the reasoning is `Completion.thinking`, off the final frame."""
         # The route first: `compute.enabled` is about what this node gives, so
         # it stands in front of this node's own aliases and not in front of a
         # peer's, which the peer's own flag guards.
@@ -997,6 +1013,7 @@ class Gateway:
             # (A-VENDOR-KEY-HAS-NO-PARALLEL-CAP-SO-GUESTS-CAN-EXHAUST-THE-VENDORS-LIMIT-AND-OVERRUN-THE-CEILING).
             return await self._call(alias, owner, prompt, ledger, caller, request_id,
                                     messages=messages, system=system, tools=tools, on_chunk=on_chunk,
+                                    on_reasoning=on_reasoning,
                                     images=images, reasoning_effort=reasoning_effort)
 
         # The call stands on its local alias from acceptance until it is answered, and a served
@@ -1021,6 +1038,7 @@ class Gateway:
             try:
                 completion = await self._call(alias, owner, prompt, ledger, caller, request_id,
                                               messages=messages, system=system, tools=tools, on_chunk=on_chunk,
+                                              on_reasoning=on_reasoning,
                                               images=images, reasoning_effort=reasoning_effort)
                 if local_alias is not None:
                     note_caller_call(local_alias, caller)
@@ -1215,11 +1233,28 @@ class Gateway:
         images: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: Optional[str] = None,
         on_chunk: Optional[Callable[..., Any]] = None,
+        on_reasoning: Optional[Callable[..., Any]] = None,
     ) -> Completion:
         # Clocked after any wait: the price depends on the hour the call is made (D3).
         started_at = datetime.now(timezone.utc)
         clock = time.monotonic()
         effort_kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
+        # What came back, for the row of a call that does not finish. The reasoning is
+        # read here whether or not this form hands it to its client: it was paid for.
+        seen_text: List[str] = []
+        seen_reasoning: List[str] = []
+        stream_kwargs: Dict[str, Any] = {}
+        if on_chunk is not None:
+            async def chunk_seen(text: str, conversation_id: Any = None) -> None:
+                seen_text.append(text or "")
+                await on_chunk(text, conversation_id)
+
+            async def reasoning_seen(text: str, conversation_id: Any = None) -> None:
+                seen_reasoning.append(text)
+                if on_reasoning is not None:
+                    await on_reasoning(text, conversation_id)
+
+            stream_kwargs = {"on_chunk": chunk_seen, "on_reasoning": reasoning_seen}
         try:
             if images and not tools:
                 # Without tools an image takes `query`, the door with the
@@ -1236,9 +1271,24 @@ class Gateway:
                 )
             else:
                 result = await self._core.llm_manager.query_messages(
-                    messages, system=system, tools=tools or None, on_chunk=on_chunk,
+                    messages, system=system, tools=tools or None,
                     provider_alias=alias, return_metadata=True, reasoning_effort=reasoning_effort,
+                    **stream_kwargs,
                 )
+        except asyncio.CancelledError:
+            # A vendor had the prompt whatever came back; a local call with nothing
+            # back spent no money, and nothing is known of it.
+            if owner == "vendor" or seen_text or seen_reasoning:
+                try:
+                    estimate = await self._core.llm_manager.estimated_usage(
+                        alias, prompt, "".join(seen_text), "".join(seen_reasoning),
+                    )
+                    estimate["served_effort"] = normalize_reasoning_effort(reasoning_effort)
+                    self._write_local_row(alias, ledger, caller, request_id, estimate, started_at,
+                                          time.monotonic() - clock)
+                except Exception:
+                    logger.error("Usage row for an ended gateway call on '%s' was not built", alias, exc_info=True)
+            raise
         except Exception as e:
             logger.warning("Gateway call on '%s' failed: %s", alias, e)
             refusal = card_queue_refusal_in(e)
@@ -1248,10 +1298,30 @@ class Gateway:
             raise GatewayError(502, f"provider '{alias}' failed: {e}", "upstream_error")
         duration_s = time.monotonic() - clock
 
+        request_id, billing, price = self._write_local_row(alias, ledger, caller, request_id, result,
+                                                           started_at, duration_s)
+        tool_calls = [call for call in result.get("tool_calls") or [] if isinstance(call, dict)]
+        return Completion(
+            request_id=request_id, alias=alias, owner=owner, route="local", model=result.get("model"),
+            text=result.get("response") or "",
+            prompt_tokens=result.get("prompt_tokens"), completion_tokens=result.get("response_tokens"),
+            thinking_tokens=result.get("thinking_tokens"),
+            started_at=started_at, duration_s=duration_s, billing=billing,
+            cost_amount=price["cost_amount"], cost_currency=price["cost_currency"],
+            finish_reason=_finish_reason(result.get("finish_reason"), tool_calls),
+            output_includes_thinking=result.get("output_includes_thinking", "unknown"),
+            tool_calls=tool_calls,
+            thinking=_reasoning_text(result.get("thinking"), result.get("response")),
+        )
+
+    def _write_local_row(
+        self, alias: str, ledger: NodeLedger, caller: str, request_id: Optional[str],
+        result: Dict[str, Any], started_at: datetime, duration_s: float,
+    ) -> Tuple[str, str, Dict[str, Any]]:
+        """One usage row for one call on this node's own alias, and `(id, billing, price)`."""
         model = result.get("model")
         prompt_tokens = result.get("prompt_tokens")
         completion_tokens = result.get("response_tokens")
-        tool_calls = [call for call in result.get("tool_calls") or [] if isinstance(call, dict)]
         # The provider's own price where it gave one (`llm_manager.reported_cost`
         # copies it into `result`), otherwise the provider type's.
         provider = (getattr(self._core.llm_manager, "providers", None) or {}).get(alias)
@@ -1300,17 +1370,7 @@ class Gateway:
             logger.error("Usage row for gateway request %s was not built", request_id, exc_info=True)
         else:
             ledger.append(row)
-        return Completion(
-            request_id=request_id, alias=alias, owner=owner, route="local", model=model,
-            text=result.get("response") or "",
-            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-            thinking_tokens=result.get("thinking_tokens"),
-            started_at=started_at, duration_s=duration_s, billing=billing,
-            cost_amount=price["cost_amount"], cost_currency=price["cost_currency"],
-            finish_reason=_finish_reason(result.get("finish_reason"), tool_calls),
-            output_includes_thinking=result.get("output_includes_thinking", "unknown"),
-            tool_calls=tool_calls,
-        )
+        return request_id, billing, price
 
     async def _complete_via_peer(
         self,
@@ -1606,6 +1666,7 @@ class Gateway:
             output_includes_thinking=output_includes_thinking,
             finish_reason=_finish_reason(result.get("finish_reason"), tool_calls),
             tool_calls=tool_calls,
+            thinking=_reasoning_text(result.get("thinking"), text),
         )
 
     def _count_here(self, prompt: str, text: str, model: str) -> Tuple[int, int]:
@@ -1676,6 +1737,8 @@ def _chat_completion_json(completion: Completion) -> Dict[str, Any]:
         # `null` content beside the calls when the model said nothing, as OpenAI writes it.
         message["content"] = completion.text or None
         message["tool_calls"] = _openai_tool_calls(completion)
+    if completion.thinking:
+        message["reasoning_content"] = completion.thinking
     return {
         "id": f"chatcmpl-{completion.request_id}",
         "object": "chat.completion",
@@ -1714,11 +1777,20 @@ class _EventStream:
     """An SSE response opened on its first write, so that everything the
     gateway refuses before the first byte — an alias outside the lists, a
     spent quota, a busy card — is still an HTTP status, and only a failure
-    after the first byte has to be said inside the stream."""
+    after the first byte has to be said inside the stream.
+
+    A write into a connection that is gone never raises. It runs inside the
+    provider's stream, or in the frame handler on the peer route, and there
+    `ClientConnectionResetError`, an `OSError`, reads as the engine's failure
+    and is retried (ADR-041 D4, amendment 2026-11-04). It cancels the handler
+    instead, the same thing `handler_cancellation` does when `connection_lost`
+    arrives a loop turn later: the call ends and its holds are let go."""
 
     def __init__(self, request: web.Request):
         self._request = request
         self.response: Optional[web.StreamResponse] = None
+        self._handler = asyncio.current_task()
+        self._client_left = False
 
     @property
     def opened(self) -> bool:
@@ -1732,13 +1804,24 @@ class _EventStream:
             await self.response.prepare(self._request)
         return self.response
 
+    def _the_client_left(self) -> None:
+        self._client_left = True
+        self._handler.cancel()
+
     async def write(self, data: bytes) -> None:
-        await (await self._open()).write(data)
+        if self._client_left:
+            return
+        try:
+            await (await self._open()).write(data)
+        except ConnectionError:
+            self._the_client_left()
 
     async def close(self) -> web.StreamResponse:
-        response = await self._open()
-        await response.write_eof()
-        return response
+        try:
+            await (await self._open()).write_eof()
+        except ConnectionError:
+            self._the_client_left()
+        return self.response
 
 
 # The whole scale this node knows, said in one place because every refusal
@@ -2330,7 +2413,11 @@ class GatewayServer:
         # sentence rather than a 405 that says nothing about this door.
         for path in UNSERVED_ROUTES:
             app.router.add_route("*", path, self._unserved)
-        runner = web.AppRunner(app, access_log=None)
+        # `handler_cancellation`: a client's connection closing cancels its
+        # handler, so a generation nobody will read stops where it stands, in the
+        # reasoning or inside a call that writes only at its end (ADR-041 D4,
+        # amendment 2026-11-04). Off by default in aiohttp.
+        runner = web.AppRunner(app, access_log=None, handler_cancellation=True)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.port)
         try:
@@ -2390,6 +2477,11 @@ class GatewayServer:
             )
         try:
             return await handler(request)
+        except asyncio.CancelledError:
+            # The client's connection closed, or this listener is stopping.
+            logger.info("gateway %s %s ended before its answer: the client left or the listener "
+                        "is stopping, and the call ended with it", request.method, request.path)
+            raise
         except GatewayError as e:
             _log_refusal(request, e)
             return error(e.status, e.message, e.code, e.retry_after_sec)
@@ -2478,27 +2570,48 @@ class GatewayServer:
         one chunk, since the door hands it back parsed. Every event carries the
         id minted here, which is also the id the call runs under on either
         route — the shape's contract is one id per response, and the ledger
-        rows of both nodes join the client on it."""
+        rows of both nodes join the client on it.
+
+        Reasoning travels as `reasoning_content` deltas, the field DeepSeek,
+        llama-server and the Strata launcher stream: as the provider makes it on
+        a provider's stream, in one delta in front of the text on a path that
+        answers whole. Raw, on purpose (ADR-041 D4, amendment 2026-11-04). Only
+        a peer that sent chunks puts it behind the text, because the reasoning
+        rides the frame that ends them."""
         request_id = str(uuid.uuid4())
         created = int(time.time())
         stream = _EventStream(request)
+        wrote_role = False
         wrote_text = False
+        wrote_reasoning = False
 
         async def emit(delta: Optional[Dict[str, Any]], finish_reason: Optional[str] = None,
                        usage: Optional[Dict[str, Any]] = None) -> None:
             await stream.write(_sse_data(_chunk_json(request_id, created, alias, delta, finish_reason, usage)))
 
+        def with_role_once(delta: Dict[str, Any]) -> Dict[str, Any]:
+            nonlocal wrote_role
+            if wrote_role:
+                return delta
+            wrote_role = True
+            return {"role": "assistant", **delta}
+
         async def on_chunk(text: str, _conversation_id: Any = None) -> None:
             nonlocal wrote_text
             if not text:
                 return
-            delta = {"content": text} if wrote_text else {"role": "assistant", "content": text}
             wrote_text = True
-            await emit(delta)
+            await emit(with_role_once({"content": text}))
+
+        async def on_reasoning(text: str, _conversation_id: Any = None) -> None:
+            nonlocal wrote_reasoning
+            wrote_reasoning = True
+            await emit(with_role_once({"reasoning_content": text}))
 
         try:
             completion = await self.gateway.complete(
                 alias, prompt, messages=messages, system=system, tools=tools, on_chunk=on_chunk,
+                on_reasoning=on_reasoning,
                 images=images, reasoning_effort=reasoning_effort, request_id=request_id,
             )
         except GatewayError as e:
@@ -2513,19 +2626,23 @@ class GatewayServer:
             await stream.write(b"data: [DONE]\n\n")
             return await stream.close()
 
+        # Whatever no callback carried. On the local route text already written with
+        # no reasoning delta means the reasoning was in that text, as `<think>` tags.
+        if completion.thinking and not wrote_reasoning and (not wrote_text or completion.route == "peer"):
+            await emit(with_role_once({"reasoning_content": completion.thinking}))
         finish_reason = _openai_finish_reason(completion)
         inline_usage = None if include_usage else _usage(completion)
         finished = False
         if not wrote_text and completion.text:
             if completion.tool_calls:
-                await emit({"role": "assistant", "content": completion.text})
+                await emit(with_role_once({"content": completion.text}))
             else:
-                await emit({"role": "assistant", "content": completion.text}, finish_reason, inline_usage)
+                await emit(with_role_once({"content": completion.text}), finish_reason, inline_usage)
                 finished = True
             wrote_text = True
         if completion.tool_calls:
             calls = [dict(call, index=index) for index, call in enumerate(_openai_tool_calls(completion))]
-            await emit({"tool_calls": calls} if wrote_text else {"role": "assistant", "tool_calls": calls})
+            await emit(with_role_once({"tool_calls": calls}))
         if not finished:
             await emit({}, finish_reason, inline_usage)
         if include_usage:
@@ -2575,9 +2692,13 @@ class GatewayServer:
         block per call with its whole input in one `input_json_delta` (the door
         hands the call back parsed), `message_delta` with the counts, `message_stop`.
         A head written before the door has counted says `input_tokens: 0`; the
-        cumulative usage on `message_delta` carries the count. Thinking is not
-        streamed. `message_start` carries the id minted here whether it leaves
-        before the answer or after it, and that is the id the call runs under."""
+        cumulative usage on `message_delta` carries the count. `message_start`
+        carries the id minted here whether it leaves before the answer or after
+        it, and that is the id the call runs under.
+
+        Thinking is not handed over on this form, as text or as a block: a real
+        block carries a signature this door cannot make (ADR-041 D4, amendment
+        2026-11-04). Its count travels on `message_delta`."""
         minted = str(uuid.uuid4())
         stream = _EventStream(request)
         text_block_open = False

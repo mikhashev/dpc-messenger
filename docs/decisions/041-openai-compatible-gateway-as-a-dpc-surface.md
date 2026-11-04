@@ -987,6 +987,98 @@ so the provider step now prices served rows and peers' menu rows as well — a
 NeuralDeep alias served to a peer is quoted and frozen in RUB unless
 `compute.tariff_currency` names another unit.))*
 
+*(**Amendment, 2026-11-04 — a client that leaves ends its call, and the OpenAI
+form hands over the reasoning.** Mike's order on the team's consensus,
+2026-11-04. Two changes; the first stands without the second.
+
+**A client that leaves.** A chunk callback runs inside the provider's stream, so
+a write into a closing transport (`ClientConnectionResetError`, an `OSError`) read
+as the engine's failure and `_is_retryable` retried it. Reproduced over a real
+listener and the real provider against an HTTP double, on both forms, and worst on
+the tools path, where the first write comes after the engine has finished and a
+finished answer was asked for again (Zcode saw seven in 600 s; that count is his).
+`_is_retryable` is not narrowed. A write that finds the client gone no longer
+raises into its caller: it cancels the request's handler, and
+`handler_cancellation` does the same when the connection closes with nothing
+being written, so a whole-answer call, a client gone during the reasoning, and one
+waiting for the card or the semaphore all end too. Everything held is let go by what
+already lets go on a cancellation. **A generation under way loses its connection
+to the engine.** Whether that stops it is the engine's: the launcher's source says
+a slot whose consumer left is stopped (`serve/server.py`, v0.2.9, read and not
+run).
+
+**A cold start is a generation somebody else may be waiting for.** Alone, a client
+that leaves stops the load it began, as any cancelled caller does: nobody wants that
+child. So a client alone whose timeout is shorter than the load stops it each time it
+leaves, and is never answered. A load of 74 s (the team's figure, not measured here)
+needs dsh's timeout past 74 s; dsh's own number was not read here. Any request that
+stays sees it through. With another request on the alias, waiting for its start, in
+line for it, or standing on it between two rounds, the load goes on and holds the
+start lock until it ends, and that request finds the child up. A kept load steps down
+its ladder and rolls back as its caller's would. One that fails says why in the log and
+hands the lock to the request to try for itself; a stop ends it, and so does the last
+request leaving, at the card queue's next poll. A place behind on another alias gets
+its turn either way.
+
+**A call that ended this way still counts**, because a guest's ceiling is summed from
+rows. Before this change the sequence send, take a chunk, drop the link left no row
+either, after retrying until the budget ran out, each attempt paid for. An engine
+reports usage on its last frame, so such a call has only `LLMManager.estimated_usage`:
+one row with `counts_source: ours`, the prompt and what came back counted here, the
+reasoning in `thinking_tokens` as `thinking_source: estimated` and inside the output
+(`output_includes_thinking: includes`), priced by its type or by the provider's own
+list. It is low: what was made and never came back is in nobody's count. A vendor
+call with nothing back is counted for its prompt; a local one with nothing back spent
+no money, nothing is known of it, and it leaves no row. A call that never reached a
+provider leaves none.
+
+On the peer route the guest stops waiting and writes no row. No frame tells a host
+its guest stopped reading, so a host with a live connection generates to the end
+and writes its row (the invariant above: the host's row is the record, the guest's
+may be missing), and each late chunk leaves the guest one warning line, as after a
+timeout. A host whose own chunk send fails had the same retry and now ends its call
+the same way, with its lock freed and that one row.
+
+**The reasoning, OpenAI form.** A stream carries `reasoning_content` deltas and a
+whole message a `reasoning_content` field, the names DeepSeek, llama-server and the
+launcher write. Reasoning reaches the door by `on_reasoning`, which only the door
+passes, so an agent and a peer's chunk sender get what they always got. What a call
+gives:
+
+| Path | Who | What the client sees |
+|---|---|---|
+| Stream, no tools | `llamacpp_server`, `strata`, `deepseek`, `zai`, `neuraldeep` | Deltas as the engine makes them, before the content |
+| Tools | those five and `ollama` | One delta before the prose and the calls: no provider streams while holding tools |
+| No stream entry point | `anthropic`, `ollama` | One delta before the whole answer |
+| An image without tools, or no stream asked | every provider that stores it | One delta before the text, or the message field |
+| Stream on a peer alias | the host | One delta **after** the text when the host sent chunks, because a chunk carries text and the reasoning rides the frame that ends them; before it when the host sent none |
+| Any | `gemini`, `gigachat`, `openai`, a provider with none | Nothing, and the stream as before. `<think>` tags a model writes into its text stay in that text on a stream, where no rule runs |
+
+Reasoning a provider returned as the answer, as Ollama does when the model answered
+nothing, is the answer and is said once, on either path and across a peer.
+
+**Raw, and that is the decision.** Reasoning can hold written call markup. The
+answer's cleaning rules (`_strip_role_boundaries`, `_written_tool_calls`) run in
+the agent loop over an agent's final answer: no rule runs at this door, on the
+content either, and the agent's own reasoning line is not cleaned. Applied here
+they would cut at the marker and lose what follows, and a stream would have to hold
+back every suffix that might open one. Of 8356 reasoning texts stored on the owner's
+node on 2026-11-04, 5 hold such markup, and in all five the model is talking about a
+call, most often diagnosing its own malformed one: the rule would cut the sentence
+that explains the failure. It calls nothing: a client reads calls from `tool_calls`.
+That is by reading the wire's contract and not by running each client.
+
+**Sent back.** `reasoning_content` on an assistant turn is read by nobody: not
+refused, not text, not a replay. The replay rules stand as they were: the alias's
+`preserve_reasoning` reads the `thinking` an agent kept on its own turn, which this
+door never sets, and DeepSeek pads or looks up its own copy by call id.
+
+**The Messages form stays as it was**: no thinking block and no reasoning text, the
+count alone. A real block carries a signature this door cannot make, the client
+replays it, and on a DeepSeek alias the converter would send a replayed block's text
+to the vendor as `reasoning_content`. Whether an unsigned block is safe in Claude
+Code was not tested; open for Mike.)*
+
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
 Sharing a vendor-backed alias is a different act: **the node holding the key

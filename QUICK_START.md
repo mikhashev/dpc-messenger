@@ -340,7 +340,9 @@ If you cannot meet this, stop here: the steps below will not produce a working s
 
 ### What crosses the peer route, and what does not
 
-- **Crosses:** streaming, tools, images, reasoning effort and the usage rows.
+- **Crosses:** streaming, tools, images, reasoning effort, the usage rows and, on the
+  OpenAI form, the reasoning text, which a stream gets after the answer's chunks because
+  it rides the frame that ends them.
 - **Refused with 400:** a forced `tool_choice` (`required`, or a named tool) and
   `parallel_tool_calls: false` (`disable_parallel_tool_use` on the Anthropic form). Some
   clients send them; switch that option off in the client.

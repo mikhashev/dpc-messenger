@@ -407,6 +407,19 @@ class NeuralDeepProvider(AIProvider):
             COST_BASIS_LIST_PRICE_REFERENCE if mode == "subscription"
             else COST_BASIS_CHARGED if mode else COST_BASIS_UNKNOWN)
 
+    async def price_estimated_usage(self, prompt_tokens: int, completion_tokens: int) -> Dict[str, Any]:
+        """The cost columns for counts this node made itself (`LLMManager.estimated_usage`):
+        this list and this wallet, as for a call whose usage arrived."""
+        usage: Dict[str, Any] = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                                 "cache_read_input_tokens": 0}
+        try:
+            await self._price_usage(usage, self._wire_model(None))
+        except Exception as exc:  # a price must never fail the row
+            logger.error("NeuralDeep %s: pricing failed", self.alias, exc_info=True)
+            usage["cost_amount"] = None
+            usage["cost_unpriced_reason"] = f"pricing failed: {type(exc).__name__}"
+        return {key: value for key, value in usage.items() if key.startswith("cost_")}
+
     async def _record_usage(self, raw_usage: Any, *, path: str, model: str,
                             served_effort: Optional[str], tool_calls: int = 0) -> Dict[str, Any]:
         if raw_usage is None:
@@ -898,6 +911,8 @@ class NeuralDeepProvider(AIProvider):
         on_chunk: callable,
         conversation_id: str = None,
         reasoning_effort: str = None,
+        *,
+        on_reasoning: Optional[callable] = None,
     ) -> str:
         self._last_thinking = None
         self._last_usage = None
@@ -924,6 +939,8 @@ class NeuralDeepProvider(AIProvider):
                 reasoning = getattr(delta, "reasoning_content", None)
                 if reasoning:
                     thinking_text += reasoning
+                    if on_reasoning:
+                        await on_reasoning(reasoning, conversation_id)
                 text = getattr(delta, "content", None)
                 if text and not full_text:
                     text = text.lstrip()
@@ -975,6 +992,8 @@ class NeuralDeepProvider(AIProvider):
         on_chunk: Optional[callable] = None,
         conversation_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        *,
+        on_reasoning: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """Returns {content, tool_calls_raw, thinking, usage}; tool_calls_raw
         items expose .id/.name/.input as llm_adapter._chat_native_tools reads."""
@@ -1003,6 +1022,8 @@ class NeuralDeepProvider(AIProvider):
                     SimpleNamespace(id=tc.id, name=tc.function.name, input=input_data)
                 )
 
+            if on_reasoning and thinking:
+                await on_reasoning(thinking, conversation_id)
             if on_chunk and content:
                 await on_chunk(content, conversation_id)
 

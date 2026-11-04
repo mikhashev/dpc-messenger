@@ -951,6 +951,8 @@ class LlamaServerProvider(DeepSeekProvider):
         conversation_id: Optional[str] = None,
         reasoning_budget_tokens: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
+        *,
+        on_reasoning: Optional[callable] = None,
     ) -> str:
         """Streaming text generation; on_chunk(text, conversation_id) per piece.
 
@@ -1027,6 +1029,8 @@ class LlamaServerProvider(DeepSeekProvider):
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
                         thinking_text += reasoning
+                        if on_reasoning:
+                            await on_reasoning(reasoning, conversation_id)
                     text = getattr(delta, "content", None)
                     if text:
                         full_text += text
@@ -1085,6 +1089,8 @@ class LlamaServerProvider(DeepSeekProvider):
         reasoning_effort: Optional[str] = None,
         reasoning_budget_tokens: Optional[int] = None,
         tool_choice: str = "auto",
+        *,
+        on_reasoning: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """Native tool calling, Anthropic-shape in and out, on the local server.
 
@@ -1141,6 +1147,8 @@ class LlamaServerProvider(DeepSeekProvider):
                     SimpleNamespace(id=tc.id, name=tc.function.name, input=input_data)
                 )
 
+            if on_reasoning and thinking:
+                await on_reasoning(thinking, conversation_id)
             if on_chunk and content:
                 await on_chunk(content, conversation_id)
 

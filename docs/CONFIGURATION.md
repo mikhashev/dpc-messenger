@@ -232,6 +232,25 @@ gateway carries two more things the peer wire under it already had (ADR-041 D4, 
 Sampling — `max_tokens`, `temperature`, `top_p`, `stop_sequences` — stays the alias
 owner's configuration on this node and is not read from the request.
 
+**Reasoning text.** On the OpenAI form a stream carries `reasoning_content` deltas before
+the content they precede, as the engine makes them; a call with tools, and a provider with
+no stream, gives one delta in front of the answer; a whole message has a `reasoning_content`
+field. It is raw: call markup a model wrote while thinking stays in it and calls nothing. On
+a peer's alias it rides the frame that ends the answer, so a stream gets it after the text
+when the host sent chunks. A provider with none sends none. A client sending the field back
+on an assistant turn is neither refused nor read. The Messages form hands over no thinking
+block and no reasoning text, only the count (ADR-041 D4, amendment 2026-11-04).
+
+**A client that leaves ends its call.** When a client's connection closes, on either form,
+streaming or not, the call ends where it stands and is not retried: the connection to the
+engine closes and the card and the queue are let go. It leaves a usage row with what is known,
+`counts_source: ours`, counted here over the prompt and what came back, so it counts against
+a vendor ceiling, on the low side; a local call with nothing back leaves none. On a peer's alias
+this node stops waiting and writes no row, while the host, which no frame can tell, generates
+to the end and writes its own. A cold start stops with a client that was alone on it, so a client
+whose timeout is shorter than the load is never answered: set it past the load. With another
+request on the alias the load goes on for that request.
+
 **What it does not serve, said out loud.** The three routes above are the whole surface.
 An IDE client also indexes a repository and completes a line, and those calls —
 `/v1/embeddings`, `/v1/completions`, and Anthropic's legacy `/v1/complete` — are answered

@@ -756,6 +756,8 @@ class OllamaProvider(AIProvider):
         system: Any = "",
         on_chunk: Optional[Any] = None,
         conversation_id: Optional[str] = None,
+        *,
+        on_reasoning: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         self._last_thinking = None
@@ -806,13 +808,16 @@ class OllamaProvider(AIProvider):
         # Same trade as the chat path: an agent round with neither an answer nor a
         # tool call is a dead round, and the reasoning is better than nothing to
         # continue from. Logged, so the round can be told apart afterwards.
-        if not content and not tool_calls_raw and self._last_thinking:
+        promoted = not content and not tool_calls_raw and self._last_thinking
+        if promoted:
             logger.warning(
                 "OllamaProvider '%s': round produced neither an answer nor a tool "
                 "call, continuing on %d characters of reasoning.",
                 self.alias, len(self._last_thinking),
             )
             content = self._last_thinking
+        if on_reasoning and self._last_thinking and not promoted:
+            await on_reasoning(self._last_thinking, conversation_id)
         if on_chunk and content:
             await on_chunk(content, conversation_id)
 

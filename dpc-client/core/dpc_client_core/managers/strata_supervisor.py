@@ -1496,7 +1496,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                             )
                     return await self._launch(python)
 
-                return await self._launch_pin(launch, fallback)
+                return await self._launch_unless_left_alone(self._launch_pin(launch, fallback))
             except BaseException:
                 self._release_card_unless_live()
                 raise

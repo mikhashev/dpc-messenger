@@ -479,6 +479,8 @@ class DeepSeekProvider(AIProvider):
         on_chunk: callable,
         conversation_id: str = None,
         reasoning_effort: str = None,
+        *,
+        on_reasoning: Optional[callable] = None,
     ) -> str:
         """Streaming text generation. Calls on_chunk(text, conversation_id) per token.
 
@@ -522,6 +524,8 @@ class DeepSeekProvider(AIProvider):
                 reasoning = getattr(delta, "reasoning_content", None)
                 if reasoning:
                     thinking_text += reasoning
+                    if on_reasoning:
+                        await on_reasoning(reasoning, conversation_id)
                 text = getattr(delta, "content", None)
                 if text:
                     full_text += text
@@ -588,6 +592,8 @@ class DeepSeekProvider(AIProvider):
         conversation_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         tool_choice: str = "auto",
+        *,
+        on_reasoning: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """
         Native tool calling. Returns {content, tool_calls_raw, thinking, usage}
@@ -661,6 +667,8 @@ class DeepSeekProvider(AIProvider):
                 if len(self._cot_cache) > 1000:
                     self._cot_cache.clear()
 
+            if on_reasoning and thinking:
+                await on_reasoning(thinking, conversation_id)
             if on_chunk and content:
                 await on_chunk(content, conversation_id)
 

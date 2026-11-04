@@ -387,17 +387,27 @@ class TestTheSameLoopAndNoOwner:
     async def test_a_call_on_the_service_loop_runs_inline(self, tmp_path, home, monkeypatch):
         bind_owner_loop(asyncio.get_running_loop())
         sup, spawned = _strata(tmp_path, monkeypatch)
-        caller = asyncio.current_task()
-        tasks_at_spawn = []
+        loop = asyncio.get_running_loop()
+        loops_at_spawn = []
+        forwarded = []
         real_spawn = sup._spawn
+        real_forward = asyncio.run_coroutine_threadsafe
 
         async def spawn(cmd, env):
-            tasks_at_spawn.append(asyncio.current_task())
+            loops_at_spawn.append(asyncio.get_running_loop())
             return await real_spawn(cmd, env)
 
+        def forward(coro, target):
+            forwarded.append(coro)
+            return real_forward(coro, target)
+
         sup._spawn = spawn
+        # The load has a task of its own so a client that leaves cannot take it from the
+        # next request (ADR-041 D4, amendment 2026-11-04); nothing is handed across loops.
+        monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", forward)
         await sup.ensure_running()
-        assert tasks_at_spawn == [caller], "no forwarding task on the owner loop itself"
+        assert loops_at_spawn == [loop]
+        assert forwarded == [], "no forwarding task on the owner loop itself"
         await sup.stop()
 
     @pytest.mark.asyncio

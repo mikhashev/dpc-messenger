@@ -623,6 +623,9 @@ class _CardBorrow:
 # it, and a mark from a tool thread reaches `ensure_running` the way the peer mark does.
 # A `_DaemonToolPool` thread inherits nothing, so it is carried there (`carrying_card_hold`).
 _CARD_HOLD: contextvars.ContextVar = contextvars.ContextVar("dpc_card_hold", default=None)
+# True inside a load's own task and what it starts: a failed rung's stop of its own child runs
+# in a task of its own, and it is not somebody stopping the load.
+_IN_ITS_OWN_LOAD: contextvars.ContextVar = contextvars.ContextVar("dpc_in_its_own_load", default=False)
 
 
 def _now_on_the_owner_loop(fn: Callable[..., None], *args: Any) -> None:
@@ -1828,6 +1831,11 @@ class LlamaServerSupervisor:
         # Serialises starts only: `_proc` and `props` also change outside it, when
         # an abandoned stop (`_abandoned_stop`) finishes after its start has gone.
         self._start_lock = asyncio.Lock()
+        # Requests waiting for that lock to start this alias; a stop's wait is not one.
+        self._start_waiters = 0
+        # A load that outlives the caller that began it, and holds the lock until it ends.
+        self._detached_start: Optional[asyncio.Future] = None
+        self._detached_watch: Optional[asyncio.Future] = None
         # The stop of a child whose start was interrupted, while it runs. It runs
         # as its own task so a second cancellation cannot leave it half done, and
         # the next start waits for it: the old child still holds the port.
@@ -2332,29 +2340,93 @@ class LlamaServerSupervisor:
         stop on the other side of the lock counts against its deadline: a start of its own alias
         that holds the lock is bounded by `start_timeout_s`, and it is what this request wants."""
         lock = self._start_lock
-        if request is None or not lock.locked():
-            await lock.acquire()
-        else:
-            task = asyncio.ensure_future(lock.acquire())
-            try:
-                while True:
-                    done, _ = await asyncio.wait({task}, timeout=_SWAP_POLL_S)
-                    if done:
-                        task.result()
-                        break
-                    self._check_a_wait_can_end(request)
-                    if self._draining and _swap_clock() >= request.stop_bound:
-                        raise self._ran_out_refusal(request)
-            except BaseException:
-                if task.done() and not task.cancelled() and task.exception() is None:
-                    lock.release()
-                else:
-                    task.cancel()
-                raise
+        self._start_waiters += 1
+        try:
+            if request is None or not lock.locked():
+                await lock.acquire()
+            else:
+                task = asyncio.ensure_future(lock.acquire())
+                try:
+                    while True:
+                        done, _ = await asyncio.wait({task}, timeout=_SWAP_POLL_S)
+                        if done:
+                            task.result()
+                            break
+                        self._check_a_wait_can_end(request)
+                        if self._draining and _swap_clock() >= request.stop_bound:
+                            raise self._ran_out_refusal(request)
+                except BaseException:
+                    if task.done() and not task.cancelled() and task.exception() is None:
+                        lock.release()
+                    else:
+                        task.cancel()
+                    raise
+        finally:
+            self._start_waiters -= 1
         try:
             yield
         finally:
-            lock.release()
+            if self._detached_start is None:
+                lock.release()
+            else:
+                self._detached_start.add_done_callback(self._detached_start_ended)
+
+    def _another_request_wants_this_alias(self) -> bool:
+        """Besides the one this code runs for: one waiting to start it, one in line for it,
+        or one standing on it that has not asked yet, as a turn between two rounds has not."""
+        own = _CARD_HOLD.get()
+        return (
+            self._start_waiters > 0
+            or any(place.alias == self.alias for place in _CARD_QUEUE)
+            or any(hold is not own for hold in _CARD_HOLDS.get(self.alias, []))
+        )
+
+    async def _launch_unless_left_alone(self, launching: Awaitable[Dict[str, Any]]) -> Dict[str, Any]:
+        """`launching` for the caller, whom a client closing its connection can cancel at any
+        moment (ADR-041 D4, amendment 2026-11-04). A caller that leaves stops a load only it
+        wants. One that another request wants goes on, the lock with it, and that request
+        finds the child up; a load that fails hands it the lock to try for itself."""
+        async def load() -> Dict[str, Any]:
+            _IN_ITS_OWN_LOAD.set(True)
+            return await launching
+
+        task = asyncio.ensure_future(load())
+        task.add_done_callback(lambda ended: ended.cancelled() or ended.exception())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                raise
+            if self._another_request_wants_this_alias():
+                logger.info(
+                    "%s[%s]: the caller that began this start left, and another request wants the "
+                    "alias: the load goes on", self.ENGINE, self.alias,
+                )
+                self._detached_start = task
+                self._detached_watch = asyncio.ensure_future(self._stop_a_load_nobody_wants(task))
+                raise
+            task.cancel()
+            await asyncio.wait({task})
+            raise
+
+    async def _stop_a_load_nobody_wants(self, task: asyncio.Future) -> None:
+        """Those who wanted a kept load leave by many doors, in one tick with its caller too,
+        so it is asked at the line's own poll rather than at each of them."""
+        while not task.done():
+            await asyncio.wait({task}, timeout=_SWAP_POLL_S)
+            if not task.done() and not self._another_request_wants_this_alias():
+                logger.info("%s[%s]: nobody wants this load any more: stopping it", self.ENGINE, self.alias)
+                task.cancel()
+                return
+
+    def _detached_start_ended(self, task: asyncio.Future) -> None:
+        self._detached_start = None
+        self._start_lock.release()
+        self._release_card_unless_live()
+        if not task.cancelled() and task.exception() is not None:
+            # Its caller left, so this line is the only place the reason reaches.
+            logger.warning("%s[%s]: the load kept for another request failed: %s",
+                           self.ENGINE, self.alias, task.exception())
 
     async def _free_the_card(self, request: Optional[_QueuedRequest]) -> None:
         """This alias's start, first in line, with an excluding holder on the card: stop the
@@ -2494,8 +2566,11 @@ class LlamaServerSupervisor:
 
     def _release_card_unless_live(self) -> None:
         """A start that failed before leaving a live child holds nothing. A child
-        still being stopped holds the card until its stop lets go of it."""
+        still being stopped holds the card until its stop lets go of it, and a load that
+        outlived its caller holds it until it ends."""
         if self._abandoned_stop is not None and not self._abandoned_stop.done():
+            return
+        if self._detached_start is not None:
             return
         if self._proc is None or self._proc.returncode is not None:
             _CARD_CLAIMS.pop(self, None)
@@ -2580,7 +2655,7 @@ class LlamaServerSupervisor:
                         return await self._launch(child)
                     return await self._launch_auto_kv(child)
 
-                return await self._launch_pin(launch, fallback)
+                return await self._launch_unless_left_alone(self._launch_pin(launch, fallback))
             except BaseException:
                 self._release_card_unless_live()
                 raise
@@ -3505,6 +3580,8 @@ class LlamaServerSupervisor:
     @on_the_owner_loop
     async def stop(self) -> None:
         """Stop the child, and only then let go of the card."""
+        if self._detached_start is not None and not _IN_ITS_OWN_LOAD.get():
+            self._detached_start.cancel()  # kept for a request, and this stop outranks it
         if self in _CARD_CLAIMS:
             _CARD_CLAIMS[self] = "stopping"
         try:

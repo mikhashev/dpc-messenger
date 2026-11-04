@@ -1009,14 +1009,37 @@ class P2PCoordinator:
             )
 
             seq = 0
+            # This runs in a task of its own (`p2p_manager` gives every frame one).
+            this_request = asyncio.current_task()
+            guest_gone = False
+            seen_text: List[str] = []
+            seen_reasoning: List[str] = []
+
+            async def reasoning_seen(text: str, _conversation_id: Any = None) -> None:
+                seen_reasoning.append(text)
 
             async def send_chunk(text: str, _conversation_id: Any = None) -> None:
-                nonlocal seq
-                if not text:
+                # Inside the provider's stream, where a dead connection's OSError
+                # reads as the engine's and is retried. No frame can tell the host
+                # a guest has stopped reading; a failed send can, so the call ends
+                # here with its lock and card let go, and is counted below
+                # (ADR-041 D4, amendment 2026-11-04).
+                nonlocal seq, guest_gone
+                if not text or guest_gone:
                     return
-                await self.p2p_manager.send_message_to_peer(
-                    peer_id, create_remote_inference_chunk(request_id, seq, text)
-                )
+                seen_text.append(text)
+                try:
+                    await self.p2p_manager.send_message_to_peer(
+                        peer_id, create_remote_inference_chunk(request_id, seq, text)
+                    )
+                except OSError as e:
+                    guest_gone = True
+                    logger.info(
+                        "Peer %s is gone from request %s (%s): the call ends here and is not "
+                        "generated again", peer_id, request_id, e,
+                    )
+                    this_request.cancel()
+                    return
                 seq += 1
 
             # Money bounds a vendor alias, not the card: no queue, as on the
@@ -1050,19 +1073,38 @@ class P2PCoordinator:
                 # with checkpointing off, so it parks nothing in the owner's
                 # conversation cache (ADR-044 point 9). The owner does not queue
                 # behind this lock; the engine serves one request at a time.
-                with serving_a_peer(peer_id):
-                    if messages and not images:
-                        result = await self.service.llm_manager.query_messages(
-                            messages, system=system or "", tools=tools or None,
-                            on_chunk=send_chunk if stream else None,
-                            provider_alias=serving_alias, return_metadata=True,
-                            **query_kwargs,
-                        )
-                    else:
-                        result = await self.service.llm_manager.query(
-                            prompt, provider_alias=serving_alias, images=images,
-                            return_metadata=True, **query_kwargs,
-                        )
+                try:
+                    with serving_a_peer(peer_id):
+                        if messages and not images:
+                            result = await self.service.llm_manager.query_messages(
+                                messages, system=system or "", tools=tools or None,
+                                on_chunk=send_chunk if stream else None,
+                                provider_alias=serving_alias, return_metadata=True,
+                                **({"on_reasoning": reasoning_seen} if stream else {}),
+                                **query_kwargs,
+                            )
+                        else:
+                            result = await self.service.llm_manager.query(
+                                prompt, provider_alias=serving_alias, images=images,
+                                return_metadata=True, **query_kwargs,
+                            )
+                except asyncio.CancelledError:
+                    # The guest's ceiling is summed from rows: a call it can walk away
+                    # from unrecorded is a call it gets free.
+                    if guest_gone:
+                        try:
+                            estimate = await self.service.llm_manager.estimated_usage(
+                                serving_alias, prompt, "".join(seen_text), "".join(seen_reasoning),
+                            )
+                            self._record_peer_call(
+                                peer_id=peer_id, request_id=request_id, serving_alias=serving_alias,
+                                result=estimate, model=estimate.get("model"), started_at=started_at,
+                                duration_s=time.monotonic() - clock, served_effort=served_effort,
+                            )
+                        except Exception:
+                            logger.error("Usage row for request %s of the gone peer %s was not built",
+                                         request_id, peer_id, exc_info=True)
+                    raise
                 # A served call, the one that leaves a row below, opens or renews this
                 # peer's window on a local alias (ADR-044, the card queue, rule 6). A refused
                 # or failed one does not, and neither does a vendor's: it has no card.

@@ -259,6 +259,18 @@ def accepts_reasoning_effort(entry_point: Any) -> bool:
     return "reasoning_effort" in parameters
 
 
+def takes_on_reasoning(entry_point: Any) -> bool:
+    """Whether one provider entry point names `on_reasoning`. By name alone: a
+    `**kwargs` of a provider that forwards what it is given would carry the
+    callback towards a vendor's request."""
+    if entry_point is None:
+        return False
+    try:
+        return "on_reasoning" in inspect.signature(entry_point).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def reported_served_effort(provider: Any) -> Optional[str]:
     """The rung the provider says its last call ran on, or None.
 
@@ -1012,6 +1024,7 @@ class LLMManager:
         provider_alias: str | None = None,
         return_metadata: bool = False,
         reasoning_effort: Optional[str] = None,
+        on_reasoning: Optional[Callable] = None,
     ):
         """A conversation, optional tools and an optional chunk callback in;
         `query(return_metadata=True)`'s dict plus four keys out.
@@ -1031,6 +1044,12 @@ class LLMManager:
         thought less than it was asked to must not come back looking like one
         that did. `None` asks for nothing and reaches no provider, which is
         what every caller written before this parameter existed keeps doing.
+
+        `on_reasoning(text, conversation_id)` is `on_chunk` for the reasoning,
+        before the content it precedes; the gateway is its one caller, and a
+        caller that does not pass it gets what it always got, the text on
+        `on_chunk` and the reasoning in `thinking`. A provider with none sends
+        none. Nothing here cleans it (ADR-041 D4, amendment 2026-11-04).
         """
         if not isinstance(messages, list) or not messages:
             raise ValueError("query_messages needs a non-empty list of messages.")
@@ -1079,6 +1098,10 @@ class LLMManager:
                     "on this path."
                 )
             effort_kwargs["reasoning_effort"] = reasoning_effort
+        reasoning_kwargs: Dict[str, Any] = (
+            {"on_reasoning": on_reasoning}
+            if on_reasoning is not None and takes_on_reasoning(entry_point) else {}
+        )
         image_notes: List[str] = []
         if image_count:
             messages, image_notes = await normalise_turn_images(messages, image_pixel_limit_of(provider))
@@ -1088,7 +1111,7 @@ class LLMManager:
                         alias_to_use, provider.model, len(tools))
             raw = await entry_point(
                 messages, tools, system=system, on_chunk=on_chunk, conversation_id=conversation_id,
-                **effort_kwargs,
+                **effort_kwargs, **reasoning_kwargs,
             ) or {}
             response = raw.get("content") or ""
             tool_calls = [_tool_use_block(call) for call in raw.get("tool_calls_raw") or []]
@@ -1097,12 +1120,19 @@ class LLMManager:
         elif path == "generate_response_stream":
             logger.info("Routing streaming query to provider '%s' with model '%s'",
                         alias_to_use, provider.model)
-            response = await entry_point(prompt_text, on_chunk, conversation_id, **effort_kwargs)
+            response = await entry_point(prompt_text, on_chunk, conversation_id, **effort_kwargs, **reasoning_kwargs)
             streamed, flattened, tools_used = True, True, False
         else:
             logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
             response = await entry_point(prompt_text, **effort_kwargs)
             streamed, flattened, tools_used = False, True, False
+            # A prompt door has it on the instance by now, and nothing has been written.
+            if on_reasoning is not None and provider.supports_thinking() and hasattr(provider, 'get_last_thinking'):
+                stored = provider.get_last_thinking()
+                # Equal to the answer: a provider gave it as the answer, as Ollama
+                # does when the model answered nothing, and it is said once.
+                if stored and stored != response:
+                    await on_reasoning(stored, conversation_id)
             if on_chunk is not None:
                 logger.info("Provider '%s' has no generate_response_stream: the answer is "
                             "delivered whole and 'streamed' says so", alias_to_use)
@@ -1180,6 +1210,35 @@ class LLMManager:
                 **reported_cost(provider),
             }
         return response
+
+    async def estimated_usage(self, alias: str, prompt: str, text: str = "", reasoning: str = "") -> Dict[str, Any]:
+        """`query_messages`' dict for a call that ended before its usage arrived: this
+        node's own count over the prompt and over what came back, reasoning included.
+
+        An engine reports usage on its last frame, so a call cut short has only this.
+        `counts_source` says so, and it is low: what was made and never came back is in
+        nobody's count. A provider that prices its own calls prices these numbers.
+        """
+        provider = self.providers[alias]
+        # A llama-server alias may name a gguf and no model; the counter wants a name.
+        counted_as = provider.model or alias
+        thinking_tokens = self.count_tokens(reasoning, counted_as) if reasoning else None
+        response_tokens = (self.count_tokens(text, counted_as) if text else 0) + (thinking_tokens or 0)
+        usage: Dict[str, Any] = {
+            "response": text,
+            "provider": alias,
+            "model": provider.model,
+            "prompt_tokens": self.count_tokens(prompt, counted_as) if prompt else 0,
+            "response_tokens": response_tokens,
+            "thinking_tokens": thinking_tokens,
+            "thinking_source": "estimated" if thinking_tokens else None,
+            "counts_source": "ours",
+            "output_includes_thinking": "includes",
+        }
+        price = getattr(provider, "price_estimated_usage", None)
+        if price is not None:
+            usage.update(await price(usage["prompt_tokens"], response_tokens))
+        return usage
 
     async def shutdown(self) -> None:
         """
