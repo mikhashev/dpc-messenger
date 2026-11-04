@@ -287,6 +287,7 @@ def waiting_for_the_card_at_most(wait_s: float, why: str):
 # A ContextVar for the reason `_PEER_CALL` is one. Without it a request asking for another excluding
 # alias meets the refusal, whatever the call is.
 _CARD_BORROW: contextvars.ContextVar = contextvars.ContextVar("dpc_card_borrow", default=False)
+_A_DESCRIPTION_WOULD_LOSE_PARKED = "stopping it for a description would drop its parked conversations"
 
 
 @contextlib.contextmanager
@@ -1980,13 +1981,16 @@ class LlamaServerSupervisor:
             hint = ("" if swap_on else
                     " Or tick 'Swap local models when the card holder is idle' in Providers > "
                     "Local engines, and DPC stops an idle holder for you.")
-            if not swap_on or not _this_request_holds(other.alias):
-                why = f"swapping is off, the start serves a peer, or '{other.alias}' is already stopping"
-            elif state in ("draining", "stopping"):
+            stands_there = swap_on and _this_request_holds(other.alias)
+            if stands_there and state in ("draining", "stopping"):
                 why = f"this request is running on '{other.alias}', which is already {state}"
-            else:
+            elif stands_there:
                 why = (f"this request is running on '{other.alias}' and would wait on itself"
                        f"{self._why_no_card_borrow(other) or ''}")
+            elif swap_on and self._description_may_not_stop(other):
+                why = _A_DESCRIPTION_WOULD_LOSE_PARKED
+            else:
+                why = f"swapping is off, the start serves a peer, or '{other.alias}' is already stopping"
             return CardHeldError(
                 f"{self.ENGINE}[{self.alias}] cannot load: the card is held by "
                 f"{other.ENGINE} alias '{other.alias}' ({state}). "
@@ -2004,6 +2008,12 @@ class LlamaServerSupervisor:
                 return self._a_place_waits_refusal()
         return None
 
+    def _description_may_not_stop(self, holder: "LlamaServerSupervisor") -> bool:
+        """A description never stops an engine that drops what it parked, whoever it stands on
+        (Mike's call, 2026-11-04, until the session-files measurement). The one place to change it:
+        the call marked `a_card_borrow`, and only that; an ordinary request swaps as it did."""
+        return _CARD_BORROW.get() and holder.DROPS_PARKED_ON_STOP
+
     def _why_no_card_borrow(self, holder: "LlamaServerSupervisor") -> Optional[str]:
         """Rule 9's second sentence: a request's description may give up the request's own alias,
         through the queue, within its one deadline, on a stop that loses no parked conversations.
@@ -2020,8 +2030,8 @@ class LlamaServerSupervisor:
             return ", and it has already given up its own alias for a description"
         if hold.alias != holder.alias or holder._draining:
             return ""
-        if holder.DROPS_PARKED_ON_STOP:
-            return ", and stopping it for a description would drop its parked conversations"
+        if self._description_may_not_stop(holder):
+            return f", and {_A_DESCRIPTION_WOULD_LOSE_PARKED}"
         others = [other.alias for other, _state in self._blocking_holders() if other is not holder]
         if others:
             return f", and '{others[0]}' is on the card too"
@@ -2240,6 +2250,8 @@ class LlamaServerSupervisor:
             if self._why_no_card_borrow(found[0]) is not None:
                 return None
             borrows_from = found[0].alias
+        elif found is not None and self._description_may_not_stop(found[0]):
+            return None  # the claim refuses, at once and not after a wait in line
         if _CARD_QUEUE:
             if self._this_request_is_not_new() or self._this_request_stands_elsewhere_on_the_card():
                 return None
@@ -2375,6 +2387,8 @@ class LlamaServerSupervisor:
                 stands_there = _this_request_holds(holder.alias)
                 if stands_there and not request.may_stop_its_own_stand_on(holder.alias):
                     return  # rule 9: it would wait on itself
+                if not stands_there and self._description_may_not_stop(holder):
+                    return  # it took the card while this waited: the claim refuses
                 now = _swap_clock()
                 # A holder stopping for another reason is waited for like a busy one (decision 1).
                 stopping = state == "stopping" or holder._draining

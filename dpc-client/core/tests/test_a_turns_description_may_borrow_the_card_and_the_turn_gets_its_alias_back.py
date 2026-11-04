@@ -41,6 +41,8 @@ from dpc_client_core.managers.llama_server_supervisor import (
 )
 from dpc_client_core.managers.strata_supervisor import PeerStartRefused
 from dpc_client_core.providers.llamacpp_server_provider import _ACTIVE_SUPERVISORS
+from dpc_client_core.dpc_agent.tools.registry import ToolContext
+from dpc_client_core.service import CoreService
 from dpc_client_core.settings import Settings
 
 from tests.test_a_callers_run_of_calls_keeps_its_alias_busy_for_the_window import _Clock
@@ -51,6 +53,8 @@ from tests.test_a_request_holds_the_card_from_its_first_round_to_its_last import
     _another_request,
     _Engine,
     _Eye,
+    _text_of,
+    _Vendor,
     _finish,
     _held,
     _QueryingManager,
@@ -1323,31 +1327,197 @@ class TestTheDescriptionIsKeptForTheTurn:
 
 
 class TestAStrataHolderTheRequestDoesNotStandOn:
-    """Today's behaviour, written down until Mike rules (2026-11-03): rule 9's sentence is about the
-    request's own alias. A description whose request stands on no alias on the card queues as a
-    normal request, so an idle Strata holder is swapped out for it and its parked conversations go."""
+    """A description never stops a Strata holder (Mike's call, 2026-11-04, until the session-files
+    measurement), also where the request does not stand on it: the refusal in the words of the
+    Strata-holder refusal, the turn goes on, and what is parked stays. Only a call marked as a
+    description: an ordinary request's swap and a person's group image are as they were."""
+
+    PARKED = "stopping it for a description would drop its parked conversations"
+
+    def _a_strata_holder(self, tmp_path):
+        holder = _strata(tmp_path / "s", "the strata holder")
+        _ACTIVE_SUPERVISORS["the strata holder"] = holder
+        return holder
 
     @pytest.mark.asyncio
-    async def test_a_cloud_agent_s_description_swaps_out_an_idle_strata_holder(self, tmp_path, swaps):
+    @pytest.mark.parametrize("alias", [None, A], ids=["a cloud agent", "a turn whose alias has no child"])
+    async def test_a_description_is_refused_and_the_strata_holder_stays(self, tmp_path, swaps, alias):
         _a, b, _blind, _eyes, _manager = _pair(tmp_path)
-        s = _strata(tmp_path / "s", "the strata holder")
-        _ACTIVE_SUPERVISORS["the strata holder"] = s
-        await s.ensure_running()
-        async with card_held_for(None, "accepted_request", conversation_id="cloud"):
-            with base_mod.a_card_borrow():
+        holder = self._a_strata_holder(tmp_path)
+        await holder.ensure_running()
+        started = time.monotonic()
+        async with card_held_for(alias, "accepted_request", conversation_id="c"):
+            with base_mod.a_card_borrow(), pytest.raises(CardHeldError) as raised:
                 await asyncio.wait_for(b.ensure_running(), 10)
-        assert swaps == [("the strata holder", B)] and base_mod.last_swap()["parked_dropped"] is True
+        assert time.monotonic() - started < 5, "swap_wait_s is 60: refused at once"
+        message = str(raised.value)
+        assert self.PARKED in message and "strata alias 'the strata holder'" in message
+        assert "would wait on itself" not in message, "this request does not stand on it"
+        assert swaps == [] and b._proc is None and _in_line() == []
+        _untouched(holder)
 
     @pytest.mark.asyncio
-    async def test_a_description_on_a_turn_whose_alias_has_no_child_does_the_same(self, tmp_path, swaps):
+    async def test_a_cloud_agent_s_turn_goes_on_with_a_failed_description(self, tmp_path, swaps):
+        _a, b, _blind, eyes, manager = _pair(tmp_path)
+        holder = self._a_strata_holder(tmp_path)
+        await holder.ensure_running()
+        saw = []
+
+        class Cloud(_Vendor):
+            async def generate_with_tools(self, messages, tools, system=None, on_chunk=None,
+                                          conversation_id=None, **_):
+                saw.append(_text_of(messages))
+                return await super().generate_with_tools(messages, tools, system, on_chunk, conversation_id)
+
+        manager.providers["cloud"] = Cloud()
+        agent = _agent(tmp_path, manager, provider_alias="cloud")
+
+        answer = await asyncio.wait_for(
+            agent.process("what is this", "chat", image_base64=PIXEL, image_mime="image/png"), 20,
+        )
+
+        assert answer == "the answer" and agent._last_trace.get("turn_end") is None
+        assert FAILED in saw[0] and self.PARKED in saw[0]
+        assert eyes.asked == 1 and eyes.looks == 0
+        assert swaps == [] and b._proc is None
+        _untouched(holder)
+
+    @pytest.mark.asyncio
+    async def test_the_tool_comes_back_with_the_refusal_and_the_strata_holder_stays(self, tmp_path, swaps):
+        base_mod.bind_owner_loop(asyncio.get_running_loop())
+        _a, b, _blind, _eyes, manager = _pair(tmp_path)
+        holder = self._a_strata_holder(tmp_path)
+        await holder.ensure_running()
+        cloud = _Vendor()
+        manager.providers["cloud"] = cloud
+        agent = _agent(tmp_path, manager, provider_alias="cloud")
+        name = _render(agent)
+        service = SimpleNamespace(llm_manager=manager)
+
+        async with card_held_for(None, "accepted_request", conversation_id="c"):
+            answer = await describe_image(ToolContext(agent_root=agent.agent_root, dpc_service=service), name)
+
+        assert answer.startswith("⚠️ Vision query failed:") and self.PARKED in answer
+        assert swaps == [] and b._proc is None
+        _untouched(holder)
+
+    @pytest.mark.asyncio
+    async def test_a_strata_alias_that_took_the_card_while_the_description_waited_is_not_stopped_either(
+        self, tmp_path, swaps,
+    ):
+        # In line behind the Strata alias, with a llama-server child on the card when it asked.
+        a, b, _blind, _eyes, _manager = _pair(tmp_path)
+        s = self._a_strata_holder(tmp_path)
+        await a.ensure_running()
+        slot = a.call_slot()
+        await slot.__aenter__()
+        waiting = _request(s, conversation_id="owner on strata")
+        await _until(lambda: _in_line() == ["the strata holder"])
+
+        async def a_cloud_description():
+            async with card_held_for(None, "accepted_request", conversation_id="cloud"):
+                with base_mod.a_card_borrow():
+                    await b.ensure_running()
+
+        asking = _another_request(a_cloud_description())
+        await _until(lambda: _in_line() == ["the strata holder", B])
+        await slot.__aexit__(None, None, None)
+        await asyncio.wait_for(waiting, 10)
+
+        with pytest.raises(CardHeldError, match=self.PARKED):
+            await asyncio.wait_for(asking, 10)
+        assert swaps == [(A, "the strata holder")] and b._proc is None
+        _untouched(s)
+
+    @pytest.mark.asyncio
+    async def test_with_a_strata_holder_on_the_card_it_does_not_wait_in_line_to_be_refused(self, tmp_path, swaps):
         _a, b, _blind, _eyes, _manager = _pair(tmp_path)
-        s = _strata(tmp_path / "s", "the strata holder")
-        _ACTIVE_SUPERVISORS["the strata holder"] = s
-        await s.ensure_running()
+        holder = self._a_strata_holder(tmp_path)
+        g = _strata(tmp_path / "g", G)
+        _ACTIVE_SUPERVISORS[G] = g
+        await holder.ensure_running()
+        slot = holder.call_slot()
+        await slot.__aenter__()
+        waiting = _request(g, conversation_id="owner")
+        await _until(lambda: _in_line() == [G])
+        started = time.monotonic()
+        async with card_held_for(None, "accepted_request", conversation_id="cloud"):
+            with base_mod.a_card_borrow(), pytest.raises(CardHeldError, match=self.PARKED):
+                await asyncio.wait_for(b.ensure_running(), 10)
+        assert time.monotonic() - started < 5 and _in_line() == [G]
+        await slot.__aexit__(None, None, None)
+        await asyncio.wait_for(waiting, 10)
+
+    @pytest.mark.asyncio
+    async def test_a_description_asking_for_the_alias_it_gave_up_still_takes_the_way_back(self, tmp_path, swaps):
+        # The holder is Strata, and this is the request's own stand, which the rule does not refuse.
+        a, b, _blind, _eyes, _manager = _pair(tmp_path)
+        await a.ensure_running()
         async with card_held_for(A, "accepted_request", conversation_id="c"):
             with base_mod.a_card_borrow():
                 await asyncio.wait_for(b.ensure_running(), 10)
+                await asyncio.wait_for(a.ensure_running(), 10)
+        assert swaps == [(A, B), (B, A)] and _alive(a)
+
+    @pytest.mark.asyncio
+    async def test_a_description_still_swaps_out_an_idle_llama_server_child_it_does_not_stand_on(self, tmp_path, swaps):
+        a, b, _blind, _eyes, _manager = _pair(tmp_path)
+        await a.ensure_running()
+        async with card_held_for(None, "accepted_request", conversation_id="cloud"):
+            with base_mod.a_card_borrow():
+                await asyncio.wait_for(b.ensure_running(), 10)
+        assert swaps == [(A, B)], "DROPS_PARKED_ON_STOP decides"
+
+    @pytest.mark.asyncio
+    async def test_with_the_swap_off_the_refusal_is_today_s(self, tmp_path, settings, swaps):
+        settings.set_local_engine_swap(False, 300)
+        _a, b, _blind, _eyes, _manager = _pair(tmp_path)
+        holder = self._a_strata_holder(tmp_path)
+        await holder.ensure_running()
+        async with card_held_for(None, "accepted_request", conversation_id="cloud"):
+            with base_mod.a_card_borrow(), pytest.raises(CardHeldError, match="swapping is off") as raised:
+                await asyncio.wait_for(b.ensure_running(), 5)
+        assert self.PARKED not in str(raised.value)
+        _untouched(holder)
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_request_still_swaps_out_an_idle_strata_holder(self, tmp_path, swaps):
+        _a, b, _blind, _eyes, _manager = _pair(tmp_path)
+        holder = self._a_strata_holder(tmp_path)
+        await holder.ensure_running()
+        async with card_held_for(None, "accepted_request", conversation_id="cloud"):
+            await asyncio.wait_for(b.ensure_running(), 10)
         assert swaps == [("the strata holder", B)] and base_mod.last_swap()["parked_dropped"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_person_s_group_image_is_no_marked_description_and_still_swaps_it_out(self, tmp_path, swaps):
+        # Not touched by the call: what a group image does in this case, written down.
+        _a, b, _blind, _eyes, manager = _pair(tmp_path)
+        holder = self._a_strata_holder(tmp_path)
+        await holder.ensure_running()
+
+        described = await asyncio.wait_for(
+            CoreService._describe_image_for_agents(SimpleNamespace(llm_manager=manager), PIXEL, "image/png"), 10,
+        )
+
+        assert described == DESCRIPTION
+        assert swaps == [("the strata holder", B)] and base_mod.last_swap()["parked_dropped"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_picture_turn_on_a_childless_alias_is_refused_the_look_and_its_own_round_still_swaps(
+        self, tmp_path, swaps,
+    ):
+        # The description stops nothing; the turn's own model call is an ordinary request, not changed.
+        a, b, blind, eyes, manager = _pair(tmp_path)
+        holder = self._a_strata_holder(tmp_path)
+        await holder.ensure_running()
+
+        agent, answer = await _a_picture_turn(tmp_path, manager)
+
+        assert answer == "the answer" and agent._last_trace.get("turn_end") is None
+        assert FAILED in blind.saw[0] and self.PARKED in blind.saw[0]
+        assert eyes.looks == 0 and swaps == [("the strata holder", A)]
+        assert _alive(a) and not _alive(holder)
 
 
 class TestTheTool:

@@ -735,11 +735,22 @@ One call in flight is too short a measure of busy, and two aliases trade the car
    another alias meet the refusal. A llama-server child is the only holder that can be given up
    and, since two of them do not exclude each other, a Strata vision alias the only thing it is
    given up for. So the first swap stops a child that parks nothing, and the way back stops Strata.
-   - **The sentence's own limit.** It speaks of a request giving up *its own* alias. A description
-     whose request stands on no alias on the card (a cloud agent, or a turn whose alias has no child
-     now) is not a borrow: it queues as a normal request, as the sentence before says, so an idle
-     Strata holder is swapped out for it and what it parked goes, said as `parked_dropped` true.
-     That is what happens today; whether it should is still open with Mike, 2026-11-04.
+   - **A description never stops a Strata holder** (Mike's call, team chat, 2026-11-04, agreed by the
+     team as a decision until the session-files measurement; the one place to change it is
+     `_description_may_not_stop`). This holds also where the request does not stand on it: a cloud
+     agent, or a turn whose alias has no child now. Such a description is not a borrow, and it does
+     queue as a normal request as the sentence before says, except that a holder with
+     `DROPS_PARKED_ON_STOP` true is refused, at once if it is on the card when the description asks and
+     at its turn in line if it took the card meanwhile, in the words of the Strata-holder refusal. The
+     turn goes on with a failed description and what is parked stays. An idle llama-server child is
+     swapped out for it as before. This covers only the calls marked as a description
+     (`_pre_analyze_image_for_agent`, `describe_image`). Not changed: an ordinary request's swap, so the
+     model call of a turn on a childless alias still swaps out an idle Strata holder, and what it
+     parked goes, right after its description was refused to protect it; and a person's group image
+     (`_describe_image_for_agents`), unmarked, which is a request of its own and swaps out an idle
+     Strata holder within its 30 s, `parked_dropped` as the engine's count says; and `read_document`'s
+     page look (`dpc_agent/tools/document.py`), unmarked as well, which from a request not standing on
+     the card, such as a cloud agent's, swaps out an idle Strata holder the same way.
    - **The first swap.** The request takes a place for the vision alias, on the deadline of its
      hold, and acts as any first place does; its own hold does not make its alias busy
      (`_busy_for_the_card`'s `but_for`), and every other stand does: a second request on the alias,
