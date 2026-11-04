@@ -673,14 +673,14 @@ def _run_djvu(binary: str, args: List[str]) -> Tuple[int, str, str]:
 
     if run.exceeded_mb:
         return -1, "", (
-            f"{Path(binary).name} killed by DPC memory ceiling "
-            f"({run.ceiling_mb} MB): its tree reached {run.exceeded_mb} MB "
+            f"{Path(binary).name} hit the DPC memory ceiling "
+            f"({run.ceiling_mb} MB): it and everything it started reached {run.exceeded_mb} MB "
             f"- {run.killed}. {CEILING_HINT}."
         )
     if run.timed_out:
         return -1, "", (
             f"{Path(binary).name} did not finish within {DJVU_CALL_SECONDS} s"
-            f" and was killed - {run.killed}. {captured_sizes(run)}"
+            f" - {run.killed}. {captured_sizes(run)}"
         )
     return run.returncode, run.stdout, run.stderr
 

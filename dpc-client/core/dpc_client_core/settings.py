@@ -190,7 +190,7 @@ class Settings:
             'collect_hardware_specs': 'true',    # Collect hardware tiers (RAM, CPU, disk, GPU)
             'collect_dev_tools': 'true',         # Collect installed dev tools and versions
             'collect_ai_models': 'false',        # Collect locally available AI models (opt-in for compute-sharing)
-            'shell_memory_limit_mb': '8192'      # Memory ceiling for an agent command and its children, in MB; 0 = off. Read at each command, no restart; DPC_SHELL_MEMORY_LIMIT_MB overrides it
+            'shell_memory_limit_mb': '8192'      # Memory ceiling for an agent command and everything it started, summed, in MB; 0 = off. Read at each command, no restart; DPC_SHELL_MEMORY_LIMIT_MB overrides it
         }
 
         self._config['dht'] = {

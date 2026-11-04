@@ -2597,15 +2597,21 @@ def _execute_shell_command(
         if run.exceeded_mb:
             # Name the ceiling the run was actually held to.
             note = (
-                f"Error: the command and its children reached "
-                f"{run.exceeded_mb} MB, over the {run.ceiling_mb} MB "
-                f"ceiling, and were killed"
+                f"Error: the command and everything it started reached "
+                f"{run.exceeded_mb} MB, over the {run.ceiling_mb} MB ceiling"
             )
             # Naming the clock when the ceiling is what fired tells the agent
-            # the wrong cause, so the timeout adds only what it knows.
+            # the wrong cause, so the timeout adds only what it knows. The
+            # verdict is the only place that says killed: it was read back.
             if run.killed:
                 note += f" - {run.killed}"
             note += f". {CEILING_HINT} if this work genuinely needs more."
+        elif run.left_running:
+            note = (
+                f"[The command ended (exit code {run.returncode}) and left a process running "
+                f"that still holds its output, so after {timeout}s this call stopped waiting "
+                f"for it. Nothing was killed; below is what had arrived by then.]"
+            )
         elif run.timed_out:
             note = "\n".join([
                 f"Error: command timed out after {timeout}s - {run.killed}.",

@@ -48,9 +48,11 @@ _CEILING_ENV = "DPC_SHELL_MEMORY_LIMIT_MB"
 _CEILING_ENV_GENERIC = "DPC_SYSTEM_SHELL_MEMORY_LIMIT_MB"
 _CEILING_SECTION, _CEILING_KEY = "system", "shell_memory_limit_mb"
 
-# What a refusal tells the agent, kept in one place for every caller.
+# What a refusal tells the agent, kept in one place for every caller. The quoted
+# label is the screen's; the limit is on the sum, as settings.py words it.
 CEILING_HINT = (
-    f"Raise {_CEILING_KEY} in [{_CEILING_SECTION}] of config.ini (the next "
+    f"Raise {_CEILING_KEY} in [{_CEILING_SECTION}] of config.ini, the limit on an "
+    f"agent command and everything it started, summed (the next "
     f"command reads it, no restart; the Agent map's \"RAM limit per process\" "
     f"field sets it too; {_CEILING_ENV} in the environment overrides it)"
 )
@@ -186,7 +188,8 @@ def _tree_memory_mb(process: "subprocess.Popen") -> float:
     """Memory held by the command and everything it started, in MB.
 
     The whole tree, because the runaway was a grandchild: a parent that reads
-    only its own usage watches an innocent shell while the machine fills up.
+    only its own usage watches an innocent shell while the machine fills up. The
+    walk, and on Windows the members of the command's job, each counted once.
     """
     try:
         import psutil
@@ -201,13 +204,21 @@ def _tree_memory_mb(process: "subprocess.Popen") -> float:
                 "only the timeout limits a command"
             )
         return 0.0
+    procs: dict = {}
     try:
         root = psutil.Process(process.pid)
-        procs = [root] + root.children(recursive=True)
+        procs = {proc.pid: proc for proc in [root] + root.children(recursive=True)}
     except Exception:
-        return 0.0
+        pass
+    job = _job_of(process)
+    for pid in (job.members() or ()) if job is not None else ():
+        if pid not in procs:
+            try:
+                procs[pid] = psutil.Process(pid)
+            except Exception:
+                continue  # it exited between listing and reading; not an error
     total = 0.0
-    for proc in procs:
+    for proc in procs.values():
         try:
             total += _process_memory_mb(proc)
         except Exception:
@@ -224,13 +235,16 @@ def _watch_memory(
 ) -> None:
     """Kill the tree if it grows past the ceiling. Runs on a daemon thread.
 
-    Polling rather than an OS limit on purpose: a Windows Job Object and a
-    POSIX RLIMIT_AS are both better instruments and neither is the same
-    instrument, so a limit expressed that way would mean two behaviours to
-    reason about and one of them untested here. A poll is the same code and the
-    same number on all three platforms; its cost is granularity, and against a
-    process that spent nine and a half hours above the line, granularity of two
-    seconds is not the weak part.
+    The quantity is the sum over the command's processes, polled, the same code
+    and the same number on all three platforms. An OS limit counts something else:
+    a Job Object limits commit per process or per job, RLIMIT_AS an address space.
+    The cost of a poll is granularity, and against a process that spent nine and a
+    half hours above the line, two seconds is not the weak part.
+
+    On Windows a `CommandJob` serves it in two other ways while the command's root
+    lives: it names the members when a parent link broke, and it kills them all. The
+    poll ends with the root on every platform, so what the command left running is
+    not watched: an accepted cost, ADR-046's amendment of 2026-11-04.
 
     `stop` wakes the sleep the moment the caller has its answer. Without it the
     caller's `join` waited out the rest of a poll interval after every process
@@ -323,15 +337,29 @@ def _kill_process_tree(process: "subprocess.Popen") -> str:
     """Kill the command and everything it started. Returns what happened, for the agent.
 
     Killing the direct child is not enough and never was: the child is a shell,
-    and what the agent actually launched is the shell's child. `taskkill /T`
-    walks the Windows tree; on POSIX the process got its own session at spawn,
-    so one `killpg` reaches every descendant that did not deliberately break
-    away.
+    and what the agent actually launched is the shell's child. A command's
+    `CommandJob` is killed and read back empty, and only while its root lives: what
+    a command that has ended left running stays. With no job, `taskkill /T` walks the
+    Windows tree, which stops at a process that has exited; on POSIX the process
+    got its own session at spawn, so one `killpg` reaches every descendant that
+    did not deliberately break away.
     """
     import signal
 
     pid = process.pid
     if platform.system() == "Windows":
+        job = _job_of(process)
+        if job is not None and process.poll() is not None:
+            return "the command had already ended; what it left running was not killed"
+        left = job.kill() if job is not None else None
+        if job is not None and left is not None:
+            if not left:
+                return "the command and its descendants were killed"
+            log.warning("the job of pid %s still holds %s after the kill", pid, left)
+            return (
+                f"the kill did not reach the whole tree ({len(left)} of its "
+                "processes still running); a descendant may survive"
+            )
         try:
             done = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
@@ -345,7 +373,10 @@ def _kill_process_tree(process: "subprocess.Popen") -> str:
             # anyway — false in exactly the partial-kill case the bounded
             # drain exists for.
             if done.returncode == 0:
-                return "the command and its descendants were killed"
+                return (
+                    "the command and the descendants its parent links reach were "
+                    "killed; one whose parent had already exited may survive"
+                )
             log.warning(
                 "taskkill on pid %s exited %s: %s", pid, done.returncode,
                 (done.stderr or b"").decode("utf-8", "replace").strip()[:200],
@@ -444,6 +475,95 @@ def _registry():
     except ImportError:
         return None
     return process_registry.get_registry()
+
+
+def _job_module():
+    """`job_object`, or None where this file is loaded on its own (see `_registry`)."""
+    try:
+        from dpc_client_core import job_object
+    except ImportError:
+        return None
+    return job_object
+
+
+_COMMAND_JOB_ATTR = "dpc_command_job"
+_job_failures_announced: set = set()
+
+
+def _announce_job_failure(exc: Exception) -> None:
+    """A WARNING per kind of failure: this could run at every command."""
+    text = str(exc) or type(exc).__name__
+    if text not in _job_failures_announced:
+        _job_failures_announced.add(text)
+        log.warning(
+            "A command runs without a Job Object (%s): its processes are found by "
+            "parent link alone, so the ceiling and the kill do not reach one whose "
+            "parent has exited", text,
+        )
+
+
+def _new_command_job() -> Any:
+    """The job for the next command, or None: off Windows, or when it cannot be made."""
+    if sys.platform != "win32":
+        return None
+    jobs = _job_module()
+    if jobs is None:
+        return None
+    try:
+        import psutil  # noqa: F401  # `_wake` needs it; without it no child is left suspended
+
+        return jobs.create_command_job()
+    except Exception as exc:
+        _announce_job_failure(exc)
+        return None
+
+
+def _job_of(process: Any) -> Any:
+    """The `CommandJob` a child entered, or None."""
+    job = getattr(process, _COMMAND_JOB_ATTR, None)
+    jobs = _job_module() if job is not None else None
+    return job if jobs is not None and isinstance(job, jobs.CommandJob) else None
+
+
+def _wake(process: "subprocess.Popen") -> None:
+    """Start a child created suspended, or raise: `psutil.Process.resume`, NtResumeProcess
+    on Windows. `Popen` keeps no thread handle to give `ResumeThread` (ADR-046, 2026-11-04)."""
+    import psutil
+
+    psutil.Process(process.pid).resume()
+
+
+def _enter_job_and_start(process: "subprocess.Popen", job: Any) -> bool:
+    """Put a suspended child in `job` and wake it. A job that refuses it is let go and
+    the child runs without one. False: it could not be woken, having run nothing, and
+    the caller starts it again without a job."""
+    try:
+        job.enter(process)
+        setattr(process, _COMMAND_JOB_ATTR, job)
+    except Exception as exc:
+        _announce_job_failure(exc)
+        job.close()
+    try:
+        _wake(process)
+        return True
+    except Exception as exc:
+        reason = f"could not be woken: {type(exc).__name__}"
+        if reason not in _job_failures_announced:
+            _job_failures_announced.add(reason)
+            log.warning("pid %s %s (%s); starting it again without a job", process.pid, reason, exc)
+    job.close()
+    try:
+        process.kill()
+        process.wait(5)
+    except Exception as exc:
+        log.warning("the suspended pid %s could not be killed either (%s: %s); it stays, frozen",
+                    process.pid, type(exc).__name__, exc)
+    for stream in (process.stdout, process.stderr):
+        try:
+            stream.close()
+        except Exception:
+            pass
+    return False
 
 
 _DRAIN_AFTER_KILL_SECONDS = 5
@@ -636,6 +756,7 @@ def _drain_after_kill(process: "subprocess.Popen", output: Optional[_OutputReade
 # `subprocess.CREATE_NO_WINDOW` exists only on Windows; the value is spelled
 # here so the Windows branch can be tested by injection on any platform.
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+CREATE_SUSPENDED = 0x00000004
 
 
 def _command_text(cmd) -> str:
@@ -750,6 +871,9 @@ class SupervisedRun:
     # How the process registry recorded the end (ADR-046 point 4); empty when
     # the run was not registered.
     exit_reason: str = ""
+    # Windows: the root exited and something it left still held the pipes at the
+    # timeout. Nothing was killed and `returncode` is the root's.
+    left_running: bool = False
 
     @property
     def ok(self) -> bool:
@@ -800,6 +924,12 @@ def run_supervised(
     `on_stdout` gets each stdout line as it arrives (`_OutputReader`), for a
     caller that reads a child's progress live; `stdout` still holds all of it.
     `on_stderr` and `cr_ends_line` are `_OutputReader`'s.
+
+    On Windows the child starts suspended and enters a `CommandJob` before its first
+    instruction, so nothing it starts is born outside. The root decides: while it lives
+    the job is summed, and killed at the ceiling or the timeout; once it has exited
+    nothing is killed here, however the pipes stand. Pipes still held at the timeout
+    return what was read, with `left_running`.
     """
     ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
     if ceiling is None:
@@ -825,124 +955,157 @@ def run_supervised(
         # Before the child exists: a spawn the backend's stop has refused must
         # not be born (ADR-046 point 7, step 1).
         registry.check_open(launcher, launcher_kind, while_stopping=while_stopping)
-    process = subprocess.Popen(
-        cmd,
-        shell=shell,
-        # Bytes: `_OutputReader` decodes them once, as text mode would have.
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=cwd,
-        env=env,
-        # Nobody is sitting at this process; a prompt would be asked of the
-        # operator's console and waited for until the timeout ran out.
-        stdin=subprocess.DEVNULL,
-        **kwargs,
-    )
-    detail = f"timeout {timeout}s, ceiling {ceiling or 'off'} MB"
-    if registry is not None:
+    job = _new_command_job()
+    while True:
+        started_as = dict(kwargs)
+        if job is not None:
+            started_as["creationflags"] = kwargs.get("creationflags", 0) | CREATE_SUSPENDED
         try:
-            registry.register(
-                process.pid,
-                launcher=launcher,
-                launcher_kind=launcher_kind,
-                command=log_as or _command_text(cmd),
-                handle=process,
-                log=log,
-                detail=detail,
+            process = subprocess.Popen(
+                cmd,
+                shell=shell,
+                # Bytes: `_OutputReader` decodes them once, as text mode would have.
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd=cwd,
-                while_stopping=while_stopping,
+                env=env,
+                # Nobody is sitting at this process; a prompt would be asked of the
+                # operator's console and waited for until the timeout ran out.
+                stdin=subprocess.DEVNULL,
+                **started_as,
             )
-        except Exception:
-            # Closed in the instant between the check and here, or a malformed
-            # entry: either way the child exists and nobody would end it.
-            _kill_process_tree(process)
+        except BaseException:
+            if job is not None:
+                job.close()
             raise
-    else:
-        log.info(
-            "spawned pid %s for %s (%s): %.120s",
-            process.pid, launcher, detail, log_as or _command_text(cmd),
-        )
-
-    def _note_stop(reason: str) -> Callable[[], None]:
-        return lambda: registry.note_stop_sent(process.pid, reason) if registry is not None else None
-
-    verdict: dict = {}
-    watch_thread: Optional[threading.Thread] = None
-    watch_stop = threading.Event()
-    if ceiling and ceiling > 0:
-        watch_thread = threading.Thread(
-            target=_watch_memory,
-            args=(process, ceiling, verdict, watch_stop, _note_stop("memory_ceiling")),
-            name=f"dpc-memory-watch-{process.pid}",
-            daemon=True,
-        )
-        watch_thread.start()
-
-    def _noted(at: float) -> None:
-        if registry is not None:
-            registry.note_output(process.pid, at)
-
-    output = _OutputReader(
-        process, _noted, _join_bytes if output_bytes else _decode_output, on_stdout,
-        on_stderr=on_stderr, cr_ends_line=cr_ends_line,
-    )
-    run = SupervisedRun(ceiling_mb=ceiling)
+        if job is None or _enter_job_and_start(process, job):
+            break
+        job = None
     try:
-        _wait_for_output(process, output, timeout)
-        run.stdout, run.stderr = output.text()
-        run.returncode = process.returncode
-    except subprocess.TimeoutExpired:
-        run.timed_out = True
-        _note_stop("timeout")()  # before the kill: a SIGKILL is not a crash
-        run.killed = _kill_process_tree(process)
-        run.stdout, run.stderr = _drain_after_kill(process, output)
-        run.returncode = process.returncode
-        # The ceiling kill always said so here; the timeout kill did not, and
-        # three agent commands that left the console raw were visible only in
-        # the agents' tools.jsonl.
-        prompt = None if output_bytes else (
-            pager_prompt_at_end(run.stdout) or pager_prompt_at_end(run.stderr))
-        log.warning(
-            "the command tree of pid %s for %s ran past its %ss timeout - %s; "
-            "%d chars of stdout and %d of stderr captured%s: %.200s",
-            process.pid, launcher, timeout, run.killed,
-            len(run.stdout or ""), len(run.stderr or ""),
-            f"; the output ends at a pager prompt {prompt!r}" if prompt else "",
-            (log_as or _command_text(cmd)).replace("\r", " ").replace("\n", " "),
-        )
-    if watch_thread is not None:
-        # communicate() can return before the watcher has written its verdict.
-        # A watcher mid-kill finishes it (it is past its sleep); one asleep is
-        # woken and leaves without a poll, so a short command costs no interval.
-        watch_stop.set()
-        watch_thread.join(timeout=15)
-    if verdict.get("exceeded_mb"):
-        run.exceeded_mb = verdict["exceeded_mb"]
-        if not run.killed:
-            run.killed = verdict.get("killed") or "the command and its descendants were killed"
-    if registry is not None:
-        # Last, with the stop (if any) already announced: the word comes from
-        # what was sent, and a code nobody sent is read for a death. A kill
-        # whose pipes never closed may leave the code unread; the stop that was
-        # announced still names the end.
-        code = process.returncode
-        if code is None:
+        detail = f"timeout {timeout}s, ceiling {ceiling or 'off'} MB"
+        if registry is not None:
             try:
-                code = process.poll()
+                registry.register(
+                    process.pid,
+                    launcher=launcher,
+                    launcher_kind=launcher_kind,
+                    command=log_as or _command_text(cmd),
+                    handle=process,
+                    log=log,
+                    detail=detail,
+                    cwd=cwd,
+                    while_stopping=while_stopping,
+                )
             except Exception:
-                code = None
+                # Closed in the instant between the check and here, or a malformed
+                # entry: either way the child exists and nobody would end it.
+                _kill_process_tree(process)
+                raise
+        else:
+            log.info(
+                "spawned pid %s for %s (%s): %.120s",
+                process.pid, launcher, detail, log_as or _command_text(cmd),
+            )
+
+        def _note_stop(reason: str) -> Callable[[], None]:
+            return lambda: registry.note_stop_sent(process.pid, reason) if registry is not None else None
+
+        verdict: dict = {}
+        watch_thread: Optional[threading.Thread] = None
+        watch_stop = threading.Event()
+        if ceiling and ceiling > 0:
+            watch_thread = threading.Thread(
+                target=_watch_memory,
+                args=(process, ceiling, verdict, watch_stop, _note_stop("memory_ceiling")),
+                name=f"dpc-memory-watch-{process.pid}",
+                daemon=True,
+            )
+            watch_thread.start()
+
+        def _noted(at: float) -> None:
+            if registry is not None:
+                registry.note_output(process.pid, at)
+
+        output = _OutputReader(
+            process, _noted, _join_bytes if output_bytes else _decode_output, on_stdout,
+            on_stderr=on_stderr, cr_ends_line=cr_ends_line,
+        )
+        run = SupervisedRun(ceiling_mb=ceiling)
         try:
-            last = output.last_output_at
-            if last is not None:
-                # The notes were throttled; the entry ends with the last bytes' time.
-                registry.note_output(process.pid, last)
-            ended = registry.end(process.pid, code)
-        except Exception as exc:  # the registry must never take a finished command down
-            log.warning("process registry: could not record the end of pid %s: %s", process.pid, exc)
-            ended = None
-        if ended is not None:
-            run.exit_reason = ended.exit_reason or ""
-    return run
+            _wait_for_output(process, output, timeout)
+            run.stdout, run.stderr = output.text()
+            run.returncode = process.returncode
+        except subprocess.TimeoutExpired:
+            if platform.system() == "Windows" and process.poll() is not None:
+                # `start` from cmd hands its child the inheritable pipes, and cmd has no
+                # way to give them up: this is a command that ended, not one that hung.
+                output.abandon()
+                run.stdout, run.stderr = output.text()
+                run.returncode = process.returncode
+                run.left_running = True
+                log.info(
+                    "pid %s for %s exited with %s and left a process holding its pipes; "
+                    "stopped waiting at the %ss timeout, nothing was killed: %.200s",
+                    process.pid, launcher, process.returncode, timeout,
+                    (log_as or _command_text(cmd)).replace("\r", " ").replace("\n", " "),
+                )
+            else:
+                run.timed_out = True
+                _note_stop("timeout")()  # before the kill: a SIGKILL is not a crash
+                run.killed = _kill_process_tree(process)
+                run.stdout, run.stderr = _drain_after_kill(process, output)
+                run.returncode = process.returncode
+                # The ceiling kill always said so here; the timeout kill did not, and
+                # three agent commands that left the console raw were visible only in
+                # the agents' tools.jsonl.
+                prompt = None if output_bytes else (
+                    pager_prompt_at_end(run.stdout) or pager_prompt_at_end(run.stderr))
+                log.warning(
+                    "the command tree of pid %s for %s ran past its %ss timeout - %s; "
+                    "%d chars of stdout and %d of stderr captured%s: %.200s",
+                    process.pid, launcher, timeout, run.killed,
+                    len(run.stdout or ""), len(run.stderr or ""),
+                    f"; the output ends at a pager prompt {prompt!r}" if prompt else "",
+                    (log_as or _command_text(cmd)).replace("\r", " ").replace("\n", " "),
+                )
+        if watch_thread is not None:
+            # communicate() can return before the watcher has written its verdict.
+            # A watcher mid-kill finishes it (it is past its sleep); one asleep is
+            # woken and leaves without a poll, so a short command costs no interval.
+            watch_stop.set()
+            watch_thread.join(timeout=15)
+        if verdict.get("exceeded_mb"):
+            run.exceeded_mb = verdict["exceeded_mb"]
+            if not run.killed:
+                run.killed = verdict.get("killed") or "the kill had not finished when the run ended; a descendant may survive"
+        if registry is not None:
+            # Last, with the stop (if any) already announced: the word comes from
+            # what was sent, and a code nobody sent is read for a death. A kill
+            # whose pipes never closed may leave the code unread; the stop that was
+            # announced still names the end.
+            code = process.returncode
+            if code is None:
+                try:
+                    code = process.poll()
+                except Exception:
+                    code = None
+            try:
+                last = output.last_output_at
+                if last is not None:
+                    # The notes were throttled; the entry ends with the last bytes' time.
+                    registry.note_output(process.pid, last)
+                ended = registry.end(process.pid, code)
+            except Exception as exc:  # the registry must never take a finished command down
+                log.warning("process registry: could not record the end of pid %s: %s", process.pid, exc)
+                ended = None
+            if ended is not None:
+                run.exit_reason = ended.exit_reason or ""
+        return run
+    finally:
+        # On every path, and it ends nothing: what a command left stays.
+        command_job = _job_of(process)
+        if command_job is not None:
+            command_job.close()
 
 
 # The subsystems a short probe runs as (ADR-046 point 3).

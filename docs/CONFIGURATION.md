@@ -688,7 +688,8 @@ person, not only as a machine (Mike's call, 2026-09-14; ADR-041 D7, amendment
 - **Privacy Note:** Disabled by default. Enable only if you want to share compute resources with peers.
 
 #### `shell_memory_limit_mb`
-- **Description:** Memory ceiling, in MB, for one agent command and every process it starts (`run_shell`, `read_document`'s DjVu tools, the git tool). Past it the whole tree is killed and the agent is told the number and this key.
+- **Description:** Memory ceiling, in MB, for one agent command and everything it started, summed (`run_shell`, `read_document`'s DjVu tools, the git tool); not a limit per process. Past it they are all killed and the agent is told the number and this key.
+- **What a command leaves running:** the ceiling holds while the command's first process lives. Once that process has exited nothing watches what it left: a server stays, and a runaway stays too, until it ends or the backend stops. On Windows nothing kills it at the timeout either: something that still holds the command's output (a `start` from cmd always does) makes the call wait out its timeout; `run_shell` then returns with a sentence that says so, and the git tool and the DjVu tools return their ordinary result.
 - **Default:** `8192`
 - **Environment Variable:** `DPC_SHELL_MEMORY_LIMIT_MB` overrides the file; `DPC_SYSTEM_SHELL_MEMORY_LIMIT_MB` is honoured below it
 - **Valid Values:** a whole number of MB; `0` turns the ceiling off
@@ -997,7 +998,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `collect_hardware_specs` | `true` | Collect hardware tiers (RAM, CPU, disk, GPU) |
 | `collect_dev_tools` | `true` | Collect installed dev tools and versions |
 | `collect_ai_models` | `false` | Collect locally available AI models (opt-in for compute-sharing) |
-| `shell_memory_limit_mb` | `8192` | Memory ceiling for an agent command and its children, in MB; 0 = off. Read at each command, no restart; DPC_SHELL_MEMORY_LIMIT_MB overrides it |
+| `shell_memory_limit_mb` | `8192` | Memory ceiling for an agent command and everything it started, summed, in MB; 0 = off. Read at each command, no restart; DPC_SHELL_MEMORY_LIMIT_MB overrides it |
 
 #### `[telegram]`
 

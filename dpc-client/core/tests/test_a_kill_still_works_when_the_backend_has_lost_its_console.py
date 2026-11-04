@@ -70,4 +70,4 @@ def test_the_tree_dies_and_the_sentence_says_so_with_the_console_host_gone(tmp_p
     assert report["bare_rc"] == 0xC0000142, "the premise: an inheriting child dies at start"
     assert report["tree"] == 4, f"the launcher, its python, and their child's two: {report}"
     assert report["alive"] == [], f"survived the kill: {report}"
-    assert report["said"] == "the command and its descendants were killed", report
+    assert report["said"].startswith("the command and the descendants its parent links reach were killed"), report

@@ -90,7 +90,8 @@ What exists, read in code on 2026-10-25:
 Two earlier records bound the decision. ADR-044 gave the Strata tree one fate through a
 kill-on-close job object in the launcher, and noted that the job can fail to apply. And
 `process.py` already explains why the memory ceiling is a poll and not a job limit; this
-record uses the job for one thing only, the kill, and leaves the ceiling where it is.
+record uses the job for one thing only, the kill, and leaves the ceiling where it is. (The
+amendment of 2026-11-04 adds a job per command, which also names the members for the poll.)
 
 ## Decision Drivers
 
@@ -609,6 +610,72 @@ holds on Windows only.
   default and the `no_answer` deadline) were decided the same day and are not part of
   this record; they live in CLAUDE.md and the glossary, as Mike's call set it.
 
+## Amendment, 2026-11-04: a Job Object per command on Windows, and the root decides
+
+*Mike's call, 2026-11-04, team chat: kill only at the ceiling or the timeout, and what an
+agent left stays.* The walks of the ceiling and the kill follow parent links, and a link ends
+at a process that has exited. Measured the same day through `_execute_shell_command`: a chain
+whose middle exited, with its top alive, never fired the ceiling, the result said the
+descendants were killed, and the leaf lived on at 1032 MB. So each command started by
+`run_supervised` gets a `CommandJob` (`job_object.py`).
+
+- **The root decides.** While the command's root process lives, the job names its members for
+  the sum, and kills them all at the ceiling or the timeout. Once the root has exited this code
+  kills nothing, however the pipes stand: no ceiling, no timeout kill, no job kill from the
+  registry's paths. That closes the chain above, which is the real hole, and nothing wider.
+- **The accepted cost, plainly.** A runaway a command left behind is not watched. Its memory
+  counts against nothing, and nothing here will stop it; it ends by itself or with the
+  backend's job. This is the ruling of 2026-08-27, that an agent starting a server wants it left
+  running, and it is accepted as a cost, Mike's call of the same day.
+- **Why not more: a first form of this amendment was narrowed the day it was written.** It
+  also killed at the timeout with the root gone and went on watching what was left. A reviewer
+  measured what that did. `start "" /b server >nul 2>&1` and `start "" /min server`, through
+  `_execute_shell_command`, were killed at the timeout, because cmd passes its inheritable pipes
+  on to what it starts and a redirection does not close them. cmd has no way to give them up, so
+  an agent has no way out from cmd, and POSIX's "redirect it and it is free" does not carry
+  over. PowerShell's `Start-Process` gives them up. And the watch counted the larger of resident
+  and committed, which counts mapped files, once per process that maps them: a `llama-server`
+  on a GGUF of 8 GB or more, `start chrome` or `code .` would have died at a later poll, with no
+  owner told, under a ceiling frozen at the command's start and with nothing that lists them.
+- **Two roles and no limit.** The quantity is what it was: the sum over the command's processes
+  of the larger of resident and committed, polled. A job's memory limits count another quantity
+  (Johnny's objection, taken), so none is set.
+- **The handle closes when the command is done, on every path,** in a `finally`, and closing it
+  ends nothing: the job is not kill-on-close. One handle while a command runs, no thread.
+- **Pipes still held at the timeout, with the root gone,** return what was read at once, without
+  the drain: `SupervisedRun.left_running`, `returncode` the root's, and the registry's `exited`,
+  all true of the root. `run_shell` says the command ended, left a process running that still
+  holds its output, and that nothing was killed. A `start` from cmd so costs the whole timeout,
+  as it did before this amendment; this was measured and not shortened. The readers stop keeping
+  what they read: two daemon threads stay blocked on a silent pipe until its holder ends, with
+  about 11 handles per such call (8 calls measured, all back when the holders ended), and a
+  holder that writes later finds the pipe closed, as on the abandoned drain of point 3.
+- **The backend's stop.** The backend's own kill-on-close job is what ends what commands left,
+  as it was. Step 2 of point 7 reaches a command whose root lives through its job, orphans
+  included.
+- **Nesting.** The job nests in the backend's. A process that makes a job of its own inside it
+  (the shape of Strata's `serve/winjob.py`) nests in turn and is killed with it. The supervised
+  engines are not under one: both start through their own `_spawn`, not through `run_supervised`.
+- **The race of option A is closed by a suspended start.** The child is created with
+  `CREATE_SUSPENDED`, entered, then woken, so nothing it starts is born outside. `Popen`
+  closes the thread handle, so the wake is `psutil.Process.resume` (NtResumeProcess inside
+  psutil); a documented Toolhelp walk for the thread cost 40 ms per command here (8360
+  threads on the machine) against 0.03 ms. Option B's objection to ctypes over an undocumented
+  call does not reach this: the call is psutil's, and the backend's own job still needs none.
+- **Failure is not fatal.** A job that cannot be made or entered falls back to the walk, with
+  one WARNING per kind of failure. A child that cannot be woken has run nothing, so it is killed
+  and started again without a job, with the reason in one WARNING per kind, and a kill that fails
+  too is said. No psutil, no job.
+- **The sentence is what was verified.** "the command and its descendants were killed" is said
+  when the job reads empty after the kill. A `taskkill` that exited 0 now claims only the
+  descendants its parent links reach, because it cannot see the others. The tools' own "and were
+  killed" before the verdict is gone.
+- **Off Windows nothing changes:** no job, the walk, the timeout as it was.
+- **What it does not reach:** a process started by a hand-off outside the job (a service, WMI,
+  `explorer.exe <target>`) is no member. The registry's peaks and `list_my_processes` still walk
+  parent links, and a process left behind is on no list; `finish_shutdown` kills by pid alone, so
+  an entry it finds open gets the walk and not the job.
+
 ## Confirmation
 
 Compliance, not progress. Every item is a test or a recorded measurement. The tests marked
@@ -786,6 +853,17 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
   recorded order and not a fake clock.)
 - [x] **Camoufox and Playwright** launch, browse and close under the job without a
   breakaway error (Windows, 2026-10-25, the opt-in test with `DPC_JOB_CHECKS=1`).
+- [x] **The job per command, the root decides (amendment of 2026-11-04).** With the root alive,
+  a leaf whose middle exited is killed at the ceiling and at the timeout and the sentence is
+  true; the sum counts two children with no walkable link, and one alone stays under. With the
+  root gone, `start "" /b` with a redirect, `start "" /min` and PowerShell's `Start-Process`
+  stay, a timeout returns at once with the true sentence, a runaway past the ceiling is left
+  alone, and a stop kills nothing; what was left dies with the backend's job and outlives a
+  closed handle without it; a job that fails falls back to the walk; the handle closes on every
+  path, counted. (`dpc-client/core/tests/test_while_the_root_lives_the_job_kills_and_after_it_nothing_does.py`.)
+  Red against the module as it stood; mutations in a scratch copy each went red on their own
+  tests. Run 2026-11-04 on Windows only; the two POSIX tests wait for CI, and no live backend has
+  run it.
 
 ## Scope
 
@@ -872,6 +950,7 @@ files.**
 | Local API command `list_processes` (`ProcessRegistry.list_processes`: the kept entries, the daily history for `since`/`until`, `commit_mb` read at the request on Windows; `free_commit` by `commit_memory.read_free_commit_or_physical`, physical memory by psutil and commit null off Windows); agent tools `list_my_processes` and `kill_my_process` (`ProcessRegistry.cancel_by_agent`, the orderly stop's announce-kill-end path with `cancelled_by_agent`); `FreeCommitReading` and `freeCommitLine` in the UI take a reading with no commit; tests in `tests/test_the_local_api_answers_which_processes_run_now.py` and `tests/test_an_agent_sees_and_ends_only_its_own_processes.py` | Done 2026-10-27 | the commit that carries this row |
 | The turn and the waiting chats (point 8, amended 2026-10-27): `RunGate` in `dpc_agent/run_gate.py` for the agent's run gate (both doors register the chat they answer in) and the room lock (`room_busy`); `model_call` around the adapter's call, `approval` around the run_shell and schedule_task waits (from the executor thread through `call_soon_threadsafe`), `round` and `tool` from the loop; `turn` and `waiting` on each `list_agents` row and `agent_turn_updated` at every change; the words for them (`utils/agentTurnNotice.ts`; the line in the waiting chat was removed on 2026-10-27, Mike's call: the sidebar's state line says it) with the 120 s rule (`TURN_UNCONFIRMED_AFTER_S`); tests in `tests/test_a_waiting_chat_is_on_the_run_gate_until_it_runs.py`, `tests/test_the_turn_says_when_it_waits_for_the_model_or_an_approval.py` and `src/lib/utils/agentTurnNotice.test.ts` | Done 2026-10-27 | the commit that carries this row |
 | Size limits of the history (Mike's order, 2026-11-03): a daily file rotates past 10 MiB (`HISTORY_FILE_MAX_BYTES`) as `YYYY-MM-DD.N.jsonl`, a failed rename is logged once and retried, at twice the limit (`HISTORY_STUCK_FACTOR`) rows are dropped with a WARNING; all history is held to 50 MiB (`HISTORY_TOTAL_MAX_BYTES`), oldest first, today's current file never removed, at start, at a rotation and at the first row of a new day; `command` keeps 120 characters, the launcher and origin strings 255 (`FIELD_MAX_CHARS`); tests in `tests/test_the_process_registrys_files_stay_under_a_limit_and_rotate.py` | Done 2026-11-03 | `fc01f2b5` |
+| A Job Object per command on Windows, the root decides (amendment of 2026-11-04): `CommandJob` in `job_object.py`; `run_supervised`, `_watch_memory`, `_tree_memory_mb`, `_kill_process_tree`, `SupervisedRun.left_running` in `process.py`; tests in `tests/test_while_the_root_lives_the_job_kills_and_after_it_nothing_does.py` | Done 2026-11-04, not run on a live backend | the commit that carries this row |
 | UI: AGENTS row and the agent configuration dialog (own card) | Pending | — |
 
 ## Open Questions

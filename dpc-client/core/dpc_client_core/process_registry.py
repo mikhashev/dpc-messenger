@@ -1412,7 +1412,11 @@ class ProcessRegistry:
                           "not the agent whose call woke it")
         if not agent_id or entry.agent_id != agent_id:
             return None, f"pid {pid} was not started by this agent"
-        if probe(pid, entry.start_time) != "same":
+        identity = probe(pid, entry.start_time)
+        if identity == "gone":
+            # The entry stays open while something the command left holds its output (ADR-046).
+            return None, f"pid {pid} has already exited; nothing was killed, and what it left running keeps running"
+        if identity != "same":
             return None, f"pid {pid} no longer belongs to the process the registry recorded"
         ended: List[ProcessEntry] = []
         verdict = self._kill_command(entry, kill_tree or _kill_tree_of, wait_s, ended, reason="cancelled_by_agent")

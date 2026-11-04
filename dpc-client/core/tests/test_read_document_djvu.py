@@ -247,11 +247,12 @@ def test_a_tree_killed_by_the_memory_ceiling_names_the_ceiling_and_the_usage(mon
     )
     rc, out, err = D._run_djvu("ddjvu", ["-format=pnm"])
     assert rc == -1
-    assert "ddjvu killed by DPC memory ceiling (8192 MB)" in err
+    assert "ddjvu hit the DPC memory ceiling (8192 MB)" in err
     assert "8300 MB" in err
     assert "descendants were killed" in err
     assert (
-        "Raise shell_memory_limit_mb in [system] of config.ini (the next command "
+        "Raise shell_memory_limit_mb in [system] of config.ini, the limit on an agent "
+        "command and everything it started, summed (the next command "
         "reads it, no restart; the Agent map's \"RAM limit per process\" field sets it too; "
         "DPC_SHELL_MEMORY_LIMIT_MB in the environment overrides it)."
     ) in err

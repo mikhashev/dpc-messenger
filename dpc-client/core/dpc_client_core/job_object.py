@@ -25,6 +25,11 @@ configured yet at that point, so the call returns a `JobOutcome` and the caller
 writes it with `JobOutcome.log` once the handlers are in place.
 
 Windows only. Elsewhere it does nothing; the POSIX points of the ADR are later.
+
+`CommandJob` is a second, smaller use of the same object: one per command started
+through `run_supervised` (ADR-046, amendment of 2026-11-04). It nests inside the
+backend's job, sets no limit at all, and only names the command's processes and
+kills them.
 """
 
 from __future__ import annotations
@@ -33,13 +38,17 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x0800
 JobObjectExtendedLimitInformation = 9
+JobObjectBasicProcessIdList = 3
+ERROR_MORE_DATA = 234
+# How long a kill waits to read the job empty before it says who is still there.
+COMMAND_JOB_KILL_VERIFY_S = 5.0
 
 # The one handle, for the life of the process. Not inheritable: it is created
 # with no security attributes, and nothing duplicates it.
@@ -80,6 +89,12 @@ def _load_kernel32():
     k32.IsProcessInJob.argtypes = (
         wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL),
     )
+    k32.QueryInformationJobObject.restype = wintypes.BOOL
+    k32.QueryInformationJobObject.argtypes = (
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD, wintypes.LPVOID,
+    )
+    k32.TerminateJobObject.restype = wintypes.BOOL
+    k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
     return k32
 
 
@@ -126,6 +141,9 @@ class _StepFailed(Exception):
         super().__init__(step, code)
         self.step = step
         self.code = code
+
+    def __str__(self) -> str:
+        return f"{self.step} failed, Windows error {self.code} ({_win_error_text(self.code)})"
 
 
 def _create_kill_on_close_job(k32) -> int:
@@ -199,6 +217,104 @@ def _win_error_text(code: int) -> str:
         return ctypes.FormatError(code).strip()
     except Exception:
         return "no text"
+
+
+class CommandJob:
+    """The Job Object of one command: it names the command's processes and kills them.
+
+    A process whose parent has exited is on no walk by parent link and is still a
+    member here, and so is a member of a job nested inside this one.
+
+    Not kill-on-close and with no limit set. Closing the handle ends nothing, so a
+    server the command left running outlives this object, and a memory limit here
+    would count another quantity than the ceiling (`process._watch_memory`). No
+    BREAKAWAY_OK, so a descendant cannot leave. The lock keeps a kill on one thread
+    from using a handle another has just closed.
+    """
+
+    def __init__(self, k32, handle: int):
+        import threading
+
+        self._k32 = k32
+        self._handle: Optional[int] = handle
+        self._lock = threading.Lock()
+
+    def enter(self, process) -> None:
+        """Put a `Popen`'s child in the job, or raise."""
+        import ctypes
+
+        with self._lock:
+            if self._handle is None:
+                raise _StepFailed("AssignProcessToJobObject", 6)  # ERROR_INVALID_HANDLE
+            if not self._k32.AssignProcessToJobObject(self._handle, int(process._handle)):
+                raise _StepFailed("AssignProcessToJobObject", ctypes.get_last_error())
+
+    def members(self) -> Optional[List[int]]:
+        """The pids in the job now, or None when it cannot be read."""
+        import ctypes
+        from ctypes import wintypes
+
+        room = 64
+        with self._lock:
+            if self._handle is None:
+                return None
+            for _ in range(8):
+                size = 8 + room * ctypes.sizeof(ctypes.c_size_t)
+                buf = ctypes.create_string_buffer(size)  # two DWORDs, then the ULONG_PTRs
+                header = (wintypes.DWORD * 2).from_buffer(buf)
+                if self._k32.QueryInformationJobObject(
+                    self._handle, JobObjectBasicProcessIdList, buf, size, None,
+                ):
+                    return list((ctypes.c_size_t * header[1]).from_buffer(buf, 8))
+                if ctypes.get_last_error() != ERROR_MORE_DATA:
+                    return None
+                room = max(room * 2, header[0] + 16)
+        return None
+
+    def kill(self, wait_s: float = COMMAND_JOB_KILL_VERIFY_S) -> Optional[List[int]]:
+        """Terminate every member and wait to read the job empty.
+
+        `[]` is a verified kill; a list names who is still there after `wait_s`;
+        None means the job is closed or the terminate call failed. The exit code is
+        1, the code `taskkill /F` leaves."""
+        import ctypes
+        import time
+
+        with self._lock:
+            if self._handle is None:
+                return None
+            if not self._k32.TerminateJobObject(self._handle, 1):
+                logger.warning(
+                    "TerminateJobObject failed, Windows error %s", ctypes.get_last_error(),
+                )
+                return None
+        deadline = time.monotonic() + wait_s
+        while True:
+            left = self.members()
+            if not left or time.monotonic() >= deadline:
+                return left
+            time.sleep(0.02)
+
+    def close(self) -> None:
+        """Let the job go; its members keep running. Safe to call twice."""
+        with self._lock:
+            handle, self._handle = self._handle, None
+        if handle is not None:
+            self._k32.CloseHandle(handle)
+
+
+def create_command_job(platform: Optional[str] = None) -> Optional[CommandJob]:
+    """An empty `CommandJob`; None off Windows; raises when it cannot be made."""
+    platform = platform if platform is not None else sys.platform
+    if platform != "win32":
+        return None
+    import ctypes
+
+    k32 = _load_kernel32()
+    job = k32.CreateJobObjectW(None, None)  # no security attributes: not inheritable
+    if not job:
+        raise _StepFailed("CreateJobObjectW", ctypes.get_last_error())
+    return CommandJob(k32, job)
 
 
 def open_url_outside_the_job(

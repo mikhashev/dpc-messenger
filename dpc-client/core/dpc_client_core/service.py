@@ -11084,7 +11084,8 @@ class CoreService:
         return {"status": "success", "asked": asked}
 
     async def set_shell_memory_limit(self, mb: int) -> Dict[str, Any]:
-        """Set the memory limit per agent process (`[system] shell_memory_limit_mb`), in MiB.
+        """Set the memory limit on an agent command and everything it started, summed
+        (`[system] shell_memory_limit_mb`), in MiB.
 
         0 means no limit; a negative or non-integer `mb` is refused with its reason, and so
         is any change while an environment variable (either name) decides the limit, because

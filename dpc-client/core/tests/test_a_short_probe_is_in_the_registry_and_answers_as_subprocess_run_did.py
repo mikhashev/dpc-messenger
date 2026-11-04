@@ -141,7 +141,7 @@ class TestTheEntry:
         run_probe(_py("pass"), launcher="device_probe", timeout=30)
         assert seen["stdin"] is subprocess.DEVNULL
         if sys.platform == "win32":
-            assert seen["creationflags"] == process_mod.CREATE_NO_WINDOW
+            assert seen["creationflags"] & ~process_mod.CREATE_SUSPENDED == process_mod.CREATE_NO_WINDOW
         else:
             assert seen["start_new_session"] is True
 

@@ -253,5 +253,6 @@ class TestTheKillReportsWhatItActuallyDid:
         process = types.SimpleNamespace(pid=4242, kill=lambda: None)
 
         assert shell_tool._kill_process_tree(process) == (
-            "the command and its descendants were killed"
+            "the command and the descendants its parent links reach were killed; "
+            "one whose parent had already exited may survive"
         )

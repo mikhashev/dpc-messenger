@@ -50,6 +50,8 @@ def popen(monkeypatch):
             return 0
 
     monkeypatch.setattr(process_mod.subprocess, "Popen", _FakePopen)
+    # No real process to enter a job: the flags under test are the caller's and the console's.
+    monkeypatch.setattr(process_mod, "_new_command_job", lambda: None)
     return seen
 
 

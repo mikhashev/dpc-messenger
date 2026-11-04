@@ -161,6 +161,13 @@ class TestKillMyProcessRefuses:
         entry, said = registry.cancel_by_agent(7_971_031, "agent_a", probe=lambda pid, start: "other")
         assert entry is None and "no longer belongs" in said
 
+    def test_a_root_that_exited_and_left_its_output_held_is_called_exited(self, tmp_path, registry, no_kill):
+        registry.register(7_971_032, launcher="run_shell", launcher_kind="tool", command="x", origin=_origin("agent_a"))
+        entry, said = registry.cancel_by_agent(7_971_032, "agent_a", probe=lambda pid, start: "gone")
+        assert entry is None
+        assert "has already exited" in said and "nothing was killed" in said
+        assert "no longer belongs" not in said
+
 
 class TestKillMyProcessKillsItsOwn:
     def test_it_ends_cancelled_by_agent_with_its_code(self, tmp_path, registry, started):
