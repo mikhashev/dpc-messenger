@@ -488,13 +488,22 @@ class OllamaProvider(AIProvider):
         """
         prompt_tokens = getattr(response, "prompt_eval_count", 0) or 0
         completion_tokens = getattr(response, "eval_count", 0) or 0
-        return {
+        usage = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
             "output_includes_thinking": self.DECLARED_OUTPUT_INCLUDES_THINKING,
             "served_effort": served_effort,
         }
+        # `stop` or `length`, the word the agent loop and a usage row read.
+        done_reason = getattr(response, "done_reason", None)
+        if isinstance(done_reason, str) and done_reason:
+            usage["finish_reason"] = done_reason
+        # Without it `length` cannot be told from a full window.
+        ceiling = positive_ceiling(self.config.get("num_predict"))
+        if ceiling is not None:
+            usage["max_tokens"] = ceiling
+        return usage
 
     def _log_usage(self, response: Any, path: str, served_effort: Optional[str] = None) -> None:
         """One line per call carrying what the daemon reported, not what we guessed.
@@ -794,15 +803,18 @@ class OllamaProvider(AIProvider):
         tool_calls_raw = []
         for tc in (getattr(msg, 'tool_calls', None) or []):
             args = tc.function.arguments
+            unreadable = {}
             if isinstance(args, str):
                 try:
                     args = json.loads(args) if args else {}
                 except (json.JSONDecodeError, TypeError):
+                    unreadable = {"unreadable_arguments": args}
                     args = {}
             tool_calls_raw.append(SimpleNamespace(
                 id=getattr(tc, 'id', None) or f"call_{uuid.uuid4().hex[:8]}",
                 name=tc.function.name,
                 input=args or {},
+                **unreadable,
             ))
 
         # Same trade as the chat path: an agent round with neither an answer nor a

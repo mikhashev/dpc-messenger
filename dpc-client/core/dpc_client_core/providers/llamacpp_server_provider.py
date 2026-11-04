@@ -24,17 +24,15 @@ dictionary comes from the model's jinja file.
 """
 
 import asyncio
-import json
 import logging
 import re
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 
 from openai import AsyncOpenAI
 
 from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_base64,
-                   image_blocks_in_turns, positive_ceiling, with_tool_call_blocks)
+                   image_blocks_in_turns, positive_ceiling, tool_use_of, with_tool_call_blocks)
 from .deepseek_provider import DeepSeekProvider
 
 from ..managers import llama_server_supervisor as _llama_server_supervisor_module
@@ -1139,13 +1137,7 @@ class LlamaServerProvider(DeepSeekProvider):
 
             tool_calls_raw = []
             for tc in (msg.tool_calls or []):
-                try:
-                    input_data = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except (json.JSONDecodeError, TypeError):
-                    input_data = {}
-                tool_calls_raw.append(
-                    SimpleNamespace(id=tc.id, name=tc.function.name, input=input_data)
-                )
+                tool_calls_raw.append(tool_use_of(tc))
 
             if on_reasoning and thinking:
                 await on_reasoning(thinking, conversation_id)

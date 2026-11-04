@@ -1,16 +1,14 @@
 # dpc_client_core/providers/deepseek_provider.py
 
 import os
-import json
 import asyncio
 import time
 import logging
-from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages,
+from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, tool_use_of,
                    configured_reasoning_default,
                    image_base64, network_client_bounds,
                    normalize_reasoning_effort, positive_ceiling)
@@ -650,13 +648,7 @@ class DeepSeekProvider(AIProvider):
 
             tool_calls_raw = []
             for tc in (msg.tool_calls or []):
-                try:
-                    input_data = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except (json.JSONDecodeError, TypeError):
-                    input_data = {}
-                tool_calls_raw.append(
-                    SimpleNamespace(id=tc.id, name=tc.function.name, input=input_data)
-                )
+                tool_calls_raw.append(tool_use_of(tc))
 
             # Cache this round's reasoning_content keyed by tool_call id so the NEXT
             # round replays the real CoT (see the injection above). Bounded to avoid

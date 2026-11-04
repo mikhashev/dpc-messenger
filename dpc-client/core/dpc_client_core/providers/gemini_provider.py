@@ -10,6 +10,10 @@ from .base import AIProvider, image_base64
 
 logger = logging.getLogger(__name__)
 
+# The candidate's `finish_reason` in the OpenAI vocabulary a usage's is in (`gateway.Completion`).
+# The rest of the vendor's words have no equal there and stay unreported.
+_FINISH_REASONS = {"STOP": "stop", "MAX_TOKENS": "length"}
+
 
 class GeminiProvider(AIProvider):
     """
@@ -87,6 +91,11 @@ class GeminiProvider(AIProvider):
         }
         if thoughts:
             usage["thinking_source"] = "engine"
+        candidates_of = getattr(response, "candidates", None)
+        word = getattr(candidates_of[0], "finish_reason", None) if candidates_of else None
+        finish_reason = _FINISH_REASONS.get(word)
+        if finish_reason:
+            usage["finish_reason"] = finish_reason
         return usage
 
     def _log_usage(self, usage: Dict[str, Any], path: str) -> Dict[str, Any]:

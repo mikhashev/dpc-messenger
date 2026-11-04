@@ -6,6 +6,7 @@ import json
 import math
 import logging
 import re
+from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
@@ -685,6 +686,20 @@ def image_blocks_in_turns(messages: Any) -> int:
                 if isinstance(b, dict) and b.get("type") == "image"
             )
     return count
+
+
+def tool_use_of(tc: Any) -> SimpleNamespace:
+    """An OpenAI-shape call in the `tool_use` shape the adapter reads. Arguments that do not parse
+    stand in `unreadable_arguments`: a call cut at the output limit arrives as half a JSON string,
+    and `input` {} alone ran the tool on nothing."""
+    raw = tc.function.arguments
+    if isinstance(raw, dict):
+        return SimpleNamespace(id=tc.id, name=tc.function.name, input=raw)
+    try:
+        arguments = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        return SimpleNamespace(id=tc.id, name=tc.function.name, input={}, unreadable_arguments=str(raw))
+    return SimpleNamespace(id=tc.id, name=tc.function.name, input=arguments)
 
 
 def with_tool_call_blocks(content: str, tool_calls: Any) -> str:

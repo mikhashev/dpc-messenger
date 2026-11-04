@@ -17,6 +17,7 @@ import asyncio
 import gc
 import json
 import logging
+import os
 import pathlib
 import time
 import queue
@@ -47,6 +48,7 @@ from ..process_registry import SpawnOrigin, get_registry, spawn_origin
 from .run_gate import note_turn
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
+    CONTEXT_LIMIT_RATIO,
     ContextLimitGuard,
     BudgetLimitGuard,
     LoopGuard,
@@ -71,6 +73,12 @@ MAX_WRITTEN_CALL_RETRIES = 3
 # ping-pong whatever the agent's `max_rounds` is. A policy number: three times the empty rounds
 # of the one live turn seen, 2026-11-04, four in 32.
 MAX_EMPTY_ROUNDS_PER_TURN = 12
+# How many times a reply cut at the output limit goes on: twice since the last tool ran, and this
+# many in a turn, because a model that repeats itself spends the whole limit each time (one turn,
+# per A-CHAT-REPLY-MAY-SPEND-SIXTY-FIVE-THOUSAND-OUTPUT-TOKENS, spent 65 536 on a repeated prefix).
+# Policy numbers: per the board card of 2026-11-04, the ledger of 2026-10 and 11 held no agent round cut there.
+MAX_OUTPUT_LIMIT_CONTINUES_SINCE_A_TOOL = 2
+MAX_OUTPUT_LIMIT_CONTINUES_PER_TURN = 6
 
 # Usage counters only some providers report. DeepSeek splits its prompt into
 # cache hit and miss and names its reasoning tokens; nobody else does. They are
@@ -1002,50 +1010,239 @@ def _ran_earlier_warning(ran_earlier: List[str]) -> str:
     return f" {called} did run earlier in this turn: look at its result before calling it again, or it may be done twice."
 
 
-def _no_answer_note(words: List[str], tools_ran: bool) -> str:
+def _no_answer_note(words: List[str], tools_ran: bool, cut_at: Optional[str] = None,
+                    window_full: bool = False) -> str:
     """What the reader sees when the model wrote nothing to the end. Its reasoning stays out: that
     is thinking the owner may read beside a record, not something said to a room."""
     note = "⚠️ No answer: the agent's model returned no text, so the turn ended here without a reply."
+    if cut_at:
+        note += f" Its reply was cut at {cut_at} before any text"
+        note += "." if window_full else ", and telling it so did not help."
     if tools_ran:
         note += (" The tools it called before that did run: look at their results before asking again, "
                  "or they may run twice.")
-    else:
+    elif not window_full:
         note += " Ask again to get one."
+    if window_full:
+        note += f" {_NO_ROOM_LEFT}"
     return "\n\n".join([note] + words)
+
+
+# A provider's word for a reply that reached its output limit, in lower case: `length` in the OpenAI
+# vocabulary and Ollama's `done_reason`, `max_tokens` from Anthropic, `MAX_TOKENS` from Gemini.
+_OUTPUT_LIMIT_WORDS = frozenset({"length", "max_tokens"})
+# At the join, a phrase this long is a repeat and is taken once. Shorter, it stays twice: dropping a real
+# repeated line loses text, and showing a short one twice is what the note on the join says may happen.
+_SHORTEST_REPEAT_AT_THE_JOIN = 32
+_MOST_PLACES_LOOKED_AT = 1000
+# A reply that opens as the text opened is a restart from this long, and when that is at least half of the
+# shorter of the two. Under it both stay: a second form letter shares its opening and is new text. A real
+# restart runs for thousands of tokens, so a restart missed here is short.
+_SHORTEST_RESTART = 200
+_NO_ROOM_LEFT = "There is no room left to go on: start a new task, or raise the agent's context_window if the model has room."
+
+
+def _stopped_at_a_limit(usage: Dict[str, Any]) -> bool:
+    word = usage.get("finish_reason")
+    return isinstance(word, str) and word.lower() in _OUTPUT_LIMIT_WORDS
+
+
+def _count(usage: Dict[str, Any], key: str) -> int:
+    value = usage.get(key)
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def _reached_the_window(usage: Optional[Dict[str, Any]], window: Optional[int]) -> bool:
+    """The same word from a full window: llama-server's slot running out of context capacity, or
+    Strata's `fit_max_tokens`. A ceiling reached says it was the ceiling (its count equals the ceiling
+    on the ledger's rows); short of it, or with none, prompt and reply against the window decide, at
+    the line above which ContextLimitGuard would refuse the next round anyway."""
+    usage = usage or {}
+    if not window or window <= 0 or not _stopped_at_a_limit(usage):
+        return False
+    ceiling, spent = _count(usage, "max_tokens"), _count(usage, "completion_tokens")
+    if ceiling and spent >= ceiling:
+        return False
+    return _count(usage, "prompt_tokens") + spent >= CONTEXT_LIMIT_RATIO * window
+
+
+def _output_limit_of(usage: Optional[Dict[str, Any]], window: Optional[int] = None) -> Optional[str]:
+    """The limit a call stopped at, in words for a sentence; None for one that did not, or whose
+    provider does not say. With no ceiling in the usage the count is named as a count. Under a ceiling
+    with room left in the window it is neither limit: Strata also ends a reply this way when one token
+    repeats 256 times and when its logits go non-finite (serve/server.py, v0.2.9, #606, #879)."""
+    usage = usage or {}
+    if not _stopped_at_a_limit(usage):
+        return None
+    if _reached_the_window(usage, window):
+        return f"the context window of {window} tokens"
+    ceiling, spent = _count(usage, "max_tokens"), _count(usage, "completion_tokens")
+    if ceiling and spent and spent < ceiling:
+        return f"a stop of the engine's, after {spent} of the {ceiling} tokens it may write"
+    if ceiling:
+        return f"the output limit of {ceiling} tokens"
+    if spent:
+        return f"the output limit, after about {spent} tokens"
+    return "the output limit"
+
+
+def _take_out_cut_calls(msg: Dict[str, Any], cut_at: Optional[str]) -> List[Dict[str, Any]]:
+    """Out of `msg`, the native calls whose arguments are not whole; they never run. Arguments that
+    did not parse, and, in a round cut at the limit, a last call with none: `{}` is what a host's
+    wire and a closed JSON object alike say, and an earlier call was finished before the next began."""
+    calls = msg.get("tool_calls") or []
+    whole, cut = [], []
+    for position, tc in enumerate(calls):
+        empty_at_the_cut = (
+            cut_at and msg.get("tool_calls_native") and position == len(calls) - 1
+            and tc["function"].get("arguments") in (None, "", "{}", {})
+        )
+        (cut if empty_at_the_cut or tc.get("_unreadable_arguments") is not None else whole).append(tc)
+    if cut:
+        msg["tool_calls"] = whole
+    return cut
+
+
+def _names_of(calls: List[Dict[str, Any]]) -> List[str]:
+    return list(dict.fromkeys(tc["function"].get("name") or _UNNAMED_TOOL for tc in calls))
+
+
+def _cut_calls_text(content: Optional[str], calls: List[Dict[str, Any]]) -> Optional[str]:
+    """What is worth keeping of calls that did not run; None when nothing of them came back."""
+    written = [{"name": tc["function"].get("name"), "arguments": tc["_unreadable_arguments"]}
+               for tc in calls if tc.get("_unreadable_arguments") is not None]
+    if not written:
+        return None
+    return f"{content or ''}\n\n--- tool calls ---\n{json.dumps(written, ensure_ascii=False, indent=2)}"
+
+
+def _cut_call_request(
+    names: List[str], cut_at: Optional[str], *, kept_at: Optional[str] = None, tools_stay: bool = True,
+    ran_earlier: Optional[List[str]] = None,
+) -> str:
+    """The reason a call that did not run is asked for again, or, beside calls that ran, told about."""
+    called = ", ".join(f"`{n}`" for n in names)
+    if cut_at:
+        said = f"Your call of {called} was cut at {cut_at}, inside its arguments, so it was not executed."
+    else:
+        said = f"Your call of {called} came back with arguments that do not parse as JSON, so it was not executed."
+    if kept_at:
+        said += f" What it had written is kept at `{kept_at}` in your folder."
+    said += _ran_earlier_warning(ran_earlier or [])
+    if tools_stay:
+        return f"{said} Make the call again with less in it, in smaller parts if it is long, or answer in words."
+    return f"{said} No tool will run now: answer in words, with what you have."
+
+
+def _continue_request(cut_at: str) -> str:
+    """What a reply cut in its text is told. The words stand above this in the history."""
+    return (
+        f"Your last message was cut at {cut_at}: it stops where it ends above, perhaps in mid-word. "
+        "It is kept, and the reader will see it with what you write next, as one text. "
+        "Go on from exactly that point without repeating anything, or, if nothing is left to say, reply with nothing."
+    )
+
+
+def _no_text_request(cut_at: str, reasoned: bool, has_words: bool = False) -> str:
+    """Not a blind re-send: a request that spent the limit before any text spends it the same way again."""
+    kept = " The text you wrote before it is kept and will be shown; do not repeat it." if has_words else ""
+    if reasoned:
+        return (
+            f"Your last message was cut at {cut_at} before any text: the whole of it went on reasoning, "
+            "and nobody saw anything. Asked again the same way it would end the same way, so reason less now "
+            f"and answer, or make your call, early.{kept}"
+        )
+    return (
+        f"Your last message was cut at {cut_at} and held no text anyone could read. Nobody saw anything. "
+        f"Write your answer, or make your call, at once.{kept}"
+    )
+
+
+def _cut_off_note(cut_at: str, continued: int = 0, added_nothing: bool = False, window_full: bool = False) -> str:
+    """What stands under a text that stopped at the limit and went no further."""
+    if added_nothing:
+        return (f"⚠️ Cut off: the model's reply stopped at {cut_at} here, and told so it added nothing, so this "
+                "may or may not be the whole of it. Ask it to go on if something is missing.")
+    note = f"⚠️ Cut off: the model's reply stopped at {cut_at} here, so the text above is not the whole of it."
+    if continued:
+        note += f" It had gone on {_times(continued)}."
+    return f"{note} {_NO_ROOM_LEFT if window_full else 'Ask it to go on to get the rest.'}"
+
+
+def _continued_note(cut_at: str, continued: int) -> str:
+    """What stands under a text joined at the limit. In the middle a mark would be damage to a
+    document, and the model is only asked to resume exactly: nothing here can check that it did."""
+    return (f"⚠️ Continued: this reply reached {cut_at} and the agent went on {_times(continued)}, "
+            "so text may be repeated or missing where it was joined.")
+
+
+def _times(count: int) -> str:
+    return "once" if count == 1 else f"{count} times"
+
+
+def _joined_at_the_output_limit(before: str, after: str) -> str:
+    """A text cut at the limit with what the model went on with, character by character: no
+    paragraph between them, since the cut may be in mid-word. A model that wrote it all again, began
+    again from the top, or wrote the tail again, has it once; the longer copy of a restart stands,
+    since a reply cut again is shorter than what it repeats."""
+    after = _without_history_markers(after or "")
+    opening = before.strip()
+    if opening and (after.startswith(opening)
+                    or (len(opening) >= _SHORTEST_REPEAT_AT_THE_JOIN and opening in after)):
+        return after
+    shared = len(os.path.commonprefix([before, after]))
+    if shared >= _SHORTEST_RESTART and shared * 2 >= min(len(before), len(after)):
+        return before if len(before) >= len(after) else after
+    phrase = after[:_SHORTEST_REPEAT_AT_THE_JOIN]
+    place = before.find(phrase) if len(phrase) == _SHORTEST_REPEAT_AT_THE_JOIN else -1
+    for _ in range(_MOST_PLACES_LOOKED_AT):
+        if place == -1:
+            break
+        if after.startswith(before[place:]):
+            return before[:place] + after
+        place = before.find(phrase, place + 1)
+    return before + after
 
 
 def _written_call_retry_request(
     names: List[str], *, tools_stay: bool = True, kept_at: Optional[str] = None, has_words: bool = False,
-    ran_earlier: Optional[List[str]] = None,
+    ran_earlier: Optional[List[str]] = None, cut_at: Optional[str] = None,
 ) -> str:
     """The reason a retry carries. The broken text is not shown back, so the history
     holds no copy of the form for the model to repeat; where it is kept is."""
     called = ", ".join(f"`{n}`" for n in names)
-    said = (
-        f"Your last message wrote {called} as text. It did not read as a call of a declared "
-        f"tool, so it was not executed."
-    )
+    if cut_at:
+        said = f"Your last message was cut at {cut_at} inside {called}, written as text, so it was not executed."
+    else:
+        said = (
+            f"Your last message wrote {called} as text. It did not read as a call of a declared "
+            f"tool, so it was not executed."
+        )
     said += " Your words before it are kept and will be shown; do not repeat them." if has_words else " Nobody saw it."
     if kept_at:
         said += f" The text of the call is kept at `{kept_at}` in your folder, so it need not be written out again."
     said += _ran_earlier_warning(ran_earlier or [])
+    if cut_at:
+        said += " It has to fit the limit this time: write less in one reply."
     if tools_stay:
         return f"{said} Make the call in the declared form, with the tool's exact name and parameters, or answer in words."
     return f"{said} No tool will run now: answer in words, with what you have."
 
 
-# In place of a reply that was nothing but a written call, where the history ends in a user turn:
-# the roles keep alternating for a template that insists, and no markup goes back.
+# In place of a reply with nothing of its own to show, where the history ends in a user turn: the
+# roles keep alternating for a template that insists, and no markup goes back.
 _WRITTEN_CALL_TURN = "(I wrote a tool call as text. It did not run.)"
+_NO_TEXT_TURN = "(This reply was cut before any text.)"
+_CALL_NOT_RUN_TURN = "(My tool call was not whole. It did not run.)"
 
 
-def _ask_again(messages: List[Dict[str, Any]], said: str, reason: str) -> None:
+def _ask_again(messages: List[Dict[str, Any]], said: str, reason: str, in_place: str = _WRITTEN_CALL_TURN) -> None:
     """Add the model's own words, if any, and the reason. `_runtime_note`: this is the loop
     talking, so the adapter puts a turn's image description on the person's turn and not here."""
     if said:
         messages.append({"role": "assistant", "content": said})
     elif messages and messages[-1].get("role") == "user":
-        messages.append({"role": "assistant", "content": _WRITTEN_CALL_TURN})
+        messages.append({"role": "assistant", "content": in_place})
     messages.append({"role": "user", "content": reason, "_runtime_note": True})
 
 
@@ -1096,13 +1293,20 @@ def _without_written_calls(on_chunk: Optional[Callable[[str, str], Any]]) -> Opt
 
 def _not_executed_note(
     names: List[str], prose: str, kept_at: Optional[str] = None, retried: bool = False,
-    ran_earlier: Optional[List[str]] = None,
+    ran_earlier: Optional[List[str]] = None, cut_at: Optional[str] = None, native: bool = False,
 ) -> str:
-    """What the reader sees in place of a call that was written and not made. Replayed whole into
-    the next prompt, so a tool that ran is not called never executed, or the model does it twice."""
+    """What the reader sees in place of a call that was written and not made, or made and cut
+    (`native`). Replayed whole into the next prompt, so a tool that ran is not called never
+    executed, or the model does it twice."""
     ran_earlier = ran_earlier or []
     never = [n for n in names if re.split(r"[=\s]", n, maxsplit=1)[0] not in ran_earlier]
     note = "⚠️ Not done: the agent wrote its last action as text instead of running it"
+    if native and cut_at:
+        note = f"⚠️ Not done: the agent's last action was cut at {cut_at} inside its arguments"
+    elif native:
+        note = "⚠️ Not done: the arguments of the agent's last action came back unreadable"
+    elif cut_at:
+        note += f", and its reply was cut at {cut_at} inside it"
     if never:
         called = ", ".join(f"`{n}`" for n in never)
         note += (
@@ -1115,7 +1319,9 @@ def _not_executed_note(
             f"{' ' if never else '. '}{called} did run earlier in this turn, but not this call of it: "
             f"look at its result before asking again, or it may be done twice."
         )
-    if retried:
+    if retried and native:
+        note += " It was told and it happened again, so the turn ended here without its answer."
+    elif retried:
         note += " It was told and wrote it as text again, so the turn ended here without its answer."
     if kept_at:
         note += (
@@ -1132,6 +1338,7 @@ def _answer_without_unrun_calls(
     keep: Optional[Callable[[str], Optional[str]]] = None,
     retried: bool = False,
     words: Optional[List[str]] = None,
+    cut_at: Optional[str] = None,
 ) -> str:
     """A final answer with no tool call passed off as one.
 
@@ -1146,6 +1353,7 @@ def _answer_without_unrun_calls(
     `retried`: the model was already asked again, and the note says so.
     `words`: what it said in front of an earlier written call. They go on after the check,
     which has to see this reply alone: in front of a lone call they would make it prose.
+    `cut_at`: this reply stopped at the output limit, and the note says so.
     """
     names = [tc.get("function", {}).get("name") or "an unnamed tool" for tc in (calls or [])]
     prose = _prose_outside_tool_calls(content) if calls else (content or "")
@@ -1167,7 +1375,7 @@ def _answer_without_unrun_calls(
         {"tools": names, "chars": len(content or ""), "kept_at": kept_at}
     )
     return _not_executed_note(names, _with_words_before_the_retry(words or [], _without_history_markers(prose)),
-                              kept_at, retried, ran_earlier=_names_that_ran(names, llm_trace))
+                              kept_at, retried, ran_earlier=_names_that_ran(names, llm_trace), cut_at=cut_at)
 
 
 def _classify_tool_error(result: str) -> str:
@@ -1540,10 +1748,12 @@ async def _one_finalising_call(
     reasoning_effort: Optional[str] = None,
     task_id: str = "",
     observe_request: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+    window: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """One call that ends a turn; None when `cancel_on` fired first and the call
     was cancelled. A guard's stop is cancelled by the user's Stop; the user's
-    Stop's own summary only by the Kill."""
+    Stop's own summary only by the Kill. The reply carries `_cut_at` (`_output_limit_of`),
+    `_window_full` and `_cut_calls` (`_take_out_cut_calls`): no call here goes on from a cut."""
     seen = observe_request(messages, tools_sent, reasoning_effort) if observe_request else None
     row_id = None
     extra = {"tool_choice": tool_choice} if tool_choice else {}
@@ -1570,7 +1780,11 @@ async def _one_finalising_call(
         final_msg, final_usage = await chat_task
         row_id = (final_usage or {}).get("request_id")
         accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
-        return final_msg or {}
+        reply = dict(final_msg or {})
+        reply["_cut_at"] = _output_limit_of(final_usage, window)
+        reply["_window_full"] = _reached_the_window(final_usage, window)
+        reply["_cut_calls"] = _take_out_cut_calls(reply, reply["_cut_at"])
+        return reply
     finally:
         prompt_divergence.log_observation(seen, row_id)
 
@@ -1590,6 +1804,7 @@ async def _finalize_after_user_stop(
     observe_request: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
     keep_unexecuted: Optional[Callable[[str], Optional[str]]] = None,
     kill_event: Optional[asyncio.Event] = None,
+    window: Optional[int] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """The user's Stop: the work ends, and one more call writes where it stopped.
 
@@ -1617,7 +1832,7 @@ async def _finalize_after_user_stop(
             cancel_on=kill_event, tool_choice="none",
             on_stream_chunk=on_stream_chunk, conversation_id=conversation_id,
             reasoning_effort=reasoning_effort, task_id=task_id,
-            observe_request=observe_request,
+            observe_request=observe_request, window=window,
         )
     except Exception as e:
         log.warning("The summary call after the user's stop failed", exc_info=True)
@@ -1639,6 +1854,8 @@ async def _finalize_after_user_stop(
     answer = _strip_history_markers(_strip_role_boundaries(answer)).strip()
     if not answer:
         return f"{stopped_text}\n\nNo summary: the model's answer was empty.", accumulated_usage, llm_trace
+    if final_msg["_cut_at"]:
+        answer = f"{answer}\n\n{_cut_off_note(final_msg['_cut_at'], window_full=final_msg['_window_full'])}"
     return answer, accumulated_usage, llm_trace
 
 
@@ -1678,6 +1895,7 @@ async def _finalize_after_guard_stop(
     execute_tool_calls: Optional[Callable[..., Awaitable[bool]]] = None,
     keep_unexecuted: Optional[Callable[[str], Optional[str]]] = None,
     kill_event: Optional[asyncio.Event] = None,
+    window: Optional[int] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Shared "guard fired → graceful termination" sequence.
 
@@ -1704,7 +1922,9 @@ async def _finalize_after_guard_stop(
     research the guard stopped cannot resume.
 
     So up to three model calls, none counted as a round, each with its usage row:
-    this one, the retry above, and one more ask when the answer is a written call.
+    this one, the retry above, and one more ask when the answer is a written call
+    or a native call cut in its arguments. An answer cut at the output limit does
+    not go on from here: it ends with the note and `turn_end` `guard`.
 
     Two exceptions: after ContextLimitGuard the call is skipped, and a
     user stop during the call cancels it (a Kill during its tool round ends
@@ -1749,7 +1969,7 @@ async def _finalize_after_guard_stop(
             cancel_on=stop_event, tool_choice=tool_choice,
             on_stream_chunk=on_stream_chunk, conversation_id=conversation_id,
             reasoning_effort=reasoning_effort, task_id=task_id,
-            observe_request=observe_request,
+            observe_request=observe_request, window=window,
         )
 
     try:
@@ -1775,6 +1995,11 @@ async def _finalize_after_guard_stop(
                     llm_trace["stopped_by_user"] = True
                     llm_trace["turn_end"] = _user_stop_end(kill_event)
                     return user_stopped, accumulated_usage, llm_trace
+                if final_msg["_cut_calls"]:
+                    names = _names_of(final_msg["_cut_calls"])
+                    messages.append({"role": "user", "content": _cut_call_request(
+                        names, final_msg["_cut_at"], tools_stay=False,
+                        ran_earlier=_names_that_ran(names, llm_trace)), "_runtime_note": True})
             else:
                 log.info("Finalising call answered with tool calls; asking again with tool_choice=none")
             # Not tools=None: on the adapter that is the flattened text path, one
@@ -1794,19 +2019,29 @@ async def _finalize_after_guard_stop(
             written = list(dict.fromkeys(
                 [tc.get("function", {}).get("name") or _UNNAMED_TOOL for tc in in_text] + names_written
             ))
-            if written:
+            cut_calls = final_msg["_cut_calls"]
+            if written or cut_calls:
                 said = _without_history_markers(prose).strip()
                 words = [said] if said else []
-                kept_at = keep_unexecuted(first_reply) if keep_unexecuted is not None else None
-                log.warning("Finalising call wrote %s as text; asking once more, for words", ", ".join(written))
+                kept = _cut_calls_text(first_reply, cut_calls) if cut_calls else first_reply
+                kept_at = keep_unexecuted(kept) if keep_unexecuted is not None and kept else None
+                ran = _names_that_ran(written + _names_of(cut_calls), llm_trace)
+                log.warning("Finalising call wrote %s as text; asking once more, for words",
+                            ", ".join(written + _names_of(cut_calls)))
                 llm_trace.setdefault("written_call_retries", []).append({
-                    "round": "finalising", "tools": written,
+                    "round": "finalising", "tools": written + _names_of(cut_calls),
                     "rejected": final_msg.get("rejected_tool_calls") or [],
                     "chars": len(first_reply), "kept_at": kept_at,
                 })
-                _ask_again(messages, said, _written_call_retry_request(
-                    written, tools_stay=False, kept_at=kept_at, has_words=bool(said),
-                    ran_earlier=_names_that_ran(written, llm_trace)))
+                if cut_calls:
+                    _ask_again(messages, said, _cut_call_request(
+                        _names_of(cut_calls), final_msg["_cut_at"], kept_at=kept_at, tools_stay=False,
+                        ran_earlier=ran), in_place=_CALL_NOT_RUN_TURN)
+                else:
+                    _ask_again(messages, said, _written_call_retry_request(
+                        written, tools_stay=False, kept_at=kept_at, has_words=bool(said),
+                        ran_earlier=ran, cut_at=final_msg["_cut_at"]))
+                written = written + _names_of(cut_calls)
                 final_msg = await _final_call(tools, tool_choice="none")
         if final_msg is None:
             log.info("Agent stopped by user during the finalising call after a guard stop")
@@ -1820,6 +2055,10 @@ async def _finalize_after_guard_stop(
             final_msg.get("content") or "",
             llm_trace, unrun, keep=keep_unexecuted, retried=bool(written), words=words,
         ))
+        if answer and final_msg["_cut_at"]:
+            # The last word on the turn, so nothing goes on from here.
+            answer = f"{answer.rstrip()}\n\n{_cut_off_note(final_msg['_cut_at'], window_full=final_msg['_window_full'])}"
+            llm_trace["turn_end"] = "guard"
         if written and len(llm_trace.get("unexecuted_tool_calls", ())) > notes_before:
             # Asked twice and no answer: the note stands in for one.
             llm_trace["turn_end"] = "guard"
@@ -2121,6 +2360,31 @@ async def run_llm_loop(
     # The words in front of a call the model is being asked to make again: they belong to the
     # reply the retry repairs, and reach a reader with whatever ends that repair.
     words_before_the_retry: List[str] = []
+    output_limit_continues = 0
+    output_limit_continues_since_the_last_tool = 0
+    # Text continues in what the turn will answer with, and the limit they reached.
+    continues_in_the_answer = 0
+    last_cut_at: Optional[str] = None
+    # The last of the words was cut in its text, so the next reply joins it character by character.
+    words_end_at_the_cut = False
+    # What the last prompt does not hold yet, for the next round's window checks.
+    tokens_since_the_last_prompt = 0
+
+    def _a_continue_is_left() -> bool:
+        return (output_limit_continues_since_the_last_tool < MAX_OUTPUT_LIMIT_CONTINUES_SINCE_A_TOOL
+                and output_limit_continues < MAX_OUTPUT_LIMIT_CONTINUES_PER_TURN)
+
+    def _count_the_continue(kind: str, cut_at: Optional[str]) -> None:
+        """A 200 like a written call's: the next pass is a round like any other."""
+        nonlocal output_limit_continues, output_limit_continues_since_the_last_tool
+        output_limit_continues += 1
+        output_limit_continues_since_the_last_tool += 1
+        llm_trace.setdefault("output_limit_continues", []).append({"round": round_idx, "kind": kind})
+        log.warning("Round %d stopped at %s (%s); the agent is told, continue %d/%d", round_idx,
+                    cut_at or "unreadable arguments", kind, output_limit_continues, MAX_OUTPUT_LIMIT_CONTINUES_PER_TURN)
+        emit_progress("The reply reached the output limit; the agent is told and goes on." if cut_at
+                      else "A tool call came back unreadable and did not run; asking again.",
+                      None, round_idx, None, _round_speed)
 
     def _with_the_words(result: Tuple[str, Dict[str, Any], Dict[str, Any]]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
         """A finalising call's result, for when it ended a repair."""
@@ -2154,6 +2418,7 @@ async def run_llm_loop(
                     observe_request=_observe_request,
                     keep_unexecuted=_keep_unexecuted,
                     kill_event=kill_event,
+                    window=ctx.state.context_window,
                 ))
 
             # RoundLimitGuard + BudgetLimitGuard + ContextLimitGuard checkpoint.
@@ -2161,7 +2426,9 @@ async def run_llm_loop(
             # this is the moment a guard can still refuse cheaply: the numbers are
             # the previous round's real input size and the window it was measured
             # against, which is exactly what compaction triggers on below.
-            ctx.state.last_prompt_tokens = accumulated_usage["last_prompt_tokens"]
+            next_prompt_tokens = accumulated_usage["last_prompt_tokens"] + tokens_since_the_last_prompt
+            tokens_since_the_last_prompt = 0
+            ctx.state.last_prompt_tokens = next_prompt_tokens
             ctx.state.context_window = int(
                 _compaction_state.window if _compaction_state.window else (context_window or 0)
             )
@@ -2178,6 +2445,7 @@ async def run_llm_loop(
                     execute_tool_calls=_dispatch_round,
                     keep_unexecuted=_keep_unexecuted,
                     kill_event=kill_event,
+                    window=ctx.state.context_window,
                 ))
 
             # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
@@ -2186,7 +2454,7 @@ async def run_llm_loop(
             messages = await apply_compaction(
                 messages,
                 state=_compaction_state,
-                last_prompt_tokens=accumulated_usage["last_prompt_tokens"],
+                last_prompt_tokens=next_prompt_tokens,
                 llm_manager=_compaction_llm,
                 notify=lambda m: emit_progress(m, None, round_idx),
                 round_idx=round_idx,
@@ -2296,8 +2564,15 @@ async def run_llm_loop(
                 llm_trace["turn_end"] = "failed"
                 return "⚠️ No response from LLM", accumulated_usage, llm_trace
 
+            _cut_at = _output_limit_of(usage, ctx.state.context_window)
+            # No model call helps here: another one only grows the prompt.
+            _window_full = _reached_the_window(usage, ctx.state.context_window)
+            _cut_calls = _take_out_cut_calls(msg, _cut_at)
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
+            if _cut_at and content and not tool_calls and content.strip() == (msg.get("thinking") or "").strip():
+                # Ollama hands over the reasoning when there is no text. Cut, it would go on as words.
+                content = ""
             # The launcher's word on this reply; the provider has logged the names.
             rejected_calls = msg.get("rejected_tool_calls") or []
             if rejected_calls:
@@ -2359,6 +2634,7 @@ async def run_llm_loop(
                     execute_tool_calls=_dispatch_round,
                     keep_unexecuted=_keep_unexecuted,
                     kill_event=kill_event,
+                    window=ctx.state.context_window,
                 ))
 
             # No tool calls — final response or empty-response retry
@@ -2380,8 +2656,51 @@ async def run_llm_loop(
                 _final_quality["answered"] = _answered and not _written
                 append_jsonl(logs_dir / "reasoning.jsonl", _final_quality)
 
+                if _cut_at:
+                    last_cut_at = _cut_at
+                if _cut_calls:
+                    # Nothing ran: the words stay, and the model hears why.
+                    _names = _names_of(_cut_calls)
+                    _said = _without_history_markers(_written_prose).strip()
+                    _text = _cut_calls_text(content, _cut_calls)
+                    _kept_at = _keep_unexecuted(_text) if _text else None
+                    _ran = _names_that_ran(_names, llm_trace)
+                    words_end_at_the_cut = False
+                    if _a_continue_is_left() and not _window_full:
+                        _count_the_continue("call", _cut_at)
+                        if _said:
+                            words_before_the_retry.append(_said)
+                        _ask_again(messages, _said, _cut_call_request(
+                            _names, _cut_at, kept_at=_kept_at, ran_earlier=_ran), in_place=_CALL_NOT_RUN_TURN)
+                        continue
+                    llm_trace.setdefault("unexecuted_tool_calls", []).append(
+                        {"tools": _names, "chars": len(_text or ""), "kept_at": _kept_at})
+                    llm_trace["turn_end"] = "guard"
+                    _note = _not_executed_note(
+                        _names, _with_words_before_the_retry(words_before_the_retry, _said), _kept_at,
+                        retried=not _window_full, ran_earlier=_ran, cut_at=_cut_at, native=True)
+                    return (f"{_note}\n\n⚠️ {_NO_ROOM_LEFT}" if _window_full else _note), accumulated_usage, llm_trace
+
+                # Text the role cut would take: the cut fell in scaffolding, past the end of the words.
+                _in_scaffolding = bool(_cut_at and _answered and not _written
+                                       and _strip_role_boundaries(content) != content)
+                _cut_in_the_text = bool(_cut_at and _answered and not _written and not _in_scaffolding)
+                if _cut_in_the_text and _a_continue_is_left() and not _window_full:
+                    _count_the_continue("text", _cut_at)
+                    continues_in_the_answer += 1
+                    _piece = _without_history_markers(content)
+                    if words_end_at_the_cut:
+                        words_before_the_retry[-1] = _joined_at_the_output_limit(words_before_the_retry[-1], _piece)
+                    else:
+                        words_before_the_retry.append(_piece)
+                    words_end_at_the_cut = True
+                    # Coming back in the next prompt. Reasoning does not, on a turn with no call.
+                    tokens_since_the_last_prompt = int(usage.get("content_tokens", usage.get("completion_tokens", 0)) or 0)
+                    _ask_again(messages, _piece, _continue_request(_cut_at))
+                    continue
+
                 if _answered and _written and not written_call_retried_since_the_last_tool \
-                        and written_call_retries < MAX_WRITTEN_CALL_RETRIES:
+                        and written_call_retries < MAX_WRITTEN_CALL_RETRIES and not _window_full:
                     # A 200 with no call in it: nothing `_retry_with_backoff` sees. The
                     # next pass round the loop is a round like any other, with its guards,
                     # its usage row and the card's hold.
@@ -2400,19 +2719,23 @@ async def run_llm_loop(
                     _said = _without_history_markers(_written_prose).strip()
                     if _said:
                         words_before_the_retry.append(_said)
+                    words_end_at_the_cut = False
                     _ask_again(messages, _said, _written_call_retry_request(
                         rejected_calls or _written, kept_at=_kept_at, has_words=bool(_said),
-                        ran_earlier=_names_that_ran(_written, llm_trace)))
+                        ran_earlier=_names_that_ran(_written, llm_trace), cut_at=_cut_at))
                     emit_progress("A tool call came back as text and did not run; asking again.",
                                   None, round_idx, None, _round_speed)
                     continue
 
                 if _answered:
+                    if words_end_at_the_cut and not _written:
+                        content = _joined_at_the_output_limit(words_before_the_retry.pop(), content)
                     # Before the role cut, which would eat a lone fenced call to
                     # nothing and leave an empty answer instead of the note.
                     content = _answer_without_unrun_calls(
                         content, llm_trace, keep=_keep_unexecuted,
                         retried=written_call_retried_since_the_last_tool, words=words_before_the_retry,
+                        cut_at=_cut_at if _written else None,
                     )
                     if _written:
                         # The note stands in for the answer the turn never wrote.
@@ -2426,6 +2749,15 @@ async def run_llm_loop(
                     # the counter appeared only on tool-heavy runs. Emit it here too.
                     if _round_speed:
                         emit_progress(clean_content.strip()[:200] or "done", None, round_idx, None, _round_speed)
+                    if _cut_in_the_text:
+                        # Nothing more is asked for, so the note says the rest is missing.
+                        llm_trace["turn_end"] = "guard"
+                        clean_content = (f"{clean_content.rstrip()}\n\n"
+                                         f"{_cut_off_note(_cut_at, continues_in_the_answer, window_full=_window_full)}")
+                    elif _written and _window_full:
+                        clean_content = f"{clean_content.rstrip()}\n\n⚠️ {_NO_ROOM_LEFT}"
+                    elif continues_in_the_answer and not _written:
+                        clean_content = f"{clean_content.rstrip()}\n\n{_continued_note(last_cut_at, continues_in_the_answer)}"
                     return clean_content, accumulated_usage, llm_trace
                 if ("prompt_tokens" in usage
                         and usage.get("prompt_tokens") == 0
@@ -2452,6 +2784,27 @@ async def run_llm_loop(
                 # holds that reasoning and is tested on its own.
                 _empty_thinking = (msg.get("thinking") or "").strip()
                 _empty_diag = _empty_answer_diagnosis(content, _empty_thinking)
+                if _cut_at and _a_continue_is_left() and not _window_full:
+                    _count_the_continue("no text", _cut_at)
+                    _ask_again(messages, "", _no_text_request(_cut_at, bool(_empty_thinking), bool(words_before_the_retry)),
+                               in_place=_NO_TEXT_TURN)
+                    # It was told to answer, not to go on, so what comes next stands on its own.
+                    words_end_at_the_cut = False
+                    continue
+                if words_end_at_the_cut or (_cut_at and continues_in_the_answer):
+                    # It was told it may finish by writing nothing, so nothing is asked again.
+                    llm_trace["turn_end"] = "guard"
+                    return (
+                        "\n\n".join(w.rstrip() for w in words_before_the_retry) + "\n\n"
+                        + _cut_off_note(last_cut_at, continues_in_the_answer, added_nothing=not _cut_at,
+                                        window_full=_window_full),
+                        accumulated_usage, llm_trace,
+                    )
+                if _cut_at:
+                    llm_trace["turn_end"] = "guard"
+                    return (_no_answer_note(words_before_the_retry, bool(_accumulated_tool_calls), cut_at=_cut_at,
+                                            window_full=_window_full),
+                            accumulated_usage, llm_trace)
                 if empty_retry_count < MAX_EMPTY_RETRIES and empty_rounds_in_the_turn < MAX_EMPTY_ROUNDS_PER_TURN:
                     empty_retry_count += 1
                     empty_rounds_in_the_turn += 1
@@ -2473,6 +2826,10 @@ async def run_llm_loop(
             # empty round has its retries back: the work went on since the last one.
             written_call_retried_since_the_last_tool = False
             empty_retry_count = 0
+            output_limit_continues_since_the_last_tool = 0
+            # The words go into this round's text, and the answer is what comes after the tools.
+            continues_in_the_answer = 0
+            words_end_at_the_cut = False
             # A call refused or written beside the ones that run: out of the turn the model
             # is shown again, and of the round's text, and told below.
             content, _beside = _beside_native_calls(msg)
@@ -2552,13 +2909,22 @@ async def run_llm_loop(
                     observe_request=_observe_request,
                     keep_unexecuted=_keep_unexecuted,
                     kill_event=kill_event,
+                    window=ctx.state.context_window,
                 )
 
+            _told: List[str] = []
             if _beside:
                 log.warning("Round %d also wrote %s as text beside its calls; told, and not run", round_idx, ", ".join(_beside))
                 llm_trace.setdefault("written_calls_beside", []).append({"round": round_idx, "tools": _beside})
-                messages.append({"role": "user", "content": _written_call_beside_note(
-                    _beside, _names_that_ran(_beside, llm_trace)), "_runtime_note": True})
+                _told.append(_written_call_beside_note(_beside, _names_that_ran(_beside, llm_trace)))
+            if _cut_calls:
+                _names = _names_of(_cut_calls)
+                log.warning("Round %d: %s cut beside calls that ran; told, and not run", round_idx, ", ".join(_names))
+                _text = _cut_calls_text(thinking, _cut_calls)
+                _told.append(_cut_call_request(_names, _cut_at, kept_at=_keep_unexecuted(_text) if _text else None,
+                                               ran_earlier=_names_that_ran(_names, llm_trace)))
+            if _told:
+                messages.append({"role": "user", "content": "\n\n".join(_told), "_runtime_note": True})
 
             # Snapshot this round's tool results so LoopGuard can tell a
             # genuinely-stuck poll (identical output) from a long-running one

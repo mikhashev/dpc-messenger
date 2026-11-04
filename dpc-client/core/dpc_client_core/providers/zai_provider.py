@@ -2,16 +2,14 @@
 
 import os
 import re
-import json
 import asyncio
 import time
 import logging
-from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, image_base64,
+from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, image_base64, tool_use_of,
                    network_client_bounds)
 
 logger = logging.getLogger(__name__)
@@ -462,13 +460,7 @@ class ZaiProvider(AIProvider):
 
             tool_calls_raw = []
             for tc in (msg.tool_calls or []):
-                try:
-                    input_data = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except (json.JSONDecodeError, TypeError):
-                    input_data = {}
-                tool_calls_raw.append(
-                    SimpleNamespace(id=tc.id, name=tc.function.name, input=input_data)
-                )
+                tool_calls_raw.append(tool_use_of(tc))
 
             if on_reasoning and thinking:
                 await on_reasoning(thinking, conversation_id)

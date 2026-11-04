@@ -1063,14 +1063,19 @@ class DpcLlmAdapter:
         # Convert Anthropic tool_use blocks → Ouroboros tool_calls format
         tool_calls = []
         for block in raw.get("tool_calls_raw", []):
-            tool_calls.append({
+            call: Dict[str, Any] = {
                 "id": block.id,
                 "type": "function",
                 "function": {
                     "name": block.name,
                     "arguments": json.dumps(block.input),
                 },
-            })
+            }
+            # What came back did not parse. The loop never runs it, and takes the key with the call.
+            unreadable = getattr(block, "unreadable_arguments", None)
+            if isinstance(unreadable, str):
+                call["_unreadable_arguments"] = unreadable
+            tool_calls.append(call)
 
         response_msg: Dict[str, Any] = {
             "role": "assistant",

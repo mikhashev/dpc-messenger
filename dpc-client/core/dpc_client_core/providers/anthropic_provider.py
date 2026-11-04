@@ -10,6 +10,10 @@ from .base import AIProvider, ANTHROPIC_THINKING_MODELS, image_base64, network_c
 
 logger = logging.getLogger(__name__)
 
+# `stop_reason` in the OpenAI vocabulary a usage's `finish_reason` is in (`gateway.Completion`).
+# The rest of the vendor's words have no equal there and stay unreported.
+_FINISH_REASONS = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length", "tool_use": "tool_calls"}
+
 
 class AnthropicProvider(AIProvider):
     """Claude over the Messages API.
@@ -83,6 +87,9 @@ class AnthropicProvider(AIProvider):
         }
         if thinking:
             usage["thinking_source"] = "engine"
+        finish_reason = _FINISH_REASONS.get(getattr(message, "stop_reason", None))
+        if finish_reason:
+            usage["finish_reason"] = finish_reason
         return usage
 
     def _log_usage(self, message: Any, path: str) -> Dict[str, Any]:

@@ -422,6 +422,10 @@ __all__ = [
 ]
 
 
+# Above this share of the window the next round is refused. A reply that stopped there cannot go on.
+CONTEXT_LIMIT_RATIO = 0.95
+
+
 class ContextLimitGuard(GuardMiddleware):
     """Stop before a round the window cannot hold.
 
@@ -445,7 +449,7 @@ class ContextLimitGuard(GuardMiddleware):
     interrupted, low enough to leave room for one more round's growth.
     """
 
-    def __init__(self, ratio: float = 0.95) -> None:
+    def __init__(self, ratio: float = CONTEXT_LIMIT_RATIO) -> None:
         self._ratio = ratio
         self._seen_ratio: Optional[float] = None
 
