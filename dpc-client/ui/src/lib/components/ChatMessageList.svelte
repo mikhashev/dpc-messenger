@@ -488,6 +488,7 @@
       agentName={agentProgressName}
       isLive={true}
       currentTool={agentProgressTool || ''}
+      currentMessage={agentProgressMessage}
       currentRound={agentProgressRound}
       streamingText={filteredStreamingText}
       conversationId={conversationId}

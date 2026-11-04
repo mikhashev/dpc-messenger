@@ -6,6 +6,7 @@
      */
     import { untrack } from 'svelte';
     import { getToolLabel, getToolArgPreview } from '$lib/utils/toolDisplay';
+    import { liveToolArgPreview } from '$lib/utils/liveToolArg';
     import { occupancyFromSpeed, occupancyLabel, occupancyTitle } from '$lib/utils/contextOccupancy';
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
     import { sendCommand } from '$lib/coreService';
@@ -28,6 +29,7 @@
         agentName = '',
         isLive = false,
         currentTool = '',
+        currentMessage = null,
         currentRound = 0,
         streamingText = '',
         conversationId = '',
@@ -38,6 +40,7 @@
         agentName?: string;
         isLive?: boolean;
         currentTool?: string;
+        currentMessage?: string | null;
         currentRound?: number;
         streamingText?: string;
         conversationId?: string;
@@ -268,6 +271,9 @@
                     <div class="tool-call-item current">
                         <span class="spinner-small"></span>
                         <span class="tool-name">{getToolLabel(currentTool)}</span>
+                        {#if liveToolArgPreview(currentTool, currentMessage)}
+                            <span class="tool-arg"> — {liveToolArgPreview(currentTool, currentMessage)}</span>
+                        {/if}
                     </div>
                 {/if}
                 {#if isLive && conversationId}
