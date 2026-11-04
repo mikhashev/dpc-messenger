@@ -1159,12 +1159,21 @@ class LlamaServerProvider(DeepSeekProvider):
                 max_tokens=self.max_tokens,
                 engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
             )
-            return {
+            result = {
                 "content": content,
                 "tool_calls_raw": tool_calls_raw,
                 "thinking": thinking,
                 "usage": usage,
             }
+            rejected = rejected_tool_call_names(resp)
+            if rejected:
+                # The launcher's own line stays in its log; nothing here said so before.
+                logger.warning(
+                    "'%s': the launcher returned %d call(s) as text, not a call of a declared tool: %s",
+                    self.alias, len(rejected), ", ".join(rejected),
+                )
+                result["rejected_tool_calls"] = rejected
+            return result
 
         try:
             return await _call()
@@ -1264,6 +1273,16 @@ class LlamaServerProvider(DeepSeekProvider):
         """The server serves exactly one -m model and ignores this field, but
         the SDK requires a string; the GGUF's stem says more than an alias."""
         return self.model or Path(self.config["gguf_path"]).stem
+
+
+def rejected_tool_call_names(resp: Any) -> List[str]:
+    """The names in `strata_rejected_tool_calls`: `[{"name", "reason"}]` at the top of a
+    Strata launcher's reply when a `<tool_call>` block did not read as a call of a declared
+    tool and went back as text (serve/server.py, v0.2.9). No field on plain llama-server."""
+    field = (getattr(resp, "model_extra", None) or {}).get("strata_rejected_tool_calls")
+    if not isinstance(field, list):
+        return []
+    return [e["name"] for e in field if isinstance(e, dict) and isinstance(e.get("name"), str) and e["name"]]
 
 
 # A child that is draining is in neither list the shutdown used to walk. It leaves

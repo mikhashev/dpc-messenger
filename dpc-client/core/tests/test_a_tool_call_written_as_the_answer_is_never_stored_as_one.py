@@ -119,17 +119,19 @@ TOOLS = [{"type": "function", "function": {"name": "write_file", "parameters": {
 
 
 def test_the_guard_stop_retry_answering_in_dsml_stores_the_note():
-    """The live sequence with no dispatch to run the call: tool call, retry, DSML."""
+    """The live sequence with no dispatch to run the call: tool call, retry, DSML, and
+    once more with the reason, DSML again."""
     llm = _Scripted(
         {"role": "assistant", "content": "", "tool_calls": [
             {"id": "w", "function": {"name": "write_file", "arguments": "{}"}}]},
+        {"role": "assistant", "content": ARK_DSML},
         {"role": "assistant", "content": ARK_DSML},
     )
     text, _, trace = asyncio.run(_finalize_after_guard_stop(
         _hooks(), [{"role": "user", "content": "q"}], llm, None, "c", {}, {},
         fallback_reason="stopped", tools=TOOLS,
     ))
-    assert llm.calls == [None, "none"]
+    assert llm.calls == [None, "none", "none"]
     assert text.startswith("⚠️ Not done") and "`write_file`" in text and "DSML" not in text
     assert trace["unexecuted_tool_calls"][0]["tools"] == ["write_file"]
 

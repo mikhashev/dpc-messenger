@@ -21,6 +21,7 @@ import pathlib
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..dpc_agent.agent import DpcAgent, AgentConfig
+from ..dpc_agent.loop import without_tag_calls
 from ..dpc_agent.run_gate import RunGate, StoppedWhileWaiting, _RUN_GATES, get_run_gate, hold, turn_title  # noqa: F401
 from ..providers.base import ModelNotCachedError
 from .llama_server_supervisor import leave_card_queue, runs_on_a_local_engine
@@ -1440,6 +1441,9 @@ class DpcAgentManager:
         """What a run left beside its text: (thinking, streamed output when it differs)."""
         thinking = agent._last_usage.get("thinking") if agent._last_usage else None
         raw = "".join(stream_chunks) if stream_chunks else None
+        # A reply streamed in pieces is no chunk the loop's filter can read: its written call is
+        # taken out here, for the record. The live text has shown it by now.
+        raw = without_tag_calls(raw) if raw else raw
         streaming_raw = raw if raw and raw.strip() != (response or "").strip() else None
         return thinking, streaming_raw
 

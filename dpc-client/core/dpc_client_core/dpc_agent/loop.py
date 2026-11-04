@@ -63,6 +63,14 @@ log = logging.getLogger(__name__)
 # Default configuration
 DEFAULT_MAX_ROUNDS = 200
 DEFAULT_TIMEOUT_SEC = 120
+# How many times one turn asks again after a call written as text: once since the last
+# tool ran, and this many in all, because each retry is a round of generation. Johnny's turn of 2026-11-03 wrote one 4 times in 32
+# rounds (launcher log), so a long turn can use more than one.
+MAX_WRITTEN_CALL_RETRIES = 3
+# A tool that ran refills an empty round's retries, so this is what ends an empty-then-tool
+# ping-pong whatever the agent's `max_rounds` is. A policy number: three times the empty rounds
+# of the one live turn seen, 2026-11-04, four in 32.
+MAX_EMPTY_ROUNDS_PER_TURN = 12
 
 # Usage counters only some providers report. DeepSeek splits its prompt into
 # cache hit and miss and names its reasoning tokens; nobody else does. They are
@@ -645,6 +653,11 @@ def _extract_thinking_prefix(content: str) -> str:
 # in the log, so eating prose is visible rather than silent.
 _ROLE_BOUNDARY_PATTERNS = ["\n[USER]\n", "\n[ASSISTANT]\n", "\n[SYSTEM]\n", "[USER]",
                           "[TOOL RESULT:", "```tool_call"]
+# An invented result in the form a local model's template teaches: the next thing such a model
+# writes after a call, on every provider. Beside the list because it is cut only where it opens a
+# line outside code; this project names the tag in its own sentences. Prose that opens a line with
+# it loses what follows, by name in the log.
+_TOOL_RESPONSE_OPENER = re.compile(r"<tool_response\s*>", re.IGNORECASE)
 
 # `[#74 | 06:42:57 | Johnny]` — the marker `context.history_prefix` puts on every
 # history line, the reader's own past turns included, which is why a model emits it
@@ -727,6 +740,12 @@ def _strip_role_boundaries(content: str) -> str:
         if idx != -1 and idx < earliest:
             earliest = idx
             hit = pat.strip()
+    code = [span.span() for span in _CODE_SPAN.finditer(content)]
+    for m in _TOOL_RESPONSE_OPENER.finditer(content):
+        if m.start() < earliest and _starts_a_line(content, m.start()) and not any(a <= m.start() < b for a, b in code):
+            earliest = m.start()
+            hit = m.group()
+            break
     if earliest < len(content):
         log.warning(
             "_strip_role_boundaries: cut %d chars at %r — scaffolding the model copied "
@@ -772,6 +791,159 @@ def _lone_call_json(content: str) -> Optional[str]:
     return None
 
 
+# A call in the tag form a local model's template teaches. The whole forms and the
+# broken ones are all in the stored history: `<function=NAME>`, the name fused with a
+# parameter (`<function=NAME=KEY>`), `=NAME>`, GLM's `NAME<arg_key>` and `NAME>{`, JSON.
+_TAG_CALL_OPENER = re.compile(r"<tool_call\s*>", re.IGNORECASE)
+_TAG_CALL_START = re.compile(
+    r"\s*(?:"
+    r"<function\b\s*=?\s*(?P<function>[\w.-]*)"
+    r"|<\s*=\s*(?P<bare_tag>[\w.-]+)"
+    r"|=\s*(?P<equals>[\w.-]+)\s*>"
+    r"|<parameter=(?P<parameter>[\w.-]+)"
+    r"|(?P<glm>[\w.-]+)(?=\s*(?:<arg_key>|>\s*\{|\n\s*\{|[ \t]+arguments\s*=|</tool_call>))"
+    r"|\{\s*\"name\"\s*:\s*\"(?P<json>[^\"]+)\""
+    r")"
+)
+_TAG_CALL_WITH_PARAMETERS = frozenset({"function", "bare_tag", "equals", "parameter"})
+_REST_OF_THE_NAME_TAG = re.compile(r"[\w.=-]*>?")
+_AFTER_THE_NAME_TAG = re.compile(r"[ \t]*(?:\r?\n|<|$)")
+_TAG_CALL_TAG = re.compile(r"<parameter=[^>\n]*>|</parameter>|</function>|</tool_call>", re.IGNORECASE)
+_MORE_TAG_CALL_CLOSERS = re.compile(r"(?:\s*</(?:function|tool_call)>)*", re.IGNORECASE)
+_TOOL_CALL_CLOSER = re.compile(r"</tool_call>", re.IGNORECASE)
+# What an engine's stop token leaves behind a reply, `<|im_end|>` and its kin.
+_STOP_TOKENS = re.compile(r"(?:\s*<\|[\w-]+\|>)+")
+_CALL_FENCE_OPENER = re.compile(r"```tool_call\b[^\n]*", re.IGNORECASE)
+_FENCE_CLOSER = re.compile(r"^ {0,3}```[ \t]*$", re.MULTILINE)
+_JSON_CALL_NAME = re.compile(r'"name"\s*:\s*"([^"]+)"')
+_UNNAMED_TOOL = "an unnamed tool"
+
+
+def _starts_a_line(content: str, position: int) -> bool:
+    """Nothing but blanks or the runtime's history marker before `position` on its
+    line. Four spaces or a tab are a Markdown code block."""
+    before = content[content.rfind("\n", 0, position) + 1:position]
+    if not before.strip():
+        return len(before) < 4 and "\t" not in before
+    return not _without_history_markers(before).strip()
+
+
+def _nothing_after(tail: str) -> bool:
+    """Only blanks, an engine's stop token, or text the role cut takes anyway. Text behind a role
+    marker cannot be kept as an answer here: with the block read as a quote, the cut would post
+    the bare block."""
+    return not _strip_role_boundaries(_STOP_TOKENS.sub("", tail)).strip()
+
+
+def _tag_call_end(content: str, start: "re.Match[str]") -> Optional[int]:
+    """Where the block `start` opens ends, by its own closer and not by the text's last one;
+    None when what follows the opener is prose. A closing word inside a parameter's value is
+    the value's. With no closer the block was cut, which a call's end looks like only inside a
+    value that began on its own line, or right behind a tag."""
+    if start.lastgroup not in _TAG_CALL_WITH_PARAMETERS:
+        closer = _TOOL_CALL_CLOSER.search(content, start.end())
+        return closer.end() if closer else len(content)
+    scan_from = start.start() if start.lastgroup == "parameter" else start.end()
+    if start.lastgroup != "parameter":
+        scan_from = _REST_OF_THE_NAME_TAG.match(content, scan_from).end()
+        if not _AFTER_THE_NAME_TAG.match(content, scan_from):
+            return None
+    in_value = False
+    value_at = after_tag = scan_from
+    for tag in _TAG_CALL_TAG.finditer(content, scan_from):
+        word = tag.group().lower()
+        if word.startswith("<parameter="):
+            if not in_value:
+                in_value, value_at = True, tag.end()
+        elif word == "</parameter>":
+            in_value, after_tag = False, tag.end()
+        elif not in_value:
+            return _MORE_TAG_CALL_CLOSERS.match(content, tag.end()).end()
+    if in_value:
+        return len(content) if content[value_at:value_at + 1] in ("", "\n", "\r") else None
+    return len(content) if not content[after_tag:].strip() else None
+
+
+def _tag_call_at(content: str, opener: "re.Match[str]") -> Optional[Tuple[str, int]]:
+    """The tool's name and the block's end, for an opener a call's structure follows."""
+    start = _TAG_CALL_START.match(content, opener.end())
+    if not start:
+        return None
+    end = _tag_call_end(content, start)
+    return None if end is None else (start.group(start.lastgroup) or _UNNAMED_TOOL, end)
+
+
+def _written_tag_calls(content: str) -> Tuple[List[str], str]:
+    """The tag form, when the answer ends in it.
+
+    A call is the end of what a model says, so a block with text after it is a
+    quote, and that text the answer (Ark, 2026-05-12: a stray tag, then 1800 real
+    characters). The first block's own closer rules, with only further blocks
+    behind it. The opener has to start a line outside code: the launcher also
+    counts one in mid-sentence, and this project talks about its own format.
+    """
+    code = [m.span() for m in _CODE_SPAN.finditer(content)]
+    for m in _TAG_CALL_OPENER.finditer(content):
+        if any(a <= m.start() < b for a, b in code) or not _starts_a_line(content, m.start()):
+            continue
+        call = _tag_call_at(content, m)
+        if call is None:
+            continue
+        names, at = [call[0]], call[1]
+        while True:
+            following = _TAG_CALL_OPENER.match(content, len(content) - len(content[at:].lstrip()))
+            call = _tag_call_at(content, following) if following else None
+            if call is None:
+                break
+            names.append(call[0])
+            at = call[1]
+        if not _nothing_after(content[at:]):
+            return [], content
+        return list(dict.fromkeys(names)), content[:m.start()].strip()
+    return [], content
+
+
+def _written_call_fences(content: str) -> Tuple[List[str], str]:
+    """The ```tool_call fence, wherever it stands outside other code. The role cut takes
+    everything from such a fence on, so words behind it survive only by coming out here."""
+    code = [m.span() for m in _CODE_SPAN.finditer(content)]
+    names: List[str] = []
+    pieces: List[str] = []
+    cursor = 0
+    for m in _CALL_FENCE_OPENER.finditer(content):
+        # The fence is itself what `_CODE_SPAN` matches, so only a span opened earlier hides it.
+        if m.start() < cursor or any(a < m.start() < b for a, b in code) or not _starts_a_line(content, m.start()):
+            continue
+        closer = _FENCE_CLOSER.search(content, m.end())
+        body_end = closer.start() if closer else len(content)
+        name = _JSON_CALL_NAME.search(content, m.end(), body_end)
+        names.append(name.group(1) if name else _UNNAMED_TOOL)
+        pieces.append(content[cursor:m.start()])
+        cursor = closer.end() if closer else len(content)
+    if not names:
+        return [], content
+    pieces.append(content[cursor:])
+    prose = "\n\n".join(piece.strip() for piece in pieces if piece.strip())
+    return list(dict.fromkeys(names)), _strip_role_boundaries(prose).strip()
+
+
+def without_tag_calls(content: str) -> str:
+    """Every tag block out of `content`, outside code, wherever it stands: for what the launcher
+    refused beside calls that ran and for the stored raw text, where nobody is asked to read a quote."""
+    code = [m.span() for m in _CODE_SPAN.finditer(content)]
+    pieces: List[str] = []
+    cursor = 0
+    for m in _TAG_CALL_OPENER.finditer(content):
+        if m.start() < cursor or any(a <= m.start() < b for a, b in code):
+            continue
+        call = _tag_call_at(content, m)
+        if call is not None:
+            pieces.append(content[cursor:m.start()])
+            cursor = call[1]
+    pieces.append(content[cursor:])
+    return "\n\n".join(piece.strip() for piece in pieces if piece.strip())
+
+
 def _written_tool_calls(content: str) -> Tuple[List[str], str]:
     """Tools an answer wrote out as a call instead of making one, and the prose left.
 
@@ -780,12 +952,21 @@ def _written_tool_calls(content: str) -> Tuple[List[str], str]:
     closer — outside code, so a sentence that names one tag is left alone. The
     block is cut from its first tag to its last; an unclosed one (cut by
     max_tokens) runs to the end, since what follows is the call's argument.
+    The other two forms: `_written_tag_calls`, `_written_call_fences`.
     """
     if not content:
         return [], content or ""
     lone = _lone_call_json(content)
     if lone:
         return [lone], ""
+    names, prose = _written_dsml_calls(content)
+    tag_names, prose = _written_tag_calls(prose)
+    fence_names, prose = _written_call_fences(prose)
+    return list(dict.fromkeys(names + tag_names + fence_names)), prose
+
+
+def _written_dsml_calls(content: str) -> Tuple[List[str], str]:
+    """The DSML half of `_written_tool_calls`."""
     code = [m.span() for m in _CODE_SPAN.finditer(content)]
     tags = [m for m in _DSML_TAG.finditer(content)
             if not any(a <= m.start() < b for a, b in code)]
@@ -805,14 +986,137 @@ def _written_tool_calls(content: str) -> Tuple[List[str], str]:
     return names, prose
 
 
-def _not_executed_note(names: List[str], prose: str, kept_at: Optional[str] = None) -> str:
-    """What the reader sees in place of a call that was written and not made."""
+def _names_that_ran(names: List[str], llm_trace: Dict[str, Any]) -> List[str]:
+    """Which of these tools ran earlier in this turn, by name, a launcher's fused name read up to
+    its `=`. By name and not by arguments, which a written call may not spell readably: the
+    fail-safe side, since "never executed" of a write that ran makes the model repeat it."""
+    ran = {entry.get("tool") for entry in llm_trace.get("accumulated_tool_calls") or []}
+    return list(dict.fromkeys(n for n in (re.split(r"[=\s]", name, maxsplit=1)[0] for name in names) if n in ran))
+
+
+def _ran_earlier_warning(ran_earlier: List[str]) -> str:
+    """The sentence for a model about to be told a call of a tool did not run."""
+    if not ran_earlier:
+        return ""
+    called = ", ".join(f"`{n}`" for n in ran_earlier)
+    return f" {called} did run earlier in this turn: look at its result before calling it again, or it may be done twice."
+
+
+def _no_answer_note(words: List[str], tools_ran: bool) -> str:
+    """What the reader sees when the model wrote nothing to the end. Its reasoning stays out: that
+    is thinking the owner may read beside a record, not something said to a room."""
+    note = "⚠️ No answer: the agent's model returned no text, so the turn ended here without a reply."
+    if tools_ran:
+        note += (" The tools it called before that did run: look at their results before asking again, "
+                 "or they may run twice.")
+    else:
+        note += " Ask again to get one."
+    return "\n\n".join([note] + words)
+
+
+def _written_call_retry_request(
+    names: List[str], *, tools_stay: bool = True, kept_at: Optional[str] = None, has_words: bool = False,
+    ran_earlier: Optional[List[str]] = None,
+) -> str:
+    """The reason a retry carries. The broken text is not shown back, so the history
+    holds no copy of the form for the model to repeat; where it is kept is."""
     called = ", ".join(f"`{n}`" for n in names)
-    note = (
-        f"⚠️ Not done: the agent wrote its last action as text instead of running it, "
-        f"so {called} was never executed. Nothing that call would have done has "
-        f"happened; ask again to have it done."
+    said = (
+        f"Your last message wrote {called} as text. It did not read as a call of a declared "
+        f"tool, so it was not executed."
     )
+    said += " Your words before it are kept and will be shown; do not repeat them." if has_words else " Nobody saw it."
+    if kept_at:
+        said += f" The text of the call is kept at `{kept_at}` in your folder, so it need not be written out again."
+    said += _ran_earlier_warning(ran_earlier or [])
+    if tools_stay:
+        return f"{said} Make the call in the declared form, with the tool's exact name and parameters, or answer in words."
+    return f"{said} No tool will run now: answer in words, with what you have."
+
+
+# In place of a reply that was nothing but a written call, where the history ends in a user turn:
+# the roles keep alternating for a template that insists, and no markup goes back.
+_WRITTEN_CALL_TURN = "(I wrote a tool call as text. It did not run.)"
+
+
+def _ask_again(messages: List[Dict[str, Any]], said: str, reason: str) -> None:
+    """Add the model's own words, if any, and the reason. `_runtime_note`: this is the loop
+    talking, so the adapter puts a turn's image description on the person's turn and not here."""
+    if said:
+        messages.append({"role": "assistant", "content": said})
+    elif messages and messages[-1].get("role") == "user":
+        messages.append({"role": "assistant", "content": _WRITTEN_CALL_TURN})
+    messages.append({"role": "user", "content": reason, "_runtime_note": True})
+
+
+def _with_words_before_the_retry(words: List[str], text: str) -> str:
+    """The retry repairs one reply, so the words in front of its written call stand above what the
+    retry wrote, unless it wrote them again."""
+    if not words:
+        return text
+    answer = _without_history_markers(text or "")
+    kept = [w for w in words if w not in answer]
+    return "\n\n".join(kept + ([answer] if answer else []))
+
+
+def _beside_native_calls(msg: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """A reply's text with what was refused or written beside its native calls taken out, and
+    those names; nothing beside calls the adapter read out of the text, which are the calls that
+    ran. Refused by the launcher it goes even with text after it."""
+    content = msg.get("content") or ""
+    if not msg.get("tool_calls_native"):
+        return content, []
+    written, prose = _written_tool_calls(content)
+    rejected = msg.get("rejected_tool_calls") or []
+    return (without_tag_calls(prose) if rejected else prose), (rejected or written)
+
+
+def _written_call_beside_note(names: List[str], ran_earlier: Optional[List[str]] = None) -> str:
+    """What a round's reply wrote beside the calls that ran; the loop goes on either way."""
+    called = ", ".join(f"`{n}`" for n in names)
+    return (
+        f"Your last message also wrote {called} as text. It did not read as a call of a declared "
+        f"tool, so it was not executed; the other calls ran. Call it again in the declared form if you still need it."
+        + _ran_earlier_warning(ran_earlier or [])
+    )
+
+
+def _without_written_calls(on_chunk: Optional[Callable[[str, str], Any]]) -> Optional[Callable[[str, str], Any]]:
+    """A stream callback that drops a chunk that is a written call. The tools path hands a whole
+    reply over as one chunk, and the chunks become the live text and `streaming_raw`."""
+    if on_chunk is None:
+        return None
+
+    async def _forward(chunk: str, conversation_id: str) -> None:
+        if not _written_tool_calls(chunk)[0]:
+            await on_chunk(chunk, conversation_id)
+
+    return _forward
+
+
+def _not_executed_note(
+    names: List[str], prose: str, kept_at: Optional[str] = None, retried: bool = False,
+    ran_earlier: Optional[List[str]] = None,
+) -> str:
+    """What the reader sees in place of a call that was written and not made. Replayed whole into
+    the next prompt, so a tool that ran is not called never executed, or the model does it twice."""
+    ran_earlier = ran_earlier or []
+    never = [n for n in names if re.split(r"[=\s]", n, maxsplit=1)[0] not in ran_earlier]
+    note = "⚠️ Not done: the agent wrote its last action as text instead of running it"
+    if never:
+        called = ", ".join(f"`{n}`" for n in never)
+        note += (
+            f", so {called} was never executed. Nothing that call would have done has "
+            f"happened; ask again to have it done."
+        )
+    if ran_earlier:
+        called = ", ".join(f"`{n}`" for n in ran_earlier)
+        note += (
+            f"{' ' if never else '. '}{called} did run earlier in this turn, but not this call of it: "
+            f"look at its result before asking again, or it may be done twice."
+        )
+    if retried:
+        note += " It was told and wrote it as text again, so the turn ended here without its answer."
     if kept_at:
         note += (
             f" The text of the call is kept at `{kept_at}` in the agent's folder"
@@ -826,6 +1130,8 @@ def _answer_without_unrun_calls(
     llm_trace: Dict[str, Any],
     calls: Optional[List[Dict[str, Any]]] = None,
     keep: Optional[Callable[[str], Optional[str]]] = None,
+    retried: bool = False,
+    words: Optional[List[str]] = None,
 ) -> str:
     """A final answer with no tool call passed off as one.
 
@@ -837,13 +1143,16 @@ def _answer_without_unrun_calls(
     `keep` writes the replaced text somewhere and returns its address. Without
     it the call's body is gone: the trace is not persisted, and Ark rebuilt
     his 16k write-up from the chat text the note now takes the place of.
+    `retried`: the model was already asked again, and the note says so.
+    `words`: what it said in front of an earlier written call. They go on after the check,
+    which has to see this reply alone: in front of a lone call they would make it prose.
     """
     names = [tc.get("function", {}).get("name") or "an unnamed tool" for tc in (calls or [])]
     prose = _prose_outside_tool_calls(content) if calls else (content or "")
     written, prose = _written_tool_calls(prose)
     names = list(dict.fromkeys(names + written))
     if not names:
-        return content
+        return _with_words_before_the_retry(words or [], content)
     body = content or ""
     if calls:
         # Native calls carry their arguments outside the text.
@@ -857,7 +1166,8 @@ def _answer_without_unrun_calls(
     llm_trace.setdefault("unexecuted_tool_calls", []).append(
         {"tools": names, "chars": len(content or ""), "kept_at": kept_at}
     )
-    return _not_executed_note(names, prose, kept_at)
+    return _not_executed_note(names, _with_words_before_the_retry(words or [], _without_history_markers(prose)),
+                              kept_at, retried, ran_earlier=_names_that_ran(names, llm_trace))
 
 
 def _classify_tool_error(result: str) -> str:
@@ -1393,6 +1703,9 @@ async def _finalize_after_guard_stop(
     not run, and the answer says so (`_answer_without_unrun_calls`), so the
     research the guard stopped cannot resume.
 
+    So up to three model calls, none counted as a round, each with its usage row:
+    this one, the retry above, and one more ask when the answer is a written call.
+
     Two exceptions: after ContextLimitGuard the call is skipped, and a
     user stop during the call cancels it (a Kill during its tool round ends
     the turn `killed`). The user's own Stop, with no guard, is
@@ -1449,7 +1762,7 @@ async def _finalize_after_guard_stop(
                     "once, then asking for the answer with tool_choice=none",
                     len(calls), ", ".join(tc["function"]["name"] for tc in calls),
                 )
-                content = final_msg.get("content") or ""
+                content = _beside_native_calls(final_msg)[0]
                 prefix = _extract_thinking_prefix(content)
                 turn: Dict[str, Any] = {"role": "assistant", "content": prefix, "tool_calls": calls}
                 notes = (final_msg.get("thinking") or "").strip()
@@ -1468,16 +1781,49 @@ async def _finalize_after_guard_stop(
             # user message the engine shares no prefix with (live: 101,547 tokens
             # re-read). "none" keeps the native shape where the provider takes it.
             final_msg = await _final_call(tools, tool_choice="none")
+        # A call written as text in place of the answer gets one more ask, with the
+        # reason: the shape of 2026-10-31 and 2026-11-01, where the note alone would
+        # still lose the answer. Under "none" nothing it writes can run.
+        written: List[str] = []
+        words: List[str] = []
+        if final_msg is not None and not final_msg.get("tool_calls"):
+            first_reply = final_msg.get("content") or ""
+            in_text = _calls_in(final_msg, llm) if tools else []
+            names_written, prose = _written_tool_calls(
+                _prose_outside_tool_calls(first_reply) if in_text else first_reply)
+            written = list(dict.fromkeys(
+                [tc.get("function", {}).get("name") or _UNNAMED_TOOL for tc in in_text] + names_written
+            ))
+            if written:
+                said = _without_history_markers(prose).strip()
+                words = [said] if said else []
+                kept_at = keep_unexecuted(first_reply) if keep_unexecuted is not None else None
+                log.warning("Finalising call wrote %s as text; asking once more, for words", ", ".join(written))
+                llm_trace.setdefault("written_call_retries", []).append({
+                    "round": "finalising", "tools": written,
+                    "rejected": final_msg.get("rejected_tool_calls") or [],
+                    "chars": len(first_reply), "kept_at": kept_at,
+                })
+                _ask_again(messages, said, _written_call_retry_request(
+                    written, tools_stay=False, kept_at=kept_at, has_words=bool(said),
+                    ran_earlier=_names_that_ran(written, llm_trace)))
+                final_msg = await _final_call(tools, tool_choice="none")
         if final_msg is None:
             log.info("Agent stopped by user during the finalising call after a guard stop")
             llm_trace["stopped_by_user"] = True
             llm_trace["turn_end"] = _user_stop_end(kill_event)
-            return user_stopped, accumulated_usage, llm_trace
+            return _with_words_before_the_retry(words, user_stopped), accumulated_usage, llm_trace
         # Calls still in this answer are not run: one round was the allowance.
         unrun = _calls_in(final_msg, llm) if tools else []
-        answer = _answer_without_unrun_calls(
-            final_msg.get("content") or "", llm_trace, unrun, keep=keep_unexecuted,
-        )
+        notes_before = len(llm_trace.get("unexecuted_tool_calls", ()))
+        answer = _strip_role_boundaries(_answer_without_unrun_calls(
+            final_msg.get("content") or "",
+            llm_trace, unrun, keep=keep_unexecuted, retried=bool(written), words=words,
+        ))
+        if written and len(llm_trace.get("unexecuted_tool_calls", ())) > notes_before:
+            # Asked twice and no answer: the note stands in for one.
+            llm_trace["turn_end"] = "guard"
+            return answer, accumulated_usage, llm_trace
         if answer:
             # Written under "stop and answer", but written: the person gets an
             # answer, so the record is an ordinary one (no turn_end).
@@ -1548,6 +1894,7 @@ async def run_llm_loop(
     logs_dir = agent_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     sweep_unfinished(logs_dir)
+    on_stream_chunk = _without_written_calls(on_stream_chunk)
     _prune_tool_outputs(agent_root)
     turn_id = _new_turn_id()
 
@@ -1656,12 +2003,15 @@ async def run_llm_loop(
         _divergence["requests"] += 1
         return seen
 
-    _kept_unexecuted = [0]
+    _kept_unexecuted: Dict[str, Optional[str]] = {}
 
     def _keep_unexecuted(text: str) -> Optional[str]:
-        """The text of a call that will not run, beside this turn's tool outputs."""
-        _kept_unexecuted[0] += 1
-        return _store_turn_text(agent_root, turn_id, f"unexecuted-{_kept_unexecuted[0]}.txt", text)
+        """The text of a call that did not run, beside this turn's tool outputs. A model that
+        writes the same text again gets the same address."""
+        if text not in _kept_unexecuted:
+            _kept_unexecuted[text] = _store_turn_text(
+                agent_root, turn_id, f"unexecuted-{len(_kept_unexecuted) + 1}.txt", text)
+        return _kept_unexecuted[text]
 
     async def _dispatch_round(target, calls, round_reasoning) -> bool:
         """Run one round's calls through the registry and record each result
@@ -1764,7 +2114,22 @@ async def run_llm_loop(
 
     round_idx = 0
     empty_retry_count = 0
+    empty_rounds_in_the_turn = 0
     MAX_EMPTY_RETRIES = 3
+    written_call_retries = 0
+    written_call_retried_since_the_last_tool = False
+    # The words in front of a call the model is being asked to make again: they belong to the
+    # reply the retry repairs, and reach a reader with whatever ends that repair.
+    words_before_the_retry: List[str] = []
+
+    def _with_the_words(result: Tuple[str, Dict[str, Any], Dict[str, Any]]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+        """A finalising call's result, for when it ended a repair."""
+        return (_with_words_before_the_retry(words_before_the_retry, result[0]), result[1], result[2])
+
+    def _failed_with_the_words(text: str) -> str:
+        """A failed turn's text with them under it: its replay is the first line, the error's."""
+        return "\n\n".join([text] + words_before_the_retry)
+
     try:
         while True:
             round_idx += 1
@@ -1781,7 +2146,7 @@ async def run_llm_loop(
                     # Nothing was done yet, so there is nothing to summarise.
                     llm_trace["turn_end"] = _user_stop_end(kill_event)
                     return stopped_text, accumulated_usage, llm_trace
-                return await _finalize_after_user_stop(
+                return _with_the_words(await _finalize_after_user_stop(
                     messages, llm, on_stream_chunk, conversation_id,
                     accumulated_usage, llm_trace, stopped_text,
                     task_id=task_id, tools=tool_schemas,
@@ -1789,7 +2154,7 @@ async def run_llm_loop(
                     observe_request=_observe_request,
                     keep_unexecuted=_keep_unexecuted,
                     kill_event=kill_event,
-                )
+                ))
 
             # RoundLimitGuard + BudgetLimitGuard + ContextLimitGuard checkpoint.
             # The context pair is written here rather than after the call, because
@@ -1801,7 +2166,7 @@ async def run_llm_loop(
                 _compaction_state.window if _compaction_state.window else (context_window or 0)
             )
             if await hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx) is not None:
-                return await _finalize_after_guard_stop(
+                return _with_the_words(await _finalize_after_guard_stop(
                     hooks, messages, llm, on_stream_chunk, conversation_id,
                     accumulated_usage, llm_trace,
                     fallback_reason=f"⚠️ Task exceeded MAX_ROUNDS ({max_rounds}).",
@@ -1813,7 +2178,7 @@ async def run_llm_loop(
                     execute_tool_calls=_dispatch_round,
                     keep_unexecuted=_keep_unexecuted,
                     kill_event=kill_event,
-                )
+                ))
 
             # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
             # previous round's real input size — one request stale; the incremental pass
@@ -1880,11 +2245,11 @@ async def run_llm_loop(
                 llm_trace["killed_mid_call"] = True
                 llm_trace["turn_end"] = "killed"
                 llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
-                return (
+                return _with_the_words((
                     f"⚠️ Stopped by user: killed mid-call in round {round_idx} "
                     f"(the model's answer was not waited for).",
                     accumulated_usage, llm_trace,
-                )
+                ))
             except PeerRefused as e:
                 # The host answered and did not serve: a notice, not an LLM
                 # error, and no traceback — the adapter logged it at WARNING.
@@ -1894,7 +2259,7 @@ async def run_llm_loop(
                     "code": e.code, "notice": notice,
                 }
                 llm_trace["turn_end"] = "refused"
-                return notice, accumulated_usage, llm_trace
+                return _with_the_words((notice, accumulated_usage, llm_trace))
             except Exception as e:
                 engine_refusal = engine_refusal_in(e)
                 if isinstance(engine_refusal, TakenOutOfTheCardQueue):
@@ -1905,11 +2270,11 @@ async def run_llm_loop(
                     llm_trace["stopped_by_user"] = True
                     llm_trace["turn_end"] = _user_stop_end(kill_event)
                     llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
-                    return (
+                    return _with_the_words((
                         f"⚠️ Stopped by user: taken out of the queue for the card in round {round_idx} "
                         f"(no model call was made).",
                         accumulated_usage, llm_trace,
-                    )
+                    ))
                 if engine_refusal is not None:
                     # The queue's, the card held with the swap off, or an engine draining. No model
                     # failed, so no "LLM error" and no traceback, and the text is the refusal's and
@@ -1918,10 +2283,10 @@ async def run_llm_loop(
                     # chats, off the post, as `refused` would not.
                     log.warning("Round %d ended on the local engine's refusal: %s", round_idx, engine_refusal)
                     llm_trace["turn_end"] = "failed"
-                    return f"⚠️ {engine_refusal}", accumulated_usage, llm_trace
+                    return _failed_with_the_words(f"⚠️ {engine_refusal}"), accumulated_usage, llm_trace
                 log.error(f"LLM error: {e}", exc_info=True)
                 llm_trace["turn_end"] = "failed"
-                return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace
+                return _failed_with_the_words(f"⚠️ LLM error: {e}"), accumulated_usage, llm_trace
             finally:
                 CALL_PROGRESS.reset(_progress_token)
                 prompt_divergence.log_observation(_seen, _row_id)
@@ -1933,6 +2298,11 @@ async def run_llm_loop(
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
+            # The launcher's word on this reply; the provider has logged the names.
+            rejected_calls = msg.get("rejected_tool_calls") or []
+            if rejected_calls:
+                llm_trace.setdefault("rejected_tool_calls", []).append(
+                    {"round": round_idx, "tools": rejected_calls})
 
             log.debug(f"LLM response: tool_calls={len(tool_calls)}, content_len={len(content) if content else 0}")
             if tool_calls:
@@ -1954,8 +2324,14 @@ async def run_llm_loop(
                 else:
                     log.warning(f"No tool_calls parsed but 'tool_call' found in content: {content[:200]!r}")
 
+            # Decided here and not in the final branch: a written call is no text for the guards,
+            # so a call written now and then cannot hold off ResearchLimitGuard. Words in front
+            # of it are text.
+            _written, _written_prose = ([], content or "") if tool_calls else _written_tool_calls(content or "")
+
             # Update LoopState for guards — mutation contract: update BEFORE fire().
-            ctx.state.last_response_has_text = bool(content and content.strip())
+            ctx.state.last_response_has_text = bool(
+                _without_history_markers(_written_prose).strip() if _written else (content and content.strip()))
             ctx.state.tool_calls_this_turn = len(tool_calls)
             ctx.state.accumulated_cost_usd = accumulated_usage.get("cost", 0.0)
             ctx.state.last_assistant_text = content or ""
@@ -1971,7 +2347,7 @@ async def run_llm_loop(
 
             # AFTER_LLM_CALL: ToolLimit / ResearchLimit / LoopGuard checkpoint.
             if await hooks.fire(HookLifecycle.AFTER_LLM_CALL, ctx) is not None:
-                return await _finalize_after_guard_stop(
+                return _with_the_words(await _finalize_after_guard_stop(
                     hooks, messages, llm, on_stream_chunk, conversation_id,
                     accumulated_usage, llm_trace,
                     fallback_reason="⚠️ Agent loop stopped by guard.",
@@ -1983,7 +2359,7 @@ async def run_llm_loop(
                     execute_tool_calls=_dispatch_round,
                     keep_unexecuted=_keep_unexecuted,
                     kill_event=kill_event,
-                )
+                ))
 
             # No tool calls — final response or empty-response retry
             if not tool_calls:
@@ -1999,13 +2375,48 @@ async def run_llm_loop(
                 # Asked once: the predicate decides both what the ledger records and
                 # which branch runs, and calling it twice invites the two to disagree.
                 _answered = not _is_answerless(content)
-                _final_quality["answered"] = _answered
+                # The check on the text decides, not the launcher's field, which also stands
+                # on a sentence that quotes the format outside code.
+                _final_quality["answered"] = _answered and not _written
                 append_jsonl(logs_dir / "reasoning.jsonl", _final_quality)
+
+                if _answered and _written and not written_call_retried_since_the_last_tool \
+                        and written_call_retries < MAX_WRITTEN_CALL_RETRIES:
+                    # A 200 with no call in it: nothing `_retry_with_backoff` sees. The
+                    # next pass round the loop is a round like any other, with its guards,
+                    # its usage row and the card's hold.
+                    written_call_retries += 1
+                    written_call_retried_since_the_last_tool = True
+                    _kept_at = _keep_unexecuted(content or "")
+                    llm_trace.setdefault("written_call_retries", []).append({
+                        "round": round_idx, "tools": _written, "rejected": rejected_calls,
+                        "chars": len(content or ""), "kept_at": _kept_at,
+                    })
+                    log.warning(
+                        "Round %d wrote %s as text (%d chars), no call in the reply; retry %d/%d with the reason",
+                        round_idx, ", ".join(_written), len(content or ""),
+                        written_call_retries, MAX_WRITTEN_CALL_RETRIES,
+                    )
+                    _said = _without_history_markers(_written_prose).strip()
+                    if _said:
+                        words_before_the_retry.append(_said)
+                    _ask_again(messages, _said, _written_call_retry_request(
+                        rejected_calls or _written, kept_at=_kept_at, has_words=bool(_said),
+                        ran_earlier=_names_that_ran(_written, llm_trace)))
+                    emit_progress("A tool call came back as text and did not run; asking again.",
+                                  None, round_idx, None, _round_speed)
+                    continue
 
                 if _answered:
                     # Before the role cut, which would eat a lone fenced call to
                     # nothing and leave an empty answer instead of the note.
-                    content = _answer_without_unrun_calls(content, llm_trace, keep=_keep_unexecuted)
+                    content = _answer_without_unrun_calls(
+                        content, llm_trace, keep=_keep_unexecuted,
+                        retried=written_call_retried_since_the_last_tool, words=words_before_the_retry,
+                    )
+                    if _written:
+                        # The note stands in for the answer the turn never wrote.
+                        llm_trace["turn_end"] = "guard"
                     clean_content = _strip_history_markers(_strip_role_boundaries(content))
                     # Intermediate per-round text is shown per-round (round_text), not
                     # assembled into the final answer (Variant 2). Final = this last round.
@@ -2025,10 +2436,12 @@ async def run_llm_loop(
                     )
                     llm_trace["turn_end"] = "failed"
                     return (
-                        "⚠️ The provider dropped the request without processing it "
-                        "(zero token usage) — the conversation has most likely "
-                        "outgrown the model's context window. End session to "
-                        "continue, or shorten the history.",
+                        _failed_with_the_words(
+                            "⚠️ The provider dropped the request without processing it "
+                            "(zero token usage) — the conversation has most likely "
+                            "outgrown the model's context window. End session to "
+                            "continue, or shorten the history."
+                        ),
                         accumulated_usage,
                         llm_trace,
                     )
@@ -2039,8 +2452,9 @@ async def run_llm_loop(
                 # holds that reasoning and is tested on its own.
                 _empty_thinking = (msg.get("thinking") or "").strip()
                 _empty_diag = _empty_answer_diagnosis(content, _empty_thinking)
-                if empty_retry_count < MAX_EMPTY_RETRIES:
+                if empty_retry_count < MAX_EMPTY_RETRIES and empty_rounds_in_the_turn < MAX_EMPTY_ROUNDS_PER_TURN:
                     empty_retry_count += 1
+                    empty_rounds_in_the_turn += 1
                     log.warning(
                         "LLM returned empty content — retry %d/%d [thinking_len=%d → %s]",
                         empty_retry_count, MAX_EMPTY_RETRIES, len(_empty_thinking), _empty_diag,
@@ -2048,9 +2462,20 @@ async def run_llm_loop(
                     continue
                 log.warning(
                     "LLM returned empty content after %d retries [thinking_len=%d → %s]",
-                    MAX_EMPTY_RETRIES, len(_empty_thinking), _empty_diag,
+                    empty_retry_count, len(_empty_thinking), _empty_diag,
                 )
-                return "", accumulated_usage, llm_trace
+                # Every reader skips an empty text, so the turn would end in silence.
+                llm_trace["turn_end"] = "guard"
+                return (_no_answer_note(words_before_the_retry, bool(_accumulated_tool_calls)),
+                        accumulated_usage, llm_trace)
+
+            # A tool is about to run, so the next written call may be asked about again, and an
+            # empty round has its retries back: the work went on since the last one.
+            written_call_retried_since_the_last_tool = False
+            empty_retry_count = 0
+            # A call refused or written beside the ones that run: out of the turn the model
+            # is shown again, and of the round's text, and told below.
+            content, _beside = _beside_native_calls(msg)
 
             # Process tool calls — strip hallucinated post-tool-call content before storing
             thinking = _extract_thinking_prefix(content)
@@ -2083,6 +2508,11 @@ async def run_llm_loop(
             round_reasoning = _round_reasoning(
                 msg.get("thinking"), thinking, content, tool_calls
             )
+            if words_before_the_retry:
+                # The retry made the call: the same reply as words and a call, whose words are
+                # the round's. They are in the history already, as the turn before the reason.
+                round_reasoning = "\n\n".join(words_before_the_retry + ([round_reasoning] if round_reasoning else []))
+                words_before_the_retry = []
 
             if round_reasoning:
                 emit_progress(round_reasoning, None, round_idx, None, _round_speed)
@@ -2124,6 +2554,12 @@ async def run_llm_loop(
                     kill_event=kill_event,
                 )
 
+            if _beside:
+                log.warning("Round %d also wrote %s as text beside its calls; told, and not run", round_idx, ", ".join(_beside))
+                llm_trace.setdefault("written_calls_beside", []).append({"round": round_idx, "tools": _beside})
+                messages.append({"role": "user", "content": _written_call_beside_note(
+                    _beside, _names_that_ran(_beside, llm_trace)), "_runtime_note": True})
+
             # Snapshot this round's tool results so LoopGuard can tell a
             # genuinely-stuck poll (identical output) from a long-running one
             # whose progress is still advancing (output changes each poll).
@@ -2140,7 +2576,7 @@ async def run_llm_loop(
     except Exception as e:
         log.error(f"Loop error: {e}", exc_info=True)
         llm_trace["turn_end"] = "failed"
-        return f"⚠️ Loop error: {e}", accumulated_usage, llm_trace
+        return _failed_with_the_words(f"⚠️ Loop error: {e}"), accumulated_usage, llm_trace
     finally:
         # One place for every way a Kill ends the turn: mid-call, mid-tool, or
         # in a finalising call. Stop alone ends nothing.

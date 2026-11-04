@@ -1078,9 +1078,12 @@ class DpcLlmAdapter:
         }
         if tool_calls:
             response_msg["tool_calls"] = tool_calls
+            response_msg["tool_calls_native"] = True
             log.info("Native tool calling: %d tool call(s): %s", len(tool_calls), [tc["function"]["name"] for tc in tool_calls])
         if raw.get("thinking"):
             response_msg["thinking"] = raw["thinking"]
+        if raw.get("rejected_tool_calls"):
+            response_msg["rejected_tool_calls"] = list(raw["rejected_tool_calls"])
 
         usage = raw.get("usage") or {}
         provider_reported_drop = (
@@ -1431,6 +1434,7 @@ class DpcLlmAdapter:
                 ]
                 if tool_calls:
                     response_msg["tool_calls"] = tool_calls
+                    response_msg["tool_calls_native"] = True
                     log.info("Native tool calling on peer: %d tool call(s): %s",
                              len(tool_calls), [tc["function"]["name"] for tc in tool_calls])
             elif tools:
@@ -1550,7 +1554,8 @@ class DpcLlmAdapter:
 
     def _extract_user_text(self, messages: List[Dict[str, Any]]) -> str:
         """
-        Extract text content from the last user message.
+        Extract text content from the last user message, which is a person's
+        or a tool's and not one the loop itself added (`_runtime_note`).
 
         Args:
             messages: List of message dicts with role/content
@@ -1559,7 +1564,7 @@ class DpcLlmAdapter:
             Text content of the last user message, or empty string
         """
         for msg in reversed(messages):
-            if msg.get("role") == "user":
+            if msg.get("role") == "user" and not msg.get("_runtime_note"):
                 content = msg.get("content")
                 if isinstance(content, str):
                     return content
@@ -1701,9 +1706,10 @@ class DpcLlmAdapter:
                 f"{description}"
             )
 
-        # Find the last user message and inject description
+        # Find the last user message and inject description. A note the loop added stays out:
+        # the description belongs on the person's turn, and moving it rewrites the prompt.
         for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
+            if messages[i].get("role") == "user" and not messages[i].get("_runtime_note"):
                 content = messages[i].get("content")
 
                 # Build the enhanced content with image context

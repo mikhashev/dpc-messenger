@@ -972,6 +972,14 @@ Notification Bot: Sending update to Telegram...
 
 3. Check tool logs: `~/.dpc/agents/{agent_id}/logs/tools.jsonl`
 
+### A Tool Call Shows Up as Text
+
+A model sometimes writes a tool call into its text instead of making one. The loop does not take that for an answer: it asks once more, saying the call was not executed, once since the last tool ran and at most three times in a turn; each retry is a round and counts as one. The text of the call is kept in the agent's `state/tool_results/<turn_id>/` from the first attempt, and words the model wrote in front of it stay in the answer. If the model still writes a call, the turn ends with `⚠️ Not done`, naming the tool and where its text is. If a tool of that name ran earlier in the turn, the note says so instead of calling it never executed: look at its result before asking again. A call refused beside others that ran is not retried: the agent is told in the next round. On Strata the refused names are in `dpc-client.log` as well as in the launcher's log. After a guard stop up to three model calls can run, none counted as a round, each with its usage row; ContextLimitGuard skips them. A written call handed over as one chunk (the tools path) reaches neither the screen nor the stored raw output; a reply streamed in pieces (the text path, a peer's relay) shows it on the screen while it streams, and its tag form is taken out of what is stored. An invented `<tool_response>` that opens a line outside code never reaches the chat, and prose that opens a line with the tag loses what follows it; a mention in mid-sentence stays, so an invented result opened in mid-line would be posted.
+
+### A Turn Ends With `⚠️ No answer`
+
+A model sometimes writes reasoning and no text. The round is sent again as it was, up to three times in a row; a tool that runs gives those retries back, and a turn allows 12 such rounds in all, under `max_rounds` and the other guards. If the model still writes nothing, the turn ends with this note instead of in silence, stored with `turn_end` `guard`, so it wakes nobody and stays out of knowledge. The reasoning is not posted. Why the model did this is not known; `dpc-client.log` names the diagnosis on each such round.
+
 ### Budget Exceeded
 
 
