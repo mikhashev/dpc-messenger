@@ -333,13 +333,30 @@ def _descendants(pid: int) -> list:
     return found
 
 
+class KilledNothing(str):
+    """A kill's verdict when nothing was killed. The registry reads the mark, so an
+    entry says a stop only when one reached something (`_kill_command`)."""
+
+    killed_nothing = True
+
+
+_ENDED_NOT_KILLED = "the command had already ended; what it left running was not killed"
+
+
+def _root_has_exited(process: Any) -> bool:
+    """False too for a target with no `poll`: a pid, which the registry has identified."""
+    poll = getattr(process, "poll", None)
+    return poll is not None and poll() is not None
+
+
 def _kill_process_tree(process: "subprocess.Popen") -> str:
     """Kill the command and everything it started. Returns what happened, for the agent.
 
     Killing the direct child is not enough and never was: the child is a shell,
     and what the agent actually launched is the shell's child. A command's
     `CommandJob` is killed and read back empty, and only while its root lives: what
-    a command that has ended left running stays. With no job, `taskkill /T` walks the
+    a command that has ended left running stays, here, for everything automatic;
+    a person's Kill is `kill_what_it_left`. With no job, `taskkill /T` walks the
     Windows tree, which stops at a process that has exited; on POSIX the process
     got its own session at spawn, so one `killpg` reaches every descendant that
     did not deliberately break away.
@@ -348,9 +365,9 @@ def _kill_process_tree(process: "subprocess.Popen") -> str:
 
     pid = process.pid
     if platform.system() == "Windows":
+        if _root_has_exited(process):
+            return KilledNothing(_ENDED_NOT_KILLED)
         job = _job_of(process)
-        if job is not None and process.poll() is not None:
-            return "the command had already ended; what it left running was not killed"
         left = job.kill() if job is not None else None
         if job is not None and left is not None:
             if not left:
@@ -428,13 +445,63 @@ def _kill_process_tree(process: "subprocess.Popen") -> str:
                 )
             return "the command and its process group were killed"
 
+    # A root already reaped: `Popen.kill` would do nothing, silently.
+    if _root_has_exited(process):
+        return KilledNothing(_ENDED_NOT_KILLED)
     # Last resort: at least the direct child, so we do not leave it running
     # while telling the agent we cleaned up.
     try:
         process.kill()
         return "only the command itself could be killed; a descendant may survive"
     except Exception:
-        return "the command could not be killed"
+        return KilledNothing("the command could not be killed")
+
+
+@dataclass
+class _KillOfWhatItLeft:
+    """On a `Popen` from the moment a person's Kill begins; `answered` wakes the call."""
+
+    said: str = ""
+    answered: threading.Event = field(default_factory=threading.Event)
+
+
+_KILL_OF_WHAT_IT_LEFT_ATTR = "dpc_kill_of_what_it_left"
+
+
+def kill_what_it_left(process: Any) -> Optional[str]:
+    """A person's Kill once the command's root has exited, while its call still waits on
+    what the root left: the job is open in that window and is killed and read back. The
+    verdict, or None where this is not the case: a root that lives, or off Windows, which
+    has no job and takes `_kill_process_tree`'s road. Everything automatic stays there.
+    The call goes on waiting until `answer_the_waiting_call`."""
+    if platform.system() != "Windows" or not _root_has_exited(process):
+        return None
+    setattr(process, _KILL_OF_WHAT_IT_LEFT_ATTR, _KillOfWhatItLeft())
+    job = _job_of(process)
+    if job is None:
+        return KilledNothing("the command had already ended and has no job, "
+                             "so what it left running could not be reached")
+    before = job.members()
+    if before is not None and not before:
+        return KilledNothing("the command had already ended and left nothing running")
+    left = job.kill() if before else None
+    if left is None or set(left) >= set(before):
+        log.warning("the kill did not reach what pid %s left: %s of %s still there", process.pid, left, before)
+        return KilledNothing("the command had already ended; the kill did not reach what it left running")
+    if not left:
+        return "the command had already ended; what it left running was killed"
+    log.warning("the job of pid %s still holds %s after the kill", process.pid, left)
+    return (f"the command had already ended; the kill did not reach all it left running "
+            f"({len(left)} of its processes still running)")
+
+
+def answer_the_waiting_call(process: Any, said: str) -> None:
+    """The kill and its record are done: the call waiting on `process` may return, with
+    `said`. After the record, so that its own `end` cannot read a stop taken back."""
+    kill = getattr(process, _KILL_OF_WHAT_IT_LEFT_ATTR, None)
+    if kill is not None:
+        kill.said = said
+        kill.answered.set()
 
 
 class _PidHandle:
@@ -567,6 +634,11 @@ def _enter_job_and_start(process: "subprocess.Popen", job: Any) -> bool:
 
 
 _DRAIN_AFTER_KILL_SECONDS = 5
+_WOKEN_ASKED_EVERY_S = 0.1
+# After a person's Kill: for what the pipes already hold, then what holds them is left.
+_READ_AFTER_A_KILL_S = 0.5
+# Above the job's verify (5 s) and the registry's wait for the code (2 s): the answer comes.
+_KILL_ANSWER_WAIT_S = 10.0
 _READ_CHUNK_BYTES = 65536
 # The registry hears of output at most this often: a chatty command reads a
 # 64 KiB chunk far more often than anyone needs `last_output_at` to move, and
@@ -691,10 +763,15 @@ class _OutputReader:
         """The call is over: keep nothing more, and leave at the next chunk."""
         self._abandoned = True
 
-    def wait(self, deadline: float) -> bool:
-        """Both pipes at their end before `deadline` (monotonic)."""
+    def wait(self, deadline: float, woken: Optional[Callable[[], bool]] = None) -> bool:
+        """Both pipes at their end before `deadline` (monotonic). `woken`, asked every
+        `_WOKEN_ASKED_EVERY_S`, gives up the wait early; a pipe's end still returns at once."""
         for thread in self._threads:
-            thread.join(max(0.0, deadline - time.monotonic()))
+            while thread.is_alive():
+                left = deadline - time.monotonic()
+                if left <= 0 or (woken is not None and woken()):
+                    break
+                thread.join(left if woken is None else min(left, _WOKEN_ASKED_EVERY_S))
         return not any(thread.is_alive() for thread in self._threads)
 
     def text(self) -> tuple:
@@ -703,11 +780,15 @@ class _OutputReader:
                 self._decode(list(self._chunks["stderr"])))
 
 
-def _wait_for_output(process: "subprocess.Popen", output: _OutputReader, timeout: float) -> None:
+def _wait_for_output(
+    process: "subprocess.Popen", output: _OutputReader, timeout: float,
+    woken: Optional[Callable[[], bool]] = None,
+) -> None:
     """What `communicate(timeout=…)` waited for: both pipes at their end and the
-    process gone, inside one bound. Raises `subprocess.TimeoutExpired` past it."""
+    process gone, inside one bound. Raises `subprocess.TimeoutExpired` past it, or
+    when `woken` gave up the wait."""
     deadline = time.monotonic() + timeout
-    if not output.wait(deadline):
+    if not output.wait(deadline, woken):
         raise subprocess.TimeoutExpired(getattr(process, "args", None), timeout)
     process.wait(timeout=max(0.0, deadline - time.monotonic()))
 
@@ -872,7 +953,8 @@ class SupervisedRun:
     # the run was not registered.
     exit_reason: str = ""
     # Windows: the root exited and something it left still held the pipes at the
-    # timeout. Nothing was killed and `returncode` is the root's.
+    # timeout. Nothing was killed and `returncode` is the root's. A person's Kill
+    # before that says what it did in `killed`, and this stays False.
     left_running: bool = False
 
     @property
@@ -928,8 +1010,9 @@ def run_supervised(
     On Windows the child starts suspended and enters a `CommandJob` before its first
     instruction, so nothing it starts is born outside. The root decides: while it lives
     the job is summed, and killed at the ceiling or the timeout; once it has exited
-    nothing is killed here, however the pipes stand. Pipes still held at the timeout
-    return what was read, with `left_running`.
+    nothing automatic is killed here, however the pipes stand. Pipes still held at the
+    timeout return what was read, with `left_running`; a person's Kill before that
+    (`kill_what_it_left`) ends the wait at once, and `killed` says what it did.
     """
     ceiling = ceiling_mb if ceiling_mb is not None else _MEMORY_CEILING_MB
     if ceiling is None:
@@ -1031,12 +1114,27 @@ def run_supervised(
             on_stderr=on_stderr, cr_ends_line=cr_ends_line,
         )
         run = SupervisedRun(ceiling_mb=ceiling)
+
+        def _kill_of_what_it_left() -> Optional[_KillOfWhatItLeft]:
+            return getattr(process, _KILL_OF_WHAT_IT_LEFT_ATTR, None)
+
+        def _kill_answered() -> bool:
+            kill = _kill_of_what_it_left()
+            return kill is not None and kill.answered.is_set()
+
         try:
-            _wait_for_output(process, output, timeout)
+            _wait_for_output(process, output, timeout, woken=_kill_answered)
             run.stdout, run.stderr = output.text()
             run.returncode = process.returncode
         except subprocess.TimeoutExpired:
-            if platform.system() == "Windows" and process.poll() is not None:
+            kill = _kill_of_what_it_left()
+            if kill is not None:
+                kill.answered.wait(_KILL_ANSWER_WAIT_S)
+                output.wait(time.monotonic() + _READ_AFTER_A_KILL_S)
+                output.abandon()
+                run.stdout, run.stderr = output.text()
+                run.returncode = process.poll()
+            elif platform.system() == "Windows" and process.poll() is not None:
                 # `start` from cmd hands its child the inheritable pipes, and cmd has no
                 # way to give them up: this is a command that ended, not one that hung.
                 output.abandon()
@@ -1068,6 +1166,12 @@ def run_supervised(
                     f"; the output ends at a pager prompt {prompt!r}" if prompt else "",
                     (log_as or _command_text(cmd)).replace("\r", " ").replace("\n", " "),
                 )
+        kill = _kill_of_what_it_left()
+        if kill is not None:
+            kill.answered.wait(_KILL_ANSWER_WAIT_S)
+            run.killed = kill.said or "the kill had not finished when the run ended; a process may survive"
+            log.info("pid %s for %s had exited with %s and a Kill ended the wait: %s",
+                     process.pid, launcher, run.returncode, run.killed)
         if watch_thread is not None:
             # communicate() can return before the watcher has written its verdict.
             # A watcher mid-kill finishes it (it is past its sleep); one asleep is

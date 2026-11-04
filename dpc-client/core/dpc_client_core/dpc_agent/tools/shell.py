@@ -2606,6 +2606,11 @@ def _execute_shell_command(
             if run.killed:
                 note += f" - {run.killed}"
             note += f". {CEILING_HINT} if this work genuinely needs more."
+        elif run.killed and not run.timed_out:
+            note = (
+                f"[A Kill ended this call after the command ended (exit code {run.returncode}): "
+                f"{run.killed}. Below is what had arrived by then.]"
+            )
         elif run.left_running:
             note = (
                 f"[The command ended (exit code {run.returncode}) and left a process running "

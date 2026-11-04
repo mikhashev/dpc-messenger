@@ -217,6 +217,8 @@ def _kill_my_process(ctx: "ToolContext", pid: Any) -> str:
     entry, said = get_registry().cancel_by_agent(pid, own_id)
     if entry is None:
         return f"⚠️ Refused: {said}. kill_my_process ends only a running process your own tools started (see list_my_processes)."
+    if entry.ended_at is None:
+        return f"⚠️ pid {entry.pid} ({entry.launcher}: {entry.command!r}) is still running: {said}."
     return (f"pid {entry.pid} ({entry.launcher}: {entry.command!r}) ended {entry.exit_reason}, "
             f"exit_code {entry.exit_code}: {said}")
 

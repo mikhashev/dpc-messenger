@@ -620,9 +620,10 @@ descendants were killed, and the leaf lived on at 1032 MB. So each command start
 `run_supervised` gets a `CommandJob` (`job_object.py`).
 
 - **The root decides.** While the command's root process lives, the job names its members for
-  the sum, and kills them all at the ceiling or the timeout. Once the root has exited this code
-  kills nothing, however the pipes stand: no ceiling, no timeout kill, no job kill from the
-  registry's paths. That closes the chain above, which is the real hole, and nothing wider.
+  the sum, and kills them all at the ceiling or the timeout. Once the root has exited nothing
+  automatic kills, however the pipes stand: no ceiling, no timeout kill, no job kill from the
+  backend's stop, and `kill_my_process` refuses. That closes the chain above, which is the real
+  hole, and nothing wider. A person's Kill is the one exception, below.
 - **The accepted cost, plainly.** A runaway a command left behind is not watched. Its memory
   counts against nothing, and nothing here will stop it; it ends by itself or with the
   backend's job. This is the ruling of 2026-08-27, that an agent starting a server wants it left
@@ -650,6 +651,19 @@ descendants were killed, and the leaf lived on at 1032 MB. So each command start
   what they read: two daemon threads stay blocked on a silent pipe until its holder ends, with
   about 11 handles per such call (8 calls measured, all back when the holders ended), and a
   holder that writes later finds the pipe closed, as on the abandoned drain of point 3.
+- **A person's Kill ends what is left while the call waits** (Mike and the team, 2026-11-04). The
+  Kill button (`interrupt_agent` with `force`, then `stop_commands_of`) is the only person's act
+  that reaches a process; Stop alone ends nothing. The job is open in that window, so the Kill
+  kills its members and reads it back, the call returns at once and `run_shell` says what was
+  killed. After the call has returned the handle is closed and the entry ended, so nothing
+  reaches what it left (card KILL-CANNOT-REACH-WHAT-A-COMMAND-LEFT-ONCE-ITS-CALL-HAS-RETURNED).
+  Off Windows there is no job and no such window: `killpg` reaches the group until the root is
+  reaped, and after that nothing, which the sentence now says (read, not run).
+- **The record says what the kill did.** `_kill_command` ends an entry with the stop only when
+  the process is gone and the kill reached something. A process that lives has no end: its entry
+  stays open and the stop announced is taken back, so step 5 of point 7 still finds it. One that
+  had ended by itself, or a kill that killed nothing, gets the word its own code gives, `exited`
+  or `crashed`. No new word. Kills of one entry run one at a time.
 - **The backend's stop.** The backend's own kill-on-close job is what ends what commands left,
   as it was. Step 2 of point 7 reaches a command whose root lives through its job, orphans
   included.

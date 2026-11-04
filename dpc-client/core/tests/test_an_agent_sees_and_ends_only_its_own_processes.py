@@ -14,6 +14,7 @@ signalled. Nothing here touches `~/.dpc`; the registry is the in-memory default.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -203,6 +204,152 @@ class TestKillMyProcessKillsItsOwn:
         entry, _said = registry.cancel_by_agent(child.pid, "agent_a")
         assert child.wait(timeout=20) is not None
         assert entry.exit_reason == "backend_stop", "the precedence rule of point 4"
+
+
+class _Missed(str):
+    """A kill's verdict that nothing was killed, as `process.py` marks one."""
+
+    killed_nothing = True
+
+
+class TestTheRecordSaysWhatTheKillDid:
+    """An entry is closed by what happened to its process, not by the fact that a kill was tried."""
+
+    @staticmethod
+    def _turn_origin():
+        return SpawnOrigin(agent_id="agent_a", conversation_id="chat-of-agent_a", tool="run_shell", round=1, turn_id="t1")
+
+    def _child_in_a_turn(self, started, registry):
+        child = subprocess.Popen(SLEEP)
+        started.append(child)
+        registry.register(child.pid, launcher="run_shell", launcher_kind="tool", command=SLEEP, handle=child,
+                          origin=self._turn_origin())
+        return child
+
+    def _assert_open_then_exited(self, registry, child):
+        assert child.poll() is None, "the test's kill was to miss"
+        assert [e.pid for e in registry.open_entries()] == [child.pid], "closed while the process lives"
+        child.kill()
+        code = child.wait(timeout=20)
+        ended = registry.end(child.pid, code)
+        assert ended.exit_reason != "stopped" and ended.stop_kind is None, "a stop nothing delivered stayed noted"
+
+    @pytest.mark.parametrize("verdict", [_Missed("the command could not be killed"), "the kill did not reach it"])
+    def test_a_persons_kill_that_missed_leaves_it_open(self, registry, started, verdict, caplog):
+        child = self._child_in_a_turn(started, registry)
+        with caplog.at_level(logging.WARNING, logger=pr.logger.name):
+            ended = registry.stop_commands_of(self._turn_origin(), kill_tree=lambda target: verdict, wait_s=0.2)
+        assert ended == []
+        assert f"pid {child.pid} (run_shell) is still running after the kill; its entry stays open" in caplog.text
+        self._assert_open_then_exited(registry, child)
+
+    def test_a_kill_that_raised_leaves_it_open(self, registry, started):
+        child = self._child_in_a_turn(started, registry)
+
+        def raises(target):
+            raise OSError("denied by the test")
+
+        ended = registry.stop_commands_of(self._turn_origin(), kill_tree=raises, wait_s=0.2)
+        assert ended == []
+        self._assert_open_then_exited(registry, child)
+
+    def test_a_second_kill_waits_and_tries_again_when_the_first_missed(self, registry, started):
+        child = self._child_in_a_turn(started, registry)
+        running, most, calls = [], [], []
+
+        def misses(target):
+            running.append(target)
+            most.append(len(running))
+            calls.append(target)
+            time.sleep(0.3)
+            running.pop()
+            return _Missed("no")
+
+        kills = [threading.Thread(
+            target=registry.stop_commands_of, args=(self._turn_origin(),), kwargs={"kill_tree": misses, "wait_s": 0.1},
+            daemon=True) for _ in range(2)]
+        for kill in kills:
+            kill.start()
+        for kill in kills:
+            kill.join(20)
+        assert max(most) == 1, "two kills of one entry at once"
+        assert len(calls) == 2, "the process lives on, so the second press tries again"
+        self._assert_open_then_exited(registry, child)
+
+    def test_a_kill_that_raised_on_what_had_ended_by_itself_is_not_a_stop(self, registry, started):
+        child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(5)"])
+        started.append(child)
+        registry.register(child.pid, launcher="run_shell", launcher_kind="tool", command="x", handle=child,
+                          origin=self._turn_origin())
+        child.wait(timeout=30)
+
+        def raises(target):
+            raise OSError("denied by the test")
+
+        assert registry.stop_commands(kill_tree=raises) == [], "listed as killed"
+        (entry,) = registry.entries()
+        assert (entry.exit_reason, entry.exit_code) == ("exited", 5)
+
+    def test_a_miss_leaves_a_stop_someone_else_announced_first(self, registry, started):
+        child = self._child_in_a_turn(started, registry)
+        registry.note_stop_sent(child.pid, "timeout")
+        registry.stop_commands_of(self._turn_origin(), kill_tree=lambda target: _Missed("no"), wait_s=0.2)
+        child.kill()
+        ended = registry.end(child.pid, child.wait(timeout=20))
+        assert ended.exit_reason == "timeout", "the Kill's miss took back the timeout's stop"
+
+    def test_a_miss_on_a_pid_with_no_handle_that_is_alive_leaves_it_open(self, registry, started):
+        child = subprocess.Popen(SLEEP)
+        started.append(child)
+        registry.register(child.pid, launcher="run_shell", launcher_kind="tool", command=SLEEP,
+                          origin=self._turn_origin())
+        ended = registry.stop_commands_of(self._turn_origin(), kill_tree=lambda target: _Missed("no"), wait_s=0.2)
+        assert ended == []
+        self._assert_open_then_exited(registry, child)
+
+    def test_a_process_that_had_ended_by_itself_keeps_its_own_word_and_code(self, registry, started):
+        child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(5)"])
+        started.append(child)
+        registry.register(child.pid, launcher="run_shell", launcher_kind="tool", command="x", handle=child,
+                          origin=self._turn_origin())
+        child.wait(timeout=30)
+        ended = registry.stop_commands_of(self._turn_origin(), kill_tree=lambda target: _Missed("not killed"))
+        assert ended == [], "listed as killed"
+        (entry,) = registry.entries()
+        assert (entry.exit_reason, entry.stop_kind, entry.exit_code) == ("exited", None, 5)
+
+    def test_a_kill_that_worked_still_says_stopped(self, registry, started):
+        child = self._child_in_a_turn(started, registry)
+        ended = registry.stop_commands_of(self._turn_origin())
+        assert [(e.exit_reason, e.stop_kind) for e in ended] == [("stopped", "ui_stop")]
+        assert child.wait(timeout=20) is not None
+
+    def test_kill_my_process_says_a_miss_and_not_that_it_ended(self, tmp_path, registry, started, monkeypatch):
+        child = _child(started, registry, agent="agent_a")
+        monkeypatch.setattr(pr, "_kill_tree_of", lambda target: _Missed("the command could not be killed"))
+        text = skills._kill_my_process(_ctx(tmp_path, "agent_a"), child.pid)
+        assert text.startswith("⚠️") and "still running" in text and "could not be killed" in text, text
+        assert " ended " not in text, text
+        self._assert_open_then_exited(registry, child)
+
+    def test_a_root_gone_between_the_check_and_the_kill_reads_exited(self, tmp_path, registry, started):
+        """`cancel_by_agent`'s probe saw it alive; the real kill then finds it ended."""
+        child = _child(started, registry, agent="agent_a")
+        child.kill()
+        code = child.wait(timeout=20)
+        entry, said = registry.cancel_by_agent(child.pid, "agent_a", probe=lambda pid, start: "same")
+        assert entry.exit_reason == ("crashed" if code < 0 else "exited") and entry.exit_code is not None, entry
+        assert "already ended" in said and "not killed" in said, said
+
+    def test_the_orderly_stop_finds_a_miss_open_and_its_last_step_takes_it(self, registry, started):
+        child = _child(started, registry, agent="agent_a")
+        registry.begin_shutdown()
+        assert registry.stop_commands(kill_tree=lambda target: _Missed("no"), wait_s=0.2) == []
+        assert [e.pid for e in registry.open_entries()] == [child.pid]
+        registry.finish_shutdown()
+        assert child.wait(timeout=20) is not None
+        (entry,) = registry.entries()
+        assert entry.exit_reason == "backend_stop"
 
 
 class TestRegistration:

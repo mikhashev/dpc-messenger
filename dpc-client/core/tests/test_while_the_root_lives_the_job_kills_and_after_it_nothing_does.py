@@ -9,6 +9,9 @@ to give them up, so a server started that way holds them; the first form of this
 killed it at the timeout, and that is what an agent's server must not suffer (Mike's call,
 2026-11-04). A runaway a command left behind is not watched: the accepted cost.
 
+All of that binds what is automatic. A person's Kill, while the call still waits, ends what the
+command left, and the call returns at once (Mike and the team, 2026-11-04).
+
 Every memory-using child is `bounded_allocator`'s; every sleeper here ends by itself.
 """
 
@@ -22,6 +25,7 @@ import sys
 import textwrap
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -29,7 +33,9 @@ import pytest
 from dpc_client_core import job_object, process_registry
 from dpc_client_core.dpc_agent.tools import process as process_mod
 from dpc_client_core.dpc_agent.tools import shell as shell_tool
+from dpc_client_core.dpc_agent.tools import skills
 from dpc_client_core.dpc_agent.tools.process import SupervisedRun, run_supervised
+from dpc_client_core.dpc_agent.tools.registry import ToolContext
 from dpc_client_core.process_registry import SpawnOrigin, spawn_origin
 from tests.bounded_allocator import TIMEOUT_S, allocator
 
@@ -325,6 +331,302 @@ def test_a_stop_after_the_root_exited_kills_nothing(shape):
     assert _alive(pid), "a kill reached what the ended command left"
     thread.join(20)
     assert runs and runs[0].left_running and runs[0].killed == "", runs
+    assert runs[0].exit_reason == "exited", "the stop sent nothing and the root ended by itself"
+
+
+# ------------------------------------------- a person's Kill: what it left dies while the call waits
+
+TURN = SpawnOrigin(agent_id="agent_kill", conversation_id="c", tool="run_shell", round=1, turn_id="turn-1")
+LEFT_KILLED = "the command had already ended; what it left running was killed"
+NOT_REACHED = "the command had already ended; the kill did not reach what it left running"
+AT_ONCE_S = 12  # the call's own timeout is TIMEOUT_S; the kill may take its 5 s to verify
+
+
+class _Waiting:
+    """A call on a thread of its own, in a turn, waiting on what its exited root left."""
+
+    def __init__(self, shape: Shape, call):
+        self.results = []
+
+        def _in_thread():
+            with spawn_origin(TURN):
+                self.results.append(call())
+
+        self.thread = threading.Thread(target=_in_thread, daemon=True)
+        self.thread.start()
+        self.leaf = shape.pid()
+        registry = process_registry.get_registry()
+        assert _wait_for(lambda: registry.open_entries("tool"), 20), "the command never registered"
+        (self.entry,) = registry.open_entries("tool")
+        handle = registry.handle_of(self.entry.pid)
+        assert _wait_for(lambda: handle.poll() is not None, 20), "the root never exited"
+        self.started = time.monotonic()
+
+    def kill(self):
+        return process_registry.get_registry().stop_commands_of(TURN)
+
+    def result(self):
+        self.thread.join(TIMEOUT_S + 10)
+        took = time.monotonic() - self.started
+        assert self.results, "the call never returned"
+        assert took < AT_ONCE_S, f"{took:.1f} s: the call waited out its timeout after the Kill"
+        return self.results[0]
+
+
+def _exits_with_3(shape: Shape, leaf: str) -> str:
+    return shape.script(f"""
+        import subprocess, sys
+        print('before it left', flush=True)
+        subprocess.Popen([sys.executable, {leaf!r}])
+        sys.exit(3)
+    """)
+
+
+def _run_in_turn(top: str, **kwargs) -> SupervisedRun:
+    return _run(top, launcher="run_shell", ceiling_mb=0, **kwargs)
+
+
+@windows_only
+def test_a_persons_kill_ends_what_the_command_left_and_the_call_returns_at_once(shape):
+    top = _exits_with_3(shape, shape.leaf(_sleeper()))
+    waiting = _Waiting(shape, lambda: _run_in_turn(top))
+
+    ended = waiting.kill()
+
+    assert _gone(waiting.leaf), "a person's Kill left it running"
+    run = waiting.result()
+    assert not run.left_running and not run.timed_out and run.returncode == 3, run
+    assert run.killed == LEFT_KILLED and run.stdout.strip() == "before it left", run
+    assert run.exit_reason == "stopped", run
+    assert [(e.pid, e.exit_reason, e.stop_kind, e.exit_code) for e in ended] == [
+        (waiting.entry.pid, "stopped", "ui_stop", 3)], "the root's own code, with the stop that was sent"
+
+
+@windows_only
+@pytest.mark.parametrize("slow", ["before the terminate", "after the terminate"])
+def test_two_kills_that_overlap_are_one_kill_with_one_sentence_and_one_stop(slow, shape, monkeypatch):
+    real_kill = job_object.CommandJob.kill
+    in_the_kill = threading.Event()
+
+    def slowly(job, *args, **kwargs):
+        in_the_kill.set()
+        if slow == "before the terminate":
+            time.sleep(1)
+        left = real_kill(job, *args, **kwargs)
+        if slow == "after the terminate":
+            time.sleep(1)
+        return left
+
+    monkeypatch.setattr(job_object.CommandJob, "kill", slowly)
+    top = _exits_with_3(shape, shape.leaf(_sleeper()))
+    waiting = _Waiting(shape, lambda: _run_in_turn(top))
+    ended = []
+    first = threading.Thread(target=lambda: ended.extend(waiting.kill()), daemon=True)
+    second = threading.Thread(target=lambda: ended.extend(waiting.kill()), daemon=True)
+
+    first.start()
+    assert in_the_kill.wait(10), "the first Kill never reached the job"
+    second.start()
+    first.join(20)
+    second.join(20)
+
+    run = waiting.result()
+    assert run.killed == LEFT_KILLED, run
+    assert [(e.exit_reason, e.stop_kind, e.exit_code) for e in ended] == [("stopped", "ui_stop", 3)], ended
+    (entry,) = process_registry.get_registry().entries()
+    assert (entry.exit_reason, entry.stop_kind) == ("stopped", "ui_stop"), entry
+    assert _gone(waiting.leaf)
+
+
+@windows_only
+def test_it_reaches_a_process_whose_parent_had_also_exited(shape):
+    """No walk from anything alive names it; the job does."""
+    top = shape.starts(shape.starts(shape.leaf(_sleeper())))
+    waiting = _Waiting(shape, lambda: _run_in_turn(top))
+
+    waiting.kill()
+
+    assert _gone(waiting.leaf)
+    assert waiting.result().killed == LEFT_KILLED
+
+
+@windows_only
+def test_the_tool_says_what_was_killed_and_not_that_nothing_was(shape, monkeypatch):
+    monkeypatch.setattr(shell_tool, "_MEMORY_CEILING_MB", 0)
+    top = _exits_with_3(shape, shape.leaf(_sleeper()))
+    waiting = _Waiting(shape, lambda: shell_tool._execute_shell_command(_shell(top), None, TIMEOUT_S))
+
+    waiting.kill()
+
+    result = waiting.result()
+    assert "Nothing was killed" not in result, result
+    assert (f"[A Kill ended this call after the command ended (exit code 3): {LEFT_KILLED}. "
+            "Below is what had arrived by then.]") in result, result
+    assert "before it left" in result, result
+    assert _gone(waiting.leaf)
+
+
+@windows_only
+@pytest.mark.parametrize("named, kill", [
+    ("the terminate call failed", lambda self, *a, **k: None),
+    ("every member is still there", lambda self, *a, **k: self.members()),
+])
+def test_a_kill_that_misses_returns_at_once_says_so_and_the_entry_keeps_the_roots_word(
+    named, kill, shape, monkeypatch, caplog,
+):
+    monkeypatch.setattr(job_object.CommandJob, "kill", kill)
+    monkeypatch.setattr(shell_tool, "_MEMORY_CEILING_MB", 0)
+    registry = process_registry.get_registry()
+    take_back = registry._take_back_stop
+
+    def slowly(*args):  # longer than a woken call reads: woken before the record, it would end the entry here
+        time.sleep(process_mod._READ_AFTER_A_KILL_S + 1)
+        take_back(*args)
+
+    monkeypatch.setattr(registry, "_take_back_stop", slowly)
+    top = _exits_with_3(shape, shape.leaf(_sleeper()))
+    waiting = _Waiting(shape, lambda: shell_tool._execute_shell_command(_shell(top), None, TIMEOUT_S))
+
+    with caplog.at_level(logging.INFO, logger=PROCESS_LOG):
+        ended = waiting.kill()
+        result = waiting.result()
+
+    assert NOT_REACHED in result and "Nothing was killed" not in result, result
+    assert _alive(waiting.leaf), "the test's kill was to miss"
+    assert ended == [], "an entry listed as killed by a Kill that killed nothing"
+    (entry,) = registry.entries()
+    assert (entry.exit_reason, entry.stop_kind, entry.exit_code) == ("exited", None, 3), entry
+    lines = [r.getMessage() for r in caplog.records]
+    assert any("the kill did not reach what pid" in line for line in lines), lines
+    assert any("had exited with 3 and a Kill ended the wait" in line and NOT_REACHED in line for line in lines), lines
+
+
+@windows_only
+def test_a_kill_whose_answer_never_comes_is_not_reported_as_done(shape, monkeypatch):
+    monkeypatch.setattr(process_mod, "answer_the_waiting_call", lambda process, said: None)
+    monkeypatch.setattr(process_mod, "_KILL_ANSWER_WAIT_S", 0.2)
+    top = _exits_with_3(shape, shape.leaf(_sleeper()))
+    waiting = _Waiting(shape, lambda: _run_in_turn(top))
+
+    waiting.kill()
+
+    assert waiting.result().killed == "the kill had not finished when the run ended; a process may survive"
+
+
+@windows_only
+def test_a_kill_that_reaches_a_part_says_how_many_are_left_and_records_the_stop(shape, monkeypatch):
+    first, second = shape.leaf(_sleeper()), shape.leaf(_sleeper())
+    top = shape.script(f"""
+        import subprocess, sys
+        subprocess.Popen([sys.executable, {first!r}])
+        subprocess.Popen([sys.executable, {second!r}])
+    """)
+
+    def one_of_them(job, *args, **kwargs):
+        proc = psutil.Process(shape.pid(0))
+        proc.kill()
+        proc.wait(5)
+        return job.members()
+
+    monkeypatch.setattr(job_object.CommandJob, "kill", one_of_them)
+    waiting = _Waiting(shape, lambda: _run_in_turn(top))
+    assert shape.pid(1)
+
+    ended = waiting.kill()
+
+    run = waiting.result()
+    assert run.killed.startswith("the command had already ended; the kill did not reach all it left running ("), run
+    assert run.killed.endswith("of its processes still running)"), run
+    assert _alive(shape.pid(1)) and [e.exit_reason for e in ended] == ["stopped"], ended
+
+
+@windows_only
+def test_with_no_job_a_persons_kill_says_it_could_not_reach_and_returns(shape, monkeypatch):
+    monkeypatch.setattr(process_mod, "_new_command_job", lambda: None)
+    top = _exits_with_3(shape, shape.leaf(_sleeper()))
+    waiting = _Waiting(shape, lambda: _run_in_turn(top))
+
+    ended = waiting.kill()
+
+    run = waiting.result()
+    assert run.killed == ("the command had already ended and has no job, "
+                          "so what it left running could not be reached"), run
+    assert _alive(waiting.leaf) and ended == [] and run.exit_reason == "exited", run
+
+
+@windows_only
+def test_a_command_that_left_nothing_is_not_recorded_as_stopped():
+    """The moment between the pipes' end and the call's own `end`."""
+    job = process_mod._new_command_job()
+    child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(4)"],
+                             creationflags=process_mod.CREATE_NO_WINDOW | process_mod.CREATE_SUSPENDED)
+    assert process_mod._enter_job_and_start(child, job)
+    child.wait(30)
+    registry = process_registry.get_registry()
+    registry.register(child.pid, launcher="run_shell", launcher_kind="tool", command="x", handle=child, origin=TURN)
+    try:
+        assert _wait_for(lambda: not job.members(), 10)
+        said = process_mod.kill_what_it_left(child)
+        assert said == "the command had already ended and left nothing running" and said.killed_nothing
+        assert registry.stop_commands_of(TURN) == []
+    finally:
+        job.close()
+    (entry,) = registry.entries()
+    assert (entry.exit_reason, entry.exit_code) == ("exited", 4), entry
+
+
+@windows_only
+def test_the_ceiling_and_the_timeout_still_kill_nothing_once_the_root_has_exited(shape):
+    """The guard for everything automatic stays: same process, same state, the automatic door."""
+    top = shape.starts(shape.leaf(_sleeper()))
+    waiting = _Waiting(shape, lambda: _run(top, launcher="run_shell", timeout=4, ceiling_mb=0))
+    handle = process_registry.get_registry().handle_of(waiting.entry.pid)
+
+    said = process_mod._kill_process_tree(handle)
+
+    assert said == "the command had already ended; what it left running was not killed" and said.killed_nothing
+    assert _alive(waiting.leaf)
+    assert waiting.result().left_running
+
+
+@windows_only
+def test_kill_my_process_keeps_its_refusal_in_the_window(shape, tmp_path):
+    (tmp_path / TURN.agent_id).mkdir()
+    ctx = ToolContext(agent_root=tmp_path / TURN.agent_id)
+    top = shape.starts(shape.leaf(_sleeper()))
+    waiting = _Waiting(shape, lambda: _run(top, launcher="run_shell", timeout=4, ceiling_mb=0))
+
+    text = skills._kill_my_process(ctx, waiting.entry.pid)
+
+    assert "Refused" in text and "has already exited" in text and "nothing was killed" in text, text
+    assert _alive(waiting.leaf), "the agent has not asked for what it left to die"
+    run = waiting.result()
+    assert run.left_running and run.killed == "" and run.exit_reason == "exited", run
+
+
+def test_off_windows_a_group_kill_that_found_the_root_reaped_does_not_claim_it(monkeypatch):
+    """POSIX has no job: `getpgid` of a pid the memory watcher's `poll` has reaped raises, and
+    the last resort's `Popen.kill` is then silent. Nothing was killed, and it said the command was."""
+    def _no_such_process(pid):
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(process_mod.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(process_mod, "_descendants", lambda pid: [])
+    monkeypatch.setattr(process_mod.os, "getpgid", _no_such_process, raising=False)
+    exited = types.SimpleNamespace(pid=4242, poll=lambda: 0, kill=lambda: None)
+    running = types.SimpleNamespace(pid=4242, poll=lambda: None, kill=lambda: None)
+
+    said = process_mod._kill_process_tree(exited)
+
+    assert said == "the command had already ended; what it left running was not killed" and said.killed_nothing
+    assert process_mod._kill_process_tree(running) == (
+        "only the command itself could be killed; a descendant may survive")
+
+
+@posix_only
+def test_off_windows_a_persons_kill_takes_the_old_road():
+    """No job, so no window of its own: `kill_what_it_left` answers None and the tree kill runs."""
+    assert process_mod.kill_what_it_left(types.SimpleNamespace(pid=4242, poll=lambda: 0)) is None
 
 
 @windows_only

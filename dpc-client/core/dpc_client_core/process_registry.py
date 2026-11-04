@@ -75,7 +75,8 @@ NTSTATUS-class code on Windows) and `exited` otherwise. So a sender announces it
 stop *before* it signals (`note_stop_sent`), and whoever later sees the process
 gone calls `end` with the return code. Either order of two parties reporting
 the same end gives the same record: the first `end` wins, and a later one may only
-complete an `exit_code` the first did not have.
+complete an `exit_code` the first did not have. A stop announced and then not delivered
+(`_kill_command`: the process lives on, or the kill killed nothing) is taken back.
 
 **Precedence.** A stop announced after the backend's orderly stop began
 (`begin_shutdown`) is `backend_stop` whoever sent the signal, and so is the stop's
@@ -449,6 +450,8 @@ class _Live:
     # The directory the child was started in, when the launcher gave it: where a
     # git killed at the stop may have left `.git/index.lock`.
     cwd: Optional[str] = None
+    # One kill of this entry at a time (`_kill_command`).
+    kill_lock: threading.Lock = field(default_factory=threading.Lock)
     # When (the sampler's monotonic clock) the early samples of this entry are due.
     early_due: List[float] = field(default_factory=list)
     # Every process ever seen in the tree, by (pid, creation time): its last
@@ -1394,7 +1397,8 @@ class ProcessRegistry:
         only when it is an open entry a tool started for `agent_id`. Anything else
         is refused with the reason and nothing is signalled; a subsystem is refused
         even when this agent's call woke it, because its owner is the backend.
-        Returns (the entry as ended, the kill's verdict) or (None, the refusal)."""
+        Returns (the entry, the kill's verdict), the entry still open when the process
+        lives on, or (None, the refusal)."""
         if not isinstance(pid, int) or isinstance(pid, bool):
             return None, f"{pid!r} is not a pid"
         agent_id = _bounded(agent_id)  # compared with the entry's, which is cut
@@ -1539,7 +1543,7 @@ class ProcessRegistry:
                 self._kill_command(entry, kill_tree, wait_s, ended)
         for entry in self._wait_for_git([e for e in commands if _is_git(e)], probe_identity):
             cwd = self._cwd_of(entry.pid)
-            if self._kill_command(entry, kill_tree, wait_s, ended):
+            if _something_was_killed(self._kill_command(entry, kill_tree, wait_s, ended)):
                 self._warn_of_index_lock(entry, cwd)
         return ended
 
@@ -1557,11 +1561,17 @@ class ProcessRegistry:
         a server on purpose), and so does one with no turn; an origin with no
         turn ends nothing. Never a subsystem (its owner is the backend) nor a
         lost attribution. A killed git's `.git/index.lock` is named in the log.
-        Returns the entries killed."""
+        This is a person's act, so a command whose root has exited while its call
+        waits loses what it left too; the rule that nothing is killed then binds what
+        is automatic (ADR-046). Returns the entries killed."""
         if not origin.agent_id or not origin.turn_id:
             return []
         if kill_tree is None:
             kill_tree = _kill_tree_of
+
+        def kill(target: Any) -> str:
+            return _kill_what_it_left(target) or kill_tree(target)
+
         shielded = own_and_ancestor_pids()
         ended: List[ProcessEntry] = []
         turn = (_bounded(origin.agent_id), _bounded(origin.conversation_id), _bounded(origin.turn_id))
@@ -1569,7 +1579,11 @@ class ProcessRegistry:
             if (entry.agent_id, entry.conversation_id, entry.turn_id) != turn or entry.pid in shielded:
                 continue
             cwd = self._cwd_of(entry.pid)
-            if self._kill_command(entry, kill_tree, wait_s, ended, reason="stopped", stop="ui_stop") and _is_git(entry):
+            handle = self.handle_of(entry.pid)
+            verdict = self._kill_command(entry, kill, wait_s, ended, reason="stopped", stop="ui_stop")
+            if verdict is not None and handle is not None:
+                _answer_the_waiting_call(handle, verdict)
+            if _something_was_killed(verdict) and _is_git(entry):
                 self._warn_of_index_lock(entry, cwd)
         return ended
 
@@ -1577,9 +1591,28 @@ class ProcessRegistry:
         self, entry: ProcessEntry, kill_tree: Callable[[Any], str], wait_s: float, ended: List[ProcessEntry],
         reason: str = "backend_stop", stop: Optional[str] = None,
     ) -> Optional[str]:
-        """Announce, kill, end with `reason`; returns the kill's verdict, None when
+        """Announce, kill, record what the kill did; returns its verdict, None when
         it had already ended. The orderly stop's, `cancel_by_agent`'s and
-        `stop_commands_of`'s one path."""
+        `stop_commands_of`'s one path.
+
+        The entry says the stop only when the process is gone and the kill reached
+        something, and only then is it in `ended`. A process that lives has no end: the
+        entry stays open, for whoever sees it end. One that had ended by itself, and a
+        kill that killed nothing, get the word its own code gives. Either way the stop
+        announced is taken back, as nothing delivered it.
+
+        One at a time per entry: a second kill waits, and finds the entry closed, or
+        tries again when the first one missed a process that lives on. Without this it
+        reads the job the first emptied, and takes back the first's stop as its own."""
+        with self._lock:
+            live = self._live.get(entry.pid)
+        with live.kill_lock if live is not None else contextlib.nullcontext():
+            return self._kill_and_record(entry, kill_tree, wait_s, ended, reason, stop)
+
+    def _kill_and_record(
+        self, entry: ProcessEntry, kill_tree: Callable[[Any], str], wait_s: float, ended: List[ProcessEntry],
+        reason: str, stop: Optional[str],
+    ) -> Optional[str]:
         with self._lock:
             if self._open.get(entry.pid) is not entry:
                 return None
@@ -1588,14 +1621,39 @@ class ProcessRegistry:
         try:
             verdict = kill_tree(handle if handle is not None else entry.pid)
         except Exception as exc:
-            verdict = f"the kill failed ({type(exc).__name__}: {exc})"
             logger.warning("process registry: could not kill pid %s (%s): %s", entry.pid, entry.launcher, exc)
+            verdict = _KillFailed(f"the kill failed ({type(exc).__name__}: {exc})")
         returncode = self._returncode_of(handle, wait_s)
-        done = self.end(entry.pid, returncode, reason=reason, stop=stop)
+        if self._lives_on(entry, handle, returncode):
+            self._take_back_stop(entry.pid, (reason, stop))
+            logger.warning(
+                "process registry: pid %s (%s) is still running after the kill; its entry stays open: %s",
+                entry.pid, entry.launcher, verdict,
+            )
+            return verdict
+        if _something_was_killed(verdict):
+            done = self.end(entry.pid, returncode, reason=reason, stop=stop)
+            if done is not None:
+                ended.append(done)
+        else:
+            self._take_back_stop(entry.pid, (reason, stop))
+            self.end(entry.pid, returncode)
         logger.debug("process registry: stopped pid %s (%s): %s", entry.pid, entry.launcher, verdict)
-        if done is not None:
-            ended.append(done)
         return verdict
+
+    @staticmethod
+    def _lives_on(entry: ProcessEntry, handle: Any, returncode: Optional[int]) -> bool:
+        if getattr(handle, "poll", None) is not None:
+            return returncode is None
+        return probe_identity(entry.pid, entry.start_time) == "same"
+
+    def _take_back_stop(self, pid: int, sent: Tuple[str, Optional[str]]) -> None:
+        """Only the stop this path announced: another's that came first stands."""
+        with self._lock:
+            live = self._live.get(pid)
+            if live is not None and live.stop_sent == sent:
+                live.stop_sent = None
+                live.stop_sent_while_stopping = False
 
     # -- git at the stop: time to finish, then the kill -----------------------------
 
@@ -1760,6 +1818,32 @@ def _kill_pid_tree(pid: int) -> str:
     from .dpc_agent.tools import process as _process
 
     return _process.kill_pid_tree(pid)
+
+
+def _kill_what_it_left(target: Any) -> Optional[str]:
+    """A person's Kill of a command whose root has exited; None for any other target."""
+    if isinstance(target, int):
+        return None
+    from .dpc_agent.tools import process as _process
+
+    return _process.kill_what_it_left(target)
+
+
+def _answer_the_waiting_call(handle: Any, verdict: str) -> None:
+    from .dpc_agent.tools import process as _process
+
+    _process.answer_the_waiting_call(handle, verdict)
+
+
+class _KillFailed(str):
+    """A kill that raised; the same mark as `process.KilledNothing`, which is not imported here."""
+
+    killed_nothing = True
+
+
+def _something_was_killed(verdict: Optional[str]) -> bool:
+    """A verdict with no mark counts as a kill: the sentences that name a partial one are that."""
+    return bool(verdict) and not getattr(verdict, "killed_nothing", False)
 
 
 # --- the resource sampler (ADR-046 point 3) ---------------------------------------------
