@@ -1,5 +1,5 @@
 /**
- * The "RAM limit per process" line of the Agent map's D-PC backend card: what
+ * The "RAM limit per command" line of the Agent map's D-PC backend card: what
  * `list_processes` says (`shell_memory_limit_mb`, `shell_memory_limit_source`),
  * how it is worded, what a typed value means, and when to warn. The backend owns
  * the rules (`set_shell_memory_limit` refuses a negative or non-integer value and
@@ -37,7 +37,7 @@ export interface MemoryLimitView {
     /** The limit in MiB; 0 (or less) is no limit. */
     mb: number;
     source: MemoryLimitSource;
-    /** "RAM limit per process: 32,768 MiB", or "... no limit". */
+    /** "RAM limit per command: 32,768 MiB", or "... no limit". */
     line: string;
     /** "(default)" when the number is the built-in one, else empty. */
     suffix: string;
@@ -73,7 +73,7 @@ export function memoryLimitView(listing: MemoryLimitFields | null | undefined): 
     return {
         mb,
         source,
-        line: `RAM limit per process: ${formatMemoryLimit(mb)}`,
+        line: `RAM limit per command: ${formatMemoryLimit(mb)}`,
         suffix: source === 'default' ? '(default)' : '',
         // The backend says "env" for either name and the screen cannot tell which, so both are named.
         envNote: fromEnvironment ? `set by ${MEMORY_LIMIT_ENV_NAMES.join(' or ')} in the environment` : '',

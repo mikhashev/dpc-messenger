@@ -78,7 +78,7 @@ describe('memoryLimitView', () => {
     });
     it('words the line from the number', () => {
         const v = memoryLimitView({ shell_memory_limit_mb: 32768, shell_memory_limit_source: 'config' })!;
-        expect(v.line).toBe('RAM limit per process: 32,768 MiB');
+        expect(v.line).toBe('RAM limit per command: 32,768 MiB');
         expect(v.suffix).toBe('');
         expect(v.editable).toBe(true);
         expect(v.envNote).toBe('');
@@ -86,7 +86,7 @@ describe('memoryLimitView', () => {
     });
     it('labels 0 as no limit', () => {
         const v = memoryLimitView({ shell_memory_limit_mb: 0, shell_memory_limit_source: 'config' })!;
-        expect(v.line).toBe('RAM limit per process: no limit');
+        expect(v.line).toBe('RAM limit per command: no limit');
         expect(v.warning).toBe('');
     });
     it('marks the default, and an unknown source reads as the default', () => {

@@ -15,7 +15,7 @@ const fn = (name: string) => {
   return m![0];
 };
 
-describe('the D-PC backend card shows the memory limit per process', () => {
+describe('the D-PC backend card shows the memory limit per command', () => {
   it('builds the line from the list_processes fields through the util, inside the backend card', () => {
     expect(src).toContain('let limit = $derived(memoryLimitView(listing));');
     expect(src).toContain('shell_memory_limit_mb: r.shell_memory_limit_mb ?? null');

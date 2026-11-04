@@ -179,7 +179,7 @@
   }));
   let selected = $derived(map.agents.find(a => a.agent_id === pickSelected(map, selectedId)) ?? null);
 
-  // The memory limit per process: the line, and its inline edit (a number, Save / Cancel).
+  // The memory limit per command: the line, and its inline edit (a number, Save / Cancel).
   let limit = $derived(memoryLimitView(listing));
   let limitEditing = $state(false);
   let limitDraft = $state('');
@@ -383,7 +383,7 @@
             {#if limit}
               <div class="limit-line">
                 {#if limitEditing}
-                  <label class="small" for="memory-limit-input">RAM limit per process:</label>
+                  <label class="small" for="memory-limit-input">RAM limit per command:</label>
                   <input
                     id="memory-limit-input"
                     class="limit-input"

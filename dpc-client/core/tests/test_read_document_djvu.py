@@ -253,7 +253,7 @@ def test_a_tree_killed_by_the_memory_ceiling_names_the_ceiling_and_the_usage(mon
     assert (
         "Raise shell_memory_limit_mb in [system] of config.ini, the limit on an agent "
         "command and everything it started, summed (the next command "
-        "reads it, no restart; the Agent map's \"RAM limit per process\" field sets it too; "
+        "reads it, no restart; the Agent map's \"RAM limit per command\" field sets it too; "
         "DPC_SHELL_MEMORY_LIMIT_MB in the environment overrides it)."
     ) in err
 

@@ -695,7 +695,7 @@ person, not only as a machine (Mike's call, 2026-09-14; ADR-041 D7, amendment
 - **Valid Values:** a whole number of MB; `0` turns the ceiling off
 - **Applies:** at the next command, no restart — the file is re-read when its modification time or size changes. An environment variable is fixed for the life of the process, so while one is set an edit here changes nothing until it is removed and the service restarted
 - **Bad value:** a value that is not a number is logged once and the default `8192` is used; it never stops the agent tools from loading
-- **In the app:** the Agent map's D-PC backend card shows "RAM limit per process" (`shell_memory_limit_mb` and `shell_memory_limit_source` in the `list_processes` answer) and its Edit writes this key through the `set_shell_memory_limit` command; with an environment variable set the card is read-only and says which variables decide
+- **In the app:** the Agent map's D-PC backend card shows "RAM limit per command" (`shell_memory_limit_mb` and `shell_memory_limit_source` in the `list_processes` answer) and its Edit writes this key through the `set_shell_memory_limit` command; with an environment variable set the card is read-only and says which variables decide
 
 **Example Configuration:**
 ```ini

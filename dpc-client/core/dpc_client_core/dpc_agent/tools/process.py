@@ -53,7 +53,7 @@ _CEILING_SECTION, _CEILING_KEY = "system", "shell_memory_limit_mb"
 CEILING_HINT = (
     f"Raise {_CEILING_KEY} in [{_CEILING_SECTION}] of config.ini, the limit on an "
     f"agent command and everything it started, summed (the next "
-    f"command reads it, no restart; the Agent map's \"RAM limit per process\" "
+    f"command reads it, no restart; the Agent map's \"RAM limit per command\" "
     f"field sets it too; {_CEILING_ENV} in the environment overrides it)"
 )
 

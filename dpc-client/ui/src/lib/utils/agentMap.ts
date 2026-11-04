@@ -75,7 +75,7 @@ export interface ProcessListing {
     /** The card's VRAM in MiB (nvidia-smi); null without an NVIDIA signal. */
     vram_free_mib: number | null;
     vram_total_mib: number | null;
-    /** The memory limit per agent process in MiB (0 = no limit) and where it comes from
+    /** The memory limit per agent command in MiB (0 = no limit) and where it comes from
      *  ("env", "config" or "default"); an older backend sends neither (utils/shellMemoryLimit.ts). */
     shell_memory_limit_mb?: number | null;
     shell_memory_limit_source?: string | null;
