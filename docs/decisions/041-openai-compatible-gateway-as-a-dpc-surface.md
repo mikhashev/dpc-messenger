@@ -1120,6 +1120,34 @@ An image beside tools stays in its turn and the call streams. The other provider
 they were. The launcher's frames were read from one live call with one tool; llama-server's
 were read from code and not run.)*
 
+*(**Amendment, 2026-11-05 — a call the output limit ended inside is told to the client.**
+The paragraph above says the door drops the mark and its client gets `{}` under
+`finish_reason: length`, and on `strata` no call at all. Live that day the client ended the
+turn on it, every token written was lost, and a person's "continue" regenerated the same
+oversized call without end. That is changed, on both routes and in all four forms (OpenAI and
+Messages, whole and streamed). When a completion's `finish_reason` is an output-limit word
+(`length`, `max_tokens`), the door takes out of `tool_calls` any call marked unreadable and a
+last call with no arguments (`{}` is what a closed object and a cut one both say; an earlier
+call was finished before the next began, and stays). `finish_reason` stays `length`
+(`max_tokens` in the Messages form), so a client does not read it as a turn that ended on a
+call. What the call had written is kept in `<DPC home>/gateway/unexecuted/<request id>.txt`
+(the newest 20 files stay; a failed write is logged and the note has no address), and one note
+is appended to the reply text, after a blank line, in the words the agent loop gives a cut call
+(`_cut_call_request`): the call was cut at the output limit of N tokens, inside its arguments,
+so it was not executed; what it had written is kept at the path; make the call again with less
+in it, in smaller parts if it is long. A stream that wrote text first writes the note as one
+more piece before the finish chunk; otherwise it is the text. The ledger row is what was
+measured, and the note is not in it.
+
+How the mark gets there: `unreadable_arguments` travels beside the `tool_use` blocks in
+`query_messages`' result, by position, and only when a call has one, so the blocks a guest is
+sent are the four-key blocks they were. On the peer route the wire has no mark and no ceiling,
+so the guest's door cuts by the empty last call alone, names no number and keeps no file. The
+Strata stream no longer drops a cut call: it keeps it, marked, as llama-server's does. Not
+repaired: a request that is not a stream on `strata` still gets the launcher's whole reply,
+which leaves the call out before the door sees it. A guest served on a streamed `strata` call
+now receives that call as `{}` under `length`, as it already did from `llamacpp_server`.)*
+
 *(**Amendment, 2026-11-05 — the door's usage carries the cache hit its row holds.** Mike's
 call, 2026-11-05. A local call's `cached_tokens` (the number `usage_row` takes) is printed as
 `prompt_tokens_details.cached_tokens`, inside `prompt_tokens`, on the OpenAI form, and in the

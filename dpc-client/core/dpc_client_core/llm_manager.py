@@ -339,8 +339,12 @@ def reported_engine(provider: Any) -> Dict[str, Any]:
 def _tool_use_block(call: Any) -> Dict[str, Any]:
     """One returned tool call as an Anthropic `tool_use` block. Providers hand
     these back as `SimpleNamespace(id, name, input)`; a mapping is read too."""
-    read = (lambda key: call.get(key)) if isinstance(call, dict) else (lambda key: getattr(call, key, None))
-    return {"type": "tool_use", "id": read("id"), "name": read("name"), "input": read("input") or {}}
+    return {"type": "tool_use", "id": _read_of(call, "id"), "name": _read_of(call, "name"),
+            "input": _read_of(call, "input") or {}}
+
+
+def _read_of(call: Any, key: str) -> Any:
+    return call.get(key) if isinstance(call, dict) else getattr(call, key, None)
 
 
 class LLMManager:
@@ -1067,6 +1071,7 @@ class LLMManager:
         prompt_text = flatten_messages(messages, system)
 
         tool_calls: List[Dict[str, Any]] = []
+        unreadable: Dict[int, str] = {}
         path_usage: Dict[str, Any] = {}
         # Image blocks in the turns, including those a tool returned inside its
         # result: the same count the host's gate in front of this call reads.
@@ -1114,7 +1119,13 @@ class LLMManager:
                 **effort_kwargs, **reasoning_kwargs,
             ) or {}
             response = raw.get("content") or ""
-            tool_calls = [_tool_use_block(call) for call in raw.get("tool_calls_raw") or []]
+            returned = raw.get("tool_calls_raw") or []
+            tool_calls = [_tool_use_block(call) for call in returned]
+            # Beside the blocks, not in them: the blocks go to a peer on the wire as they are.
+            unreadable = {
+                position: written for position, call in enumerate(returned)
+                if isinstance(written := _read_of(call, "unreadable_arguments"), str)
+            }
             path_usage = raw.get("usage") or {}
             streamed, flattened, tools_used = False, False, True
         elif path == "generate_response_stream":
@@ -1202,6 +1213,9 @@ class LLMManager:
                 "flattened": flattened,
                 "tools_used": tools_used,
                 "tool_calls": tool_calls,
+                # Only a call cut at the output limit has one: position -> what its arguments
+                # held. Not on the peer wire; the gateway door reads it (ADR-041, 2026-11-05).
+                **({"unreadable_arguments": unreadable} if unreadable else {}),
                 # The engine's word on the call, for the usage row; the
                 # `finish_reason` below, with its path fallback, wins over it.
                 **reported_engine(provider),

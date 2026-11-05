@@ -457,7 +457,15 @@ async def _both_paths(engine_kwargs, provider_kwargs):
 async def test_the_stream_returns_the_result_the_whole_path_returns(tmp_path, local, scenario):
     engine_kwargs, provider_kwargs = local
     whole, streamed, trace = await _both_paths({**engine_kwargs, **SAME_RESULT[scenario]}, provider_kwargs)
-    assert _comparable(streamed) == _comparable(whole)
+    if provider_kwargs and scenario == "cut-in-a-call":
+        # The launcher's whole reply leaves the cut call out; its stream keeps it, marked, for the
+        # door to take out and say so (ADR-041, amendment 2026-11-05). Nothing else differs.
+        *kept, cut = _comparable(streamed)["tool_calls_raw"]
+        assert cut["unreadable_arguments"] == '{"path": "a.t'
+        assert kept == _comparable(whole)["tool_calls_raw"]
+        assert {**_comparable(streamed), "tool_calls_raw": kept} == _comparable(whole)
+    else:
+        assert _comparable(streamed) == _comparable(whole)
     assert "".join(trace.of("content")) == whole["content"], "what was written is the text the result holds"
 
 
@@ -522,23 +530,28 @@ async def test_a_call_cut_at_the_limit_is_marked_on_llama_server_and_left_out_by
     (call,) = llama["tool_calls_raw"]
     assert call.input == {} and call.unreadable_arguments == '{"path": "a.t'
     assert llama["usage"]["finish_reason"] == "length"
-    _, strata, _ = await _both_paths(cut, _strata_kwargs(tmp_path))
-    assert strata["tool_calls_raw"] == [] and strata["usage"]["finish_reason"] == "length"
+    whole, strata, _ = await _both_paths(cut, _strata_kwargs(tmp_path))
+    assert whole["tool_calls_raw"] == [] and whole["usage"]["finish_reason"] == "length"
+    (call,) = strata["tool_calls_raw"]
+    assert call.input == {} and call.unreadable_arguments == '{"path": "a.t'
+    assert strata["usage"]["finish_reason"] == "length"
 
 
-@pytest.mark.parametrize("usage_apart, delta", [
-    (True, [{**CALL_ON_THE_WIRE, "id": "call_cut", "function": {"name": "read_file", "arguments": "{}"}}]), (False, None),
-], ids=["llamacpp_server", "strata"])
+@pytest.mark.parametrize("usage_apart", [True, False], ids=["llamacpp_server", "strata"])
 @pytest.mark.asyncio
-async def test_at_the_door_a_cut_call_is_empty_on_llama_server_and_absent_on_the_launcher_under_length(
-    tmp_path, usage_apart, delta,
+async def test_at_the_door_a_cut_call_reaches_the_client_on_neither_engine_and_the_note_says_so(
+    tmp_path, monkeypatch, usage_apart,
 ):
+    """Both engines used to end differently here: `{}` on llama-server, nothing on the launcher.
+    The door now takes the call out on both and tells the client (ADR-041, 2026-11-05)."""
+    monkeypatch.setenv("DPC_HOME", str(tmp_path))
     _, text, _, _ = await _door_call(
         tmp_path, {"calls": (CUT_CALL,), "finish": "length", "content": CONTENT, "usage_apart": usage_apart},
         _chat(stream=True, tools=TOOLS_OPENAI), engine_class=_Launcher,
         provider_kwargs={} if usage_apart else _strata_kwargs(tmp_path),
     )
-    assert (_field(_deltas(text), "tool_calls") or [None])[0] == delta
+    assert _field(_deltas(text), "tool_calls") == []
+    assert "Your call of `read_file` was cut at the output limit" in "".join(_field(_deltas(text), "content"))
     assert _events(text)[-1]["choices"][0]["finish_reason"] == "length"
 
 

@@ -1256,10 +1256,13 @@ class LlamaServerProvider(DeepSeekProvider):
                 if isinstance(e, httpx.TransportError):
                     raise _StreamBrokenBeforeADelta(f"{type(e).__name__}: {e}") from e
                 raise
+            # A call the output ended inside stays, marked by `tool_use_of`: the launcher's whole
+            # reply leaves it out, but its stream has sent the pieces, and the door tells the
+            # client what was cut instead of ending the turn with nothing (ADR-041, 2026-11-05).
             tool_calls_raw = [
                 tool_use_of(SimpleNamespace(id=calls[i]["id"], function=SimpleNamespace(
                     name=calls[i]["name"], arguments=calls[i]["arguments"])))
-                for i in sorted(calls) if self._keeps_a_call_off_a_stream(calls[i]["arguments"], finish_reason)
+                for i in sorted(calls)
             ]
             # The launcher's whole reply says this text once, as the answer (`openai_collect`).
             same_text = reasoning_text.strip() and reasoning_text.strip() == content.strip()
@@ -1394,11 +1397,6 @@ class LlamaServerProvider(DeepSeekProvider):
         """The server serves exactly one -m model and ignores this field, but
         the SDK requires a string; the GGUF's stem says more than an alias."""
         return self.model or Path(self.config["gguf_path"]).stem
-
-    def _keeps_a_call_off_a_stream(self, arguments: str, finish_reason: Optional[str]) -> bool:
-        """Whether a call assembled from deltas is one the whole reply would hold.
-        llama-server's holds a call cut at the limit, and `tool_use_of` marks it."""
-        return True
 
 
 class _StreamBrokenAfterADelta(Exception):

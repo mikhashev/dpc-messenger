@@ -609,6 +609,9 @@ class Completion:
     # ledger row's `cached_tokens`; None where nobody measured it (the peer wire
     # carries none), and then the shapes print no field rather than a zero.
     cached_tokens: Optional[int] = None
+    # The sentence that tells the client a call was cut at the output limit, already at the end
+    # of `text`. A stream that wrote the text before it knew writes this alone, after a blank line.
+    cut_note: str = ""
 
 
 def _finish_reason(reported: Optional[str], tool_calls: List[Dict[str, Any]]) -> Optional[str]:
@@ -618,6 +621,84 @@ def _finish_reason(reported: Optional[str], tool_calls: List[Dict[str, Any]]) ->
     if tool_calls and reported in (None, "stop"):
         return "tool_calls"
     return reported
+
+
+# A provider's word for a reply that reached its output limit, as `dpc_agent/loop.py` reads it.
+_OUTPUT_LIMIT_WORDS = frozenset({"length", "max_tokens"})
+# What a call the output ended inside had written is kept for the person to open; this many files stay.
+UNEXECUTED_KEPT = 20
+
+
+def _unexecuted_dir() -> Path:
+    """Beside the ledger, under the same home rule (`node_ledger.ledger_dir`)."""
+    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "gateway" / "unexecuted"
+
+
+def _keep_unexecuted(request_id: str, written: List[Tuple[str, str]]) -> Optional[str]:
+    """What cut calls had written, in one file named for the request; its address, or None when
+    it could not be kept: the note then has no address and the turn still ends the same way."""
+    stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(request_id or "")) or uuid.uuid4().hex
+    body = "\n\n".join(f"--- tool call `{name or 'unnamed'}` ---\n{arguments}" for name, arguments in written)
+    folder = _unexecuted_dir()
+    path = folder / f"{stem}.txt"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(dir=folder, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(body)
+            os.replace(temp_name, path)
+        except BaseException:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
+    except OSError as e:
+        logger.warning("Gateway request %s: what its cut call had written was not kept: %s", request_id, e)
+        return None
+    try:
+        older = sorted((p for p in folder.glob("*.txt") if p != path),
+                       key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True)
+        for stale in older[UNEXECUTED_KEPT - 1:]:
+            stale.unlink()
+    except OSError as e:
+        logger.warning("Gateway: the folder of unexecuted calls was not trimmed: %s", e)
+    return str(path.resolve())
+
+
+def _without_the_cut_call(
+    request_id: str, finish_reason: Any, text: str, tool_calls: List[Dict[str, Any]],
+    unreadable: Dict[int, str], ceiling: Any,
+) -> Tuple[str, List[Dict[str, Any]], str]:
+    """`(text, calls, note)` for a reply the output limit ended. A call whose arguments did not
+    parse, and a last call with none (`{}` is what a closed object and a cut one both say), never
+    reach the client: it would run them on nothing. A call finished before the next began stays.
+    The note says what happened, once, for the client to show; nothing else about the reply changes.
+    The model of this is `loop._take_out_cut_calls` and `_cut_call_request`."""
+    if not (isinstance(finish_reason, str) and finish_reason.lower() in _OUTPUT_LIMIT_WORDS):
+        return text, tool_calls, ""
+    whole: List[Dict[str, Any]] = []
+    cut: List[Tuple[int, Dict[str, Any]]] = []
+    for position, call in enumerate(tool_calls):
+        if position in unreadable or (position == len(tool_calls) - 1 and not call.get("input")):
+            cut.append((position, call))
+        else:
+            whole.append(call)
+    if not cut:
+        return text, tool_calls, ""
+    written = [(call.get("name") or "", unreadable[position]) for position, call in cut
+               if unreadable.get(position)]
+    kept_at = _keep_unexecuted(request_id, written) if written else None
+    called = ", ".join(f"`{n}`" for n in dict.fromkeys(call.get("name") or "unnamed" for _, call in cut))
+    stopped_at = (f"the output limit of {ceiling} tokens"
+                  if isinstance(ceiling, int) and not isinstance(ceiling, bool) and ceiling > 0
+                  else "the output limit")
+    note = f"Your call of {called} was cut at {stopped_at}, inside its arguments, so it was not executed."
+    if kept_at:
+        note += f" What it had written is kept at `{kept_at}`."
+    note += " Make the call again with less in it, in smaller parts if it is long."
+    return (f"{text}\n\n{note}" if text else note), whole, note
 
 
 def _reasoning_text(value: Any, answer: Any) -> Optional[str]:
@@ -1305,9 +1386,14 @@ class Gateway:
         request_id, billing, price = self._write_local_row(alias, ledger, caller, request_id, result,
                                                            started_at, duration_s)
         tool_calls = [call for call in result.get("tool_calls") or [] if isinstance(call, dict)]
+        # After the row: what the model made is what was measured, the note is the door's.
+        text, tool_calls, cut_note = _without_the_cut_call(
+            request_id, result.get("finish_reason"), result.get("response") or "", tool_calls,
+            result.get("unreadable_arguments") or {}, result.get("max_tokens"),
+        )
         return Completion(
             request_id=request_id, alias=alias, owner=owner, route="local", model=result.get("model"),
-            text=result.get("response") or "",
+            text=text, cut_note=cut_note,
             prompt_tokens=result.get("prompt_tokens"), completion_tokens=result.get("response_tokens"),
             thinking_tokens=result.get("thinking_tokens"),
             started_at=started_at, duration_s=duration_s, billing=billing,
@@ -1664,8 +1750,13 @@ class Gateway:
             logger.error("Usage row for gateway request %r via peer %s was not built", request_id, peer_id, exc_info=True)
         else:
             (self._ledger or default_ledger()).append(row)
+        # The host's wire carries no mark and no ceiling: a cut call reaches here as `{}`.
+        shown_text, tool_calls, cut_note = _without_the_cut_call(
+            request_id, result.get("finish_reason"), text, tool_calls, {}, None,
+        )
         return Completion(
-            request_id=request_id, alias=name, owner=peer_id, route="peer", model=model, text=text,
+            request_id=request_id, alias=name, owner=peer_id, route="peer", model=model, text=shown_text,
+            cut_note=cut_note,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=result.get("thinking_tokens"),
             started_at=started_at, duration_s=duration_s, billing=billing, cost_amount=None,
@@ -2655,6 +2746,9 @@ class GatewayServer:
         finish_reason = _openai_finish_reason(completion)
         inline_usage = None if include_usage else _usage(completion)
         finished = False
+        if wrote_text and completion.cut_note:
+            # `completion.text` ends in the note, and the client has the rest of it already.
+            await emit(with_role_once({"content": f"\n\n{completion.cut_note}"}))
         if not wrote_text and completion.text:
             if completion.tool_calls:
                 await emit(with_role_once({"content": completion.text}))
@@ -2759,6 +2853,9 @@ class GatewayServer:
                 await stream.write(_sse_event(_content_block_start(0)))
                 await stream.write(_sse_event(_text_delta(0, completion.text)))
                 text_block_open = True
+        elif text_block_open and completion.cut_note:
+            # The block is open with the text the client has; the note goes after it, once.
+            await stream.write(_sse_event(_text_delta(0, f"\n\n{completion.cut_note}")))
         if text_block_open:
             await stream.write(_sse_event(_content_block_stop(0)))
             index = 1
