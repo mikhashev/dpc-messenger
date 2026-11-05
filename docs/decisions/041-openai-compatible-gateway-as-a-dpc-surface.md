@@ -1120,6 +1120,14 @@ An image beside tools stays in its turn and the call streams. The other provider
 they were. The launcher's frames were read from one live call with one tool; llama-server's
 were read from code and not run.)*
 
+*(**Amendment, 2026-11-05 — the door's usage carries the cache hit its row holds.** Mike's
+call, 2026-11-05. A local call's `cached_tokens` (the number `usage_row` takes) is printed as
+`prompt_tokens_details.cached_tokens`, inside `prompt_tokens`, on the OpenAI form, and in the
+Messages form as `cache_read_input_tokens` with `input_tokens` the prompt minus the hit, as
+Anthropic defines the two, so a client that sums them counts the prompt once. A hit nobody
+measured, or larger than its prompt, is no field; the peer wire carries none, so a
+`remote:` alias prints none.)*
+
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
 Sharing a vendor-backed alias is a different act: **the node holding the key

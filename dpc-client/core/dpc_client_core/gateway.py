@@ -605,6 +605,10 @@ class Completion:
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     # The reasoning text `thinking_tokens` counts, or None where there is none.
     thinking: Optional[str] = None
+    # How much of `prompt_tokens` the engine or vendor served from its cache, the
+    # ledger row's `cached_tokens`; None where nobody measured it (the peer wire
+    # carries none), and then the shapes print no field rather than a zero.
+    cached_tokens: Optional[int] = None
 
 
 def _finish_reason(reported: Optional[str], tool_calls: List[Dict[str, Any]]) -> Optional[str]:
@@ -1312,6 +1316,8 @@ class Gateway:
             output_includes_thinking=result.get("output_includes_thinking", "unknown"),
             tool_calls=tool_calls,
             thinking=_reasoning_text(result.get("thinking"), result.get("response")),
+            # The number the row above took from the same dict.
+            cached_tokens=result.get("cached_tokens"),
         )
 
     def _write_local_row(
@@ -1702,15 +1708,31 @@ def _output_tokens(completion: Completion) -> Tuple[int, Optional[int]]:
     return count, thinking
 
 
+def _cached(completion: Completion) -> Optional[int]:
+    """The cache hit as a whole count inside the prompt, or None: a hit larger
+    than its prompt is not a split a client could subtract."""
+    hit = completion.cached_tokens
+    if isinstance(hit, bool) or not isinstance(hit, int) or hit < 0:
+        return None
+    if hit > (completion.prompt_tokens or 0):
+        return None
+    return hit
+
+
 def _usage(completion: Completion) -> Dict[str, Any]:
     prompt = completion.prompt_tokens or 0
     output, reasoning = _output_tokens(completion)
-    return {
+    usage: Dict[str, Any] = {
         "prompt_tokens": prompt,
         "completion_tokens": output,
         "total_tokens": prompt + output,
         "completion_tokens_details": {"reasoning_tokens": reasoning or 0},
     }
+    # Inside `prompt_tokens`, as OpenAI defines it; absent when not measured.
+    hit = _cached(completion)
+    if hit is not None:
+        usage["prompt_tokens_details"] = {"cached_tokens": hit}
+    return usage
 
 
 def _openai_finish_reason(completion: Completion) -> str:
@@ -2708,7 +2730,7 @@ class GatewayServer:
             if not text:
                 return
             if not stream.opened:
-                await stream.write(_sse_event(_message_head(minted, alias, input_tokens=0)))
+                await stream.write(_sse_event(_message_head(minted, alias, input_usage={"input_tokens": 0})))
                 await stream.write(_sse_event(_content_block_start(0)))
                 text_block_open = True
             await stream.write(_sse_event(_text_delta(0, text)))
@@ -2731,7 +2753,7 @@ class GatewayServer:
         index = 0
         if not stream.opened:
             await stream.write(_sse_event(
-                _message_head(minted, alias, input_tokens=completion.prompt_tokens or 0)))
+                _message_head(minted, alias, input_usage=_anthropic_input(completion))))
             if completion.text or not completion.tool_calls:
                 # A text block even when empty, as the non-stream shape has one.
                 await stream.write(_sse_event(_content_block_start(0)))
@@ -2799,8 +2821,19 @@ def _anthropic_output(completion: Completion) -> Dict[str, Any]:
     return usage
 
 
+def _anthropic_input(completion: Completion) -> Dict[str, Any]:
+    """Anthropic's `input_tokens` is the prompt read fresh, beside
+    `cache_read_input_tokens`; a client sums them, so with a measured hit the
+    prompt is split and never repeated. Unmeasured: the whole prompt, no field."""
+    prompt = completion.prompt_tokens or 0
+    hit = _cached(completion)
+    if hit is None:
+        return {"input_tokens": prompt}
+    return {"input_tokens": prompt - hit, "cache_read_input_tokens": hit}
+
+
 def _anthropic_usage(completion: Completion) -> Dict[str, Any]:
-    return {"input_tokens": completion.prompt_tokens or 0, **_anthropic_output(completion)}
+    return {**_anthropic_input(completion), **_anthropic_output(completion)}
 
 
 def _message_content(completion: Completion) -> List[Dict[str, Any]]:
@@ -2833,11 +2866,11 @@ def _message_json(completion: Completion) -> Dict[str, Any]:
 # The stream events, in the order the wire wants them.
 
 
-def _message_head(request_id: str, alias: str, *, input_tokens: int) -> Dict[str, Any]:
+def _message_head(request_id: str, alias: str, *, input_usage: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "message_start", "message": {
         "id": f"msg_{request_id}", "type": "message", "role": "assistant", "model": alias,
         "content": [], "stop_reason": None, "stop_sequence": None,
-        "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+        "usage": {**input_usage, "output_tokens": 0},
     }}
 
 
