@@ -44,6 +44,18 @@ session: "DPC Project group chat, 2026-10-25 — card THE-BACKEND-KEEPS-NO-LIST-
 > foreign `taskkill`, the signal's name and the weaker guarantee on POSIX is corrected
 > to what the code does and what was measured.
 >
+> **Amendment of 2026-11-05 (Mike's yes): `swap` joins the stop kinds.** Point 4 said that a
+> switch of local engines reaches the supervisor as the UI's stop button and is `ui_stop`.
+> That held until the idle swap and the card queue (ADR-044, amendments of 2026-11-02): a
+> holder is now stopped to free the card for another start with no person's press, and the
+> log read `stopped` / `ui_stop` for it. The stop is real and the default named who asked,
+> wrongly. A stop made because a swap needed the card is `stopped` with `stop_kind: swap`
+> (the vocabulary's own word, **local engine swap**), put down in one place,
+> `_stop_for_the_swap`, which every swap reaches (the idle swap, the card queue, a
+> borrow and its way back); a person's Stop engine and a settings save stay `ui_stop`.
+> `engine_switch` stays out: it named the same thing under a rule written when no path to
+> it existed.
+>
 > **Axis `knowledge, network`.** `knowledge` because most spawns are an agent's tool
 > calls and the board card carries that axis; `network` because the two local engines of
 > ADR-040 and ADR-044 (both `network`) join the same ownership. `honesty` was considered
@@ -287,7 +299,9 @@ holds on Windows only.
    - `cancelled_by_agent` — killed by its own agent through `kill_my_process` (point 8).
    - `orphan_swept` — a process of an earlier run found alive at start and killed (point 6).
    - `stopped` — a stop DPC asked for while the backend runs, with a second field,
-     `stop_kind`: `ui_stop` (a person stopped it from the UI), `failed_start` (a start
+     `stop_kind`: `ui_stop` (a person stopped it from the UI), `swap` (the stop of a
+     local engine that held the card another start needed, made with no person's press:
+     the idle swap, the card queue, a borrow and its way back), `failed_start` (a start
      that did not finish, or that the launcher refused at the version check or the smoke,
      cleared away), `engine_died` (the engine died after its start had succeeded and DPC
      stopped the launcher: Strata's watcher and a 503 naming the engine's exit code; the
@@ -298,8 +312,9 @@ holds on Windows only.
      `stop_reason`, so as not to collide with the `stop_reason` the gateway writes on the
      wire (the Anthropic Messages API field), which cannot be renamed. Mike's call,
      2026-10-25, on the proposal of Ark and CC; the rename and `engine_died` the same day
-     on the reviews of Ark, Zcode and CC. A switch of local engines has no kind of its
-     own: it reaches the supervisor as the UI's stop button and is `ui_stop`.
+     on the reviews of Ark, Zcode and CC. A switch of local engines had no kind of its
+     own while it reached the supervisor as the UI's stop button and was `ui_stop`; since
+     the idle swap stops a holder by itself it has one, `swap` (amendment of 2026-11-05).
    - `crashed` — ended by a signal or by an NTSTATUS error code (`0xC0000000` up to, not
      including, `0xE0000000`: the customer bit marks codes a program chose, so `exit(-1)`,
      `0xFFFFFFFF`, stays an ordinary exit) that nobody sent. The rule is **who sent, not
@@ -330,7 +345,8 @@ holds on Windows only.
    back in the commit that adds its producer. The list is an allowlist, so a value nothing
    produces cannot appear in the data by accident, and the only way it gets in is a person
    writing it, whereupon the entry says something that did not happen and the check stays
-   silent. By that rule `engine_switch` was removed (no path to it will ever exist),
+   silent. By that rule `engine_switch` was removed (no path to it existed then; the idle swap
+   made one on 2026-11-02, and its word is `swap`),
    `browser_closed` stays (its producer is browser registration, point 5, the next phase),
    and `idle_unload` stays tied to an open question: its producer exists only if the owner
    decides that DPC, and not the engine, unloads an idle model (the question about Strata
@@ -754,7 +770,7 @@ Compliance, not progress. Every item is a test or a recorded measurement. The te
 - [ ] **`kill_my_process`** refuses a pid that is not in the registry, another agent's
   pid and the backend's pid, and ends its own as `cancelled_by_agent`.
 - [ ] **Exit reasons** are one of the eight words on every path that ends a process, a
-  `stopped` carries one of the five `stop_kind` values, and `exit_code` and `signal` are
+  `stopped` carries one of the six `stop_kind` values, and `exit_code` and `signal` are
   stored on every entry (`exited` with 0 included); a test enumerates the code paths.
   (Partly done: the registry refuses a word outside the lists, tests
   `TestTheClosedVocabulary`; the enumeration of every code path is not written.)
@@ -1009,7 +1025,7 @@ files.**
   every spawn and end was judged too heavy.
 - **Q8 — an engine stopped by its supervisor while the backend runs. Answered,
   2026-10-25 (Mike's call).** A stop from the UI (a switch to the other local engine
-  arrives as the same button) and an unfinished or refused start cleared away end the child
+  arrived as the same button until the idle swap of 2026-11-02, whose stop is `swap`) and an unfinished or refused start cleared away end the child
   with a stop DPC sent, outside the backend's own stop; an engine that died after it was up
   and had its launcher stopped is `engine_died`. The word is `stopped`, with `stop_kind`
   saying what kind; a stop announced after the orderly stop began is `backend_stop`
@@ -1034,7 +1050,7 @@ and is not used for the registry.
 |---|---|---|
 | **process registry** (`ProcessRegistry`, a module `process_registry.py`, a state file `~/.dpc/process_registry.json` and daily files `~/.dpc/process_registry/YYYY-MM-DD.jsonl`, rotated past 10 MiB as `YYYY-MM-DD.N.jsonl`) | `AgentRegistry` in `dpc_agent/utils.py`: a list the backend keeps and persists; the daily files follow the **node ledger**'s way of appending | "registry" is crowded (agents, tools); the qualifier carries it. "Ledger" was not used: the **node ledger** is the usage record. |
 | **exit reason** (`exit_reason`), the eight values `exited`, `timeout`, `memory_ceiling`, `backend_stop`, `cancelled_by_agent`, `orphan_swept`, `crashed`, `stopped` | `timed_out`, `ceiling_mb`, `exceeded_mb`, `killed` on `SupervisedRun`; "stop" from `stop_all_supervisors`; "orphan" from `retire_orphan`; `stopped` from `provider_unavailable` ("stopped after an engine failure") | `crashed` has no earlier use; its meaning is Q2, answered in point 4. |
-| **`stop_kind`** with `idle_unload`, `ui_stop`, `engine_died`, `failed_start`, `browser_closed` | `launcher_kind` (a closed set that qualifies a broader word); `idle_unload_s` of ADR-044; `_clear_unfinished_start`; `_fail_closed` | Present only on `stopped`. Named `stop_kind` so as not to collide with the `stop_reason` the gateway writes on the wire (the Anthropic Messages API field; the browser tool's scroll loop and the file search have a `stop_reason` of their own too); a file written under the first spelling is read as `stop_kind`. Not `stop_cause`: beside `exit_reason` it would read as a synonym. |
+| **`stop_kind`** with `idle_unload`, `ui_stop`, `swap`, `engine_died`, `failed_start`, `browser_closed` | `launcher_kind` (a closed set that qualifies a broader word); `idle_unload_s` of ADR-044; `_clear_unfinished_start`; `_fail_closed` | Present only on `stopped`. Named `stop_kind` so as not to collide with the `stop_reason` the gateway writes on the wire (the Anthropic Messages API field; the browser tool's scroll loop and the file search have a `stop_reason` of their own too); a file written under the first spelling is read as `stop_kind`. Not `stop_cause`: beside `exit_reason` it would read as a synonym. |
 | **`exit_code`**, **`signal`** | `returncode` on `SupervisedRun`; POSIX signal names | Stored on every entry; `exit_code: null` means this backend did not see the end; `signal` is the signal's name (`SIGKILL`). |
 | **`parent_pid`**, **`parent_start_time`** | `pid` and the start time of point 3 | Make the registry a tree; the graph of point 8 is a view over it. |
 | **spawn origin** (`SPAWN_ORIGIN`, a context variable) with `agent_id`, `conversation_id`, `tool`, `round` | `CALL_PROGRESS` in `llm_adapter.py`; `agent_id` and `conversation_id` are the code's words | "origin" also means who raised a board entry (glossary, **origin**); the two senses are different and do not meet in one file, and both glossary rows now say so. |

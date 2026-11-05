@@ -201,6 +201,7 @@ describe('how an entry ended', () => {
         expect(endLabel(proc({ ended_at: iso(1), exit_reason: 'exited', exit_code: 2 }))).toBe('exited 2');
         expect(endLabel(proc({ ended_at: iso(1), exit_reason: 'exited', exit_code: null }))).toBe('exited');
         expect(endLabel(proc({ ended_at: iso(1), exit_reason: 'stopped', stop_kind: 'ui_stop' }))).toBe('stopped · ui_stop');
+        expect(endLabel(proc({ ended_at: iso(1), exit_reason: 'stopped', stop_kind: 'swap' }))).toBe('stopped · swap');
         expect(endLabel(proc({ ended_at: iso(1), exit_reason: 'memory_ceiling' }))).toBe('memory_ceiling');
         expect(endLabel(proc({ ended_at: iso(1), exit_reason: null }))).toBe('ended');
     });

@@ -1113,8 +1113,11 @@ def engine_refusal_in(error: Optional[BaseException]) -> Optional[LlamaServerErr
 
 
 async def stop_by_hand(supervisor: "LlamaServerSupervisor", timeout: Optional[float] = None,
-                       reopen: bool = True) -> None:
+                       reopen: bool = True, why: Optional[str] = None) -> None:
     """The Stop engine command's path (`stop_local_engine`) and the idle swap's.
+
+    `why` is the registry's stop word where it is not a person's press (the swap passes `swap`);
+    left out, the stop reads `ui_stop`.
 
     Behind the supervisor's start lock, so a start in progress finishes first rather
     than spawning after the stop; then the existing drain-then-stop. `timeout=None`
@@ -1123,7 +1126,7 @@ async def stop_by_hand(supervisor: "LlamaServerSupervisor", timeout: Optional[fl
     asked after the drain, not before it: a save that retired the supervisor while
     it drained leaves it closed."""
     async with supervisor._start_lock:
-        await supervisor.drain(timeout=timeout)
+        await supervisor.drain(timeout=timeout, **({"why": why} if why else {}))
         if reopen and _still_configured(supervisor):
             supervisor.reopen()
 
@@ -1790,11 +1793,10 @@ class LlamaServerSupervisor:
     EXCLUSIVE_ON_THE_CARD = False
     # The process registry's launcher word for this engine (ADR-046 point 3).
     PROCESS_LAUNCHER = "llamacpp_server"
-    # A stop DPC asks for outside its own shutdown and outside a failed start is a
-    # person's action in the UI (the stop button, a settings save that retires the
-    # child). `idle_unload` has no path of its own in the code (no child is stopped
-    # for being idle), and a switch to the other engine reaches here as the same stop
-    # button, so there is no word for it.
+    # A stop DPC asks for outside its own shutdown, outside a failed start and outside a
+    # swap is a person's action in the UI (the stop button, a settings save that retires
+    # the child). `idle_unload` has no path of its own in the code (no child is stopped
+    # for being idle). The stop a swap makes says `swap`: `_stop_for_the_swap` passes it.
     DEFAULT_STOP = "ui_stop"
 
     @classmethod
@@ -2526,7 +2528,7 @@ class LlamaServerSupervisor:
         done whoever is still waiting for it."""
         try:
             parked = await holder._parked_conversations()
-            await stop_by_hand(holder)
+            await stop_by_hand(holder, why="swap")
         except BaseException:
             holder._end_swap_drain()
             raise
@@ -3538,8 +3540,11 @@ class LlamaServerSupervisor:
             return False
 
     @on_the_owner_loop
-    async def drain(self, timeout: Optional[float] = 120.0) -> None:
+    async def drain(self, timeout: Optional[float] = 120.0, why: Optional[str] = None) -> None:
         """Refuse new work, let in-flight calls finish, then stop.
+
+        `why` is the process registry's word for that stop, put down once the wait is over (a
+        stop already announced by a death keeps its own); left out, `DEFAULT_STOP`.
 
         `timeout=None` waits as long as the work takes. That is Mike's rule for
         a configuration change, 2026-08-22: a save must never cut a generation
@@ -3559,6 +3564,8 @@ class LlamaServerSupervisor:
                 self.ENGINE, self.alias,
                 self._in_flight,
             )
+        if why and not self._stop_why:
+            self._stop_why = why
         await self.stop()
 
     async def _wait_idle(self) -> None:

@@ -208,8 +208,10 @@ _OLD_STOP_FIELD = "stop_reason"  # read from an older file, never written
 # A value stays only while something produces it or a named decision will create its
 # producer (ADR-046 point 4). `browser_closed` is the browser's orderly close
 # (`AuthBrowser.close` in `dpc_agent/tools/browser.py`); `idle_unload` waits on
-# the owner's open choice of who unloads an idle engine.
-STOP_VALUES = ("idle_unload", "ui_stop", "engine_died", "failed_start", "browser_closed")
+# the owner's open choice of who unloads an idle engine; `swap` is the stop of a local
+# engine that held the card another start needed (`_stop_for_the_swap`), made with no
+# person's press.
+STOP_VALUES = ("idle_unload", "ui_stop", "engine_died", "failed_start", "browser_closed", "swap")
 LAUNCHER_KINDS = ("tool", "subsystem")
 # A subsystem's launcher is one of these words; a tool's is the tool's name.
 SUBSYSTEMS = ("strata", "llamacpp_server", "browser", "device_probe", "git_helper")

@@ -174,7 +174,7 @@ class TestTheClosedVocabulary:
         assert "stop_reason" not in written, "stop_reason is the Anthropic field the gateway writes"
 
     def test_the_list_holds_what_something_produces_and_engine_switch_is_not_in_it(self, registry):
-        assert set(STOP_VALUES) == {"idle_unload", "ui_stop", "engine_died", "failed_start", "browser_closed"}
+        assert set(STOP_VALUES) == {"idle_unload", "ui_stop", "engine_died", "failed_start", "browser_closed", "swap"}
         registry.register(7_100_003, launcher="strata", launcher_kind="subsystem", command="x")
         with pytest.raises(ValueError):
             registry.end(7_100_003, 0, reason="stopped", stop="engine_switch")

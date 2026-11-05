@@ -527,9 +527,9 @@ class TestOneDeadline:
         timeouts = []
         real_stop = base_mod.stop_by_hand
 
-        async def recording(supervisor, timeout=None, reopen=True):
+        async def recording(supervisor, timeout=None, reopen=True, why=None):
             timeouts.append(timeout)
-            await real_stop(supervisor, timeout=timeout, reopen=reopen)
+            await real_stop(supervisor, timeout=timeout, reopen=reopen, why=why)
 
         monkeypatch.setattr(base_mod, "stop_by_hand", recording)
         reached, let_go = _slow_stop(f)
