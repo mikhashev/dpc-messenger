@@ -2974,7 +2974,13 @@ class ContextFirewall:
     # --- Block / Unblock (blocked_nodes) ---
 
     def is_blocked(self, node_id: Any) -> bool:
-        """`node_id` is in `blocked_nodes`: no session, no dial, no relay, no wake."""
+        """`node_id` is in `blocked_nodes`: no session, no dial, no relay, no gossip,
+        no file, no wake, and no reply from the DHT.
+
+        In the DHT a node names itself and nothing proves it (RPCs are unsigned),
+        so a block by id there stops a client that keeps its id, not one that
+        lies about it. Signing the RPCs is a separate card.
+        """
         return isinstance(node_id, str) and node_id in getattr(self, 'blocked_nodes', ())
 
     @staticmethod

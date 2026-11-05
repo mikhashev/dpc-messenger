@@ -5096,6 +5096,10 @@ class CoreService:
             })
 
         await self.disconnect_from_peer(node_id)
+        # Its DHT entry and any value stored under its id; Unblock restores none.
+        dht_manager = getattr(self.p2p_manager, "dht_manager", None)
+        if dht_manager is not None:
+            dht_manager.forget(node_id)
         await self._apply_saved_firewall_rules(message)
         logger.info("Blocked %s: removed from %d group(s), %d rule(s) deleted, was connected: %s",
                     node_id, len(removed_from_groups), len(removed_rules), was_connected)

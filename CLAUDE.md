@@ -1319,13 +1319,20 @@ Access control file format (`~/.dpc/privacy_rules.json`):
 session either way: the listener closes it after its key is proved and before HELLO_ACK,
 telling it nothing (as at `max_proved_connections_per_ip`), and nothing dials it, answers
 its Hub offer, relays for it or delivers its gossip. Its group records are kept but not
-relayed and wake nobody. The list is written by Block (`block_peer`), which also removes
+relayed and wake nobody. In the DHT (UDP) a packet that names a blocked id as its sender
+is dropped with no reply and changes nothing, nothing is handed out under that id in
+FIND_NODE or FIND_VALUE, and a STORE or a value keyed by it is refused; `block_peer` also
+drops its routing entry (replacement cache included) and any value stored under it.
+**That check is on the id a packet claims, and nothing proves the claim**: DHT messages
+are unsigned, so a block by id stops a client that keeps its id and not one that lies
+about it, until the RPCs are signed (a separate card). The list is written by Block
+(`block_peer`), which also removes
 the node from every group and deletes every other entry in this file that is its id (a key,
 a value or a list item; a sandbox path that merely contains the id stays), and is
 cleared by Unblock (`unblock_peer`), which restores none of that; the editor's Save keeps
 the list on disk and drops any entry that is a blocked id, so a snapshot from before the
 Block puts nothing back. A block names a key, so it does not survive the peer's reinstall. Mike's
-call, 2026-10-31.
+call, 2026-10-31; the DHT part, Mike's call, 2026-11-05.
 
 **Transcription has two directions and two permissions.** `enabled` / `allow_nodes` /
 `allow_groups` / `allowed_models` govern *serving*: whether a peer may use this node's

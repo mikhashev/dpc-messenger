@@ -254,6 +254,11 @@ class KBucket:
         Returns:
             True if node was removed
         """
+        # The cache too: a node left there is promoted into the table later.
+        cached = [n for n in self.replacement_cache if n.node_id == node_id]
+        for node in cached:
+            self.replacement_cache.remove(node)
+
         for node in self.nodes:
             if node.node_id == node_id:
                 self.nodes.remove(node)
@@ -271,7 +276,7 @@ class KBucket:
                 self._last_updated = time.time()
                 return True
 
-        return False
+        return bool(cached)
 
     def get_last_updated(self) -> float:
         """Return timestamp of last update (add/remove/refresh)."""

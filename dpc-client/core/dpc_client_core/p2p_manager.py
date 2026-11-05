@@ -437,7 +437,9 @@ class P2PManager:
                     node_id=self.node_id,
                     ip=dht_announce_ip,
                     port=p2p_port,  # P2P TLS port for connections
-                    config=dht_config
+                    config=dht_config,
+                    # Asked per packet, so a hot-reload or an Unblock needs no restart.
+                    is_blocked=lambda nid: is_blocked_by(getattr(self, "firewall", None), nid),
                 )
 
                 # Start DHT UDP server

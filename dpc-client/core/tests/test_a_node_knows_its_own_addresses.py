@@ -83,6 +83,7 @@ def _manager(responses):
     manager.stats = {"bootstraps": 0}
     manager.config = SimpleNamespace(bootstrap_timeout=5.0)
     manager._seed_nodes = []
+    manager.rpc_handler = SimpleNamespace(blocked_answers=0)
 
     async def _ping(ip, port):
         return responses.get((ip, port))

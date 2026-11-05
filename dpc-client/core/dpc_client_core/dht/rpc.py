@@ -27,6 +27,7 @@ import uuid
 from typing import Dict, Any, List, Optional, Tuple, Callable
 from dataclasses import dataclass
 
+from .distance import parse_node_id
 from .routing import DHTNode, RoutingTable
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,8 @@ class DHTRPCHandler:
     def __init__(
         self,
         routing_table: RoutingTable,
-        config: Optional[RPCConfig] = None
+        config: Optional[RPCConfig] = None,
+        is_blocked: Optional[Callable[[str], bool]] = None
     ):
         """
         Initialize RPC handler.
@@ -64,9 +66,12 @@ class DHTRPCHandler:
         Args:
             routing_table: Routing table for node lookups
             config: RPC configuration (optional)
+            is_blocked: asked on every packet, so a block or an Unblock
+                needs no restart; None means nobody is blocked
         """
         self.routing_table = routing_table
         self.config = config or RPCConfig()
+        self._is_blocked = is_blocked
 
         # UDP transport
         self.transport: Optional[asyncio.DatagramTransport] = None
@@ -77,6 +82,9 @@ class DHTRPCHandler:
 
         # Key-value storage (key → value, for STORE/FIND_VALUE)
         self._storage: Dict[str, str] = {}
+
+        # Answers to our own requests that a block dropped (see _drop_blocked)
+        self.blocked_answers = 0
 
         # Rate limiting (ip → (count, reset_time))
         self._rate_limiter: Dict[str, Tuple[int, float]] = {}
@@ -114,6 +122,84 @@ class DHTRPCHandler:
         if self.transport:
             self.transport.close()
             logger.info("DHT RPC server stopped")
+
+    # ===== Block (blocked_nodes) =====
+
+    def _blocked(self, node_id: Any) -> bool:
+        """A node id in `blocked_nodes`. Never this node's own id, and False
+        when the question fails. An id here is a claim: nothing in a packet
+        proves it, so this stops a client that keeps its id, not one that lies."""
+        if self._is_blocked is None or not isinstance(node_id, str):
+            return False
+        if node_id == self.routing_table.node_id:
+            return False
+        try:
+            return self._is_blocked(node_id) is True
+        except Exception:
+            return False
+
+    # Storage keys that carry a node id after a prefix.
+    _KEY_PREFIXES = ("cert:", "relay:")
+
+    @classmethod
+    def _key_id(cls, key: Any) -> Any:
+        """The node id a storage key names: `cert:<id>` and `relay:<id>` name <id>."""
+        if isinstance(key, str):
+            for prefix in cls._KEY_PREFIXES:
+                if key.startswith(prefix):
+                    return key[len(prefix):]
+        return key
+
+    def _blocked_key(self, key: Any) -> bool:
+        """A key that is a blocked id, or `cert:` plus one."""
+        return self._blocked(self._key_id(key))
+
+    def without_blocked(self, nodes: List[DHTNode]) -> List[DHTNode]:
+        """`nodes` minus every blocked id."""
+        return [n for n in nodes if not self._blocked(n.node_id)]
+
+    def _unblocked_closest(self, target: str) -> List[DHTNode]:
+        """The 20 closest known nodes to hand out, a blocked id never among them.
+        `target` may be a key (`cert:<id>`); any key that is not a node id (nor a
+        prefix plus one) has no neighbours to give and is answered with an
+        empty list, not silence."""
+        target_id = self._key_id(target)
+        try:
+            parse_node_id(target_id)
+        except (ValueError, AttributeError):
+            return []
+        pool = self.routing_table.find_closest_nodes(
+            target_id, count=max(20, self.routing_table.get_node_count())
+        )
+        return self.without_blocked(pool)[:20]
+
+    def forget(self, node_id: str) -> None:
+        """Drop `node_id` from the table (and its replacement cache) and any
+        value stored under it, its `cert:` too. Called when it is blocked."""
+        self.routing_table.remove_node(node_id)
+        for key in (node_id, *(prefix + node_id for prefix in self._KEY_PREFIXES)):
+            self._storage.pop(key, None)
+
+    def _drop_blocked(self, message: Dict, addr: Tuple[str, int]) -> None:
+        """What the choke point does with a packet from a blocked id."""
+        node_id = message.get("node_id")
+        logger.debug("DHT: dropped %s from blocked node %s (%s:%d)",
+                     message.get("type"), node_id, addr[0], addr[1])
+        self.routing_table.remove_node(node_id)
+        # Our own ping, answered by a blocked node: end the wait at once, as
+        # an answer that does not count, and remember that it was a block.
+        future = self._pending_rpcs.pop(message.get("rpc_id"), None)
+        if future is not None and not future.done():
+            self.blocked_answers += 1
+            future.set_result({"type": "BLOCKED", "node_id": node_id})
+
+    def purge_blocked(self) -> int:
+        """Take every blocked id out of the table: a block edited in by hand or
+        reloaded leaves entries `block_peer` never saw. Returns how many."""
+        gone = [n.node_id for n in self.routing_table.get_all_nodes() if self._blocked(n.node_id)]
+        for node_id in gone:
+            self.routing_table.remove_node(node_id)
+        return len(gone)
 
     # ===== Outgoing RPCs (Client-side) =====
 
@@ -190,7 +276,7 @@ class DHTRPCHandler:
                 )
                 for n in nodes_data
             ]
-            return nodes
+            return self.without_blocked(nodes)
 
         return None
 
@@ -213,6 +299,9 @@ class DHTRPCHandler:
         Returns:
             True if stored successfully
         """
+        if self._blocked_key(key):
+            return False
+
         rpc = {
             "type": "STORE",
             "rpc_id": str(uuid.uuid4()),
@@ -252,6 +341,9 @@ class DHTRPCHandler:
         Returns:
             {"value": str} if found, {"nodes": List[DHTNode]} if not found
         """
+        if self._blocked_key(key):
+            return None
+
         rpc = {
             "type": "FIND_VALUE",
             "rpc_id": str(uuid.uuid4()),
@@ -275,7 +367,7 @@ class DHTRPCHandler:
                     )
                     for n in nodes_data
                 ]
-                return {"nodes": nodes}
+                return {"nodes": self.without_blocked(nodes)}
 
         return None
 
@@ -326,6 +418,18 @@ class DHTRPCHandler:
         """
         sender_ip, sender_port = addr
 
+        # One choke point, before the rate limit so a blocked sender spends no
+        # budget of whoever shares its address: a request or a PONG naming a
+        # blocked id gets no reply, changes nothing, and loses its table entry.
+        # A bad packet is left to the rate limit and the error path below.
+        try:
+            message = json.loads(data.decode('utf-8'))
+        except ValueError:
+            message = None
+        if isinstance(message, dict) and self._blocked(message.get("node_id")):
+            self._drop_blocked(message, addr)
+            return
+
         # Rate limiting
         if not self._check_rate_limit(sender_ip):
             logger.warning("Rate limit exceeded for %s", sender_ip)
@@ -335,7 +439,8 @@ class DHTRPCHandler:
 
         try:
             # Deserialize message
-            message = json.loads(data.decode('utf-8'))
+            if message is None:
+                message = json.loads(data.decode('utf-8'))
             rpc_type = message.get("type")
             rpc_id = message.get("rpc_id")
 
@@ -410,7 +515,7 @@ class DHTRPCHandler:
             return
 
         # Find k closest nodes
-        closest = self.routing_table.find_closest_nodes(target_id, count=20)
+        closest = self._unblocked_closest(target_id)
 
         # Serialize nodes
         nodes_data = [
@@ -443,6 +548,17 @@ class DHTRPCHandler:
             logger.warning("STORE missing key/value from %s", addr)
             return
 
+        # Not stored, and said so: the sender is not the blocked one.
+        if self._blocked_key(key):
+            logger.debug("DHT: refused STORE under blocked key %s", key)
+            await self._send_response(addr, {
+                "type": "STORED",
+                "rpc_id": rpc_id,
+                "success": False,
+                "timestamp": time.time(),
+            })
+            return
+
         # Store key-value pair
         self._storage[key] = value
         logger.debug("DHT: Stored %s → %s (storage now has %d entries)",
@@ -470,7 +586,7 @@ class DHTRPCHandler:
             return
 
         # Check if we have the value
-        if key in self._storage:
+        if key in self._storage and not self._blocked_key(key):
             # Found - return value
             response = {
                 "type": "VALUE_FOUND",
@@ -480,7 +596,7 @@ class DHTRPCHandler:
             }
         else:
             # Not found - return k closest nodes
-            closest = self.routing_table.find_closest_nodes(key, count=20)
+            closest = self._unblocked_closest(key)
             nodes_data = [
                 {"node_id": node.node_id, "ip": node.ip, "port": node.port}
                 for node in closest

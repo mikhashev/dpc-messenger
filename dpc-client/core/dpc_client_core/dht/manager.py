@@ -22,7 +22,7 @@ import json
 import logging
 import socket
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 
 from .routing import DHTNode, RoutingTable
@@ -87,7 +87,8 @@ class DHTManager:
         node_id: str,
         ip: str,
         port: int,
-        config: Optional[DHTConfig] = None
+        config: Optional[DHTConfig] = None,
+        is_blocked: Optional[Callable[[str], bool]] = None
     ):
         """
         Initialize DHT manager.
@@ -97,6 +98,7 @@ class DHTManager:
             ip: Local IP address for DHT announcements
             port: UDP port for DHT RPCs
             config: DHT configuration (optional)
+            is_blocked: node id -> in `blocked_nodes`; see DHTRPCHandler
         """
         self.node_id = node_id
         self.ip = ip
@@ -114,7 +116,7 @@ class DHTManager:
             timeout=self.config.rpc_timeout,
             max_retries=self.config.rpc_retries
         )
-        self.rpc_handler = DHTRPCHandler(self.routing_table, rpc_config)
+        self.rpc_handler = DHTRPCHandler(self.routing_table, rpc_config, is_blocked)
 
         # Background tasks
         self._maintenance_task: Optional[asyncio.Task] = None
@@ -155,6 +157,10 @@ class DHTManager:
         self._maintenance_task = asyncio.create_task(self._maintenance_loop())
 
         logger.info("DHT manager started on %s:%d", host, bind_port)
+
+    def forget(self, node_id: str) -> None:
+        """Drop a node from the table and any value stored under its id (Block)."""
+        self.rpc_handler.forget(node_id)
 
     async def stop(self):
         """Stop DHT manager and background tasks."""
@@ -208,6 +214,7 @@ class DHTManager:
         self_seeds = []
 
         # Step 1: Contact all seed nodes
+        blocked_before = self.rpc_handler.blocked_answers
         ping_tasks = [
             self._ping_node(ip, port)
             for ip, port in seed_nodes
@@ -245,6 +252,12 @@ class DHTManager:
                     "itself (%s). A seed has to be a node somewhere else.",
                     len(self_seeds), len(seed_nodes),
                     ", ".join(f"{ip}:{port}" for ip, port in self_seeds),
+                )
+            elif self.rpc_handler.blocked_answers > blocked_before:
+                logger.info(
+                    "DHT cannot bootstrap: %d seed(s) answered and are blocked "
+                    "(blocked_nodes); a seed has to be a node you have not blocked.",
+                    self.rpc_handler.blocked_answers - blocked_before,
                 )
             else:
                 logger.error("Bootstrap failed: no responsive seed nodes")
@@ -373,6 +386,7 @@ class DHTManager:
         start_time = time.time()
 
         # Initialize with k closest from local table
+        self.rpc_handler.purge_blocked()
         shortlist = self.routing_table.find_closest_nodes(target_id, self.config.k)
 
         if not shortlist:
@@ -566,6 +580,9 @@ class DHTManager:
             (ip, port) tuple if found, None otherwise
         """
         logger.debug("Searching for peer %s", target_node_id[:20])
+
+        if self.rpc_handler._blocked(target_node_id):
+            return None
 
         # Perform iterative lookup
         closest = await self.find_node(target_node_id)
@@ -795,6 +812,9 @@ class DHTManager:
         """
         logger.debug("Searching for full endpoint: %s", target_node_id[:20])
 
+        if self.rpc_handler._blocked(target_node_id):
+            return None
+
         # Perform iterative lookup
         closest = await self.find_node(target_node_id)
 
@@ -965,6 +985,7 @@ class DHTManager:
         Get all known peers from routing table.
 
         Returns:
-            List of DHTNode objects
+            List of DHTNode objects, a blocked id never among them
         """
+        self.rpc_handler.purge_blocked()
         return self.routing_table.get_all_nodes()
