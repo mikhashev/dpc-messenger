@@ -1048,7 +1048,8 @@ gives:
 | Path | Who | What the client sees |
 |---|---|---|
 | Stream, no tools | `llamacpp_server`, `strata`, `deepseek`, `zai`, `neuraldeep` | Deltas as the engine makes them, before the content |
-| Tools | those five and `ollama` | One delta before the prose and the calls: no provider streams while holding tools |
+| Stream, tools | `llamacpp_server`, `strata` (amendment 2026-11-05 below) | Deltas as the engine makes them, the calls whole at the end |
+| Tools, otherwise | `deepseek`, `zai`, `neuraldeep`, `ollama`, and a whole message on any | One delta before the prose and the calls, or the message field |
 | No stream entry point | `anthropic`, `ollama` | One delta before the whole answer |
 | An image without tools, or no stream asked | every provider that stores it | One delta before the text, or the message field |
 | Stream on a peer alias | the host | One delta **after** the text when the host sent chunks, because a chunk carries text and the reasoning rides the frame that ends them; before it when the host sent none |
@@ -1078,6 +1079,46 @@ count alone. A real block carries a signature this door cannot make, the client
 replays it, and on a DeepSeek alias the converter would send a replayed block's text
 to the vendor as `reasoning_content`. Whether an unsigned block is safe in Claude
 Code was not tested; open for Mike.)*
+
+*(**Amendment, 2026-11-05 — a door's stream with tools streams from the engine, on the
+two local provider types.** Mike's call, 2026-11-05. Measured through the door: one tool
+and `stream: true` gave one reasoning delta and one content delta at the end of the call,
+and without tools 28 as they came. dsh sends tools on every call.
+
+`generate_with_tools` of `llamacpp_server` and `strata` opens a stream when it is handed
+`on_reasoning`. Reasoning and text go out as the engine makes them; call deltas are
+assembled by index and come back in the same result, so a call is still one piece on the
+wire, parsed. Nothing is folded into the text on this path. Without `on_reasoning` the
+request stays the one it was, with no `stream` key.
+
+**Who passes it.** The two doors and no agent: the gateway on any stream, the Messages
+form included (its client gets the text as it comes and still no reasoning), and the P2P
+door on a stream a guest asked for. That corrects "only the door passes" above: a guest's
+text on these aliases now leaves the host as it is made, and its reasoning still rides the
+last frame.
+
+**The result is the whole path's.** The launcher's whole reply is its stream collected
+(`openai_collect`, `serve/server.py` v0.2.9), and two of that function's rules are repeated
+here: a call the output ended inside is left out on `strata`, and reasoning equal to the
+answer is not also reasoning. Usage, `timings`, the finish word and
+`strata_rejected_tool_calls` are read off whichever chunk carries them; the launcher puts
+all of them on its last, and the last is where a refused call's name is, absent when none
+was refused. llama-server's whole reply keeps a cut call, so there `tool_use_of` still marks
+`unreadable_arguments`. The door drops that mark, as on the whole path: its client gets `{}`
+under `finish_reason: length`.
+
+**A stream that breaks.** A dropped connection, or an orderly end with no finish word, which
+every ending of the launcher's stream names (`openai_chunks`, read; llama-server's was not
+read or run, only the provider's reader of it). Before any delta went out it is retried, as a
+drop on the whole path is; an `error` frame there goes by `_is_retryable`'s words. After a
+delta none is retried: a second generation would write its text behind the first's. The client
+gets the `error` event, and such a call leaves no row, as any failed call does. The plain stream
+has the same gap on a drop and stays as it was: there it needs this whole rule, because that
+path retries after text today.
+
+An image beside tools stays in its turn and the call streams. The other providers are as
+they were. The launcher's frames were read from one live call with one tool; llama-server's
+were read from code and not run.)*
 
 ### D5 — API-backed models are shareable, and the quota is a financial control
 

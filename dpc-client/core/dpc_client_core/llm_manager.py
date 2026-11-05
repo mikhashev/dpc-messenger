@@ -1046,7 +1046,7 @@ class LLMManager:
         what every caller written before this parameter existed keeps doing.
 
         `on_reasoning(text, conversation_id)` is `on_chunk` for the reasoning,
-        before the content it precedes; the gateway is its one caller, and a
+        before the content it precedes; the two doors pass it, and a
         caller that does not pass it gets what it always got, the text on
         `on_chunk` and the reasoning in `thinking`. A provider with none sends
         none. Nothing here cleans it (ADR-041 D4, amendment 2026-11-04).

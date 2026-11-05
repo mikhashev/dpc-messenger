@@ -236,6 +236,17 @@ class StrataProvider(LlamaServerProvider):
     def _model_name(self) -> str:
         return self.model or "strata"
 
+    def _keeps_a_call_off_a_stream(self, arguments: str, finish_reason: Optional[str]) -> bool:
+        """The launcher's whole reply leaves out a call the output ended inside
+        (`openai_collect`, #211, serve/server.py v0.2.9); its stream has sent the pieces."""
+        if finish_reason == "tool_calls":
+            return True
+        try:
+            json.loads(arguments)
+        except ValueError:
+            return False
+        return True
+
     @classmethod
     def _is_retryable(cls, error: Exception) -> bool:
         """A call served to a peer is never retried here: the engine is the

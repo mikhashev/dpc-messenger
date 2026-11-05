@@ -11,6 +11,8 @@ Reasoning travels by `on_reasoning`, a parameter only the door passes, so the ag
 loop, the UI and a peer's chunk sender keep receiving what they received, and that
 is pinned on the real provider classes. The stack under the door is real, as in the
 file `_Engine` comes from.
+
+Beside tools `llamacpp_server` and `strata` stream too (amendment 2026-11-05).
 """
 
 import ast
@@ -18,13 +20,20 @@ import asyncio
 import inspect
 import json
 import textwrap
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
+from aiohttp import web
 from openai import AsyncOpenAI
 
+from dpc_client_core import gateway as gateway_module
+from dpc_client_core.dpc_agent.llm_adapter import DpcLlmAdapter
 from dpc_client_core.gateway import _openai_messages
 from dpc_client_core.llm_manager import PROVIDER_MAP, LLMManager
+from dpc_client_core.managers.llama_server_supervisor import _CARD_HOLDS
 from dpc_client_core.providers import AIProvider
 from dpc_client_core.providers.deepseek_provider import DeepSeekProvider
 from dpc_client_core.providers.neuraldeep_provider import NeuralDeepProvider
@@ -40,6 +49,7 @@ from tests.test_a_client_that_leaves_the_door_ends_the_call_and_nothing_is_gener
     _Client,
     _Engine,
     _forget,
+    _host,
     _local_provider,
     _messages,
     _service,
@@ -84,9 +94,10 @@ def _field(deltas, name):
     return [delta[name] for delta in deltas if delta.get(name)]
 
 
-async def _door_call(tmp_path, engine_kwargs, body, *, path=CHAT_PATH, provider_kwargs=None, prepare=None):
+async def _door_call(tmp_path, engine_kwargs, body, *, path=CHAT_PATH, provider_kwargs=None, prepare=None,
+                     engine_class=_Engine):
     """One call through the whole stack. Returns (status, text, engine, rows)."""
-    async with _Engine(**engine_kwargs) as engine:
+    async with engine_class(**engine_kwargs) as engine:
         provider = _local_provider(engine, **(provider_kwargs or {}))
         if prepare is not None:
             prepare(provider)
@@ -159,25 +170,718 @@ async def test_a_stream_on_a_strata_alias_carries_it_too(tmp_path):
     assert _field(_deltas(text), "reasoning_content") == list(REASONING)
 
 
-# --- (2) the tools path answers whole: one delta, still in front ----------------------
+# --- (2) the tools path on a door's stream: deltas as the engine makes them, a call whole ---
+
+
+CALL_IN_PIECES = {"id": "call_85f3c07168754206a762f97c", "name": "read_file",
+                  "pieces": ('{"path"', ': "a', '.txt"}')}
+CALL_ON_THE_WIRE = {"index": 0, "id": CALL_IN_PIECES["id"], "type": "function",
+                    "function": {"name": "read_file", "arguments": json.dumps({"path": "a.txt"})}}
+# The `timings` of the live call, whole.
+LAUNCHER_TIMINGS = {"cache_n": 0, "prompt_n": 285, "prompt_ms": 1240.5, "prompt_per_token_ms": 4.353,
+                    "prompt_per_second": 229.7, "predicted_n": 52, "predicted_ms": 457.4,
+                    "predicted_per_token_ms": 8.796, "predicted_per_second": 113.7,
+                    "draft_n": 48, "draft_n_accepted": 36}
+
+
+class _Launcher(_Engine):
+    """`openai_chunks` on a stream, `openai_collect` on a whole reply: a role chunk, a
+    keep-alive comment, reasoning, content, a call as a name and then pieces of its
+    arguments, and a last chunk with the finish word, usage, `timings` and, when a call
+    was refused, `strata_rejected_tool_calls`. `usage_apart` is llama-server: the reason
+    on one chunk and the usage on a chunk with no choices, and a whole reply that keeps a
+    call the output ended inside. `breaks` says per request where a stream goes wrong and,
+    in a pair, how: `error` is the launcher's frame after the headers went (`EngineDied`,
+    `ValueError`), `drop` the connection aborting, `clean` an orderly end with no finish word."""
+
+    def __init__(self, *, calls=(), finish="stop", rejected=None, usage_apart=False, breaks=(), timings=LAUNCHER_TIMINGS,
+                 after_last=False, with_usage=True, **kwargs):
+        super().__init__(**kwargs)
+        self.calls, self.finish, self.rejected, self.timings = calls, finish, rejected, timings
+        self.usage_apart, self.after_last, self.with_usage = usage_apart, after_last, with_usage
+        self.breaks = list(breaks)
+        self.raw = []
+
+    async def _chat(self, request):
+        self.raw.append(await request.read())
+        return await super()._chat(request)
+
+    def _usage(self):
+        return {"prompt_tokens": 285, "completion_tokens": 52, "total_tokens": 337,
+                "prompt_tokens_details": {"cached_tokens": 0}}
+
+    def _last_fields(self):
+        fields = {"usage": self._usage()} if self.with_usage else {}
+        if self.timings:
+            fields["timings"] = self.timings
+        if self.rejected:
+            fields["strata_rejected_tool_calls"] = self.rejected
+        return fields
+
+    async def _whole(self):
+        await asyncio.sleep(self.delay)
+        reasoning, content = "".join(self.reasoning), "".join(self.content)
+        if reasoning.strip() and reasoning.strip() == content.strip():
+            reasoning = ""
+        calls = [{"id": c["id"], "type": "function",
+                  "function": {"name": c["name"], "arguments": "".join(c["pieces"])}} for c in self.calls]
+        if self.finish != "tool_calls" and not self.usage_apart:
+            calls = [c for c in calls if _parses(c["function"]["arguments"])]
+        message = {"role": "assistant", "content": content or None}
+        if reasoning:
+            message["reasoning_content"] = reasoning
+        if calls:
+            message["tool_calls"] = calls
+        return web.json_response({
+            "id": "chatcmpl-engine", "object": "chat.completion", "created": 1, "model": "m",
+            "choices": [{"index": 0, "message": message, "finish_reason": self.finish}],
+            **self._last_fields(),
+        })
+
+    async def _stream(self, request):
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        breaks_at = self.breaks.pop(0) if self.breaks else None
+        breaks_at, how = breaks_at if isinstance(breaks_at, tuple) else (breaks_at, "error")
+
+        async def send(payload):
+            await response.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+            await asyncio.sleep(self.delay)
+
+        async def end():
+            await response.write(b"data: [DONE]\n\n")
+            await response.write_eof()
+            return response
+
+        async def broke(where):
+            if breaks_at != where:
+                return False
+            if how == "drop":
+                request.transport.abort()
+            elif how == "error":
+                await send({"error": {"type": "server_error", "message": "connection reset by the engine"}})
+            elif how == "refusal":
+                await send({"error": {"type": "server_error", "message": "the engine refused this request"}})
+            return True
+
+        await send(self._chunk({"role": "assistant", "content": None if self.usage_apart else ""}))
+        await response.write(b": keep-alive\n\n")
+        if await broke("role"):
+            return await end()
+        for piece in self.reasoning:
+            await send(self._chunk({"reasoning_content": piece}))
+            if await broke("reasoning"):
+                return await end()
+        if self.content_gate is not None:
+            await self.content_gate.wait()
+        for piece in self.content:
+            await send(self._chunk({"content": piece}))
+            if await broke("content"):
+                return await end()
+        for index, call in enumerate(self.calls):
+            await send(self._chunk({"tool_calls": [{"index": index, "id": call["id"], "type": "function",
+                                                    "function": {"name": call["name"], "arguments": ""}}]}))
+            for piece in call["pieces"]:
+                await send(self._chunk({"tool_calls": [{"index": index, "function": {"arguments": piece}}]}))
+                if await broke("call"):
+                    return await end()
+        if self.usage_apart:
+            await send(self._chunk({}, self.finish))
+            await send({**self._chunk({}), "choices": [], **self._last_fields()})
+        else:
+            await send({**self._chunk({}, self.finish), **self._last_fields()})
+        if self.after_last:
+            await send({**self._chunk({}), "choices": []})
+        return await end()
+
+
+def _parses(text):
+    try:
+        json.loads(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _called(*calls, **kwargs):
+    """What a double is given for a turn that ends on calls."""
+    return {"calls": calls or (CALL_IN_PIECES,), "finish": "tool_calls", **kwargs}
+
+
+@pytest.fixture(params=["llamacpp_server", "strata"])
+def local(request, tmp_path):
+    """Both classes, each with its engine's shape: (double's kwargs, provider's kwargs)."""
+    if request.param == "strata":
+        return {}, _strata_kwargs(tmp_path)
+    return {"usage_apart": True}, {}
+
+
+def _strata_kwargs(tmp_path):
+    return {"provider_class": StrataProvider, "model": "qwen3.8-flash-next-iq3_xxs",
+            "strata_install_dir": str(_install(tmp_path)), "strata_base_config": "strata-base.json",
+            "conversation_cache_mib": 10240}
 
 
 @pytest.mark.parametrize("content", [CONTENT, ()], ids=["with-prose", "calls-alone"])
 @pytest.mark.asyncio
-async def test_on_the_tools_path_the_reasoning_is_one_delta_in_front_of_the_prose_and_the_calls(tmp_path, content):
+async def test_a_stream_with_tools_gives_the_deltas_as_made_and_the_call_whole_at_the_end(tmp_path, local, content):
+    engine_kwargs, provider_kwargs = local
     status, text, engine, _ = await _door_call(
-        tmp_path, {"reasoning": REASONING, "content": content, "tool_calls": [ENGINE_CALL]},
-        _chat(stream=True, tools=TOOLS_OPENAI),
+        tmp_path, {**engine_kwargs, **_called(reasoning=REASONING, content=content)},
+        _chat(stream=True, tools=TOOLS_OPENAI), engine_class=_Launcher, provider_kwargs=provider_kwargs,
     )
-    assert status == 200
-    deltas = _deltas(text)
-    assert deltas[0] == {"role": "assistant", "reasoning_content": "".join(REASONING)}
-    assert len(_field(deltas, "reasoning_content")) == 1, "the reasoning was written twice"
-    filled = [delta for delta in deltas[1:] if delta]
-    assert "tool_calls" in filled[-1] and "role" not in filled[-1]
-    if content:
-        assert filled[0] == {"content": "".join(content)}
+    assert status == 200, text
+    assert engine.requests[0]["stream"] is True
+    deltas = [delta for delta in _deltas(text) if delta]
+    assert deltas[0] == {"role": "assistant", "reasoning_content": REASONING[0]}
+    assert _field(deltas, "reasoning_content") == list(REASONING), "the pieces, and once: nothing again at the end"
+    assert _field(deltas, "content") == list(content)
+    assert deltas[-1] == {"tool_calls": [CALL_ON_THE_WIRE]}, "a call in one piece, parsed"
+    assert len(_field(deltas, "tool_calls")) == 1
+    keys = [next(k for k in delta if k != "role") for delta in deltas]
+    assert keys == ["reasoning_content"] * 3 + ["content"] * len(content) + ["tool_calls"]
+    assert "```tool_call" not in text, "the plain path's folded call reached a client as text"
     assert _events(text)[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_a_reasoning_delta_beside_tools_leaves_while_the_model_is_still_thinking(tmp_path, local):
+    engine_kwargs, provider_kwargs = local
+    gate = asyncio.Event()
+    async with _Launcher(**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT, content_gate=gate)) as engine:
+        provider = _local_provider(engine, **provider_kwargs)
+        try:
+            async with _running(tmp_path, _service(tmp_path, provider)) as (server, _):
+                client = _Client(server.port, _key(tmp_path), CHAT_PATH, _chat(stream=True, tools=TOOLS_OPENAI))
+                await client.send()
+                seen = await client.read_until(REASONING[-1].encode("utf-8"))
+                assert b'"content"' not in seen and not engine.finished
+                assert provider.supervisor._in_flight == 1, "the stream runs outside the call slot"
+                assert _CARD_HOLDS.get(ALIAS), "the stream runs with no hold on the card"
+                gate.set()
+                rest = await client.read_until(b"[DONE]")
+                await client.leave()
+                assert b"answer" in rest and b"read_file" in rest
+        finally:
+            gate.set()
+            _forget(provider)
+
+
+@pytest.mark.asyncio
+async def test_the_messages_form_beside_tools_streams_its_text_and_ends_on_a_whole_call(tmp_path, local):
+    engine_kwargs, provider_kwargs = local
+    status, text, _, _ = await _door_call(
+        tmp_path, {**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT)},
+        _messages(stream=True, tools=TOOLS_ANTHROPIC), path=MESSAGES_PATH,
+        engine_class=_Launcher, provider_kwargs=provider_kwargs,
+    )
+    assert status == 200, text
+    events = _events(text)
+    assert [e["delta"]["text"] for e in events if e.get("delta", {}).get("type") == "text_delta"] == list(CONTENT)
+    (start,) = [e["content_block"] for e in events if e.get("content_block", {}).get("type") == "tool_use"]
+    assert start["name"] == "read_file"
+    (piece,) = [e["delta"]["partial_json"] for e in events if e.get("delta", {}).get("type") == "input_json_delta"]
+    assert json.loads(piece) == {"path": "a.txt"}
+    assert "think " not in text, "this form hands over no reasoning"
+
+
+@pytest.mark.asyncio
+async def test_the_request_on_a_stream_is_the_request_on_the_whole_path_and_two_keys(tmp_path, local):
+    engine_kwargs, provider_kwargs = local
+    async with _Launcher(**engine_kwargs, **_called(content=CONTENT)) as engine:
+        provider = _local_provider(engine, **provider_kwargs)
+        try:
+            turns = [{"role": "user", "content": "hi"}]
+            await provider.generate_with_tools(turns, TOOLS_ANTHROPIC, reasoning_effort="high", tool_choice="none")
+            trace = _Trace()
+            await provider.generate_with_tools(turns, TOOLS_ANTHROPIC, reasoning_effort="high", tool_choice="none",
+                                               on_chunk=trace.chunk, on_reasoning=trace.reasoning)
+        finally:
+            _forget(provider)
+    whole, streamed = engine.requests
+    assert streamed.pop("stream_options") == {"include_usage": True} and streamed.pop("stream") is True
+    assert streamed == whole
+
+
+# --- (2a) the result is the one the whole path gives ---------------------------------------
+
+
+def _comparable(result):
+    """The result without what is our clock's: the engine's words on the call all stay."""
+    usage = dict(result["usage"])
+    speed = {k: v for k, v in usage.pop("speed").items() if k not in ("elapsed_s", "total_tok_s")}
+    return {**result, "usage": {**usage, "speed": speed},
+            "tool_calls_raw": [vars(call) for call in result["tool_calls_raw"]]}
+
+
+CUT_CALL = {"id": "call_cut", "name": "read_file", "pieces": ('{"path"', ': "a.t')}
+TWO_CALLS = (CALL_IN_PIECES, {"id": "call_2", "name": "read_file", "pieces": ('{"path": "b.txt"}',)})
+SAME_RESULT = {
+    "call": _called(reasoning=REASONING, content=CONTENT),
+    "calls-alone": _called(reasoning=REASONING, content=()),
+    "two-calls": _called(*TWO_CALLS, content=CONTENT),
+    "no-reasoning": _called(content=CONTENT),
+    "text-only": {"reasoning": REASONING, "content": CONTENT},
+    "refused-call": {"reasoning": REASONING, "content": CONTENT,
+                     "rejected": [{"name": "ghost", "reason": "undeclared"}]},
+    "cut-in-a-call": {"calls": (CALL_IN_PIECES, CUT_CALL), "finish": "length", "content": CONTENT},
+    "cut-in-prose": {"reasoning": REASONING, "content": CONTENT, "finish": "length"},
+    "no-think-end": {"reasoning": ("the same text",), "content": ("the same text",)},
+    "unparsed-under-tool-calls": _called(CUT_CALL, content=CONTENT),
+    "a-chunk-after-the-last": {"content": CONTENT, "after_last": True,
+                               "rejected": [{"name": "ghost", "reason": "undeclared"}]},
+}
+
+
+async def _both_paths(engine_kwargs, provider_kwargs):
+    """(the whole path's result, the stream's, the stream's trace)."""
+    turns = [{"role": "user", "content": "hi"}]
+    async with _Launcher(**engine_kwargs) as engine:
+        provider = _local_provider(engine, **{"max_tokens": 64, **provider_kwargs})
+        try:
+            whole = await provider.generate_with_tools(turns, TOOLS_ANTHROPIC)
+            thinking_after_whole = provider.get_last_thinking()
+            trace = _Trace()
+            streamed = await provider.generate_with_tools(
+                turns, TOOLS_ANTHROPIC, on_chunk=trace.chunk, on_reasoning=trace.reasoning,
+            )
+            assert provider.get_last_thinking() == thinking_after_whole
+            assert (provider.get_last_usage() or {}) == streamed["usage"]
+        finally:
+            _forget(provider)
+    return whole, streamed, trace
+
+
+@pytest.mark.parametrize("scenario", SAME_RESULT, ids=str)
+@pytest.mark.asyncio
+async def test_the_stream_returns_the_result_the_whole_path_returns(tmp_path, local, scenario):
+    engine_kwargs, provider_kwargs = local
+    whole, streamed, trace = await _both_paths({**engine_kwargs, **SAME_RESULT[scenario]}, provider_kwargs)
+    assert _comparable(streamed) == _comparable(whole)
+    assert "".join(trace.of("content")) == whole["content"], "what was written is the text the result holds"
+
+
+@pytest.mark.asyncio
+async def test_the_engines_words_on_the_call_arrive_from_either_shape_of_stream(tmp_path, local):
+    engine_kwargs, provider_kwargs = local
+    _, streamed, _ = await _both_paths({**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT)},
+                                       provider_kwargs)
+    usage = streamed["usage"]
+    assert (usage["prompt_tokens"], usage["completion_tokens"]) == (285, 52)
+    assert (usage["finish_reason"], usage["max_tokens"]) == ("tool_calls", 64)
+    assert (usage["prefilled_tokens"], usage["cached_tokens"]) == (285, 0)
+    assert (usage["prompt_ms"], usage["predicted_ms"]) == (1240.5, 457.4)
+    assert usage["speed"]["draft_acceptance"] == 0.75
+    assert usage["speed"]["speed_source"] == "engine"
+    assert usage["reasoning_tokens"] > 0 and usage["thinking_source"] == "estimated"
+
+
+@pytest.mark.asyncio
+async def test_with_no_engine_timings_the_stream_splits_the_speed_at_its_first_chunk(tmp_path, local):
+    engine_kwargs, provider_kwargs = local
+    whole, streamed, _ = await _both_paths({**engine_kwargs, **_called(content=CONTENT, timings=None)}, provider_kwargs)
+    assert "prefill_tok_s" not in whole["usage"]["speed"], "a call with no first chunk has no such boundary"
+    assert streamed["usage"]["speed"]["prefill_tok_s"] > 0
+    assert "speed_source" not in streamed["usage"]["speed"]
+
+
+@pytest.mark.asyncio
+async def test_the_callbacks_are_told_the_conversation_and_the_text_is_kept_without_a_chunk_callback(tmp_path, local):
+    engine_kwargs, provider_kwargs = local
+    async with _Launcher(**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT)) as engine:
+        provider = _local_provider(engine, **provider_kwargs)
+        try:
+            turns = [{"role": "user", "content": "hi"}]
+            reasoning, chunk = AsyncMock(), AsyncMock()
+            await provider.generate_with_tools(turns, TOOLS_ANTHROPIC, conversation_id="conv",
+                                               on_chunk=chunk, on_reasoning=reasoning)
+            assert reasoning.await_args_list[0].args == (REASONING[0], "conv")
+            assert chunk.await_args_list[0].args == (CONTENT[0], "conv")
+            result = await provider.generate_with_tools(turns, TOOLS_ANTHROPIC, on_reasoning=reasoning)
+            assert result["content"] == "".join(CONTENT)
+        finally:
+            _forget(provider)
+
+
+@pytest.mark.asyncio
+async def test_a_call_the_launcher_refused_is_named_from_the_last_chunk_and_absent_otherwise(tmp_path, local, caplog):
+    engine_kwargs, provider_kwargs = local
+    refused = [{"name": "ghost", "reason": "undeclared"}]
+    with caplog.at_level("WARNING", logger="dpc_client_core.providers.llamacpp_server_provider"):
+        _, streamed, _ = await _both_paths({**engine_kwargs, "content": CONTENT, "rejected": refused}, provider_kwargs)
+    assert streamed["rejected_tool_calls"] == ["ghost"]
+    assert caplog.text.count("not a call of a declared tool: ghost") == 2, "said on each path"
+    _, streamed, _ = await _both_paths({**engine_kwargs, "content": CONTENT}, provider_kwargs)
+    assert "rejected_tool_calls" not in streamed
+
+
+@pytest.mark.asyncio
+async def test_a_call_cut_at_the_limit_is_marked_on_llama_server_and_left_out_by_the_launcher(tmp_path):
+    cut = {"calls": (CUT_CALL,), "finish": "length", "content": CONTENT}
+    _, llama, _ = await _both_paths({**cut, "usage_apart": True}, {})
+    (call,) = llama["tool_calls_raw"]
+    assert call.input == {} and call.unreadable_arguments == '{"path": "a.t'
+    assert llama["usage"]["finish_reason"] == "length"
+    _, strata, _ = await _both_paths(cut, _strata_kwargs(tmp_path))
+    assert strata["tool_calls_raw"] == [] and strata["usage"]["finish_reason"] == "length"
+
+
+@pytest.mark.parametrize("usage_apart, delta", [
+    (True, [{**CALL_ON_THE_WIRE, "id": "call_cut", "function": {"name": "read_file", "arguments": "{}"}}]), (False, None),
+], ids=["llamacpp_server", "strata"])
+@pytest.mark.asyncio
+async def test_at_the_door_a_cut_call_is_empty_on_llama_server_and_absent_on_the_launcher_under_length(
+    tmp_path, usage_apart, delta,
+):
+    _, text, _, _ = await _door_call(
+        tmp_path, {"calls": (CUT_CALL,), "finish": "length", "content": CONTENT, "usage_apart": usage_apart},
+        _chat(stream=True, tools=TOOLS_OPENAI), engine_class=_Launcher,
+        provider_kwargs={} if usage_apart else _strata_kwargs(tmp_path),
+    )
+    assert (_field(_deltas(text), "tool_calls") or [None])[0] == delta
+    assert _events(text)[-1]["choices"][0]["finish_reason"] == "length"
+
+
+@pytest.mark.asyncio
+async def test_a_callback_that_raises_closes_the_stream_to_the_engine(local):
+    engine_kwargs, provider_kwargs = local
+    many = tuple(f"thought{i} " for i in range(60))
+    async with _Launcher(**engine_kwargs, reasoning=many, content=CONTENT, delay=0.02) as engine:
+        provider = _local_provider(engine, **provider_kwargs)
+        try:
+            with pytest.raises(RuntimeError):
+                await provider.generate_with_tools([{"role": "user", "content": "hi"}], TOOLS_ANTHROPIC,
+                                                   on_reasoning=AsyncMock(side_effect=ValueError("no")))
+            await _until(lambda: engine.left or engine.finished)
+            assert engine.left == 1 and engine.finished == 0, "the engine went on for nobody"
+        finally:
+            _forget(provider)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_closed_a_whole_call_at_the_limit_keeps_it_on_the_launcher(tmp_path):
+    whole, streamed, _ = await _both_paths({"calls": (CALL_IN_PIECES,), "finish": "length"}, _strata_kwargs(tmp_path))
+    assert [c.input for c in streamed["tool_calls_raw"]] == [{"path": "a.txt"}] == [
+        c.input for c in whole["tool_calls_raw"]]
+
+
+@pytest.mark.asyncio
+async def test_the_row_of_a_streamed_call_with_tools_has_the_engines_word(tmp_path, local):
+    engine_kwargs, provider_kwargs = local
+    _, text, _, rows = await _door_call(
+        tmp_path, {**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT)},
+        _chat(stream=True, tools=TOOLS_OPENAI, stream_options={"include_usage": True}),
+        engine_class=_Launcher, provider_kwargs={"max_tokens": 64, **provider_kwargs},
+    )
+    (row,) = rows
+    assert row["counts_source"] == "engine"
+    assert (row["prompt_tokens"], row["completion_tokens"]) == (285, 52)
+    assert (row["finish_reason"], row["max_tokens"]) == ("tool_calls", 64)
+    assert (row["prefilled_tokens"], row["cached_tokens"]) == (285, 0)
+    assert row["thinking_tokens"] > 0 and row["output_includes_thinking"] == "includes"
+    assert _events(text)[-1]["usage"]["completion_tokens"] == 52
+
+
+@pytest.mark.asyncio
+async def test_a_picture_beside_tools_stays_in_the_turn_and_the_call_streams(tmp_path, local, caplog):
+    engine_kwargs, provider_kwargs = local
+
+    def sees(provider):
+        provider.supports_vision = lambda: True
+
+    picture = [{"type": "text", "text": "what is this"},
+               {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{ONE_PIXEL}"}}]
+    body = {"model": ALIAS, "stream": True, "tools": TOOLS_OPENAI, "messages": [{"role": "user", "content": picture}]}
+    with caplog.at_level("INFO", logger="dpc_client_core.providers.llamacpp_server_provider"):
+        status, text, engine, _ = await _door_call(
+            tmp_path, {**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT)}, body,
+            prepare=sees, engine_class=_Launcher, provider_kwargs=provider_kwargs,
+        )
+    assert status == 200, text
+    assert _field(_deltas(text), "reasoning_content") == list(REASONING)
+    (sent,) = engine.requests
+    assert sent["stream"] is True and "image_url" in json.dumps(sent["messages"])
+    assert "images=1 tools=1, tool_calls=1" in caplog.text and "path=tools-stream" in caplog.text
+
+
+# --- (2b) a stream that breaks, and a client that leaves ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_breaks_before_any_delta_is_retried_and_says_everything_once(
+    tmp_path, local, fast_backoff,  # noqa: F811
+):
+    engine_kwargs, provider_kwargs = local
+    status, text, engine, rows = await _door_call(
+        tmp_path, {**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT, breaks=["role"])},
+        _chat(stream=True, tools=TOOLS_OPENAI), engine_class=_Launcher, provider_kwargs=provider_kwargs,
+    )
+    assert status == 200, text
+    assert len(engine.requests) == 2, "nothing was written, so asking again repeats nothing"
+    deltas = _deltas(text)
+    assert _field(deltas, "reasoning_content") == list(REASONING)
+    assert _field(deltas, "content") == list(CONTENT)
+    assert len(rows) == 1
+
+
+@pytest.mark.parametrize("breaks_at", ["reasoning", "content"])
+@pytest.mark.asyncio
+async def test_a_stream_that_breaks_after_a_delta_is_not_asked_again_and_the_client_is_told(
+    tmp_path, local, fast_backoff, breaks_at,  # noqa: F811
+):
+    engine_kwargs, provider_kwargs = local
+    lock = asyncio.Semaphore(1)
+    async with _Launcher(**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT, breaks=[breaks_at]),
+                         ) as engine:
+        provider = _local_provider(engine, **provider_kwargs)
+        try:
+            async with _running(tmp_path, _service(tmp_path, provider), inference_lock=lock) as (server, _):
+                status, text = await _post(server, tmp_path, CHAT_PATH, _chat(stream=True, tools=TOOLS_OPENAI))
+            assert await _settled(engine) == 1, "a second generation would write its text behind the first's"
+            assert not lock.locked() and provider.supervisor._in_flight == 0
+        finally:
+            _forget(provider)
+    assert status == 200
+    (error,) = [event["error"] for event in _events(text) if "error" in event]
+    assert error["code"] == "upstream_error"
+    assert text.count(REASONING[0]) == 1
+    assert "tool_calls" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_writes_and_then_breaks_is_not_asked_again(tmp_path, local, fast_backoff):  # noqa: F811
+    engine_kwargs, provider_kwargs = local
+    _, text, engine, _ = await _door_call(
+        tmp_path, {**engine_kwargs, **_called(content=CONTENT, breaks=["role", "content"])},
+        _chat(stream=True, tools=TOOLS_OPENAI), engine_class=_Launcher, provider_kwargs=provider_kwargs,
+    )
+    assert len(engine.requests) == 2
+    assert text.count(f'"content": "{CONTENT[0]}"') == 1
+
+
+@pytest.mark.parametrize("breaks_at, content", [
+    (("role", "drop"), CONTENT), (("role", "clean"), CONTENT), (("call", "drop"), ()), (("call", "clean"), ()),
+], ids=["drop-in-prefill", "no-finish-in-prefill", "drop-in-a-call", "no-finish-in-a-call"])
+@pytest.mark.asyncio
+async def test_a_stream_gone_wrong_with_nothing_written_is_asked_again_and_says_it_once(
+    tmp_path, local, fast_backoff, breaks_at, content,  # noqa: F811
+):
+    engine_kwargs, provider_kwargs = local
+    status, text, engine, rows = await _door_call(
+        tmp_path, {**engine_kwargs, **_called(content=content, breaks=[breaks_at])},
+        _chat(stream=True, tools=TOOLS_OPENAI), engine_class=_Launcher, provider_kwargs=provider_kwargs,
+    )
+    assert status == 200, text
+    assert len(engine.requests) == 2
+    deltas = _deltas(text)
+    assert _field(deltas, "content") == list(content)
+    assert _field(deltas, "tool_calls") == [[CALL_ON_THE_WIRE]], "the half-written call was not lost"
+    assert _events(text)[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    (row,) = rows
+    assert row["counts_source"] == "engine"
+
+
+@pytest.mark.parametrize("path, body", [
+    (CHAT_PATH, _chat(stream=True, tools=TOOLS_OPENAI)), (MESSAGES_PATH, _messages(stream=True, tools=TOOLS_ANTHROPIC)),
+], ids=["openai", "messages"])
+@pytest.mark.parametrize("breaks_at", [("content", "drop"), ("content", "clean"), ("call", "clean")],
+                         ids=["drop", "no-finish", "no-finish-in-a-call"])
+@pytest.mark.asyncio
+async def test_a_stream_gone_wrong_after_a_delta_is_not_asked_again_and_is_no_answer(
+    tmp_path, local, fast_backoff, breaks_at, path, body,  # noqa: F811
+):
+    engine_kwargs, provider_kwargs = local
+    status, text, engine, rows = await _door_call(
+        tmp_path, {**engine_kwargs, **_called(content=CONTENT, breaks=[breaks_at])}, body, path=path,
+        engine_class=_Launcher, provider_kwargs=provider_kwargs,
+    )
+    assert status == 200, text
+    assert len(engine.requests) == 1
+    assert [event for event in _events(text) if "error" in event], "the client was not told"
+    assert "read_file" not in text
+    assert rows == [], "a broken stream is not a served call"
+
+
+@pytest.mark.parametrize("how", ["drop", "clean"])
+@pytest.mark.asyncio
+async def test_a_retry_that_writes_and_then_goes_wrong_is_not_asked_again(tmp_path, local, fast_backoff, how):  # noqa: F811
+    engine_kwargs, provider_kwargs = local
+    _, text, engine, _ = await _door_call(
+        tmp_path, {**engine_kwargs, **_called(content=CONTENT, breaks=[("role", how), ("content", how)])},
+        _chat(stream=True, tools=TOOLS_OPENAI), engine_class=_Launcher, provider_kwargs=provider_kwargs,
+    )
+    assert len(engine.requests) == 2
+    assert text.count(f'"content": "{CONTENT[0]}"') == 1
+
+
+@pytest.mark.asyncio
+async def test_an_engine_that_never_finishes_a_stream_is_a_failure_and_no_row(tmp_path, local, fast_backoff):  # noqa: F811
+    engine_kwargs, provider_kwargs = local
+    status, text, engine, rows = await _door_call(
+        tmp_path, {**engine_kwargs, **_called(content=CONTENT, breaks=[("role", "clean")] * 5000)},
+        _chat(stream=True, tools=TOOLS_OPENAI), engine_class=_Launcher, provider_kwargs=provider_kwargs,
+    )
+    assert status == 502, text
+    assert len(engine.requests) > 1
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_an_engines_refusal_on_a_stream_is_not_asked_again(tmp_path, local, fast_backoff):  # noqa: F811
+    """Only a broken transport joins the retried set: this frame says the same thing twice."""
+    engine_kwargs, provider_kwargs = local
+    status, text, engine, _ = await _door_call(
+        tmp_path, {**engine_kwargs, **_called(content=CONTENT, breaks=[("role", "refusal")])},
+        _chat(stream=True, tools=TOOLS_OPENAI), engine_class=_Launcher, provider_kwargs=provider_kwargs,
+    )
+    assert status == 502, text
+    assert len(engine.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_finish_word_with_no_usage_is_an_answer_and_is_not_asked_again(tmp_path, local):
+    """The whole path's rule for a reply with no usage: the engine's last chunk is the
+    finish word, so only its absence reads as broken."""
+    engine_kwargs, provider_kwargs = local
+    whole, streamed, _ = await _both_paths({**engine_kwargs, **_called(content=CONTENT, with_usage=False)}, provider_kwargs)
+    assert streamed["usage"] == whole["usage"] == {}
+    assert streamed["content"] == "".join(CONTENT)
+    assert [c.input for c in streamed["tool_calls_raw"]] == [{"path": "a.txt"}]
+
+
+@pytest.mark.asyncio
+async def test_a_call_served_to_a_peer_on_strata_is_not_asked_again_after_a_drop(tmp_path, fast_backoff):  # noqa: F811
+    """ADR-044 point 9: a peer told so comes back on its own."""
+    async with _Launcher(**_called(content=CONTENT, breaks=[("role", "drop")])) as engine:
+        provider = _local_provider(engine, **_strata_kwargs(tmp_path))
+        coordinator, wire = _host(tmp_path, provider)
+        frames = []
+
+        async def send(_peer_id, frame):
+            frames.append(frame)
+
+        wire.p2p_manager.send_message_to_peer = send
+        try:
+            await asyncio.create_task(coordinator.handle_inference_request(
+                "peer-1", "req-1", "hi", provider=provider.alias,
+                messages=[{"role": "user", "content": "hi"}], tools=TOOLS_ANTHROPIC, stream=True,
+            ))
+        finally:
+            _forget(provider)
+    assert len(engine.requests) == 1
+    (answer,) = [f["payload"] for f in frames if f["command"] == "REMOTE_INFERENCE_RESPONSE"]
+    assert answer.get("error") or answer.get("status") == "error"
+
+
+@pytest.mark.parametrize("handler_cancellation", [True, False], ids=["connection-lost", "failing-write"])
+@pytest.mark.asyncio
+async def test_a_client_that_leaves_a_stream_with_tools_stops_the_engine_and_lets_go(
+    tmp_path, local, monkeypatch, fast_backoff, handler_cancellation,  # noqa: F811
+):
+    if not handler_cancellation:
+        runner = gateway_module.web.AppRunner
+        monkeypatch.setattr(gateway_module.web, "AppRunner",
+                            lambda app, **kw: runner(app, **{**kw, "handler_cancellation": False}))
+    engine_kwargs, provider_kwargs = local
+    many = tuple(f"thought{i} " for i in range(60))
+    lock = asyncio.Semaphore(1)
+    async with _Launcher(**engine_kwargs, **_called(reasoning=many, content=CONTENT, delay=0.02)) as engine:
+        provider = _local_provider(engine, **provider_kwargs)
+        try:
+            async with _running(tmp_path, _service(tmp_path, provider), inference_lock=lock) as (server, ledger):
+                client = _Client(server.port, _key(tmp_path), CHAT_PATH, _chat(stream=True, tools=TOOLS_OPENAI))
+                await client.send()
+                await client.read_until(b"thought1 ")
+                await client.leave()
+                await _until(lambda: not lock.locked())
+                assert await _settled(engine) == 1, "the answer was generated again for nobody"
+                assert engine.left == 1 and engine.finished == 0, "the engine went on for nobody"
+                assert provider.supervisor._in_flight == 0, "the call slot is still held"
+                assert not _CARD_HOLDS.get(ALIAS), "the card hold outlived the call"
+                (row,) = list(ledger.rows())
+                assert row["counts_source"] == "ours" and row["thinking_tokens"] > 0
+        finally:
+            _forget(provider)
+
+
+# --- (2c) a host serving a guest's stream ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_host_sends_a_guests_text_as_it_is_made_and_the_calls_and_notes_on_the_last_frame(tmp_path, local):
+    """The P2P door passes the callback too, on a stream a guest asked for."""
+    engine_kwargs, provider_kwargs = local
+    async with _Launcher(**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT)) as engine:
+        provider = _local_provider(engine, **provider_kwargs)
+        coordinator, wire = _host(tmp_path, provider)
+        frames = []
+
+        async def send(_peer_id, frame):
+            frames.append(frame)
+
+        wire.p2p_manager.send_message_to_peer = send
+        try:
+            await asyncio.create_task(coordinator.handle_inference_request(
+                "peer-1", "req-1", "hi", provider=provider.alias,
+                messages=[{"role": "user", "content": "hi"}], tools=TOOLS_ANTHROPIC, stream=True,
+            ))
+        finally:
+            _forget(provider)
+    assert [f["payload"]["delta"] for f in frames if f["command"] == "REMOTE_INFERENCE_CHUNK"] == list(CONTENT)
+    (answer,) = [f["payload"] for f in frames if f["command"] == "REMOTE_INFERENCE_RESPONSE"]
+    assert answer["thinking"] == "".join(REASONING)
+    assert [c["input"] for c in answer["tool_calls"]] == [{"path": "a.txt"}]
+    if provider_kwargs:
+        (sent,) = engine.requests
+        assert sent["strata_checkpoint"] is False, "a peer's call parks nothing, on a stream too"
+
+
+# --- (2d) nobody else moved ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_agents_call_through_the_real_adapter_stays_one_whole_request(tmp_path, local):
+    engine_kwargs, provider_kwargs = local
+    async with _Launcher(**engine_kwargs, **_called(reasoning=REASONING, content=CONTENT)) as engine:
+        provider = _local_provider(engine, **provider_kwargs)
+        try:
+            adapter = DpcLlmAdapter(SimpleNamespace(token_count_manager=None, providers={}), provider_alias="test")
+            chunks = AsyncMock()
+            message, _ = await adapter._chat_native_tools(
+                provider, [{"role": "user", "content": "hi"}],
+                [{"function": {"name": "read_file", "description": "", "parameters": {}}}],
+                on_stream_chunk=chunks, conversation_id="conv",
+            )
+        finally:
+            _forget(provider)
+    (sent,) = engine.requests
+    assert "stream" not in sent and "stream_options" not in sent
+    assert engine.finished == 1
+    assert [call.args for call in chunks.await_args_list] == [("".join(CONTENT), "conv")], "one whole chunk"
+    assert message["thinking"] == "".join(REASONING)
+    assert [json.loads(c["function"]["arguments"]) for c in message["tool_calls"]] == [{"path": "a.txt"}]
+
+
+@pytest.mark.parametrize("body, whole", [
+    ({"tools": TOOLS_OPENAI}, True), ({"stream": True, "tools": TOOLS_OPENAI}, False),
+], ids=["whole", "stream"])
+@pytest.mark.asyncio
+async def test_a_door_call_streams_from_the_engine_only_when_the_client_asked(tmp_path, local, body, whole):
+    engine_kwargs, provider_kwargs = local
+    _, _, engine, _ = await _door_call(tmp_path, {**engine_kwargs, **_called(content=CONTENT)}, _chat(**body),
+                                       engine_class=_Launcher, provider_kwargs=provider_kwargs)
+    (sent,) = engine.requests
+    assert ("stream" not in sent) is whole
+
+
+def test_only_the_two_doors_can_turn_the_stream_on():
+    """Above the providers. `llm_manager` passes on what it is given; the agent package
+    names the callback nowhere, so no agent's call reaches `_call_on_a_stream`."""
+    root = Path(inspect.getfile(LLMManager)).parent
+    naming = {path.relative_to(root).as_posix() for path in root.rglob("*.py")
+              if "on_reasoning" in path.read_text(encoding="utf-8") and path.parent.name != "providers"}
+    assert naming == {"gateway.py", "llm_manager.py", "p2p_coordinator.py"}
+    assert "generate_with_tools" in (root / "dpc_agent" / "llm_adapter.py").read_text(encoding="utf-8")
 
 
 # --- (3) a whole message --------------------------------------------------------------

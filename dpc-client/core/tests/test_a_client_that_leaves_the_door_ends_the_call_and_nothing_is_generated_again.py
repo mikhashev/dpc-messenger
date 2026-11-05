@@ -344,9 +344,10 @@ async def test_a_write_into_a_closing_transport_is_not_read_as_a_provider_failur
 async def test_the_tools_path_generates_once_when_the_write_after_it_finds_the_client_gone(
     tmp_path, fast_backoff, no_handler_cancellation,
 ):
-    """The path that made the whole answer again: a tools call is not a stream, so
-    the first write comes after the engine has finished, and the failure of that
-    write used to throw the finished answer away and ask for it again."""
+    """The path that made the whole answer again: a tools call was not a stream, so
+    the first write came after the engine had finished, and the failure of that write
+    threw the finished answer away and asked for it again. On a vendor's class it is
+    still not a stream; on this class the first write comes with the first delta."""
     gate = asyncio.Event()
     lock = asyncio.Semaphore(1)
     async with _Engine(gate=gate, content=("the whole answer",)) as engine:

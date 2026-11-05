@@ -27,8 +27,10 @@ import asyncio
 import logging
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 
+import httpx
 from openai import AsyncOpenAI
 
 from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_base64,
@@ -581,9 +583,12 @@ class LlamaServerProvider(DeepSeekProvider):
         exception, and retrying it just burns the backoff budget to hear the
         same refusal again. A card held by the other engine is the same: it
         stays held until a person acts (ADR-044 point 4), and so is a pin that
-        is not installed: only the owner's download brings it."""
-        if isinstance(error, (CardHeldError, PinNotInstalledError)):
+        is not installed: only the owner's download brings it. A second generation
+        after a stream broke would write its text behind the first's."""
+        if isinstance(error, (CardHeldError, PinNotInstalledError, _StreamBrokenAfterADelta)):
             return False
+        if isinstance(error, _StreamBrokenBeforeADelta):
+            return True
         code = cls._error_status_code(error)
         if code == 500:
             return False
@@ -1097,6 +1102,10 @@ class LlamaServerProvider(DeepSeekProvider):
         request still carries the tools: the chat template renders them into
         the system head, so dropping them would move the prefix the server has
         cached. The agent loop's post-guard retry is the caller that sends it.
+
+        `on_reasoning` is a door asking for the stream: reasoning and text go out
+        as the engine makes them and the calls come back whole in the same result.
+        Without it the call is not a stream (ADR-041 D4, amendment 2026-11-05).
         """
         self._last_thinking = None
         self._last_usage = None
@@ -1140,8 +1149,6 @@ class LlamaServerProvider(DeepSeekProvider):
             for tc in (msg.tool_calls or []):
                 tool_calls_raw.append(tool_use_of(tc))
 
-            if on_reasoning and thinking:
-                await on_reasoning(thinking, conversation_id)
             if on_chunk and content:
                 await on_chunk(content, conversation_id)
 
@@ -1176,11 +1183,124 @@ class LlamaServerProvider(DeepSeekProvider):
                 result["rejected_tool_calls"] = rejected
             return result
 
+        async def _call_on_a_stream():
+            client = await self._ensure()
+            import time as _time
+            extra_body = self._build_extra_body(
+                reasoning_effort, reasoning_budget_tokens,
+                effective_max_tokens=self.max_tokens,
+            )
+            params: Dict[str, Any] = {
+                "model": self._model_name(),
+                "max_tokens": self.max_tokens,
+                "messages": openai_messages,
+                "tools": openai_tools,
+                "tool_choice": tool_choice,
+                "extra_body": extra_body,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                **self._sampling_on_the_wire(extra_body, self._sampling_params(reasoning_effort=reasoning_effort)),
+            }
+            _t_first: Optional[float] = None
+            content = ""
+            reasoning_text = ""
+            calls: Dict[int, Dict[str, Any]] = {}
+            finish_reason = None
+            raw_usage = None
+            timings = None
+            rejected: List[str] = []
+            handed_over = False
+            try:
+                async with self.supervisor.call_slot():
+                    _t0 = _time.perf_counter()  # inside the slot, as on plain-stream
+                    # Closed on every exit, a failed callback's too: nobody reads what the engine goes on making.
+                    async with await client.chat.completions.create(**params) as stream:
+                        async for chunk in stream:
+                            if _t_first is None:
+                                _t_first = _time.perf_counter() - _t0
+                            # Each read off any chunk: the launcher puts all of it on its last,
+                            # llama-server the reason one chunk before a usage with no choices.
+                            if chunk.usage is not None:
+                                raw_usage = chunk.usage
+                            timings = (chunk.model_extra or {}).get("timings") or timings
+                            rejected = rejected_tool_call_names(chunk) or rejected
+                            if not chunk.choices:
+                                continue
+                            finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
+                            delta = chunk.choices[0].delta
+                            reasoning = getattr(delta, "reasoning_content", None)
+                            if reasoning:
+                                reasoning_text += reasoning
+                                handed_over = True
+                                await on_reasoning(reasoning, conversation_id)
+                            text = getattr(delta, "content", None)
+                            if text:
+                                content += text
+                                if on_chunk:
+                                    handed_over = True
+                                    await on_chunk(text, conversation_id)
+                            for part in getattr(delta, "tool_calls", None) or []:
+                                call = calls.setdefault(
+                                    getattr(part, "index", None) or 0, {"id": None, "name": "", "arguments": ""})
+                                fn = getattr(part, "function", None)
+                                call["id"] = call["id"] or getattr(part, "id", None)
+                                call["name"] = call["name"] or (getattr(fn, "name", None) or "")
+                                call["arguments"] += getattr(fn, "arguments", None) or ""
+                # Every ending of the launcher's stream names one (`openai_chunks`, v0.2.9).
+                if finish_reason is None:
+                    raise httpx.RemoteProtocolError("the stream ended with no finish word")
+            except Exception as e:
+                if handed_over:
+                    raise _StreamBrokenAfterADelta(f"{type(e).__name__}: {e}") from e
+                # The SDK wraps a transport error on the whole path, and not while a stream is read.
+                if isinstance(e, httpx.TransportError):
+                    raise _StreamBrokenBeforeADelta(f"{type(e).__name__}: {e}") from e
+                raise
+            tool_calls_raw = [
+                tool_use_of(SimpleNamespace(id=calls[i]["id"], function=SimpleNamespace(
+                    name=calls[i]["name"], arguments=calls[i]["arguments"])))
+                for i in sorted(calls) if self._keeps_a_call_off_a_stream(calls[i]["arguments"], finish_reason)
+            ]
+            # The launcher's whole reply says this text once, as the answer (`openai_collect`).
+            same_text = reasoning_text.strip() and reasoning_text.strip() == content.strip()
+            thinking = None if same_text else reasoning_text or None
+            self._last_thinking = thinking
+            usage = self._record_usage(
+                raw_usage,
+                path="tools-stream",
+                conversation_id=conversation_id,
+                tool_calls=len(tool_calls_raw),
+                images=image_blocks_in_turns(messages),
+                tools=len(tools or []),
+                effort=self._effort_label(reasoning_effort, extra_body),
+                served_effort=self._served_effort(extra_body),
+                reasoning_text=thinking,
+                elapsed_s=_time.perf_counter() - _t0,
+                t_first_chunk_s=_t_first,
+                finish_reason=finish_reason,
+                max_tokens=self.max_tokens,
+                engine_timings=timings,
+            )
+            result = {
+                "content": content,
+                "tool_calls_raw": tool_calls_raw,
+                "thinking": thinking,
+                "usage": usage,
+            }
+            if rejected:
+                logger.warning(
+                    "'%s': the launcher returned %d call(s) as text, not a call of a declared tool: %s",
+                    self.alias, len(rejected), ", ".join(rejected),
+                )
+                result["rejected_tool_calls"] = rejected
+            return result
+
+        call_engine = _call if on_reasoning is None else _call_on_a_stream
         try:
-            return await _call()
+            return await call_engine()
         except Exception as e:
             if self._is_retryable(e):
-                return await self._retry_with_backoff(_call, e)
+                return await self._retry_with_backoff(call_engine, e)
             raise RuntimeError(
                 f"llamacpp_server native tool calling failed for '{self.alias}': "
                 f"{type(e).__name__}: {e}"
@@ -1274,6 +1394,19 @@ class LlamaServerProvider(DeepSeekProvider):
         """The server serves exactly one -m model and ignores this field, but
         the SDK requires a string; the GGUF's stem says more than an alias."""
         return self.model or Path(self.config["gguf_path"]).stem
+
+    def _keeps_a_call_off_a_stream(self, arguments: str, finish_reason: Optional[str]) -> bool:
+        """Whether a call assembled from deltas is one the whole reply would hold.
+        llama-server's holds a call cut at the limit, and `tool_use_of` marks it."""
+        return True
+
+
+class _StreamBrokenAfterADelta(Exception):
+    """A stream that failed after a delta had reached the door. Not retried."""
+
+
+class _StreamBrokenBeforeADelta(Exception):
+    """A stream the engine dropped or left unfinished with nothing written yet. Retried."""
 
 
 def rejected_tool_call_names(resp: Any) -> List[str]:

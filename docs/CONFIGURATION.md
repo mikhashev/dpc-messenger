@@ -233,9 +233,10 @@ Sampling — `max_tokens`, `temperature`, `top_p`, `stop_sequences` — stays th
 owner's configuration on this node and is not read from the request.
 
 **Reasoning text.** On the OpenAI form a stream carries `reasoning_content` deltas before
-the content they precede, as the engine makes them; a call with tools, and a provider with
-no stream, gives one delta in front of the answer; a whole message has a `reasoning_content`
-field. It is raw: call markup a model wrote while thinking stays in it and calls nothing. On
+the content they precede, as the engine makes them, beside tools too on `llamacpp_server` and
+`strata`, where a call still arrives whole at the end; a call with tools on another provider,
+and a provider with no stream, gives one delta in front of the answer; a whole message has a
+`reasoning_content` field. It is raw: call markup a model wrote while thinking stays in it and calls nothing. On
 a peer's alias it rides the frame that ends the answer, so a stream gets it after the text
 when the host sent chunks. A provider with none sends none. A client sending the field back
 on an assistant turn is neither refused nor read. The Messages form hands over no thinking
