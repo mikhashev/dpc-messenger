@@ -3,7 +3,7 @@
 import logging
 from typing import Dict, Any
 
-from .base import AIProvider
+from .base import AIProvider, first_finish_reason, with_stop
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +83,12 @@ class GigaChatProvider(AIProvider):
         return False
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
+        self._last_usage = None
         try:
             async with self._GigaChat(**self._client_kwargs) as client:
                 response = await client.achat(prompt)
+                # Why it stopped; the request sends no ceiling and no counts are read.
+                self._last_usage = with_stop({}, first_finish_reason(response)) or None
                 return response.choices[0].message.content
         except Exception as e:
             raise RuntimeError(f"GigaChatProvider '{self.alias}' failed: {e}") from e
@@ -100,14 +103,18 @@ class GigaChatProvider(AIProvider):
         # Accepted so every provider answers the same call, and not forwarded:
         # whether this API has an equivalent has not been checked. Named rather
         # than swallowed by **kwargs, so the next reader sees it is a decision.
+        self._last_usage = None
         try:
             full_text = ""
+            finish_reason = None
             async with self._GigaChat(**self._client_kwargs) as client:
                 async for chunk in client.astream(prompt):
+                    finish_reason = first_finish_reason(chunk) or finish_reason
                     text = chunk.choices[0].delta.content or ""
                     full_text += text
                     if on_chunk and text:
                         await on_chunk(text, conversation_id)
+            self._last_usage = with_stop({}, finish_reason) or None
             return full_text
         except Exception as e:
             raise RuntimeError(

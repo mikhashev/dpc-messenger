@@ -9,9 +9,9 @@ from typing import Dict, Any, Optional, List, Union
 from openai import AsyncOpenAI
 
 from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, tool_use_of,
-                   configured_reasoning_default,
+                   configured_reasoning_default, first_finish_reason,
                    image_base64, network_client_bounds,
-                   normalize_reasoning_effort, positive_ceiling)
+                   normalize_reasoning_effort, positive_ceiling, with_stop)
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +234,8 @@ class DeepSeekProvider(AIProvider):
         tool_calls: int = 0,
         effort: Any = "server-default",
         served_effort: Optional[str] = None,
+        finish_reason: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Keep the accounting and write the one line the burn history is made of.
 
@@ -246,6 +248,9 @@ class DeepSeekProvider(AIProvider):
             return {}
         # The rung, for whoever writes the row: the label below is prose.
         usage["served_effort"] = served_effort
+        # Why it stopped and the ceiling it ran under: `length` is how a cut reply is told from a
+        # finished one, on the row and in the agent loop.
+        with_stop(usage, finish_reason, max_tokens)
         self._last_usage = usage
         logger.info(
             "DeepSeek usage: alias=%s conv=%s prompt=%d (hit=%d/miss=%d), "
@@ -459,6 +464,8 @@ class DeepSeekProvider(AIProvider):
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
                 served_effort=self._served_effort(extra_body),
+                finish_reason=first_finish_reason(resp),
+                max_tokens=params["max_tokens"],
             )
             return msg.content or ""
 
@@ -505,8 +512,12 @@ class DeepSeekProvider(AIProvider):
 
             full_text = ""
             thinking_text = ""
+            finish_reason = None
+            self._last_usage = None  # a retry starts clean: the late stamp below is for this stream's own
             stream = await self.client.chat.completions.create(**params)
             async for chunk in stream:
+                # Before the usage: both can arrive on one chunk, or the word one chunk earlier.
+                finish_reason = first_finish_reason(chunk) or finish_reason
                 chunk_usage = getattr(chunk, "usage", None)
                 if chunk_usage is not None:
                     self._record_usage(
@@ -515,6 +526,8 @@ class DeepSeekProvider(AIProvider):
                         conversation_id=conversation_id,
                         effort=self._effort_label(None, extra_body),
                         served_effort=self._served_effort(extra_body),
+                        finish_reason=finish_reason,
+                        max_tokens=params["max_tokens"],
                     )
                 if not chunk.choices:
                     continue
@@ -532,6 +545,8 @@ class DeepSeekProvider(AIProvider):
             if thinking_text:
                 self._last_thinking = thinking_text
                 logger.info("DeepSeek streaming thinking: %d chars", len(thinking_text))
+            if self._last_usage is not None:  # the word that came after the usage chunk
+                with_stop(self._last_usage, finish_reason, params["max_tokens"])
             return full_text
 
         try:
@@ -671,6 +686,8 @@ class DeepSeekProvider(AIProvider):
                 tool_calls=len(tool_calls_raw),
                 effort=self._effort_label(reasoning_effort, extra_body),
                 served_effort=self._served_effort(extra_body),
+                finish_reason=first_finish_reason(resp),
+                max_tokens=params["max_tokens"],
             )
             return {
                 "content": content,
@@ -736,6 +753,8 @@ class DeepSeekProvider(AIProvider):
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(effort, extra_body),
                 served_effort=self._served_effort(extra_body),
+                finish_reason=first_finish_reason(resp),
+                max_tokens=params["max_tokens"],
             )
             return msg.content or ""
 

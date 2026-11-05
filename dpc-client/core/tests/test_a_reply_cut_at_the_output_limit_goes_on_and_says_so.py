@@ -7,7 +7,7 @@ limit, as other tool messages do, and let it continue by itself.
 
 The usage dicts are the real providers': the section at the end drives each provider class through
 the real adapter and the real loop, and pins the shape the doubles above it mirror. A provider
-whose usage says nothing keeps the old behaviour, and those are named there.
+whose usage says nothing (the peer-provider class) keeps the old behaviour.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ from dpc_client_core.dpc_agent.llm_adapter import DpcLlmAdapter
 from dpc_client_core.dpc_agent.loop import (
     MAX_OUTPUT_LIMIT_CONTINUES_PER_TURN,
     MAX_OUTPUT_LIMIT_CONTINUES_SINCE_A_TOOL,
+    MAX_OUTPUT_LIMIT_NO_TEXT_PER_TURN,
+    MAX_OUTPUT_LIMIT_NO_TEXT_SINCE_A_TOOL,
     USER_STOP_SUMMARY_REQUEST,
     _joined_at_the_output_limit,
     _output_limit_of,
@@ -407,7 +409,7 @@ def test_a_cut_with_only_markers_says_nobody_could_read_it(tmp_path, monkeypatch
 def test_reasoning_spent_on_every_try_ends_on_the_no_answer_note_naming_the_cut(tmp_path, monkeypatch):
     llm = _Script(_cut("", thinking="the private reasoning"))
     text, _, trace = _loop(tmp_path, monkeypatch, llm)
-    assert len(llm.requests) == MAX_OUTPUT_LIMIT_CONTINUES_SINCE_A_TOOL + 1
+    assert len(llm.requests) == MAX_OUTPUT_LIMIT_NO_TEXT_SINCE_A_TOOL + 1 == 2
     assert text.startswith(NO_ANSWER) and trace["turn_end"] == "guard"
     assert f"Its reply was cut at {LIMIT} before any text, and telling it so did not help." in text
     assert "private" not in text
@@ -419,9 +421,51 @@ def test_a_round_that_is_only_empty_stays_a_blind_resend(tmp_path, monkeypatch):
     assert llm.requests[1] == llm.requests[0]
 
 
+def test_a_no_text_round_spends_none_of_the_continues_of_the_document_that_follows(tmp_path, monkeypatch):
+    """A model that burned its output reasoning arrived at its real document with none left."""
+    llm = _Script(_cut("", thinking="r"), _cut("one "), _cut("two "), _done("three"))
+    text, _, trace = _loop(tmp_path, monkeypatch, llm)
+    assert text.startswith("one two three\n\n⚠️ Continued") and "turn_end" not in trace
+    assert [c["kind"] for c in trace["output_limit_continues"]] == ["no text", "text", "text"]
+
+
+def test_the_continues_of_a_text_leave_a_no_text_round_its_own(tmp_path, monkeypatch):
+    llm = _Script(_cut("one "), _cut("two "), _cut("", thinking="r"), _done("Rest."))
+    text, _, _ = _loop(tmp_path, monkeypatch, llm)
+    assert len(llm.requests) == 4 and text.startswith("one two \n\nRest.\n\n⚠️ Continued")
+
+
+def test_a_cut_call_spends_none_of_the_no_text_bound_nor_the_other_way(tmp_path, monkeypatch):
+    llm = _Script(_cut("", thinking="r"), _broken(), _broken(), _done("Words."))
+    text, _, trace = _loop(tmp_path, monkeypatch, llm)
+    assert text == "Words." and "turn_end" not in trace
+
+
+def test_a_second_no_text_round_since_a_tool_ends_the_turn(tmp_path, monkeypatch):
+    llm = _Script(_cut("", thinking="r"), _cut("", thinking="r"), _done("never asked"))
+    text, _, trace = _loop(tmp_path, monkeypatch, llm)
+    assert len(llm.requests) == 2 and text.startswith(NO_ANSWER) and trace["turn_end"] == "guard"
+
+
+def test_a_tool_gives_the_no_text_continue_back_and_the_turn_allows_two(tmp_path, monkeypatch):
+    assert MAX_OUTPUT_LIMIT_NO_TEXT_PER_TURN == 2
+    no_text = _cut("", thinking="r")
+    llm = _Script(no_text, _called(1), no_text, _called(2), no_text, _done("never asked"))
+    tools = _Tools()
+    text, _, trace = _loop(tmp_path, monkeypatch, llm, tools=tools)
+    assert len(llm.requests) == 5 and len(tools.executed) == 2
+    assert text.startswith(NO_ANSWER) and trace["turn_end"] == "guard"
+
+
+def test_the_log_counts_a_no_text_round_against_its_own_limit(tmp_path, monkeypatch, caplog):
+    with caplog.at_level("WARNING"):
+        _loop(tmp_path, monkeypatch, _Script(_cut("", thinking="r"), _done("Words.")))
+    assert any("(no text); the agent is told, continue 1/2" in r.getMessage() for r in caplog.records)
+
+
 def test_the_empty_rounds_counter_is_not_spent_by_a_cut(tmp_path, monkeypatch):
     empty = _done("", thinking="r")
-    llm = _Script(_cut("", thinking="r"), _cut("", thinking="r"), empty, empty, empty, _done("The answer."))
+    llm = _Script(_cut("", thinking="r"), empty, empty, empty, _done("The answer."))
     text, _, _ = _loop(tmp_path, monkeypatch, llm)
     assert text == "The answer."
 
@@ -489,7 +533,7 @@ def test_a_call_cut_in_its_arguments_does_not_run_and_the_agent_is_told(tmp_path
     assert told["_runtime_note"] is True
     assert f"Your call of `write_file` was cut at {LIMIT}, inside its arguments, so it was not executed." in told["content"]
     assert "Make the call again with less in it, in smaller parts if it is long, or answer in words." in told["content"]
-    assert "c9" not in str(llm.requests[1]), "no half call in the history"
+    assert not any(m.get("tool_calls") for m in llm.requests[1]), "no half call in the history"
     assert llm.requests[1][-2] == {"role": "assistant", "content": "(My tool call was not whole. It did not run.)"}
 
 
@@ -1254,15 +1298,18 @@ def _neuraldeep(monkeypatch, *responses):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("make", ["deepseek", "zai", "neuraldeep"])
-async def test_a_provider_whose_usage_says_nothing_keeps_the_old_behaviour(make, tmp_path, monkeypatch):
-    """The named gap, VENDOR-ROWS-CARRY-NO-FINISH-REASON-AND-MAX-TOKENS: the word is on the choice
-    and never reaches usage, so the text is taken for the whole answer."""
+async def test_a_vendor_cut_at_its_ceiling_goes_on_and_the_row_says_why(make, tmp_path, monkeypatch):
+    """VENDOR-ROWS-CARRY-NO-FINISH-REASON-AND-MAX-TOKENS: the word on the choice reaches the usage,
+    so the agent is told and continues, and the ledger row keeps the word and the ceiling."""
     monkeypatch.setattr("dpc_client_core.dpc_agent.loop.load_agent_config", lambda _n: {})
     cut = _chat_resp("the sen", usage=_openai_usage(), finish_reason="length")
-    provider = {"deepseek": lambda: _deepseek(cut), "zai": lambda: _zai(cut),
-                "neuraldeep": lambda: _neuraldeep(monkeypatch, cut)}[make]()
-    text, _, trace = await _through_the_loop(_adapter(provider, tmp_path), tmp_path)
-    assert text == "the sen" and "turn_end" not in trace
+    rest = _chat_resp("tence", usage=_openai_usage(5), finish_reason="stop")
+    provider = {"deepseek": lambda: _deepseek(cut, rest), "zai": lambda: _zai(cut, rest),
+                "neuraldeep": lambda: _neuraldeep(monkeypatch, cut, rest)}[make]()
+    llm = _adapter(provider, tmp_path)
+    text, _, _ = await _through_the_loop(llm, tmp_path)
+    assert text.startswith("the sentence\n\n⚠️ Continued")
+    assert [(r["finish_reason"], r["max_tokens"]) for r in llm._ledger.rows()] == [("length", 8192), ("stop", 8192)]
 
 
 @pytest.mark.asyncio
@@ -1270,7 +1317,7 @@ async def test_a_provider_whose_usage_says_nothing_keeps_the_old_behaviour(make,
 async def test_every_openai_shaped_provider_marks_arguments_that_do_not_parse(make, tmp_path, monkeypatch, _engine_home):
     monkeypatch.setattr("dpc_client_core.dpc_agent.loop.load_agent_config", lambda _n: {})
     call = NS(id="c1", function=NS(name="write_file", arguments='{"path": "a.md", "content": "half'))
-    first = _chat_resp("", tool_calls=[call], usage=_openai_usage(), finish_reason="length")
+    first = _chat_resp("", tool_calls=[call], usage=_openai_usage(5), finish_reason="stop")  # no cut to lean on
     second = _chat_resp("In words.", usage=_openai_usage(5), finish_reason="stop")
     if make == "strata":
         provider, _ = _strata(tmp_path, first, second)
@@ -1333,14 +1380,100 @@ async def test_a_host_at_a_full_window_is_not_continued_on_the_peer_route(tmp_pa
     assert len(asks) == 1 and trace["turn_end"] == "guard" and "the context window of 8192 tokens" in text
 
 
+def _an_answer(word):
+    return NS(choices=[NS(finish_reason=word, message=NS(content="words", tool_calls=None))])
+
+
+def _openai_alias(**config):
+    provider = OpenAICompatibleProvider("oa", {"model": "gpt-4o", "api_key": "k", **config})
+    provider.client = NS(chat=NS(completions=NS(create=AsyncMock(return_value=_an_answer("length")))))
+    return provider
+
+
 @pytest.mark.asyncio
-async def test_a_provider_with_no_usage_at_all_keeps_the_old_behaviour(tmp_path, monkeypatch):
+async def test_an_openai_compatible_alias_names_no_ceiling_its_request_did_not_send(tmp_path):
+    provider = _openai_alias(max_tokens=4096)
+    await provider.generate_response("q")
+    assert provider.get_last_usage() == {"finish_reason": "length"}
+    assert _output_limit_of(provider.get_last_usage()) == "the output limit"
+
+
+@pytest.mark.asyncio
+async def test_an_openai_compatible_alias_with_no_ceiling_names_none():
+    provider = _openai_alias()
+    await provider.generate_response("q")
+    assert "max_tokens" not in provider.get_last_usage()
+    assert _output_limit_of(provider.get_last_usage()) == "the output limit"
+
+
+@pytest.mark.asyncio
+async def test_a_vision_call_leaves_no_word_from_the_call_before():
+    provider = _openai_alias(max_tokens=4096)
+    await provider.generate_response("q")
+    assert provider.get_last_usage()["finish_reason"] == "length"
+    await provider.generate_with_vision("what is this", [{"base64": "aGk=", "mime_type": "image/png"}])
+    assert provider.get_last_usage() is None
+
+
+class _GigaClient:
+    """The gigachat SDK's client as the provider uses it."""
+
+    def __init__(self, **_kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def achat(self, _prompt):
+        return _an_answer("length")
+
+    async def astream(self, _prompt):
+        yield NS(choices=[NS(finish_reason="length", delta=NS(content="words"))])
+
+
+def _giga(**config):
+    from dpc_client_core.providers.gigachat_provider import GigaChatProvider
+    provider = GigaChatProvider("giga", {"api_key": "k", "model": "GigaChat-2-Pro", **config})
+    provider._GigaChat = _GigaClient
+    return provider
+
+
+@pytest.mark.asyncio
+async def test_a_gigachat_alias_names_no_ceiling_its_request_did_not_send_on_both_paths():
+    provider = _giga(max_tokens=2048)
+    await provider.generate_response("q")
+    assert provider.get_last_usage() == {"finish_reason": "length"}
+    await provider.generate_response_stream("q", None)
+    assert provider.get_last_usage() == {"finish_reason": "length"}
+
+
+@pytest.mark.asyncio
+async def test_a_gigachat_alias_with_no_ceiling_names_none():
+    provider = _giga()
+    await provider.generate_response("q")
+    assert "max_tokens" not in provider.get_last_usage()
+    await provider.generate_response_stream("q", None)
+    assert "max_tokens" not in provider.get_last_usage()
+
+
+@pytest.mark.asyncio
+async def test_an_openai_compatible_provider_reports_the_stop_alone_and_its_counts_stay_ours(tmp_path, monkeypatch):
+    """No token counts are read from this provider's replies, so the usage holds the stop word only:
+    the adapter recounts and puts that word on its own usage, and the loop goes on."""
     monkeypatch.setattr("dpc_client_core.dpc_agent.loop.load_agent_config", lambda _n: {})
     provider = OpenAICompatibleProvider("oa", {"model": "gpt-x", "api_key": "k"})
     provider.client = NS(chat=NS(completions=_Completions(
-        _chat_resp("the sen", usage=_openai_usage(), finish_reason="length"))))
-    text, _, trace = await _through_the_loop(_adapter(provider, tmp_path), tmp_path)
-    assert text == "the sen" and "turn_end" not in trace
+        _chat_resp("the sen", usage=_openai_usage(), finish_reason="length"),
+        _chat_resp("tence", usage=_openai_usage(5), finish_reason="stop"))))
+    llm = _adapter(provider, tmp_path)
+    text, _, _ = await _through_the_loop(llm, tmp_path)
+    assert text.startswith("the sentence\n\n⚠️ Continued")
+    rows = list(llm._ledger.rows())
+    assert [(r["finish_reason"], r["max_tokens"]) for r in rows] == [("length", None), ("stop", None)]
+    assert all(r["counts_source"] == "ours" for r in rows)
 
 
 @pytest.mark.asyncio

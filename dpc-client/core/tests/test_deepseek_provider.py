@@ -229,6 +229,8 @@ async def test_generate_with_tools_maps_response_to_contract():
         # Thinking is on and no rung was named, by the call or by the alias:
         # the vendor's own default ran, and no word describes it.
         "served_effort": None,
+        # The double's choice names no stop word; the ceiling is the request's.
+        "max_tokens": 8192,
     }
     assert len(result["tool_calls_raw"]) == 1
     tc = result["tool_calls_raw"][0]

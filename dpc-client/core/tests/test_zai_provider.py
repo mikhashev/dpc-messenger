@@ -166,6 +166,8 @@ async def test_generate_with_tools_maps_response_to_contract():
         # The tools path builds its body with no effort at all, so thinking was
         # neither disabled nor named.
         "served_effort": None,
+        # The double's choice names no stop word; the ceiling is the request's.
+        "max_tokens": 8192,
     }
 
     assert len(result["tool_calls_raw"]) == 1

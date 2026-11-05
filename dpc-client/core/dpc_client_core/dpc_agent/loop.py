@@ -79,6 +79,11 @@ MAX_EMPTY_ROUNDS_PER_TURN = 12
 # Policy numbers: per the board card of 2026-11-04, the ledger of 2026-10 and 11 held no agent round cut there.
 MAX_OUTPUT_LIMIT_CONTINUES_SINCE_A_TOOL = 2
 MAX_OUTPUT_LIMIT_CONTINUES_PER_TURN = 6
+# A reply cut before any text has a smaller bound of its own, and spends none of the above, or a model
+# that burned its output reasoning would reach its real document with no continues left. Policy
+# numbers too: nobody has yet seen a model recover after `_no_text_request`.
+MAX_OUTPUT_LIMIT_NO_TEXT_SINCE_A_TOOL = 1
+MAX_OUTPUT_LIMIT_NO_TEXT_PER_TURN = 2
 
 # Usage counters only some providers report. DeepSeek splits its prompt into
 # cache hit and miss and names its reasoning tokens; nobody else does. They are
@@ -2362,6 +2367,8 @@ async def run_llm_loop(
     words_before_the_retry: List[str] = []
     output_limit_continues = 0
     output_limit_continues_since_the_last_tool = 0
+    no_text_continues = 0
+    no_text_continues_since_the_last_tool = 0
     # Text continues in what the turn will answer with, and the limit they reached.
     continues_in_the_answer = 0
     last_cut_at: Optional[str] = None
@@ -2374,14 +2381,25 @@ async def run_llm_loop(
         return (output_limit_continues_since_the_last_tool < MAX_OUTPUT_LIMIT_CONTINUES_SINCE_A_TOOL
                 and output_limit_continues < MAX_OUTPUT_LIMIT_CONTINUES_PER_TURN)
 
+    def _a_no_text_continue_is_left() -> bool:
+        return (no_text_continues_since_the_last_tool < MAX_OUTPUT_LIMIT_NO_TEXT_SINCE_A_TOOL
+                and no_text_continues < MAX_OUTPUT_LIMIT_NO_TEXT_PER_TURN)
+
     def _count_the_continue(kind: str, cut_at: Optional[str]) -> None:
         """A 200 like a written call's: the next pass is a round like any other."""
         nonlocal output_limit_continues, output_limit_continues_since_the_last_tool
-        output_limit_continues += 1
-        output_limit_continues_since_the_last_tool += 1
+        nonlocal no_text_continues, no_text_continues_since_the_last_tool
+        if kind == "no text":
+            no_text_continues += 1
+            no_text_continues_since_the_last_tool += 1
+            count, limit = no_text_continues, MAX_OUTPUT_LIMIT_NO_TEXT_PER_TURN
+        else:
+            output_limit_continues += 1
+            output_limit_continues_since_the_last_tool += 1
+            count, limit = output_limit_continues, MAX_OUTPUT_LIMIT_CONTINUES_PER_TURN
         llm_trace.setdefault("output_limit_continues", []).append({"round": round_idx, "kind": kind})
         log.warning("Round %d stopped at %s (%s); the agent is told, continue %d/%d", round_idx,
-                    cut_at or "unreadable arguments", kind, output_limit_continues, MAX_OUTPUT_LIMIT_CONTINUES_PER_TURN)
+                    cut_at or "unreadable arguments", kind, count, limit)
         emit_progress("The reply reached the output limit; the agent is told and goes on." if cut_at
                       else "A tool call came back unreadable and did not run; asking again.",
                       None, round_idx, None, _round_speed)
@@ -2784,7 +2802,7 @@ async def run_llm_loop(
                 # holds that reasoning and is tested on its own.
                 _empty_thinking = (msg.get("thinking") or "").strip()
                 _empty_diag = _empty_answer_diagnosis(content, _empty_thinking)
-                if _cut_at and _a_continue_is_left() and not _window_full:
+                if _cut_at and _a_no_text_continue_is_left() and not _window_full:
                     _count_the_continue("no text", _cut_at)
                     _ask_again(messages, "", _no_text_request(_cut_at, bool(_empty_thinking), bool(words_before_the_retry)),
                                in_place=_NO_TEXT_TURN)
@@ -2827,6 +2845,7 @@ async def run_llm_loop(
             written_call_retried_since_the_last_tool = False
             empty_retry_count = 0
             output_limit_continues_since_the_last_tool = 0
+            no_text_continues_since_the_last_tool = 0
             # The words go into this round's text, and the answer is what comes after the tools.
             continues_in_the_answer = 0
             words_end_at_the_cut = False

@@ -7,8 +7,8 @@ from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
-from .base import (AIProvider, OPENAI_THINKING_MODELS, image_base64, network_client_bounds,
-                   with_tool_call_blocks)
+from .base import (AIProvider, OPENAI_THINKING_MODELS, first_finish_reason, image_base64,
+                   network_client_bounds, with_stop, with_tool_call_blocks)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,7 @@ class OpenAICompatibleProvider(AIProvider):
         return any(tm in self.model.lower() for tm in OPENAI_THINKING_MODELS)
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
+        self._last_usage = None
         try:
             # Use kwargs override or config default for temperature
             temperature = kwargs.get("temperature", self.temperature)
@@ -77,6 +78,10 @@ class OpenAICompatibleProvider(AIProvider):
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temperature,
             )
+            # The reply's token counts are not read here (the caller recounts), so the usage holds
+            # only why it stopped. The request sends no ceiling, so none is named.
+            usage = with_stop({}, first_finish_reason(response))
+            self._last_usage = usage or None
             # A llama-server behind this alias parses a call with no tools sent.
             msg = response.choices[0].message
             return with_tool_call_blocks(msg.content or "", getattr(msg, "tool_calls", None))
@@ -88,6 +93,7 @@ class OpenAICompatibleProvider(AIProvider):
         OpenAI vision API using multimodal content arrays.
         Docs: https://platform.openai.com/docs/guides/vision
         """
+        self._last_usage = None
         # Built before the try: a refusal here is about the request, not about
         # the API, and must not be reported as the API having failed.
         content = [{"type": "text", "text": prompt}]

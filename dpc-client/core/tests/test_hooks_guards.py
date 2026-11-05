@@ -347,6 +347,27 @@ class TestBudgetLimitGuard:
         assert await g.between_rounds(make_ctx(accumulated_cost_usd=0.1)) is None
 
 
+class TestBudgetLimitGuardSpeaksInDollars:
+    """Both numbers are dollars (`accumulated_cost_usd`, `budget_usd`), printed as whole tokens: a
+    task at $0.60 of $1.00 read `0 tokens (>50% of budget 1 tokens)`."""
+
+    @pytest.mark.asyncio
+    async def test_the_stop_message(self):
+        g = BudgetLimitGuard(budget_remaining_usd=1.0, max_fraction=0.5)
+        await g.between_rounds(make_ctx(accumulated_cost_usd=0.6))
+        assert g.stop_message() == (
+            "[BUDGET_LIMIT] Task spent $0.6000 (>50% of its budget of $1.0000). Give your final response now."
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_log_line(self, caplog):
+        g = BudgetLimitGuard(budget_remaining_usd=1.0, max_fraction=0.5)
+        with caplog.at_level("WARNING"):
+            await g.between_rounds(make_ctx(accumulated_cost_usd=0.6))
+        assert "BudgetLimitGuard: $0.6000 exceeded 50% of the budget of $1.0000" in caplog.text
+        assert "tokens" not in caplog.text
+
+
 class TestRegistryIntegration:
     @pytest.mark.asyncio
     async def test_guards_dispatch_via_lifecycle(self):

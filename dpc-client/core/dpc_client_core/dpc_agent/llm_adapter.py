@@ -977,7 +977,9 @@ class DpcLlmAdapter:
             # class out of twelve, and it is what let three providers build a
             # usage dict privately while this reader priced its own estimate.
             reported = provider.get_last_usage()
-            if reported:
+            # A usage with no counts, only why the call stopped (OpenAI-compatible, GigaChat), is
+            # no report of counts: they are recounted below and the stop is put on that usage.
+            if reported and all(isinstance(reported.get(k), int) for k in ("prompt_tokens", "completion_tokens")):
                 self._note_call(counts_source="engine")
                 usage: Dict[str, Any] = dict(reported)
                 self._price_usage(usage, provider, model_name)
@@ -998,6 +1000,7 @@ class DpcLlmAdapter:
                 "total_tokens": prompt_tokens + completion_tokens,
                 # Counted over the visible text; the thinking, if any, was already apart from it.
                 "output_includes_thinking": "excludes",
+                **{k: reported[k] for k in ("finish_reason", "max_tokens") if reported and k in reported},
             }
             self._price_usage(usage, provider, model_name)
 

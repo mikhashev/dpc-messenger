@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, tool_use_of,
                    configured_reasoning_default, image_base64,
                    network_client_bounds, normalize_reasoning_effort,
-                   numeric_setting, positive_ceiling)
+                   numeric_setting, positive_ceiling, first_finish_reason, with_stop)
 from ..dpc_agent.pricing import (COST_BASIS_CHARGED, COST_BASIS_LIST_PRICE_REFERENCE,
                                  COST_BASIS_UNKNOWN, NEURALDEEP_CURRENCY, compute_cost_rub)
 from .neuraldeep_prices import REFRESH_INTERVAL, RETRY_AFTER_FAILURE, price_source
@@ -419,11 +419,15 @@ class NeuralDeepProvider(AIProvider):
         return {key: value for key, value in usage.items() if key.startswith("cost_")}
 
     async def _record_usage(self, raw_usage: Any, *, path: str, model: str,
-                            served_effort: Optional[str], tool_calls: int = 0) -> Dict[str, Any]:
+                            served_effort: Optional[str], tool_calls: int = 0,
+                            finish_reason: Optional[str] = None,
+                            max_tokens: Optional[int] = None) -> Dict[str, Any]:
         if raw_usage is None:
             return {}
         usage = self._usage_from_response(raw_usage, model)
         usage["served_effort"] = served_effort
+        # Why it stopped and the ceiling the request carried, for the row and for the agent loop.
+        with_stop(usage, finish_reason, max_tokens)
         try:
             await self._price_usage(usage, model)
         except Exception as exc:  # a price must never fail the call
@@ -891,7 +895,9 @@ class NeuralDeepProvider(AIProvider):
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
             await self._record_usage(getattr(resp, "usage", None), path="plain",
-                                     model=params["model"], served_effort=self._effort_word(effort))
+                                     model=params["model"], served_effort=self._effort_word(effort),
+                                     finish_reason=first_finish_reason(resp),
+                                     max_tokens=params["max_tokens"])
             return (msg.content or "").lstrip()
 
         try:
@@ -925,12 +931,18 @@ class NeuralDeepProvider(AIProvider):
             )
             full_text = ""
             thinking_text = ""
+            finish_reason = None
+            self._last_usage = None  # a retry starts clean: the late stamp below is for this stream's own
             async for chunk in stream:
+                # Before the usage: both can arrive on one chunk, or the word one chunk earlier.
+                finish_reason = first_finish_reason(chunk) or finish_reason
                 chunk_usage = getattr(chunk, "usage", None)
                 if chunk_usage is not None:
                     await self._record_usage(chunk_usage, path="plain-stream",
                                              model=params["model"],
-                                             served_effort=self._effort_word(reasoning_effort))
+                                             served_effort=self._effort_word(reasoning_effort),
+                                             finish_reason=finish_reason,
+                                             max_tokens=params["max_tokens"])
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -948,6 +960,8 @@ class NeuralDeepProvider(AIProvider):
                         await on_chunk(text, conversation_id)
             if thinking_text:
                 self._last_thinking = thinking_text
+            if self._last_usage is not None:  # the word that came after the usage chunk
+                with_stop(self._last_usage, finish_reason, params["max_tokens"])
             return full_text
 
         try:
@@ -1023,6 +1037,7 @@ class NeuralDeepProvider(AIProvider):
                 resp.usage, path="tools", model=params["model"],
                 served_effort=self._effort_word(reasoning_effort),
                 tool_calls=len(tool_calls_raw),
+                finish_reason=first_finish_reason(resp), max_tokens=params["max_tokens"],
             )
             return {"content": content, "tool_calls_raw": tool_calls_raw,
                     "thinking": thinking, "usage": usage}
@@ -1070,7 +1085,9 @@ class NeuralDeepProvider(AIProvider):
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
             await self._record_usage(getattr(resp, "usage", None), path="vision",
-                                     model=params["model"], served_effort=self._effort_word(effort))
+                                     model=params["model"], served_effort=self._effort_word(effort),
+                                     finish_reason=first_finish_reason(resp),
+                                     max_tokens=params["max_tokens"])
             return (msg.content or "").lstrip()
 
         try:

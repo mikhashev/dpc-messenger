@@ -9,8 +9,8 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, image_base64, tool_use_of,
-                   network_client_bounds)
+from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, first_finish_reason, image_base64,
+                   tool_use_of, network_client_bounds, with_stop)
 
 logger = logging.getLogger(__name__)
 
@@ -234,26 +234,29 @@ class ZaiProvider(AIProvider):
             return self._temperature_explicit
         return 1.0
 
-    def _usage_from(self, resp) -> Dict[str, Any]:
+    def _usage_from(self, resp, max_tokens: Optional[int] = None) -> Dict[str, Any]:
         """Normalise the SDK's usage object into the shape the cost meter reads.
 
         Every path calls this, not only the tool path. This is a prepaid provider:
         a call whose tokens are not recorded is money the burn digest, the alert
         thresholds and the runway cannot see — the exact hole this project already
         paid for once on the DeepSeek plain path.
+
+        `max_tokens` is the ceiling the request carried; the stop word is read off the response's
+        first choice. A stream stamps both itself, once the last chunk is in.
         """
         u = getattr(resp, "usage", None)
         if u is None:
             return {}
         details = getattr(u, "prompt_tokens_details", None)
         cached = getattr(details, "cached_tokens", 0) if details else 0
-        return {
+        return with_stop({
             "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
             "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
             "total_tokens": getattr(u, "total_tokens", 0) or 0,
             "cache_read_input_tokens": cached or 0,
             "output_includes_thinking": self.DECLARED_OUTPUT_INCLUDES_THINKING,
-        }
+        }, first_finish_reason(resp), max_tokens)
 
     def _log_usage(
         self, usage: Dict[str, Any], path: str, tool_calls: int = 0,
@@ -278,6 +281,7 @@ class ZaiProvider(AIProvider):
     async def generate_response(self, prompt: str, **kwargs) -> str:
         """Non-streaming text generation."""
         self._last_thinking = None
+        self._last_usage = None  # a call that reports nothing must not read the last one's stop
 
         async def _call():
             params: Dict[str, Any] = {
@@ -294,7 +298,7 @@ class ZaiProvider(AIProvider):
             resp = await self.client.chat.completions.create(**params)
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
-            self._log_usage(self._usage_from(resp), path="plain",
+            self._log_usage(self._usage_from(resp, params["max_tokens"]), path="plain",
                             served_effort=self._served_effort(extra))
             return msg.content or ""
 
@@ -319,6 +323,7 @@ class ZaiProvider(AIProvider):
     ) -> str:
         """Streaming text generation. Calls on_chunk(text, conversation_id) per token."""
         self._last_thinking = None
+        self._last_usage = None  # a call that reports nothing must not read the last one's stop
 
         async def _call():
             params: Dict[str, Any] = {
@@ -342,8 +347,11 @@ class ZaiProvider(AIProvider):
             full_text = ""
             thinking_text = ""
             usage: Dict[str, Any] = {}
+            finish_reason = None
             stream = await self.client.chat.completions.create(**params)
             async for chunk in stream:
+                # The word and the usage can share a chunk or come apart in either order.
+                finish_reason = first_finish_reason(chunk) or finish_reason
                 chunk_usage = self._usage_from(chunk)
                 if chunk_usage:
                     usage = chunk_usage
@@ -363,6 +371,8 @@ class ZaiProvider(AIProvider):
             if thinking_text:
                 self._last_thinking = thinking_text
                 logger.info("Z.AI streaming thinking: %d chars", len(thinking_text))
+            if usage:
+                with_stop(usage, finish_reason, params["max_tokens"])
             self._log_usage(usage, path="plain-stream", served_effort=self._served_effort(extra))
             return full_text
 
@@ -433,6 +443,7 @@ class ZaiProvider(AIProvider):
         as consumed by llm_adapter._chat_native_tools.
         """
         self._last_thinking = None
+        self._last_usage = None  # a call that reports nothing must not read the last one's stop
         openai_messages = self._anthropic_to_openai_messages(system, messages, provider=self)
         openai_tools = self._anthropic_to_openai_tools(tools)
 
@@ -467,7 +478,7 @@ class ZaiProvider(AIProvider):
             if on_chunk and content:
                 await on_chunk(content, conversation_id)
 
-            usage = self._usage_from(resp)
+            usage = self._usage_from(resp, params["max_tokens"])
             self._log_usage(usage, path="tools", tool_calls=len(tool_calls_raw),
                             served_effort=self._served_effort(extra))
             return {
@@ -500,14 +511,17 @@ class ZaiProvider(AIProvider):
                 },
             })
 
+        self._last_usage = None
+
         async def _call():
+            max_tokens = kwargs.get("max_tokens", self.max_tokens)
             resp = await self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                max_tokens=max_tokens,
                 messages=[{"role": "user", "content": content}],
                 temperature=self._effective_temperature(kwargs.get("temperature")),
             )
-            self._log_usage(self._usage_from(resp), path="vision", served_effort=None)
+            self._log_usage(self._usage_from(resp, max_tokens), path="vision", served_effort=None)
             return resp.choices[0].message.content or ""
 
         try:

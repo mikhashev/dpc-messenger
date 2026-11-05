@@ -194,6 +194,32 @@ def positive_ceiling(value: Any) -> Optional[int]:
     return int(number) if number is not None and number > 0 else None
 
 
+# A vendor's `finish_reason` in the OpenAI vocabulary a usage's is in (`gateway.Completion`). A word
+# with no equal there (a filter, a vendor error) stays unreported, as with the Anthropic and Gemini maps.
+_FINISH_REASONS = {"stop": "stop", "length": "length", "max_tokens": "length",
+                   "tool_calls": "tool_calls", "function_call": "tool_calls"}
+
+
+def first_finish_reason(response: Any) -> Optional[str]:
+    """`choices[0].finish_reason` of a response or of one stream chunk; the usage-only chunk has no
+    choices and says None."""
+    choices = getattr(response, "choices", None)
+    return getattr(choices[0], "finish_reason", None) if choices else None
+
+
+def with_stop(usage: Dict[str, Any], finish_reason: Any, max_tokens: Any = None) -> Dict[str, Any]:
+    """`usage`, in place, with why the call stopped and the ceiling its request carried: the pair the
+    agent loop reads to tell a reply cut at the output limit, and a usage row keeps. Each call site
+    passes the number its request carries as `max_tokens`; a request with none passes none."""
+    word = _FINISH_REASONS.get(finish_reason.strip().lower()) if isinstance(finish_reason, str) else None
+    if word:
+        usage["finish_reason"] = word
+    ceiling = positive_ceiling(max_tokens)
+    if ceiling is not None:
+        usage["max_tokens"] = ceiling
+    return usage
+
+
 def configured_reasoning_default(provider: Any) -> Optional[str]:
     """The alias's configured `reasoning_effort` resolved onto its own ladder,
     and the default its model's template named where nothing is configured.
