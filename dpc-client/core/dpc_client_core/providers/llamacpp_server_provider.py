@@ -996,6 +996,10 @@ class LlamaServerProvider(DeepSeekProvider):
                 async for chunk in stream:
                     if _t_first is None:
                         _t_first = _time.perf_counter() - _t0
+                    # Before the usage: Strata sends both on its last chunk, llama-server apart.
+                    _fr = getattr(chunk.choices[0], "finish_reason", None) if chunk.choices else None
+                    if _fr:
+                        finish_reason = _fr
                     chunk_usage = getattr(chunk, "usage", None)
                     if chunk_usage is not None:
                         self._record_usage(
@@ -1020,9 +1024,6 @@ class LlamaServerProvider(DeepSeekProvider):
                         )
                     if not chunk.choices:
                         continue
-                    _fr = getattr(chunk.choices[0], "finish_reason", None)
-                    if _fr:
-                        finish_reason = _fr
                     delta = chunk.choices[0].delta
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:

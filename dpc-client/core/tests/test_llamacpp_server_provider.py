@@ -1061,6 +1061,39 @@ class TestTheReasonTheModelStoppedReachesTheCaller:
         assert usage["max_tokens"] == p.max_tokens
 
     @pytest.mark.asyncio
+    async def test_streaming_reads_it_off_a_last_chunk_that_also_carries_the_usage(self):
+        """Strata's launcher, read live 2026-11-05: finish_reason and usage on one chunk."""
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        chunks = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(reasoning_content=None, content="hi"),
+                    finish_reason=None)],
+                usage=None),
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(reasoning_content=None, content=None),
+                    finish_reason="length")],
+                usage=SimpleNamespace(prompt_tokens=9, completion_tokens=2, total_tokens=11)),
+        ]
+
+        class _Stream:
+            def __aiter__(self):
+                async def gen():
+                    for c in chunks:
+                        yield c
+                return gen()
+
+        class _Completions:
+            async def create(self, **params):
+                return _Stream()
+
+        self._wire(p, SimpleNamespace(chat=SimpleNamespace(completions=_Completions())))
+        await p.generate_response_stream("hi")
+        assert p.get_last_usage()["finish_reason"] == "length"
+
+    @pytest.mark.asyncio
     async def test_streaming_carries_it_from_the_chunk_before_the_usage_chunk(self):
         """The terminal usage chunk has no choices, so the reason arrives one
         chunk earlier — reading it off the usage chunk would always be None."""
