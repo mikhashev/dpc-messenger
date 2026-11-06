@@ -6924,24 +6924,13 @@ class CoreService:
             history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
             monitor.set_token_count(history_tokens)
             token_usage = monitor.get_token_usage()
-            token_limit = token_usage.get("token_limit", 0)
-            await self.local_api.broadcast_event("token_usage_updated", {
-                "conversation_id": group_id,
-                "tokens_used": history_tokens,
-                "token_limit": token_limit,
-                "history_tokens": history_tokens,
-                "tokens_after_last_response": 0,
-                "tokens_after_last_response_at": None,
-            })
+            usage = self._group_token_usage(group_id, history_tokens, token_usage.get("token_limit", 0))
+            await self.local_api.broadcast_event("token_usage_updated", usage)
             return {
                 "status": "success",
                 "message_id": message_id,
                 "msg_index": msg_index,
-                "tokens_used": history_tokens,
-                "token_limit": token_limit,
-                "history_tokens": history_tokens,
-                "tokens_after_last_response": 0,
-                "tokens_after_last_response_at": None,
+                **{k: v for k, v in usage.items() if k != "conversation_id"},
             }
         except Exception as e:
             logger.error("Error sending group message: %s", e, exc_info=True)
@@ -7190,25 +7179,40 @@ class CoreService:
                             datetime.now(timezone.utc).isoformat(),
                             display_name or agent_id)
 
-    async def broadcast_group_token_usage(self, group_id: str) -> None:
-        """Recompute the worst-agent group counter and push it to the UI (used after a live model switch)."""
+    def _group_token_usage(self, group_id: str, history_tokens: int, fallback_limit: int) -> Dict[str, Any]:
+        """The group counter: the dialogue's size and, once an agent has answered here, the
+        agent whose context is fullest. Every path that sends the counter builds it here,
+        so an owner's message does not replace the agents' rows with the dialogue alone."""
         worst = self._worst_group_agent_context(group_id)
         if not worst:
-            return
+            return {
+                "conversation_id": group_id,
+                "tokens_used": history_tokens,
+                "token_limit": fallback_limit,
+                "history_tokens": history_tokens,
+                "tokens_after_last_response": 0,
+                "tokens_after_last_response_at": None,
+            }
         tokens_after_last_response, token_limit, tokens_after_last_response_at = worst[:3]
-        context_agent = worst[3] if len(worst) > 3 else ""
-        monitor = self.knowledge_service._get_or_create_conversation_monitor(group_id)
-        history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
-        await self.local_api.broadcast_event("token_usage_updated", {
+        return {
             "conversation_id": group_id,
             "tokens_used": max(history_tokens, tokens_after_last_response),
             "token_limit": token_limit,
             "history_tokens": history_tokens,
             "tokens_after_last_response": tokens_after_last_response,
             "tokens_after_last_response_at": tokens_after_last_response_at,
-            "context_agent": context_agent,
+            "context_agent": worst[3] if len(worst) > 3 else "",
             "context_agents": self._group_agent_context_list(group_id),
-        })
+        }
+
+    async def broadcast_group_token_usage(self, group_id: str) -> None:
+        """Recompute the worst-agent group counter and push it to the UI (used after a live model switch)."""
+        if not self._worst_group_agent_context(group_id):
+            return
+        monitor = self.knowledge_service._get_or_create_conversation_monitor(group_id)
+        history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
+        await self.local_api.broadcast_event("token_usage_updated",
+                                             self._group_token_usage(group_id, history_tokens, 0))
 
     def get_group_agent_context(self, group_id: str, agent_id: str) -> Optional[tuple]:
         return self._group_agent_context.get(group_id, {}).get(agent_id)
