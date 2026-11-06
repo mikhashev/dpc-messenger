@@ -11161,6 +11161,7 @@ class CoreService:
             logger.error("list_processes failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e) or type(e).__name__}
 
+    @slow_command
     async def get_process_command(self, pid: int, started_at: str) -> Dict[str, Any]:
         """The full command line of a running process of the registry, read from the OS
         now (ADR-046 amendment of 2026-11-06); nothing is stored. `pid` and `started_at`
