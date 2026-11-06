@@ -1902,6 +1902,8 @@
   }
 
   .peer-block-btn {
+    /* It sits in .chat-title-section, a flex column that stretches its children. */
+    align-self: flex-start;
     padding: 0.2rem 0.6rem;
     background: transparent;
     color: #999;
