@@ -1288,10 +1288,26 @@ class TestPeers:
         assert _in_line() == []
         _untouched(f)
         llama = _llama("a llama alias")
+        # Since the amendment of 2026-11-06 an idle holder is swapped out for a peer on the owner's
+        # terms, and even then the peer is in no line: it is seen standing nowhere through its stop.
+        reached, let_go = _slow_stop(f)
         with serving_a_peer(PEER):
-            with pytest.raises(CardHeldError, match="the card is held by"):  # the claim's refusal
-                await asyncio.wait_for(llama.ensure_running(), 5)
-        assert _in_line() == []
+            started = asyncio.ensure_future(llama.ensure_running())
+            await asyncio.wait_for(reached.wait(), 5)
+            assert _in_line() == []
+            let_go.set()
+            await asyncio.wait_for(started, 5)
+        assert _in_line() == [] and _alive(llama) and not _alive(f)
+        await llama.drain(timeout=None)
+        llama.reopen()
+        await f.ensure_running()
+        # A busy holder, and a peer is refused at once and takes no place either.
+        async with card_held_for(F, "accepted_request", agent_id="agent_owner"):
+            with serving_a_peer(PEER):
+                with pytest.raises(CardHeldError, match="cannot load for a peer: the card is held by") as refused:
+                    await asyncio.wait_for(llama.ensure_running(), 5)
+            assert "agent_owner" not in str(refused.value)
+            assert _in_line() == []
         _untouched(f)
 
     @pytest.mark.asyncio

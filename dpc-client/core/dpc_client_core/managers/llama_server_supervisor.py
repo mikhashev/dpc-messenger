@@ -926,10 +926,11 @@ class _QueuedRequest:
     deadline until it starts (`starts_the_way_back`), and `card_queue` reports no time till then."""
 
     __slots__ = ("place", "hold", "accepted_at", "queued_at", "wait_s", "wait_why", "give_up_at", "came_late",
-                 "stop_bound", "out", "_turn_mark", "borrows_from", "way_back")
+                 "stop_bound", "out", "_turn_mark", "borrows_from", "way_back", "for_a_peer")
 
     def __init__(self, place: _CardPlace, borrows_from: Optional[str] = None, way_back: bool = False):
         self.place = place
+        self.for_a_peer = False
         self.hold: Optional[_CardHold] = _CARD_HOLD.get()
         self.borrows_from = borrows_from
         self.way_back = way_back
@@ -1034,6 +1035,25 @@ class _QueuedRequest:
         if self.hold is not None and self.hold.borrow is not None and self.hold.borrow.way_back is self:
             _hold_borrow_ends(self.hold)
         self.leaves()
+
+
+def _a_peers_request(alias: str) -> _QueuedRequest:
+    """The request a start for a peer swaps with (ADR-044, amendment 2026-11-06): it has a
+    `_CardPlace` and is in it, but the place is never put in `_CARD_QUEUE`, so a peer takes no
+    place and waits in no line (rule 7). It has no time to wait: it is `came_late` from the
+    start, so `_free_the_card` stops a holder that is not busy and refuses one that is. Nothing
+    of an owner's hold or deadline is its own."""
+    place = _CardPlace(alias)
+    request = _QueuedRequest(place)
+    request.hold = None
+    request.for_a_peer = True
+    now = _swap_clock()
+    request.accepted_at, request.wait_s = now, 0
+    request.give_up_at = now
+    request.came_late = True
+    request.stop_bound = now + _STOP_WITH_NO_WAIT_LEFT_S
+    place.requests.append(request)
+    return request
 
 
 def _stands_before_the_line(hold: _CardHold) -> bool:
@@ -2092,8 +2112,35 @@ class LlamaServerSupervisor:
     DROPS_PARKED_ON_STOP = False
 
     def _start_is_for_a_peer(self) -> bool:
-        """A call served to a peer never swaps (ADR-044 amendment, rule 2)."""
+        """A call served to a peer, or a start begun for one: it takes no place in the card
+        queue (rule 7) and swaps only on the owner's own terms (`_why_a_peer_may_not_swap`)."""
         return peer_being_served() is not None
+
+    def _why_a_peer_may_not_swap(self) -> Optional[str]:
+        """Why a start for a peer may not stop what holds the card, or None when it may (ADR-044,
+        amendment 2026-11-06, Mike's call). The owner's conditions for a swap and no wait: the
+        switch is on, nothing is in the card queue, and no holder is busy by rule 1 (starting, a
+        call in flight, an `accepted_request`, a caller in its window) or already stopping. Claims
+        and awaits nothing, so `_free_the_card` asks it in the stretch of the mark. Said in a
+        peer's words, to a peer: no agent, chat or caller is named."""
+        holders = self._blocking_holders()
+        if holders and not swap_policy()[0]:
+            return "this node's owner has not turned on swapping local models for an idle holder"
+        if _CARD_QUEUE:
+            return "a request on this node is waiting for the card, and a peer's request does not go ahead of it"
+        for holder, state in holders:
+            if state in ("stopping", "draining") or holder._draining:
+                return "it is already stopping"
+            if holder._busy_for_the_card(state):
+                return "it is busy, and a peer's request does not wait for a busy holder"
+        return None
+
+    def _a_peer_cannot_swap_refusal(self, holder: "LlamaServerSupervisor", why: str) -> CardQueueRefusal:
+        return CardQueueRefusal(
+            f"{self.ENGINE}[{self.alias}] cannot load for a peer: the card is held by "
+            f"{holder.ENGINE} alias '{holder.alias}'; {why}",
+            holder.alias, holder.ENGINE,
+        )
 
     def _draining_error(self) -> LlamaServerError:
         """The refusal of a new call or start while this supervisor drains. A background call
@@ -2249,9 +2296,9 @@ class LlamaServerSupervisor:
             # A peer never takes a place, and a new one does not go ahead of one (rule 7).
             if _CARD_QUEUE and not (self._child_is_up() and peer in _callers_in_their_window(self.alias)):
                 raise self._a_place_waits_refusal()
-            return None
+            return self._a_peers_request_that_may_swap()
         if self._start_is_for_a_peer():
-            return None
+            return self._a_peers_request_that_may_swap()
         if hold is not None and hold.borrow is not None and hold.borrow.alias == self.alias:
             return None  # it stands here; a child gone meanwhile is refused at the claim
         found = self._blocking_holder()
@@ -2282,6 +2329,19 @@ class LlamaServerSupervisor:
             request.leaves()
             raise
         return request if request.in_line() else None
+
+    def _a_peers_request_that_may_swap(self) -> Optional[_QueuedRequest]:
+        """A peer's start, with the swap on and a holder in its way: the request `_free_the_card`
+        swaps with, which is in no line. A place that waits refuses it here, in a peer's words
+        (rule 7: it does not go ahead). None when nothing is in the way or the child is already up,
+        and the start's own path says the rest (the claim refuses a place that waits with no holder
+        left). The holder is not decided on here: `_free_the_card` asks again later."""
+        found = None if self._child_is_up() else self._blocking_holder()
+        if found is None:
+            return None
+        if _CARD_QUEUE:
+            raise self._a_peer_cannot_swap_refusal(found[0], self._why_a_peer_may_not_swap())
+        return _a_peers_request(self.alias)
 
     async def _take_the_way_back(self, request: _QueuedRequest) -> Optional[_QueuedRequest]:
         """A card-borrow's request asks for its own alias again, from the place it already has."""
@@ -2458,6 +2518,17 @@ class LlamaServerSupervisor:
                 if found is None:
                     return  # freed, by us or by someone else's stop: not this swap's doing
                 holder, state = found
+                if request.for_a_peer:
+                    # A start for a peer (amendment 2026-11-06): the owner's own conditions, with
+                    # no wait. Asked here, in the stretch of the mark below, so nothing that came
+                    # into the line or onto the holder since the policy looked is passed over.
+                    why = self._why_a_peer_may_not_swap()
+                    if why is not None:
+                        raise self._a_peer_cannot_swap_refusal(holder, why)
+                    stands_there = False
+                    logger.info("%s[%s]: stopping '%s' (%s) to free the card for a peer's start",
+                                self.ENGINE, self.alias, holder.alias, holder.ENGINE)
+                    break
                 stands_there = _this_request_holds(holder.alias)
                 if stands_there and not request.may_stop_its_own_stand_on(holder.alias):
                     return  # rule 9: it would wait on itself
@@ -2485,7 +2556,12 @@ class LlamaServerSupervisor:
             holder._begin_swap_drain(self)  # no await since the last check above
             if stands_there:
                 request.gives_up_its_stand()
-            request.says_it_waits()
+            if request.for_a_peer:
+                # The stop's clock starts at the mark: a launcher takes longer to go than the
+                # few instants since this request was made.
+                request.stop_bound = _swap_clock() + _STOP_WITH_NO_WAIT_LEFT_S
+            else:
+                request.says_it_waits()
             await self._wait_for_the_stop(holder, request)
         if self._blocking_holder() is not None:
             # Out of rounds: `_claim_card` names whoever holds the card now. FIFO is what closes

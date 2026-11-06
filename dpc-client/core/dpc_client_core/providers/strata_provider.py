@@ -292,7 +292,13 @@ class StrataProvider(LlamaServerProvider):
         None when it began one or one is under way (ADR-044 point 9).
 
         (0) DPC's own install: a peer's request never sets off its fetch (~700 MB).
-        (a) The card: the refusal the owner's start would meet (`_card_held_error`).
+        (a) The card: the refusal the owner's start would meet (`_card_held_error`), unless
+            the owner allows a swap and the swap's own conditions hold now: the switch is on,
+            nothing waits in the card queue and the holder is not busy
+            (`_why_a_peer_may_not_swap`, ADR-044 amendment 2026-11-06). Then the start is
+            begun and swaps the holder out itself, through the owner's path, which asks the
+            same again before it marks anything; the card's free VRAM is not read, because the
+            holder is what takes it, and the owner's own swap reads none either.
         (b) Free VRAM: Strata sizes its expert cache to what is free, so the
             config holds no per-model figure; the bar is the llama-server
             admission budget, physical VRAM less the desktop reserve."""
@@ -314,39 +320,54 @@ class StrataProvider(LlamaServerProvider):
                     "this node yet, and a peer's request does not fetch it"
                 )
         not_started = f"'{self.alias}' is not running, and a peer's request does not start it now"
+        swaps_the_holder = False
 
         def card_refusal() -> Optional[str]:
+            nonlocal swaps_the_holder
+            swaps_the_holder = False
             held = sup._card_held_error()
             if held is None:
                 return None
+            why = sup._why_a_peer_may_not_swap()
+            if why is None and not isinstance(held, _base.CardQueueRefusal):
+                swaps_the_holder = True
+                return None
             if isinstance(held, _base.CardQueueRefusal):
-                return f"{not_started}: a request on this node is waiting for the card"
-            return f"{not_started}: the card is held by {held.holder_engine} alias '{held.holder_alias}'"
+                return f"{not_started}: {why or 'a request on this node is waiting for the card'}"
+            return f"{not_started}: the card is held by {held.holder_engine} alias '{held.holder_alias}'; {why}"
 
         refusal = card_refusal()
         if refusal:
             return refusal
-        free, total = await asyncio.gather(
-            asyncio.to_thread(_base._free_vram_mib), asyncio.to_thread(_base._total_vram_mib),
-        )
-        if free is None or total is None:
-            return f"{not_started}: the card's free VRAM cannot be read"
-        needed = total - _base._DESKTOP_RESERVE_MIB
-        if free < needed:
-            return (
-                f"{not_started}: {free} MiB of VRAM free, {needed} MiB needed "
-                f"(the card's {total} MiB less {_base._DESKTOP_RESERVE_MIB} MiB for the desktop)"
+        if not swaps_the_holder:
+            free, total = await asyncio.gather(
+                asyncio.to_thread(_base._free_vram_mib), asyncio.to_thread(_base._total_vram_mib),
             )
-        # Asked again: the reads above awaited, and an owner start may have claimed the card.
-        refusal = card_refusal()
-        if refusal:
-            return refusal
+            if free is None or total is None:
+                return f"{not_started}: the card's free VRAM cannot be read"
+            needed = total - _base._DESKTOP_RESERVE_MIB
+            if free < needed:
+                return (
+                    f"{not_started}: {free} MiB of VRAM free, {needed} MiB needed "
+                    f"(the card's {total} MiB less {_base._DESKTOP_RESERVE_MIB} MiB for the desktop)"
+                )
+            # Asked again: the reads above awaited, and an owner start may have claimed the card.
+            refusal = card_refusal()
+            if refusal:
+                return refusal
         if sup.start_for_peer(peer_id):
-            logger.info(
-                "strata '%s': peer %s started the launcher (the card not held by the other "
-                "engine, %d MiB of VRAM free, %d MiB needed)",
-                self.alias, peer_id or "unknown", free, needed,
-            )
+            if swaps_the_holder:
+                logger.info(
+                    "strata '%s': peer %s started the launcher, and the start stops the holder of "
+                    "the card first (swap_when_idle, no queue, the holder idle)",
+                    self.alias, peer_id or "unknown",
+                )
+            else:
+                logger.info(
+                    "strata '%s': peer %s started the launcher (the card not held by the other "
+                    "engine, %d MiB of VRAM free, %d MiB needed)",
+                    self.alias, peer_id or "unknown", free, needed,
+                )
         return None
 
     def engine_failure(self) -> Optional[Dict[str, Any]]:

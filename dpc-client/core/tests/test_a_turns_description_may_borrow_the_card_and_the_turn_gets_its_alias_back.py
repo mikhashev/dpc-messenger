@@ -291,7 +291,9 @@ class TestWhatKeepsTheRefusal:
         self, tmp_path, swaps,
     ):
         # A llama-server child made to exclude, so that only the queue's own peer gate stands here:
-        # with a Strata alias the start's "a peer does not start it" answers first.
+        # with a Strata alias the start's "a peer does not start it" answers first. The holder is
+        # busy (a request stands on it), so the peer's swap, allowed since the amendment of
+        # 2026-11-06 on the owner's terms, is refused at once and in a peer's words.
         a, _b, _blind, _eyes, _manager = _pair(tmp_path)
         lone = _llama(G)
         lone.EXCLUSIVE_ON_THE_CARD = True
@@ -299,8 +301,9 @@ class TestWhatKeepsTheRefusal:
         await a.ensure_running()
         async with card_held_for(A, "accepted_request", conversation_id="c"):
             with serving_a_peer("dpc-node-guest"), base_mod.a_card_borrow():
-                with pytest.raises(CardHeldError, match="would wait on itself"):
+                with pytest.raises(CardHeldError, match="cannot load for a peer.*it is busy") as refused:
                     await asyncio.wait_for(lone.ensure_running(), 5)
+            assert "conversation" not in str(refused.value) and "'c'" not in str(refused.value)
             assert _in_line() == []
         assert swaps == [] and lone._proc is None
         _untouched(a)

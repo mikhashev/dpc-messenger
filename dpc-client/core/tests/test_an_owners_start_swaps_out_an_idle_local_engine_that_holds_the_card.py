@@ -5,9 +5,9 @@ by the Stop engine command's path and starts the new one, when `swap_when_idle` 
 the holder is idle or finishes within `swap_wait_s`; a busy holder is not marked and serves
 on (the card queue's rule 2; the holds on an alias are in
 `test_a_request_holds_the_card_from_its_first_round_to_its_last.py`, and the queue in
-`test_requests_wanting_the_card_wait_in_one_line_and_nothing_is_forced.py`). A peer's call never
-swaps, and with the setting off the refusal is today's. Real supervisors and their real `ensure_running`;
-the child, the health and props reads are faked at the supervisors' own seams, as in
+`test_requests_wanting_the_card_wait_in_one_line_and_nothing_is_forced.py`). A peer's call swaps
+only on the owner's terms (amendment 2026-11-06), and with the setting off the refusal is today's.
+Real supervisors and their real `ensure_running`; the child, the health and props reads are faked at the supervisors' own seams, as in
 `test_one_local_engine_holds_the_card.py`. Every home is under tmp_path.
 """
 
@@ -94,8 +94,12 @@ class TestWhereTheRefusalStaysAsToday:
         _holder_untouched(holder)
 
     @pytest.mark.asyncio
-    async def test_a_peer_call_never_swaps_even_when_the_holder_is_idle(self, tmp_path):
+    async def test_a_peer_call_with_the_setting_off_is_refused_and_the_holder_is_untouched(self, tmp_path, settings):
+        # ADR-044 amendment 2026-11-06: a peer swaps on the owner's terms, so with the switch
+        # off it meets today's refusal (the swap-on cases are in
+        # `test_a_peer_may_swap_an_idle_card_when_the_owner_allows_it.py`).
         holder, new = await _running_pair(tmp_path, "strata")
+        settings.set_local_engine_swap(False, 300)
 
         with serving_a_peer("dpc-node-" + "b" * 32):
             with pytest.raises(CardHeldError, match="strata alias 'flash'"):
@@ -105,8 +109,9 @@ class TestWhereTheRefusalStaysAsToday:
         assert new._proc is None
 
     @pytest.mark.asyncio
-    async def test_a_strata_start_begun_for_a_peer_never_swaps_either(self, tmp_path):
+    async def test_a_strata_start_begun_for_a_peer_with_the_setting_off_is_refused_too(self, tmp_path, settings):
         holder, new = await _running_pair(tmp_path, "llama")
+        settings.set_local_engine_swap(False, 300)
 
         token = strata_mod._STARTED_FOR_PEER.set("dpc-node-" + "c" * 32)
         try:

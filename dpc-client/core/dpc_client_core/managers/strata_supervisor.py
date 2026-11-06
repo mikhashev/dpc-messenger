@@ -922,7 +922,9 @@ class StrataSupervisor(LlamaServerSupervisor):
 
     def _start_is_for_a_peer(self) -> bool:
         """A peer's call, or the owner's own start begun for a peer's request
-        (`start_for_peer`, which runs unmarked): neither swaps another engine out."""
+        (`start_for_peer`, which runs unmarked): neither takes a place in the card queue, and
+        either swaps another engine out only on the owner's terms (ADR-044, amendment of
+        2026-11-06; `_why_a_peer_may_not_swap`)."""
         return super()._start_is_for_a_peer() or _STARTED_FOR_PEER.get() is not None
 
     def on_the_card(self) -> bool:
