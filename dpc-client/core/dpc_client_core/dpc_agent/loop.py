@@ -878,8 +878,13 @@ def _tag_call_end(content: str, start: "re.Match[str]") -> Optional[int]:
 
 
 def _tag_call_at(content: str, opener: "re.Match[str]") -> Optional[Tuple[str, int]]:
-    """The tool's name and the block's end, for an opener a call's structure follows."""
-    start = _TAG_CALL_START.match(content, opener.end())
+    """The tool's name and the block's end, for an opener a call's structure follows. A repeated
+    opener in front of it is the same block (2026-11-06: `</tool_call>\\n<tool_call>\\n<tool_call>`
+    hid both of Johnny's written calls, and the raw block went to the room)."""
+    at = opener.end()
+    while again := _TAG_CALL_OPENER.match(content, len(content) - len(content[at:].lstrip())):
+        at = again.end()
+    start = _TAG_CALL_START.match(content, at)
     if not start:
         return None
     end = _tag_call_end(content, start)
