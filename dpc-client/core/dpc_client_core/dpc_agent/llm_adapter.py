@@ -627,9 +627,14 @@ class DpcLlmAdapter:
                 raise
             host = _host_name(service, peer) if service is not None else peer
             where = peer if host == peer else f"{host} ({peer})"
-            raise RuntimeError(
+            err = RuntimeError(
                 f"Model '{self._provider_alias}' on peer {where} did not answer: {e}"
-            ) from e
+            )
+            # Read by sleep's failure reason, which names the model and its host
+            # in the group chat (as PeerRefused carries `host_name`).
+            err.host_name = host
+            err.provider_alias = self._provider_alias
+            raise err from e
         return str((response or {}).get("content") or "")
 
     def _note_call(self, **facts: Any) -> None:

@@ -775,6 +775,8 @@ async def run_sleep(
             except Exception:
                 pass
     await _SLEEP_PIPELINE_LOCK.acquire()
+    synthesis_unparsable: Optional[json.JSONDecodeError] = None
+    synthesis_dump: Optional[Path] = None
     try:
         results_dir = conversation_dir / "sleep_results"
         results_dir.mkdir(exist_ok=True)
@@ -1027,12 +1029,13 @@ async def run_sleep(
         try:
             result = _parse_llm_json(response)
         except json.JSONDecodeError as err:
-            _capture_unparsable(
+            synthesis_dump = _capture_unparsable(
                 response, err,
                 label="synthesis",
                 usage=_last_usage_of(llm_manager, provider_alias),
                 dump_dir=results_dir,
             )
+            synthesis_unparsable = err
             raise
 
         morning_brief = result.get("morning_brief", {})
@@ -1140,6 +1143,43 @@ async def run_sleep(
             "last_error": err_desc,
             "error_at": datetime.now(timezone.utc).isoformat(),
         })
-        return {"status": "error", "error": err_desc}
+        reason = _sleep_failure_reason(
+            e, err_desc,
+            alias=provider_alias or getattr(llm_manager, "default_provider", None),
+            synthesis_dump=synthesis_dump if e is synthesis_unparsable else None,
+            synthesis_unparsable=e is synthesis_unparsable,
+        )
+        return {"status": "error", "error": err_desc, "reason": reason}
     finally:
         _SLEEP_PIPELINE_LOCK.release()
+
+
+def _sleep_failure_reason(
+    exc: BaseException, err_desc: str, *, alias: Optional[str],
+    synthesis_dump: Optional[Path], synthesis_unparsable: bool,
+) -> str:
+    """Why a sleep failed, in one clause a person reads in the group chat.
+
+    The cases that have happened get their own words: a peer model whose
+    peer is not connected (Muse, 2026-11-06) and a synthesis answer that was
+    not JSON (Ark, same day). Anything else is the exception as logged.
+    """
+    if synthesis_unparsable:
+        saved = (f"raw output saved to {synthesis_dump.name}" if synthesis_dump is not None
+                 else "the raw output could not be saved")
+        return f"the synthesis answer from {alias or 'the default model'} was not valid JSON; {saved}"
+    chain: list = []
+    link: Optional[BaseException] = exc
+    while link is not None and link not in chain:
+        chain.append(link)
+        link = link.__cause__ or link.__context__
+    peer_error = next((x for x in chain if getattr(x, "host_name", None)), None)
+    if peer_error is not None:
+        model = getattr(peer_error, "provider_alias", None) or alias or "?"
+        host = peer_error.host_name
+        if any(isinstance(x, ConnectionError) for x in chain):
+            return f"the peer model {model} on {host} is not connected"
+        cause = chain[chain.index(peer_error) + 1] if chain.index(peer_error) + 1 < len(chain) else None
+        detail = f": {cause}" if cause is not None and str(cause) else ""
+        return f"the peer model {model} on {host} did not answer{detail}"
+    return err_desc

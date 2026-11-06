@@ -11247,6 +11247,20 @@ class CoreService:
             parts.append(f"\n*{n} sessions analyzed ({period})*")
         return "\n".join(parts)
 
+    async def _post_group_sleep_failure(self, group_id: str, agent_name: str, reason: str) -> None:
+        """Say in the group, from the agent, that its sleep did not complete and why.
+
+        Posted by the path a morning brief takes; never raises, since it runs in
+        the failure branch of a background task and a second error there would
+        hide the first.
+        """
+        text = f"**Sleep did not complete:** {reason}."
+        try:
+            await self.send_group_agent_message(group_id, agent_name, text)
+        except Exception as e:
+            logger.error("Group sleep: could not post the failure of %s to %s: %s",
+                         agent_name, group_id, e, exc_info=True)
+
     async def toggle_sleep(self, agent_id: str = None) -> Dict[str, Any]:
         """Toggle sleep/wakeup for an agent. If awake, starts sleep pipeline. If sleeping, returns current state."""
         if agent_id is None:
@@ -11471,6 +11485,7 @@ class CoreService:
                         "current": current, "total": total,
                         "phase": phase, "archive_file": archive_file,
                     })
+                result = None
                 try:
                     result = await run_sleep(
                         adir, lm, agent_id=aid, force=False,
@@ -11486,6 +11501,13 @@ class CoreService:
                         if isinstance(new_msg_id, str):  # a refusal is a dict, and truthy
                             brief["chat_message_id"] = new_msg_id
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                    elif result.get("status") == "error":
+                        # A failed sleep says so in the group, from the agent, where the
+                        # brief would have been; a log line alone was silence (Mike's
+                        # call, 2026-11-06).
+                        reason = (result.get("reason") or result.get("error")
+                                  or result.get("message") or "unknown error")
+                        await self._post_group_sleep_failure(group_id, dname, reason)
                     done_data = {"agent_id": aid, "group_id": group_id, "status": "awake",
                                  "result": result.get("status", "unknown"),
                                  "sessions_analyzed": result.get("sessions_analyzed", 0)}
@@ -11494,6 +11516,9 @@ class CoreService:
                     logger.error("Group sleep error for %s: %s", aid, e, exc_info=True)
                     await self.local_api.broadcast_event("sleep_state_changed", {
                         "agent_id": aid, "group_id": group_id, "status": "awake", "result": "error", "error": str(e)})
+                    if result is None:  # run_sleep itself raised, not the posting after it
+                        await self._post_group_sleep_failure(
+                            group_id, dname, f"{type(e).__name__}: {e}" if str(e) else type(e).__name__)
 
             asyncio.create_task(_run_group_sleep())
             triggered.append(agent_id)
