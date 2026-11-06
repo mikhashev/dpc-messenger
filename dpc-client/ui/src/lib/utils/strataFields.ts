@@ -20,7 +20,7 @@ export interface StrataParamSpec {
 }
 
 /**
- * Strata's serve/runconfig.py EDITABLE (Strata v0.2.9, read 2026-10-31), in
+ * Strata's serve/runconfig.py EDITABLE (Strata v0.2.11, compared 2026-11-06), in
  * its order, with its help texts. `open_browser` is left out: DPC's start
  * config always writes it false. The backend's STRATA_MODEL_PARAMS
  * (strata_supervisor.py) is the same list; a backend test keeps them equal.
@@ -70,8 +70,8 @@ export interface StrataCacheAdmissionSpec {
 
 /**
  * The conversation cache's admission rules (read in src/program/generate.cpp at Strata
- * 0.1.45, 2026-10-19; the defaults re-checked in the `--help` of engine 0.1.55, Strata
- * v0.2.9, 2026-10-31). Every start config carries all three, the default included,
+ * 0.1.45, 2026-10-19; the defaults re-checked in the `--help` of engine 0.1.57, Strata
+ * v0.2.11, 2026-11-06). Every start config carries all three, the default included,
  * so the value is the alias's and visible. The backend's CACHE_ADMISSION_FLAGS
  * (strata_supervisor.py) is the same list; a backend test keeps them equal.
  */

@@ -12,7 +12,7 @@ src=<control_root>)`, calls `model_table(hardware())` and prints one JSON line,
 
 Read-only, on purpose:
 - `Strata(...)` only resolves its paths; it creates nothing. `hardware()` and
-  `model_table()` call no `save_state` and make no folder (checked in v0.2.9). `installed`
+  `model_table()` call no `save_state` and make no folder (checked in v0.2.9; v0.2.11 run 2026-11-06, no folder made). `installed`
   is decided from `strata-*.json` under `<run_configs_dir>`; a folder that does not exist
   has none, so every size is not installed, and it is not created.
 - Bytecode is not written (`-I` ignores PYTHONDONTWRITEBYTECODE, so it is set here): the

@@ -134,7 +134,7 @@ class _Env:
         (folder / "engine-component.json").write_bytes(
             json.dumps(manifest, indent=1, ensure_ascii=False).encode("utf-8"))
         report = {"schema_version": 1, "ok": True,
-                  "feed": {"source": cmd[cmd.index("--feed") + 1], "sequence": 118},
+                  "feed": {"source": cmd[cmd.index("--feed") + 1], "sequence": 121},
                   "results": [{"component": "engine", "status": "updated", "changed": True,
                                "installed_after": {"version": manifest["version"], "folder": self.folder}}],
                   "exit_code": 0}
@@ -165,7 +165,7 @@ def test_one_control_row_per_platform_of_one_control_version():
     for plat, row in sf.PLATFORM_ASSETS.items():
         assert plat in row["name"]
         assert re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) and row["size"] > 0
-        assert re.fullmatch(r"[0-9a-f]{12}", row["commit"])
+        assert re.fullmatch(r"[0-9a-f]{9,12}", row["commit"])  # the Mac engines of v0.2.11 write nine digits
         versions.add(re.match(r"strata-control-(\d+\.\d+\.\d+)-", row["name"]).group(1))
     assert versions == {sf.STRATA_ENGINE_VERSION}
 
@@ -271,7 +271,7 @@ def _other_public() -> str:
     ("bad_signature", "signature is 'one that does not verify'"),
     ("tampered", "signature is 'one that does not verify'"),
     ("platform", "platform is 'linux-x86_64'"),
-    ("commit", "build_id is 'version 0.1.55, build_id 4cf0d8cd3809+metal"),
+    ("commit", "build_id is 'version 0.1.57, build_id 4cf0d8cd3809+metal"),
     ("file_hash", "files[strata.exe].sha256"),
 ])
 def test_an_engine_that_is_not_the_pin_is_refused_at_install(world, case, field):
@@ -302,8 +302,29 @@ def test_an_engine_that_is_not_the_pin_is_refused_at_install(world, case, field)
 
 def test_the_build_commit_counts_as_a_whole_token_wherever_build_id_puts_it(world):
     # linux-aarch64 engines carry the commit at the tail of build_id, the others at the head.
-    world.manifest = _manifest(build_id=f"release-0.1.55-cuda13-13.0-aarch64-{COMMIT}")
+    world.manifest = _manifest(build_id=f"release-0.1.57-cuda13-13.0-aarch64-{COMMIT}")
     assert sf.install_pin().is_dir()
+
+
+def test_the_build_commit_spelled_in_full_counts_as_that_commit(world):
+    # The Linux sycl engine of v0.2.11 writes all 40 hex digits of the commit its siblings shorten to 12.
+    world.manifest = _manifest(build_id=f"{COMMIT}{'a' * (40 - len(COMMIT))}-oneapi2026.1.1")
+    assert sf.install_pin().is_dir()
+
+
+_FEED = json.loads((Path(__file__).parent / "fixtures" / f"strata_{sf.STRATA_RELEASE_TAG}_feed_packages.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("row", _FEED["engine"], ids=lambda row: row["url"])
+def test_every_engine_of_the_pinned_feed_carries_the_commit_its_platform_row_names(world, monkeypatch, tmp_path, row):
+    # What a bump gets wrong silently: one package spelling the commit another way is refused only after its download.
+    monkeypatch.setattr(sf, "platform_tag", lambda: row["platform"])
+    folder = tmp_path / "pin" / "components" / "engine" / "one"
+    folder.mkdir(parents=True)
+    manifest = _manifest(platform=row["platform"], backend=row["backend"], variant=row["variant"] or None, build_id=row["build_id"])
+    manifest["signature"] = _sign(world.key, manifest, world.public)
+    (folder / "engine-component.json").write_bytes(json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
+    assert sf.check_engine_identity(folder)["build_id"] == row["build_id"]
 
 
 def test_the_build_commit_inside_a_longer_hex_run_is_not_the_commit(world):

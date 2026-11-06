@@ -101,7 +101,7 @@ class PeerStartRefused(PeerCallRefused):
 # takes). The rules that decide what the conversation cache admits, from the
 # engine's flag parser and help (src/program/generate.cpp, read at Strata 0.1.45,
 # 477ac13c, 2026-10-19; the three defaults below re-checked in the `--help` of
-# engine 0.1.55, Strata v0.2.9, 2026-10-31). Each is written into every start config, the
+# engine 0.1.57, Strata v0.2.11, 2026-11-06). Each is written into every start config, the
 # default too, so the value the engine parks by is ours and named even when the
 # alias sets none (Mike's call, 2026-10-19). The RAM floor is physical RAM —
 # MemAvailable, GlobalMemoryStatusEx ullAvailPhys on Windows, under the cgroup
@@ -205,7 +205,7 @@ _STRUCTURAL_KEYS = frozenset({
 _ARG_PARAMS = {"vram_reserve_mib": "--vram-reserve-mib"}
 
 # The keys Strata's own page edits, with their kinds — serve/runconfig.py
-# EDITABLE as of Strata v0.2.9 (read 2026-10-31). `open_browser` is left out:
+# EDITABLE as of Strata v0.2.11 (the file unchanged since v0.2.9, compared 2026-11-06). `open_browser` is left out:
 # DPC's start config always writes it false. Mirrored for the UI in
 # dpc-client/ui/src/lib/utils/strataFields.ts (a test keeps the two equal).
 STRATA_MODEL_PARAMS: Dict[str, Any] = {
@@ -680,7 +680,7 @@ def _commit_note(before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any
 
 
 # The engine's warning that the expert arena does not fit (src/core/expert_source.cpp,
-# engine 0.1.55), and only that: its "waiting up to 20 s" lines say "and", not "but",
+# its text found in engine 0.1.57), and only that: its "waiting up to 20 s" lines say "and", not "but",
 # and a start can recover from those. Its words and not its numbers, so that an engine
 # update has fewer ways to turn the note off in silence.
 _ARENA_SHORT_RE = re.compile(r"the expert arena needs .+ but .+ short")

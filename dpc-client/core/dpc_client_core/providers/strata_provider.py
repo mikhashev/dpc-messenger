@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # ADR-044 point 9 (Mike's call, 2026-10-20): every call served to a peer goes
 # out with Strata's per-request checkpoint switch off. The launcher reads the
 # request body as its sampling dict and turns this key into the engine's
-# `ckpt=0` (serve/server.py:1478-1481, Strata v0.2.9); the engine
+# `ckpt=0` (serve/server.py:1705-1706, Strata v0.2.11); the engine
 # then takes no checkpoint for the request and neither continues nor parks its
 # session afterwards (src/program/generate.cpp:13882-13886, :17183), so a
 # peer's call leaves no snapshot in the conversation cache to compete with ours.

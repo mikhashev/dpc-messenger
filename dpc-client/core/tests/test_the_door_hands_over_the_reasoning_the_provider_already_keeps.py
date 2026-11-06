@@ -5,7 +5,7 @@ NEVER-HANDS-IT-OVER-SO-A-CLIENT-WATCHES-AN-EMPTY-THINKING-LINE. On the OpenAI fo
 a stream carries `reasoning_content` deltas as the model makes them, before the
 content they precede, and a whole message carries a `reasoning_content` field: the
 names DeepSeek, llama-server and the Strata launcher write (`serve/server.py`
-v0.2.9, `chunk({"reasoning_content": ...})` and `msg["reasoning_content"]`).
+v0.2.11, `chunk({"reasoning_content": ...})` and `msg["reasoning_content"]`).
 
 Reasoning travels by `on_reasoning`, a parameter only the door passes, so the agent
 loop, the UI and a peer's chunk sender keep receiving what they received, and that

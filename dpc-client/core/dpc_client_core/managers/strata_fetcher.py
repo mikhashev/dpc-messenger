@@ -7,7 +7,7 @@ is the tag of one Strata release, on Strata's app line (0.2.x), published with i
 package (`strata-control-<ver>-<platform>.zip`) and the engine packages are versioned
 0.1.x inside it. `STRATA_ENGINE_VERSION` is that engine version (`strata.exe` and
 `strata-vision.exe`, launched by the **launcher** `serve/server.py`), the one it reports
-at `/metrics` `engine.version`. A person sees both as "Strata v0.2.9 (engine 0.1.55)".
+at `/metrics` `engine.version`. A person sees both as "Strata v0.2.11 (engine 0.1.57)".
 
 Until now the second number lived on each alias as a hand-raised
 `tested_version`. It is in code instead, as `LLAMA_CPP_TAG` is for the llama.cpp
@@ -57,78 +57,81 @@ from .local_engine_pin_fetcher import (
 
 logger = logging.getLogger(__name__)
 
-STRATA_RELEASE_TAG = "v0.2.9"
-STRATA_ENGINE_VERSION = "0.1.55"
+STRATA_RELEASE_TAG = "v0.2.11"
+STRATA_ENGINE_VERSION = "0.1.57"
 
 # The tag's own folder: never releases/latest, which moves with every release.
 STRATA_RELEASE_BASE = "https://github.com/Niko1221/Strata/releases/download"
 
 # One Control row per platform, keyed by Strata's platform words. `commit` is the build
 # commit every engine of that platform carries in its `build_id` as a whole hex token: at
-# the head on Windows, Linux x86_64 and macOS (`99866a47a2b8+cuda13.0`), at the tail on
-# linux-aarch64 (`release-0.1.55-cuda13-13.0-aarch64-99866a47a2b8`).
+# the head on Windows, Linux x86_64 and macOS (`0bdcef4682c5+cuda13.0`, on macOS nine hex
+# digits, `3e0210663+metal`), at the tail on linux-aarch64
+# (`release-0.1.57-cuda13-13.0-aarch64-0bdcef4682c5`). The Linux x86_64 sycl engine spells
+# the same commit in full (`0bdcef4682c5371f...d78205-oneapi2026.1.1`).
 # A bump fills `name`/`sha256`/`size` from the release's install-manifest.txt (check the
 # API digest), `commit` from the build_id of the platform's engines in its strata-feed.json,
 # and `installed_bytes` (Control unpacked: its archive's regular-file members) from the
-# control entry of that file; on 2026-11-01 the Windows zip's members summed to that figure to the byte.
+# control entry of that file; on 2026-11-06 the members of all four archives of v0.2.11
+# summed to that figure to the byte.
 PLATFORM_ASSETS: Dict[str, Dict[str, Any]] = {
     "windows-x86_64": {
-        "name": "strata-control-0.1.55-windows-x86_64.zip",
-        "sha256": "bdca3a42071704eab33455a4c85d4867c0ecfd6face95a08f13e8967e5594e99",
-        "size": 73_121_142,
-        "installed_bytes": 228_912_696,
-        "commit": "99866a47a2b8",
+        "name": "strata-control-0.1.57-windows-x86_64.zip",
+        "sha256": "e93caba92fd69398fa18e4e698c21e798e2e488c2d7ddb77b5272bec6d347d8f",
+        "size": 73_411_113,
+        "installed_bytes": 229_788_151,
+        "commit": "0bdcef4682c5",
     },
     "linux-x86_64": {
-        "name": "strata-control-0.1.55-linux-x86_64.tar.gz",
-        "sha256": "50783d2fa6c6e98e9bdc8d4f66ad070706b1e1f3e5e2782cc59fd5dabd9488e8",
-        "size": 99_498_096,
-        "installed_bytes": 334_063_585,
-        "commit": "99866a47a2b8",
+        "name": "strata-control-0.1.57-linux-x86_64.tar.gz",
+        "sha256": "2ac78cffee4a638b4f32d3020d5a85da8bd1d32a2b12705d8c4fb706b6094d08",
+        "size": 99_944_994,
+        "installed_bytes": 335_557_257,
+        "commit": "0bdcef4682c5",
     },
     "linux-aarch64": {
-        "name": "strata-control-0.1.55-linux-aarch64.tar.gz",
-        "sha256": "0f298b915c6bbf71e14fcfcfea96348ea5333a86981c6f9c8398488671203789",
-        "size": 83_372_878,
-        "installed_bytes": 274_092_725,
-        "commit": "99866a47a2b8",
+        "name": "strata-control-0.1.57-linux-aarch64.tar.gz",
+        "sha256": "5b4d75b6bc23749fe8140e82db80167d65d17c25a1b42e4f80edd1ee3828fc67",
+        "size": 83_864_826,
+        "installed_bytes": 273_479_276,
+        "commit": "0bdcef4682c5",
     },
     "macos-arm64": {
-        "name": "strata-control-0.1.55-macos-arm64.tar.gz",
-        "sha256": "5c3f8eada00ebfffa0fcca71f5f8a9abf45c8f8e5bb94ef07e9862191626f226",
-        "size": 50_763_163,
-        "installed_bytes": 150_421_924,
-        "commit": "4cf0d8cd3809",
+        "name": "strata-control-0.1.57-macos-arm64.tar.gz",
+        "sha256": "e61f9906004cca42108b20752e53362e30791181b587b1ee6d50afcae837004d",
+        "size": 51_086_513,
+        "installed_bytes": 149_891_272,
+        "commit": "3e0210663",
     },
 }
 
 # Every engine package of the pinned feed, per platform: (backend, variant, size,
 # installed_bytes), the pair strata-feed.json declares per package: download `size` and
 # `installed_bytes` (two figures on purpose, not to be folded into one). From the signed
-# strata-feed.json of v0.2.9 (-linux-aarch64 for that platform); re-read at every pin
-# move. The rows: tests/fixtures/strata_v0.2.9_feed_packages.json, tied by a test.
+# strata-feed.json of v0.2.11 (-linux-aarch64 for that platform); re-read at every pin
+# move. The rows: tests/fixtures/strata_v0.2.11_feed_packages.json, tied by a test.
 _ENGINE_PACKAGES: Dict[str, Tuple[Tuple[str, str, int, int], ...]] = {
     "windows-x86_64": (
-        ("cuda", "cuda12", 904_164_080, 1_444_237_804),
-        ("cuda", "cuda13", 621_585_315, 949_389_792),
-        ("hip", "rdna2", 172_708_267, 577_773_839),
-        ("hip", "rdna3", 277_761_345, 884_731_110),
-        ("hip", "rx9070", 568_281_872, 1_002_533_527),
+        ("cuda", "cuda12", 915_324_388, 1_479_343_085),
+        ("cuda", "cuda13", 627_812_560, 970_245_089),
+        ("hip", "rdna2", 174_926_996, 584_050_448),
+        ("hip", "rdna3", 282_636_213, 899_260_647),
+        ("hip", "rx9070", 570_803_280, 1_010_309_272),
     ),
     "linux-x86_64": (
-        ("cuda", "cuda12", 935_156_308, 1_546_437_671),
-        ("cuda", "cuda13", 647_149_266, 1_043_689_345),
-        ("hip", "halo", 171_940_773, 738_621_707),
-        ("hip", "rx6000", 203_505_232, 1_019_905_738),
-        ("hip", "rx7900", 250_890_402, 1_048_301_839),
-        ("hip", "rx9070", 409_437_119, 1_433_032_433),
-        ("sycl", "", 186_756_682, 685_939_381),
+        ("cuda", "cuda12", 946_360_848, 1_581_632_104),
+        ("cuda", "cuda13", 720_473_300, 1_183_061_759),
+        ("hip", "halo", 247_896_848, 1_107_155_781),
+        ("hip", "rx6000", 205_633_740, 1_026_389_690),
+        ("hip", "rx7900", 329_144_905, 1_424_249_969),
+        ("hip", "rx9070", 674_428_112, 2_481_015_812),
+        ("sycl", "", 187_499_098, 689_576_353),
     ),
     "linux-aarch64": (
-        ("cuda", "cuda13", 656_111_027, 928_127_879),
+        ("cuda", "cuda13", 659_232_889, 935_801_311),
     ),
     "macos-arm64": (
-        ("metal", "", 5_304_303, 14_743_181),
+        ("metal", "", 5_455_515, 15_145_462),
     ),
 }
 
@@ -143,16 +146,17 @@ def _smallest(rows) -> Tuple[str, str, int, int]:
 
 # Strata's updater picks the engine package by the card, so before it runs only the range
 # is known. The one package of the platform with the largest size + installed_bytes, both
-# figures from it (cuda12 on Windows and Linux x86_64).
+# figures from it (cuda12 on Windows, hip rx9070 on Linux x86_64, whose download is smaller
+# than cuda12's: the sum is what bounds the disk, the download figure is its package's).
 ENGINE_SIZE_MAX: Dict[str, int] = {p: _largest(r)[2] for p, r in _ENGINE_PACKAGES.items()}
 ENGINE_INSTALLED_BYTES_MAX: Dict[str, int] = {p: _largest(r)[3] for p, r in _ENGINE_PACKAGES.items()}
 # The one package with the smallest size + installed_bytes (hip rdna2 on Windows, sycl on Linux x86_64).
 ENGINE_SIZE_MIN: Dict[str, int] = {p: _smallest(r)[2] for p, r in _ENGINE_PACKAGES.items()}
 ENGINE_INSTALLED_BYTES_MIN: Dict[str, int] = {p: _smallest(r)[3] for p, r in _ENGINE_PACKAGES.items()}
 
-# Strata's BACKEND_MATRIX (strata_control/targets.py of v0.2.9): the families Strata
+# Strata's BACKEND_MATRIX (strata_control/targets.py of v0.2.11): the families Strata
 # commits to per platform. Strata's set, not DPC's; a family is offered only where the
-# pinned feed also has a package of it (v0.2.9 has no cpu package anywhere).
+# pinned feed also has a package of it (v0.2.11 has no cpu package anywhere).
 _BACKEND_MATRIX: Dict[str, Tuple[str, ...]] = {
     "metal": ("macos-arm64",),
     "cuda": ("windows-x86_64", "linux-x86_64", "linux-aarch64"),
@@ -186,17 +190,17 @@ _NO_SPACE = re.compile(r"not enough free space on (?P<drive>.+?): (?P<free>\d+) 
 #   `STRATA_INSTALL_DIR`, `STRATA_SETTINGS_FILE`);
 # - `strata_models_probe.py`'s use of `Strata(...)`, `hardware()` and the `model_table()`
 #   fields in tools/strata_mcp.py (`installed`, `on_this_pc`, `download_gb`, `ram_needed_gb`,
-#   ...): Strata's internal API, passed through by `list_strata_models` as they are.
+#   ...): Strata's internal API, passed through by `list_strata_models` as they are;
+# - what the launcher decides at a start for a start config with no key for it
+#   (serve/server.py `engine_args`, `apply_vision_defaults`): the drafter, the reader, the reserve.
 _INSTALL_LOCK = threading.Lock()
 # The alias of a live Strata launcher running DPC's own install, or None; set by
 # strata_supervisor, which owns the launchers. Replacing the install under one is refused.
-# One engine per install, because families cannot stay side by side across updates in
-# Strata v0.2.9: after an install its updater prunes every engine folder but the new one
-# and the "previous" one (strata_control/updater.py:1023-1035, :1136-1137), and the previous
-# is what a start of the *requested* family would have picked (:1069, :1129), so an engine
-# of another family is deleted. A start also picks within a family by newest, not by build
-# (engine_component.py:985-996). So a different backend replaces the install, and only
-# while no launcher runs from it.
+# One engine per install. Strata's updater no longer asks for it: up to v0.2.9 it pruned
+# every engine folder but the new one and the "previous" one; in v0.2.11 it removes none
+# (strata_control/updater.py:1217). A start still picks within a family by newest, not by
+# build (engine_component.py:1151-1152), and DPC keeps its rule: a different backend replaces
+# the install, and only while no launcher runs from it.
 _launcher_running: Callable[[], Optional[str]] = lambda: None
 
 
@@ -351,9 +355,9 @@ def _check_chosen(identity: Dict[str, Any], backend: str, folder: Path) -> None:
 
 # --- one engine of a family: Strata's start cannot be told a build ------------------------
 # A start resolves `component:strata-engine` with the family alone (engine_component.py
-# expand, :1007-1016) and picks among that family's folders by its own order: a rollback pin,
-# then version, driver, AMD preference, arch (resolve, :985-996). The updater keeps the new
-# engine and the previous one of the same family (updater.py:1136-1137), so hip-rdna2 could
+# expand, :1165-1174) and picks among that family's folders by its own order: a rollback pin,
+# then version, driver, AMD preference, arch (resolve, :1145-1152). The updater keeps the older
+# engines (updater.py:1217), so hip-rdna2 could
 # outrank a chosen hip-rdna3. The install therefore holds one folder per family, and a start
 # refuses an install with two. DPC's retained pin is the rollback, not Strata's "previous";
 # Strata's own state (`.updates/state.json`) is never written.
@@ -361,7 +365,7 @@ def _check_chosen(identity: Dict[str, Any], backend: str, folder: Path) -> None:
 
 def _engines_of_family(engine_dir: Path, family: Any, keep: str) -> List[Path]:
     """The engine folders of `family` under `engine_dir` other than `keep`. A dot folder is
-    not one: Strata's scan skips it (engine_component.py:836)."""
+    not one: Strata's scan skips it (engine_component.py:993)."""
     out: List[Path] = []
     if not engine_dir.is_dir():
         return out
@@ -471,7 +475,8 @@ def check_engine_identity(
         raise refuse("version", found, pinned)
     if manifest.get("platform") != plat:
         raise refuse("platform", manifest.get("platform"), plat)
-    token = rf"(?<![0-9a-fA-F]){re.escape(commit)}(?![0-9a-fA-F])"
+    # A whole hex token: the commit as the row has it, or the same commit in its full 40 digits.
+    token = rf"(?<![0-9a-fA-F]){re.escape(commit)}(?:[0-9a-fA-F]{{{40 - len(commit)}}})?(?![0-9a-fA-F])"
     if not isinstance(build_id, str) or not re.search(token, build_id):
         raise refuse("build_id", found, pinned)
     _check_chosen({"backend": manifest.get("backend"), "variant": variant}, backend, folder)

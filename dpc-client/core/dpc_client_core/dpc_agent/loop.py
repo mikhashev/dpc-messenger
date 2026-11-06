@@ -1075,7 +1075,7 @@ def _output_limit_of(usage: Optional[Dict[str, Any]], window: Optional[int] = No
     """The limit a call stopped at, in words for a sentence; None for one that did not, or whose
     provider does not say. With no ceiling in the usage the count is named as a count. Under a ceiling
     with room left in the window it is neither limit: Strata also ends a reply this way when one token
-    repeats 256 times and when its logits go non-finite (serve/server.py, v0.2.9, #606, #879)."""
+    repeats 256 times and when its logits go non-finite (serve/server.py, v0.2.11, #606, #879)."""
     usage = usage or {}
     if not _stopped_at_a_limit(usage):
         return None

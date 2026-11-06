@@ -379,7 +379,7 @@ class TestSaveValidation:
         errors = self._errors({"alias": "flash", "type": "strata", "model": "flash"})
         joined = " ".join(errors)
         assert "needs strata_base_config" in joined
-        assert "empty means DPC's own install of Strata v0.2.9 (engine 0.1.55)" in joined
+        assert "empty means DPC's own install of Strata v0.2.11 (engine 0.1.57)" in joined
         assert "needs strata_install_dir" not in joined
         assert "conversation_cache_mib" in joined
 

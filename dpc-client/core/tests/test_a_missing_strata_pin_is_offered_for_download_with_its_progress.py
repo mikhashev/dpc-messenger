@@ -40,7 +40,7 @@ from tests.test_the_strata_install_is_fetched_by_its_pin_and_its_engine_is_check
 ALIAS = "flash next"
 NAME = "strata"
 PLAT = "windows-x86_64"
-EXACT = 621_585_315  # the cuda13 package of v0.2.9 on Windows: what the updater would report
+EXACT = 627_812_560  # the cuda13 package of v0.2.11 on Windows: what the updater would report
 LABEL = f"engine {sf.STRATA_ENGINE_VERSION} {PLAT}-cuda-cuda13"
 
 
@@ -60,14 +60,14 @@ FIXTURE_LINES = [
     "not json at all",
     _progress(100_000_000),
     "{broken",
-    _event(event="progress", phase="download", component="control", label="Control 0.1.55",
+    _event(event="progress", phase="download", component="control", label="Control 0.1.57",
            done=99, total=100, percent=99, bytes_per_second=1),
     _event(event="progress", phase="download", component="engine", label=LABEL,
            done="300000000", total=EXACT, percent=48, bytes_per_second=1),
     _progress(300_000_000),
     _progress(50_000_000),  # a download Strata restarted from 0: the bar holds
     _progress(EXACT),
-    _event(event="phase", phase="done", message="Engine 0.1.55 is installed", component="engine"),
+    _event(event="phase", phase="done", message="Engine 0.1.57 is installed", component="engine"),
 ]
 
 
@@ -145,7 +145,7 @@ def test_the_size_is_control_plus_the_largest_engine_of_the_platform():
         assert sf.ENGINE_SIZE_MAX[plat] > 0 and sf.ENGINE_INSTALLED_BYTES_MAX[plat] > sf.ENGINE_SIZE_MAX[plat]
         assert row["installed_bytes"] > row["size"]
     # The largest Windows package (cuda12), not the one this card would get (cuda13).
-    assert sf.ENGINE_SIZE_MAX[PLAT] == 904_164_080 > EXACT
+    assert sf.ENGINE_SIZE_MAX[PLAT] == 915_324_388 > EXACT
     assert sf.SIZE_SOURCE == "package_max"
 
 
@@ -433,7 +433,7 @@ def test_run_supervised_hands_each_stdout_line_over_while_the_child_runs(tmp_pat
 
 # --- the sizes are the feed rows' maxima and minima --------------------------
 
-_ROWS = json.loads((Path(__file__).parent / "fixtures" / "strata_v0.2.9_feed_packages.json").read_text(encoding="utf-8"))
+_ROWS = json.loads((Path(__file__).parent / "fixtures" / "strata_v0.2.11_feed_packages.json").read_text(encoding="utf-8"))
 
 
 def test_the_pinned_sizes_are_the_extremes_of_the_feed_rows_of_the_pinned_release():
@@ -517,7 +517,7 @@ def test_the_llama_pin_keeps_its_one_size_check(service, monkeypatch):
 NO_SPACE_ERROR = ("not enough free space on C:\\: 1210 MiB free, 1498 MiB needed. "
                   "Free up some space on C:\\ and run the update again")
 NO_SPACE_REPORT = _event(
-    ok=False, feed={"source": "https://github.com/Niko1221/Strata/releases/download/v0.2.9", "sequence": 118,
+    ok=False, feed={"source": "https://github.com/Niko1221/Strata/releases/download/v0.2.11", "sequence": 121,
                     "channel": "stable", "key_id": "5d1bc23abbeffd0d"},
     results=[{"component": "engine", "status": "failed", "changed": False, "error": NO_SPACE_ERROR,
               "exit_code": 6, "installed_before": None}],

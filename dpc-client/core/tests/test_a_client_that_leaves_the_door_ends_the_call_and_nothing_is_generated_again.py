@@ -11,7 +11,7 @@ Nothing is stood in for between the door and the socket to the engine: a real
 its real supervisor and the real OpenAI SDK, against `_Engine`, an HTTP server
 on port 0 that speaks what the engine speaks. `_Engine`'s frames are checked
 against the provider's reader (`generate_response_stream`, `generate_with_tools`)
-and against the Strata launcher's writer (`serve/server.py`, v0.2.9, the
+and against the Strata launcher's writer (`serve/server.py`, v0.2.11, the
 `chunk(...)` calls and the final `last["usage"]`), not against this file's asserts.
 The client is a raw socket, so leaving is a socket closing and not an SDK's idea
 of it. Cross-platform: pure asyncio on loopback.

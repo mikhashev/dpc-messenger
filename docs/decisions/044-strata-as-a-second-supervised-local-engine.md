@@ -1169,3 +1169,12 @@ Nothing below has been run live: acceptance is a live start with no budget, shor
    as `list_processes` does, because this hint needs physical memory there; the two commit fields stay
    null. A null is then a reading that failed, on every OS. The Strata supervisor keeps
    `read_free_commit`, which is None off Windows.
+
+## Amendment, 2026-11-06 — the pin moves to Strata v0.2.11 (engine 0.1.57)
+
+*(Mike's order to update the engines together. Read in the release's own Control packages of v0.2.9 and v0.2.11; the start smoke is recorded on the point-5 card.)*
+
+1. **One engine per install is now DPC's rule alone.** The amendment of 2026-11-01 gives Strata's updater as a reason: it kept only the new and the previous engine. In v0.2.11 it removes none (`strata_control/updater.py:1217`). A start still picks within a family by newest, never by build (`engine_component.py:1145-1152`), so one folder per family stays.
+2. **The launcher takes Strata's shared activity lease** (`serve/server.py` `main`) in the per-user runtime folder. DPC's updater still does not see a launcher of ours, because it runs with a throwaway home; Strata's own updater, run with the real home, now does.
+3. **The launcher decides more at a start, from a start config with no key for it**: the drafter (`engine_args`, Auto: DFlash2 when its pack is in the model data folder, else the MTP, with one line) and the picture reader (`apply_vision_defaults`: on one NVIDIA card the reader starts with the first picture, and a reserve of 700 or none becomes 2048). DPC's start config writes no `drafting` key and no `elastic` key.
+4. **The build commit may be spelled in full.** The Linux sycl engine's `build_id` carries all 40 digits; the identity check takes the commit as the row has it or in full, and a test runs every engine row of the feed through it.

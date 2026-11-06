@@ -28,7 +28,7 @@ from .local_engine_pin_fetcher import (
     read_marker,
 )
 
-LLAMA_CPP_TAG = "b11669"
+LLAMA_CPP_TAG = "b12110"
 LLAMA_CPP_RELEASE_BASE = "https://github.com/ggml-org/llama.cpp/releases/download"
 _INSTALL_LOCK = threading.Lock()
 
@@ -53,14 +53,14 @@ WIN_CUDA_FAMILY = "win-cuda-13.4-x64"
 # pin: read `nightly-tag.txt` from the newest `vX.Y.Z`, then take that tag's
 # `digest` and `size` from the release API.
 #
-# b11669 is what v0.7.0 named (2026-10-15). Do not follow `releases/latest`: it
+# b12110 is what v0.9.0 named (2026-11-04). Do not follow `releases/latest`: it
 # now returns the versioned release, whose only asset is that text file.
 PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
     WIN_CUDA_FAMILY: [
         {
             "name": f"llama-{LLAMA_CPP_TAG}-bin-{WIN_CUDA_FAMILY}.zip",
-            "sha256": "3b92d5c064f5032e603e531d3ec8961f3bd6613e5dfad047399a92dec8e95dbc",
-            "size": 154_582_227,
+            "sha256": "dc910a969190b5d42e189afd73117f6bbdd8dd8ed6586342c5e0b82cab62c673",
+            "size": 169_175_655,
         },
         {
             "name": f"cudart-llama-bin-{WIN_CUDA_FAMILY}.zip",
@@ -71,15 +71,15 @@ PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
     "macos-arm64": [
         {
             "name": f"llama-{LLAMA_CPP_TAG}-bin-macos-arm64.tar.gz",
-            "sha256": "dbed55493d72bc1ba2babc8770d669c2289b5bc4ee9fb2a4dfc158d45b7d13fd",
-            "size": 12_191_582,
+            "sha256": "4f5b8de12e0b9516658ca6a5764c6ffb3d7c659c3dd538556b1413c7b4050662",
+            "size": 16_650_691,
         },
     ],
     "ubuntu-x64": [
         {
             "name": f"llama-{LLAMA_CPP_TAG}-bin-ubuntu-x64.tar.gz",
-            "sha256": "cf07c1c112d709bd67e522017471de57ed0ec8bea031d732c5422351c07f65ac",
-            "size": 17_851_611,
+            "sha256": "368227edcc229be5f9bed16a2223d79b5e41d0ac2e19bcf5825e82291c060e55",
+            "size": 23_051_958,
         },
     ],
 }
@@ -89,11 +89,11 @@ PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
 # excluded; the others: regular-file member sizes of the sha256-verified
 # tarballs. Re-measure on every pin move.
 INSTALLED_BYTES: Dict[str, int] = {
-    WIN_CUDA_FAMILY: 747_386_477,
-    "macos-arm64": 32_243_798,
-    "ubuntu-x64": 46_118_030,
+    WIN_CUDA_FAMILY: 771_197_549,
+    "macos-arm64": 42_092_502,
+    "ubuntu-x64": 58_199_622,
 }
-INSTALLED_BYTES_MEASURED_ON = "2026-11-01"
+INSTALLED_BYTES_MEASURED_ON = "2026-11-06"
 
 
 def platform_tag() -> str:

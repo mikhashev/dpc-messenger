@@ -386,7 +386,7 @@ class TestTheFetchRunsWithTheCardHeld:
         monkeypatch.setattr(sup, "_launch", lambda *a, **k: pytest.fail("launched without an install"))
         with pytest.raises(LlamaServerError) as excinfo:
             await sup.ensure_running()
-        assert str(excinfo.value).startswith("strata[flash next]: DPC's own install of Strata v0.2.9")
+        assert str(excinfo.value).startswith("strata[flash next]: DPC's own install of Strata v0.2.11")
         assert "exit 6, failed" in str(excinfo.value)
         assert sup not in base_mod._CARD_CLAIMS
 
@@ -468,7 +468,7 @@ class TestAPeerDoesNotFetch:
         monkeypatch.setattr(p.supervisor, "start_for_peer", lambda peer: pytest.fail("a peer began a start"))
         refusal = await p.peer_refusal("peer-1")
         assert refusal == (
-            "'flash' is not running: Strata v0.2.9 is not installed on this node yet, "
+            "'flash' is not running: Strata v0.2.11 is not installed on this node yet, "
             "and a peer's request does not fetch it"
         )
 
@@ -501,7 +501,7 @@ class TestTheSaveWithoutAnInstallDir:
         errors = strata_config_errors({"strata_base_config": "strata-base.json", "conversation_cache_mib": 1})
         assert errors == [
             "strata_base_config: strata-base.json must be an absolute path when strata_install_dir is "
-            "empty — DPC's own install of Strata v0.2.9 holds no run config of yours to read it against"
+            "empty — DPC's own install of Strata v0.2.11 holds no run config of yours to read it against"
         ]
         assert strata_config_errors({"strata_base_config": "strata-base.json", "conversation_cache_mib": 1},
                                     check_paths=True) == errors
@@ -510,7 +510,7 @@ class TestTheSaveWithoutAnInstallDir:
         errors = strata_config_errors({"conversation_cache_mib": 1})
         assert errors == [
             "needs strata_base_config: an existing Strata run config to start from (strata_install_dir "
-            "may stay empty: empty means DPC's own install of Strata v0.2.9 (engine 0.1.55))"
+            "may stay empty: empty means DPC's own install of Strata v0.2.11 (engine 0.1.57))"
         ]
 
     def test_the_chat_template_of_a_relative_tokenizer_is_read_from_the_pin(self, world):

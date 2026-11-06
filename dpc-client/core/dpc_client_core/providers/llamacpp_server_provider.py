@@ -1246,7 +1246,7 @@ class LlamaServerProvider(DeepSeekProvider):
                                 call["id"] = call["id"] or getattr(part, "id", None)
                                 call["name"] = call["name"] or (getattr(fn, "name", None) or "")
                                 call["arguments"] += getattr(fn, "arguments", None) or ""
-                # Every ending of the launcher's stream names one (`openai_chunks`, v0.2.9).
+                # Every ending of the launcher's stream names one (`openai_chunks`, v0.2.11).
                 if finish_reason is None:
                     raise httpx.RemoteProtocolError("the stream ended with no finish word")
             except Exception as e:
@@ -1410,7 +1410,7 @@ class _StreamBrokenBeforeADelta(Exception):
 def rejected_tool_call_names(resp: Any) -> List[str]:
     """The names in `strata_rejected_tool_calls`: `[{"name", "reason"}]` at the top of a
     Strata launcher's reply when a `<tool_call>` block did not read as a call of a declared
-    tool and went back as text (serve/server.py, v0.2.9). No field on plain llama-server."""
+    tool and went back as text (serve/server.py, v0.2.11). No field on plain llama-server."""
     field = (getattr(resp, "model_extra", None) or {}).get("strata_rejected_tool_calls")
     if not isinstance(field, list):
         return []

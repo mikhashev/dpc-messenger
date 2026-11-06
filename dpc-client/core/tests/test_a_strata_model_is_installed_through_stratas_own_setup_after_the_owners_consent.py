@@ -176,7 +176,7 @@ class TestTheCommand:
     @pytest.mark.asyncio
     async def test_control_not_installed_is_refused_with_the_reason_and_creates_nothing(
             self, host, tmp_path, monkeypatch):
-        missing = tmp_path / "bin" / "strata" / "v0.2.9" / "x"
+        missing = tmp_path / "bin" / "strata" / "v0.2.11" / "x"
         monkeypatch.setattr(strata_fetcher, "install_root", lambda *a, **k: missing)
         out = await _ask(host)
         assert out["status"] == "error" and "not installed" in out["message"] and str(missing) in out["message"]

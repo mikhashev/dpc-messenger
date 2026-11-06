@@ -265,7 +265,7 @@ def test_a_pin_a_live_child_runs_from_is_skipped(home, tmp_path):
 
 
 def test_with_no_other_pin_passed_every_older_pin_is_kept(home, tmp_path):
-    # Today's node: no marker carries start_passed_at; b11669's first pass marks it
+    # Today's node: no marker carries start_passed_at; the current pin's first pass marks it
     # and removes nothing — the old pins go when the next new pin passes.
     roots = {t: _llama_pin(t) for t in (OLDEST, OLDER, RET)}
     roots[CUR] = _llama_pin(CUR)
@@ -454,12 +454,12 @@ def test_a_retained_pin_without_its_binary_is_no_rollback_and_no_older_one_stand
 
 
 @pytest.mark.parametrize("build, ok", [
-    ("b11669-620d2225c", True),
-    ("version: 0.7.0-dev (build 11669, commit 620d2225c)", True),
-    ("11669 (620d2225c)", True),
-    ("b116690-620d2225c", False),
-    ("b1166-620d2225c", False),
-    ("a11669f", False),
+    ("b12110-cd959bae9", True),
+    ("version: 0.9.0-dev (build 12110, commit cd959bae9)", True),
+    ("12110 (cd959bae9)", True),
+    ("b121100-cd959bae9", False),
+    ("b1211-cd959bae9", False),
+    ("a12110f", False),
     ("", False),
     (None, False),
 ])
@@ -650,7 +650,7 @@ def test_the_strata_row_names_its_running_pin_and_the_status_carries_pins(strata
 
 @pytest.mark.parametrize("how", ["rolled_back", "not_downloaded"])
 def test_a_running_retained_strata_pin_matches_its_own_engine_version(strata_world, service, monkeypatch, how):
-    # Its engine is the retained marker's 0.1.50, not the pin's 0.1.55: not a mismatch.
+    # Its engine is the retained marker's 0.1.50, not the pin's STRATA_ENGINE_VERSION: not a mismatch.
     if how == "not_downloaded":
         strata_world["current"]["root"] = None
     sup = _strata({S_CUR: "smoke"})
