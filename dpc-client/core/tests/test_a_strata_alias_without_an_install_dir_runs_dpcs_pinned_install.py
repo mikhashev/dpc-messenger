@@ -360,6 +360,10 @@ class TestTheFetchRunsWithTheCardHeld:
         monkeypatch.setattr(sf, "ensure_install", fake_ensure)
         monkeypatch.setattr(sup, "_launch", self._fake_launch(sup, launches))
         await sup.ensure_running()
+        # The start's pass leaves the pruning of older pins running in a thread; ended here, or it
+        # is a pending task destroyed whenever the collector gets to it, in some later test's log.
+        if sup._prune_task is not None:
+            await sup._prune_task
         assert fetched == [{"thread": True, "card_held": True, "config": sup.config}]
         assert launches == [world.root / "python" / ("python.exe" if sys.platform == "win32" else "bin/python3")]
         assert sup in base_mod._CARD_CLAIMS
