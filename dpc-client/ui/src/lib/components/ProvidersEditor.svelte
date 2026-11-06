@@ -34,7 +34,9 @@
     versionDiffers, cacheSummaryLine, freeCommitLine, type StrataParamSpec,
     type FreeCommitReading, STRATA_CACHE_ADMISSION, admissionPlaceholder, cacheFlagsLine,
     engineAdmissionLine, ENGINE_BACKEND_HELP, ENGINE_BACKEND_OWN_FOLDER, engineBackendOptions,
-    strataWindowHint,
+    strataWindowHint, draftingSelectValue, draftingFromSelect, draftingHelp, DRAFTING_AUTO_LABEL,
+    STRATA_DRAFTING_CHOICES, pictureReaderSelectValue, PICTURE_READER_OPTIONS, pictureReaderHelp,
+    engineDraftingLine,
   } from '$lib/utils/strataFields';
 
   export let open: boolean = false;
@@ -120,6 +122,8 @@
     vram_reserve_mib?: number;   // --vram-reserve-mib, VRAM left for other programs
     vision?: boolean;            // unset = the base config decides
     control_vector?: boolean;    // unset = the base config decides
+    drafting?: 'mtp' | 'dflash2'; // Strata's drafter; unset = auto, Strata decides (never stored as "auto")
+    vision_elastic?: boolean;    // the vision block's `elastic`: true = reader starts with the first picture; unset = auto
     model_params?: Record<string, unknown>; // Strata /config keys (runconfig.py EDITABLE)
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
@@ -407,6 +411,20 @@
   /** Tri-state for vision / control_vector: '' leaves the base config's choice. */
   function strataTriValue(v: boolean | undefined): string {
     return v === undefined ? '' : v ? 'true' : 'false';
+  }
+
+  /** The drafter dropdown: auto stores nothing, so the key is left out of the alias. */
+  function setStrataDrafting(i: number, raw: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i];
+    const choice = draftingFromSelect(raw);
+    if (choice === undefined) delete p.drafting; else p.drafting = choice;
+    editedConfig = editedConfig;
+  }
+
+  /** The picture reader dropdown: auto ('') leaves the key out, true / false write the boolean. */
+  function setStrataPictureReader(i: number, raw: string) {
+    setBool(i, 'vision_elastic', raw === 'auto' ? '' : raw);
   }
 
   let strataParamErrors: Record<string, string> = {};
@@ -1847,6 +1865,7 @@
           <strong>Images:</strong> {row.metrics.images ? 'on' : 'off'} ·
           <strong>Free VRAM:</strong> {row.metrics.vram_free_mib != null ? `${row.metrics.vram_free_mib.toLocaleString()} MiB` : '—'}</p>
         <p><strong>Conversation cache:</strong> {cacheSummaryLine(row.metrics.conversation_cache)}</p>
+        <p><strong>Drafter, as the engine chose it:</strong> {engineDraftingLine(row.metrics.drafter, row.metrics.drafting_note)}</p>
         <p><strong>Admission, as the engine reports it:</strong> {engineAdmissionLine(row.metrics.cache_admission)}</p>
       {:else if row.metrics_error}
         <p class="help-text warn">/metrics unreadable: {row.metrics_error}</p>
@@ -3301,6 +3320,17 @@
                       </div>
 
                       <div class="form-group">
+                        <label for="strata-reader-{i}">Picture reader</label>
+                        <select id="strata-reader-{i}" value={pictureReaderSelectValue(sp.vision_elastic)}
+                          on:change={(e) => setStrataPictureReader(i, e.currentTarget.value)}>
+                          {#each PICTURE_READER_OPTIONS as o}
+                            <option value={o.value}>{o.label}</option>
+                          {/each}
+                        </select>
+                        <p class="help-text">{pictureReaderHelp(strataBase(strataInspect, i, 'vision_elastic'))}</p>
+                      </div>
+
+                      <div class="form-group">
                         <label for="strata-cvec-{i}">Control vector</label>
                         <select id="strata-cvec-{i}" value={strataTriValue(sp.control_vector)}
                           on:change={(e) => setBool(i, 'control_vector', e.currentTarget.value)}>
@@ -3555,6 +3585,18 @@
                             {/if}
                             <p class="help-text">{spec.help}</p>
                           </div>
+                          {#if spec.key === 'mtp'}
+                            <div class="form-group">
+                              <label for="strata-drafting-{i}">Drafter (<code>drafting</code>)</label>
+                              <select id="strata-drafting-{i}" value={draftingSelectValue(sp.drafting)}
+                                on:change={(e) => setStrataDrafting(i, e.currentTarget.value)}>
+                                {#each STRATA_DRAFTING_CHOICES as choice}
+                                  <option value={choice}>{choice === 'auto' ? DRAFTING_AUTO_LABEL : choice}</option>
+                                {/each}
+                              </select>
+                              <p class="help-text">{draftingHelp(strataBase(strataInspect, i, 'drafting'))}</p>
+                            </div>
+                          {/if}
                         {/each}
                       </details>
 

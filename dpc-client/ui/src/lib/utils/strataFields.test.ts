@@ -3,6 +3,8 @@ import {
   STRATA_MODEL_PARAMS, suggestPleGguf, pleAfterNativeChange, parseModelParam, modelParamText,
   basePlaceholder, versionDiffers, cacheSummaryLine, formatMib, freeCommitLine,
   STRATA_CACHE_ADMISSION, admissionPlaceholder, cacheFlagsLine, engineAdmissionLine,
+  STRATA_DRAFTING_CHOICES, PICTURE_READER_OPTIONS, draftingSelectValue, draftingFromSelect, draftingHelp,
+  pictureReaderSelectValue, pictureReaderHelp, engineDraftingLine,
 } from './strataFields';
 
 const spec = (key: string) => STRATA_MODEL_PARAMS.find((s) => s.key === key)!;
@@ -157,5 +159,47 @@ describe('the cache admission fields', () => {
     expect(engineAdmissionLine({ min_free_mib: 2560, min_tokens: 0, park_gain: null }))
       .toBe('RAM floor 2,560 MiB, shortest parked 0 tokens, park gain not reported');
     expect(engineAdmissionLine(undefined)).toBe('not reported');
+  });
+});
+
+describe('the drafter and the picture reader dropdowns', () => {
+  it('list auto first, and never offer off for the drafter', () => {
+    expect([...STRATA_DRAFTING_CHOICES]).toEqual(['auto', 'mtp', 'dflash2']);
+    expect(PICTURE_READER_OPTIONS.map((o) => o.value)).toEqual(['auto', 'false', 'true']);
+    expect(PICTURE_READER_OPTIONS.map((o) => o.label)).toEqual([
+      'auto (Strata decides)', 'start with the engine', 'start with the first picture',
+    ]);
+  });
+
+  it('read a missing or unknown stored value as auto, never as a blank', () => {
+    expect(draftingSelectValue(undefined)).toBe('auto');
+    expect(draftingSelectValue('auto')).toBe('auto');
+    expect(draftingSelectValue('off')).toBe('auto');
+    expect(draftingSelectValue('mtp')).toBe('mtp');
+    expect(draftingSelectValue('dflash2')).toBe('dflash2');
+    expect(pictureReaderSelectValue(undefined)).toBe('auto');
+    expect(pictureReaderSelectValue(true)).toBe('true');
+    expect(pictureReaderSelectValue(false)).toBe('false');
+  });
+
+  it('store nothing for auto', () => {
+    expect(draftingFromSelect('auto')).toBeUndefined();
+    expect(draftingFromSelect('mtp')).toBe('mtp');
+    expect(draftingFromSelect('dflash2')).toBe('dflash2');
+  });
+
+  it('say what auto means now, and show the base config value that stays', () => {
+    expect(draftingHelp(undefined)).toContain('DFlash2 when its pack is in the data folder, else MTP');
+    expect(draftingHelp(undefined)).toContain('Draft layer (MTP) field');
+    expect(draftingHelp('mtp')).toContain('The base config says "mtp" and stays.');
+    expect(pictureReaderHelp(undefined)).toContain('starts with the first picture');
+    expect(pictureReaderHelp(undefined)).toContain('--vram-elastic');
+    expect(pictureReaderHelp(false)).toContain('The base config says engine and stays.');
+  });
+
+  it("show the engine's own drafter line", () => {
+    expect(engineDraftingLine(null, null)).toBe('not reported');
+    expect(engineDraftingLine('dflash2', '')).toBe('DFlash2');
+    expect(engineDraftingLine('mtp', 'Drafting: MTP (DFlash2 is not downloaded yet)')).toBe('Drafting: MTP (DFlash2 is not downloaded yet)');
   });
 });

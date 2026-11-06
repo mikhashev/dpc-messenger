@@ -46,6 +46,8 @@ _STRATA_FLAG_KEYS = (
     "conversation_cache_park_gain", "max_context", "resident_budget_gib", "vram_reserve_mib",
     "slot_save_path",
     "vision", "control_vector",
+    # The drafter and when the picture reader starts (Strata's `drafting` and the vision block's `elastic`).
+    "drafting", "vision_elastic",
     "model_params", "extra_args",
     # Model-file overrides (ADR-044 point 7): each replaces a base config value.
     "native_gguf", "ple_gguf", "pack_dir", "mtp_dir", "expert_profile", "mmproj",
@@ -391,6 +393,11 @@ def metrics_summary(metrics: Dict[str, Any]) -> Dict[str, Any]:
         "live_state": live.get("state"),
         "max_context": engine.get("max_context"),
         "images": engine.get("images"),
+        # Which drafter the engine started with (mtp | dflash2 | off) and, when it is not the
+        # one asked for, why, in the launcher's words; both are keys of /metrics `engine`
+        # (strata_control/drafting.py engine_info), "" or absent when the launcher says none.
+        "drafter": engine.get("drafting"),
+        "drafting_note": engine.get("drafting_note"),
         "vram_free_mib": free_mib,
         "conversation_cache": {
             k: cache.get(k) for k in (

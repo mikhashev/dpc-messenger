@@ -98,6 +98,68 @@ export function admissionPlaceholder(spec: StrataCacheAdmissionSpec, baseValue: 
   return `${written} — the base config's ${modelParamText(baseValue)} is not used`;
 }
 
+/**
+ * The drafter and the picture reader: two typed alias fields, each a dropdown whose first
+ * option is an explicit "auto" (Mike's call, 2026-11-06). "auto" stores nothing: the key is
+ * left out of the alias and of the start config, and Strata decides. The backend's
+ * `DRAFTING_CHOICES` (strata_supervisor.py) is the same list; a backend test keeps them equal.
+ * `off` is not a drafter choice: the Draft layer (MTP) field above turns the layer off.
+ */
+export const STRATA_DRAFTING_CHOICES = ['auto', 'mtp', 'dflash2'] as const;
+export type StrataDraftingChoice = (typeof STRATA_DRAFTING_CHOICES)[number];
+
+/** The dropdown value for a stored `drafting`: anything but mtp / dflash2 reads as auto. */
+export function draftingSelectValue(stored: unknown): StrataDraftingChoice {
+  return stored === 'mtp' || stored === 'dflash2' ? stored : 'auto';
+}
+
+/** The stored `drafting` for a dropdown value: auto stores nothing (undefined). */
+export function draftingFromSelect(raw: string): 'mtp' | 'dflash2' | undefined {
+  return raw === 'mtp' || raw === 'dflash2' ? raw : undefined;
+}
+
+export const DRAFTING_AUTO_LABEL = 'auto (Strata decides)';
+
+/** The help under the drafter dropdown; the base config's own `drafting` stays when this field is auto. */
+export function draftingHelp(baseValue: unknown): string {
+  const base = typeof baseValue === 'string' && baseValue !== ''
+    ? ` The base config says "${baseValue}" and stays.` : '';
+  return 'auto: on one NVIDIA card DFlash2 when its pack is in the data folder, else MTP. '
+    + 'To turn the draft layer off use the Draft layer (MTP) field.' + base;
+}
+
+export type PictureReaderChoice = 'auto' | 'false' | 'true';
+
+/** The dropdown value for a stored `vision_elastic`: only a boolean is a choice. */
+export function pictureReaderSelectValue(stored: unknown): PictureReaderChoice {
+  return stored === true ? 'true' : stored === false ? 'false' : 'auto';
+}
+
+export const PICTURE_READER_OPTIONS: { value: PictureReaderChoice; label: string }[] = [
+  { value: 'auto', label: 'auto (Strata decides)' },
+  { value: 'false', label: 'start with the engine' },
+  { value: 'true', label: 'start with the first picture' },
+];
+
+/** The help under the picture reader dropdown. `baseValue` is the vision block's own `elastic`. */
+export function pictureReaderHelp(baseValue: unknown): string {
+  const base = typeof baseValue === 'boolean'
+    ? ` The base config says ${baseValue ? 'first picture' : 'engine'} and stays.` : '';
+  return 'auto: on one NVIDIA card the reader starts with the first picture. '
+    + 'Starting with the first picture frees VRAM only on an engine that has --vram-elastic; '
+    + 'otherwise Strata starts the reader anyway. Needs a vision block.' + base;
+}
+
+/** One line for the status panel: the drafter the running engine chose, and why not the one asked for. */
+export function engineDraftingLine(drafter: string | null | undefined, note: string | null | undefined): string {
+  const word = (drafter ?? '').trim();
+  const why = (note ?? '').trim();
+  if (!word && !why) return 'not reported';
+  const label = word === 'mtp' ? 'MTP' : word === 'dflash2' ? 'DFlash2' : word === 'off' ? 'off' : word || '?';
+  // The launcher's note already begins "Drafting: <word> (reason)"; show it whole, it is its own words.
+  return why ? why : label;
+}
+
 /** The five cache flags as the start config the last launch used writes them (`start_cache_flags`). */
 export interface StartCacheFlags {
   conversation_cache_mib?: number | null;

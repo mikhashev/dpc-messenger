@@ -162,6 +162,13 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # None keeps whatever the base config says; True / False decide.
     "vision": None,
     "control_vector": None,
+    # Which drafter guesses ahead (`mtp` / `dflash2`), written at the root of the start
+    # config as Strata's own `drafting` key; None or "auto" writes nothing and Strata decides.
+    "drafting": None,
+    # When the picture reader starts (True: with the first picture, False: with the
+    # engine), written as `elastic` inside the start config's "vision" block; None or
+    # "auto" writes nothing and Strata decides.
+    "vision_elastic": None,
     # Strata `/config` keys written into the start config the way Strata's own
     # serve/runconfig.py stores them: `sampling.<k>` in the "sampling" block,
     # `vram_reserve_mib` as its engine flag, everything else top level.
@@ -267,6 +274,76 @@ def slot_save_path_error(value: Any) -> Optional[str]:
     if not os.path.isabs(value):
         return f"slot_save_path: expected an absolute path, not {value!r}"
     return None
+
+
+# The drafter an alias may name: Strata's own run-config key `drafting`, read at the
+# root of the config (serve/server.py `engine_args`, strata_control/drafting.py;
+# Strata v0.2.11). `off` is not offered: it is the same as `model_params.mtp = false`,
+# and one thing gets one key. "auto" is the dropdown's word for "Strata decides",
+# which is the key's absence (a literal "auto" in the start config adds nothing),
+# so it is never written (Mike's call, 2026-11-06).
+DRAFTING_CHOICES = ("mtp", "dflash2")
+AUTO = "auto"
+
+
+def drafting_choice(value: Any) -> Optional[str]:
+    """The `drafting` value a start writes: "mtp" or "dflash2", or None for auto (not written).
+    Call only on a value `drafting_error` accepted."""
+    return value if value in DRAFTING_CHOICES else None
+
+
+def drafting_error(value: Any) -> Optional[str]:
+    """Why `value` cannot be the alias's `drafting`, or None (None, "" and "auto" are auto)."""
+    if value is None or value == "" or value == AUTO:
+        return None
+    if isinstance(value, str) and value in DRAFTING_CHOICES:
+        return None
+    if value == "off":
+        return ("drafting: \"off\" is not a choice here; turn the draft layer off with "
+                "model_params mtp = false, which is the same thing")
+    return f"drafting: expected auto, {' or '.join(DRAFTING_CHOICES)}, not {value!r}"
+
+
+def vision_elastic_choice(value: Any) -> Optional[bool]:
+    """The `elastic` value a start writes into the "vision" block: True, False, or None for auto
+    (not written). Call only on a value `vision_elastic_error` accepted."""
+    return value if isinstance(value, bool) else None
+
+
+def vision_elastic_error(value: Any) -> Optional[str]:
+    """Why `value` cannot be the alias's `vision_elastic`, or None (None, "" and "auto" are auto)."""
+    if value is None or value == "" or value == AUTO or isinstance(value, bool):
+        return None
+    return f"vision_elastic: expected auto, true or false, not {value!r}"
+
+
+def _base_config_path_of(config: Dict[str, Any]) -> Path:
+    """The alias's base config as the supervisor reads it: relative against the install dir
+    (else DPC's own install of the pin)."""
+    configured = config.get("strata_install_dir")
+    install = Path(str(configured)) if configured else strata_fetcher.install_root()
+    base = Path(str(config.get("strata_base_config") or ""))
+    return base if base.is_absolute() else install / base
+
+
+def vision_elastic_needs_a_block(config: Dict[str, Any]) -> Optional[str]:
+    """Why the alias's `vision_elastic` has no "vision" block to go into, or None.
+
+    Only a set value (true / false) needs one. Reads the base config; a base that cannot be
+    read answers None, the save's other checks name it."""
+    if vision_elastic_choice(config.get("vision_elastic")) is None:
+        return None
+    if config.get("vision") is False:
+        return ("vision_elastic: the start has no \"vision\" block to put it in, because the "
+                "alias turns vision off; leave it at auto or turn vision on")
+    try:
+        cfg = read_base_config(_base_config_path_of(config))
+    except (ValueError, OSError):
+        return None
+    if isinstance(cfg.get("vision"), dict):
+        return None
+    return ("vision_elastic: the start has no \"vision\" block (encoder exe) to put it in; the "
+            "base config has none, so leave it at auto")
 
 
 # Alias key -> the engine flag whose value it replaces (ADR-044 point 7).
@@ -385,6 +462,9 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
     slot_error = slot_save_path_error(config.get("slot_save_path"))
     if slot_error:
         errors.append(slot_error)
+    for error in (drafting_error(config.get("drafting")), vision_elastic_error(config.get("vision_elastic"))):
+        if error:
+            errors.append(error)
     params = config.get("model_params")
     if params is not None and not isinstance(params, dict):
         errors.append(f"model_params must be an object, got {params!r}")
@@ -409,6 +489,9 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
         slot = config.get("slot_save_path")
         if slot and slot_save_path_error(slot) is None and Path(slot).exists() and not Path(slot).is_dir():
             errors.append(f"slot_save_path: {slot} exists and is not a folder")
+        block_error = vision_elastic_needs_a_block(config)
+        if block_error:
+            errors.append(block_error)
         word_error = reasoning_effort_error(config)
         if word_error:
             errors.append(word_error)
@@ -556,6 +639,10 @@ def inspect_base_config(path: Any, install_dir: Any = None) -> Dict[str, Any]:
     values["slot_save_path"] = cfg.get("slot_save_path") if isinstance(cfg.get("slot_save_path"), str) else None
     values["vision"] = reads_images(cfg)
     values["mmproj"] = (block or {}).get("mmproj")
+    # What the base config itself says, for the "auto" options' help: Strata's own keys.
+    values["drafting"] = cfg.get("drafting") if isinstance(cfg.get("drafting"), str) else None
+    values["vision_elastic"] = (block or {}).get("elastic") if isinstance((block or {}).get("elastic"), bool) else None
+    values["vision_block"] = block is not None
     cvec = _flag_value(args, "--control-vector-scaled")
     cv_file, cv_scale = split_control_vector(cvec) if cvec else (None, None)
     values["control_vector"] = any(_is_control_vector_flag(a) for a in args)
@@ -1084,6 +1171,23 @@ class StrataSupervisor(LlamaServerSupervisor):
             raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
         if slot_value:
             cfg["slot_save_path"] = str(slot_value)
+        # The drafter and the picture reader: written only when the alias chooses; "auto"
+        # (absent) leaves Strata's own pick, and a base config's own key stays as it is.
+        for refusal in (drafting_error(c.get("drafting")), vision_elastic_error(c.get("vision_elastic"))):
+            if refusal:
+                raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
+        drafting = drafting_choice(c.get("drafting"))
+        if drafting is not None:
+            cfg["drafting"] = drafting
+        elastic = vision_elastic_choice(c.get("vision_elastic"))
+        if elastic is not None:
+            if not isinstance(cfg.get("vision"), dict):
+                raise LlamaServerError(
+                    f"strata[{self.alias}]: vision_elastic is set but the start has no \"vision\" "
+                    f"block (encoder exe) to put it in: the base config {base_path} has none, or "
+                    "vision is off; set vision_elastic to auto"
+                )
+            cfg["vision"] = {**cfg["vision"], "elastic": elastic}
         if cfg.get("lazy_load") is True and cfg.get("vision"):
             raise LlamaServerError(
                 f"strata[{self.alias}]: lazy_load is text-only and this start reads images "
