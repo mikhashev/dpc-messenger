@@ -11,9 +11,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 log = logging.getLogger(__name__)
 
@@ -490,6 +491,172 @@ def _parse_llm_json(response: str) -> Dict[str, Any]:
         return json.loads(cleaned)
 
 
+# A quote inside a string ends it only when what follows can follow a string.
+_AFTER_STRING = ",}]:"
+_WHITESPACE = " \t\r\n"
+# `"extracted_relations": [...placeholder — filled below...]`: a model echoing the
+# prompt's own outline. Only a bracket that opens on `...` or `…` and holds no
+# quote or bracket of its own, so a real array is never taken for one.
+_PLACEHOLDER_MEMBER = re.compile(
+    r'"[^"\\\n]*"\s*:\s*(?:\[\s*(?:\.\.\.|…)[^\[\]{}"\n]*\]|\{\s*(?:\.\.\.|…)[^\[\]{}"\n]*\})\s*,?'
+)
+
+
+def _close_containers(stack: List[str]) -> str:
+    return "".join("}" if opener == "{" else "]" for opener in reversed(stack))
+
+
+def _repair_json(text: str) -> tuple[str, List[str]]:
+    """Mend the ways a sleep answer was seen to break, and name each mend.
+
+    Seven answers that failed between 2026-08-21 and 2026-11-06 broke in four
+    ways: a quote inside a string left unescaped, a string whose closing quote
+    was dropped before a newline and its closer, an answer cut mid-string (at
+    the token ceiling, or at `finish=stop` mid-word), and a placeholder copied
+    from the prompt's outline. Each rule below mends one of them and nothing
+    wider; the result is only a candidate, which the caller still parses.
+    """
+    fixes: List[str] = []
+
+    def _drop_placeholder(match: "re.Match[str]") -> str:
+        fixes.append("dropped_placeholder")
+        return ""
+
+    text = _PLACEHOLDER_MEMBER.sub(_drop_placeholder, text)
+
+    out: List[str] = []
+    stack: List[str] = []
+    # Where the text could be cut and still close: just inside an opener, or
+    # just before a comma between members. Used when closing the cut text
+    # where it stopped leaves a key without a value.
+    cuts: List[tuple[int, List[str]]] = []
+    in_string = False
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if in_string:
+            if c == "\\":
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            if c == '"':
+                j = i + 1
+                while j < n and text[j] in _WHITESPACE:
+                    j += 1
+                if j >= n or text[j] in _AFTER_STRING:
+                    in_string = False
+                    out.append(c)
+                else:
+                    out.append('\\"')
+                    fixes.append("escaped_quote")
+                i += 1
+                continue
+            if c == "\n":
+                j = i + 1
+                while j < n and text[j] in _WHITESPACE:
+                    j += 1
+                if j < n and text[j] in "}]":
+                    in_string = False
+                    out.append('"')
+                    fixes.append("closed_string_at_newline")
+                    i += 1
+                    continue
+            if c < " ":
+                # A raw control character is a fault of its own, but the newline
+                # among them is what every multi-line summary carries.
+                out.append(json.dumps(c)[1:-1])
+                fixes.append("escaped_control_character")
+                i += 1
+                continue
+            out.append(c)
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+        elif c in "{[":
+            stack.append(c)
+            out.append(c)
+            cuts.append((len(out), list(stack)))
+            i += 1
+            continue
+        elif c in "}]":
+            j = len(out) - 1
+            while j >= 0 and out[j] in _WHITESPACE:
+                j -= 1
+            if j >= 0 and out[j] == ",":
+                del out[j]
+                fixes.append("dropped_trailing_comma")
+            if stack:
+                stack.pop()
+        elif c == ",":
+            cuts.append((len(out), list(stack)))
+        out.append(c)
+        i += 1
+
+    if not in_string and not stack:
+        return "".join(out), fixes
+
+    # The text stops inside the answer. Close the string it stopped in, then
+    # every container still open; if that leaves a key without a value or half
+    # a literal, cut back to the last place a member ended instead.
+    tail = "".join(out) + ('"' if in_string else "")
+    tail = tail.rstrip(_WHITESPACE).rstrip(",").rstrip(_WHITESPACE)
+    candidate = tail + _close_containers(stack)
+    try:
+        json.loads(candidate)
+    except json.JSONDecodeError:
+        for position, open_stack in reversed(cuts):
+            cut = "".join(out[:position]).rstrip(_WHITESPACE).rstrip(",")
+            attempt = cut + _close_containers(open_stack)
+            try:
+                json.loads(attempt)
+            except json.JSONDecodeError:
+                continue
+            candidate = attempt
+            fixes.append("dropped_cut_member")
+            break
+    if in_string:
+        fixes.append("closed_string_at_end")
+    fixes.append("closed_containers_at_end")
+    return candidate, fixes
+
+
+class _ParsedAnswer(NamedTuple):
+    data: Dict[str, Any]
+    # What `_repair_json` mended; empty when the answer parsed as written.
+    fixes: List[str]
+    # The strict parser's verdict, kept for the dump when a repair was needed.
+    strict_error: Optional[json.JSONDecodeError]
+
+
+def _parse_llm_answer(response: str, *, required_dicts: tuple = ()) -> _ParsedAnswer:
+    """Strict parse, then the fence strip, then a repair of the stripped text.
+
+    A repaired answer is accepted only as an object whose `required_dicts` are
+    all objects: a repair that parses into the wrong shape has not recovered
+    the answer. When nothing yields one, the strict parser's own error is
+    raised, so the caller's failure path sees what it saw before repairs
+    existed (Mike's call, 2026-11-06: repair first, fail only when that fails).
+    """
+    try:
+        return _ParsedAnswer(_parse_llm_json(response), [], None)
+    except json.JSONDecodeError as err:
+        strict_error = err
+    cleaned = response.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
+    repaired, fixes = _repair_json(cleaned)
+    try:
+        data = json.loads(repaired)
+    except json.JSONDecodeError:
+        raise strict_error from None
+    if not isinstance(data, dict) or not all(
+        isinstance(data.get(key), dict) for key in required_dicts
+    ):
+        raise strict_error
+    return _ParsedAnswer(data, fixes, strict_error)
+
+
 def _last_usage_of(llm_manager, provider_alias: Optional[str]) -> Dict[str, Any]:
     """What the provider reported for its most recent call, or nothing.
 
@@ -514,8 +681,14 @@ def _capture_unparsable(
     label: str,
     usage: Optional[Dict[str, Any]] = None,
     dump_dir: Optional[Path] = None,
+    repaired_fixes: Optional[List[str]] = None,
 ) -> Optional[Path]:
     """Record what could not be parsed, before the exception leaves.
+
+    With `repaired_fixes` the answer did not parse as written but was mended
+    by `_repair_json`: the raw text is kept the same way, under `repaired_`
+    rather than `failed_`, and the record is a WARNING naming the mends,
+    because the sleep goes on.
 
     The 2026-08-20 synthesis failure destroyed its own evidence: the
     exception carried a position and nothing else, so «the model wrote a
@@ -535,7 +708,8 @@ def _capture_unparsable(
         try:
             dump_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            dump_path = dump_dir / f"failed_{label}_{stamp}.txt"
+            prefix = "failed" if repaired_fixes is None else "repaired"
+            dump_path = dump_dir / f"{prefix}_{label}_{stamp}.txt"
             # errors="replace", and the guard catches ValueError beside OSError:
             # a lone surrogate makes strict encoding raise UnicodeEncodeError,
             # which is a ValueError — so a narrow guard would let the instrument
@@ -545,6 +719,17 @@ def _capture_unparsable(
         except (OSError, ValueError) as dump_err:
             log.warning("Unparsable %s: the dump could not be written: %s", label, dump_err)
             dump_path = None
+
+    if repaired_fixes is not None:
+        log.warning(
+            "Sleep %s answer repaired, %d fixes (%s): strict parse said %s at char %d "
+            "| chars=%d completion_tokens=%s/%s finish=%s | dump=%s",
+            label, len(repaired_fixes), ", ".join(sorted(set(repaired_fixes))),
+            err.msg, err.pos, len(response),
+            usage.get("completion_tokens", "?"), usage.get("max_tokens", "?"),
+            usage.get("finish_reason", "?"), dump_path or "-",
+        )
+        return dump_path
 
     log.error(
         "Unparsable %s response: %s at char %d | chars=%d completion_tokens=%s/%s "
@@ -719,7 +904,7 @@ async def _analyze_single_session(
             "LLM returned empty response (extended thinking may have consumed all output tokens)"
         )
     try:
-        finding = _parse_llm_json(response)
+        parsed = _parse_llm_answer(response)
     except json.JSONDecodeError as err:
         _capture_unparsable(
             response, err,
@@ -728,6 +913,15 @@ async def _analyze_single_session(
             dump_dir=conversation_dir / "sleep_results",
         )
         raise
+    if parsed.fixes:
+        _capture_unparsable(
+            response, parsed.strict_error,
+            label="session-analysis",
+            usage=_last_usage_of(llm_manager, provider_alias),
+            dump_dir=conversation_dir / "sleep_results",
+            repaired_fixes=parsed.fixes,
+        )
+    finding = parsed.data
     finding["archive_file"] = archive_file
     finding["digest_date"] = digest.get("date", "")
     finding["source"] = digest.get("source", "1:1")
@@ -1027,7 +1221,9 @@ async def run_sleep(
                 "LLM returned empty response (extended thinking may have consumed all output tokens)"
             )
         try:
-            result = _parse_llm_json(response)
+            parsed = _parse_llm_answer(
+                response, required_dicts=("morning_brief", "sleep_findings"),
+            )
         except json.JSONDecodeError as err:
             synthesis_dump = _capture_unparsable(
                 response, err,
@@ -1037,6 +1233,15 @@ async def run_sleep(
             )
             synthesis_unparsable = err
             raise
+        if parsed.fixes:
+            _capture_unparsable(
+                response, parsed.strict_error,
+                label="synthesis",
+                usage=_last_usage_of(llm_manager, provider_alias),
+                dump_dir=results_dir,
+                repaired_fixes=parsed.fixes,
+            )
+        result = parsed.data
 
         morning_brief = result.get("morning_brief", {})
         sleep_findings = result.get("sleep_findings", {})

@@ -161,6 +161,20 @@ async def test_an_unparsable_synthesis_names_the_model_and_the_dump(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_a_repairable_synthesis_posts_its_brief_and_keeps_the_raw_text(tmp_path, monkeypatch):
+    conv = _setup(tmp_path)
+    # Quotes inside a string and a cut at the end: mended, not failed (2026-11-06).
+    broken = '{"summary": "s", "morning_brief": {"summary": "the "slow" brief"}, "sleep_findings": {"x": ["cu'
+
+    posted = await _group_sleep(monkeypatch, _Manager(_Service(), synthesis=broken))
+
+    assert len(posted) == 1
+    assert posted[0][2].startswith("**Morning Brief (Sleep Consolidation)**")
+    assert not list((conv / "sleep_results").glob("failed_*.txt"))
+    assert len(list((conv / "sleep_results").glob("repaired_synthesis_*.txt"))) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_completed_sleep_posts_its_brief_and_nothing_else(tmp_path, monkeypatch):
     conv = _setup(tmp_path)
 
