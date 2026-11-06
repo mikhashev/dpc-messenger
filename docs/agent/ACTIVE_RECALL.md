@@ -124,8 +124,10 @@ doc_text = key + " " + heading + " " + body      # heading omitted if empty
 
 The same `doc_text` goes to both channels. The embedding model is `BAAI/bge-m3` (1024
 dimensions) via sentence-transformers with `normalize_embeddings=True`. When the model loads,
-its sequence limit is set to `min(max_tokens, the model's current limit)` (bge-m3 ships 8192),
-and never raised; a `max_tokens` of 0 or less leaves the model's own limit. `max_tokens` is 4096
+its sequence limit is set to `min(max_tokens, the model's current limit)` (bge-m3 ships 8192);
+a `max_tokens` of 0 or less leaves the model's own limit. "Current" is the value on the loaded
+model at that moment, which after a first lowering is no longer 8192 (see the known defect
+below). `max_tokens` is 4096
 by default, so the embedding sees only the **first 4096 tokens** of a long document. BM25 keeps
 the full `doc_text` (up to the 100,000-character cap).
 
@@ -137,8 +139,18 @@ and the per-turn recall fallback do not) moves the shared window. Both defaults 
 and no agent config on this node sets `max_tokens` (checked 2026-11-06), so none of this is
 visible. It becomes visible once the window is not the same everywhere: two agents with different
 `max_tokens` share one window, so an agent whose index was built under one window can be queried
-under the other's; and because the limit is never raised past the value already applied, a
-larger `max_tokens` stated after the model has loaded is recorded but has no effect on the model.
+under the other's.
+
+**Known defect: within one process the window can be lowered but never raised again.** Each
+application computes `min(max_tokens, current)` against the model's *current* sequence limit,
+not against the limit it shipped with. Once a caller has lowered 8192 to, say, 2048, a later
+caller stating 4096 sets the shared provider's `max_tokens` to 4096 and re-applies, but
+`min(4096, 2048)` is 2048. Until the process restarts, the provider's `max_tokens` says 4096 while
+documents and queries are cut at 2048; no log line reports the window actually in force, and an
+index rebuilt in that process is built under a smaller window than its config states. A rebuild
+should keep the model's native limit from load time and apply `min(max_tokens, native)` each
+time, so the window follows the stated value in both directions, capped at the native limit
+(never above it: positions the model was not trained on give worse embeddings, not longer ones).
 
 ### 4.3 When it runs
 
@@ -189,9 +201,19 @@ graph hit at this depth.
 ### 6.1 Gate and queries
 
 The block runs on every turn where the current message text or the conversation history is
-non-empty. Any exception skips recall for that turn: the user sees an ordinary turn with no
-recall block, and the log records it — at INFO when the embedding model is not cached locally,
-at WARNING with the traceback for anything else.
+non-empty. Any exception outside the graph step skips recall for that turn: the user sees an
+ordinary turn with no recall block, and the log records it — at INFO when the embedding model is
+not cached locally, at WARNING with the traceback for anything else.
+
+The graph step (§6.4) has its own handler. An exception there — while opening the graph store or
+during the expansion — is caught at DEBUG with the fixed text `Active Recall Graph L7:
+unavailable (cold start or no graph DB)` and no traceback, and the turn continues with the vector
+and text channels only (`G` empty). A failure to open the store is swallowed one level lower,
+with no log line at all: the opener returns "no graph", is not cached, and is retried on the next
+turn. At the default INFO level, therefore, a broken graph looks exactly like an absent one.
+**Known defect** (§13): a rebuild should keep absence (no graph store yet) silent but log a
+failure to open or expand the graph at WARNING with the traceback, as it does for the rest of
+recall, while still continuing the turn without the graph channel.
 
 * **Q1** — the current message text exactly as the agent receives it. DPC's dispatchers prefix
   it with the sender, e.g. `[Mike]: <text>` or `[Group chat — Mike says]: <text>`.
@@ -236,7 +258,7 @@ whitespace. Reproduce this if you want identical rankings; fix it if you want be
 ### 6.4 Graph channel
 
 `G = graph_expand(seeds = distinct keys of V and T)`, §5. Skipped when there are no seeds or no
-graph.
+graph, and dropped (with the turn continuing) when the step raises (§6.1).
 
 ## 7. Fusion
 
@@ -388,10 +410,20 @@ to `state/knowledge_access.jsonl`:
 ```
 
 `addresses` is empty in `hints` mode. The printed addresses are also kept in memory under the
-turn's task id (in DPC the conversation id, so each turn replaces the previous one; up to 32
-ids are kept); when the agent then calls `read_file` under that id, the tool log row gets
-`"via_hint": true|false` (omitted if the turn was offered nothing). `via_hint` is recorded for measurement; decay does
-not use it.
+turn's task id (in DPC the conversation id; up to 32 ids are kept); when the agent then calls
+`read_file` under that id, the tool log row gets `"via_hint": true|false`, or no field when
+nothing is stored under the id. `via_hint` is recorded for measurement; decay does not use it.
+
+**Known defect: a turn that printed no address does not replace the previous offer.** The
+stored set is overwritten only by a turn that printed at least one non-null address. A turn in
+`hints` mode, a `full` turn whose every slot had no address, a turn with no candidate left, a
+`skip` turn and a turn where recall failed all leave the earlier turn's set in place under the
+same conversation id. A read in such a turn is then labelled `via_hint` against an older turn's
+offer: `true` if it opens a document printed there, `false` instead of absent otherwise. Because
+the id is the conversation, not the turn, this reaches back across any number of turns until the
+next turn that prints an address. A rebuild should record every turn's offer, empty included,
+keyed by an id unique to the turn, so that a read in a turn that printed nothing carries no
+`via_hint`.
 
 The loop closes on the next turn: injections and reads both feed §8. At each agent start,
 injection lines older than the read window are moved to `knowledge_access.archive.jsonl`
@@ -406,7 +438,8 @@ log and its rotated copy (812 rows, 2026-10-22 to 2026-11-06). The injections na
 keys. Matched the way §8 matches (by key or by `source_path`), 4 of those 64 had any read, 8
 reads in total. All 812 read rows carry `via_hint`: 3 are `true` (two reads of one document in
 one group chat, one read of another), 809 `false`. These are one agent's counts over two weeks,
-not a follow-rate.
+not a follow-rate. The labels were written by the mechanism with the defect above, so a row may
+have been judged against an earlier turn's offer; the counts were not corrected for that.
 
 ## 12. Worked example (agent Johnny, 2026-11-06)
 
@@ -487,6 +520,20 @@ excerpt.
    producer. The per-agent memory config fields `active_recall`
    and `max_recall_results` are read but not consulted by the live path: recall runs whenever an
    index exists, and the slot count is fixed at 3.
+
+Known code defects — the code does something other than what it states it does. Each is
+described where the mechanism meets it; a rebuild should do what the last sentence of each says.
+
+10. **The embedding window can be lowered but not raised in one process** (§4.2). The limit is
+    taken as `min(max_tokens, current)` against the already-lowered value, so the provider's
+    `max_tokens` can say more than the window in use, unlogged. Correct: `min(max_tokens, the
+    model's native limit)` on every application.
+11. **A turn that printed no address keeps the previous turn's offer** (§11). Reads in `hints`,
+    `skip`, empty, all-unaddressed or failed turns are labelled `via_hint` against an older offer under the same
+    conversation id. Correct: store every turn's offer, empty included, under a per-turn id.
+12. **A graph failure is logged as absence** (§6.1). Opening or expanding the graph can fail with
+    no log line (open) or a DEBUG line with no traceback (expand), and the turn continues without
+    the graph channel. Correct: keep the turn going, but log a failure at WARNING with traceback.
 
 ## 14. Reproduce it
 
@@ -583,7 +630,7 @@ Paths are relative to `dpc-client/core/dpc_client_core/`; line numbers as of 202
 | Address, render, hints mode, mode choice | `dpc_agent/active_recall.py:68`, `:130`, `:186`, `:174` |
 | Filter, selection, logging | `dpc_agent/active_recall.py:222`, `:251`, `:572` |
 | Access counts, grace, multiplier, decay | `dpc_agent/active_recall.py:287-349`, `:398`, `:472`, `:490`, `:504` |
-| `via_hint`, log compaction | `dpc_agent/active_recall.py:557`, `:604`; `dpc_agent/loop.py:1500-1504` |
+| `via_hint`, log compaction | `dpc_agent/active_recall.py:557`, `:604`; offer kept only when an address was printed `:544-553`; `dpc_agent/loop.py:1500-1504` |
 | RRF and layer weights | `dpc_agent/hybrid_search.py:13-80` |
 | Vector index | `dpc_agent/faiss_index.py:70` (search) |
 | BM25 index and tokeniser | `dpc_agent/bm25_index.py:53-73`, `:107`, `:178`, `:231` |
@@ -597,8 +644,9 @@ Paths are relative to `dpc-client/core/dpc_client_core/`; line numbers as of 202
 | Startup sync | `managers/agent_manager.py:313` (`_init_memory_indexes`), `:367-680` |
 | Live reindex triggers | `dpc_agent/tools/core.py:362-391` (L5 write); `knowledge_service.py:1621-1627` (L6 commit) |
 | Embedding model and limits | `dpc_agent/memory.py:361-364`, `:673-707`; `dpc_agent/memory_config.py` |
-| `max_tokens` defaults, shared provider | `dpc_agent/memory_config.py:30`; `dpc_agent/memory.py:556` (constructor default), `:407-440` (per-process singleton, later `max_tokens` applied), `:696` (`min(limit, current)`); callers `dpc_agent/agent.py:210-218` (no `max_tokens`), `managers/agent_manager.py:387-399` (`mem_cfg.max_tokens`, re-applied to an existing provider), `dpc_agent/context.py:757` (per-turn fallback, no `max_tokens`) |
+| `max_tokens` defaults, shared provider | `dpc_agent/memory_config.py:30`; `dpc_agent/memory.py:556` (constructor default), `:407-441` (per-process singleton, later `max_tokens` applied), `:686-696` (`min(limit, current)`, the never-raised window), `:668-671` (applied at load); callers `dpc_agent/agent.py:210-218` (no `max_tokens`), `managers/agent_manager.py:387-399` (`mem_cfg.max_tokens`, re-applied to an existing provider), `dpc_agent/context.py:757` (per-turn fallback, no `max_tokens`) |
 | Rebuild when the map outlives the index | `dpc_agent/indexing_pipeline.py:466`; caller `managers/agent_manager.py:516-518` |
 | Recall failure logging, usage-ratio fallback | `dpc_agent/context.py:824-829`; `:143-154` |
+| Graph-step failure handling | `dpc_agent/context.py:800-801` (expansion, DEBUG, no traceback); `:45-54` (opener, no log, not cached) |
 | Prompt-size estimate log line | `dpc_agent/agent.py:491-515` |
 | L6 weight history | `git log -S '"L6": 1.5'`: added in 4e062760 (2026-04-18), removed in ed589b36 (2026-08-12) |
