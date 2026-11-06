@@ -1,8 +1,8 @@
-# DPTP Specification: D-PC Transfer Protocol v1.13
+# DPTP Specification: D-PC Transfer Protocol v1.14
 
-**Version:** 1.13
+**Version:** 1.14
 **Status:** Draft / PoC
-**Date:** October 2026
+**Date:** November 2026
 **License:** CC0 1.0 Universal (Public Domain)
 
 ## 1. Overview
@@ -415,7 +415,8 @@ Requests the peer to execute an AI inference query using their local compute res
       {"name": "get_weather", "description": "Current weather for a city",
        "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}
     ],
-    "stream": false            // Optional: ask for REMOTE_INFERENCE_CHUNK frames (v1.7+)
+    "stream": false,           // Optional: ask for REMOTE_INFERENCE_CHUNK frames (v1.7+)
+    "max_tokens": 16384        // Optional: the longest answer the guest wants (v1.14+)
   }
 }
 ```
@@ -442,6 +443,7 @@ Requests the peer to execute an AI inference query using their local compute res
 - `system` (string or array, optional, v1.7+): The system prompt that goes with `messages`; a string or a list of content blocks. Meaningless without `messages`, and already folded into `prompt` by the sender.
 - `tools` (array, optional, v1.7+): Anthropic tool definitions — `name`, `description`, `input_schema` — the model may call. Any calls it makes come back in the response's `tool_calls`; the guest runs them and sends the next request with the results in `messages`. A host whose serving alias has no native tool-calling path answers with the error response rather than answering without the tools: a text answer to a request that asked for tools breaks the caller's loop. `supports_tools` in PROVIDERS_RESPONSE (§3.5) lets a guest see that before it spends a round trip; the host's refusal here is the gate.
 - `stream` (boolean, optional, v1.7+, default false): Whether the host should send REMOTE_INFERENCE_CHUNK frames as the answer is made. A host that does not know the field sends none, and the guest receives the whole answer in the response, as it always did.
+- `max_tokens` (integer, optional, v1.14+): The longest answer the guest wants, in tokens, reasoning included where the host's provider counts it inside the answer. A request, not an instruction, like `reasoning_effort`: the host lowers it to the ceiling its menu row states for the serving alias (`settings.max_output_tokens`, §3.5) and never serves more than that. Absent means the guest did not choose, and the host answers at its own ceiling, as before the field. Where the row states no ceiling the host sends nothing to its provider and answers at the alias's own; a guest that needs the number reads the row before it calls. The host applies it where the call takes its prompt door — a request carrying no `messages`, or carrying `images` — and a request with `messages` is served at the alias's ceiling. A value that is not a positive whole number is answered with the error response (`invalid_value`) before anything runs. How long the guest waits for the answer is its own and does not travel.
 
 Fields a receiver does not recognise are ignored, never refused: a newer guest must still be answered by an older host.
 
@@ -2868,6 +2870,16 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.14 (November 2026)
+- **§3.4 REMOTE_INFERENCE_REQUEST** — optional `max_tokens`: the longest answer the guest
+  wants. The host lowers it to the `max_output_tokens` its menu row states for the serving
+  alias, sends nothing where the row states none, and refuses a value that is not a
+  positive whole number with `invalid_value`. Until now an agent pinned to a peer's model
+  could not say how long an answer it had room for: a sleep synthesis that reserved
+  16384 tokens was answered at whatever the host's alias runs at (Mike's call,
+  2026-11-06). **Additive:** an older host ignores the field and answers as
+  before, and a request without it is byte-identical to a v1.13 request.
 
 ### v1.13 (October 2026)
 - **§3.1 LINK_PING, LINK_PONG** — an application-level liveness check on direct TLS, and

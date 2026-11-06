@@ -26,8 +26,9 @@ class RemoteInferenceRequestHandler(MessageHandler):
             sender_node_id: Node ID of requester
             payload: "request_id" and "prompt", plus the optional "model",
                 "provider", "images", "reasoning_effort", "messages", "system",
-                "tools" and "stream". A field this node has never heard of is
-                neither read nor refused: a newer guest must still be answered.
+                "tools", "stream" and "max_tokens". A field this node has never
+                heard of is neither read nor refused: a newer guest must still
+                be answered.
         """
         request_id = payload.get("request_id")
         prompt = payload.get("prompt")
@@ -41,11 +42,15 @@ class RemoteInferenceRequestHandler(MessageHandler):
         system = payload.get("system")
         tools = payload.get("tools")
         stream = bool(payload.get("stream"))
+        # The longest answer the peer asked for (DPTP v1.14); the host lowers it
+        # to its own ceiling. Handed on only when sent, so a request without it
+        # reaches the host exactly as before.
+        limits = {"max_tokens": payload["max_tokens"]} if "max_tokens" in payload else {}
 
         await self.service._handle_inference_request(
             sender_node_id, request_id, prompt, model, provider, images,
             reasoning_effort, messages=messages, system=system, tools=tools,
-            stream=stream,
+            stream=stream, **limits,
         )
         return None
 

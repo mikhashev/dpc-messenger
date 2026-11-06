@@ -553,11 +553,12 @@ class DpcLlmAdapter:
         model: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: Optional[str] = None,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
         task_id: Optional[str] = None,
         tool_choice: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Send chat request through DPC's LLMManager.
@@ -568,7 +569,9 @@ class DpcLlmAdapter:
             tools: Optional list of tool schemas (handled via prompt injection)
             reasoning_effort: one word from the shared scale (off/low/medium/high/max),
                 passed to the provider, which maps it onto what its own model can do
-            max_tokens: Max completion tokens
+            max_tokens: The longest answer asked for, read on the peer route only,
+                where it travels as the request's `max_tokens` (DPTP v1.14); None
+                sends nothing and the host answers at its own ceiling
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks
             task_id: The task this call belongs to, carried into its usage row (node_ledger)
@@ -577,6 +580,8 @@ class DpcLlmAdapter:
                 renders the same head. Honoured only where the provider's
                 `generate_with_tools` names the parameter; anywhere else the call
                 is made without tools, as it was before the parameter existed.
+            timeout: Seconds to wait for a peer's answer, in place of the
+                dpc_agent provider's; read on the peer route only
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -596,7 +601,7 @@ class DpcLlmAdapter:
             response_msg, usage = await self._chat(
                 messages, model=model, tools=tools, reasoning_effort=reasoning_effort,
                 max_tokens=max_tokens, on_stream_chunk=on_stream_chunk,
-                conversation_id=conversation_id, tool_choice=tool_choice,
+                conversation_id=conversation_id, tool_choice=tool_choice, timeout=timeout,
             )
         self._write_usage_row(
             usage, response_msg, started_at=started_at, duration_s=time.monotonic() - clock,
@@ -604,12 +609,19 @@ class DpcLlmAdapter:
         )
         return response_msg, usage
 
-    async def _ask_once(self, prompt: str, reasoning_effort: Optional[str] = None) -> str:
+    async def _ask_once(
+        self, prompt: str, reasoning_effort: Optional[str] = None,
+        max_tokens: Optional[int] = None, timeout: Optional[float] = None,
+    ) -> str:
         """One prompt through this adapter's own route, answered as text: an
         agent's auxiliary model (sleep, snapshot summarising, compaction) whose
         alias lives on the agent's peer. `chat` writes the usage row and `_chat`
         takes the route; the prompt is re-cut here first, since the re-cut in
         `_chat` reads tool turns and this is a single user turn.
+
+        `max_tokens` and `timeout` are the caller's own, as sleep's synthesis
+        sets them: the first travels to the host, which lowers it to its
+        ceiling; the second is how long this node waits for the answer.
 
         A peer that is unreachable or refuses raises, naming the peer and the
         alias; nothing falls back to a model of this node.
@@ -621,7 +633,8 @@ class DpcLlmAdapter:
             prompt = self._prompt_for_peer(prompt, peer, service)
         try:
             response, _ = await self.chat([{"role": "user", "content": prompt}],
-                                          reasoning_effort=reasoning_effort)
+                                          reasoning_effort=reasoning_effort,
+                                          max_tokens=max_tokens, timeout=timeout)
         except Exception as e:
             if not peer:
                 raise
@@ -765,10 +778,11 @@ class DpcLlmAdapter:
         model: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: Optional[str] = None,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
         tool_choice: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """`chat` without the usage row: picks the route and makes the call."""
         # `tool_choice="none"` is honoured on the native tools path alone; every
@@ -869,6 +883,7 @@ class DpcLlmAdapter:
                     images=peer_images,
                     reasoning_effort=reasoning_effort,
                     tool_choice=tool_choice,
+                    **self._asked_limits(max_tokens, timeout),
                 )
             else:
                 # Global peer_id routing (legacy KISS approach)
@@ -878,6 +893,7 @@ class DpcLlmAdapter:
                     images=peer_images,
                     reasoning_effort=reasoning_effort,
                     tool_choice=tool_choice,
+                    **self._asked_limits(max_tokens, timeout),
                 )
 
         alias = self._get_agent_provider_alias()
@@ -1272,6 +1288,13 @@ class DpcLlmAdapter:
             })
         return result
 
+    @staticmethod
+    def _asked_limits(max_tokens: Optional[int], timeout: Optional[float]) -> Dict[str, Any]:
+        """The caller's `max_tokens` and `timeout` for the peer route, only those
+        it named: a call that names neither reaches it as it always did."""
+        asked = {"max_tokens": max_tokens, "timeout": timeout}
+        return {key: value for key, value in asked.items() if value is not None}
+
     async def _chat_via_remote_peer(
         self,
         dpc_agent_provider: Any,
@@ -1282,6 +1305,8 @@ class DpcLlmAdapter:
         images: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: Optional[str] = None,
         tool_choice: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Route inference to remote peer when dpc_agent.peer_id is set.
@@ -1300,6 +1325,9 @@ class DpcLlmAdapter:
             images: Optional list of image dicts for vision queries; sent only
                 as DPTP §3.4 allows, i.e. carrying base64 rather than a path
             tool_choice: "none" withholds the tools
+            max_tokens: The request's `max_tokens` (DPTP v1.14), sent only when
+                given; the host lowers it to its own ceiling
+            timeout: The wait for the answer in place of the provider's
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -1348,7 +1376,8 @@ class DpcLlmAdapter:
             # Call remote inference via CoreService
             # Use configurable timeout from dpc_agent provider (default 1200s,
             # the host's own budget plus overhead — ADR-040 D4-0)
-            timeout = getattr(dpc_agent_provider, 'timeout', 1200.0) or 1200.0
+            # The caller's own wait wins where it names one, as at the service door.
+            timeout = timeout or getattr(dpc_agent_provider, 'timeout', 1200.0) or 1200.0
             log.info(f"Routing agent inference to remote peer: {peer_id} (timeout={timeout}s)")
             host_name = _host_name(service, peer_id)
             ask = dict(
@@ -1358,6 +1387,8 @@ class DpcLlmAdapter:
                 provider=dpc_agent_provider.remote_provider,
                 reasoning_effort=reasoning_effort,
                 timeout=timeout,
+                # Only when asked: a call that names none is the request it always was.
+                **({"max_tokens": max_tokens} if max_tokens else {}),
             )
             result = None
             if native:
@@ -2114,7 +2145,14 @@ class _PinnedAgentQueries:
             raise ValueError(f"'{provider_alias}' is a peer's alias; it is asked for text here")
         adapter = DpcLlmAdapter(self._llm_manager, provider_alias=provider_alias,
                                 compute_host=self._compute_host, caller=self._caller)
-        return await adapter._ask_once(prompt, reasoning_effort=kwargs.get("reasoning_effort"))
+        # The caller's answer length and wait go with it (Mike's call, 2026-11-06):
+        # without them the host answered sleep's synthesis at its own ceiling and
+        # this node waited the provider's time, not sleep's. `reasoning_budget_tokens`
+        # has no field on the wire (DPTP §3.4) and stays behind.
+        return await adapter._ask_once(
+            prompt, reasoning_effort=kwargs.get("reasoning_effort"),
+            max_tokens=kwargs.get("max_tokens"), timeout=kwargs.get("timeout"),
+        )
 
 
 def _llm_manager_for_agent(llm_manager: Any, compute_host: Any, caller: Optional[str] = None) -> Any:

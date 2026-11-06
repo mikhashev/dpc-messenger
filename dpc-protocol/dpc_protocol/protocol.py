@@ -155,6 +155,7 @@ def create_remote_inference_request(
     system: Any = None,
     tools: list = None,
     stream: bool = False,
+    max_tokens: int = None,
 ) -> Dict[str, Any]:
     """
     Creates a remote inference request message.
@@ -178,9 +179,13 @@ def create_remote_inference_request(
         tools: Anthropic tool definitions `{name, description, input_schema}`.
         stream: Whether to ask for REMOTE_INFERENCE_CHUNK frames; absent and
                 False alike mean the whole answer in the response, as before.
+        max_tokens: The longest answer the caller wants, in tokens (DPTP v1.14).
+                A request, not an instruction, like `reasoning_effort`: the host
+                lowers it to the ceiling its alias's menu row states. Absent
+                means the host answers at its own ceiling, as before.
 
-    The four v1.7 fields ride only when they carry something, so a request
-    without them is byte-identical to the prompt-only one.
+    The four v1.7 fields and `max_tokens` ride only when they carry something,
+    so a request without them is byte-identical to the prompt-only one.
     """
     payload = {
         "request_id": request_id,
@@ -202,6 +207,8 @@ def create_remote_inference_request(
         payload["tools"] = tools
     if stream:
         payload["stream"] = True
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     return {"command": "REMOTE_INFERENCE_REQUEST", "payload": payload}
 
 

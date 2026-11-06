@@ -39,7 +39,7 @@ def test_a_request_that_names_none_of_the_new_fields_is_the_shape_it_always_was(
     })
 
 
-@pytest.mark.parametrize("absent", ["messages", "system", "tools", "stream"])
+@pytest.mark.parametrize("absent", ["messages", "system", "tools", "stream", "max_tokens"])
 def test_each_new_request_field_is_absent_rather_than_null_when_unused(absent):
     payload = create_remote_inference_request("req-1", "hello")["payload"]
     assert absent not in payload

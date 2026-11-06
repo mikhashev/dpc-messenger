@@ -8969,11 +8969,12 @@ class CoreService:
         """
         await self.context_coordinator.handle_device_context_request(peer_id, request_id)
 
-    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None, messages: list = None, system=None, tools: list = None, stream: bool = False):
+    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None, messages: list = None, system=None, tools: list = None, stream: bool = False, max_tokens=None):
         """Delegated to P2PCoordinator."""
         await self.p2p_coordinator.handle_inference_request(
             peer_id, request_id, prompt, model, provider, images, reasoning_effort,
             messages=messages, system=system, tools=tools, stream=stream,
+            max_tokens=max_tokens,
         )
 
     async def _handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
@@ -9211,6 +9212,7 @@ class CoreService:
         images: list = None, reasoning_effort: str = None, timeout: float = None,
         messages: list = None, system: Any = None, tools: list = None,
         on_chunk: Optional[Any] = None, request_id: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """Delegated to P2PCoordinator.
 
@@ -9227,7 +9229,7 @@ class CoreService:
         return await self.p2p_coordinator.request_inference_from_peer(
             peer_id, prompt, model, provider, images, reasoning_effort, timeout,
             messages=messages, system=system, tools=tools,
-            on_chunk=on_chunk, request_id=request_id,
+            on_chunk=on_chunk, request_id=request_id, max_tokens=max_tokens,
         )
 
     async def _request_transcription_from_peer(

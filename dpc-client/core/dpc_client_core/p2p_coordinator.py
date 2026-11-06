@@ -384,6 +384,45 @@ class P2PCoordinator:
         rung = reasoning_word_for(provider, word)
         return rung if isinstance(rung, str) and rung else None
 
+    def _max_tokens_for_peer(
+        self, peer_id: str, requested: Any, serving_alias: str,
+    ) -> Optional[int]:
+        """The answer length a served call asks its provider for: the guest's
+        `max_tokens` lowered to the ceiling this alias's menu row states
+        (`settings.max_output_tokens`, DPTP §3.5), or None, which sends nothing
+        and serves the call at the alias's own ceiling, as before the field.
+
+        None where the guest asked for nothing, and where the row states no
+        ceiling: such a provider reads no per-call value, or reads one with no
+        bound this node chose, and the guest's number is not what sets this
+        node's spend. `ValueError` for a value that is not a positive whole
+        number, refused before anything runs, as an unknown effort word is.
+        """
+        if requested is None:
+            return None
+        if isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
+            raise ValueError(
+                f"max_tokens must be a positive whole number of tokens; {requested!r} is not one"
+            )
+        from .providers.base import positive_ceiling
+        from .service import menu_settings_row
+
+        ceiling = positive_ceiling(
+            menu_settings_row(self._provider_for_alias(serving_alias)).get("max_output_tokens")
+        )
+        if ceiling is None:
+            logger.info(
+                "Peer %s asked for max_tokens %d; %s states no output ceiling, so the call "
+                "runs at its own", peer_id, requested, serving_alias,
+            )
+            return None
+        if requested > ceiling:
+            logger.info(
+                "Peer %s asked for max_tokens %d; %s is capped at %d", peer_id, requested,
+                serving_alias, ceiling,
+            )
+        return min(requested, ceiling)
+
     def _provider_for_alias(self, alias: str) -> Optional[Any]:
         """The loaded provider behind an alias, or None. The registry is a dict or
         it is nothing: a stand-in answering every attribute would be read here as
@@ -736,7 +775,7 @@ class P2PCoordinator:
         self, peer_id: str, request_id: str, prompt: str, model: str = None,
         provider: str = None, images: list = None, reasoning_effort: str = None,
         messages: list = None, system: Any = None, tools: list = None,
-        stream: bool = False,
+        stream: bool = False, max_tokens: Any = None,
     ):
         """Handle incoming remote inference request from a peer.
 
@@ -754,6 +793,11 @@ class P2PCoordinator:
 
         None of this is read before the gates below have passed, and a refused
         call emits no chunk.
+
+        `max_tokens` (DPTP v1.14) is the longest answer the guest asked for,
+        lowered to this alias's stated ceiling (`_max_tokens_for_peer`). It
+        reaches the provider on the `query` door only: `query_messages` takes
+        no per-call length, so a conversation is served at the alias's ceiling.
         """
         from dpc_protocol.protocol import (
             REFUSAL_IDENTITY_UNPROVED,
@@ -927,6 +971,21 @@ class P2PCoordinator:
                 logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
             return
 
+        # The answer length, refused before any row when it is not a number of
+        # tokens; the guest's request is what is wrong, as with an effort word.
+        try:
+            served_max_tokens = self._max_tokens_for_peer(peer_id, max_tokens, serving_alias)
+        except ValueError as refusal:
+            logger.warning("Peer inference refused for %s: %s", peer_id, refusal)
+            error_response = create_remote_inference_response(
+                request_id=request_id, error=str(refusal), code=REFUSAL_INVALID_VALUE,
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
         # Tools the serving alias has no path for: the guest's own request, and
         # the gate that means `tools_unsupported`. The flat `images` field
         # reaches `query`, whose vision entry point holds no tools, so beside
@@ -1087,6 +1146,7 @@ class P2PCoordinator:
                             result = await self.service.llm_manager.query(
                                 prompt, provider_alias=serving_alias, images=images,
                                 return_metadata=True, **query_kwargs,
+                                **({"max_tokens": served_max_tokens} if served_max_tokens else {}),
                             )
                 except asyncio.CancelledError:
                     # The guest's ceiling is summed from rows: a call it can walk away
@@ -1497,6 +1557,7 @@ class P2PCoordinator:
         images: list = None, reasoning_effort: str = None, timeout: float = 1200.0,
         messages: list = None, system: Any = None, tools: list = None,
         on_chunk: Optional[Any] = None, request_id: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """Request remote inference from a specific peer.
 
@@ -1513,6 +1574,10 @@ class P2PCoordinator:
         `request_id` is minted here only when the caller supplies none: a door
         that has already shown an id to its own client passes it in, and the
         frame, the future, the chunk registry and both rows carry that one.
+
+        `max_tokens` is the longest answer the caller asks for (DPTP v1.14); the
+        host lowers it to its own ceiling, and an older host ignores it.
+        `timeout` is this node's wait for the answer and never travels.
         """
         import uuid
         from dpc_protocol.protocol import create_remote_inference_request
@@ -1534,7 +1599,7 @@ class P2PCoordinator:
                 model=model, provider=provider, images=images,
                 reasoning_effort=reasoning_effort,
                 messages=messages, system=system, tools=tools,
-                stream=on_chunk is not None,
+                stream=on_chunk is not None, max_tokens=max_tokens,
             )
             await self.p2p_manager.send_message_to_peer(peer_id, request_message)
 

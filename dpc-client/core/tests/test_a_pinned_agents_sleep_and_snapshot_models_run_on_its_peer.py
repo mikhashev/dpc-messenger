@@ -118,9 +118,11 @@ def _rows(tmp_path):
 # --- sleep ------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_a_pinned_agents_peer_sleep_model_is_asked_of_its_peer(tmp_path):
+async def test_a_pinned_agents_peer_sleep_model_is_asked_of_its_peer(tmp_path, monkeypatch):
     service = _Service()
     manager = _Manager(service)
+    monkeypatch.setattr(sleep_pipeline, "_synthesis_request_limits", lambda window: {
+        "max_tokens": 16384, "reasoning_budget_tokens": 4096, "reasoning_effort": "high"})
 
     result = await run_sleep(_conversation(tmp_path), _llm_manager_for_agent(manager, PEER, AGENT),
                              provider_alias=PEER_ALIAS)
@@ -128,6 +130,12 @@ async def test_a_pinned_agents_peer_sleep_model_is_asked_of_its_peer(tmp_path):
     assert result["status"] == "completed", result
     assert manager.local_calls == []
     assert [(s["peer_id"], s["provider"]) for s in service.sent] == [(PEER, PEER_ALIAS)] * 2
+    # The synthesis's own answer length and wait go with it (DPTP v1.14); the
+    # session analysis names no length and keeps the provider's wait.
+    analysis, synthesis = service.sent
+    assert synthesis["max_tokens"] == 16384
+    assert synthesis["timeout"] == sleep_pipeline.SYNTHESIS_TIMEOUT_SECONDS
+    assert "max_tokens" not in analysis and analysis["timeout"] == 5
     rows = _rows(tmp_path)
     assert [(r["route"], r["alias"], r["served_by"], r["caller"]) for r in rows] == \
         [("peer", PEER_ALIAS, PEER, AGENT)] * 2
