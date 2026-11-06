@@ -1067,6 +1067,7 @@
     <div class="chat-panel" style="height: {chatPanelHeight}px;">
       <div class="chat-header">
         <div class="chat-title-section">
+          <div class="chat-title-row">
           <button
             type="button"
             class="chat-header-toggle"
@@ -1097,6 +1098,25 @@
               {/if}
             </h2>
           </button>
+          <!-- Block / Unblock beside the peer's name, hidden with the rest when the header is folded -->
+          {#if isP2PChat && !chatHeaderCollapsed}
+              {#if $blockedNodeIds.includes(activeChatId)}
+                <button
+                  type="button"
+                  class="peer-block-btn"
+                  title="Unblock this peer: it may connect again, but groups and firewall rules it was removed from are not restored"
+                  onclick={() => handleUnblockPeer(activeChatId)}
+                >Unblock</button>
+              {:else}
+                <button
+                  type="button"
+                  class="peer-block-btn"
+                  title="Block this peer: ends the connection, removes it from groups and deletes the firewall rules that name it"
+                  onclick={() => handleBlockPeer(activeChatId)}
+                >Block</button>
+              {/if}
+          {/if}
+          </div>
 
           <!-- Group topic display (v0.19.0) - inside title section for proper positioning -->
           {#if !chatHeaderCollapsed && isGroupChat && $groupChats.get(activeChatId)?.topic}
@@ -1148,7 +1168,7 @@
           {/if}
 
           <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI or group chats — groups have it in Settings) -->
-          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai' && !activeChatId.startsWith('group-')}
+          {#if !chatHeaderCollapsed && !$aiChats.has(activeChatId) && activeChatId !== 'local_ai' && !activeChatId.startsWith('group-')}
             <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
               <input
                 type="checkbox"
@@ -1170,23 +1190,8 @@
           {/if}
 
           <!-- Telegram bot integration status (v0.14.0+) - P2P chats only -->
-          {#if isP2PChat}
+          {#if isP2PChat && !chatHeaderCollapsed}
             <TelegramStatus conversationId={activeChatId} />
-            {#if $blockedNodeIds.includes(activeChatId)}
-              <button
-                type="button"
-                class="peer-block-btn"
-                title="Unblock this peer: it may connect again, but groups and firewall rules it was removed from are not restored"
-                onclick={() => handleUnblockPeer(activeChatId)}
-              >Unblock</button>
-            {:else}
-              <button
-                type="button"
-                class="peer-block-btn"
-                title="Block this peer: ends the connection, removes it from groups and deletes the firewall rules that name it"
-                onclick={() => handleBlockPeer(activeChatId)}
-              >Block</button>
-            {/if}
           {/if}
         </div>
 
@@ -1901,14 +1906,20 @@
     margin-left: 0.3em;
   }
 
+  .chat-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+  }
+
   .peer-block-btn {
-    /* It sits in .chat-title-section, a flex column that stretches its children. */
-    align-self: flex-start;
+    flex: 0 0 auto;
     padding: 0.2rem 0.6rem;
-    background: transparent;
-    color: #999;
+    background: #fff3cd;
+    color: #856404;
     font-size: 0.8rem;
-    border: 1px solid #ddd;
+    border: 1px solid #ffc107;
     border-radius: 6px;
     cursor: pointer;
   }
