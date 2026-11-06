@@ -1637,8 +1637,13 @@ async def _execute_with_timeout(
     finally:
         note_turn(tool=None)
         # Don't shutdown the shared executor - it will be reused
-        # Force garbage collection after each tool execution to prevent memory accumulation
-        gc.collect()
+        # Force garbage collection after each tool execution to prevent memory accumulation.
+        # Not when the call is being cancelled (a Kill): a full collection runs on the event
+        # loop and takes about a second in a large process (CI, 2026-11-06), and the Kill
+        # is meant to end the turn at once.
+        task = asyncio.current_task()
+        if task is None or not task.cancelling():
+            gc.collect()
 
 
 class CallKilled(Exception):

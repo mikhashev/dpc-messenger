@@ -317,3 +317,22 @@ def test_only_the_children_of_that_turn_are_killed():
     # A Kill that names no turn ends nothing, rather than guessing one call.
     turnless = SpawnOrigin(agent_id="agent_a", conversation_id="chat-1", tool="run_shell", round=3)
     assert registry.stop_commands_of(turnless, kill_tree=lambda t: killed.append(t)) == []
+
+
+@pytest.mark.asyncio
+async def test_a_kill_does_not_wait_for_the_garbage_collection_after_a_tool(tmp_path, tools, monkeypatch):
+    """CI, 2026-11-06: the three Kill tests above took 1.16-1.18 s in the full suite. The tool
+    call's `finally` ran `gc.collect()` on the event loop as the Kill cancelled it, and in a
+    large process a full collection is about a second. A slow collection must not hold a Kill."""
+    import gc
+
+    from dpc_client_core.dpc_agent import loop as loop_module
+
+    real = gc.collect
+    monkeypatch.setattr(loop_module.gc, "collect", lambda *a, **k: (time.sleep(1.0), real())[1])
+    llm = _Llm(_asks(_call("slow_async")), _says("never asked"))
+
+    (_text, _u, trace), took = await _kill_while_running(llm, tools, tmp_path)
+
+    assert took < 1.0, f"the Kill waited {took:.1f}s, a collection's worth"
+    assert trace["turn_end"] == "killed"
