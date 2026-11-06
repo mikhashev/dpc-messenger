@@ -60,7 +60,8 @@ There is no chunking: one row per document in each channel. Each row carries thi
 ```
 
 "Body" is the file text with a leading front-matter block removed: if the text starts with
-`---`, everything up to and including the next line that is exactly `---` is dropped (knowledge
+`---`, everything up to and including the next line that reads `---` once trailing whitespace
+is removed is dropped (knowledge
 commits open with such an envelope of ids and signatures). If no closing line exists, nothing
 is removed.
 
@@ -122,9 +123,22 @@ doc_text = key + " " + heading + " " + body      # heading omitted if empty
 ```
 
 The same `doc_text` goes to both channels. The embedding model is `BAAI/bge-m3` (1024
-dimensions) via sentence-transformers with `normalize_embeddings=True`; the model's sequence
-limit is set to `min(4096, model maximum)` tokens, so the embedding sees only the **first 4096
-tokens** of a long document. BM25 keeps the full `doc_text` (up to the 100,000-character cap).
+dimensions) via sentence-transformers with `normalize_embeddings=True`. When the model loads,
+its sequence limit is set to `min(max_tokens, the model's current limit)` (bge-m3 ships 8192),
+and never raised; a `max_tokens` of 0 or less leaves the model's own limit. `max_tokens` is 4096
+by default, so the embedding sees only the **first 4096 tokens** of a long document. BM25 keeps
+the full `doc_text` (up to the 100,000-character cap).
+
+The default 4096 is written in two places: the per-agent memory config field and the embedding
+provider's own constructor. The provider is one object per model per process, shared by indexing
+and by every agent's queries: whoever creates it first sets its device, and a later caller that
+states `max_tokens` (the startup sync does, from the agent's memory config; the agent constructor
+and the per-turn recall fallback do not) moves the shared window. Both defaults are 4096 today
+and no agent config on this node sets `max_tokens` (checked 2026-11-06), so none of this is
+visible. It becomes visible once the window is not the same everywhere: two agents with different
+`max_tokens` share one window, so an agent whose index was built under one window can be queried
+under the other's; and because the limit is never raised past the value already applied, a
+larger `max_tokens` stated after the model has loaded is recorded but has no effect on the model.
 
 ### 4.3 When it runs
 
@@ -132,7 +146,9 @@ tokens** of a long document. BM25 keeps the full `doc_text` (up to the 100,000-c
   compute `doc_hash` for each, embed only documents whose hash changed or is new, delete rows
   for keys that disappeared, write `file_hashes` last as the commit point. A full rebuild is
   forced when the embedding model, the key-format marker or the backend pair changed, or when
-  the stored map lists documents the stored index does not hold. Embedding runs in batches of
+  the stored map lists documents while the stored index failed to load or holds no rows at all.
+  A partial mismatch (the map lists more documents than the index holds, but the index is not
+  empty) does not force a rebuild. Embedding runs in batches of
   16 (configurable).
 * **Live replace**: when the agent writes a file under `knowledge/`, that one key is removed and
   re-added in both channels; when a knowledge commit is approved, the L6 file is replaced the
@@ -173,7 +189,9 @@ graph hit at this depth.
 ### 6.1 Gate and queries
 
 The block runs on every turn where the current message text or the conversation history is
-non-empty. Any exception skips recall for that turn silently (logged).
+non-empty. Any exception skips recall for that turn: the user sees an ordinary turn with no
+recall block, and the log records it — at INFO when the embedding model is not cached locally,
+at WARNING with the traceback for anything else.
 
 * **Q1** — the current message text exactly as the agent receives it. DPC's dispatchers prefix
   it with the sender, e.g. `[Mike]: <text>` or `[Group chat — Mike says]: <text>`.
@@ -205,6 +223,10 @@ Corpus tokenisation (at index time):
    stop-word set: stopwords-iso `ru` + `en`, plus **corpus stop words** — tokens present in more
    than 80 % of documents (computed only when the corpus has >= 5 documents).
 
+The corpus layer exists but in practice rarely fires: on 2026-11-06 the index of agent Johnny
+held 1327 documents and exactly one corpus stop word (`##`). The fixed ru+en list does the
+filtering.
+
 Query tokenisation: the same function with the same stop words, then the surviving tokens are
 joined by spaces and passed through `bm25s.tokenize` (lowercase, regex `\b\w\w+\b`, English
 stop words). The corpus side keeps punctuation glued to words (`recall,`), the query side does
@@ -232,7 +254,7 @@ candidates = sort keys by score, descending (stable)
 | Layer label | Weight |
 |---|---|
 | L1 | 1.3 |
-| L6 | 1.0 (was 1.5 in ADR-010; lowered 2026-08-12) |
+| L6 | 1.0 (1.5 in the code from its first version, 2026-04-18, until commit ed589b36 on 2026-08-12) |
 | L5 | 1.0 |
 | EXT | 0.9 |
 | L2 | 0.8 |
@@ -267,7 +289,8 @@ access = reads + (min(1, injections / 20) * 0.3   if injections > 0 else 0)
 max_access = max(access over all candidates)
 if no evidence at all, or max_access <= 0, or logs unreadable: no decay
 multiplier = max(0.1, access / max_access)          if access > 0
-           = 1.0   if access == 0 and the file's mtime is less than 7 days old
+           = 1.0   if access == 0 and 0 <= (now - the file's mtime) < 7 days
+                   (no source_path, a failed stat, or an mtime in the future: not in grace)
            = 0.1   otherwise
 score = fused_score * multiplier;  re-sort descending (stable)
 ```
@@ -286,7 +309,10 @@ better.
 ## 9. Selection and mode
 
 Context usage ratio = (prompt tokens measured after the last response in this chat) /
-(context window); if no prompt has been measured yet in this chat, history tokens / window.
+(context window); if no prompt has been measured yet in this chat (for example the first turn
+in a chat after a restart), history tokens / window, and 0 if neither figure is known. History
+alone is a lower bound on the prompt, so on such a turn the mode can be fuller than the real
+usage would allow.
 
 | Ratio | Mode | Effect |
 |---|---|---|
@@ -374,11 +400,23 @@ injection lines older than the read window are moved to `knowledge_access.archiv
 The INFO log line per turn reports what actually went in, with post-decay scores:
 `Active Recall injected 3 of 29 candidates (mode=full): key(0.018), ...`.
 
+**One measurement (agent Johnny, 2026-11-06).** Population: his injection log (98 lines,
+2026-10-23 to 2026-11-06; 80 `full`, 18 `hints`) and the finished `read_file` rows of his tool
+log and its rotated copy (812 rows, 2026-10-22 to 2026-11-06). The injections named 64 distinct
+keys. Matched the way §8 matches (by key or by `source_path`), 4 of those 64 had any read, 8
+reads in total. All 812 read rows carry `via_hint`: 3 are `true` (two reads of one document in
+one group chat, one read of another), 809 `false`. These are one agent's counts over two weeks,
+not a follow-rate.
+
 ## 12. Worked example (agent Johnny, 2026-11-06)
 
 The owner wrote in a group, addressing the agent: "@Johnny, you take a look too, think it
 over" (translated). The previous ten messages were about an audio-editor idea, a GitHub link and
-a song file. Context usage was 37,419 / 250,000 = 15 %, so mode `full`.
+a song file. The prompt-size line logged for the turn read 37,419 / 250,000 tokens (15 %). That
+line is an estimate of the assembled prompt, raised to the last measured prompt when that is
+larger; it is not the ratio recall read, which is not logged. Recall's ratio is the last
+measured prompt or the history alone (§9), neither of which exceeds the estimate, so it was at
+most about 15 %: mode `full`.
 
 **Channels** (from the debug log of that turn).
 * V1 (Q1): ten documents, nearly all named after Johnny (his retrospectives, his identity file,
@@ -403,8 +441,12 @@ a song file. Context usage was 37,419 / 250,000 = 15 %, so mode `full`.
 | `retro-2026-09-10-gateway-tariff-johnny.md` | L7 | 0.6 x 1/61 = 0.00984 | 0 + 12/20 x 0.3 = 0.18 | 0.6 | **0.0059** |
 
 The access figures are back-solved from the logged scores (0.018, 0.014, 0.006) and agree with
-the counts on disk a few minutes later (15, 65, 13, 3 injections, zero reads — this and later
-turns had added their own injections). Because `backlog.md` received a multiplier of 1.0 while
+the injection log: before this turn it held, for the four rows in table order
+(`retro-2026-09-08`, `grable_catalog.md`, `backlog.md`, `retro-2026-09-10`), 3, 13, 62 and 12
+injections, and zero reads for any of them. These counts were measured on 2026-11-06 and are a
+snapshot, not constants: every turn that injects appends one line and adds one to each key it
+names. After this turn and the next two the same four stood at 3, 15, 65 and 13; when the log
+reached 98 lines later that day, `backlog.md` stood at 66. Because `backlog.md` received a multiplier of 1.0 while
 its access was the 0.3 cap, no candidate of the 29 had a single counted read: the whole
 reordering was done by injection counts. The fused leader fell to fourth; a graph hit, at the
 lowest weight and with no excerpt, took the third slot. Its hint printed `(chunk 0)` as the
@@ -432,13 +474,17 @@ excerpt.
    user stop words). In the live path only the BM25 channel filters stop words (fixed ru+en
    plus corpus stops); the vector channel embeds Q1 and Q2 raw; there is no language detection
    and no user layer.
-7. **Q2 truncation keeps the oldest text.** The embedding truncates at 4096 tokens from the
-   end, so on long histories Q2 represents the oldest of the ten messages, not the latest.
+7. **Q2 truncation keeps the oldest text.** The embedding keeps the first 4096 tokens of its
+   input and drops everything after them. Q2 joins the ten messages oldest first, so on a long
+   history the tokens that survive are those of the oldest messages, and the newest messages —
+   the ones closest to the current turn — are the ones cut.
 8. **BM25 token mismatch** between corpus and query (§6.3).
 9. **Divergences from the ADRs:** BGE-M3 sparse output (ADR-018) is not used — the text channel
    is BM25 only; ADR-018 planned the whole history as the context query, the code uses the last
-   10 messages; grace is 7 days, not 5 sessions (ADR-013); L6 weight is 1.0, not 1.5 (ADR-010);
-   L1 and L2 have weights but no producer. The per-agent memory config fields `active_recall`
+   10 messages; grace is 7 days, not 5 sessions (ADR-013); ADR-010 fixes no weights, only an
+   order, L6 > L1 > L5 > L2, and the weight table no longer follows it (L1 1.3 is above L6 1.0
+   since the code's own 1.5 for L6 was removed on 2026-08-12); L1 and L2 have weights but no
+   producer. The per-agent memory config fields `active_recall`
    and `max_recall_results` are read but not consulted by the live path: recall runs whenever an
    index exists, and the slot count is fixed at 3.
 
@@ -489,24 +535,39 @@ def recall(task_text, history, usage_ratio, now):
     if mode == "skip":
         return None
 
-    acc = {k: reads(k, meta[k].path) +
-              (min(1, inj(k) / 20) * 0.3 if inj(k) else 0) for k in cands}
-    top = max(acc.values(), default=0)
-    if top > 0:
-        for k in cands:
-            if acc[k]:
-                mult = max(0.1, acc[k] / top)
-            else:
-                mult = 1.0 if now - mtime(meta[k].path) < 7 * 86400 else 0.1
-            score[k] *= mult
-        cands.sort(key=lambda k: -score[k])
+    try:
+        ev = access_evidence()                  # both logs, one window (section 8)
+    except LogUnreadable:
+        ev = None                               # evidence unreadable: no decay
+    if ev:                                      # no evidence at all: no decay
+        acc = {k: ev.reads(k, meta[k].path) +
+                  (min(1, ev.inj(k) / 20) * 0.3 if ev.inj(k) else 0) for k in cands}
+        top = max(acc.values(), default=0)
+        if top > 0:
+            for k in cands:
+                if acc[k]:
+                    mult = max(0.1, acc[k] / top)
+                else:
+                    mult = 1.0 if in_grace(meta[k].path, now) else 0.1
+                score[k] *= mult
+            cands.sort(key=lambda k: -score[k])
 
     cands = [k for k in cands if address(meta[k]) or
              (meta[k].preview and not shared_and_gate_closed(meta[k]))]
     chosen = cands[:SLOTS]
-    block = render(chosen, mode)                # formats of section 10
-    log_injection(chosen, mode, addresses(chosen) if mode == "full" else [])
+    block = render(chosen, mode)                # formats of section 10; "" if chosen is empty
+    if chosen:                                  # nothing selected: nothing logged
+        log_injection(chosen, mode, addresses(chosen) if mode == "full" else [])
     return block                                # appended to the current user message
+
+def in_grace(path, now):
+    if not path:
+        return False                            # no path: treated as old
+    try:
+        age = now - mtime(path)
+    except OSError:
+        return False                            # cannot stat: treated as old
+    return 0 <= age < 7 * 86400                 # an mtime in the future is not in grace
 ```
 
 ## Appendix — where it lives in DPC
@@ -536,3 +597,8 @@ Paths are relative to `dpc-client/core/dpc_client_core/`; line numbers as of 202
 | Startup sync | `managers/agent_manager.py:313` (`_init_memory_indexes`), `:367-680` |
 | Live reindex triggers | `dpc_agent/tools/core.py:362-391` (L5 write); `knowledge_service.py:1621-1627` (L6 commit) |
 | Embedding model and limits | `dpc_agent/memory.py:361-364`, `:673-707`; `dpc_agent/memory_config.py` |
+| `max_tokens` defaults, shared provider | `dpc_agent/memory_config.py:30`; `dpc_agent/memory.py:556` (constructor default), `:407-440` (per-process singleton, later `max_tokens` applied), `:696` (`min(limit, current)`); callers `dpc_agent/agent.py:210-218` (no `max_tokens`), `managers/agent_manager.py:387-399` (`mem_cfg.max_tokens`, re-applied to an existing provider), `dpc_agent/context.py:757` (per-turn fallback, no `max_tokens`) |
+| Rebuild when the map outlives the index | `dpc_agent/indexing_pipeline.py:466`; caller `managers/agent_manager.py:516-518` |
+| Recall failure logging, usage-ratio fallback | `dpc_agent/context.py:824-829`; `:143-154` |
+| Prompt-size estimate log line | `dpc_agent/agent.py:491-515` |
+| L6 weight history | `git log -S '"L6": 1.5'`: added in 4e062760 (2026-04-18), removed in ed589b36 (2026-08-12) |
