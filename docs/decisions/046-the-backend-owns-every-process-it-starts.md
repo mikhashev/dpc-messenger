@@ -1107,3 +1107,16 @@ and is not used for the registry.
 - Cargo, `src/util/job.rs` and `src/bin/cargo/main.rs` in `github.com/rust-lang/cargo`,
   master as read on 2026-10-25.
 - `b26f440e` — children without the service console; `811a5303` — the console guard.
+
+## Amendment, 2026-11-06: the full command of a running process is read on request
+
+*Mike's call, 2026-11-06.* The Agent map's process card showed a command cut to
+`COMMAND_MAX_CHARS` (120), which hid the end of a long agent command. The local API
+command `get_process_command` (`pid`, `started_at` of the row) now reads the full command
+line of a process that is still running from the OS (`psutil`), after checking by the
+creation time that the pid is still the recorded process, and answers it once; the card
+shows it in a collapsible block. Storage is unchanged: the entry, the state file and the
+daily history keep the 120 characters, so a full agent command is never written to disk,
+and a finished entry has only those 120 characters, which the card says. A pid that
+changed hands, an entry with no start time, an unreadable command line and an unknown or
+ended entry are refused with a reason and a message, never an exception.

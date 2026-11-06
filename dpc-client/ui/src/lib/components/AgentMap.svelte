@@ -19,7 +19,6 @@
   import { agentTurns, agentsList } from '$lib/services/agents';
   import {
     PROCESS_POLL_MS,
-    COMMAND_CUT_NOTE,
     SYSTEM_OPEN_BY_DEFAULT,
     buildAgentMap,
     buttonSummary,
@@ -89,6 +88,38 @@
   async function copyCommand(d: MapProcessDetail) {
     const ok = await copyText(d.command);
     copyNote = { key: d.key, text: ok ? 'Copied.' : 'Could not copy; select the text and copy it by hand.' };
+  }
+
+  // The full command of a live process, asked of the backend on request (it is read
+  // from the OS and stored nowhere), by the entry's key. `text` stays after Hide, so
+  // showing it again asks nothing; a refusal keeps no text and the next press asks again.
+  type FullCommand = { text: string; shown: boolean; loading: boolean; refusal: string };
+  let fullCommands = $state<Record<string, FullCommand>>({});
+
+  async function toggleFullCommand(d: MapProcessDetail) {
+    const held = fullCommands[d.key];
+    if (held?.loading) return;
+    if (held?.text) {
+      fullCommands[d.key] = { ...held, shown: !held.shown, refusal: '' };
+      return;
+    }
+    fullCommands[d.key] = { text: '', shown: false, loading: true, refusal: '' };
+    try {
+      const r: any = await sendCommand('get_process_command', { pid: d.pid, started_at: d.startedAt });
+      if (r?.status === 'success' && typeof r.command === 'string') {
+        fullCommands[d.key] = { text: r.command, shown: true, loading: false, refusal: '' };
+      } else {
+        const why = r?.message || (r === false ? 'Not connected to the backend.' : 'The backend gave no command.');
+        fullCommands[d.key] = { text: '', shown: false, loading: false, refusal: why };
+      }
+    } catch (e: any) {
+      fullCommands[d.key] = { text: '', shown: false, loading: false, refusal: e?.message || 'The request failed.' };
+    }
+  }
+
+  async function copyFullCommand(d: MapProcessDetail) {
+    const ok = await copyText(fullCommands[d.key]?.text ?? '');
+    copyNote = { key: `${d.key}#full`, text: ok ? 'Copied.' : 'Could not copy; select the text and copy it by hand.' };
   }
 
   // The window: its box, whether it is only the header bar, and the gesture under the pointer.
@@ -304,7 +335,23 @@
       {#if copyNote?.key === d.key}<span class="muted tiny" role="status">{copyNote.text}</span>{/if}
     </div>
     <pre class="cmd-full">{d.command}</pre>
-    {#if d.commandCut}<span class="muted tiny">{COMMAND_CUT_NOTE}</span>{/if}
+    {#if d.commandCut}
+      <span class="muted tiny">{d.cutNote}</span>
+      {#if d.live}
+        {@const full = fullCommands[d.key]}
+        <div class="cmd-bar">
+          <button type="button" class="copy-button" disabled={full?.loading} onclick={() => toggleFullCommand(d)}>
+            {full?.loading ? 'Reading…' : full?.shown ? 'Hide full command' : 'Show full command'}
+          </button>
+          {#if full?.shown}
+            <button type="button" class="copy-button" onclick={() => copyFullCommand(d)}>Copy</button>
+            {#if copyNote?.key === `${d.key}#full`}<span class="muted tiny" role="status">{copyNote.text}</span>{/if}
+          {/if}
+          {#if full?.refusal}<span class="muted tiny" role="status">{full.refusal}</span>{/if}
+        </div>
+        {#if full?.shown}<pre class="cmd-full">{full.text}</pre>{/if}
+      {/if}
+    {/if}
     {#if d.fields.length}
       <dl class="fields">
         {#each d.fields as f (f.label)}
@@ -928,6 +975,7 @@
     cursor: pointer;
   }
   .copy-button:hover { background: #2c3036; color: #ffffff; }
+  .copy-button:disabled { opacity: 0.6; cursor: default; }
   .cmd-full {
     margin: 0;
     padding: 8px 10px;

@@ -107,6 +107,13 @@ export interface MapProcessDetail {
     command: string;
     /** True when the command is as long as the backend keeps, so it may have been cut there. */
     commandCut: boolean;
+    /** True while the process runs: only then can the backend read its full command from the OS. */
+    live: boolean;
+    /** What the card says about the cut: it differs for a live and a finished process. */
+    cutNote: string;
+    /** With `startedAt`, what `get_process_command` is asked for. */
+    pid: number;
+    startedAt: string | null;
     fields: DetailField[];
 }
 
@@ -426,8 +433,9 @@ function inAgentWindow(p: ProcessEntry, nowMs: number): boolean {
 /** How much of a command the backend keeps: mirrors `COMMAND_MAX_CHARS` in
  *  `process_registry.py`, which also folds its whitespace into single spaces. */
 export const COMMAND_MAX_CHARS = 120;
-export const COMMAND_CUT_NOTE =
-    `The backend keeps the first ${COMMAND_MAX_CHARS} characters of a command (whitespace folded); this is all it has.`;
+export const COMMAND_CUT_NOTE_LIVE = `Shortened to ${COMMAND_MAX_CHARS} characters, whitespace folded.`;
+export const COMMAND_CUT_NOTE_FINISHED =
+    `Shortened to ${COMMAND_MAX_CHARS} characters; the full command was not kept after the process ended.`;
 
 /** The same process on every poll: pid plus start time, else the start moment. */
 export function processKey(p: ProcessEntry): string {
@@ -465,6 +473,10 @@ export function processDetail(p: ProcessEntry, chatOf: (id: string | null) => st
         title: `pid ${p.pid} · ${endLabel(p)}`,
         command: p.command || p.launcher,
         commandCut: !!p.command && p.command.length >= COMMAND_MAX_CHARS,
+        live: !p.ended_at,
+        cutNote: p.ended_at ? COMMAND_CUT_NOTE_FINISHED : COMMAND_CUT_NOTE_LIVE,
+        pid: p.pid,
+        startedAt: p.started_at,
         fields: rows
             .filter(([, v]) => v !== null && v !== undefined && v !== '')
             .map(([label, v]) => ({ label, value: String(v) })),
@@ -551,7 +563,7 @@ function systemItems(entries: ProcessEntry[], chatOf: (id: string | null) => str
             const total = ended.reduce((sum, p) => sum + runSeconds(p, nowMs), 0);
             items.push({
                 key: `system:${launcher}:ended`,
-                name: `${label} · ${ended.length}`,
+                name: `${label} · ${plural(ended.length, 'past run', 'past runs')}`,
                 line: `ended · last at ${clockTime(last.ended_at)} · ${endsSummary(ended)} · ${formatRun(total)} in all`,
                 alive: false,
                 details: ended.map(p => processDetail(p, chatOf)),

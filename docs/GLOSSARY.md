@@ -184,8 +184,9 @@ Its own short section: these words are neither the agent's nor the wire's, they 
 ADR-046, and a reader looking for "what is running and who started it" should find them
 together. None is on the wire, and none is on a screen yet, so the tokens are `rules`
 (and `code` where the word already exists in the source); the registry core is built
-(`4ea0560f`), the sampler (`3d380706`), the local API command `list_processes` and the agent
-tools `list_my_processes` and `kill_my_process` too, and the screen, the Agent map. The
+(`4ea0560f`), the sampler (`3d380706`), the local API command `list_processes` (and
+`get_process_command`, which reads a running process's full command line from the OS on
+request and stores nothing) and the agent tools `list_my_processes` and `kill_my_process` too, and the screen, the Agent map. The
 agent's **turn** and the chats **waiting** for it are shown on the Agent map and as a state
 line under each agent in the sidebar; the open chat shows no line of its own (Mike's call,
 2026-10-27).

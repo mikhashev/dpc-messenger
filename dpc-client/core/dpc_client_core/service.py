@@ -11161,6 +11161,24 @@ class CoreService:
             logger.error("list_processes failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e) or type(e).__name__}
 
+    async def get_process_command(self, pid: int, started_at: str) -> Dict[str, Any]:
+        """The full command line of a running process of the registry, read from the OS
+        now (ADR-046 amendment of 2026-11-06); nothing is stored. `pid` and `started_at`
+        are the row's, as `list_processes` returns them. Success carries `command` and
+        `truncated`; a refusal is `status: error` with `reason` (`no_entry`, `ended`,
+        `not_running`, `other_process`, `unverifiable`, `unreadable`) and `message`."""
+        from dpc_client_core import process_registry
+
+        try:
+            answer = await asyncio.to_thread(process_registry.get_registry().full_command_of, pid, started_at)
+        except Exception as e:
+            logger.error("get_process_command failed: %s", e, exc_info=True)
+            return {"status": "error", "reason": "unreadable", "message": str(e) or type(e).__name__}
+        if not answer["ok"]:
+            return {"status": "error", "reason": answer["reason"], "message": answer["message"]}
+        return {"status": "success", "pid": pid, "started_at": started_at,
+                "command": answer["command"], "truncated": answer["truncated"]}
+
     @slow_command
     async def stop_local_engine(self, alias: str = "") -> Dict[str, Any]:
         """Stop a local engine's child by hand to free the card (ADR-044 point 4).

@@ -10,7 +10,8 @@ import {
     agentStatusLine,
     buildAgentMap,
     buttonSummary,
-    COMMAND_CUT_NOTE,
+    COMMAND_CUT_NOTE_FINISHED,
+    COMMAND_CUT_NOTE_LIVE,
     COMMAND_MAX_CHARS,
     chatNamer,
     clockTime,
@@ -211,6 +212,13 @@ describe('the system branch', () => {
     const sys = (over: Partial<ProcessEntry>) =>
         proc({ launcher_kind: 'subsystem', agent_id: null, conversation_id: null, tool: null, ...over });
 
+    it('names the finished group of a launcher by its count of past runs, never a bare number', () => {
+        const one = build({}, listing([
+            sys({ pid: 31, launcher: 'git_helper', started_at: iso(500), ended_at: iso(499.6), exit_reason: 'exited', exit_code: 0 }),
+        ]));
+        expect(one.system.map(s => s.name)).toEqual(['Git helpers · 1 past run']);
+    });
+
     it('opens collapsed', () => {
         expect(SYSTEM_OPEN_BY_DEFAULT).toBe(false);
     });
@@ -231,9 +239,9 @@ describe('the system branch', () => {
             { name: 'Strata launcher · pid 49120', alive: true,
               line: 'alive · 2 h 1 min · RSS 31.3 GB · commit 66.0 GB · VRAM 31.9 GiB' },
             { name: 'Browser · pid 5512', alive: true, line: 'alive · 41 min 0 s · RSS 812 MB · commit 1.1 GB' },
-            { name: 'Device probes · 2', alive: false,
+            { name: 'Device probes · 2 past runs', alive: false,
               line: `ended · last at ${clockTime(iso(6990))} · 1 exited 0, 1 timeout · 11 s in all` },
-            { name: 'Git helpers · 2', alive: false,
+            { name: 'Git helpers · 2 past runs', alive: false,
               line: `ended · last at ${clockTime(iso(299.8))} · exited 0 · 0.6 s in all` },
         ]);
         expect(map.systemSummary).toBe('Strata launcher · Browser · Device probes · Git helpers · 2 alive · VRAM 31.9 GiB');
@@ -533,11 +541,21 @@ describe('an expanded process', () => {
         expect(COMMAND_MAX_CHARS).toBe(120);
         expect(processDetail(proc({ command: 'x'.repeat(120) }), names).commandCut).toBe(true);
         expect(processDetail(proc({ command: 'x'.repeat(119) }), names).commandCut).toBe(false);
-        expect(COMMAND_CUT_NOTE).toContain('120');
+        expect(COMMAND_CUT_NOTE_LIVE).toBe('Shortened to 120 characters, whitespace folded.');
+        expect(COMMAND_CUT_NOTE_FINISHED).toBe(
+            'Shortened to 120 characters; the full command was not kept after the process ended.');
         // No command: the launcher stands, and nothing is said to be cut.
         const bare = processDetail(proc({ command: '' }), names);
         expect(bare.command).toBe('run_shell');
         expect(bare.commandCut).toBe(false);
+    });
+
+    it('knows whether the process is live, which note applies and what to ask the backend for', () => {
+        const live = processDetail(proc({ pid: 77, started_at: iso(60), command: 'x'.repeat(120) }), names);
+        expect(live).toMatchObject({ live: true, cutNote: COMMAND_CUT_NOTE_LIVE, pid: 77, startedAt: iso(60) });
+        const done = processDetail(
+            proc({ pid: 78, command: 'x'.repeat(120), ended_at: iso(5), exit_reason: 'exited', exit_code: 0 }), names);
+        expect(done).toMatchObject({ live: false, cutNote: COMMAND_CUT_NOTE_FINISHED, pid: 78 });
     });
 
     it('keeps its key across polls, so an open row stays open', () => {

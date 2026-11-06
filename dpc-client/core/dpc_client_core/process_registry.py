@@ -231,6 +231,9 @@ GIT_STOP_GRACE_S = 10.0
 _YIELDS_TO_BACKEND_STOP = ("stopped", "cancelled_by_agent")
 
 COMMAND_MAX_CHARS = 120
+# What `full_command_of` hands out at most: the OS allows a command line of megabytes
+# on Linux, and the answer goes over a WebSocket to a card. Never stored.
+FULL_COMMAND_MAX_CHARS = 65536
 KEEP_FINISHED_MAX = 200
 KEEP_FINISHED_DAYS = 7
 HISTORY_DAYS = 7
@@ -500,6 +503,29 @@ def probe_identity(pid: int, start_time: Optional[float]) -> str:
     if start_time is None:
         return "unverifiable"
     return "same" if abs(now - start_time) <= START_TIME_TOLERANCE_S else "other"
+
+
+def _cmdline_of(pid: int) -> List[str]:
+    """The process's argv as the OS holds it now. AccessDenied and NoSuchProcess
+    propagate; `full_command_of` turns them into a refusal."""
+    import psutil
+
+    return list(psutil.Process(pid).cmdline())
+
+
+def _join_command(argv: Sequence[str], platform: Optional[str] = None) -> str:
+    """argv as one line: Windows quoting on Windows, shell quoting elsewhere."""
+    if _is_windows(platform):
+        import subprocess
+
+        return subprocess.list2cmdline(list(argv))
+    import shlex
+
+    return shlex.join(argv)
+
+
+def _no_command(reason: str, message: str) -> Dict[str, Any]:
+    return {"ok": False, "reason": reason, "message": message}
 
 
 def own_and_ancestor_pids() -> set:
@@ -1299,6 +1325,46 @@ class ProcessRegistry:
             row["commit_mb"] = self._commit_now(entry, read_tree, probe) if entry.is_open else None
             rows.append(row)
         return rows
+
+    def full_command_of(
+        self,
+        pid: Any,
+        started_at: Any,
+        *,
+        probe: Callable[[int, Optional[float]], str] = probe_identity,
+        read_cmdline: Optional[Callable[[int], Sequence[str]]] = None,
+    ) -> Dict[str, Any]:
+        """The whole command line of a running entry, read from the OS now and stored
+        nowhere (ADR-046 amendment of 2026-11-06). The entry is found by `pid` and
+        `started_at` as `list_processes` returns them, and the pid must still be that
+        process. Answers `{"ok": True, "command", "truncated"}` or `{"ok": False,
+        "reason", "message"}`; never raises. Call it off the event loop (psutil)."""
+        if isinstance(pid, bool) or not isinstance(pid, int) or not isinstance(started_at, str) or not started_at:
+            return _no_command("no_entry", "pid must be a whole number and started_at the entry's start time")
+        found = [e for e in self.entries() if e.pid == pid and e.started_at == started_at]
+        if not found:
+            return _no_command("no_entry", f"no process {pid} started at {started_at} is in the process registry")
+        entry = found[-1]
+        if not entry.is_open:
+            return _no_command("ended", f"process {pid} ended; only the stored {COMMAND_MAX_CHARS} characters of its command exist")
+        try:
+            identity = probe(entry.pid, entry.start_time)
+        except Exception as exc:
+            return _no_command("unreadable", f"process {pid} could not be checked ({type(exc).__name__}: {exc})")
+        if identity == "gone":
+            return _no_command("not_running", f"process {pid} is no longer running; only the stored {COMMAND_MAX_CHARS} characters of its command exist")
+        if identity == "other":
+            return _no_command("other_process", f"pid {pid} now belongs to another process; its command is not read")
+        if identity != "same":
+            return _no_command("unverifiable", f"process {pid} has no recorded start time to check against, so its command is not read")
+        try:
+            argv = list((read_cmdline or _cmdline_of)(entry.pid))
+        except Exception as exc:
+            return _no_command("unreadable", f"the command line of process {pid} could not be read ({type(exc).__name__}: {exc})")
+        if not argv:
+            return _no_command("unreadable", f"the operating system gave no command line for process {pid}")
+        text = _join_command(argv, self._platform)
+        return {"ok": True, "command": text[:FULL_COMMAND_MAX_CHARS], "truncated": len(text) > FULL_COMMAND_MAX_CHARS}
 
     def _read_history(self, since: Optional[datetime], until: Optional[datetime]) -> List[ProcessEntry]:
         """The daily files' entries that ended inside the window, in the order of
