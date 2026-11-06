@@ -112,6 +112,7 @@ class _Service:
     # The real ones — a stub here would only assert the stub agrees with itself.
     _signature_fields_for = staticmethod(CoreService._signature_fields_for)
     _names_this_node_may_post_as = CoreService._names_this_node_may_post_as
+    _group_token_usage = CoreService._group_token_usage
 
     def _get_agent_display_name(self, agent_id):
         return {"agent_001": "Ark"}.get(agent_id, agent_id)
