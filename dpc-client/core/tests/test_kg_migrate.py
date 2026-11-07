@@ -60,7 +60,7 @@ def _grafeo_importable() -> bool:
 
 needs_grafeo = pytest.mark.skipif(
     not _grafeo_importable(),
-    reason="grafeo is not installed; no extra installs it since 2026-09-18",
+    reason="grafeo is not installed; the graph-grafeo extra installs it",
 )
 
 

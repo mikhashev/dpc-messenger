@@ -92,7 +92,7 @@ uv run pytest --cov=dpc_client_core  # Run with coverage
 > ⚠️ **`uv sync` is declarative, not additive.** It makes the environment match
 > exactly what the command asks for, so a bare `uv sync` **uninstalls** every
 > optional extra installed earlier — `browser` (camoufox, playwright),
-> `graph-ner` (gliner), `pdf` (pypdfium2), `voice-memory` (torch, transformers,
+> `graph-ner` (gliner), `graph-grafeo` (grafeo), `pdf` (pypdfium2), `voice-memory` (torch, transformers,
 > sentence-transformers, faiss, librosa: local Whisper voice and memory search),
 > `mlx` (Apple Silicon only).
 > Re-syncing an environment that uses extras asks the package rather than a

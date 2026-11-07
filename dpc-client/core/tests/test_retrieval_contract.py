@@ -50,9 +50,9 @@ def _make_grafeo_text(tmp_path):
     return GrafeoTextIndex(tmp_path / "txt_grafeo")
 
 
-# Grafeo is no longer installed by any extra (`graph-grafeo` left pyproject.toml on
-# 2026-09-18), so its half of every parametrised pair skips where the package is
-# absent rather than failing on the ImportError the backend raises. The native half
+# Grafeo comes only with the `graph-grafeo` extra (declared again 2026-11-07, which
+# CI does not install), so its half of every parametrised pair skips where the
+# package is absent rather than failing on the ImportError the backend raises. The native half
 # still runs, which is the point: the contract is what both must satisfy, and one
 # backend being uninstallable must not take the assertions with it.
 def _grafeo_importable() -> bool:
@@ -69,7 +69,7 @@ def _grafeo_importable() -> bool:
 
 needs_grafeo = pytest.mark.skipif(
     not _grafeo_importable(),
-    reason="grafeo is not installed; no extra installs it since 2026-09-18",
+    reason="grafeo is not installed; the graph-grafeo extra installs it",
 )
 GRAFEO_PARAM = pytest.param("grafeo", marks=needs_grafeo)
 

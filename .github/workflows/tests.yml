@@ -44,11 +44,9 @@ jobs:
       # This stays a hand-written list where the release form is `--all-extras`,
       # and the difference is the point: the release describes a whole
       # environment, this job installs only the extras whose tests exist here.
-      # `graph-grafeo` was on this line until 2026-09-18 and is gone from
-      # `pyproject.toml` (Mike's call) — an undefined extra is not ignored, uv
-      # refuses with "Extra `X` is not defined", so the removal had to land in
-      # the same commit or this job would have failed on the next push. The
-      # grafeo parity tests now skip themselves through `pytest.importorskip`.
+      # `graph-grafeo` is declared again since 2026-11-07, pinned to
+      # `grafeo==0.5.42` (Mike's call). This job still does not install it, so
+      # the grafeo parity tests keep skipping here through `pytest.importorskip`.
       - name: Sync (with the extras whose tests exist here)
         working-directory: dpc-client/core
         run: uv sync --extra browser --extra pdf --extra voice-memory

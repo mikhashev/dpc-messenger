@@ -674,10 +674,8 @@ class GrafeoGraphBackend(GraphBackend):
             import grafeo
         except ImportError as e:
             raise ImportError(
-                "GrafeoGraphBackend requires the `grafeo` package, which no "
-                "extra installs any more: graph-grafeo was removed from "
-                "pyproject.toml on 2026-09-18. Install grafeo by hand, or use "
-                "the default SQLite backend."
+                "GrafeoGraphBackend requires the `grafeo` package. "
+                "Install with: uv sync --extra graph-grafeo --inexact"
             ) from e
         # `:memory:` always gets a fresh handle — there is no on-disk WAL
         # to clash with, and parity tests rely on isolation between cases.

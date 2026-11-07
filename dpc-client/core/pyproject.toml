@@ -110,6 +110,14 @@ graph-ner = [
     # copy from PyPI.
     "dpc-client-core[voice-memory]",
 ]
+# Grafeo graph store and retrieval backend. Every agent on a machine with
+# `[knowledge_graph] backend = grafeo` keeps its graph here, so the release
+# `uv sync --all-extras` has to keep it. Pinned exactly: upstream moves fast.
+# 0.5.42 ships abi3 wheels for Windows x86_64, Linux x86_64/aarch64 and macOS
+# x86_64/arm64, so no platform marker is needed.
+graph-grafeo = [
+    "grafeo==0.5.42",
+]
 
 [dependency-groups]
 dev = [

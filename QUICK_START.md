@@ -441,6 +441,7 @@ uv sync --all-extras
 |---|---|
 | `voice-memory` | torch, transformers, sentence-transformers, faiss, librosa — local Whisper voice transcription and agent memory search (bge-m3). Needs `uv`: a packaged app without it cannot add this |
 | `browser` | camoufox — headless browser tool for agents |
+| `graph-grafeo` | grafeo 0.5.42 — the Grafeo graph store and retrieval backend (`[knowledge_graph] backend = grafeo`) |
 | `graph-ner` | gliner — named-entity extraction (includes `voice-memory`, gliner runs on torch) |
 | `pdf` | pypdfium2 — PDF reading for `read_document` |
 | `mlx` | macOS Apple Silicon only — GPU Whisper via MLX |
@@ -478,14 +479,14 @@ gliner, grafeo and their trees.
 > be *exactly* what you name — `--inexact` also keeps packages a dependency
 > change was supposed to remove.
 
-> If an agent is configured for the Grafeo backend the log now shows
-> `Background memory indexing failed: Grafeo retrieval requires the grafeo package`
-> and there is no extra to install: `graph-grafeo` was removed from
-> `pyproject.toml` on 2026-09-18 (Mike's call). The retrieval and graph code for
-> it is still in the tree, so a `grafeo` installed by hand still works, but the
-> supported path is the default — native FAISS + BM25. Remove
-> `retrieval_vector` / `retrieval_text` from the agent's `config.json` to go
-> back to it.
+> If an agent is configured for the Grafeo backend but the package is missing,
+> the log shows
+> `Background memory indexing failed: Grafeo retrieval requires the grafeo package`.
+> The `graph-grafeo` extra installs it (pinned `grafeo==0.5.42`): add it without
+> dropping the others with `uv sync --extra graph-grafeo --inexact`, or take every
+> extra with `uv sync --all-extras`. Retrieval does not need it: its default is
+> native FAISS + BM25, which an agent uses once `retrieval_vector` /
+> `retrieval_text` are removed from its `config.json`.
 
 ---
 
