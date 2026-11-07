@@ -1,7 +1,7 @@
 """BM25 keyword index (ADR-010, MEM-3.5, ADR-020 Layer 1).
 
 Character bigram tokenization for CJK/Arabic/Thai per DDA #12.
-Whitespace tokenization for Latin/Cyrillic scripts.
+Word tokenization for other scripts: punctuation splits, as it does on the query.
 Stop words via stopwordsiso (57 languages, Rule 14 Solution Check).
 """
 
@@ -13,6 +13,7 @@ import logging
 import pathlib
 import re
 import shutil
+import time
 import unicodedata
 from typing import List, Optional, Set, Tuple
 
@@ -53,9 +54,37 @@ def _load_stopwords(langs: list[str] = ("ru", "en")) -> frozenset:
 _STOP_WORDS: frozenset = _load_stopwords(["ru", "en"])
 
 
-def _tokenize_whitespace(text: str, extra_stops: frozenset = frozenset()) -> List[str]:
+def _combining_marks() -> str:
+    """The BMP's combining marks as a character-class body. `\\w` leaves them out, so
+    without them a Devanagari word would split at every vowel sign."""
+    ranges, start = [], None
+    for cp in range(0x10001):
+        mark = cp < 0x10000 and unicodedata.category(chr(cp)).startswith("M")
+        if mark and start is None:
+            start = cp
+        elif not mark and start is not None:
+            ranges.append(f"\\u{start:04x}-\\u{cp - 1:04x}")
+            start = None
+    return "".join(ranges)
+
+
+# A word is letters, digits and marks. `-` and `_` join words into one key, which is
+# kept whole *and* split into its words, so `dpc-node-x` answers for itself and for
+# `node`. Everything else (spaces, ()[]/,.:;@, quotes) only separates.
+_WORD = rf"(?:[^\W_]|[{_combining_marks()}])+"
+_KEY_RE = re.compile(rf"{_WORD}(?:[-_]{_WORD})*")
+_JOINER_RE = re.compile(r"[-_]")
+
+
+def _tokenize_words(text: str, extra_stops: frozenset = frozenset()) -> List[str]:
     stops = _STOP_WORDS | extra_stops if extra_stops else _STOP_WORDS
-    return [w.lower() for w in text.split() if len(w) > 1 and w.lower() not in stops]
+    out: List[str] = []
+    for key in _KEY_RE.findall(unicodedata.normalize("NFC", text).lower()):
+        words = _JOINER_RE.split(key) if ("-" in key or "_" in key) else ()
+        for token in (key, *words):
+            if len(token) > 1 and token not in stops:
+                out.append(token)
+    return out
 
 
 def _tokenize_bigram(text: str) -> List[str]:
@@ -64,16 +93,26 @@ def _tokenize_bigram(text: str) -> List[str]:
 
 
 def tokenize(text: str, extra_stops: frozenset = frozenset()) -> List[str]:
+    """The one tokenizer of this index: the corpus at build and the query at search.
+
+    A change here changes what a stored index means — bump TOKENIZE_VERSION.
+    """
     script = _detect_script(text)
     if script == "bigram":
         return _tokenize_bigram(text)
-    return _tokenize_whitespace(text, extra_stops)
+    return _tokenize_words(text, extra_stops)
 
 
 TEXTS_FILE = "bm25_texts.json"
 # Written into TEXTS_FILE. A store without it, or with another number, is the old
 # format: its rows were built from previews and every row's full text is unknown.
 CORPUS_VERSION = 2
+
+# Which `tokenize` built the stored corpus. A store without this file, or with another
+# number, was built by an older one and `load` rebuilds it from its texts. Version 1 was
+# the whitespace split.
+TOKENIZE_FILE = "bm25_tokenize.json"
+TOKENIZE_VERSION = 2
 
 
 def _chunks_digest(chunks_json: str) -> str:
@@ -175,15 +214,15 @@ class BM25Index:
         texts = self._full_texts()
         return {m.get("source_file", "") for t, m in zip(texts, self._chunk_metas) if t is None}
 
-    def _compute_corpus_stops(self, texts: List[str]) -> frozenset:
+    def _compute_corpus_stops(self, texts: List[str],
+                              token_lists: Optional[List[List[str]]] = None) -> frozenset:
         """Layer 2: words appearing in >80% of documents are corpus-specific noise."""
         from collections import Counter
         if len(texts) < 5:
             return frozenset()
         doc_freq: Counter = Counter()
-        for text in texts:
-            tokens = set(tokenize(text))
-            doc_freq.update(tokens)
+        for tokens in token_lists if token_lists is not None else map(tokenize, texts):
+            doc_freq.update(set(tokens))
         n_docs = len(texts)
         stops = frozenset(
             tok for tok, freq in doc_freq.items()
@@ -195,8 +234,15 @@ class BM25Index:
 
     def build(self, texts: List[str], chunk_metas: List[dict]) -> None:
         import bm25s
-        self._corpus_stop_words = self._compute_corpus_stops(texts)
-        corpus_tokens = [tokenize(t, self._corpus_stop_words) for t in texts]
+        # Tokenised once for the stops pass and the corpus, which every add and remove
+        # rebuilds. Filtering equals tokenize(t, stops); the bigram path takes no stops.
+        token_lists = [tokenize(t) for t in texts]
+        stops = self._corpus_stop_words = self._compute_corpus_stops(texts, token_lists)
+        corpus_tokens = [
+            [w for w in tokens if w not in stops] if stops and _detect_script(t) != "bigram"
+            else tokens
+            for t, tokens in zip(texts, token_lists)
+        ]
         self._retriever = bm25s.BM25()
         self._retriever.index(corpus_tokens)
         self._chunk_metas = chunk_metas
@@ -231,11 +277,14 @@ class BM25Index:
     def search(self, query: str, top_k: int = 5) -> List[Tuple[dict, float]]:
         if self._retriever is None or not self._chunk_metas:
             return []
-        import bm25s
+        # Handed over as strings, which bm25s maps through the corpus vocabulary and
+        # drops when absent. No `bm25s.tokenize` here: its regex and English stop
+        # words were a second tokenizer the corpus never went through.
         query_tokens = tokenize(query, self._corpus_stop_words)
         results, scores = self._retriever.retrieve(
-            bm25s.tokenize([" ".join(query_tokens)]),
+            [query_tokens],
             k=min(top_k, len(self._chunk_metas)),
+            show_progress=False,
         )
         out = []
         seen_files: set = set()
@@ -333,6 +382,10 @@ class BM25Index:
         # disk, and the next load would tokenise this corpus through them.
         atomic_write_text(self.index_dir / "bm25_corpus_stops.json",
                           json.dumps(sorted(self._corpus_stop_words), ensure_ascii=False))
+        # Last, so a cut before it leaves a store that is rebuilt once more, not one
+        # that claims a tokenizer it was not built by.
+        atomic_write_text(self.index_dir / TOKENIZE_FILE,
+                          json.dumps({"tokenize_version": TOKENIZE_VERSION}))
         log.info("Saved BM25 index: %d documents, %d corpus stops", len(self._chunk_metas), len(self._corpus_stop_words))
 
     def load(self) -> bool:
@@ -369,10 +422,45 @@ class BM25Index:
             stops_path = self.index_dir / "bm25_corpus_stops.json"
             if stops_path.exists():
                 self._corpus_stop_words = frozenset(json.loads(stops_path.read_text(encoding="utf-8")))
+            if self._stored_tokenize_version() != TOKENIZE_VERSION:
+                self._retokenize()
             return True
         except Exception as e:
             log.warning("Failed to load BM25 index: %s", e)
             return False
+
+    def _stored_tokenize_version(self) -> int:
+        try:
+            doc = json.loads((self.index_dir / TOKENIZE_FILE).read_text(encoding="utf-8"))
+            return int(doc.get("tokenize_version", 1))
+        except FileNotFoundError:
+            return 1
+        except Exception:
+            return 0
+
+    def _retokenize(self) -> None:
+        """Rebuild a corpus an older `tokenize` built, from the stored texts only.
+
+        No vector is touched. This instance searches the rebuilt corpus at once; the
+        save goes to the directory's index writer, where every other mutation runs, so
+        a reader never writes beside it. That job reloads, so it runs once.
+        """
+        started = time.perf_counter()
+        self._rebuild(self._full_texts(), self._chunk_metas)
+        log.info("BM25 corpus of %d documents rebuilt for tokenize v%d in %.1fs",
+                 len(self._chunk_metas), TOKENIZE_VERSION, time.perf_counter() - started)
+        from .index_writer import writer_for
+        writer = writer_for(self.index_dir)
+        if not writer.owns_current_thread:
+            index_dir = self.index_dir
+            writer.submit(lambda: BM25Index(index_dir).load())
+            return
+        try:
+            self.save()
+        except Exception:
+            # Searchable in memory still; the next load tries again.
+            log.warning("BM25 rebuild for tokenize v%d not saved", TOKENIZE_VERSION,
+                        exc_info=True)
 
     @property
     def total_documents(self) -> int:
