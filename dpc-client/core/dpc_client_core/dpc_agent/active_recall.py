@@ -15,7 +15,7 @@ import pathlib
 import time
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .hybrid_search import SearchResult
 from .index_keys import L5_PREFIX as L5_KEY_PREFIX, L6_PREFIX as L6_KEY_PREFIX
@@ -248,6 +248,24 @@ def _has_something_to_offer(result: SearchResult, extended_read_enabled: bool,
     return bool(meta.get("text"))
 
 
+def _extended_path_still_allowed(meta: Dict,
+                                 extended_path_allowed: Optional[Callable[[str], bool]]) -> bool:
+    """Is this candidate's own path still granted, for the documents read through one?
+
+    Asked of the rows hint_address resolves through the extended gate: not L5 (its key
+    is its address) and not L6 (its own gate). The global flag says nothing about one
+    path, and a revoked path keeps its rows until the next manager start, so without
+    this the document stays quoted while read_file refuses it. A row with no path
+    cannot show a grant and is dropped.
+    """
+    if extended_path_allowed is None:
+        return True
+    if str(meta.get("source_file", "")).startswith(f"{L5_KEY_PREFIX}/") or is_shared_layer(meta):
+        return True
+    source_path = meta.get("source_path", "")
+    return bool(source_path) and bool(extended_path_allowed(source_path))
+
+
 def get_recall_block(
     results: List[SearchResult],
     context_usage_ratio: float = 0.0,
@@ -256,11 +274,20 @@ def get_recall_block(
     extended_read_enabled: bool = True,
     task_id: str = "",
     shared_knowledge_enabled: bool = True,
+    extended_path_allowed: Optional[Callable[[str], bool]] = None,
 ) -> RecallInjection:
-    """Get the appropriate recall block based on context budget and decay scoring."""
+    """Get the appropriate recall block based on context budget and decay scoring.
+
+    `extended_path_allowed` is read_file's per-path check for this agent, asked now;
+    None skips it (callers with no firewall).
+    """
     mode = should_inject(context_usage_ratio)
     if mode == "skip":
         return RecallInjection(text="", mode=mode, injected=[])
+    # Before decay and the cut: a revoked document is out of the pool, so it neither
+    # takes a slot nor weighs in the decay's per-result-set scaling.
+    results = [r for r in results
+               if _extended_path_still_allowed(r.chunk_meta, extended_path_allowed)]
     if agent_root and results:
         results = _apply_decay(results, agent_root)
     results = [r for r in results

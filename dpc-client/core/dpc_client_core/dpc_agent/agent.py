@@ -324,6 +324,21 @@ class DpcAgent:
         by a different per-agent provider override). None before any call."""
         return getattr(self.llm, "_last_serving_alias", None)
 
+    def _extended_path_allowed(self, path: str) -> bool:
+        """Does read_file's per-path check let this agent read `path` right now?
+
+        The same ToolContext.validate_extended_path read_file reaches, on the live
+        firewall, so recall cannot grant what read_file refuses. The global
+        extended-read flag stays with its own parameter.
+        """
+        ctx = ToolContext(agent_root=self.agent_root, firewall=self._firewall)
+        ctx._agent = self  # whose profile the firewall is asked about
+        try:
+            ctx.validate_extended_path(path)
+            return True
+        except Exception:
+            return False
+
     async def process(
         self,
         message: str,
@@ -433,6 +448,7 @@ class DpcAgent:
         sandbox_rw = None
         extended_read = True
         shared_knowledge = True
+        extended_path_allowed = None
         if self._firewall is not None:
             all_tools_map = self._firewall.get_agent_tools_map(self._firewall_profile)
             sandbox_ro = self._firewall.get_sandbox_read_only_paths(self._firewall_profile)
@@ -444,6 +460,8 @@ class DpcAgent:
             extended_read = self._firewall.get_extended_read_enabled(self._firewall_profile)
             shared_knowledge = self._firewall.can_agent_access_context(
                 "knowledge", profile_name=self._firewall_profile)
+            # The global flag is one switch; each external path has its own grant.
+            extended_path_allowed = self._extended_path_allowed
 
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
@@ -465,6 +483,7 @@ class DpcAgent:
             extended_read_enabled=extended_read,
             shared_knowledge_enabled=shared_knowledge,
             sent_annotations=sent_annotations,
+            extended_path_allowed=extended_path_allowed,
         )
 
         # Remember the tail exactly as it went out, keyed by the message it went out

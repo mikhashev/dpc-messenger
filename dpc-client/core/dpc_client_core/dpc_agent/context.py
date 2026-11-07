@@ -23,7 +23,7 @@ import json
 import logging
 import pathlib
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from typing import Any
 from .utils import (
@@ -642,6 +642,7 @@ def build_llm_messages(
     extended_read_enabled: bool = True,
     shared_knowledge_enabled: bool = True,
     sent_annotations: Optional[Dict[str, str]] = None,
+    extended_path_allowed: Optional[Callable[[str], bool]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -675,6 +676,9 @@ def build_llm_messages(
                                hint asks the gate here — and with it shut an L6
                                document is dropped rather than quoted, because the
                                index holds 500 characters of it.
+        extended_path_allowed: read_file's per-path grant check, asked now. An
+                               external document whose path it refuses gets no hint
+                               at all; None skips the check.
         sent_annotations: message id -> the turn-context tail that was appended to
                           that user message when it was the current one. Replayed
                           byte-identically behind the message so the prompt stays a
@@ -811,6 +815,7 @@ def build_llm_messages(
                     _results, context_usage_ratio=_ctx_ratio, agent_root=agent_root,
                     extended_read_enabled=extended_read_enabled,
                     shared_knowledge_enabled=shared_knowledge_enabled,
+                    extended_path_allowed=extended_path_allowed,
                     # The identity tools.jsonl writes for the same turn — join key,
                     # not decoration.
                     task_id=str(task.get("id") or ""),
