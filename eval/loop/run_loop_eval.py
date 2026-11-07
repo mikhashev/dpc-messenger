@@ -577,6 +577,7 @@ async def run_one(agent, task: Dict[str, Any], *,
                 conversation_id=f"eval-{task['id']}",
                 reasoning_effort=reasoning_effort,
                 session_state=session_state,
+                message_source="ui",  # the owner's run: memory as in a UI turn
                 **(process_kwargs or {}),
             )
             answer = await (asyncio.wait_for(call, timeout_s) if timeout_s else call)

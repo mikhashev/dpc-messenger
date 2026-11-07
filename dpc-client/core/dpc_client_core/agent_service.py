@@ -764,9 +764,11 @@ class AgentService:
             except KeyError:
                 prio = TaskPriority.NORMAL
 
+            # The Task Board is the owner's UI, so its task runs as a UI turn.
+            data = {**(data or {}), "_message_source": "ui"}
             task = agent_manager._agent.schedule_task(
                 task_type=task_type,
-                data=data or {},
+                data=data,
                 priority=prio,
                 delay_seconds=delay_seconds if delay_seconds > 0 else 0,
             )

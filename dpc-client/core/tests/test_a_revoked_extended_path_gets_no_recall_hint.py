@@ -134,7 +134,7 @@ async def _next_turn_tail(w, monkeypatch) -> str:
     monkeypatch.setattr(context_mod, "_get_knowledge_graph", lambda root: None)
 
     with pytest.raises(_PromptBuilt):
-        await _agent(w).process(QUERY, "conv-1")
+        await _agent(w).process(QUERY, "conv-1", message_source="ui")
     return seen["tail"]
 
 

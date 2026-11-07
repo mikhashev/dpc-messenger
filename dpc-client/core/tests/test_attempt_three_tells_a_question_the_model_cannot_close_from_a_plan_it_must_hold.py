@@ -305,7 +305,8 @@ class _Agent:
         self.llm = _Adapter()
         self.root = agent_root
 
-    async def process(self, message, conversation_id, reasoning_effort=None, session_state=None):
+    async def process(self, message, conversation_id, reasoning_effort=None, session_state=None,
+                      message_source=None):
         _Agent.roots.append((self.root.name,
                              (self.root / "src" / "dpc_client_core").is_dir()))
         for n in range(len(_ROUNDS)):

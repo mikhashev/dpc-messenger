@@ -137,7 +137,8 @@ class _FakeAgent:
         self.profile = firewall_profile
         self.alias = provider_alias
 
-    async def process(self, message, conversation_id, reasoning_effort=None, session_state=None):
+    async def process(self, message, conversation_id, reasoning_effort=None, session_state=None,
+                      message_source=None):
         from dpc_client_core.dpc_agent import loop as loop_module
         prov = self.llm_manager.providers[ALIAS]
         _FakeAgent.seen.append({

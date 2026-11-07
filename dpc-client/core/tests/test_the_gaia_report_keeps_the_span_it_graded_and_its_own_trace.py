@@ -31,12 +31,12 @@ class _Agent:
     def __init__(self, text):
         self.text = text
 
-    async def process(self, message, conversation_id):
+    async def process(self, message, conversation_id, message_source=None):
         return self.text
 
 
 class _SlowAgent:
-    async def process(self, message, conversation_id):
+    async def process(self, message, conversation_id, message_source=None):
         await asyncio.sleep(5)
         return "FINAL ANSWER: late"
 

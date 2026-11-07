@@ -276,6 +276,7 @@ class DpcAgentProvider(AIProvider):
                 conversation_id=conversation_id,
                 include_context=True,
                 agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
+                message_source="ui",  # local only: dpc_agent is unservable to peers
             )
 
             logger.info(f"DpcAgentProvider '{self.alias}': Generated response ({len(response)} chars)")
@@ -332,6 +333,7 @@ class DpcAgentProvider(AIProvider):
                 include_context=True,
                 on_stream_chunk=None,  # Manager handles broadcast directly
                 agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
+                message_source="ui",  # local only: dpc_agent is unservable to peers
             )
 
             logger.info(f"DpcAgentProvider '{self.alias}': Generated streaming response ({len(response)} chars)")

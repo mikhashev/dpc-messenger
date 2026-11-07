@@ -189,7 +189,7 @@ def turn(world, monkeypatch):
 
         monkeypatch.setattr(agent_mod, "build_llm_messages", _build)
         with pytest.raises(_PromptBuilt):
-            await _agent(world, profile, provider).process(QUERY, "conv-1")
+            await _agent(world, profile, provider).process(QUERY, "conv-1", message_source="ui")
         return seen["tail"]
 
     run.opened = opened
@@ -299,7 +299,7 @@ def test_old_callers_that_pass_nothing_keep_recall(world, monkeypatch):
 
 
 def _ctx(w, profile=PROFILE):
-    ctx = ToolContext(agent_root=w["agent_root"], firewall=w["firewall"])
+    ctx = ToolContext(agent_root=w["agent_root"], firewall=w["firewall"], message_source="ui")
     ctx._agent = _agent(w, profile)
     return ctx
 
@@ -349,7 +349,7 @@ def test_memory_search_for_an_agent_without_a_profile_refuses(world, search_env)
 
 def test_memory_search_without_a_firewall_behaves_as_before(world, search_env):
     index_text(world, own_metas(world) + ext_metas(world))
-    ctx = ToolContext(agent_root=world["agent_root"], firewall=None)
+    ctx = ToolContext(agent_root=world["agent_root"], firewall=None, message_source="ui")
 
     answer = memory_search(ctx, QUERY, top_k=10)
 

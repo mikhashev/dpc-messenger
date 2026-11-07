@@ -287,6 +287,7 @@ def test_memory_search_reports_the_missing_model_without_raising(monkeypatch):
 
     class _Ctx:
         agent_root = None
+        message_source = "ui"
 
     result = tools_core.memory_search(_Ctx(), "hello")
     assert "not downloaded" in result
@@ -326,6 +327,7 @@ def test_memory_search_reports_the_missing_model_when_the_index_never_built(monk
 
     class _Ctx:
         agent_root = None
+        message_source = "ui"
 
     result = tools_core.memory_search(_Ctx(), "hello")
     assert "not downloaded" in result
@@ -377,6 +379,7 @@ def test_memory_search_still_returns_text_results_when_the_embedding_model_is_mi
 
     class _Ctx:
         agent_root = None
+        message_source = "ui"
 
     result = tools_core.memory_search(_Ctx(), "hello")
     assert "Found 1 results" in result

@@ -321,6 +321,10 @@ class ToolContext:
     # a Telegram message so that schedule_task can propagate it into task data.
     reply_telegram_chat_id: Optional[str] = None
 
+    # Where this turn came from (DpcAgent.process's message_source). memory_search,
+    # extended paths and schedule_task read it; None is nobody's turn.
+    message_source: Optional[str] = None
+
     # Skill store for execute_skill tool (set by DpcAgent.process())
     skill_store: Optional[Any] = None
 
@@ -438,6 +442,13 @@ class ToolContext:
         # First check if it's in the default sandbox
         if is_path_in_sandbox(resolved, self.agent_root):
             return resolved
+
+        # Mike's call, 2026-11-07: a Discord turn reads nothing outside the sandbox.
+        if self.message_source == "discord":
+            raise PermissionError(
+                f"path '{path}' is outside the agent directory, and a turn from discord "
+                f"reads only inside it"
+            )
 
         # Check extended sandbox
         if self.is_extended_path_allowed(str(resolved), require_write):

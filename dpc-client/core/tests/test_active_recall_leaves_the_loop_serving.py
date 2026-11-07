@@ -164,7 +164,8 @@ async def _turn(w, monkeypatch, provider, session_state=None) -> str:
 
     monkeypatch.setattr(agent_mod, "build_llm_messages", _build)
     with pytest.raises(_PromptBuilt):
-        await _agent(w, provider).process(QUERY, "conv-1", session_state=session_state)
+        await _agent(w, provider).process(QUERY, "conv-1", session_state=session_state,
+                                          message_source="ui")
     return seen["tail"]
 
 

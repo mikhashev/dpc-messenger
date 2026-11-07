@@ -329,7 +329,8 @@ class _Agent:
                                        "completion_tokens": kw["notes"] + 10,
                                        "prompt_tokens": 11000}
 
-    async def process(self, message, conversation_id, reasoning_effort=None, session_state=None):
+    async def process(self, message, conversation_id, reasoning_effort=None, session_state=None,
+                      message_source=None):
         tools = self.firewall.get_agent_tools_map(R.LOOP_PROFILE) or {}
         _Agent.seen.append(sorted(k for k, v in tools.items() if v))
         await self.llm.chat([], notes=9900 if len(_Agent.seen) == 2 else 2000)

@@ -846,6 +846,13 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
 def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
     """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
     try:
+        # Whose turn this is, asked before any index opens (agent.is_owner_caller).
+        from ..agent import is_owner_caller
+        source = getattr(ctx, "message_source", None)
+        if not is_owner_caller(source):
+            return (f"memory_search answers only the owner; this turn came from "
+                    f"{source or 'an unnamed source'}.")
+
         # The memory switch of this agent's own profile, asked before the index opens.
         # No firewall (tests, bare contexts): as before.
         firewall = getattr(ctx, "firewall", None)
@@ -1541,6 +1548,9 @@ def schedule_task(
             data["_reply_conversation_id"] = ctx.current_task_id
         if "_reply_telegram_chat_id" not in data and getattr(ctx, "reply_telegram_chat_id", None):
             data["_reply_telegram_chat_id"] = ctx.reply_telegram_chat_id
+        # _message_source: the task runs as the turn that scheduled it. Always the
+        #   context's, never the payload's: the model must not name its own source.
+        data["_message_source"] = getattr(ctx, "message_source", None)
 
         # Schedule task
         task = ctx._agent.schedule_task(

@@ -116,7 +116,7 @@ class TestTheModelIsNotToldWhichRowItIs:
         seen = {}
 
         class RecordingAgent:
-            async def process(self, message, conversation_id):
+            async def process(self, message, conversation_id, message_source=None):
                 seen["conversation_id"] = conversation_id
                 return "FINAL ANSWER: 42"
 
@@ -139,7 +139,7 @@ class TestTheModelIsNotToldWhichRowItIs:
         ids = []
 
         class RecordingAgent:
-            async def process(self, message, conversation_id):
+            async def process(self, message, conversation_id, message_source=None):
                 ids.append(conversation_id)
                 return "FINAL ANSWER: 1"
 

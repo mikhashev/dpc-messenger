@@ -1863,6 +1863,7 @@ Respond in JSON format:
                 conversation_id=proposal.conversation_id,
                 include_context=False,
                 _skip_history=True,
+                message_source="ui",  # the owner's proposal, revised on this node
             )
 
             if not response:

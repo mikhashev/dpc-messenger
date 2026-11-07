@@ -1001,6 +1001,7 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path],
         answer = await asyncio.wait_for(agent.process(
             message=question + PROMPT_SUFFIX,
             conversation_id=conversation_id,
+            message_source="ui",  # the owner's run: memory as in a UI turn
         ), timeout=timeout_seconds)
     except asyncio.TimeoutError:
         error = f"TimeoutError: no answer within {timeout_seconds:.0f}s"

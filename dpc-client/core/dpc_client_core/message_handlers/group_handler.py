@@ -479,7 +479,8 @@ class GroupTextHandler(MessageHandler):
                 self.logger.info(wake_line, agent_name, sender_name,
                                  f"invoking agent {agent_id}", group_id)
                 await self._invoke_agent(group_id, text, sender_name,
-                                         message_id, mention_depth=reply_depth)
+                                         message_id, mention_depth=reply_depth,
+                                         sender_node_id=sender_node_id)
             else:
                 self.logger.debug("Skipping @%s — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
 
@@ -540,7 +541,8 @@ class GroupTextHandler(MessageHandler):
 
     async def _invoke_agent(self, group_id: str, text: str, sender_name: str,
                             trigger_message_id: Optional[str] = None,
-                            mention_depth: int = 0) -> None:
+                            mention_depth: int = 0,
+                            sender_node_id: Optional[str] = None) -> None:
         """Invoke the default agent and post response to the group."""
         try:
             dpc_provider = self.service.llm_manager.providers.get("dpc_agent")
@@ -557,6 +559,8 @@ class GroupTextHandler(MessageHandler):
                 chat_context=self._group_chat_context(group_id),
                 _skip_history=True,
                 trigger_message_id=trigger_message_id,
+                message_source="group",
+                sender_node_id=sender_node_id,
             )
             if response:
                 agent_display = self.service._get_agent_display_name(agent_id)

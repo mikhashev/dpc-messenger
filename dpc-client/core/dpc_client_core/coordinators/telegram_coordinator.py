@@ -429,6 +429,7 @@ class TelegramBridge:
                                 message=text,
                                 conversation_id=agent_id,
                                 include_context=True,
+                                message_source="telegram",
                             )
                             if response:
                                 # The agent writes Markdown; the main bot sends HTML.

@@ -1138,8 +1138,11 @@ class DpcAgentManager:
         # When set, injected into ToolContext so schedule_task auto-fills
         # _reply_telegram_chat_id in task data for later result delivery.
         telegram_chat_id: Optional[str] = None,
-        # Source of the message for tool filtering (discord, telegram_public, etc.)
+        # Where the message came from: ui, external_agent, group, telegram or
+        # discord (DpcAgent.process, is_owner_caller). None is nobody's turn.
         message_source: Optional[str] = None,
+        # The node that sent a peer's group mention; carried to the agent only.
+        sender_node_id: Optional[str] = None,
         # Level chosen in a chat header for this call only. The room and the
         # agent's own config are consulted when it is empty.
         reasoning_effort: Optional[str] = None,
@@ -1297,6 +1300,7 @@ class DpcAgentManager:
                     image_caption=image_caption,
                     reply_telegram_chat_id=telegram_chat_id,
                     message_source=message_source,
+                    sender_node_id=sender_node_id,
                     chat_context=chat_context,
                     stop_event=interrupt_ev,
                     kill_event=kill_ev,

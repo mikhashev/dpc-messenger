@@ -50,6 +50,17 @@ log = logging.getLogger(__name__)
 
 CONTEXT_ROUND_RESERVE_TOKENS = 16384
 
+# Turns that may use the owner's memory (Mike's call, 2026-11-07). Bridges count as
+# the owner. A group keeps today's behaviour; its policy is pending under
+# A-GROUP-TURN-CAN-SHOW-THE-OWNERS-PRIVATE-MEMORY-TO-OTHER-NODES.
+_OWNER_MESSAGE_SOURCES = frozenset({"ui", "external_agent", "group"})
+
+
+def is_owner_caller(message_source: Optional[str]) -> bool:
+    """May this turn use the owner's memory? Telegram, Discord and an unnamed or
+    unknown source may not: a caller that names no source fails closed."""
+    return message_source in _OWNER_MESSAGE_SOURCES
+
 
 def tokens_block(usage: Dict[str, Any]) -> Dict[str, Any]:
     """What a finished task cost in tokens, for the record that outlives the log.
@@ -362,7 +373,11 @@ class DpcAgent:
         # Reply routing: when set, injected into ToolContext so schedule_task
         # can propagate it into task data for automatic result delivery.
         reply_telegram_chat_id: Optional[str] = None,
+        # Where the turn came from (see is_owner_caller); None is nobody's.
         message_source: Optional[str] = None,
+        # The node that sent a peer's group mention. Nothing reads it yet; it is
+        # here for the group policy that is still undecided.
+        sender_node_id: Optional[str] = None,
         chat_context: Optional[Dict[str, Any]] = None,
         stop_event: Optional[asyncio.Event] = None,
         reader_identity: Optional[Dict[str, str]] = None,
@@ -474,6 +489,8 @@ class DpcAgent:
             memory_system = bool(mem_cfg.enabled)
             active_recall = bool(mem_cfg.active_recall)
             max_recall = mem_cfg.max_recall_results
+        # The owner's memory gives no hints to anyone else's turn.
+        active_recall = active_recall and is_owner_caller(message_source)
 
         # Searched in a worker thread under a bound: the loop keeps serving guests,
         # the gateway and the UI while the queries are encoded.
@@ -586,6 +603,7 @@ class DpcAgent:
             firewall=self._firewall,  # For extended sandbox paths
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
+            message_source=message_source,
             # Where this run came from, for anything that has to ask a person
             # something (tier-1 shell approval today). The title is whatever the
             # caller already resolved — group chats carry it in chat_context;
@@ -766,14 +784,14 @@ class DpcAgent:
         Get set of allowed tools from firewall, restricted by message source
         and conversation context (group vs 1:1).
 
-        External sources (discord, telegram_public) get a read-only whitelist
+        A Discord turn gets a read-only whitelist
         intersected with firewall permissions — new tools blocked by default.
 
         Group chats restrict tools that have `{tool}_group_allowed: false`
         in the agent's firewall profile (default: false for run_shell).
         """
         if self._firewall is None:
-            if message_source in ("discord", "telegram_public"):
+            if message_source == "discord":
                 log.warning("No firewall configured — external source %s, using read-only fallback", message_source)
                 return set(self.EXTERNAL_SOURCE_ALLOWED_TOOLS)
             log.warning("No firewall configured - all tools allowed")
@@ -790,7 +808,7 @@ class DpcAgent:
             allowed = self._firewall.get_allowed_agent_tools()
             log.debug(f"Firewall allowed tools (global): {len(allowed)} tools")
 
-        if message_source in ("discord", "telegram_public"):
+        if message_source == "discord":
             allowed = allowed & self.EXTERNAL_SOURCE_ALLOWED_TOOLS
             log.info("Source %s: restricted to %d read-only tools", message_source, len(allowed))
 
@@ -1144,10 +1162,11 @@ class DpcAgent:
             # Format the prompt with task data
             prompt = definition.format_prompt(task_data)
 
-            # Run the agent with the formatted prompt
+            # Run the agent with the formatted prompt, as the turn that scheduled it
             result = await agent.process(
                 message=prompt,
                 conversation_id=f"task-{definition.task_type}",
+                message_source=task_data.get("_message_source"),
             )
             return result
 
@@ -1267,10 +1286,12 @@ class DpcAgent:
             reply_conversation_id = task.data.get("_reply_conversation_id") or task.id
             reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
 
+            # The source of the turn that scheduled it; a row without one runs as nobody.
             result = await self.process(
                 text,
                 conversation_id=reply_conversation_id,
                 reply_telegram_chat_id=reply_telegram_chat_id,
+                message_source=task.data.get("_message_source"),
                 **live,
             )
 
@@ -1298,6 +1319,7 @@ class DpcAgent:
                 conversation_id=reply_conversation_id,
                 reply_telegram_chat_id=task.data.get("_reply_telegram_chat_id"),
                 check_back_depth=depth,
+                message_source=task.data.get("_message_source"),
                 **live,
             )
 
@@ -1399,6 +1421,7 @@ class DpcAgent:
         result = await self.process(
             prompt,
             conversation_id=reply_conversation_id,
+            message_source=data.get("_message_source"),
         )
 
         if reply_telegram_chat_id:

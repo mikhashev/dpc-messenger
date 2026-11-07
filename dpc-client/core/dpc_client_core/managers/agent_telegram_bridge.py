@@ -1930,6 +1930,7 @@ Send a voice message and it will be transcribed and processed\\.
                 include_context=True,
                 sender_name=last.sender_name,
                 telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
+                message_source="telegram",
                 **kwargs,
             )
             return batch, response, None

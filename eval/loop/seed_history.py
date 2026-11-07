@@ -421,6 +421,7 @@ async def probe_round1(root: Path, *, firewall, profile: str, alias: Optional[st
     try:
         await agent.process(message=task_prompt, conversation_id=conversation_id,
                             session_state=session_state, reasoning_effort=reasoning_effort,
+                            message_source="ui",
                             **seeded_process_kwargs(seed, task_prompt))
     finally:
         factory._derive_embedding_metadata = loading

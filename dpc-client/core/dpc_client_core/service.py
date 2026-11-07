@@ -7060,6 +7060,7 @@ class CoreService:
                 chat_context=self._group_chat_context(group_id),
                 _skip_history=True,
                 trigger_message_id=trigger_message_id,
+                message_source="group",
             )
             if response:
                 agent_name = self._get_agent_display_name(agent_id)
@@ -8715,6 +8716,7 @@ class CoreService:
                         image_caption=caption,
                         attachments=attachments,
                         _skip_history=stored_here,
+                        message_source="ui",
                     )
 
                     # Broadcast result
@@ -9456,6 +9458,7 @@ class CoreService:
                 agent_llm_provider=agent_llm_provider or conversation_id,
                 sender_name=self.p2p_manager.get_display_name() or "User",
                 _skip_history=True,
+                message_source="ui",
             )
 
             # Get actual model and provider from agent's last usage.
@@ -9786,6 +9789,7 @@ class CoreService:
                 conversation_id=conversation_id,
                 sender_name=cc_name,
                 _skip_history=True,
+                message_source="external_agent",
             )
             if response:
                 logger.info("Ark responded to CC's @Ark mention in %s (%d chars)",
