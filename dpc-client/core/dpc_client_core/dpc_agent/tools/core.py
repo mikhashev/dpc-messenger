@@ -846,6 +846,15 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
 def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
     """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
     try:
+        # The memory switch of this agent's own profile, asked before the index opens.
+        # No firewall (tests, bare contexts): as before.
+        firewall = getattr(ctx, "firewall", None)
+        if firewall is not None:
+            from ..memory_config import get_memory_config
+            profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
+            if not get_memory_config(firewall.get_agent_profile_settings(profile) or {}).enabled:
+                return "Memory is off for this agent."
+
         from ..retrieval import make_backend_for_agent
         import numpy as np
 
@@ -867,11 +876,20 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
             embedding_unavailable_model = candidate_model
 
         vector_results = []
+        vector_stale = False
         if embedding_unavailable_model is None and backend.vector.load():
             try:
                 provider = get_embedding_provider(local_files_only=True)
-                qvec = np.array(provider.embed(query), dtype=np.float32)
-                vector_results = backend.vector.search(qvec, top_k)
+                # The check recall makes: vectors written by another model, window or
+                # width would rank by noise, so only the word channel answers.
+                vector_stale = backend.vector.needs_rebuild(
+                    provider.model_name,
+                    max_tokens=int(provider.max_tokens),
+                    dimensions=provider.dimensions,
+                )
+                if not vector_stale:
+                    qvec = np.array(provider.embed(query), dtype=np.float32)
+                    vector_results = backend.vector.search(qvec, top_k)
             except ModelNotCachedError as e:
                 log.info("Vector search skipped: embedding model %s not cached", e.model_name)
                 embedding_unavailable_model = e.model_name
@@ -883,7 +901,7 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
         if backend.text.load():
             text_results = backend.text.search(query, top_k)
 
-        if not vector_results and not text_results:
+        if not vector_results and not text_results and not vector_stale:
             if embedding_unavailable_model:
                 return (
                     f"memory search is unavailable: the embedding model "
@@ -892,7 +910,24 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
             return "No memory index yet. Index builds automatically at startup when memory is enabled. Try again after restart."
 
         merged = backend.fuser.fuse(vector_results, text_results)
+        if firewall is not None:
+            # A path revoked since indexing keeps its rows; read_file's own per-path
+            # check drops them before the cut, as recall does.
+            from ..active_recall import _extended_path_still_allowed
+
+            def _granted(path: str) -> bool:
+                try:
+                    ctx.validate_extended_path(path)
+                    return True
+                except Exception:
+                    return False
+
+            merged = [r for r in merged
+                      if _extended_path_still_allowed(r.chunk_meta, _granted)]
         lines = [f"Found {len(merged)} results for '{query}':\n"]
+        if vector_stale:
+            lines.insert(0, "Vector index is stale for the current embedding model/window; "
+                            "word matches only.")
         for i, r in enumerate(merged[:top_k]):
             meta = r.chunk_meta
             lines.append(f"{i+1}. [{meta.get('source_layer','L5')}] {meta.get('source_file','?')} (score: {r.score:.4f})")

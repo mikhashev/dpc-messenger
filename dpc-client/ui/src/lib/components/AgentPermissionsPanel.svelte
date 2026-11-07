@@ -682,19 +682,21 @@
               {/if}
               <span>Enable Memory System</span>
             </label>
-            <p class="help-text-small">Enables embedding-based knowledge search and Active Recall hints</p>
+            <p class="help-text-small">Enables memory search (the memory_search tool) and Active Recall hints</p>
             {#if voiceMemoryNote($nodeStatus)}
               <p class="help-text-small">{voiceMemoryNote($nodeStatus)}</p>
             {/if}
           </div>
 
-          <div class="setting-item">
+          <div class="setting-item" style="margin-left: 1.5rem;">
             <label>
               {#if editMode && editSettings?.memory}
+                <!-- Active Recall works only while the memory system is on -->
                 <input
                   type="checkbox"
                   id="agent-memory-active-recall"
                   bind:checked={editSettings.memory.active_recall}
+                  disabled={!editSettings.memory.enabled}
                 />
               {:else}
                 <input

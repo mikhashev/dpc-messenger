@@ -30,6 +30,7 @@ from .llm_adapter import DpcLlmAdapter, local_alias_of
 from .run_gate import RunGate, hold as hold_run_gate, turn_title
 from .tools.registry import ToolRegistry, ToolContext
 from .memory import Memory, generate_smart_index
+from .memory_config import get_memory_config
 from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
@@ -449,6 +450,9 @@ class DpcAgent:
         extended_read = True
         shared_knowledge = True
         extended_path_allowed = None
+        memory_system = True
+        active_recall = True
+        max_recall = 3
         if self._firewall is not None:
             all_tools_map = self._firewall.get_agent_tools_map(self._firewall_profile)
             sandbox_ro = self._firewall.get_sandbox_read_only_paths(self._firewall_profile)
@@ -462,6 +466,14 @@ class DpcAgent:
                 "knowledge", profile_name=self._firewall_profile)
             # The global flag is one switch; each external path has its own grant.
             extended_path_allowed = self._extended_path_allowed
+            # The memory switches, read now from the agent's own profile so a save
+            # applies to the next turn. No own profile means the code defaults (off),
+            # not the global dpc_agent block.
+            mem_cfg = get_memory_config(
+                self._firewall.get_agent_profile_settings(self._firewall_profile) or {})
+            memory_system = bool(mem_cfg.enabled)
+            active_recall = bool(mem_cfg.active_recall)
+            max_recall = mem_cfg.max_recall_results
 
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
@@ -484,6 +496,9 @@ class DpcAgent:
             shared_knowledge_enabled=shared_knowledge,
             sent_annotations=sent_annotations,
             extended_path_allowed=extended_path_allowed,
+            memory_system_enabled=memory_system,
+            active_recall_enabled=active_recall,
+            max_recall_results=max_recall,
         )
 
         # Remember the tail exactly as it went out, keyed by the message it went out

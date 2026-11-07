@@ -727,8 +727,7 @@ class DpcAgentManager:
         self._memory_indexes_initialized = True
 
     def sync_firewall_settings(self) -> None:
-        """Re-read settings from firewall after UI save."""
-        pass
+        """No-op: the agent reads its firewall settings live on each turn."""
 
     async def ensure_started(self) -> "DpcAgentManager":
         """

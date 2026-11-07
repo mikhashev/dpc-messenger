@@ -643,6 +643,9 @@ def build_llm_messages(
     shared_knowledge_enabled: bool = True,
     sent_annotations: Optional[Dict[str, str]] = None,
     extended_path_allowed: Optional[Callable[[str], bool]] = None,
+    memory_system_enabled: bool = True,
+    active_recall_enabled: bool = True,
+    max_recall_results: int = 3,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -679,6 +682,10 @@ def build_llm_messages(
         extended_path_allowed: read_file's per-path grant check, asked now. An
                                external document whose path it refuses gets no hint
                                at all; None skips the check.
+        memory_system_enabled: The agent's `memory.enabled`. Off means no recall
+                               work at all this turn.
+        active_recall_enabled: The agent's `memory.active_recall`: the hints alone.
+        max_recall_results: The agent's `memory.max_recall_results`, the hint count.
         sent_annotations: message id -> the turn-context tail that was appended to
                           that user message when it was the current one. Replayed
                           byte-identically behind the message so the prompt stays a
@@ -743,7 +750,8 @@ def build_llm_messages(
         _context_text = " ".join(_context_parts)
 
         _query_text = _human_text or _context_text
-        if _query_text:
+        # Both switches are asked before the backend opens or anything is encoded.
+        if _query_text and memory_system_enabled and active_recall_enabled:
             try:
                 from .active_recall import get_recall_block
                 from .retrieval import make_backend_for_agent
@@ -813,6 +821,7 @@ def build_llm_messages(
                 _ctx_ratio = context_usage_ratio(session_state)
                 _recall = get_recall_block(
                     _results, context_usage_ratio=_ctx_ratio, agent_root=agent_root,
+                    max_results=max_recall_results,
                     extended_read_enabled=extended_read_enabled,
                     shared_knowledge_enabled=shared_knowledge_enabled,
                     extended_path_allowed=extended_path_allowed,

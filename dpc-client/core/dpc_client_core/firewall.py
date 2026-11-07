@@ -2778,6 +2778,23 @@ class ContextFirewall:
                                             logger.warning("No registered tool named '%s' — key in agent_profiles.%s.tools is ignored", tool_name, profile_name)
                                         if not isinstance(tool_enabled, bool):
                                             errors.append(f"'agent_profiles.{profile_name}.tools.{tool_name}' must be a boolean")
+                            # Memory switches, read live on every turn (agent.py): a bad
+                            # value is refused here rather than met mid-turn.
+                            if 'memory' in profile_config:
+                                mem = profile_config['memory']
+                                where = f"agent_profiles.{profile_name}.memory"
+                                if not isinstance(mem, dict):
+                                    errors.append(f"'{where}' must be a dictionary")
+                                else:
+                                    for field in ('enabled', 'active_recall'):
+                                        if field in mem and not isinstance(mem[field], bool):
+                                            errors.append(f"'{where}.{field}' must be a boolean (true or false)")
+                                    if 'max_recall_results' in mem:
+                                        n = mem['max_recall_results']
+                                        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 10:
+                                            errors.append(
+                                                f"'{where}.max_recall_results' must be a whole number from 1 to 10 "
+                                                "(to turn the hints off, clear Active Recall)")
 
             # Validate image_transfer section
             if 'image_transfer' in config_dict:

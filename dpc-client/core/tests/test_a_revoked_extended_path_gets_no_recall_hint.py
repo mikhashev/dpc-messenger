@@ -67,10 +67,14 @@ def world(tmp_path, monkeypatch):
 def _write_rules(w, read_only, extended_read=True):
     w["rules"].write_text(json.dumps({
         "dpc_agent": {"enabled": True},
-        "agent_profiles": {PROFILE: {"sandbox_extensions": {
-            "read_only": [str(p) for p in read_only],
-            "extended_read_enabled": extended_read,
-        }}},
+        "agent_profiles": {PROFILE: {
+            # Recall runs only while the profile's memory system is on.
+            "memory": {"enabled": True},
+            "sandbox_extensions": {
+                "read_only": [str(p) for p in read_only],
+                "extended_read_enabled": extended_read,
+            },
+        }},
     }), encoding="utf-8")
 
 
