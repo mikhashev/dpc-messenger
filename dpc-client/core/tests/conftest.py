@@ -48,6 +48,18 @@ def _node_ledger_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _embedding_cache_in_tmp(tmp_path, monkeypatch):
+    """The embedding cache defaults to this machine's ~/.dpc/cache/embeddings, shared by
+    every agent. Tests with fake encoders wrote vectors of a foreign length there, so
+    every test gets its own cache under tmp_path. Guarded by
+    test_a_test_run_never_writes_into_the_real_embedding_cache."""
+    from dpc_client_core.dpc_agent import memory
+
+    monkeypatch.setattr(memory, "_embedding_cache_root", lambda: tmp_path / "embedding-cache")
+    monkeypatch.setattr(memory, "_disk_cache", None)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_process_registry():
     """The process registry is module state (ADR-046). A test that begins the
     backend's stop would make every later spawn refuse, and open entries of one

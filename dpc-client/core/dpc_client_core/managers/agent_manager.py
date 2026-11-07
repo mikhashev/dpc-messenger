@@ -359,7 +359,8 @@ class DpcAgentManager:
                     from dpc_client_core.dpc_agent.indexing_pipeline import rebuild_decision
                     from dpc_client_core.dpc_agent.retrieval import resolve_backend_id
                     _backend_id = resolve_backend_id(agent_root)
-                    _decision = rebuild_decision(index_dir, _actual_model, _backend_id)
+                    _decision = rebuild_decision(index_dir, _actual_model, _backend_id,
+                                                 int(mem_cfg.max_tokens))
                     needs_full_rebuild = _decision.needed
                     if _decision.message:
                         log.info("%s", _decision.message)
@@ -642,6 +643,11 @@ class DpcAgentManager:
                                     _hdr["model_name"] = _actual_model
                                     _hdr["key_format"] = KEY_FORMAT
                                     _hdr["backend"] = backend.backend_id or _backend_id
+                                    # Only a full rebuild may state the window: it cleared
+                                    # the index, so every row in it is at this one. An
+                                    # older index keeps no value, which reads "unknown".
+                                    if needs_full_rebuild:
+                                        _hdr["max_tokens"] = int(provider.max_tokens)
                                     _md["file_hashes"] = new_hashes
                                     _md.pop("extra_hash", None)
                                     write_meta(meta_path, _md)

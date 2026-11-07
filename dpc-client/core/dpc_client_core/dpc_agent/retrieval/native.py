@@ -98,8 +98,9 @@ class NativeVectorIndex(VectorIndex):
     def total_items(self) -> int:
         return self._inner.total_vectors
 
-    def needs_rebuild(self, model_name: str) -> bool:
-        return self._inner.needs_rebuild(model_name)
+    def needs_rebuild(self, model_name: str, max_tokens: Optional[int] = None,
+                      dimensions: Optional[int] = None) -> bool:
+        return self._inner.needs_rebuild(model_name, max_tokens=max_tokens, dimensions=dimensions)
 
 
 class NativeTextIndex(TextIndex):

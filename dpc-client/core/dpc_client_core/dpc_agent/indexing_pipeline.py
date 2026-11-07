@@ -382,7 +382,8 @@ class RebuildDecision:
     message: str = ""
 
 
-def rebuild_decision(index_dir: pathlib.Path, actual_model: str, backend_id: str) -> RebuildDecision:
+def rebuild_decision(index_dir: pathlib.Path, actual_model: str, backend_id: str,
+                     actual_max_tokens: Optional[int] = None) -> RebuildDecision:
     """Can the index on disk be brought up to date incrementally, or must it be rebuilt?
 
     An incremental pass only touches documents whose content hash moved, so it cannot
@@ -438,6 +439,20 @@ def rebuild_decision(index_dir: pathlib.Path, actual_model: str, backend_id: str
             message=(
                 f"Memory index was built by a different retrieval backend "
                 f"({stored_backend!r} -> {backend_id!r}), forcing rebuild"
+            ),
+        )
+
+    # The embedding window, read as FaissIndex.needs_rebuild reads it, so recall and
+    # this decision never disagree: recall would skip an index this left in place.
+    # Absent or null is an index from before the field: unknown, no rebuild.
+    stored_window = header.get("max_tokens")
+    if (actual_max_tokens is not None and stored_window is not None
+            and int(stored_window) != int(actual_max_tokens)):
+        return RebuildDecision(
+            needed=True,
+            message=(
+                f"Memory index embedding window changed ({stored_window} -> "
+                f"{actual_max_tokens} tokens), forcing rebuild"
             ),
         )
 

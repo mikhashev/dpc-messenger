@@ -391,7 +391,10 @@ class GrafeoVectorIndex(VectorIndex):
     def source_rows(self):
         return _source_rows(self._get_db(), VECTOR_LABEL)
 
-    def needs_rebuild(self, model_name: str) -> bool:
+    def needs_rebuild(self, model_name: str, max_tokens: Optional[int] = None,
+                      dimensions: Optional[int] = None) -> bool:
+        # The schema node records the model only; window and width are not stored
+        # here, so they are unknown and ask for nothing.
         # Compare requested model_name against the identifier stored on the
         # singleton _RetrievalSchema node (written on first add()). Empty
         # `model_name` arg or empty stored value (no Schema yet → first run)

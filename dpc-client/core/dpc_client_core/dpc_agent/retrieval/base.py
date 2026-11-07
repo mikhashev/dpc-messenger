@@ -122,11 +122,13 @@ class VectorIndex(ABC):
     def total_items(self) -> int:
         """Item count."""
 
-    def needs_rebuild(self, model_name: str) -> bool:
+    def needs_rebuild(self, model_name: str, max_tokens: Optional[int] = None,
+                      dimensions: Optional[int] = None) -> bool:
         """Embedding-model-change detector. Default: no detection (always False).
 
-        Vector backends MAY override to compare stored model identifier
-        against `model_name` and return True when they differ. Used by
+        Vector backends MAY override to compare stored model identifier,
+        window (`max_tokens`) and vector width against these arguments and
+        return True when a stored value differs. Used by
         model_swap.py for the prompt-on-model-change UX.
         """
         return False

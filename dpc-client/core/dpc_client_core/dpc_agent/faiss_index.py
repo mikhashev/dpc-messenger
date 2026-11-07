@@ -39,6 +39,9 @@ class IndexHeader:
     created_at: str = ""
     max_chars: int = 1500
     overlap_chars: int = 200
+    # The embedding window (EmbeddingProvider.max_tokens) the vectors were built with.
+    # None in a header written before the field existed: unknown, not different.
+    max_tokens: Optional[int] = None
 
 
 class FaissIndex:
@@ -195,8 +198,22 @@ class FaissIndex:
             log.warning("Failed to load FAISS index: %s", e)
             return False
 
-    def needs_rebuild(self, model_name: str) -> bool:
-        return self._header.model_name != model_name
+    def needs_rebuild(self, model_name: str, max_tokens: Optional[int] = None,
+                      dimensions: Optional[int] = None) -> bool:
+        """True when the stored vectors come from another model, window or width.
+
+        A value the header does not carry is unknown and never asks for a rebuild:
+        an older index must not be re-embedded only because it predates the field.
+        """
+        if self._header.model_name != model_name:
+            return True
+        stored_window = self._header.max_tokens
+        if max_tokens is not None and stored_window is not None and int(stored_window) != int(max_tokens):
+            return True
+        stored_dim = self._header.dimensions
+        if dimensions is not None and stored_dim and int(stored_dim) != int(dimensions):
+            return True
+        return False
 
     def clear(self) -> None:
         self._index = None

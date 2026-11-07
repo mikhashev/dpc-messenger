@@ -201,10 +201,10 @@ def test_embedding_provider_embed_returns_list(monkeypatch):
     import numpy as np
 
     class _NeverCached:
-        def get(self, text):
+        def get(self, *args, **kwargs):
             return None
 
-        def put(self, text, vec):
+        def put(self, *args, **kwargs):
             pass
 
     monkeypatch.setattr(

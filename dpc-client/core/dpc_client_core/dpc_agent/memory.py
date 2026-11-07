@@ -454,40 +454,58 @@ def get_embedding_provider(model_name: str = DEFAULT_EMBEDDING_MODEL, **kwargs) 
         return provider
 
 
+def _embedding_cache_root() -> pathlib.Path:
+    """``~/.dpc/cache/embeddings`` (under DPC_HOME when set). Tests point it at tmp_path."""
+    return pathlib.Path(os.environ.get("DPC_HOME", pathlib.Path.home() / ".dpc")) / "cache" / "embeddings"
+
+
+#: Cache files already reported for a wrong length, so each is logged once.
+_wrong_length_reported: set = set()
+
+
 class _EmbeddingDiskCache:
     """Content-addressed embedding cache shared across all agents.
 
-    Key: SHA256(text)[:16].  Value: float16 numpy vector on disk.
-    Location: ``~/.dpc/cache/embeddings/``.
+    Path: ``<root>/<quoted model name>/<max_tokens>/<sha256(text)[:16]>.bin``, raw
+    float32. The text alone was the key once, so a model or window change got the old
+    vectors back; the root-level files of that layout are never read. float32 because
+    the index stores float32: a hit must give the same numbers as a fresh encode.
     """
 
-    def __init__(self, cache_dir: Optional[pathlib.Path] = None, dtype=None):
+    def __init__(self, cache_dir: Optional[pathlib.Path] = None):
         import numpy as _np
         self._np = _np
-        self._dtype = dtype or _np.float16
-        if cache_dir is None:
-            cache_dir = pathlib.Path(os.environ.get("DPC_HOME", pathlib.Path.home() / ".dpc")) / "cache" / "embeddings"
-        self._dir = cache_dir
+        self._dir = cache_dir if cache_dir is not None else _embedding_cache_root()
         self._dir.mkdir(parents=True, exist_ok=True)
 
-    def _key(self, text: str) -> str:
+    def _path(self, text: str, model_name: str, max_tokens: int) -> pathlib.Path:
         import hashlib
-        return hashlib.sha256(text.encode()).hexdigest()[:16]
+        from urllib.parse import quote
+        # quote() is reversible, so two model names never share a directory.
+        return (self._dir / quote(model_name, safe="") / str(int(max_tokens))
+                / f"{hashlib.sha256(text.encode()).hexdigest()[:16]}.bin")
 
-    def get(self, text: str):
-        path = self._dir / f"{self._key(text)}.bin"
-        if path.exists():
-            try:
-                return self._np.fromfile(path, dtype=self._dtype)
-            except Exception:
-                return None
-        return None
-
-    def put(self, text: str, vector) -> None:
-        path = self._dir / f"{self._key(text)}.bin"
-        tmp = path.with_name(f"{self._key(text)}.{threading.get_ident()}.tmp")
+    def get(self, text: str, model_name: str, max_tokens: int, dimensions: Optional[int]):
+        """The stored vector, or None. A length other than `dimensions` is a miss."""
+        path = self._path(text, model_name, max_tokens)
         try:
-            self._np.asarray(vector, dtype=self._dtype).tofile(tmp)
+            vector = self._np.fromfile(path, dtype=self._np.float32)
+        except Exception:
+            return None
+        if dimensions is None or vector.size != dimensions:
+            if dimensions is not None and str(path) not in _wrong_length_reported:
+                _wrong_length_reported.add(str(path))
+                log.warning("Embedding cache file %s holds %d values, model %s gives %d — recomputing",
+                            path, vector.size, model_name, dimensions)
+            return None
+        return vector
+
+    def put(self, text: str, model_name: str, max_tokens: int, vector) -> None:
+        path = self._path(text, model_name, max_tokens)
+        tmp = path.with_name(f"{path.stem}.{threading.get_ident()}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._np.asarray(vector, dtype=self._np.float32).tofile(tmp)
             tmp.replace(path)
         except Exception:
             if tmp.exists():
@@ -695,16 +713,27 @@ class EmbeddingProvider:
         # seen produce embeddings that are worse, not longer.
         self._model.max_seq_length = min(limit, current)
 
+    def _loaded_dimensions(self) -> Optional[int]:
+        """The loaded model's vector length, or None when it does not say (every hit then misses)."""
+        try:
+            dim = self.dimensions
+        except Exception:
+            return None
+        return dim if isinstance(dim, int) and not isinstance(dim, bool) and dim > 0 else None
+
     def embed(self, text: str) -> List[float]:
+        import numpy as np
         self._load_model()
         cache = _get_disk_cache()
-        cached = cache.get(text)
+        # Read once: the instance is shared and another caller may restate the window.
+        window = int(self.max_tokens)
+        cached = cache.get(text, self.model_name, window, self._loaded_dimensions())
         if cached is not None:
             return cached.tolist()
         with self._gpu_semaphore:
-            result = self._model.encode(text, normalize_embeddings=True).tolist()
-        cache.put(text, result)
-        return result
+            vector = np.asarray(self._model.encode(text, normalize_embeddings=True), dtype=np.float32)
+        cache.put(text, self.model_name, window, vector)
+        return vector.tolist()
 
     def _encode_within_memory(self, texts: List[str]) -> List[List[float]]:
         """Encode, halving the batch whenever the device says it cannot hold it.
@@ -734,10 +763,12 @@ class EmbeddingProvider:
         self._load_model()
         import numpy as np
         cache = _get_disk_cache()
+        window = int(self.max_tokens)
+        dimensions = self._loaded_dimensions()
         results: List[Optional[List[float]]] = [None] * len(texts)
         misses: List[tuple] = []
         for i, text in enumerate(texts):
-            cached = cache.get(text)
+            cached = cache.get(text, self.model_name, window, dimensions)
             if cached is not None:
                 results[i] = cached.tolist()
             else:
@@ -747,8 +778,10 @@ class EmbeddingProvider:
             with self._gpu_semaphore:
                 vectors = self._encode_within_memory(miss_texts)
             for (idx, text), vec in zip(misses, vectors):
-                cache.put(text, vec)
-                results[idx] = vec
+                # Rounded to float32 here as in the cache, so hit and miss agree.
+                vec = np.asarray(vec, dtype=np.float32)
+                cache.put(text, self.model_name, window, vec)
+                results[idx] = vec.tolist()
         hits = len(texts) - len(misses)
         if hits > 0:
             log.debug("Embedding cache: %d hits, %d misses out of %d texts", hits, len(misses), len(texts))

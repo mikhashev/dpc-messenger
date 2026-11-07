@@ -756,8 +756,13 @@ def build_llm_messages(
                         from .memory import get_embedding_provider
                         embedding_provider = get_embedding_provider(local_files_only=True)
                         log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
-                    if _backend.vector.needs_rebuild(embedding_provider.model_name):
-                        log.info("Active Recall: vector index needs rebuild (model changed), skipping search")
+                    if _backend.vector.needs_rebuild(
+                        embedding_provider.model_name,
+                        max_tokens=int(embedding_provider.max_tokens),
+                        dimensions=embedding_provider.dimensions,
+                    ):
+                        log.info("Active Recall: vector index needs rebuild "
+                                 "(model, window or width changed), skipping search")
                     else:
                         if _human_text:
                             _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32)
