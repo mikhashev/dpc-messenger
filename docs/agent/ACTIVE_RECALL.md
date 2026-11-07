@@ -13,6 +13,11 @@ This document describes the mechanism **as the code runs it at commit `14aaf88b`
 file exists only on `dev`, not on `main`. Every constant is listed. The body needs no access to
 the repository; file and line references are only in the appendix.
 
+Three of the defects of that build have been fixed since, on `dev`, 2026-11-07: V1 in
+`f8072803` (the embedding cache), V2 in `6fdc2f44` (a revoked external path) and V6 in
+`da5fd085` (the memory switches). The sections below mark them where they apply; the text
+otherwise still describes `14aaf88b`.
+
 A rebuilder should read §14 before copying anything. It keeps three things apart: what was
 built at that commit (§14.1), the known defects of that build, which a rebuild should not carry
 over (§14.2), and the contracts a correct rebuild holds (§14.3). Sections 3 to 12 describe the
@@ -31,7 +36,7 @@ entry per document. The fused scores are multiplied by an access-history factor 
 candidates with nothing to show are dropped, and the top three are rendered as a short block
 appended to the current user message. Every injection is logged, and that log, together with
 the agent's `read_file` calls, feeds the next turn's decay. Every embedding, of a document or of
-a query, passes through one disk cache per node keyed by the text alone (§4.4).
+a query, passes through one disk cache per node (§4.4; at `14aaf88b` keyed by the text alone, since `f8072803` by model and window as well).
 
 ## 2. Words used here
 
@@ -180,15 +185,20 @@ time, so the window follows the stated value in both directions, capped at the n
   A partial mismatch (the map lists more documents than the index holds, but the index is not
   empty) does not force a rebuild. Embedding runs in batches of
   16 (configurable). The startup sync runs on the agent's index writer thread, not on the event
-  loop; startup does not wait for it. The window (`max_tokens`) is not part of the rebuild
-  decision: changing it rebuilds nothing, and documents whose hash did not move keep their old
-  vectors. A full rebuild embeds every document through the embedding cache (§4.4).
+  loop; startup does not wait for it. At `14aaf88b` the window (`max_tokens`) was not part of the rebuild
+  decision: changing it rebuilt nothing, and documents whose hash did not move kept their old
+  vectors. Since `f8072803` it is: a stored window that differs from the loaded one forces a
+  full rebuild, and a header without the field reads as unknown, so no rebuild (§4.4). A full
+  rebuild embeds every document through the embedding cache (§4.4).
 * **Live replace**: when the agent writes a file under `knowledge/`, that one key is removed and
   re-added in both channels; when a knowledge commit is approved, the L6 file is replaced the
   same way.
 * EXT changes are picked up only by the next startup sync.
 
 ### 4.4 The embedding cache
+
+*The next four paragraphs, and the known defect after them, describe the cache as built at
+`14aaf88b`. The layout that replaced it in `f8072803` is described after the defect.*
 
 Every embedding call goes through one disk cache before it reaches the model. The cache is one
 object per process, in `~/.dpc/cache/embeddings` (under `DPC_HOME` when that is set), shared by
@@ -230,6 +240,19 @@ A rebuild should key a cached vector by the text **and** the embedding identity 
 revision, effective window, normalisation), check a hit's length, store it at the precision the
 index uses, and record the same identity in the index header so that any change of it forces a
 rebuild (§14.3).
+
+**Fixed in `f8072803` (V1).** The cache path is now
+`<root>/<urllib.parse.quote(model_name, safe="")>/<max_tokens>/<sha256(text)[:16]>.bin`, raw
+float32, so a cached vector answers only for the model and the window that wrote it. A hit
+whose length differs from the loaded model's dimension is a miss, logged once per file, and a
+hit and a fresh encode give the same bytes. The index header gains `max_tokens`, written only
+by a full rebuild; `needs_rebuild(model_name, max_tokens=None, dimensions=None)` (recall,
+`memory_search`) and `rebuild_decision(..., actual_max_tokens)` (startup) compare it, and a
+stored value that is absent or null is **unknown, not different**: no rebuild, so an index
+from before the field is not re-embedded for lacking it. The old root-level `<key>.bin` files
+are never read; they stay on disk, nothing deletes them. Tests now use a temporary cache
+through an autouse fixture instead of the real one. The window of §4.2 (lowered, never raised
+within a process) is not touched by this fix.
 
 ### 4.5 Readers and writers of the stored index
 
@@ -318,7 +341,7 @@ Neither query is preprocessed before embedding.
 
 ### 6.2 Vector channel
 
-Skipped if the vector index is absent or was built with another model. Otherwise:
+Skipped if the vector index is absent or was built with another model (since `f8072803` also another window or width, §4.4). Otherwise:
 `V1 = search(embed(Q1), 10)` if Q1 is non-empty, `V2 = search(embed(Q2), 10)` if Q2 is
 non-empty. `search` L2-normalises the query, takes the top 10 rows by inner product (cosine),
 and drops rows whose key already appeared earlier **in that one result list**. The channel's
@@ -500,8 +523,10 @@ After decay, drop candidates that have **nothing to offer**: a candidate stays i
 address (§10); otherwise it stays only if it has a preview `text` and is not an L6 document
 with the shared-knowledge gate closed. Then take the **first 3**.
 
-**Settings that do not reach this path.** The per-turn path reads no memory setting at all. It
-runs whenever the current message or the history is non-empty and an index loads from disk.
+**Settings that do not reach this path — fixed in `da5fd085` (V6).** The text of this
+paragraph, down to the "Known defect", is the build at `14aaf88b`. At that commit the per-turn
+path read no memory setting at all. It ran whenever the current message or the history was
+non-empty and an index loaded from disk.
 
 * `memory.enabled = false` stops the startup sync (§4.3) but not per-turn recall: an index
   already on disk keeps being searched and injected.
@@ -512,8 +537,20 @@ runs whenever the current message or the history is non-empty and an index loads
   memory hints into agent context automatically") bound to `memory.active_recall`; switching it
   off changes nothing.
 
-**Known defect** (§14.2): a rebuild reads these settings on the per-turn path, before any
-search, so that off means off and the slot count is the configured one.
+**Known defect** at `14aaf88b` (§14.2): a rebuild reads these settings on the per-turn path,
+before any search, so that off means off and the slot count is the configured one.
+
+**Current behaviour (`da5fd085`).** On each turn `agent.py` reads
+`get_memory_config(firewall.get_agent_profile_settings(agent_id))` and passes
+`memory_system_enabled`, `active_recall_enabled` and `max_recall_results` into
+`build_llm_messages`. Recall is gated at the query check, before any backend opens or any
+encode, so with the memory system off, or with Active Recall off, there is no recall work; the
+slot count is the profile's. An agent with no own profile, or a profile with no memory block,
+gets the code default, which is off. `firewall.validate_config` refuses a non-boolean switch
+and a `max_recall_results` outside 1..10. The permissions screen greys Active Recall while the
+memory system is off. `memory_search` refuses when the memory system is off, drops external
+rows whose path is no longer granted, and skips the vector channel on a stale index.
+`memory.enabled = false` still stops the startup sync.
 
 ## 10. Rendering and placement
 
@@ -523,15 +560,25 @@ read access for EXT and for any non-L5 graph hit); otherwise there is no address
 
 The two gates are asked at the start of each turn, but each is one switch for the whole layer.
 For L6 that is the whole permission, and a closed gate drops the candidate at selection (§9).
-For EXT the recall path receives only the agent's global `extended_read_enabled` flag, never the
-grant of the candidate's own path. With that flag on, an EXT document keeps its heading, its
+For EXT, at `14aaf88b`, the recall path received only the agent's global
+`extended_read_enabled` flag, never the grant of the candidate's own path (fixed in `6fdc2f44`,
+below). With that flag on, an EXT document keeps its heading, its
 excerpt and its address after the owner removes its directory from the agent's granted paths,
 until the index drops the row at the next start of the agent manager or of the service: the
 startup sync is the only thing that re-collects EXT, and the hook the UI calls after a firewall
 save (`sync_firewall_settings` in the agent manager) does nothing. `read_file` asks the current
-grants, so it refuses the very address the hint printed. **Known defect** (§14.2): a rebuild
+grants, so it refuses the very address the hint printed. **Known defect** at `14aaf88b` (§14.2): a rebuild
 checks each candidate's own path against the agent's current grants before selection and drops
 a revoked one whole — heading, excerpt and address, not the address alone.
+
+**Fixed in `6fdc2f44` (V2) for the revoked path.** On each turn `agent.py` passes
+`extended_path_allowed` — `read_file`'s own per-path check, `ToolContext.validate_extended_path`,
+on the live firewall — to `get_recall_block`, which drops the EXT rows whose path is no longer
+granted before decay and the slot cut; such a row takes no slot and does not weigh in decay's
+scaling. An EXT row with no `source_path` is dropped when the check is given. The global
+extended-read toggle, the index and the replayed tails are unchanged: replayed tails (§10,
+Placement; §14.2 item 8) are still open, and so is the global-toggle question, open question
+(1) to the owner.
 
 Separately, and on purpose: with the EXT flag off, an EXT candidate keeps its slot and its
 excerpt and prints the dead end below instead of an address. The tests pin this as policy — the
@@ -756,9 +803,10 @@ breaking a contract the rest of the system relies on — are listed in §14.2.
    10 messages; grace is 7 days, not 5 sessions (ADR-013); ADR-010 fixes no weights, only an
    order, L6 > L1 > L5 > L2, and the weight table no longer follows it (L1 1.3 is above L6 1.0
    since the code's own 1.5 for L6 was removed on 2026-08-12); L1 and L2 have weights but no
-   producer. Of the per-agent memory config fields, `active_recall` is read only for a log line
-   at startup and `max_recall_results` is read nowhere; neither reaches the live path, which
-   runs whenever an index exists, with the slot count fixed at 3 (§9; the defect is in §14.2).
+   producer. At `14aaf88b`, of the per-agent memory config fields, `active_recall` was read only for a log
+   line at startup and `max_recall_results` was read nowhere; neither reached the live path,
+   which ran whenever an index existed, with the slot count fixed at 3. Fixed in `da5fd085`
+   (§9, §14.2).
 
 ## 14. Rebuilding it
 
@@ -775,16 +823,21 @@ Checklist:
 - [ ] Front-matter strip, heading extraction (`^#+ (.+)$`, first match), `doc_text` of §4.2,
       100,000-char cap, 500-char preview.
 - [ ] A multilingual embedding model with normalised output (bge-m3, 1024-d, 4096-token cut) and
-      an exact cosine index.
+      an exact cosine index. (The cache of `14aaf88b`, keyed by text alone, is the V1 defect;
+      the cache after `f8072803` is in §4.4.)
 - [ ] BM25 (`bm25s` defaults: method `lucene`, k1 1.5, b 0.75). The two tokenisers of §6.3 are
       the build's; a rebuild uses one tokeniser for corpus and query (§14.2, §14.3).
 - [ ] Optional graph with `DEPENDS_ON` edges between knowledge files that link each other.
 - [ ] Per turn: Q1, Q2, three channels, RRF with the weight table, decay, mode, filter, top 3,
-      render, append to the current user message, log.
+      render, append to the current user message, log. (At `14aaf88b` no setting gated this and
+      EXT was gated by the global flag only; since `da5fd085` and `6fdc2f44` the memory switches
+      gate it before any search and a revoked EXT path is dropped before decay, §9, §10.)
 - [ ] Two logs: injections (written by recall) and reads (written by your file-read tool).
 
 Minimal pseudocode of the build's ranking (it leaves out the embedding cache of §4.4, the
-loading of §4.5 and the blocking of §6.5, which §14.2 says not to copy):
+loading of §4.5 and the blocking of §6.5, which §14.2 says not to copy; it also shows neither
+the memory switches that now gate the function, §9, nor the per-path EXT check that now runs
+before decay, §10):
 
 ```python
 K, TOP_V, TOP_T, SLOTS = 60, 10, 10, 3
@@ -858,10 +911,11 @@ that description says what a rebuild does instead. Describing them here fixes no
 
 1. **A cached vector is reused under any model and any window** (§4.4). The cache key is the
    text alone; a rebuild after a model change takes old vectors back, a window change never
-   reaches a cached text, and a hit is rounded to float16 where a miss is not.
+   reaches a cached text, and a hit is rounded to float16 where a miss is not. **Fixed in
+   `f8072803`.**
 2. **The embedding window can be lowered but not raised in one process** (§4.2). The limit is
    taken as `min(max_tokens, current)` against the already-lowered value, so the provider's
-   `max_tokens` can say more than the window in use, unlogged.
+   `max_tokens` can say more than the window in use, unlogged. (Still open.)
 3. **A reader can pair one generation's index with another generation's rows** (§4.5). Vectors
    and rows, and the BM25 directory and its rows, are published one after the other and loaded
    with a count check only; a hit can be printed under another document's name and address, and
@@ -874,12 +928,13 @@ that description says what a rebuild does instead. Describing them here fixes no
    cancelled, and lets a vector-channel failure take the text channel with it.
 6. **The settings do not reach the per-turn path** (§9). `memory.enabled = false`,
    `memory.active_recall`, `memory.max_recall_results` and the UI's "Active Recall" checkbox
-   change nothing about per-turn recall.
+   change nothing about per-turn recall. **Fixed in `da5fd085`.**
 7. **Authorization for EXT is per layer, not per path** (§10). A path removed from the agent's
    grants keeps its heading, excerpt and address in recall until the next manager or service
-   start, while `read_file` already refuses it.
+   start, while `read_file` already refuses it. **Fixed in `6fdc2f44`.**
 8. **Replayed tails ignore revocation** (§10, Placement). An L6 or EXT excerpt sent before its
-   gate closed is re-sent byte for byte on later turns.
+   gate closed is re-sent byte for byte on later turns. (Still open; `6fdc2f44` did not touch
+   it.)
 9. **Retrieved fields are uncapped and unescaped** (§10). The heading, key and address have no
    cap and nothing escapes quotes or `</turn_context>`; nothing caps the block downstream.
 10. **A turn that printed no address keeps the previous offer, and the offer has no agent**
@@ -925,7 +980,10 @@ anything else.
 ## Appendix — where it lives in DPC
 
 Paths are relative to `dpc-client/core/dpc_client_core/` unless they start at the repository
-root (marked *repo:*); line numbers as of commit `14aaf88b` on `dev` (2026-11-06).
+root (marked *repo:*); line numbers as of commit `14aaf88b` on `dev` (2026-11-06). The rows for
+the embedding cache, the rebuild decision, the per-layer EXT gate and the settings point at
+lines that `f8072803`, `6fdc2f44` and `da5fd085` have since moved or changed; they are not
+re-pinned, read those functions at `HEAD`.
 
 | What | Where |
 |---|---|
