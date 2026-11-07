@@ -19,10 +19,13 @@ Assembles LLM context from:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import pathlib
 import re
+import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from typing import Any
@@ -39,12 +42,29 @@ FAISS_TOP_K = 10
 BM25_TOP_K = 10
 GRAPH_MAX_HOPS = 1
 
+# How long a turn waits for Active Recall before it goes on without hints. The loop
+# serves everyone else meanwhile; a run past the bound finishes in its worker and its
+# result is dropped. In this node's log, 2026-10-28..11-07, 195 turns spent 0.1-9.0 s
+# from the firewall line to the recall line, most near 4 s; the card's stalls were
+# 14.8 s and 53 s.
+_RECALL_WAIT_SEC = 10.0
+# Daemon workers, so a run that outlives its turn never holds the process exit; one
+# run per agent at a time, so a stuck run cannot pile more behind it.
+_RECALL_WORKERS = 2
+_recall_pool: Any = None
+_recall_running: set = set()
+
 _kg_cache: dict = {}
 
 
 def _get_knowledge_graph(agent_root: pathlib.Path):
-    """Cached KnowledgeGraph singleton per agent_root."""
-    key = str(agent_root)
+    """Cached KnowledgeGraph per agent_root and per thread.
+
+    Per thread because recall expands the graph in a worker thread, and a SQLite
+    connection is bound to the thread that opened it. Grafeo keeps one handle per
+    file (`_grafeo_instance_cache`), so every thread still reads the same store.
+    """
+    key = (str(agent_root), threading.get_ident())
     if key not in _kg_cache:
         try:
             from .knowledge_graph import KnowledgeGraph
@@ -152,6 +172,232 @@ def context_usage_ratio(session_state: Optional[Dict[str, Any]]) -> float:
     if measured is None:
         measured = state.get("history_usage_percent") or 0
     return float(measured) / 100.0
+
+
+def _recall_queries(
+    task: Dict[str, Any],
+    conversation_history: Optional[List[Dict[str, Any]]],
+    session_state: Optional[Dict[str, Any]],
+    memory_system_enabled: bool,
+    active_recall_enabled: bool,
+) -> Optional[Tuple[str, str]]:
+    """Q1 and Q2 for this turn, or None when the turn gets no recall.
+
+    Everything that can refuse recall is asked here, before an index is opened or a
+    query encoded. The skip mode is one of them: it depends on the context usage
+    ratio alone, never on what a search would find.
+    """
+    # conversation_history excludes current message (see agent.py:207 prior_history),
+    # so the task's own text is the primary query — fixes off-by-one (S79).
+    _CONTEXT_MSGS = 10
+    _human_text = task_query(task)
+    _context_text = ""
+    if conversation_history or _human_text:
+        _recent = (conversation_history or [])[-_CONTEXT_MSGS:]
+        _context_parts = [_h["content"] for _h in _recent
+                          if _h.get("role") in ("user", "assistant") and _h.get("content")]
+        _context_text = " ".join(_context_parts)
+    if not (_human_text or _context_text):
+        return None
+    if not (memory_system_enabled and active_recall_enabled):
+        return None
+    from .active_recall import should_inject
+    ratio = context_usage_ratio(session_state)
+    if should_inject(ratio) == "skip":
+        log.debug("Active Recall skipped before any search: context %.0f%% full (mode=skip)",
+                  ratio * 100)
+        return None
+    return _human_text, _context_text
+
+
+def _recall_candidates(
+    agent_root: pathlib.Path,
+    human_text: str,
+    context_text: str,
+    embedding_provider: Optional[Any],
+) -> list:
+    """Search every channel for this turn's queries and fuse them. Writes no record.
+
+    Each channel fails alone: a vector failure (the model not cached included) keeps
+    BM25, a graph failure keeps both. What was injected is recorded by
+    get_recall_block, which the caller runs only on a result it got in time.
+    """
+    from .retrieval import make_backend_for_agent
+    import numpy as _np
+
+    spent = dict.fromkeys(("open", "load", "encode", "search", "bm25", "graph", "fuse"), 0.0)
+    began = time.perf_counter()
+
+    @contextlib.contextmanager
+    def _timed(step):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            spent[step] += time.perf_counter() - t0
+
+    try:
+        with _timed("open"):
+            backend = make_backend_for_agent(agent_root)
+    except Exception:
+        log.warning("Active Recall failed: the retrieval backend did not open", exc_info=True)
+        return []
+
+    faiss_results: list = []
+    try:
+        with _timed("load"):
+            loaded = backend.vector.load()
+            if loaded and embedding_provider is None:
+                from .memory import get_embedding_provider
+                embedding_provider = get_embedding_provider(local_files_only=True)
+                log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
+            stale = loaded and backend.vector.needs_rebuild(
+                embedding_provider.model_name,
+                max_tokens=int(embedding_provider.max_tokens),
+                dimensions=embedding_provider.dimensions,
+            )
+        if stale:
+            log.info("Active Recall: vector index needs rebuild "
+                     "(model, window or width changed), skipping search")
+        elif loaded:
+            q1_results: list = []
+            q2_results: list = []
+            if human_text:
+                with _timed("encode"):
+                    q1_vec = _np.array(embedding_provider.embed(human_text), dtype=_np.float32)
+                with _timed("search"):
+                    q1_results = backend.vector.search(q1_vec, FAISS_TOP_K)
+            if context_text:
+                with _timed("encode"):
+                    q2_vec = _np.array(embedding_provider.embed(context_text), dtype=_np.float32)
+                with _timed("search"):
+                    q2_results = backend.vector.search(q2_vec, FAISS_TOP_K)
+            faiss_results = q1_results + q2_results
+            log.debug("Active Recall vector: %d results (Q1=%d + Q2=%d) — %s",
+                      len(faiss_results), len(q1_results), len(q2_results),
+                      [m.get("source_file", "?") for m, _ in faiss_results])
+    except ModelNotCachedError as e:
+        # What the user sees: nothing of it — the text and graph channels still answer.
+        faiss_results = []
+        log.info("Active Recall vector channel skipped: embedding model %s not cached",
+                 e.model_name)
+    except Exception:
+        faiss_results = []
+        log.warning("Active Recall vector channel failed; the other channels go on",
+                    exc_info=True)
+
+    keyword_results: list = []
+    try:
+        with _timed("bm25"):
+            if backend.text.load():
+                keyword_results = backend.text.search(human_text or context_text, BM25_TOP_K)
+                log.debug("Active Recall text: %d results — %s", len(keyword_results),
+                          [m.get("source_file", "?") for m, _ in keyword_results])
+    except Exception:
+        keyword_results = []
+        log.warning("Active Recall text channel failed; the other channels go on",
+                    exc_info=True)
+
+    graph_results: list = []
+    try:
+        with _timed("graph"):
+            seed_files = list({m.get("source_file", "") for m, _ in faiss_results + keyword_results
+                               if m.get("source_file")})
+            kg = _get_knowledge_graph(agent_root) if seed_files else None
+            if kg:
+                graph_results = kg.graph_expand(seed_files, max_hops=GRAPH_MAX_HOPS)
+        if graph_results:
+            # Named like the other two channels, so "does a graph result carry a key
+            # and an address" can be read here rather than waited for in a slot.
+            log.debug("Active Recall Graph L7: %d results from %d seeds — %s",
+                      len(graph_results), len(seed_files),
+                      [(m.get("source_file", "?"), bool(m.get("source_path")))
+                       for m, _ in graph_results])
+    except Exception:
+        # An absent graph is silent (the opener returns None); a broken one is not.
+        graph_results = []
+        log.warning("Active Recall Graph L7 failed; the vector and text channels go on",
+                    exc_info=True)
+
+    results: list = []
+    try:
+        with _timed("fuse"):
+            results = backend.fuser.fuse(faiss_results, keyword_results,
+                                         graph_results=graph_results)
+    except Exception:
+        log.warning("Active Recall failed: fusion", exc_info=True)
+
+    log.info("Active Recall timings: open=%.3fs load=%.3fs encode=%.3fs search=%.3fs "
+             "bm25=%.3fs graph=%.3fs fuse=%.3fs total=%.3fs "
+             "(vector=%d text=%d graph=%d fused=%d)",
+             spent["open"], spent["load"], spent["encode"], spent["search"],
+             spent["bm25"], spent["graph"], spent["fuse"], time.perf_counter() - began,
+             len(faiss_results), len(keyword_results), len(graph_results), len(results))
+    return results
+
+
+async def recall_off_loop(
+    agent_root: pathlib.Path,
+    task: Dict[str, Any],
+    conversation_history: Optional[List[Dict[str, Any]]],
+    session_state: Optional[Dict[str, Any]],
+    embedding_provider: Optional[Any],
+    memory_system_enabled: bool = True,
+    active_recall_enabled: bool = True,
+) -> list:
+    """This turn's fused Active Recall candidates, searched in a worker thread.
+
+    The event loop serves everyone else while indexes load and queries are encoded.
+    The turn waits at most `_RECALL_WAIT_SEC`; past it the turn gets [] and the run
+    finishes in its worker with its result dropped. Nothing is recorded here: the
+    injection log and the offer map are written by get_recall_block, which only the
+    caller runs, on what this returned in time. [] also means no recall this turn.
+    """
+    queries = _recall_queries(task, conversation_history, session_state,
+                              memory_system_enabled, active_recall_enabled)
+    if queries is None:
+        return []
+    key = str(agent_root)
+    if key in _recall_running:
+        log.info("Active Recall skipped: the previous run for %s is still going",
+                 pathlib.Path(agent_root).name)
+        return []
+    global _recall_pool
+    if _recall_pool is None:
+        from .loop import _DaemonToolPool
+        _recall_pool = _DaemonToolPool(workers=_RECALL_WORKERS, name_prefix="dpc_active_recall")
+
+    started = threading.Event()
+    late = threading.Event()
+
+    def _run() -> list:
+        started.set()
+        try:
+            results = _recall_candidates(agent_root, queries[0], queries[1], embedding_provider)
+        finally:
+            _recall_running.discard(key)
+        if late.is_set():
+            log.info("Active Recall: late result for %s dropped (%d candidates)",
+                     pathlib.Path(agent_root).name, len(results))
+        return results
+
+    _recall_running.add(key)
+    try:
+        return await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(_recall_pool, _run),
+            timeout=_RECALL_WAIT_SEC)
+    except asyncio.TimeoutError:
+        late.set()
+        log.info("Active Recall: no hints this turn, retrieval passed the %.1f s bound; "
+                 "it finishes off the loop and its result is dropped", _RECALL_WAIT_SEC)
+        return []
+    except Exception:
+        log.warning("Active Recall failed", exc_info=True)
+        return []
+    finally:
+        # A run cancelled while still queued never starts, so it cannot clear itself.
+        if not started.is_set():
+            _recall_running.discard(key)
 
 
 def _build_budget(
@@ -646,6 +892,7 @@ def build_llm_messages(
     memory_system_enabled: bool = True,
     active_recall_enabled: bool = True,
     max_recall_results: int = 3,
+    recall_results: Optional[list] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -686,6 +933,9 @@ def build_llm_messages(
                                work at all this turn.
         active_recall_enabled: The agent's `memory.active_recall`: the hints alone.
         max_recall_results: The agent's `memory.max_recall_results`, the hint count.
+        recall_results: This turn's fused recall candidates, already searched by the
+                        caller off the event loop (recall_off_loop); [] means none.
+                        None searches here, inline, on the calling thread.
         sent_annotations: message id -> the turn-context tail that was appended to
                           that user message when it was the current one. Replayed
                           byte-identically behind the message so the prompt stays a
@@ -738,114 +988,41 @@ def build_llm_messages(
     # current user message below: it changes with every query, and anything that
     # changes every turn must stand behind the history, not in front of it.
     # Q1 = current user message (from task), Q2 = recent context window.
+    # A caller with a loop to keep free searches off it and passes the result in
+    # (DpcAgent.process via recall_off_loop); None searches here, inline.
     recall_text: Optional[str] = None
-    # conversation_history excludes current message (see agent.py:207 prior_history),
-    # so the task's own text is the primary query — fixes off-by-one (S79).
-    _CONTEXT_MSGS = 10
-    _human_text = task_query(task)
-    if conversation_history or _human_text:
-        _recent = (conversation_history or [])[-_CONTEXT_MSGS:]
-        _context_parts = [_h["content"] for _h in _recent
-                          if _h.get("role") in ("user", "assistant") and _h.get("content")]
-        _context_text = " ".join(_context_parts)
-
-        _query_text = _human_text or _context_text
-        # Both switches are asked before the backend opens or anything is encoded.
-        if _query_text and memory_system_enabled and active_recall_enabled:
-            try:
-                from .active_recall import get_recall_block
-                from .retrieval import make_backend_for_agent
-                from .memory import EmbeddingProvider
-                import numpy as _np
-
-                _backend = make_backend_for_agent(agent_root)
-
-                _faiss_results = []
-                _q1_results = []
-                _q2_results = []
-                if _backend.vector.load():
-                    if embedding_provider is None:
-                        from .memory import get_embedding_provider
-                        embedding_provider = get_embedding_provider(local_files_only=True)
-                        log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
-                    if _backend.vector.needs_rebuild(
-                        embedding_provider.model_name,
-                        max_tokens=int(embedding_provider.max_tokens),
-                        dimensions=embedding_provider.dimensions,
-                    ):
-                        log.info("Active Recall: vector index needs rebuild "
-                                 "(model, window or width changed), skipping search")
-                    else:
-                        if _human_text:
-                            _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32)
-                            _q1_results = _backend.vector.search(_q1_vec, FAISS_TOP_K)
-                        if _context_text:
-                            _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32)
-                            _q2_results = _backend.vector.search(_q2_vec, FAISS_TOP_K)
-                        _faiss_results = _q1_results + _q2_results
-                    log.debug("Active Recall vector: %d results (Q1=%d + Q2=%d) — %s",
-                              len(_faiss_results), len(_q1_results), len(_q2_results),
-                              [m.get("source_file", "?") for m, _ in _faiss_results])
-
-                _keyword_results = []
-                _sparse_query = _human_text or _context_text
-                if _backend.text.load():
-                    _bm25_results = _backend.text.search(_sparse_query, BM25_TOP_K)
-                    _keyword_results.extend(_bm25_results)
-                    log.debug("Active Recall text: %d results — %s", len(_bm25_results),
-                              [m.get("source_file", "?") for m, _ in _bm25_results])
-
-                _graph_results = []
-                try:
-                    from .knowledge_graph import KnowledgeGraph
-                    _kg = _get_knowledge_graph(agent_root)
-                    _seed_files = list({m.get("source_file", "") for m, _ in _faiss_results + _keyword_results if m.get("source_file")})
-                    if _seed_files and _kg:
-                        _graph_results = _kg.graph_expand(_seed_files, max_hops=GRAPH_MAX_HOPS)
-                        if _graph_results:
-                            # Named like the other two channels. Counting them told us
-                            # the channel ran and nothing about what it produced, so
-                            # "does a graph result carry a key and an address" could
-                            # only be answered by waiting for one to win a slot —
-                            # which, at the lowest layer weight, it kept not doing.
-                            log.debug(
-                                "Active Recall Graph L7: %d results from %d seeds — %s",
-                                len(_graph_results), len(_seed_files),
-                                [(m.get("source_file", "?"), bool(m.get("source_path")))
-                                 for m, _ in _graph_results],
-                            )
-                except Exception:
-                    log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
-
-                _results = _backend.fuser.fuse(_faiss_results, _keyword_results, graph_results=_graph_results)
-                _ctx_ratio = context_usage_ratio(session_state)
-                _recall = get_recall_block(
-                    _results, context_usage_ratio=_ctx_ratio, agent_root=agent_root,
-                    max_results=max_recall_results,
-                    extended_read_enabled=extended_read_enabled,
-                    shared_knowledge_enabled=shared_knowledge_enabled,
-                    extended_path_allowed=extended_path_allowed,
-                    # The identity tools.jsonl writes for the same turn — join key,
-                    # not decoration.
-                    task_id=str(task.get("id") or ""),
-                )
-                if _recall:
-                    # Reported by the code that made the choice, not reconstructed
-                    # here: the count is what went in rather than what was considered,
-                    # the order and scores are post-decay, and the mode is the one that
-                    # was acted on instead of a second reading of the threshold.
-                    log.info("Active Recall injected %d of %d candidates (mode=%s): %s",
-                             len(_recall.injected), len(_results), _recall.mode,
-                             _recall.summary())
-                    recall_text = _recall.text
-                else:
-                    log.debug("Active Recall: no results matched query")
-            except ModelNotCachedError as e:
-                # What the user sees: nothing — the turn proceeds with no recall
-                # block, same as an empty result set.
-                log.info("Active Recall skipped: embedding model %s not cached", e.model_name)
-            except Exception:
-                log.warning("Active Recall failed", exc_info=True)
+    if recall_results is None:
+        _queries = _recall_queries(task, conversation_history, session_state,
+                                   memory_system_enabled, active_recall_enabled)
+        recall_results = (_recall_candidates(agent_root, _queries[0], _queries[1],
+                                             embedding_provider) if _queries else [])
+    if recall_results:
+        try:
+            from .active_recall import get_recall_block
+            _recall = get_recall_block(
+                recall_results, context_usage_ratio=context_usage_ratio(session_state),
+                agent_root=agent_root,
+                max_results=max_recall_results,
+                extended_read_enabled=extended_read_enabled,
+                shared_knowledge_enabled=shared_knowledge_enabled,
+                extended_path_allowed=extended_path_allowed,
+                # The identity tools.jsonl writes for the same turn — join key,
+                # not decoration.
+                task_id=str(task.get("id") or ""),
+            )
+            if _recall:
+                # Reported by the code that made the choice, not reconstructed
+                # here: the count is what went in rather than what was considered,
+                # the order and scores are post-decay, and the mode is the one that
+                # was acted on instead of a second reading of the threshold.
+                log.info("Active Recall injected %d of %d candidates (mode=%s): %s",
+                         len(_recall.injected), len(recall_results), _recall.mode,
+                         _recall.summary())
+                recall_text = _recall.text
+            else:
+                log.debug("Active Recall: no results matched query")
+        except Exception:
+            log.warning("Active Recall failed", exc_info=True)
 
     # Tools & capabilities (generated from firewall — transparency)
     capabilities_section = _build_capabilities_section(

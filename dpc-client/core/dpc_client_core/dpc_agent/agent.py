@@ -33,7 +33,7 @@ from .memory import Memory, generate_smart_index
 from .memory_config import get_memory_config
 from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
-from .context import build_llm_messages
+from .context import build_llm_messages, recall_off_loop
 from .sent_annotations import SentAnnotationStore
 from .loop import run_llm_loop, RECORDED_USAGE_FIELDS, task_cost_fields, unmeasured_task_cost
 from .utils import (
@@ -475,6 +475,13 @@ class DpcAgent:
             active_recall = bool(mem_cfg.active_recall)
             max_recall = mem_cfg.max_recall_results
 
+        # Searched in a worker thread under a bound: the loop keeps serving guests,
+        # the gateway and the UI while the queries are encoded.
+        recall_results = await recall_off_loop(
+            self.agent_root, task, prior_history, session_state, self._embedding_provider,
+            memory_system_enabled=memory_system, active_recall_enabled=active_recall,
+        )
+
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
             memory=self.memory,
@@ -499,6 +506,7 @@ class DpcAgent:
             memory_system_enabled=memory_system,
             active_recall_enabled=active_recall,
             max_recall_results=max_recall,
+            recall_results=recall_results,
         )
 
         # Remember the tail exactly as it went out, keyed by the message it went out
