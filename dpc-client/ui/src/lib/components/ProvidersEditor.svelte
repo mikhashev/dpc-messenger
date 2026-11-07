@@ -300,9 +300,9 @@
   // The model files, each overriding the base config's value (empty = keep it).
   const STRATA_FILE_FIELDS: { key: StrataPathKey; label: string; hint: string }[] = [
     { key: 'native_gguf', label: 'Model, first shard (--native)',
-      hint: 'The first shard of the model, …-00001-of-0000N.gguf. Picking it fills the PLE shard below with the matching …-00002-of-0000N.gguf beside it; that suggestion stays editable.' },
+      hint: 'The first shard of the model, …-00001-of-0000N.gguf. For a two-shard set, picking it fills the PLE shard below with the second shard (editable). For more shards the PLE field stays empty and the engine finds the table itself.' },
     { key: 'ple_gguf', label: 'PLE shard (--ple-gguf)',
-      hint: 'The shard holding the per-layer embeddings, usually the second one beside the first. Empty keeps the base config\'s.' },
+      hint: 'The shard holding the per-layer embeddings. Empty keeps the base config\'s, except when the first shard above is changed: then the old model\'s PLE shard is not used and the engine finds the table in the new model.' },
     { key: 'pack_dir', label: 'Expert pack folder (--pack)',
       hint: 'The packed experts the engine streams from disk, with the tokenizer inside. Empty keeps the base config\'s.' },
     { key: 'mtp_dir', label: 'MTP folder (--mtp)',

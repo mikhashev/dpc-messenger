@@ -196,17 +196,21 @@ export function engineAdmissionLine(a: EngineCacheAdmission | null | undefined):
 
 const SHARD_RE = /^(.*)-(\d{5})-of-(\d{5})(\.gguf)$/i;
 
-/** The second shard beside a first shard `...-00001-of-0000N.gguf`, or null. */
+/**
+ * The second shard beside the first shard of a TWO-shard set, or null. Strata's setup
+ * passes `--ple-gguf` only for at most two shards; for more, the engine finds the
+ * PLE table's shard itself (in a 3-shard Unsloth set shard 2 holds the weights).
+ */
 export function suggestPleGguf(native: string | undefined | null): string | null {
   const m = SHARD_RE.exec((native ?? '').trim());
-  if (!m || parseInt(m[2], 10) !== 1 || parseInt(m[3], 10) < 2) return null;
+  if (!m || parseInt(m[2], 10) !== 1 || parseInt(m[3], 10) !== 2) return null;
   return `${m[1]}-00002-of-${m[3]}${m[4]}`;
 }
 
 /**
- * The `ple_gguf` to show after the first shard changed: the new suggestion
- * when the field is empty or still holds the suggestion made for the previous
- * shard; otherwise what the user typed stays.
+ * The `ple_gguf` to show after the first shard changed: the new suggestion (or
+ * nothing) when the field is empty or still holds the suggestion made for the
+ * previous shard; otherwise what the user typed stays.
  */
 export function pleAfterNativeChange(
   currentPle: string | undefined | null,
@@ -216,7 +220,7 @@ export function pleAfterNativeChange(
   const current = (currentPle ?? '').trim();
   const suggested = suggestPleGguf(newNative);
   const stale = suggestPleGguf(previousNative);
-  if (current === '' || (stale !== null && current === stale)) return suggested ?? (current || undefined);
+  if (current === '' || (stale !== null && current === stale)) return suggested ?? undefined;
   return current;
 }
 

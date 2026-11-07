@@ -12,7 +12,11 @@ const spec = (key: string) => STRATA_MODEL_PARAMS.find((s) => s.key === key)!;
 describe('suggestPleGguf', () => {
   it('suggests the second shard beside the first', () => {
     expect(suggestPleGguf('D:\m\Flash-IQ3_XXS-00001-of-00002.gguf')).toBe('D:\m\Flash-IQ3_XXS-00002-of-00002.gguf');
-    expect(suggestPleGguf('/m/x-00001-of-00004.GGUF')).toBe('/m/x-00002-of-00004.GGUF');
+  });
+
+  it('suggests nothing for a set of more than two shards (Strata passes no --ple-gguf there)', () => {
+    expect(suggestPleGguf('/m/x-00001-of-00004.GGUF')).toBeNull();
+    expect(suggestPleGguf('/m/Qwen3.8-Flash-Next-UD-IQ2_XS-00001-of-00003.gguf')).toBeNull();
   });
 
   it('suggests nothing for another shard, a single shard or a plain file', () => {
@@ -39,6 +43,15 @@ describe('pleAfterNativeChange', () => {
 
   it('keeps what the user typed', () => {
     expect(pleAfterNativeChange('E:/own.gguf', a1, b1)).toBe('E:/own.gguf');
+  });
+
+  it('clears a stale suggestion when the new first shard has none', () => {
+    const c1 = 'D:/c-00001-of-00003.gguf';
+    expect(pleAfterNativeChange(a2, a1, c1)).toBeUndefined();
+  });
+
+  it('keeps what the user typed when the new first shard has no suggestion', () => {
+    expect(pleAfterNativeChange('E:/own.gguf', a1, 'D:/c-00001-of-00003.gguf')).toBe('E:/own.gguf');
   });
 
   it('leaves an empty field empty when the new file has no sibling', () => {

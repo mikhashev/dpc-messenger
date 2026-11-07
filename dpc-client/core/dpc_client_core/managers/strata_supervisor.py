@@ -363,13 +363,25 @@ STRATA_PATH_KEYS = (
 _SHARD_RE = re.compile(r"^(?P<stem>.*)-(?P<i>\d{5})-of-(?P<n>\d{5})(?P<ext>\.gguf)$", re.IGNORECASE)
 
 
+def _is_sibling_shard(a: Any, b: Any) -> bool:
+    """Both name shards of one set: the same stem and the same `-of-N`."""
+    ma = _SHARD_RE.match(str(a or "").strip())
+    mb = _SHARD_RE.match(str(b or "").strip())
+    return bool(ma and mb and ma["stem"] == mb["stem"] and ma["n"] == mb["n"])
+
+
 def suggest_ple_gguf(native_gguf: Any) -> Optional[str]:
-    """The second shard beside a first shard `...-00001-of-0000N.gguf`, or None.
+    """The second shard beside the first shard of a TWO-shard set, or None.
+
+    Strata's own setup passes `--ple-gguf` only for a set of at most two shards
+    (setup.py: `len(shards) <= 2`); for more it passes `--native <shard 1>` alone and
+    the engine finds the shard holding `per_layer_token_embd.weight` itself. In a
+    3-shard Unsloth set shard 2 holds the weights, so naming it would be wrong.
 
     A suggestion only: the UI pre-fills it when the first shard is picked, and
     nothing applies it to an alias that leaves `ple_gguf` unset."""
     m = _SHARD_RE.match(str(native_gguf or "").strip())
-    if not m or int(m["i"]) != 1 or int(m["n"]) < 2:
+    if not m or int(m["i"]) != 1 or int(m["n"]) != 2:
         return None
     return f"{m['stem']}-00002-of-{m['n']}{m['ext']}"
 
@@ -1052,6 +1064,13 @@ class StrataSupervisor(LlamaServerSupervisor):
 
         # Model files: each set key replaces the base's flag value; unset keeps it.
         base_native = _flag_value(args, "--native")
+        # A new first shard without its own ple_gguf must not inherit the base model's
+        # PLE shard: the engine finds the table in the new model itself. Only a base
+        # --ple-gguf that is a sibling shard of the base --native goes; anything else
+        # (a separate table file) stays, as the vision block's model does below.
+        if c.get("native_gguf") and not c.get("ple_gguf") and _is_sibling_shard(
+                base_native, _flag_value(args, "--ple-gguf")):
+            args = _drop_flag(args, lambda f: f == "--ple-gguf")
         for key, flag in MODEL_FILE_FLAGS.items():
             if c.get(key):
                 args = _set_flag(args, flag, c[key])

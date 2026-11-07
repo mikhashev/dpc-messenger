@@ -85,6 +85,29 @@ class TestModelFileOverrides:
         assert _value(args, "--control-vector-scaled") == "D:/cv/refusal.gguf:1.0"
         assert cfg["vision"]["mmproj"] == "D:/mmproj.gguf"
 
+    @pytest.mark.parametrize("new_native", [
+        "E:/m/Qwen3.8-Flash-Next-UD-IQ2_XS-00001-of-00003.gguf",
+        "E:/m/other-00001-of-00002.gguf",
+    ])
+    def test_a_new_first_shard_drops_the_base_models_ple_shard(self, tmp_path, new_native):
+        root = _install(tmp_path, args=_base_with())
+        args = _sup(root, native_gguf=new_native).build_start_config(1)["args"]
+        assert _value(args, "--native") == new_native
+        assert "--ple-gguf" not in args
+        assert _value(args, "--mtp") == "D:/mtp/rt"
+
+    def test_a_base_ple_that_is_not_a_sibling_shard_is_kept(self, tmp_path):
+        root = _install(tmp_path, args=BASE_ARGS + ["--ple-gguf", "D:/tables/ple-fp8.gguf"])
+        args = _sup(root, native_gguf="E:/m/other-00001-of-00003.gguf").build_start_config(1)["args"]
+        assert _value(args, "--ple-gguf") == "D:/tables/ple-fp8.gguf"
+
+    def test_an_explicit_ple_gguf_wins_over_the_drop(self, tmp_path):
+        root = _install(tmp_path, args=_base_with())
+        args = _sup(root, native_gguf="E:/m/other-00001-of-00003.gguf",
+                    ple_gguf="E:/m/ple.gguf").build_start_config(1)["args"]
+        assert _value(args, "--ple-gguf") == "E:/m/ple.gguf"
+        assert args.count("--ple-gguf") == 1
+
     def test_a_flag_the_base_lacks_is_appended(self, tmp_path):
         args = _sup(_install(tmp_path), mtp_dir="E:/mtp").build_start_config(1)["args"]
         assert _value(args, "--mtp") == "E:/mtp"
@@ -167,7 +190,10 @@ class TestTheModelParameters:
 
 def test_the_second_shard_is_suggested_beside_the_first():
     assert suggest_ple_gguf("D:\\m\\Flash-IQ3_XXS-00001-of-00002.gguf") == "D:\\m\\Flash-IQ3_XXS-00002-of-00002.gguf"
-    assert suggest_ple_gguf("/m/x-00001-of-00004.GGUF") == "/m/x-00002-of-00004.GGUF"
+    # More than two shards: Strata's setup passes no --ple-gguf and the engine finds the
+    # table's shard itself; shard 2 of a 3-shard Unsloth set holds the weights.
+    assert suggest_ple_gguf("/m/x-00001-of-00004.GGUF") is None
+    assert suggest_ple_gguf("/m/Qwen3.8-Flash-Next-UD-IQ2_XS-00001-of-00003.gguf") is None
     assert suggest_ple_gguf("/m/x-00002-of-00002.gguf") is None
     assert suggest_ple_gguf("/m/x-00001-of-00001.gguf") is None
     assert suggest_ple_gguf("/m/single.gguf") is None
