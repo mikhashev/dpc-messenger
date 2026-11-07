@@ -12,23 +12,26 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
 
 log = logging.getLogger(__name__)
 
 
-def _get_archive_dir(ctx: ToolContext) -> Path:
-    """Get the archive directory for the agent's conversation."""
-    # conversation_monitor knows the conversation_id and history path
+_NO_CONVERSATION = "No conversation context; cannot read session archives."
+
+
+def _get_archive_dir(ctx: ToolContext) -> Optional[Path]:
+    """The archive of the conversation this tool runs in, or None without one.
+
+    No fallback folder: the one that stood here was agent_001's, so every agent
+    without a monitor read agent_001's sessions.
+    """
     monitor = ctx.conversation_monitor
-    if monitor:
-        history_path = monitor._get_history_path()
-        return history_path.parent / "archive"
-    # Fallback: derive from dpc_service
-    dpc_dir = Path.home() / ".dpc"
-    return dpc_dir / "conversations" / "agent_001" / "archive"
+    if not monitor:
+        return None
+    return monitor._get_history_path().parent / "archive"
 
 
 def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0) -> str:
@@ -53,6 +56,8 @@ def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0) -> 
     last_n = min(max(1, last_n), 50)
     offset = max(0, offset)
     archive_dir = _get_archive_dir(ctx)
+    if archive_dir is None:
+        return _NO_CONVERSATION
 
     if not archive_dir.exists():
         return json.dumps({"error": "No archive directory found", "sessions": []})
@@ -173,6 +178,8 @@ def read_session_detail(
     offset = max(0, offset)
     max_message_chars = max(100, max_message_chars)
     archive_dir = _get_archive_dir(ctx)
+    if archive_dir is None:
+        return _NO_CONVERSATION
 
     # ADR-008: try direct path first (flat layout), then rglob (YYYY/MM layout)
     archive_path = archive_dir / filename
@@ -282,6 +289,8 @@ def search_session_archives(
     snippet_chars = max(20, snippet_chars)
 
     archive_dir = _get_archive_dir(ctx)
+    if archive_dir is None:
+        return _NO_CONVERSATION
     if not archive_dir.exists():
         return json.dumps({"error": "No archive directory found", "matches": []})
 
