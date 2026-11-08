@@ -54,11 +54,14 @@ class FakeService:
 class FakeQuery:
     def __init__(self, data, chat_id):
         self.data = data
-        self.message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id))
+        # A private chat with the presser: the chat id is the user's id.
+        self.message = types.SimpleNamespace(
+            chat=types.SimpleNamespace(id=chat_id, type="private"))
+        self.from_user = types.SimpleNamespace(id=chat_id)
         self.answered = False
         self.texts = []
 
-    async def answer(self):
+    async def answer(self, *args, **kwargs):
         self.answered = True
 
     async def edit_message_text(self, text, **kwargs):

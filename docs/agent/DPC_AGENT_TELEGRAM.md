@@ -280,6 +280,10 @@ await send_user_message(
   group writes under that group's ID. So the agent's memory answers a Telegram turn only
   when every message in it came from `telegram_owner_user_id` in a private chat with the
   bot; with no owner ID set, no Telegram turn gets it
+- The same goes for the inline buttons (knowledge vote, shell approval, queue approval):
+  they count only when `telegram_owner_user_id` presses them, in any allowed chat; with
+  no owner ID set, only a private chat with the presser counts, never a group. Anyone
+  else gets an alert and the message stays as it was (Mike's call, 2026-11-08)
 - Each agent must have explicit `telegram_enabled = true`
 - Agent can only send to its linked `telegram_chat_id`
 - Messages are sent over Telegram's encrypted connection

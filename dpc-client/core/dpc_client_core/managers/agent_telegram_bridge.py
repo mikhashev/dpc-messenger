@@ -865,10 +865,14 @@ Send a voice message and it will be transcribed and processed\\.
         Callback data format: "vote:{proposal_id}:{approve|reject}"
         """
         query = update.callback_query
+        chat_id = str(query.message.chat.id)
+        allowed = chat_id in self.allowed_chat_ids
+        if allowed and not self._is_owner_press(query):
+            await self._refuse_press(query, "vote")
+            return
         await query.answer()  # Acknowledge the callback to stop the loading spinner
 
-        chat_id = str(query.message.chat.id)
-        if chat_id not in self.allowed_chat_ids:
+        if not allowed:
             await query.edit_message_text("⛔ Unauthorized.")
             return
 
@@ -955,6 +959,11 @@ Send a voice message and it will be transcribed and processed\\.
         Callback data format: "shell:{request_id}:{approve|reject}"
         """
         query = update.callback_query
+        chat_id = str(query.message.chat.id)
+        allowed = chat_id in self.allowed_chat_ids
+        if allowed and not self._is_owner_press(query):
+            await self._refuse_press(query, "shell")
+            return
         try:
             await query.answer()
         except Exception as e:
@@ -963,8 +972,7 @@ Send a voice message and it will be transcribed and processed\\.
             # how a press ends up looking like nothing happened at all.
             log.info("Could not acknowledge shell approval press: %s", e)
 
-        chat_id = str(query.message.chat.id)
-        if chat_id not in self.allowed_chat_ids:
+        if not allowed:
             await query.edit_message_text("⛔ Unauthorized.")
             return
 
@@ -1007,13 +1015,17 @@ Send a voice message and it will be transcribed and processed\\.
         two of anything.
         """
         query = update.callback_query
+        chat_id = str(query.message.chat.id)
+        allowed = chat_id in self.allowed_chat_ids
+        if allowed and not self._is_owner_press(query):
+            await self._refuse_press(query, "schedule")
+            return
         try:
             await query.answer()
         except Exception as e:
             log.info("Could not acknowledge schedule approval press: %s", e)
 
-        chat_id = str(query.message.chat.id)
-        if chat_id not in self.allowed_chat_ids:
+        if not allowed:
             await query.edit_message_text("⛔ Unauthorized.")
             return
 
@@ -1479,6 +1491,33 @@ Send a voice message and it will be transcribed and processed\\.
         return (user_id == self._owner_user_id
                 and getattr(chat, "type", None) == "private"
                 and str(getattr(chat, "id", None)) == str(user_id))
+
+    def _is_owner_press(self, query) -> bool:
+        """May this button press decide for the owner? The vote and approval buttons
+        act as this node, so who pressed matters, not where. With an owner id
+        configured only that user counts, in any allowed chat (a group included); with
+        none, only a private chat with the presser, which is where a lone owner always
+        pressed. Mike's call, 2026-11-08.
+        """
+        user_id = getattr(getattr(query, "from_user", None), "id", None)
+        if not isinstance(user_id, int) or isinstance(user_id, bool):
+            return False
+        if self._owner_user_id is not None:
+            return user_id == self._owner_user_id
+        chat = getattr(getattr(query, "message", None), "chat", None)
+        return (getattr(chat, "type", None) == "private"
+                and str(getattr(chat, "id", None)) == str(user_id))
+
+    async def _refuse_press(self, query, handler: str) -> None:
+        """Tell the presser it is not theirs to answer; leave the message and the
+        pending request untouched so the owner can still press the same buttons."""
+        log.info("Refused a %s button press from user %s in chat %s: not the owner",
+                 handler, getattr(getattr(query, "from_user", None), "id", None),
+                 getattr(getattr(getattr(query, "message", None), "chat", None), "id", None))
+        try:
+            await query.answer("Only the owner can answer this.", show_alert=True)
+        except Exception as e:
+            log.info("Could not answer a refused %s press: %s", handler, e)
 
     async def _handle_message(self, update, context):
         """Handle incoming text message: it joins the chat's burst."""
