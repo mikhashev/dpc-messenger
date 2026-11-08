@@ -65,5 +65,6 @@ class TelegramIncomingHandler(MessageHandler):
 
     async def _handle_config_change(self, data: Dict[str, Any]):
         """Handle Telegram configuration change."""
-        self.logger.info(f"Telegram config change: {data}")
+        # Field names only: the change may carry the bot token.
+        self.logger.info("Telegram config change: fields %s", sorted(data))
         # Could trigger config reload here

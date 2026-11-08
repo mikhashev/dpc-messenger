@@ -307,16 +307,65 @@ ALLOWED_COMMANDS: frozenset = frozenset({
 # What an environment variable's name can be. Anything else in an
 # `api_key_env` field is most likely the key itself, pasted into the wrong box.
 ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_SECRET_FIELD_WORDS = ("key", "token", "secret", "password")
-_SK_VALUE_RE = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
+# A field whose lower-cased name is, or ends in, one of these holds a secret
+# (api_key, bot_token, [turn] credential, botToken, ...).
+_SECRET_FIELD_WORDS = ("key", "token", "secret", "password", "credential")
+# Named like a secret, but an identifier the log needs: an instruction set's name.
+_NOT_SECRET_FIELDS = frozenset({"set_key"})
+# An sk- word in a text that is about a key (an error detail): short ones count.
+_SK_VALUE_RE = re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{4,}")
+# Secrets recognisable by shape anywhere in a text; group `p` is kept in front
+# of the mark. Each starts with a literal and checks the character before it
+# afterwards, which lets re skip ahead: one alternation was 25x slower on 2 KB.
+_SECRET_VALUE_RES = (
+    re.compile(r"(?P<p>sk-)(?<![A-Za-z0-9]sk-)[A-Za-z0-9_\-]{20,}"),  # OpenAI, Anthropic, DeepSeek
+    re.compile(r"(?P<p>AIza)(?<![A-Za-z0-9]AIza)[0-9A-Za-z_\-]{35}"),  # Gemini
+    re.compile(r"(?P<p>hf_)(?<![A-Za-z0-9]hf_)[A-Za-z0-9]{30,}"),  # Hugging Face
+    re.compile(r"(?P<p>ghp_)(?<![A-Za-z0-9]ghp_)[A-Za-z0-9]{30,}"),  # GitHub
+    re.compile(r"(?P<p>github_pat_)(?<![A-Za-z0-9]github_pat_)[A-Za-z0-9_]{30,}"),
+    # Telegram bot token: the bot's id stays, the part after the colon goes.
+    # No boundary before the id, an API URL has /bot<token>.
+    re.compile(r"(?P<p>:)(?<=\d{6}:)[A-Za-z0-9_\-]{30,}(?![A-Za-z0-9_\-])"),
+    re.compile(r"(?P<p>)eyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),  # JWT (Hub)
+)
+# A quoted pair whose name is secret-like, as JSON or a Python repr prints it,
+# also inside an escaped JSON string: "api_key": "...", 'bot_token': '...'.
+_SECRET_PAIR_RE = re.compile(
+    r"(?P<head>(?P<q>[\"'])(?P<name>[A-Za-z0-9_]*(?:"
+    + "|".join(_SECRET_FIELD_WORDS)
+    + r"))\\?(?P=q)\s*[:=]\s*(?P<q2>\\?[\"']))(?P<value>(?:(?!(?P=q2)).)+)(?P=q2)",
+    re.IGNORECASE,
+)
 _REDACTED = "<redacted>"
+
+
+def _redact_secret_value(m: "re.Match") -> str:
+    return m.group("p") + _REDACTED
+
+
+def _redact_secret_pair(m: "re.Match") -> str:
+    if m.group("name").lower() in _NOT_SECRET_FIELDS:
+        return m.group(0)
+    return m.group("head") + _REDACTED + m.group("q2")
+
+
+def _redact_secrets_in_text(text: str) -> str:
+    """`text` with secret-named quoted pairs and secret-shaped values replaced."""
+    if not text:
+        return text
+    text = _SECRET_PAIR_RE.sub(_redact_secret_pair, text)
+    for pattern in _SECRET_VALUE_RES:
+        text = pattern.sub(_redact_secret_value, text)
+    return text
 
 
 def _redact_secrets(value, field: str = ""):
     """A copy of `value` with secrets replaced, at any depth.
 
-    Redacted: any non-empty `api_key`; an `api_key_env` that is not a valid
-    variable name; an sk-... value under a field named like key/token/secret.
+    Redacted: any non-empty string under a field whose name is or ends in a
+    _SECRET_FIELD_WORDS word (_NOT_SECRET_FIELDS excepted), but an
+    `api_key_env` holding a valid variable name stays; and in every other
+    string, whatever _redact_secrets_in_text finds by shape.
     """
     if isinstance(value, dict):
         return {k: _redact_secrets(v, str(k)) for k, v in value.items()}
@@ -325,13 +374,12 @@ def _redact_secrets(value, field: str = ""):
     if not isinstance(value, str) or not value:
         return value
     name = field.lower()
-    if name == "api_key":
+    if name == "api_key_env":
+        if not ENV_VAR_NAME_RE.fullmatch(value.strip()):
+            return _REDACTED
+    elif name not in _NOT_SECRET_FIELDS and name.endswith(_SECRET_FIELD_WORDS):
         return _REDACTED
-    if name == "api_key_env" and not ENV_VAR_NAME_RE.fullmatch(value.strip()):
-        return _REDACTED
-    if any(w in name for w in _SECRET_FIELD_WORDS) and _SK_VALUE_RE.search(value):
-        return _REDACTED
-    return value
+    return _redact_secrets_in_text(value)
 
 
 def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
@@ -373,7 +421,9 @@ def _log_error_under_ok(command: str, result, envelope: str = "OK") -> None:
     detail = result.get("message") or result.get("error") or ""
     logger.warning(
         "Command '%s' answered an error under an OK envelope: %s",
-        command, _SK_VALUE_RE.sub("sk-" + _REDACTED, str(detail))[:300] or "(no message given)",
+        command,
+        _redact_secrets_in_text(_SK_VALUE_RE.sub("sk-" + _REDACTED, str(detail)))[:300]
+        or "(no message given)",
     )
 
 
@@ -629,7 +679,9 @@ class LocalApiServer:
                         log_fn = _UI_LOG_LEVELS.get(level, ui_logger.info)
                         # Sanitize surrogates — emojis from JS UTF-16 can produce lone surrogates
                         safe_msg = msg.encode("utf-8", errors="replace").decode("utf-8")
-                        log_fn("[%s] %s", context, safe_msg)
+                        # The UI mirrors every console line, configs and form state included.
+                        log_fn("[%s] %s", _redact_secrets_in_text(str(context)),
+                               _redact_secrets_in_text(safe_msg))
                         await self._send_locked(websocket, json.dumps({"id": command_id, "command": command, "status": "OK", "payload": {}}))
                         continue
 

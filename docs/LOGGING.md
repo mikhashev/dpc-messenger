@@ -24,6 +24,14 @@ D-PC Messenger uses Python's standard library `logging` module for comprehensive
 2025-12-01 14:23:45,456 - INFO - dpc_client_core.p2p_manager - Direct TLS server listening on 0.0.0.0:8888
 ```
 
+**Secrets are redacted.** The UI command payloads logged at DEBUG hide any string under a
+field whose name is or ends in `key`, `token`, `secret`, `password` or `credential`
+(`set_key`, and an `api_key_env` holding a variable name, stay readable). Every line written
+to `dpc-client.log`, `ui.log` and the console also passes a filter that replaces values by
+shape: `sk-` keys, Gemini `AIza…`, Hugging Face `hf_…`, GitHub `ghp_…`/`github_pat_…`, JWTs,
+the secret half of a Telegram bot token, and a quoted `"api_key": "…"`-style pair. A key
+with no distinctive shape is caught only where it sits under such a field name.
+
 ## Configuration
 
 ### Basic Configuration (config.ini)

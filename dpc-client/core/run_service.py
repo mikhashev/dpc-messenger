@@ -255,6 +255,7 @@ import re
 import traceback
 from pathlib import Path
 from dpc_client_core.service import CoreService
+from dpc_client_core.local_api import _redact_secrets_in_text
 from dpc_client_core.model_download_service import VOICE_MEMORY_COMMAND, voice_memory_installed
 from dpc_client_core.dpc_agent.loop import shutdown_shared_executor
 from dpc_client_core.__version__ import __version__
@@ -331,6 +332,31 @@ class Base64TruncatingFilter(logging.Filter):
         return True
 
 
+class _SecretRedactingFilter(logging.Filter):
+    """Redacts secret-shaped values from every record a handler writes.
+
+    The backstop behind the call sites that redact for themselves: a library
+    logging a Telegram API URL, an exception text quoting a token. The message
+    is formatted here, so the args are dropped; a traceback is formatted here
+    too, because its text is where an exception's message lands.
+    """
+
+    def filter(self, record):
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True  # the handler reports a broken record to stderr, not to the file
+        record.msg = _redact_secrets_in_text(message)
+        record.args = None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = _redact_secrets_in_text(record.exc_text)
+        if record.stack_info:
+            record.stack_info = _redact_secrets_in_text(record.stack_info)
+        return True
+
+
 def setup_logging(settings):
     """Configure logging based on settings."""
     # Create log directory
@@ -356,6 +382,9 @@ def setup_logging(settings):
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     ))
     file_handler.addFilter(base64_filter)  # Add base64 truncating filter
+    # Last, so it sees the message as written. Agents read this file through run_shell.
+    secret_filter = _SecretRedactingFilter()
+    file_handler.addFilter(secret_filter)
     root_logger.addHandler(file_handler)
 
     # Console handler (optional)
@@ -366,6 +395,7 @@ def setup_logging(settings):
             '%(levelname)-8s %(message)s'
         ))
         console_handler.addFilter(base64_filter)  # Add base64 truncating filter
+        console_handler.addFilter(secret_filter)
         root_logger.addHandler(console_handler)
 
     # Quiet noisy third-party loggers (see QUIET_THIRD_PARTY_LOGGERS above),
@@ -389,6 +419,7 @@ def setup_logging(settings):
     ui_file_handler.setFormatter(logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s'
     ))
+    ui_file_handler.addFilter(secret_filter)
     ui_logger = logging.getLogger("dpc_ui")
     ui_logger.setLevel(logging.DEBUG)
     ui_logger.addHandler(ui_file_handler)

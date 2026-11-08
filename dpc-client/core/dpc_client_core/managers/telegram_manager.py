@@ -380,9 +380,10 @@ class TelegramBotManager:
                 await self._broadcast_error_event("Library Missing", error_msg)
                 raise
 
-            except InvalidToken as e:
+            except InvalidToken:
                 self._running = False
-                logger.error(f"Invalid Telegram bot token: {e}", exc_info=True)
+                # Not the exception: python-telegram-bot quotes the token in its text.
+                logger.error("Invalid Telegram bot token: Telegram rejected it")
                 error_msg = (
                     "Your Telegram bot token is invalid or expired. "
                     "Please regenerate it in BotFather and update config.ini."
