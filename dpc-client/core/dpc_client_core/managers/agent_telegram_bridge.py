@@ -992,10 +992,10 @@ Send a voice message and it will be transcribed and processed\\.
         self._pending_shell.pop(request_id, None)
 
         try:
-            if decision == "approve":
-                result = await service.shell_approve_command(request_id)
-            else:
-                result = await service.shell_reject_command(request_id)
+            # Not the public commands: those are the desktop's and say so.
+            result = await service.resolve_shell_approval(
+                request_id, approved=(decision == "approve"), resolved_via="telegram",
+            )
 
             if result.get("status") == "ok":
                 label = "✅ Approved — running." if decision == "approve" else "❌ Rejected."

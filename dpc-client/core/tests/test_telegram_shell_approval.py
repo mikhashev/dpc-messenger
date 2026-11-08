@@ -41,13 +41,11 @@ class FakeService:
         self.status = status
         self.approved = []
         self.rejected = []
+        self.surfaces = []
 
-    async def shell_approve_command(self, request_id, add_to_whitelist=False):
-        self.approved.append(request_id)
-        return {"status": self.status, "request_id": request_id}
-
-    async def shell_reject_command(self, request_id):
-        self.rejected.append(request_id)
+    async def resolve_shell_approval(self, request_id, approved, resolved_via, add_to_whitelist=False):
+        (self.approved if approved else self.rejected).append(request_id)
+        self.surfaces.append(resolved_via)
         return {"status": self.status, "request_id": request_id}
 
 
@@ -127,6 +125,7 @@ async def test_yes_approves_through_the_service():
 
     assert service.approved == ["abc123"]
     assert service.rejected == []
+    assert service.surfaces == ["telegram"]
     assert query.texts and "Approved" in query.texts[-1]
     assert "abc123" not in bridge._pending_shell
 

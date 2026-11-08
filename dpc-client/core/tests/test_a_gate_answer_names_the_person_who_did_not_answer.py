@@ -35,6 +35,15 @@ class _Service:
         pass
 
 
+def _core_service(p2p_manager):
+    """The real service methods, with only the parts a rejection touches."""
+    service = CoreService.__new__(CoreService)
+    service.p2p_manager = p2p_manager
+    service.local_api = None
+    service._get_agent_telegram_bridge = lambda agent_id: None
+    return service
+
+
 def _ctx(tmp_path, name):
     return types.SimpleNamespace(
         agent_root=tmp_path, dpc_service=_Service(name),
@@ -64,10 +73,7 @@ def test_a_refusal_from_the_service_reaches_the_agent_with_the_owner_name(tmp_pa
     try:
         ctx = _ctx(tmp_path, "Mike")
         ctx._event_loop = loop
-        service = types.SimpleNamespace(
-            p2p_manager=ctx.dpc_service.p2p_manager,
-            announce_shell_approval_closed=ctx.dpc_service.announce_shell_approval_closed,
-        )
+        service = _core_service(ctx.dpc_service.p2p_manager)
         out = {}
         t = threading.Thread(
             target=lambda: out.update(r=shell._request_approval(ctx, "rm -rf x", "tier1", "", 10)))
@@ -78,9 +84,9 @@ def test_a_refusal_from_the_service_reaches_the_agent_with_the_owner_name(tmp_pa
             threading.Event().wait(0.01)
         (request_id,) = list(shell._pending_approvals)
         asyncio.run_coroutine_threadsafe(
-            CoreService.shell_reject_command(service, request_id), loop).result(5)
+            service.shell_reject_command(request_id), loop).result(5)
         t.join(5)
-        assert out["r"] == "Command manually rejected by Mike"
+        assert out["r"] == "Command rejected by Mike on the desktop."
     finally:
         loop.call_soon_threadsafe(loop.stop)
         runner.join(timeout=5)
@@ -90,9 +96,6 @@ def test_a_refusal_from_the_service_reaches_the_agent_with_the_owner_name(tmp_pa
 def test_a_refusal_with_no_display_name_says_user(tmp_path):
     entry = {"event": threading.Event(), "agent_id": ""}
     shell._pending_approvals["r1"] = entry
-    service = types.SimpleNamespace(
-        p2p_manager=types.SimpleNamespace(get_display_name=lambda: ""),
-        announce_shell_approval_closed=_Service("x").announce_shell_approval_closed,
-    )
-    asyncio.run(CoreService.shell_reject_command(service, "r1"))
-    assert entry["result"] == "Command manually rejected by User"
+    service = _core_service(types.SimpleNamespace(get_display_name=lambda: ""))
+    asyncio.run(service.shell_reject_command("r1"))
+    assert entry["result"] == "Command rejected by User on the desktop."

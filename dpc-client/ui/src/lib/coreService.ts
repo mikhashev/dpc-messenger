@@ -942,8 +942,8 @@ export async function connectToCoreService() {
                 // of 35 events on 2026-08-25, always in the direction that
                 // makes the approval gate look like a wall. Log from here.
                 else if (message.event === "shell_approval_resolved") {
-                    const { resolution, outcome, request_id } = message.payload ?? {};
-                    console.log(`Shell approval ${resolution}: ${request_id} — ${outcome ?? ""}`);
+                    const { resolution, outcome, request_id, resolved_via } = message.payload ?? {};
+                    console.log(`Shell approval ${resolution}: ${request_id} — ${outcome ?? ""}${resolved_via ? ` [${resolved_via}]` : ""}`);
                     const { pendingShellApprovals } = await import("$lib/services/shellApproval");
                     pendingShellApprovals.update((list: any[]) =>
                         list.filter((r: any) => r.request_id !== message.payload.request_id)

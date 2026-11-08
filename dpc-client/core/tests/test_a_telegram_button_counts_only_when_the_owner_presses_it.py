@@ -27,7 +27,7 @@ ALERT = "Only the owner can answer this."
 # handler name, callback prefix, the service method it calls, the pending map
 HANDLERS = [
     ("_handle_vote_callback", "vote", "vote_knowledge_commit", None),
-    ("_handle_shell_callback", "shell", "shell_approve_command", "_pending_shell"),
+    ("_handle_shell_callback", "shell", "resolve_shell_approval", "_pending_shell"),
     ("_handle_schedule_callback", "schedule", "resolve_schedule_approval", "_pending_schedule"),
 ]
 
@@ -39,6 +39,7 @@ def _bridge(owner_user_id=None, chats=(str(OWNER_ID), str(OTHER_ID), str(GROUP_C
         vote_knowledge_commit=AsyncMock(return_value={"status": "success"}),
         shell_approve_command=AsyncMock(return_value={"status": "ok"}),
         shell_reject_command=AsyncMock(return_value={"status": "ok"}),
+        resolve_shell_approval=AsyncMock(return_value={"status": "ok"}),
         resolve_schedule_approval=AsyncMock(return_value={"status": "success"}),
     )
     bridge._agent_manager = SimpleNamespace(service=service)
@@ -70,7 +71,7 @@ def _counted(q, service, method):
 
 def _refused(q, service, bridge, pending):
     for name in ("vote_knowledge_commit", "shell_approve_command", "shell_reject_command",
-                 "resolve_schedule_approval"):
+                 "resolve_shell_approval", "resolve_schedule_approval"):
         getattr(service, name).assert_not_awaited()
     q.edit_message_text.assert_not_awaited()
     q.answer.assert_awaited_once_with(ALERT, show_alert=True)
@@ -223,7 +224,7 @@ async def test_a_refused_press_whose_alert_cannot_be_sent_still_touches_nothing(
     await _press(bridge, "_handle_shell_callback", q)
 
     q.edit_message_text.assert_not_awaited()
-    service.shell_approve_command.assert_not_awaited()
+    service.resolve_shell_approval.assert_not_awaited()
     assert "req-1" in bridge._pending_shell
 
 
@@ -237,5 +238,6 @@ async def test_after_a_refusal_the_owner_can_press_the_same_button():
     owner_press = _query("shell", OWNER_ID, GROUP_CHAT, "group")
     await _press(bridge, "_handle_shell_callback", owner_press)
 
-    service.shell_approve_command.assert_awaited_once_with("req-1")
+    service.resolve_shell_approval.assert_awaited_once_with(
+        "req-1", approved=True, resolved_via="telegram")
     assert "req-1" not in bridge._pending_shell

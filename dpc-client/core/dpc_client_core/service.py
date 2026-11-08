@@ -5614,6 +5614,7 @@ class CoreService:
                     agent_id=agent_id,
                     outcome="⌛ Answered before this arrived.",
                     resolution="superseded",
+                    resolved_via="superseded",
                 )
         else:
             logger.info("Shell approval %s offered on the interface only (no bridge for %s)",
@@ -5623,8 +5624,9 @@ class CoreService:
         self,
         request_id: str,
         agent_id: str,
-        outcome: str,
+        outcome: str = "",
         resolution: str = "expired",
+        resolved_via: str = "",
     ) -> None:
         """Withdraw a request from the surfaces still showing it, and say
         which of the four things happened to it.
@@ -5635,15 +5637,22 @@ class CoreService:
         `superseded`; this used to broadcast `shell_approval_expired` for all
         of them, so the UI log called every closure a timeout.
 
+        `resolved_via` is where it was closed: `desktop`, `telegram`,
+        `timeout` or `superseded`. A decision with no `outcome` gets its text
+        from it (`_shell_decision_outcome`).
+
         That event is still sent, unconditionally, so a UI older than this
         change still withdraws the card. It claims nothing beyond «stop
         showing this»; the truth is in `shell_approval_resolved`, and the UI
         logs from that one. Drop it once no shipped UI reads it.
         """
+        if not outcome and resolution in ("approved", "rejected"):
+            outcome = self._shell_decision_outcome(resolution, resolved_via)
         if self.local_api:
             await self.local_api.broadcast_event("shell_approval_resolved", {
                 "request_id": request_id,
                 "resolution": resolution,
+                "resolved_via": resolved_via,
                 "outcome": outcome,
             })
             await self.local_api.broadcast_event("shell_approval_expired", {
@@ -5659,8 +5668,43 @@ class CoreService:
             except Exception as e:
                 logger.debug("Could not withdraw shell approval %s from Telegram: %s", request_id, e)
 
+    # Where a decision was made, as a phrase for each reader. Only these two
+    # can decide; `timeout` and `superseded` are closures, not decisions.
+    _SHELL_DECISION_PLACES = {"desktop": "on the desktop", "telegram": "from Telegram"}
+
+    def _shell_decision_outcome(self, resolution: str, resolved_via: str) -> str:
+        mark = "✅ Approved" if resolution == "approved" else "❌ Rejected"
+        place = self._SHELL_DECISION_PLACES.get(resolved_via)
+        return f"{mark} {place}." if place else f"{mark}."
+
     async def shell_approve_command(self, request_id: str, add_to_whitelist: bool = False) -> Dict[str, Any]:
-        """Approve a Tier 1 shell command.
+        """Approve a Tier 1 shell command from the desktop dialog.
+
+        The WebSocket command table dispatches here with the payload's keys as
+        keyword arguments, so this signature is the whole of what a client can
+        say: the surface is fixed to `desktop`, and a payload that adds
+        `resolved_via` is a TypeError. Telegram goes through
+        `resolve_shell_approval`, which no client command reaches.
+        """
+        return await self.resolve_shell_approval(
+            request_id, approved=True, resolved_via="desktop", add_to_whitelist=add_to_whitelist,
+        )
+
+    async def shell_reject_command(self, request_id: str) -> Dict[str, Any]:
+        """Reject a Tier 1 shell command from the desktop dialog."""
+        return await self.resolve_shell_approval(request_id, approved=False, resolved_via="desktop")
+
+    async def resolve_shell_approval(
+        self,
+        request_id: str,
+        approved: bool,
+        resolved_via: str,
+        add_to_whitelist: bool = False,
+    ) -> Dict[str, Any]:
+        """Record a person's decision on a Tier 1 shell command and say where it was made.
+
+        Not in `ALLOWED_COMMANDS`: the desktop commands above and the Telegram
+        bridge are the only callers, each naming its own surface.
 
         Records the decision and signals the waiting executor thread, which
         runs the command itself. Executing here (async) would block the event
@@ -5668,50 +5712,27 @@ class CoreService:
         """
         from .dpc_agent.tools.shell import _pending_approvals
 
-        entry = _pending_approvals.get(request_id)
-        if not entry:
-            return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
-
-        command = entry["command"]
-        agent_name = entry["agent_name"]
-
-        logger.info("Shell command approved: %s — %r", request_id, command)
-
-        entry["decision"] = "approved"
-        event = entry.get("event")
-        if event:
-            event.set()
-
-        await self.announce_shell_approval_closed(
-            request_id=request_id,
-            agent_id=entry.get("agent_id", ""),
-            outcome="✅ Approved elsewhere.",
-            resolution="approved",
-        )
-
-        if add_to_whitelist:
-            tokens = command.strip().split()
-            cmd_prefix = " ".join(tokens[:2]) if len(tokens) >= 2 else tokens[0] if tokens else command
-            agent_profile = entry.get("agent_profile", agent_name)
-            await self.shell_add_to_whitelist(agent_profile, cmd_prefix)
-
-        return {"status": "ok", "request_id": request_id}
-
-    async def shell_reject_command(self, request_id: str) -> Dict[str, Any]:
-        """Reject a Tier 1 shell command execution request."""
-        from .dpc_agent.tools.shell import _pending_approvals
+        if resolved_via not in self._SHELL_DECISION_PLACES:
+            raise ValueError(f"resolved_via must be one of {sorted(self._SHELL_DECISION_PLACES)}")
 
         entry = _pending_approvals.get(request_id)
         if not entry:
             return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
 
-        entry["decision"] = "rejected"
-        # The node owner's name; a Telegram press comes from a whitelisted chat
-        # and is not told apart from the desktop one.
-        # A rejection must not fail over a name, so a missing manager reads "User".
+        place = self._SHELL_DECISION_PLACES[resolved_via]
+        # The node owner's name; a Telegram press comes from the owner's chat
+        # and is told apart from the desktop one only by `resolved_via`.
+        # A decision must not fail over a name, so a missing manager reads "User".
         p2p = getattr(self, "p2p_manager", None)
         owner = (p2p.get_display_name() if p2p else None) or "User"
-        entry["result"] = f"Command manually rejected by {owner}"
+
+        entry["decision"] = "approved" if approved else "rejected"
+        entry["resolved_via"] = resolved_via
+        if approved:
+            logger.info("Shell command approved via %s: %s — %r", resolved_via, request_id, entry["command"])
+            entry["note"] = f"Approved by {owner} {place}."
+        else:
+            entry["result"] = f"Command rejected by {owner} {place}."
         event = entry.get("event")
         if event:
             event.set()
@@ -5719,11 +5740,19 @@ class CoreService:
         await self.announce_shell_approval_closed(
             request_id=request_id,
             agent_id=entry.get("agent_id", ""),
-            outcome="❌ Rejected elsewhere.",
-            resolution="rejected",
+            resolution=entry["decision"],
+            resolved_via=resolved_via,
         )
 
-        logger.info("Shell command rejected: %s", request_id)
+        if approved and add_to_whitelist:
+            command = entry["command"]
+            tokens = command.strip().split()
+            cmd_prefix = " ".join(tokens[:2]) if len(tokens) >= 2 else tokens[0] if tokens else command
+            agent_profile = entry.get("agent_profile", entry["agent_name"])
+            await self.shell_add_to_whitelist(agent_profile, cmd_prefix)
+
+        if not approved:
+            logger.info("Shell command rejected via %s: %s", resolved_via, request_id)
         return {"status": "ok", "request_id": request_id}
 
     async def shell_add_to_whitelist(self, agent_id: str, command_prefix: str) -> Dict[str, Any]:

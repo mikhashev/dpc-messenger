@@ -42,10 +42,19 @@ export type ShellApprovalResolution =
   | "expired"
   | "superseded";
 
+/** Where a request was closed: the dialog, the Telegram buttons, the agent
+ *  giving up, or the other surface having answered first. */
+export type ShellApprovalResolvedVia =
+  | "desktop"
+  | "telegram"
+  | "timeout"
+  | "superseded";
+
 export interface ShellApprovalResolved {
   request_id: string;
   resolution: ShellApprovalResolution;
-  /** The same thing for a person to read, e.g. "✅ Approved elsewhere." */
+  resolved_via: ShellApprovalResolvedVia;
+  /** The same thing for a person to read, e.g. "✅ Approved on the desktop." */
   outcome: string;
 }
 

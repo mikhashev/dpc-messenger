@@ -2440,6 +2440,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                     agent_id=agent_id,
                     outcome="⌛ Expired — the agent stopped waiting for this one.",
                     resolution="expired",
+                    resolved_via="timeout",
                 ))
             except Exception as e:
                 log.warning("Failed to announce shell_approval_closed: %s", e)
@@ -2457,9 +2458,13 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
         return entry.get("result") or "Command manually rejected by User"
 
     log.info("Shell approval granted: %s — executing %r", request_id, command)
-    return _execute_shell_command(
+    output = _execute_shell_command(
         command, entry.get("cwd"), entry.get("timeout", 120), store_at=_call_store(ctx),
     )
+    # Who approved, and from where, before the output: the agent knows where a
+    # turn came from and should know where an approval did.
+    note = entry.get("note")
+    return f"{note}\n{output}" if note else output
 
 
 def _cap_stream(text: str, stream: str) -> str:

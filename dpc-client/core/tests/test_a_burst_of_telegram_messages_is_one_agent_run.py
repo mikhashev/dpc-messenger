@@ -234,7 +234,7 @@ async def test_a_command_and_a_button_bypass_the_gathering():
     query.message.chat.type = "private"
     query.from_user.id = int(CHAT_A)
     query.data = "shell:req-1:approve"
-    bridge._agent_manager.service.shell_approve_command = AsyncMock(return_value={"status": "ok"})
+    bridge._agent_manager.service.resolve_shell_approval = AsyncMock(return_value={"status": "ok"})
     await bridge._handle_shell_callback(SimpleNamespace(callback_query=query), _ctx())
     query.edit_message_text.assert_awaited_once()
     assert agent.runs == []
