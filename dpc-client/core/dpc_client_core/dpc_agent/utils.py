@@ -202,6 +202,28 @@ def auto_commit_agent_change(agent_root: pathlib.Path, message: str) -> None:
 TELEGRAM_BURST_QUIET_MAX_SECONDS = 300.0
 
 
+def telegram_owner_user_id_from(value: Any) -> Optional[str]:
+    """`telegram_owner_user_id` as it is stored: the owner's own Telegram user id,
+    ASCII digits only, or None for an empty field (no owner turns at all).
+
+    Surrounding spaces are dropped. Raises ValueError on anything else, a number
+    included: the field is text, as the chat ids are.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("telegram owner user id must be text made of digits")
+    value = value.strip()
+    if not value:
+        return None
+    if not re.fullmatch(r"[0-9]+", value):
+        raise ValueError(
+            f"telegram owner user id must be digits only (your numeric Telegram "
+            f"user id, from @userinfobot), not '{value}'"
+        )
+    return value
+
+
 class AgentRegistry:
     """
     Manages the agent registry stored in ~/.dpc/agents/_registry.json.
@@ -346,6 +368,7 @@ class AgentRegistry:
         transcription_enabled: bool = True,
         unified_conversation: bool = False,
         burst_quiet_seconds: Optional[float] = None,
+        owner_user_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Link an agent to Telegram with full configuration.
@@ -363,13 +386,18 @@ class AgentRegistry:
             burst_quiet_seconds: Seconds a chat must stay quiet before the messages
                                  gathered from it reach the agent as one run; 0 is no
                                  pause, None leaves the bridge's default (20)
+            owner_user_id: The owner's own Telegram user id, digits, stored as
+                           `telegram_owner_user_id`: his messages in a private chat
+                           with the bot are his turns. None or empty stores None,
+                           and no Telegram turn is the owner's
 
         Returns:
             Updated agent metadata or None if not found
 
         Raises:
-            ValueError: If bot_token or chat_ids format is invalid, or
-                        burst_quiet_seconds is not a number from 0 to 300
+            ValueError: If bot_token or chat_ids format is invalid,
+                        burst_quiet_seconds is not a number from 0 to 300, or
+                        owner_user_id is not digits
         """
         # Validate bot_token format
         if not isinstance(bot_token, str):
@@ -404,11 +432,14 @@ class AgentRegistry:
                     f"{TELEGRAM_BURST_QUIET_MAX_SECONDS:g}"
                 )
 
+        owner_user_id = telegram_owner_user_id_from(owner_user_id)
+
         # Build Telegram config
         telegram_config = {
             "telegram_enabled": True,
             "telegram_bot_token": bot_token,
             "telegram_allowed_chat_ids": chat_ids,
+            "telegram_owner_user_id": owner_user_id,
             "telegram_max_events_per_minute": max_events_per_minute,
             "telegram_cooldown_seconds": cooldown_seconds,
             "telegram_burst_quiet_seconds": burst_quiet_seconds,
@@ -485,6 +516,7 @@ class AgentRegistry:
             "telegram_enabled": False,
             "telegram_bot_token": None,
             "telegram_allowed_chat_ids": None,
+            "telegram_owner_user_id": None,
             "telegram_event_filter": None,
             "telegram_max_events_per_minute": None,
             "telegram_cooldown_seconds": None,

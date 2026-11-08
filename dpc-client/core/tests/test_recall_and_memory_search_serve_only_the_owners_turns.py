@@ -372,7 +372,22 @@ def _source_of(kws):
     value = kws.get("message_source")
     if value is None:
         return None
-    return value.value if isinstance(value, ast.Constant) else "<expr>"
+    return _value_of(value)
+
+
+# A source a door names by its constant rather than by a literal.
+_NAMED_SOURCES = {"TELEGRAM_OWNER_MESSAGE_SOURCE": agent_mod.TELEGRAM_OWNER_MESSAGE_SOURCE}
+
+
+def _value_of(node):
+    """A literal, a known constant, or `a if cond else b` read as the set of both."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in _NAMED_SOURCES:
+        return _NAMED_SOURCES[node.id]
+    if isinstance(node, ast.IfExp):
+        return frozenset({_value_of(node.body), _value_of(node.orelse)})
+    return "<expr>"
 
 
 EXPECTED = {
@@ -381,7 +396,10 @@ EXPECTED = {
     ("service.py", "_invoke_agent_in_agent_chat"): "external_agent",
     ("service.py", "_invoke_agent_in_group"): "group",
     ("message_handlers/group_handler.py", "_invoke_agent"): "group",
-    ("managers/agent_telegram_bridge.py", "_run_burst_batch"): "telegram",
+    # The owner's own messages in his private chat with the bot are his turn
+    # (telegram_owner_user_id, Mike's call, 2026-11-08); every other one is "telegram".
+    ("managers/agent_telegram_bridge.py", "_run_burst_batch"):
+        frozenset({"telegram", agent_mod.TELEGRAM_OWNER_MESSAGE_SOURCE}),
     ("coordinators/telegram_coordinator.py", "handle_text_message"): "telegram",
     ("coordinators/discord_coordinator.py", "handle_mention"): "discord",
     ("knowledge_service.py", "_agent_auto_revise_proposal"): "ui",

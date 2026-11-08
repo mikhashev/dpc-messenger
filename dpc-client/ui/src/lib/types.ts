@@ -127,6 +127,7 @@ export interface AgentInfo {
     telegram_enabled?: boolean;
     telegram_bot_token?: string;
     telegram_allowed_chat_ids?: string[];
+    telegram_owner_user_id?: string | null;
     telegram_event_filter?: string[];
     telegram_max_events_per_minute?: number;
     telegram_cooldown_seconds?: number;

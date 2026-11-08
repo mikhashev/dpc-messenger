@@ -50,15 +50,24 @@ log = logging.getLogger(__name__)
 
 CONTEXT_ROUND_RESERVE_TOKENS = 16384
 
+# The agent bot's turn written by the owner himself: from the user id in the agent's
+# `telegram_owner_user_id`, in a private chat with the bot, every message of the burst
+# (card A-TELEGRAM-TURN-CANNOT-TELL-THE-OWNER-FROM-ANYONE-IN-AN-ALLOWED-CHAT; the
+# per-agent key is Mike's call, 2026-11-07). Any other Telegram turn is "telegram".
+# The string is Mike's word, 2026-11-08; it lives here alone, so a rename is this line.
+TELEGRAM_OWNER_MESSAGE_SOURCE = "telegram_owner"
+
 # Turns that may use the owner's memory (Mike's call, 2026-11-07). Bridges count as
 # the owner. A group keeps today's behaviour; its policy is pending under
 # A-GROUP-TURN-CAN-SHOW-THE-OWNERS-PRIVATE-MEMORY-TO-OTHER-NODES.
-_OWNER_MESSAGE_SOURCES = frozenset({"ui", "external_agent", "group"})
+_OWNER_MESSAGE_SOURCES = frozenset({"ui", "external_agent", "group",
+                                    TELEGRAM_OWNER_MESSAGE_SOURCE})
 
 
 def is_owner_caller(message_source: Optional[str]) -> bool:
-    """May this turn use the owner's memory? Telegram, Discord and an unnamed or
-    unknown source may not: a caller that names no source fails closed."""
+    """May this turn use the owner's memory? Telegram (other than the owner's own
+    private chat), Discord and an unnamed or unknown source may not: a caller that
+    names no source fails closed."""
     return message_source in _OWNER_MESSAGE_SOURCES
 
 

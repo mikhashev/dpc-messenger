@@ -425,6 +425,11 @@ class TelegramBridge:
                             logger.info(f"Forwarding Telegram message to agent {agent_id}")
                             # A person wrote: a new CC<->agent chain for this conversation.
                             self.service.reset_cc_agent_chain(agent_id)
+                            # Never the owner's turn from this bot: the owner's own is
+                            # told apart only by an agent's telegram_owner_user_id, on
+                            # its own bot (agent_telegram_bridge); this one runs on the
+                            # global [telegram] config and has no such key, which
+                            # follows from the per-agent key (Mike's call, 2026-11-07).
                             response = await agent_manager.process_message(
                                 message=text,
                                 conversation_id=agent_id,

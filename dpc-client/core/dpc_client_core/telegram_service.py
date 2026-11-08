@@ -380,8 +380,13 @@ class TelegramService:
         transcription_enabled: bool = True,
         unified_conversation: bool = False,
         burst_quiet_seconds: Optional[float] = None,
+        owner_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Link an agent to Telegram with full configuration."""
+        """Link an agent to Telegram with full configuration.
+
+        Writes only the keys it is given (`AgentRegistry.update_agent` merges), so
+        whatever else the agent's row holds stays.
+        """
         try:
             async with self._telegram_link_lock(agent_id):
                 from .dpc_agent.utils import AgentRegistry
@@ -409,6 +414,7 @@ class TelegramService:
                         transcription_enabled=transcription_enabled,
                         unified_conversation=unified_conversation,
                         burst_quiet_seconds=burst_quiet_seconds,
+                        owner_user_id=owner_user_id,
                     )
                 except ValueError as e:
                     return {"status": "error", "message": str(e)}

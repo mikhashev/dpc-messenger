@@ -796,6 +796,7 @@ class DpcAgentManager:
             max_events_per_minute = 20
             cooldown_seconds = 3.0
             burst_quiet_seconds = None
+            owner_user_id = None  # a per-agent key; the global config has none
             transcription_enabled = True
             unified_conversation = False
             footer_enabled = True
@@ -822,6 +823,7 @@ class DpcAgentManager:
             max_events_per_minute = agent_meta.get("telegram_max_events_per_minute", 20)
             cooldown_seconds = agent_meta.get("telegram_cooldown_seconds", 3.0)
             burst_quiet_seconds = agent_meta.get("telegram_burst_quiet_seconds")
+            owner_user_id = agent_meta.get("telegram_owner_user_id")
             transcription_enabled = agent_meta.get("telegram_transcription_enabled", True)
             unified_conversation = agent_meta.get("telegram_unified_conversation", False)
             footer_enabled = agent_meta.get("telegram_footer_enabled", True)
@@ -900,6 +902,7 @@ class DpcAgentManager:
                 unified_conversation=unified_conversation,
                 footer_enabled=footer_enabled,
                 burst_quiet_seconds=burst_quiet_seconds,
+                owner_user_id=owner_user_id,
             )
             self._telegram_bridge = bridge
 
@@ -1138,8 +1141,9 @@ class DpcAgentManager:
         # When set, injected into ToolContext so schedule_task auto-fills
         # _reply_telegram_chat_id in task data for later result delivery.
         telegram_chat_id: Optional[str] = None,
-        # Where the message came from: ui, external_agent, group, telegram or
-        # discord (DpcAgent.process, is_owner_caller). None is nobody's turn.
+        # Where the message came from: ui, external_agent, group, telegram, the
+        # owner's own Telegram (TELEGRAM_OWNER_MESSAGE_SOURCE) or discord
+        # (DpcAgent.process, is_owner_caller). None is nobody's turn.
         message_source: Optional[str] = None,
         # The node that sent a peer's group mention; carried to the agent only.
         sender_node_id: Optional[str] = None,

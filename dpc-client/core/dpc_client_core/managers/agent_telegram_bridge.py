@@ -39,8 +39,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 
+from ..dpc_agent.agent import TELEGRAM_OWNER_MESSAGE_SOURCE
 from ..dpc_agent.events import AgentEvent, EventType
 from ..dpc_agent.run_gate import RunGate, StoppedWhileWaiting, turn_title
+from ..dpc_agent.utils import telegram_owner_user_id_from
 from ..telegram_format import send_rendered, strip_markdown
 from ..telegram_footer import build_footer, select_balance_for_alias
 
@@ -146,6 +148,9 @@ class _BurstItem:
     sender_name: str
     arrived_at: float
     burst: Optional["_ChatBurst"] = None
+    # Sent by the agent's owner himself (`_is_owner_message`), decided on arrival.
+    # Not the handler that owns the burst (`_reserve_burst_slot`'s `owner`).
+    from_owner: bool = False
     ready: bool = False
     dropped: bool = False
     text: str = ""
@@ -191,6 +196,7 @@ class AgentTelegramBridge:
         unified_conversation: bool = False,
         footer_enabled: bool = True,
         burst_quiet_seconds: Optional[float] = None,
+        owner_user_id: Optional[str] = None,
     ):
         """
         Initialize agent Telegram bridge.
@@ -211,6 +217,11 @@ class AgentTelegramBridge:
                             BURST_QUIET_SECONDS; 0 = no pause). Read here, once:
                             a changed value takes a bridge restart, which saving
                             the Telegram configuration does.
+            owner_user_id: The owner's own Telegram user id (the agent's
+                            `telegram_owner_user_id`, digits). A message from it in
+                            a private chat with the bot is the owner's turn; None,
+                            empty or not digits = no message is. Read here, once,
+                            like the pause.
         """
         self.bot_token = bot_token
         self.allowed_chat_ids = [str(cid) for cid in allowed_chat_ids]  # Ensure strings
@@ -224,6 +235,7 @@ class AgentTelegramBridge:
             BURST_QUIET_SECONDS if burst_quiet_seconds is None else float(burst_quiet_seconds)
         )
         self._burst_ceiling_seconds = BURST_CEILING_PAUSES * self._burst_quiet_seconds
+        self._owner_user_id = self._owner_id_of(owner_user_id)
 
         self._bot = None
         self._application = None  # telegram.ext.Application
@@ -1435,6 +1447,39 @@ Send a voice message and it will be transcribed and processed\\.
         tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
         return f"{tg_display_name} (Telegram)"
 
+    @staticmethod
+    def _owner_id_of(value: Any) -> Optional[int]:
+        """The configured `telegram_owner_user_id` as a number, or None.
+
+        The save path refuses anything but digits; a row edited by hand is not
+        checked there, so here a bad value means no owner, not a bot that will
+        not start.
+        """
+        try:
+            owner = telegram_owner_user_id_from(value)
+        except ValueError as e:
+            log.warning("Ignoring telegram_owner_user_id: %s; no Telegram turn is the owner's", e)
+            return None
+        return int(owner) if owner is not None else None
+
+    def _is_owner_message(self, update) -> bool:
+        """Did the owner himself send this: from `telegram_owner_user_id`, in a
+        private chat with the bot? A group with the owner in it is not; with no
+        id configured nobody is.
+
+        A chat id says only where a message was written, so the user id decides,
+        and only in a private chat, whose id is that user's.
+        """
+        if self._owner_user_id is None:
+            return False
+        user_id = getattr(getattr(update, "effective_user", None), "id", None)
+        chat = getattr(update, "effective_chat", None)
+        if not isinstance(user_id, int) or isinstance(user_id, bool):
+            return False
+        return (user_id == self._owner_user_id
+                and getattr(chat, "type", None) == "private"
+                and str(getattr(chat, "id", None)) == str(user_id))
+
     async def _handle_message(self, update, context):
         """Handle incoming text message: it joins the chat's burst."""
         chat_id = str(update.effective_chat.id)
@@ -1673,7 +1718,8 @@ Send a voice message and it will be transcribed and processed\\.
         if owner:
             burst = self._bursts[chat_id] = _ChatBurst()
         item = _BurstItem(kind=kind, update=update, context=context,
-                          sender_name=sender_name, arrived_at=time.monotonic(), burst=burst)
+                          sender_name=sender_name, arrived_at=time.monotonic(), burst=burst,
+                          from_owner=self._is_owner_message(update))
         burst.items.append(item)
         burst.changed.set()
         return item, owner
@@ -1924,13 +1970,15 @@ Send a voice message and it will be transcribed and processed\\.
                     skip_history = False
                 kwargs = dict(message=message, _skip_history=skip_history)
 
+            # The owner's turn only if he sent every message it carries.
+            from_owner = bool(batch) and all(item.from_owner for item in batch)
             # Call the message handler (agent_manager.process_message)
             response = await self._message_handler(
                 conversation_id=conversation_id,
                 include_context=True,
                 sender_name=last.sender_name,
                 telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
-                message_source="telegram",
+                message_source=TELEGRAM_OWNER_MESSAGE_SOURCE if from_owner else "telegram",
                 **kwargs,
             )
             return batch, response, None

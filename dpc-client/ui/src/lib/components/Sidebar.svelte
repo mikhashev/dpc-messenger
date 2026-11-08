@@ -17,6 +17,7 @@
   import { agentTurns } from '$lib/services/agents';
   import { agentHostDisplay, heldModelLabel, type HostPeer } from './agentComputeHost';
   import { BURST_QUIET_DEFAULT_SECONDS, BURST_QUIET_MAX_SECONDS, burstQuietFromAgent, burstQuietToSend } from '$lib/utils/burstQuiet';
+  import { ownerUserIdFromAgent, ownerUserIdToSend } from '$lib/utils/telegramOwner';
   import { agentStatusLine, buttonSummary, chatNamer } from '$lib/utils/agentMap';
 
   // Account balance rows (one per DeepSeek/NeuralDeep/... account, 2026-09-28
@@ -137,6 +138,7 @@
   // Telegram configuration fields
   let telegramBotToken = $state('');
   let telegramAllowedChatIds = $state('');
+  let telegramOwnerUserId = $state('');
   let telegramEventFilter = $state(DEFAULT_EVENT_FILTER);
   let telegramMaxEventsPerMinute = $state(20);
   let telegramCooldownSeconds = $state(3.0);
@@ -152,6 +154,7 @@
     // Pre-populate with existing config or defaults
     telegramBotToken = agent?.telegram_bot_token || '';
     telegramAllowedChatIds = agent?.telegram_allowed_chat_ids?.join(', ') || '';
+    telegramOwnerUserId = ownerUserIdFromAgent(agent?.telegram_owner_user_id);
     telegramEventFilter = agent?.telegram_event_filter?.join(',') || DEFAULT_EVENT_FILTER;
     telegramMaxEventsPerMinute = agent?.telegram_max_events_per_minute || 20;
     telegramCooldownSeconds = agent?.telegram_cooldown_seconds || 3.0;
@@ -179,10 +182,16 @@
           linkErrorMessage = burstQuiet.error;
           return;
         }
+        const ownerUserId = ownerUserIdToSend(telegramOwnerUserId);
+        if ('error' in ownerUserId) {
+          linkErrorMessage = ownerUserId.error;
+          return;
+        }
 
         await onLinkAgentTelegram(linkingAgentId, {
           bot_token: telegramBotToken.trim(),
           chat_ids: chatIds,
+          owner_user_id: ownerUserId.value,
           event_filter: eventFilter,
           max_events_per_minute: telegramMaxEventsPerMinute,
           cooldown_seconds: telegramCooldownSeconds,
@@ -194,6 +203,7 @@
         showTelegramLinkDialog = false;
         telegramBotToken = '';
         telegramAllowedChatIds = '';
+        telegramOwnerUserId = '';
         telegramEventFilter = DEFAULT_EVENT_FILTER;
         telegramMaxEventsPerMinute = 20;
         telegramCooldownSeconds = 3.0;
@@ -226,6 +236,7 @@
         showTelegramLinkDialog = false;
         telegramBotToken = '';
         telegramAllowedChatIds = '';
+        telegramOwnerUserId = '';
         telegramEventFilter = DEFAULT_EVENT_FILTER;
         telegramMaxEventsPerMinute = 20;
         telegramCooldownSeconds = 3.0;
@@ -245,6 +256,7 @@
     showTelegramLinkDialog = false;
     telegramBotToken = '';
     telegramAllowedChatIds = '';
+    telegramOwnerUserId = '';
     telegramEventFilter = 'task_completed,task_failed,agent_message';
     telegramMaxEventsPerMinute = 20;
     telegramCooldownSeconds = 3.0;
@@ -361,6 +373,7 @@
     telegram_enabled?: boolean;
     telegram_bot_token?: string;
     telegram_allowed_chat_ids?: string[];
+    telegram_owner_user_id?: string | null;
     telegram_event_filter?: string[];
     telegram_max_events_per_minute?: number;
     telegram_cooldown_seconds?: number;
@@ -449,6 +462,7 @@
     onLinkAgentTelegram?: (agentId: string, config: {
       bot_token: string;
       chat_ids: string[];
+      owner_user_id?: string | null;
       event_filter?: string[];
       max_events_per_minute?: number;
       cooldown_seconds?: number;
@@ -1475,6 +1489,21 @@
         <p class="dialog-info small">
           Enter multiple chat IDs separated by commas. Use negative IDs for groups.
         </p>
+
+        <!-- The owner's own Telegram user id (telegram_owner_user_id) -->
+        <label for="telegram-owner-user-id" class="dialog-label">
+          Your Telegram user ID (owner):
+        </label>
+        <input
+          id="telegram-owner-user-id"
+          type="text"
+          inputmode="numeric"
+          bind:value={telegramOwnerUserId}
+          placeholder="123456789"
+          onkeydown={(e) => e.key === 'Enter' && confirmTelegramLink()}
+          class="dialog-input"
+        />
+        <p class="dialog-hint">Turns from this user in a private chat with the bot count as yours and get the agent's memory; in a group chat they do not. Empty: every Telegram turn is treated as not yours.</p>
 
         <!-- Event Filter -->
         <span class="dialog-label">Event Filter:</span>

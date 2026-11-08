@@ -161,6 +161,7 @@
   export async function handleLinkAgentTelegram(agentId: string, config: {
     bot_token: string;
     chat_ids: string[];
+    owner_user_id?: string | null;
     event_filter?: string[];
     max_events_per_minute?: number;
     cooldown_seconds?: number;
@@ -175,6 +176,8 @@
         agent_id: agentId,
         bot_token: config.bot_token,
         chat_ids: config.chat_ids,
+        // Empty is null: no Telegram turn is the owner's (the backend checks digits again).
+        owner_user_id: config.owner_user_id ?? null,
         event_filter: config.event_filter,
         max_events_per_minute: config.max_events_per_minute || 20,
         cooldown_seconds: config.cooldown_seconds || 3.0,

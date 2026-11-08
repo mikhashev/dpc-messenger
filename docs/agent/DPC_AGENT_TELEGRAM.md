@@ -188,6 +188,7 @@ uv run python run_service.py
 | `telegram_chat_id` | string | Yes | Your Telegram chat ID (number) |
 | `telegram_linked_at` | string | Yes | ISO timestamp of when linking was created |
 | `telegram_burst_quiet_seconds` | number | No | How long the chat must stay quiet before messages you sent in a row reach the agent as one request (0 to 300, default 20; 0 sends each message at once). Set in the Telegram configuration dialog as "Join messages sent within (seconds)"; a changed value applies when the dialog is saved |
+| `telegram_owner_user_id` | string | No | Your own Telegram user id, digits only (the number @userinfobot shows). Your messages to the bot in a private chat with it count as yours and get the agent's memory (Active Recall and `memory_search`); in a group chat, and from anyone else, they do not. Empty: no Telegram turn gets the memory. Set in the dialog as "Your Telegram user ID (owner)"; Unlink clears it |
 
 ### Using the Telegram Bot
 
@@ -275,6 +276,10 @@ await send_user_message(
 
 - Uses main DPC Telegram bot (same bot for P2P + agents)
 - Only chat IDs in `allowed_chat_ids` can interact with agents
+- A chat ID says where a message was written, not who wrote it: anyone in an allowed
+  group writes under that group's ID. So the agent's memory answers a Telegram turn only
+  when every message in it came from `telegram_owner_user_id` in a private chat with the
+  bot; with no owner ID set, no Telegram turn gets it
 - Each agent must have explicit `telegram_enabled = true`
 - Agent can only send to its linked `telegram_chat_id`
 - Messages are sent over Telegram's encrypted connection

@@ -8277,6 +8277,7 @@ class CoreService:
         transcription_enabled: bool = True,
         unified_conversation: bool = False,
         burst_quiet_seconds: Optional[float] = None,
+        owner_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Delegates to TelegramService."""
         if not self.telegram_service:
@@ -8291,6 +8292,7 @@ class CoreService:
             transcription_enabled,
             unified_conversation,
             burst_quiet_seconds,
+            owner_user_id=owner_user_id,
         )
 
     async def _start_agent_telegram_bridges(self) -> None:
