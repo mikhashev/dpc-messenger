@@ -52,6 +52,7 @@
       history?: {
         preserve_on_reset: boolean;
         max_archived_sessions: number;
+        archive_include_groups?: boolean;
       };
     };
     agent_profiles?: Record<string, {
@@ -70,6 +71,7 @@
       history?: {
         preserve_on_reset: boolean;
         max_archived_sessions: number;
+        archive_include_groups?: boolean;
       };
     }>;
     file_transfer?: {

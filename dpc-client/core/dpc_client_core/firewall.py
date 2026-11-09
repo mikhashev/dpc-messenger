@@ -1257,6 +1257,18 @@ class ContextFirewall:
             default=self.history_max_archived_sessions)
         return bool(preserve), max(0, int(max_sessions))
 
+    def get_archive_include_groups(self, profile_name: Optional[str] = None) -> bool:
+        """history.archive_include_groups for an agent profile, read like preserve_on_reset
+        (profile, then global dpc_agent.history), default False.
+
+        On the owner's turns the session archive tools then also read the archives of
+        group conversations whose agents map holds this agent (ARCHIVE-GROUP-ACCESS;
+        Mike's call, 2026-11-09). Only a real true opens them.
+        """
+        val = self._get_profile_or_global(
+            profile_name, 'history', 'archive_include_groups', default=False)
+        return val is True
+
     def get_extended_write_enabled(self, profile_name: Optional[str] = None) -> bool:
         """Per-agent extended path write gate (sandbox_extensions.extended_write_enabled).
 
@@ -2714,6 +2726,11 @@ class ContextFirewall:
                     if 'human_knowledge_access' in dpc_agent and not isinstance(dpc_agent['human_knowledge_access'], bool):
                         errors.append("'dpc_agent.human_knowledge_access' must be a boolean")
 
+                    history = dpc_agent.get('history')
+                    if (isinstance(history, dict) and 'archive_include_groups' in history
+                            and not isinstance(history['archive_include_groups'], bool)):
+                        errors.append("'dpc_agent.history.archive_include_groups' must be a boolean (true or false)")
+
                     if 'tools' in dpc_agent:
                         tools = dpc_agent['tools']
                         if not isinstance(tools, dict):
@@ -2763,6 +2780,12 @@ class ContextFirewall:
                                 errors.append(f"'agent_profiles.{profile_name}.device_context_access' must be a boolean")
                             if 'human_knowledge_access' in profile_config and not isinstance(profile_config['human_knowledge_access'], bool):
                                 errors.append(f"'agent_profiles.{profile_name}.human_knowledge_access' must be a boolean")
+                            # Opens other conversations' archives (ARCHIVE-GROUP-ACCESS): a bool only.
+                            history = profile_config.get('history')
+                            if (isinstance(history, dict) and 'archive_include_groups' in history
+                                    and not isinstance(history['archive_include_groups'], bool)):
+                                errors.append(f"'agent_profiles.{profile_name}.history.archive_include_groups' "
+                                              "must be a boolean (true or false)")
                             # Validate tools
                             if 'tools' in profile_config:
                                 tools = profile_config['tools']

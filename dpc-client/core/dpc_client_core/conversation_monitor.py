@@ -2689,6 +2689,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 data = json.load(f)
             data["archived_at"] = datetime.now(timezone.utc).isoformat()
             data["session_reason"] = reason
+            group = self._group_at_archive(path.parent)
+            if group is not None:
+                data["group"] = group
 
             with open(archive_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -2716,6 +2719,32 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         except Exception as e:
             logger.warning(f"Failed to archive session for {self.conversation_id}: {e}")
             return 0
+
+    def _group_at_archive(self, conversation_dir: Path) -> Optional[Dict[str, Any]]:
+        """`group_id`, `members` and `version` of this group as its metadata says now.
+
+        Written into the session archive under `group`, so a later reader knows who
+        witnessed the session (ARCHIVE-GROUP-ACCESS; Mike's call, 2026-11-09, review by
+        Johnny and Zcode). None for a conversation that is not a group, and None with
+        one log line when the group's metadata cannot be read.
+        """
+        if not str(self.conversation_id).startswith("group-"):
+            return None
+        try:
+            with open(conversation_dir / "metadata.json", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError) as e:
+            logger.warning("Archive of %s records no group: its metadata.json could not be read (%s)",
+                           self.conversation_id, e)
+            return None
+        members = meta.get("members") if isinstance(meta, dict) else None
+        if (not isinstance(meta, dict) or meta.get("group_id") != self.conversation_id
+                or not isinstance(members, list)):
+            logger.warning("Archive of %s records no group: its metadata.json does not describe "
+                           "this group with a member list", self.conversation_id)
+            return None
+        return {"group_id": meta["group_id"], "members": list(members),
+                "version": meta.get("version", 1)}
 
     def _generate_session_digest(self, session_data: Dict[str, Any], archive_path: Path) -> None:
         """Generate an incremental session digest and append to digest.jsonl.

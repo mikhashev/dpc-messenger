@@ -287,6 +287,7 @@
       editSettings.history = {
         preserve_on_reset: true,
         max_archived_sessions: 0,
+        archive_include_groups: false,
       };
     }
   }
@@ -781,6 +782,26 @@
               <span>Preserve session history on reset</span>
             </label>
             <p class="help-text-small">Archive the conversation before clearing it so you can review old sessions.</p>
+          </div>
+
+          <div class="setting-item">
+            <label>
+              {#if editMode && editSettings}
+                <input
+                  type="checkbox"
+                  id="agent-history-include-groups"
+                  bind:checked={editSettings.history.archive_include_groups}
+                />
+              {:else}
+                <input
+                  type="checkbox"
+                  checked={displaySettings.history?.archive_include_groups ?? false}
+                  disabled
+                />
+              {/if}
+              <span>Include group sessions</span>
+            </label>
+            <p class="help-text-small">On your own turns the archive tools also read the sessions of group chats this agent is in. In a group with another person's node the agent reads only that group's sessions every current member was in.</p>
           </div>
 
           {#if (editMode ? editSettings?.history?.preserve_on_reset : (displaySettings.history?.preserve_on_reset ?? true))}

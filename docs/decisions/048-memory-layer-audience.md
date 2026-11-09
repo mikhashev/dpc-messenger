@@ -88,7 +88,8 @@ a turn sees only the layers its class may see, in every channel at once.
      `logs/`, `task_results/`, `knowledge_graph*` or `config.json*`, extended paths only
      when EXT is shared and shared knowledge only when L6 is. Every other file such a turn
      opens in the agent's directory is logged at INFO, without content. The session
-     archive tools open, for a stranger, only its own `telegram-<chat id>` conversation.
+     archive tools open, for a stranger, only its own `telegram-<chat id>` conversation
+     (the rest of their rule is under [Session archives](#session-archives)).
      The git tools follow the same gate: on a turn that is not the owner's no git write
      touches the agent directory's own repository, and a `repo_path` read or write obeys
      the extended-path rule above.
@@ -107,6 +108,42 @@ run_shell is a separate story (Mike, 2026-11-08). Strangers lose the whole agent
 because a work folder can be as personal as memory (Ark, measured on Warren: finance,
 orders); other-node groups lose the memory and the mixed stores now, and the logged opens
 decide an allow-list after a week (Johnny).
+
+## Session archives
+
+Added 2026-11-09 (Mike's call in DPC Project, review by Johnny and Zcode;
+ARCHIVE-GROUP-ACCESS). A **session archive** is one closed session of a conversation,
+kept on this node beside its history.
+
+1. **The writer records the group.** When a group conversation is reset or a new session
+   is voted, the archive gets `group`: `group_id`, `members` and `version`, copied from
+   the group's `metadata.json` at that moment. A 1:1 archive gets no such key; a group
+   whose metadata cannot be read gets none and one log line.
+2. **The read rule** of `read_session_archive`, `read_session_detail` and
+   `search_session_archives`, by turn class:
+   - a stranger reads only its own `telegram-<chat id>` conversation, as above;
+   - the owner's turn reads the current conversation, and, with
+     `agent_profiles.<id>.history.archive_include_groups` true (false by default), every
+     group conversation whose `metadata.json` agents map lists this agent under this
+     node. The agents map is the group's side of the permission and the flag the agent's;
+     both must allow. A group with no `metadata.json`, an unreadable one or an empty
+     agents map is not included;
+   - a turn in a group with another node reads that group's archive only, and only the
+     sessions whose recorded `members` include every current member. A session with no
+     recorded members (every archive written before this change) opens on the owner's
+     turns only; when the current members cannot be read, no session opens. The answer
+     says in one line how many sessions it did not show and why, so the agent does not
+     take them for absent.
+3. **Results name their conversation.** Each listed session and each search match
+   carries `conversation_id`, and `read_session_detail` takes `conversation_id` to open
+   a file of another conversation the rule opens; filenames repeat across conversations,
+   so a bare filename is looked up in the current conversation only. A conversation the
+   rule does not open is refused in one sentence.
+
+Consequence: until the Linux node is in `own_node_group`, DPC Project counts as a group
+with another node, so its sessions archived before this change close on its group turns.
+Archives written by a sync that drops records older than a reset boundary carry no
+`group` either and close the same way.
 
 ## Considered Options
 
@@ -162,6 +199,8 @@ decide an allow-list after a week (Johnny).
   replayed tails.
 - `dpc_agent/tools/core.py`, `tools/git.py`, `tools/archive.py`, `tools/registry.py` —
   the file gate, writes, `memory_search`, `get_dpc_context`.
+- `conversation_monitor.py` (`group` in a group's archive), `tools/archive.py` and
+  `firewall.py` (`history.archive_include_groups`) — session archives.
 
 ## Authors
 
