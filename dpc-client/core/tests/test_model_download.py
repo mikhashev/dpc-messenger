@@ -340,10 +340,7 @@ def test_memory_search_still_returns_text_results_when_the_embedding_model_is_mi
     channel."""
     from dpc_client_core.dpc_agent.tools import core as tools_core
 
-    class _Result:
-        def __init__(self, chunk_meta, score):
-            self.chunk_meta = chunk_meta
-            self.score = score
+    from dpc_client_core.dpc_agent.retrieval.base import FusionResult
 
     class _FakeVector:
         def load(self):
@@ -357,11 +354,15 @@ def test_memory_search_still_returns_text_results_when_the_embedding_model_is_mi
             return True
 
         def search(self, query, top_k):
-            return [_Result({"source_layer": "L5", "source_file": "notes.md"}, 0.9)]
+            return [({"source_layer": "L5", "source_file": "notes.md"}, 0.9)]
+
+        def source_rows(self):
+            return None
 
     class _FakeFuser:
         def fuse(self, vector_results, text_results):
-            return text_results
+            return [FusionResult(chunk_meta=m, score=sc, source="hybrid")
+                    for m, sc in text_results]
 
     class _FakeBackend:
         vector = _FakeVector()

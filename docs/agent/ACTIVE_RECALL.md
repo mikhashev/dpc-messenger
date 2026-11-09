@@ -572,6 +572,33 @@ opens: with none open it refuses in one line ("memory_search answers only the ow
 came from …"); otherwise it drops the rows of closed layers, by the same key prefixes, before it
 counts and cuts. A group with another node therefore gets only `L6/` rows by default.
 
+**What `memory_search` prints (step 2 of the board card, 2026-11-09).** The key is the
+document's identity in the index (§3.2), not a path; the address (§10) is what `read_file`
+takes, and the two differ for every layer but L5. The result says which is which:
+
+```
+Found 12 results for '<query>' (showing 5):          <- "(showing n)" only when the cut bit
+Searched 412 documents (L5 40, L6 360, EXT 12) in layers L5, L6, EXT; channels: vector, text.
+
+1. [L6] <heading, or the key> — read_file("<address>") (score: 0.0328; found by: vector+text)
+    key: L6/<rel> (index name; read_file does not take it)
+    <excerpt>
+```
+
+A stale index adds its one line above the first. The header counts the documents of the
+indexes whose channel ran, through the same filters as the results (open layers, a closed
+shared-knowledge gate, a revoked external path), and names a skipped channel with its reason
+(`vector skipped: stale index`, `embedding model not downloaded`). The address is
+`hint_address` asked with the gates recall asks, so the two print the same string; a document
+with none prints recall's words (`not readable from here — …`, shared with recall through
+`unreadable_action`), or says no path was recorded when the row predates `source_path`. The
+`key:` line is left out for an L5 row, whose key is its address. The excerpt is recall's (200
+characters, whitespace collapsed to single spaces); the channels are read from which result
+list held the key, because the fuser keeps one row per document and labels it only `hybrid`. A
+closed shared-knowledge gate drops the L6 row whole, as recall does, since the heading and
+excerpt would be the content the gate withholds. The score is the same RRF value as before and
+is not a similarity.
+
 ## 10. Rendering and placement
 
 **Address**: an L5 key is its own address. Any other document's address is its `source_path`,

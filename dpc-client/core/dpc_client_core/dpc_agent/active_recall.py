@@ -123,6 +123,14 @@ def hint_address(meta: Dict, extended_read_enabled: bool = True,
     return source_path if extended_read_enabled else None
 
 
+def unreadable_action(meta: Dict) -> str:
+    """The dead-end line for a document hint_address gave no address: the gate that is
+    shut. Recall and memory_search print the same words."""
+    return ("not readable from here — shared knowledge access is off"
+            if is_shared_layer(meta)
+            else "not readable from here — extended path read access is off")
+
+
 @dataclass
 class RenderedHints:
     """The block, plus the addresses it actually printed.
@@ -185,9 +193,7 @@ def render_recall_hints(
             # spending a round guessing at spellings of a path it cannot reach. Name
             # the gate that is actually shut — two layers reach this line, and telling
             # an agent to check the wrong toggle is its own kind of dead end.
-            action = ("not readable from here — shared knowledge access is off"
-                      if is_shared_layer(meta)
-                      else "not readable from here — extended path read access is off")
+            action = unreadable_action(meta)
         lines.append(f"[{source}] {filename}: {label} — {action}")
         if excerpt:
             lines.append(f"    {excerpt}")

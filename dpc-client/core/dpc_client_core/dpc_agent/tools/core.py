@@ -1010,6 +1010,42 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
 # Knowledge Tools
 # ---------------------------------------------------------------------------
 
+def _memory_search_header(backend, layers, granted, text_ran, vector_ran,
+                          vector_skipped) -> str:
+    """How many documents in which layers were searched, and which channels ran.
+
+    Counted from the rows of the indexes that ran, through the filters the results
+    pass: the layers open on this turn and, for external paths, the grant now."""
+    from ..active_recall import _extended_path_still_allowed, in_open_layers, layer_of
+    docs: Dict[str, dict] = {}
+    listable = False
+    for ran, index in ((text_ran, backend.text), (vector_ran, backend.vector)):
+        rows = index.source_rows() if ran else None
+        if rows is None:
+            continue
+        listable = True
+        for key, metas in rows.items():
+            if metas:
+                docs.setdefault(key, metas[0])
+    order = [layer for layer in ("L5", "L6", "EXT") if layer in layers]
+    ran_channels = [name for name, ran in (("vector", vector_ran), ("text", text_ran)) if ran]
+    said = ", ".join(ran_channels) if ran_channels else "none"
+    if not vector_ran:
+        said += f" (vector skipped: {vector_skipped})"
+    where = ", ".join(order)
+    if not listable:
+        return f"Searched layers {where}; channels: {said}."
+    per_layer = {layer: 0 for layer in order}
+    for meta in docs.values():
+        layer = layer_of(meta)
+        if (layer in per_layer and in_open_layers(meta, layers)
+                and _extended_path_still_allowed(meta, granted)):
+            per_layer[layer] += 1
+    counts = ", ".join(f"{layer} {n}" for layer, n in per_layer.items())
+    return (f"Searched {sum(per_layer.values())} documents ({counts}) in layers {where}; "
+            f"channels: {said}.")
+
+
 def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
     """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
     try:
@@ -1025,9 +1061,9 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
         # The memory switch of this agent's own profile, asked before the index opens.
         # No firewall (tests, bare contexts): as before.
         firewall = getattr(ctx, "firewall", None)
+        profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
         if firewall is not None:
             from ..memory_config import get_memory_config
-            profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
             if not get_memory_config(firewall.get_agent_profile_settings(profile) or {}).enabled:
                 return "Memory is off for this agent."
 
@@ -1053,7 +1089,11 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
 
         vector_results = []
         vector_stale = False
+        vector_ran = False
+        vector_skipped = ("embedding model not downloaded"
+                          if embedding_unavailable_model is not None else "no vector index")
         if embedding_unavailable_model is None and backend.vector.load():
+            vector_skipped = "search failed"
             try:
                 provider = get_embedding_provider(local_files_only=True)
                 # The check recall makes: vectors written by another model, window or
@@ -1063,19 +1103,25 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
                     max_tokens=int(provider.max_tokens),
                     dimensions=provider.dimensions,
                 )
-                if not vector_stale:
+                if vector_stale:
+                    vector_skipped = "stale index"
+                else:
                     qvec = np.array(provider.embed(query), dtype=np.float32)
                     vector_results = backend.vector.search(qvec, top_k)
+                    vector_ran = True
             except ModelNotCachedError as e:
                 log.info("Vector search skipped: embedding model %s not cached", e.model_name)
                 embedding_unavailable_model = e.model_name
+                vector_skipped = "embedding model not downloaded"
             except Exception as e:
                 log.warning("Vector search failed: %s", e)
 
         # Text-only search still runs — it does not need the embedding model.
         text_results = []
+        text_ran = False
         if backend.text.load():
             text_results = backend.text.search(query, top_k)
+            text_ran = True
 
         if not vector_results and not text_results and not vector_stale:
             if embedding_unavailable_model:
@@ -1086,30 +1132,72 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
             return "No memory index yet. Index builds automatically at startup when memory is enabled. Try again after restart."
 
         merged = backend.fuser.fuse(vector_results, text_results)
-        if firewall is not None:
-            # A path revoked since indexing keeps its rows; read_file's own per-path
-            # check drops them before the cut, as recall does.
-            from ..active_recall import _extended_path_still_allowed
 
-            def _granted(path: str) -> bool:
-                try:
-                    ctx.validate_extended_path(path)
-                    return True
-                except Exception:
-                    return False
+        from ..active_recall import (_excerpt, _extended_path_still_allowed, hint_address,
+                                     in_open_layers, is_shared_layer, unreadable_action)
 
-            merged = [r for r in merged
-                      if _extended_path_still_allowed(r.chunk_meta, _granted)]
+        # A path revoked since indexing keeps its rows; read_file's own per-path
+        # check drops them before the cut, as recall does.
+        def _granted(path: str) -> bool:
+            try:
+                ctx.validate_extended_path(path)
+                return True
+            except Exception:
+                return False
+
+        granted = _granted if firewall is not None else None
+        merged = [r for r in merged if _extended_path_still_allowed(r.chunk_meta, granted)]
         # Rows of a layer this turn may not see go before the count and the cut.
-        from ..active_recall import in_open_layers
         merged = [r for r in merged if in_open_layers(r.chunk_meta, layers)]
-        lines = [f"Found {len(merged)} results for '{query}':\n"]
+
+        # The two gates recall asks, in the state read_file will ask them, so the
+        # address printed here is the one a recall hint would print.
+        extended_read = True
+        shared_knowledge = True
+        if firewall is not None:
+            extended_read = firewall.get_extended_read_enabled(profile)
+            shared_knowledge = firewall.can_agent_access_context(
+                "knowledge", profile_name=profile)
+        if not shared_knowledge:
+            # The heading and excerpt below are the document's content; a closed
+            # shared-knowledge gate is the whole permission for L6, so the row goes
+            # whole, as in recall (_has_something_to_offer).
+            merged = [r for r in merged if not is_shared_layer(r.chunk_meta)]
+            layers = layers - {"L6"}
+
+        shown = merged[:top_k]
+        head = f"Found {len(merged)} results for '{query}'"
+        if len(shown) < len(merged):
+            head += f" (showing {len(shown)})"
+        lines = [head + ":"]
         if vector_stale:
             lines.insert(0, "Vector index is stale for the current embedding model/window; "
                             "word matches only.")
-        for i, r in enumerate(merged[:top_k]):
+        lines.append(_memory_search_header(
+            backend, layers, granted, text_ran, vector_ran, vector_skipped))
+        lines.append("")
+        by_vector = {m.get("source_file", "") for m, _ in vector_results}
+        by_text = {m.get("source_file", "") for m, _ in text_results}
+        for i, r in enumerate(shown):
             meta = r.chunk_meta
-            lines.append(f"{i+1}. [{meta.get('source_layer','L5')}] {meta.get('source_file','?')} (score: {r.score:.4f})")
+            key = meta.get("source_file", "?")
+            heading = " ".join(str(meta.get("heading") or key).split())
+            address = hint_address(meta, extended_read, shared_knowledge)
+            if address:
+                action = f'read_file("{address}")'
+            elif not meta.get("source_path"):
+                action = "not readable from here — no path was recorded when it was indexed"
+            else:
+                action = unreadable_action(meta)
+            found_by = "+".join(name for name, keys in (("vector", by_vector), ("text", by_text))
+                                if key in keys)
+            lines.append(f"{i+1}. [{meta.get('source_layer','L5')}] {heading} — {action} "
+                         f"(score: {r.score:.4f}; found by: {found_by})")
+            if address != key:
+                # The key is the document's identity in the index, not a path.
+                lines.append(f"    key: {key} (index name; read_file does not take it)")
+            if meta.get("text"):
+                lines.append(f"    {' '.join(_excerpt(meta).split())}")
         return "\n".join(lines)
 
     except Exception as e:
