@@ -12,6 +12,7 @@
     type CachedPeerRow,
   } from '$lib/utils/cachedPeers';
   import { copyText } from '$lib/utils/clipboard';
+  import { peerRowLabel } from '$lib/utils/peerRowLabel';
   import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
   import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
   import { agentTurns } from '$lib/services/agents';
@@ -145,6 +146,21 @@
   let telegramBurstQuietSeconds = $state<number | null>(BURST_QUIET_DEFAULT_SECONDS);
   let telegramTranscriptionEnabled = $state(true);
   let telegramUnifiedConversation = $state(false);
+
+  // The peer row's "more actions" menu: one open at a time, closed by an outside
+  // click or Escape.
+  let openPeerMenu = $state<string | null>(null);
+
+  function closePeerMenuOnOutsideClick(e: MouseEvent) {
+    if (openPeerMenu && !(e.target as Element | null)?.closest?.('.row-menu')) openPeerMenu = null;
+  }
+
+  function closePeerMenuOnEscape(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || !openPeerMenu) return;
+    const opener = document.querySelector<HTMLElement>('.row-menu-btn[aria-expanded="true"]');
+    openPeerMenu = null;
+    opener?.focus();
+  }
 
   // Handle Telegram link button click
   function handleLinkTelegram(agentId: string) {
@@ -647,6 +663,8 @@
   });
 </script>
 
+<svelte:window onclick={closePeerMenuOnOutsideClick} onkeydown={closePeerMenuOnEscape} />
+
 <div class="sidebar">
   <!-- Status Bar (only shown when NOT connected) -->
   {#if connectionStatus !== 'connected'}
@@ -975,67 +993,60 @@
                 }}
                 title="{agent.name} (Profile: {agent.profile_name}, LLM: {agent.provider_alias})"
               >
-                <span class="agent-name">{agent.name}</span>
-                {#if (unreadMessageCounts.get(agent.agent_id) ?? 0) > 0}
-                  <span class="unread-badge">{unreadMessageCounts.get(agent.agent_id)}</span>
-                {/if}
-                <span
-                  role="button"
-                  tabindex="0"
-                  class="agent-provider"
-                  title="Click to configure models"
-                  onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
-                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
-                >{agent.provider_alias}</span>
-                {#if hostOffline(agent.compute_host)}
+                <span class="agent-line">
+                  <span class="agent-name">{agent.name}</span>
+                  {#if (unreadMessageCounts.get(agent.agent_id) ?? 0) > 0}
+                    <span class="unread-badge">{unreadMessageCounts.get(agent.agent_id)}</span>
+                  {/if}
                   <span
                     role="button"
                     tabindex="0"
-                    class="agent-host-offline"
-                    title="Runs on {hostName(agent.compute_host ?? '')}, which is offline now. This agent will not answer until that node is back or its model is changed."
+                    class="agent-provider"
+                    title="{agent.provider_alias} - click to configure models"
                     onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
-                  >⚠ offline</span>
-                {/if}
-                <span
-                  role="button"
-                  tabindex="0"
-                  class="agent-effort"
-                  title={agent.reasoning_effort
-                    ? `Reasoning: ${agent.reasoning_effort} — click to change`
-                    : 'Reasoning: not set, the model decides — click to change'}
-                  onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
-                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
-                >{agent.reasoning_effort || '—'}</span>
-                {#if isTelegramConfigured(agent)}
+                  >{agent.provider_alias}</span>
+                  {#if hostOffline(agent.compute_host)}
+                    <span
+                      role="button"
+                      tabindex="0"
+                      class="agent-host-offline"
+                      title="Runs on {hostName(agent.compute_host ?? '')}, which is offline now. This agent will not answer until that node is back or its model is changed."
+                      onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
+                      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
+                    >⚠ offline</span>
+                  {/if}
                   <span
                     role="button"
                     tabindex="0"
-                    class="telegram-link-badge"
-                    class:paused={!agent.telegram_enabled}
-                    title={agent.telegram_enabled
-                      ? 'Linked to Telegram — click to edit settings'
-                      : 'Telegram link disabled, settings kept — click to edit or enable'}
-                    onclick={(e) => { e.stopPropagation(); handleLinkTelegram(agent.agent_id); }}
-                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleLinkTelegram(agent.agent_id); } }}
-                  >{agent.telegram_enabled ? '✓ 📱' : '⏸ 📱'}</span>
-                {/if}
+                    class="agent-effort"
+                    title={agent.reasoning_effort
+                      ? `Reasoning: ${agent.reasoning_effort} — click to change`
+                      : 'Reasoning: not set, the model decides — click to change'}
+                    onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
+                  >{agent.reasoning_effort || '—'}</span>
+                </span>
                 <span class="agent-status">
                   <span class="status-dot {status.dot}"></span>
                   <span class="status-line">{status.line}</span>
                   {#if status.waiting}<span class="status-chip">{status.waiting}</span>{/if}
                 </span>
               </button>
-              <div class="agent-actions">
-                {#if !isTelegramConfigured(agent) && onLinkAgentTelegram}
+              <div class="row-actions">
+                {#if isTelegramConfigured(agent) || onLinkAgentTelegram}
                   <button
                     type="button"
-                    class="telegram-action-btn link-btn"
+                    class="telegram-action-btn"
+                    class:linked={isTelegramConfigured(agent) && agent.telegram_enabled}
+                    class:paused={isTelegramConfigured(agent) && !agent.telegram_enabled}
                     onclick={(e) => { e.stopPropagation(); handleLinkTelegram(agent.agent_id); }}
-                    title="Link to Telegram"
-                  >
-                    📱+
-                  </button>
+                    title={!isTelegramConfigured(agent)
+                      ? 'Link to Telegram'
+                      : agent.telegram_enabled
+                        ? 'Linked to Telegram — click to edit settings'
+                        : 'Telegram link disabled, settings kept — click to edit or enable'}
+                  >{!isTelegramConfigured(agent) ? '📱+' : agent.telegram_enabled ? '✓ 📱' : '⏸ 📱'}</button>
                 {/if}
                 {#if onDeleteAgent}
                   <button
@@ -1066,20 +1077,22 @@
               }}
               title={chatInfo.provider ? `Provider: ${chatInfo.provider}` : 'Default AI Assistant'}
             >
-              {chatInfo.name}
+              <span class="peer-name">{chatInfo.name}</span>
               {#if (unreadMessageCounts.get(chatId) ?? 0) > 0}
                 <span class="unread-badge">{unreadMessageCounts.get(chatId)}</span>
               {/if}
             </button>
             {#if chatId !== 'local_ai'}
-              <button
-                type="button"
-                class="disconnect-btn"
-                onclick={(e) => { e.stopPropagation(); onDeleteAIChat(chatId); }}
-                title={chatInfo.provider === 'telegram' ? 'Delete Telegram chat' : 'Delete AI chat'}
-              >
-                ×
-              </button>
+              <div class="row-actions">
+                <button
+                  type="button"
+                  class="disconnect-btn"
+                  onclick={(e) => { e.stopPropagation(); onDeleteAIChat(chatId); }}
+                  title={chatInfo.provider === 'telegram' ? 'Delete Telegram chat' : 'Delete AI chat'}
+                >
+                  ×
+                </button>
+              </div>
             {/if}
           </li>
         {/each}
@@ -1098,29 +1111,45 @@
                 }}
                 title={peerId}
               >
-                <span class="peer-name">👤 {onGetPeerDisplayName(peerId)}</span>
+                <span class="peer-name">👤 {peerRowLabel(onGetPeerDisplayName(peerId))}</span>
                 {#if (unreadMessageCounts.get(peerId) ?? 0) > 0}
                   <span class="unread-badge">{unreadMessageCounts.get(peerId)}</span>
                 {/if}
               </button>
-              <button
-                type="button"
-                class="disconnect-btn"
-                onclick={(e) => { e.stopPropagation(); onDisconnectPeer(peerId); }}
-                title="Disconnect from peer"
-              >
-                ×
-              </button>
-              {#if onBlockPeer}
+              <div class="row-actions row-menu">
                 <button
                   type="button"
-                  class="block-btn"
-                  onclick={(e) => { e.stopPropagation(); onBlockPeer(peerId); }}
-                  title="Block this peer: ends the connection and stops it from connecting again"
+                  class="row-menu-btn"
+                  aria-haspopup="true"
+                  aria-expanded={openPeerMenu === peerId}
+                  onclick={(e) => { e.stopPropagation(); openPeerMenu = openPeerMenu === peerId ? null : peerId; }}
+                  title="More actions"
                 >
-                  Block
+                  ⋯
                 </button>
-              {/if}
+                {#if openPeerMenu === peerId}
+                  <div class="row-menu-list" aria-label="Actions for {peerRowLabel(onGetPeerDisplayName(peerId))}">
+                    <button
+                      type="button"
+                      class="row-menu-item"
+                      onclick={(e) => { e.stopPropagation(); openPeerMenu = null; onDisconnectPeer(peerId); }}
+                      title="Disconnect from peer"
+                    >
+                      Disconnect
+                    </button>
+                    {#if onBlockPeer}
+                      <button
+                        type="button"
+                        class="row-menu-item"
+                        onclick={(e) => { e.stopPropagation(); openPeerMenu = null; onBlockPeer(peerId); }}
+                        title="Block this peer: ends the connection and stops it from connecting again"
+                      >
+                        Block
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
             </li>
           {/each}
         {:else}
@@ -1984,6 +2013,14 @@
     box-shadow: 0 4px 8px rgba(147, 51, 234, 0.4);
   }
 
+  /* No row may widen the panel. `clip` (with `hidden` as the fallback) keeps the
+     list from becoming a scroll container, so the peer menu can still hang below it. */
+  .chat-list,
+  .chat-list ul {
+    overflow-x: hidden;
+    overflow-x: clip;
+  }
+
   .chat-list ul {
     list-style: none;
     padding: 0;
@@ -2010,6 +2047,7 @@
     padding: 0.6rem;
     transition: all 0.2s;
     flex: 1;
+    min-width: 0;
     position: relative;
   }
 
@@ -2061,32 +2099,63 @@
     margin-left: 0.5rem;
     min-width: 1.2rem;
     text-align: center;
+    flex: 0 0 auto;
   }
 
-  .disconnect-btn {
-    padding: 0.3rem 0.6rem;
+  /* The right-hand column: a fixed box, so the x does not depend on the row's text. */
+  .disconnect-btn,
+  .row-menu-btn {
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: transparent;
     color: #999;
-    font-size: 1.5rem;
+    font-size: 1.25rem;
+    line-height: 1;
     border: 1px solid transparent;
-    flex: 1;
   }
 
-  .disconnect-btn:hover {
+  .disconnect-btn:hover:not(:disabled),
+  .row-menu-btn:hover:not(:disabled),
+  .row-menu-btn[aria-expanded="true"] {
     background: #ffebee;
     color: #dc3545;
   }
 
-  .block-btn {
-    flex: 0 0 auto;
-    padding: 0.3rem 0.5rem;
-    background: transparent;
-    color: #999;
-    font-size: 0.75rem;
-    border: 1px solid transparent;
+  /* The peer row's menu: Disconnect and Block behind one button. */
+  .row-menu {
+    position: relative;
   }
 
-  .block-btn:hover {
+  .row-menu-list {
+    position: absolute;
+    top: calc(100% + 2px);
+    right: 0;
+    z-index: 20;
+    min-width: 8rem;
+    padding: 0.25rem;
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+
+  .row-menu-item {
+    display: block;
+    width: 100%;
+    padding: 0.4rem 0.7rem;
+    background: transparent;
+    color: #333;
+    font-size: 0.85rem;
+    text-align: left;
+    border-radius: 4px;
+  }
+
+  .row-menu-item:hover:not(:disabled) {
     background: #ffebee;
     color: #dc3545;
   }
@@ -2094,20 +2163,28 @@
   /* Agent button styles (Phase 4) */
   .agent-button {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.2rem;
     width: 100%;
+  }
+
+  /* First line: never wraps. The model chip shrinks first, the name keeps a floor. */
+  .agent-button .agent-line {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
   }
 
   /* The state line under the name: a dot, the map's words, the waiting-chat count. */
   .agent-button .agent-status {
-    flex: 0 0 100%;
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 6px;
     min-width: 0;
-    margin-top: -0.25rem;
     font-size: 0.75rem;
     font-weight: normal;
     color: #4b5563;
@@ -2126,7 +2203,8 @@
   }
 
   .agent-button .agent-name {
-    flex: 1;
+    flex: 1 1 0;
+    min-width: 5ch;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2138,9 +2216,14 @@
     background: #313244;
     padding: 0.1rem 0.3rem;
     border-radius: 3px;
-    margin-left: 0.25rem;
     cursor: pointer;
     transition: background 0.2s;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .agent-button .agent-provider:hover {
@@ -2567,25 +2650,49 @@
     margin-bottom: 0.5rem;
   }
 
-  /* Agent Actions */
-  .agent-actions {
+  /* Right-hand column of a chat row: controls sit flush right, in fixed-size boxes. */
+  .row-actions {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 0.25rem;
   }
 
+  /* One Telegram control, one width in all three states (not linked, linked, paused). */
   .telegram-action-btn {
-    padding: 0.3rem 0.5rem;
+    flex: 0 0 auto;
+    width: 2.6rem;
+    height: 28px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
     background: transparent;
     color: #0088cc;
-    font-size: 0.9rem;
+    font-size: 0.75rem;
     border: 1px solid #0088cc;
-    flex: 0 0 auto;
     min-width: auto;
-    width: auto;
     border-radius: 4px;
     cursor: pointer;
     transition: all 0.2s;
+  }
+
+  .telegram-action-btn.linked {
+    background: #0088cc;
+    color: white;
+  }
+
+  .telegram-action-btn.linked:hover:not(:disabled) {
+    background: #0077b6;
+  }
+
+  .telegram-action-btn.paused,
+  .telegram-action-btn.paused:hover:not(:disabled) {
+    background: #8a8a8a;
+    border-color: #8a8a8a;
+    color: white;
   }
 
   .telegram-action-btn:hover:not(:disabled) {
@@ -2605,9 +2712,9 @@
     border: 1px solid rgba(249, 226, 175, 0.4);
     padding: 0.1rem 0.3rem;
     border-radius: 3px;
-    margin-left: 0.25rem;
     cursor: pointer;
     white-space: nowrap;
+    flex: 0 0 auto;
   }
 
   .agent-effort {
@@ -2619,21 +2726,7 @@
     border: 1px solid var(--border-color, #3a3a3a);
     cursor: pointer;
     white-space: nowrap;
-  }
-
-  .telegram-link-badge {
-    font-size: 0.65rem;
-    background: #0088cc;
-    color: white;
-    padding: 0.1rem 0.3rem;
-    border-radius: 3px;
-    margin-left: 0.25rem;
-    border: none;
-    cursor: pointer;
-    line-height: 1;
-  }
-  .telegram-link-badge:hover {
-    background: #0077b6;
+    flex: 0 0 auto;
   }
 
   /* Telegram Link Dialog */
@@ -2875,9 +2968,6 @@
     padding: 0.05rem 0.35rem;
     margin-right: 0.3rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .telegram-link-badge.paused {
-    background: #8a8a8a;
   }
   .existing-link-info.paused {
     background: #f1f1f1;
