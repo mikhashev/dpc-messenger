@@ -9693,7 +9693,13 @@ class CoreService:
             if not dpc_agent_provider:
                 return {"status": "error", "message": "DpcAgentProvider not configured"}
 
-            manager = dpc_agent_provider.get_manager(conversation_id)
+            if conversation_id.startswith("telegram-"):
+                # A Telegram chat's own conversation belongs to the agent whose bridge
+                # serves the chat; get_manager would make an agent of that name.
+                bridge = self._get_telegram_bridge_for_conversation(conversation_id)
+                manager = getattr(bridge, "_agent_manager", None) if bridge else None
+            else:
+                manager = dpc_agent_provider.get_manager(conversation_id)
             if not manager:
                 return {"status": "error", "message": f"No agent manager for {conversation_id}"}
 
@@ -9749,37 +9755,40 @@ class CoreService:
 
             logger.info("CC response injected into %s (%d chars)", conversation_id, len(text))
 
-            # If the triggering @CC message came from Telegram, also send CC response there
+            # If the triggering @CC message came from Telegram, also send CC response to
+            # the chat it came from (its telegram_chat_id), never the first allowed chat:
+            # that one may be somebody else's. Mike's call, 2026-11-08.
             try:
-                if monitor.message_history and self.telegram_manager:
-                    # Check last few messages for Telegram source
-                    for msg in reversed(monitor.message_history[-5:]):
-                        if msg.get("sender_node_id") == "cc":
-                            continue  # Skip CC's own messages
-                        sender_name = msg.get("sender_name", "")
-                        if "(Telegram)" in sender_name:
-                            # Find linked Telegram chat_id from agent bridge
-                            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                            if dpc_agent_provider and conversation_id in getattr(dpc_agent_provider, '_managers', {}):
-                                bridge = getattr(dpc_agent_provider._managers[conversation_id], '_telegram_bridge', None)
-                                if bridge and bridge.allowed_chat_ids:
-                                    chat_id = bridge.allowed_chat_ids[0]
-                                    # Use the agent's own bot (dpc_agent_bot), not telegram_manager's bot.
-                                    # CC writes Markdown; both doors render it for Telegram.
-                                    cc_markdown = f"**CC:** {text}"
-                                    if getattr(bridge, '_bot', None):
-                                        await bridge.send_markdown(chat_id, cc_markdown)
-                                    else:
-                                        from dpc_client_core.telegram_format import markdown_to_telegram_html
-                                        await self.telegram_manager.send_message(
-                                            chat_id, markdown_to_telegram_html(cc_markdown))
-                                    logger.info("CC response also sent to Telegram chat %s via agent bot", chat_id)
-                            break
+                for msg in reversed(monitor.message_history[-5:]):
+                    if msg.get("sender_node_id") == "cc":
+                        continue  # Skip CC's own messages
+                    if "(Telegram)" in (msg.get("sender_name") or ""):
+                        chat_id = str(msg.get("telegram_chat_id") or "")
+                        bridge = getattr(manager, '_telegram_bridge', None)
+                        if not chat_id:
+                            logger.info("CC response not sent to Telegram for %s: the message "
+                                        "that woke CC recorded no chat", conversation_id)
+                        elif bridge and chat_id in bridge.allowed_chat_ids:
+                            # Use the agent's own bot (dpc_agent_bot), not telegram_manager's bot.
+                            # CC writes Markdown; both doors render it for Telegram.
+                            cc_markdown = f"**CC:** {text}"
+                            if getattr(bridge, '_bot', None):
+                                await bridge.send_markdown(chat_id, cc_markdown)
+                                logger.info("CC response also sent to Telegram chat %s via agent bot", chat_id)
+                            elif self.telegram_manager:
+                                from dpc_client_core.telegram_format import markdown_to_telegram_html
+                                await self.telegram_manager.send_message(
+                                    chat_id, markdown_to_telegram_html(cc_markdown))
+                                logger.info("CC response also sent to Telegram chat %s via main bot", chat_id)
+                        else:
+                            logger.info("CC response not sent to Telegram for %s: chat %s is not "
+                                        "an allowed chat of the agent's bot", conversation_id, chat_id)
+                    break
             except Exception as e:
                 logger.warning("Failed to send CC response to Telegram: %s", e)
 
             # If CC's response mentions @agent (by name or ID), trigger agent to respond (subject to chain depth)
-            _chain_agent_id = conversation_id
+            _chain_agent_id = getattr(manager, "agent_id", None) or conversation_id
             agent_name = self._get_agent_display_name(_chain_agent_id)
             text_lower = (text or '').lower()
             agent_mentioned = (f"@{agent_name.lower()}" in text_lower) or (f"@{_chain_agent_id}" in text_lower)
@@ -9812,7 +9821,31 @@ class CoreService:
         duplicating CC's message in history (already saved by send_cc_agent_response).
         """
         try:
+            from .dpc_agent.agent import is_owner_caller
             cc_name = self.get_cc_display_name()
+            # The turn CC carries takes the source of the chat that woke CC: the records
+            # since CC's previous message. One that is not the owner's (an unmarked
+            # Telegram user record counts as not) makes the turn that source; only
+            # the owner's records leave it external_agent. Fail closed.
+            monitor = getattr(agent_manager, "_agent_monitors", {}).get(conversation_id)
+            history = list(monitor.message_history) if monitor else []
+            i = len(history) - 1
+            while i >= 0 and history[i].get("sender_node_id") == "cc":
+                i -= 1  # CC's message that asked for this turn
+            message_source = "external_agent"
+            for msg in reversed(history[:i + 1]):
+                if msg.get("sender_node_id") == "cc":
+                    break
+                source = msg.get("message_source")
+                if source is None and msg.get("role") == "user" and msg.get("source") == "telegram":
+                    source = "telegram"
+                if source is not None and not is_owner_caller(source):
+                    message_source = source
+                    break
+            if history and history[-1].get("sender_node_id") == "cc":
+                # CC's record is this turn's prompt: it says which turn it opened.
+                history[-1]["message_source"] = message_source
+                monitor.save_history()
             # CC's message is already saved in history by send_cc_agent_response.
             # Pass _skip_history=True so this trigger prompt is NOT saved to history.json.
             response = await agent_manager.process_message(
@@ -9820,7 +9853,7 @@ class CoreService:
                 conversation_id=conversation_id,
                 sender_name=cc_name,
                 _skip_history=True,
-                message_source="external_agent",
+                message_source=message_source,
             )
             if response:
                 logger.info("Ark responded to CC's @Ark mention in %s (%d chars)",
@@ -9870,7 +9903,10 @@ class CoreService:
                 # scheduled task's prompt (`task_type`) is skipped too: it neither
                 # starts nor stops the forwarding.
                 # UI-originated chains stay in UI only — see Mike's intent in S39.
+                # The answer goes to the chat recorded on that message
+                # (telegram_chat_id), never the first allowed chat.
                 last_user_source = None
+                last_user_chat = None
                 if monitor and monitor.message_history:
                     for msg in reversed(monitor.message_history):
                         if msg.get("role") != "user":
@@ -9878,12 +9914,15 @@ class CoreService:
                         if msg.get("sender_node_id") == "cc" or msg.get("task_type"):
                             continue
                         last_user_source = msg.get("source")
+                        last_user_chat = msg.get("telegram_chat_id")
+                        if last_user_chat:
+                            last_user_source = "telegram"
                         break
                 if last_user_source == "telegram":
                     bridge = self._get_telegram_bridge_for_conversation(conversation_id)
                     if bridge:
                         try:
-                            await bridge.send_chain_response(response)
+                            await bridge.send_chain_response(response, chat_id=last_user_chat)
                         except Exception as bridge_err:
                             logger.warning(
                                 "Failed to forward chain response to Telegram for %s: %s",

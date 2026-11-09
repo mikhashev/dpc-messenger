@@ -30,7 +30,7 @@ class _Bridge:
     def __init__(self):
         self.sent = []
 
-    async def send_chain_response(self, text):
+    async def send_chain_response(self, text, chat_id=None):
         self.sent.append(text)
 
 
@@ -81,7 +81,7 @@ async def _cc_chain_answer(monitor):
 @pytest.mark.asyncio
 async def test_a_scheduled_prompt_after_telegram_keeps_the_chain_answer_going_to_telegram(monitor):
     monitor.add_message(role="user", content="how is the render?", sender_node_id=NODE,
-                        sender_name="Mike", source="telegram")
+                        sender_name="Mike", source="telegram", telegram_chat_id="4242")
     monitor.add_message(role="assistant", content="Rendering.", sender_node_id=AGENT)
     _scheduled_prompt(monitor)
 

@@ -2142,7 +2142,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     signature_fields: Optional[Dict[str, Any]] = None,
                     mention_depth: Optional[int] = None,
                     turn_end: Optional[str] = None,
-                    task_type: Optional[str] = None):
+                    task_type: Optional[str] = None,
+                    message_source: Optional[str] = None,
+                    telegram_chat_id: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -2160,6 +2162,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 absent on an answer
             task_type: The scheduled task type ('check_back', 'chat') whose run
                 wrote this prompt; absent on anything a person or a peer sent
+            message_source: The source of the agent turn this record opens or
+                answers (ui, telegram, telegram_owner, ...; is_owner_caller), so
+                the history shows which turns had the owner's memory
+            telegram_chat_id: The Telegram chat a message came from; a reply to
+                the turn goes there and nowhere else
 
         Note: This also adds to message_buffer and full_conversation for knowledge extraction.
         thinking and streaming_raw are stored in history.json but excluded from knowledge extraction.
@@ -2212,6 +2219,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["turn_end"] = turn_end
         if task_type:
             message_dict["task_type"] = task_type
+        if message_source:
+            message_dict["message_source"] = message_source
+        if telegram_chat_id:
+            message_dict["telegram_chat_id"] = str(telegram_chat_id)
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)

@@ -644,7 +644,7 @@ Send a voice message and it will be transcribed and processed\\.
         if chat_id not in self.allowed_chat_ids:
             return
 
-        conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+        conversation_id = self._conversation_id_for(chat_id, self._is_owner_message(update))
         service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
 
         if not service:
@@ -666,7 +666,7 @@ Send a voice message and it will be transcribed and processed\\.
                     parse_mode="MarkdownV2"
                 )
                 # Push empty history to DPC chat UI if unified
-                if self._unified_conversation:
+                if self._unified_conversation and conversation_id == self._agent_id:
                     await self._broadcast_history_to_ui(conversation_id)
             else:
                 msg = escape_markdown(result.get("message", "Unknown error"))
@@ -688,7 +688,7 @@ Send a voice message and it will be transcribed and processed\\.
         if chat_id not in self.allowed_chat_ids:
             return
 
-        conversation_id = self._conversation_id_for(chat_id)
+        conversation_id = self._conversation_id_for(chat_id, self._is_owner_message(update))
         burst = self._bursts.get(chat_id)
         worker = burst.worker if burst is not None else None
         dropped = self._drop_chat_burst(chat_id)
@@ -768,7 +768,7 @@ Send a voice message and it will be transcribed and processed\\.
         if chat_id not in self.allowed_chat_ids:
             return
 
-        conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+        conversation_id = self._conversation_id_for(chat_id, self._is_owner_message(update))
         service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
 
         if not service:
@@ -1448,9 +1448,17 @@ Send a voice message and it will be transcribed and processed\\.
         if callable(reset):
             reset(conversation_id)
 
-    def _conversation_id_for(self, chat_id: str) -> str:
-        """The conversation a Telegram chat writes into."""
-        return self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+    def _conversation_id_for(self, chat_id: str, from_owner: bool = False) -> str:
+        """The conversation a Telegram turn writes into and runs in.
+
+        In unified mode only the owner's own turn joins the agent's 1:1 conversation
+        with him: any other turn there would read his whole history, recent tools and
+        archives. Every other turn keeps the chat's own conversation, as without
+        unified mode. Mike's call, 2026-11-08 (review by Zcode, Johnny, Ark).
+        """
+        if self._unified_conversation and self._agent_id and from_owner:
+            return self._agent_id
+        return f"telegram-{chat_id}"
 
     @staticmethod
     def _sender_name_of(update) -> str:
@@ -1540,7 +1548,8 @@ Send a voice message and it will be transcribed and processed\\.
 
         log.info(f"Processing Telegram message from chat {chat_id} ({sender_name}): {message_text[:50]}...")
 
-        conversation_id = self._conversation_id_for(chat_id)
+        from_owner = self._is_owner_message(update)
+        conversation_id = self._conversation_id_for(chat_id, from_owner)
         try:
             self._start_new_cc_chain(conversation_id)
 
@@ -1560,6 +1569,8 @@ Send a voice message and it will be transcribed and processed\\.
                         sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
                         sender_name=sender_name,
                         source="telegram",
+                        message_source=TELEGRAM_OWNER_MESSAGE_SOURCE if from_owner else "telegram",
+                        telegram_chat_id=chat_id,
                     )
                     monitor.save_history()
                     # Broadcast cc_agent_mention for CC's MCP bridge
@@ -1569,7 +1580,7 @@ Send a voice message and it will be transcribed and processed\\.
                             conversation_id, message_text, "", self._agent_manager
                         )
                         # Push updated history to DPC UI
-                        if self._unified_conversation:
+                        if self._unified_conversation and conversation_id == self._agent_id:
                             await self._broadcast_history_to_ui(conversation_id)
                 return  # Skip Ark's process_message
         except Exception as e:
@@ -1724,7 +1735,7 @@ Send a voice message and it will be transcribed and processed\\.
             photo_bytes = await file.download_as_bytearray()
             image_base64 = base64.b64encode(bytes(photo_bytes)).decode("utf-8")
 
-            conversation_id = self._conversation_id_for(chat_id)
+            conversation_id = self._conversation_id_for(chat_id, item.from_owner)
             attachment = self._keep_incoming_photo(
                 conversation_id, bytes(photo_bytes), update.message.message_id
             )
@@ -1931,7 +1942,10 @@ Send a voice message and it will be transcribed and processed\\.
         shows as waiting and a Stop in it drops what was gathered. The
         `process_message` called inside passes through the gate this task holds.
         """
-        conversation_id = self._conversation_id_for(chat_id)
+        # Where the chat waits; the batch taken at the gate decides where it runs
+        # (`_conversation_id_for`): the owner's only if he sent every message in it.
+        conversation_id = self._conversation_id_for(
+            chat_id, bool(burst.items) and all(i.from_owner for i in burst.items))
         gate = getattr(self._agent_manager, "_run_gate", None) if self._agent_manager else None
         outcome = None
         if isinstance(gate, RunGate):
@@ -1944,6 +1958,8 @@ Send a voice message and it will be transcribed and processed\\.
                 async with gate.hold(entry, stoppable=True):
                     batch = self._take_burst_batch(burst)
                     if batch:
+                        conversation_id = self._conversation_id_for(
+                            chat_id, all(i.from_owner for i in batch))
                         outcome = await self._run_burst_batch(chat_id, conversation_id, batch, burst)
             except StoppedWhileWaiting:
                 await self._close_stopped_burst(conversation_id, burst)
@@ -1951,6 +1967,8 @@ Send a voice message and it will be transcribed and processed\\.
         else:
             batch = self._take_burst_batch(burst)
             if batch:
+                conversation_id = self._conversation_id_for(
+                    chat_id, all(i.from_owner for i in batch))
                 outcome = await self._run_burst_batch(chat_id, conversation_id, batch, burst)
         if outcome is not None:
             await self._answer_burst(conversation_id, *outcome)
@@ -1971,6 +1989,9 @@ Send a voice message and it will be transcribed and processed\\.
                                batch: List[_BurstItem], burst: _ChatBurst) -> tuple:
         """Hand one batch to the agent; returns (batch, response, error)."""
         last = batch[-1]
+        # The owner's turn only if he sent every message it carries; decided before
+        # the record, which says which turn it was.
+        from_owner = bool(batch) and all(item.from_owner for item in batch)
         # Set before the first await: the batch is out of the burst already, so
         # a drop from here on must leave this run alone (`_drop_chat_burst`).
         burst.running = True
@@ -1991,7 +2012,8 @@ Send a voice message and it will be transcribed and processed\\.
                 # B1a: Save user message to monitor and broadcast to UI BEFORE agent
                 # processing, so the message appears in DPC UI immediately (not after response).
                 # B1b: Prefix sender_name so Ark sees message source (Telegram vs DPC UI).
-                if self._agent_manager and self._unified_conversation:
+                if (self._agent_manager and self._unified_conversation
+                        and conversation_id == self._agent_id):
                     monitor = self._agent_manager._get_or_create_agent_monitor(conversation_id)
                     from dpc_client_core.dpc_agent.utils import utc_now_iso
                     monitor.add_message(
@@ -2001,6 +2023,8 @@ Send a voice message and it will be transcribed and processed\\.
                         sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
                         sender_name=last.sender_name,
                         source="telegram",
+                        message_source=TELEGRAM_OWNER_MESSAGE_SOURCE if from_owner else "telegram",
+                        telegram_chat_id=chat_id,
                     )
                     monitor.save_history()
                     await self._broadcast_history_to_ui(conversation_id)
@@ -2009,8 +2033,6 @@ Send a voice message and it will be transcribed and processed\\.
                     skip_history = False
                 kwargs = dict(message=message, _skip_history=skip_history)
 
-            # The owner's turn only if he sent every message it carries.
-            from_owner = bool(batch) and all(item.from_owner for item in batch)
             # Call the message handler (agent_manager.process_message)
             response = await self._message_handler(
                 conversation_id=conversation_id,
@@ -2038,7 +2060,8 @@ Send a voice message and it will be transcribed and processed\\.
                 log.error(f"Error sending Telegram reply: {e}", exc_info=True)
             finally:
                 # Always push updated history to DPC chat UI in unified_conversation mode
-                if self._unified_conversation and self._agent_manager:
+                if (self._unified_conversation and self._agent_manager
+                        and conversation_id == self._agent_id):
                     await self._broadcast_history_to_ui(conversation_id)
             return
 
@@ -2082,18 +2105,22 @@ Send a voice message and it will be transcribed and processed\\.
         if not callable(closer):
             return
         attachments = [i.attachment for i in ready if i.kind == "photo" and i.attachment]
+        from_owner = all(i.from_owner for i in ready)
         try:
             notice = closer(
                 message=self._burst_message(ready),
                 conversation_id=conversation_id,
                 attachments=attachments or None,
                 sender_name=ready[-1].sender_name,
+                message_source=TELEGRAM_OWNER_MESSAGE_SOURCE if from_owner else "telegram",
+                telegram_chat_id=str(ready[-1].update.effective_chat.id),
             )
             await self._reply_markdown(ready[-1].update, notice, conversation_id=conversation_id)
         except Exception as e:
             log.error(f"Error closing a stopped Telegram burst: {e}", exc_info=True)
         finally:
-            if self._unified_conversation and self._agent_manager:
+            if (self._unified_conversation and self._agent_manager
+                    and conversation_id == self._agent_id):
                 await self._broadcast_history_to_ui(conversation_id)
 
     def _keep_incoming_photo(
@@ -2313,21 +2340,26 @@ Send a voice message and it will be transcribed and processed\\.
 
         return True
 
-    async def send_chain_response(self, text: str) -> None:
-        """Forward a chain-triggered agent response to the linked Telegram chat.
+    async def send_chain_response(self, text: str, chat_id: Optional[str] = None) -> None:
+        """Forward a chain-triggered agent response to the Telegram chat the turn came from.
 
         Used by service.py `_invoke_agent_in_agent_chat()` when the last user
         message in the conversation came from Telegram (origin tracking).
-        Without this, chain-triggered responses only reach the UI broadcast
-        and never the Telegram chat that originated the session.
+        `chat_id` is the `telegram_chat_id` recorded on that message. With none
+        recorded, or a chat no longer allowed, nothing is sent: never the first
+        allowed chat, which may be somebody else's (Mike's call, 2026-11-08).
         """
         if not self._enabled or not self._bot:
             log.warning("Chain response not delivered to Telegram (bridge disabled)")
             return
-        if not self.allowed_chat_ids:
+        chat = str(chat_id) if chat_id else ""
+        if not chat:
+            log.info("Chain response not sent to Telegram: the message that woke it recorded no chat")
             return
-        chat_id = self.allowed_chat_ids[0]
-        await self.send_markdown(chat_id, text)
+        if chat not in self.allowed_chat_ids:
+            log.info("Chain response not sent to Telegram: chat %s is not an allowed chat", chat)
+            return
+        await self.send_markdown(chat, text)
 
     async def _send_message(self, chat_id: str, text: str) -> None:
         """Send Markdown to a chat, rendered; the one door handle_event uses."""

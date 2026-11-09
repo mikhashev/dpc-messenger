@@ -393,7 +393,9 @@ def _value_of(node):
 EXPECTED = {
     ("service.py", "_execute_agent_query"): "ui",
     ("service.py", "send_image"): "ui",
-    ("service.py", "_invoke_agent_in_agent_chat"): "external_agent",
+    # The source of the chat that woke CC, read from the history (external_agent when
+    # only the owner's records are there): test_a_turn_from_telegram_keeps_its_source_and_its_chat.py
+    ("service.py", "_invoke_agent_in_agent_chat"): "<expr>",
     ("service.py", "_invoke_agent_in_group"): "group",
     ("message_handlers/group_handler.py", "_invoke_agent"): "group",
     # The owner's own messages in his private chat with the bot are his turn

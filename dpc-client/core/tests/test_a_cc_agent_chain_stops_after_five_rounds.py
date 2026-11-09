@@ -72,6 +72,10 @@ def _service():
     service.get_cc_display_name = lambda: "CC"
     service._get_agent_display_name = lambda agent_id=None: "Ark"
     service.invoked = []
+    # A Telegram chat's own conversation (telegram-<chat>) is the agent's whose
+    # bridge serves the chat; send_cc_agent_response finds that manager through it.
+    service._get_telegram_bridge_for_conversation = lambda conversation_id: SimpleNamespace(
+        _agent_manager=provider.get_manager(conversation_id))
 
     def _record(conversation_id, cc_text, manager):
         service.invoked.append(conversation_id)

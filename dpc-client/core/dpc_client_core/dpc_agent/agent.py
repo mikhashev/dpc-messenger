@@ -1246,7 +1246,8 @@ class DpcAgent:
             run: Dict[str, Any] = {}
             if data.get("_reply_conversation_id"):
                 prompt = data.get("text") or self._convert_task_data_to_prompt(data)
-                run = {"prompt": prompt, "task_type": task.task_type}
+                run = {"prompt": prompt, "task_type": task.task_type,
+                       "message_source": data.get("_message_source")}
             async with scope(conversation_id, run) as live:
                 run["answer"] = await self._execute_task_guarded(task, live)
                 return run["answer"]

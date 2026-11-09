@@ -136,7 +136,7 @@ async def test_send_markdown_does_not_resend_on_an_outage():
 @pytest.mark.asyncio
 async def test_a_chain_response_is_rendered():
     bridge = _bridge()
-    await bridge.send_chain_response(AGENT_MD)
+    await bridge.send_chain_response(AGENT_MD, chat_id=CHAT)
     assert _sent(bridge._bot) == [(AGENT_HTML, "HTML")]
 
 
@@ -161,7 +161,8 @@ async def test_ccs_reply_relayed_to_telegram_is_rendered():
     monitor = SimpleNamespace(message_history=[], save_history=lambda: None,
                               get_last_msg_index=lambda: 0)
     monitor.add_message = lambda **kw: monitor.message_history.append(kw)
-    monitor.message_history.append({"role": "user", "content": "@CC?", "sender_name": "Mike (Telegram)"})
+    monitor.message_history.append({"role": "user", "content": "@CC?", "sender_name": "Mike (Telegram)",
+                                    "telegram_chat_id": CHAT})
     manager = SimpleNamespace(_agent_monitors={"agent_001": monitor}, _telegram_bridge=bridge,
                               get_session_state=lambda _c: {})
     provider = SimpleNamespace(get_manager=lambda _c: manager, _managers={"agent_001": manager})

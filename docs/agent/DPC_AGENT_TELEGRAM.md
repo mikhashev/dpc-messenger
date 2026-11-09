@@ -284,6 +284,13 @@ await send_user_message(
   they count only when `telegram_owner_user_id` presses them, in any allowed chat; with
   no owner ID set, only a private chat with the presser counts, never a group. Anyone
   else gets an alert and the message stays as it was (Mike's call, 2026-11-08)
+- With unified conversation on, only the owner's own turns (from `telegram_owner_user_id`
+  in a private chat) join the agent's conversation with the owner; any other Telegram turn
+  runs in that chat's own `telegram-<chat_id>` conversation and never sees the owner's
+  history. With no owner ID set, every Telegram turn goes there, the owner's too
+- A reply CC or a CC chain sends to Telegram goes to the chat the waking message came from
+  (recorded on it as `telegram_chat_id`), never to the first allowed chat; with no chat
+  recorded nothing is sent (Mike's call, 2026-11-08)
 - Each agent must have explicit `telegram_enabled = true`
 - Agent can only send to its linked `telegram_chat_id`
 - Messages are sent over Telegram's encrypted connection

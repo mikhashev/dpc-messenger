@@ -1086,7 +1086,9 @@ class DpcAgentManager:
     def _close_turn_stopped_while_waiting(
         self, message: str, conversation_id: str,
         attachments: Optional[List[Dict[str, Any]]] = None,
-        sender_name: str = "User", _skip_history: bool = False, **_unused: Any,
+        sender_name: str = "User", _skip_history: bool = False,
+        telegram_chat_id: Optional[str] = None, message_source: Optional[str] = None,
+        **_unused: Any,
     ) -> str:
         """The record of a message the person stopped before its run started.
 
@@ -1110,6 +1112,8 @@ class DpcAgentManager:
                 timestamp=utc_now_iso(),
                 sender_node_id=getattr(self.service.p2p_manager, "node_id", "local-user"),
                 sender_name=sender_name,
+                message_source=message_source,
+                telegram_chat_id=telegram_chat_id,
             )
         monitor.add_message(
             role="assistant",
@@ -1118,6 +1122,7 @@ class DpcAgentManager:
             sender_node_id=conversation_id,
             sender_name=self._agent_display_name or self.agent_id or "DPC Agent",
             turn_end="stopped",
+            message_source=message_source,
         )
         monitor.save_history()
         return notice
@@ -1210,7 +1215,8 @@ class DpcAgentManager:
             monitor.load_history()
 
         if not _skip_history and not is_group:
-            self._record_prompt(monitor, message, sender_name, attachments=attachments)
+            self._record_prompt(monitor, message, sender_name, attachments=attachments,
+                                message_source=message_source, telegram_chat_id=telegram_chat_id)
 
             # tokens_after_last_response is updated after each LLM response
             # (writer below this block) from accurate token counts. No additive
@@ -1260,14 +1266,16 @@ class DpcAgentManager:
                     self._daily_tokens_date = today
                 if self._daily_tokens_used >= quota_limit:
                     notice = f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
-                    await self._end_turn_by_guard(agent, monitor, emitter, task_id, conversation_id, notice)
+                    await self._end_turn_by_guard(agent, monitor, emitter, task_id, conversation_id, notice,
+                                                  message_source=message_source)
                     return notice
 
             # No window, no measure: the guard in agent.py would fall back on a number of
             # its own and call the model against it.
             if session_state.get("window_unknown"):
                 notice = f"⚠️ {session_state['window_unknown']}"
-                await self._end_turn_by_guard(agent, monitor, emitter, task_id, conversation_id, notice)
+                await self._end_turn_by_guard(agent, monitor, emitter, task_id, conversation_id, notice,
+                                                  message_source=message_source)
                 return notice
 
             reasoning_effort, effort_source = self._resolve_reasoning_effort(
@@ -1333,7 +1341,8 @@ class DpcAgentManager:
                     "duration": 5000,
                 })
             elif not is_group:
-                self._record_answer(monitor, conversation_id, agent, response, _stream_chunks)
+                self._record_answer(monitor, conversation_id, agent, response, _stream_chunks,
+                                    message_source=message_source)
 
             # Store full context measurement from this request so next request's session_state
             # can expose it. One request stale, but accurate — context grows incrementally.
@@ -1414,7 +1423,8 @@ class DpcAgentManager:
             raise
 
     async def _end_turn_by_guard(self, agent: Any, monitor: ConversationMonitor, emitter, task_id: str,
-                                 conversation_id: str, notice: str) -> None:
+                                 conversation_id: str, notice: str,
+                                 message_source: Optional[str] = None) -> None:
         """A turn a guard here refuses before any model call: its notice is the answer."""
         # No run: what the agent holds is the previous turn's, and the caller reads it
         # as this one's. The record closes the turn the message opened.
@@ -1428,6 +1438,7 @@ class DpcAgentManager:
                 sender_node_id=conversation_id,
                 sender_name=self._current_agent_display_name,
                 turn_end="guard",
+                message_source=message_source,
             )
             monitor.save_history()
         # The thinking line went up above; the turn ends the way any other does, or
@@ -1436,8 +1447,11 @@ class DpcAgentManager:
 
     def _record_prompt(self, monitor: ConversationMonitor, message: str, sender_name: str,
                        attachments: Optional[List[Dict[str, Any]]] = None,
-                       task_type: Optional[str] = None) -> None:
-        """The user-side record a run answers, saved at once."""
+                       task_type: Optional[str] = None,
+                       message_source: Optional[str] = None,
+                       telegram_chat_id: Optional[str] = None) -> None:
+        """The user-side record a run answers, saved at once, with the turn's source
+        and, for a Telegram message, the chat it came from (the reply goes there)."""
         monitor.add_message(
             role="user",
             content=message,
@@ -1446,6 +1460,8 @@ class DpcAgentManager:
             sender_node_id=getattr(self.service.p2p_manager, "node_id", "local-user"),
             sender_name=sender_name,
             task_type=task_type,
+            message_source=message_source,
+            telegram_chat_id=telegram_chat_id,
         )
         monitor.save_history()
 
@@ -1461,7 +1477,8 @@ class DpcAgentManager:
         return thinking, streaming_raw
 
     def _record_answer(self, monitor: ConversationMonitor, conversation_id: str, agent: Any,
-                       response: Optional[str], stream_chunks: List[str]) -> None:
+                       response: Optional[str], stream_chunks: List[str],
+                       message_source: Optional[str] = None) -> None:
         """The assistant record of a finished run, with its trace, saved at once.
 
         Kept when there is text, thinking or streamed output: the UI shows the
@@ -1489,6 +1506,7 @@ class DpcAgentManager:
             streaming_raw=streaming_raw,
             tool_calls=tool_calls or None,
             turn_end=turn_end,
+            message_source=message_source,
         )
         monitor.save_history()
 
@@ -1515,7 +1533,7 @@ class DpcAgentManager:
         the run ends, whether it answered, failed or was stopped. Its Stop and
         Kill events are registered as a chat run's are, so `interrupt` reaches it.
 
-        `run` carries the task's `prompt` and `task_type`, and the executor puts
+        `run` carries the task's `prompt`, `task_type` and `message_source`, and the executor puts
         the `answer` on it. Outside a group both are recorded in the chat as a
         chat run's are, and an agent chat is pushed to the UI; a group's record
         is the post (ADR-031 §3). No prompt means no record.
@@ -1532,7 +1550,8 @@ class DpcAgentManager:
             try:
                 monitor = self._get_or_create_agent_monitor(conversation_id)
                 task_type = run.get("task_type") or "chat"
-                self._record_prompt(monitor, run["prompt"], f"Scheduled {task_type}", task_type=task_type)
+                self._record_prompt(monitor, run["prompt"], f"Scheduled {task_type}", task_type=task_type,
+                                    message_source=run.get("message_source"))
             except Exception as e:
                 log.warning("Task run in %s: prompt not recorded: %s", conversation_id, e)
                 monitor = None
@@ -1560,7 +1579,8 @@ class DpcAgentManager:
             }
             if monitor is not None and "answer" in run and self._agent is not None:
                 try:
-                    self._record_answer(monitor, conversation_id, self._agent, run["answer"], streamed)
+                    self._record_answer(monitor, conversation_id, self._agent, run["answer"], streamed,
+                                        message_source=run.get("message_source"))
                 except Exception as e:
                     log.warning("Task run in %s: answer not recorded: %s", conversation_id, e)
                 await self._broadcast_history_to_ui(conversation_id)
