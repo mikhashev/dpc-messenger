@@ -71,12 +71,13 @@ def is_owner_caller(message_source: Optional[str]) -> bool:
 
 
 # The audience of each memory layer (ADR-048; Mike's call, 2026-11-08, review by
-# Zcode, Johnny, Ark). Read from agent_profiles.<id>.memory.layer_audience; an absent
+# Zcode, Johnny, Ark; L6 became private on 2026-11-09, Mike's call, review by Zcode and
+# Johnny). Read from agent_profiles.<id>.memory.layer_audience; an absent
 # field or key keeps the default. memory/ counts as L5.
 MEMORY_LAYERS = ("L5", "L6", "EXT")
 ALL_MEMORY_LAYERS = frozenset(MEMORY_LAYERS)
 LAYER_AUDIENCE_VALUES = ("private", "shared")
-DEFAULT_LAYER_AUDIENCE = {"L5": "private", "L6": "shared", "EXT": "private"}
+DEFAULT_LAYER_AUDIENCE = {"L5": "private", "L6": "private", "EXT": "private"}
 
 # Who a turn is, for the layers it may see. Code words only.
 OWNER_TURN = "owner"            # the owner's doors, or a group of this node and own nodes
@@ -647,6 +648,13 @@ class DpcAgent:
         audience_class, layers_open = self.turn_audience(message_source, conversation_id)
         # No open layer, no hints; otherwise the closed layers' rows are dropped below.
         active_recall = active_recall and bool(layers_open)
+        if audience_class != OWNER_TURN and not layers_open:
+            # The reason line, once per turn: recall is skipped and memory_search refuses.
+            closed = ", ".join(f"{l}" for l in MEMORY_LAYERS)
+            log.info("Agent %s turn in %s (%s): no memory layer is open (%s marked private "
+                     "or not shared with this turn); recall skipped",
+                     self.agent_root.name, conversation_id or message_source or "unnamed source",
+                     audience_class, closed)
 
         # Searched in a worker thread under a bound: the loop keeps serving guests,
         # the gateway and the UI while the queries are encoded.

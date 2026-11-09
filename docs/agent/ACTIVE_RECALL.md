@@ -326,7 +326,7 @@ answers and takes the memory layers that class may see (`turn_audience`): the ow
 (`ui`, `telegram_owner`, `external_agent`) and a group whose members are all this node or nodes
 of the agent's **`own_node_group`** see L5, L6 and EXT; any other group (another node, a Discord
 bridge, a group not found, an empty roster) sees only the layers its profile marks `shared` in
-**`layer_audience`** (by default L6 alone); a stranger (`telegram`, `discord`, no source) sees
+**`layer_audience`** (by default none, since L6 became private on 2026-11-09); a stranger (`telegram`, `discord`, no source) sees
 none. With no layer open there is no recall work at all. Otherwise `get_recall_block` drops
 candidates whose layer is closed, before decay and the cut, so a closed document neither takes a
 slot nor weighs in the decay's scaling. A candidate's layer is its key prefix — `knowledge/` is
@@ -569,8 +569,8 @@ rows whose path is no longer granted, and skips the vector channel on a stale in
 
 **Audience (ADR-048).** `memory_search` asks the turn's open layers (§6.1) before any index
 opens: with none open it refuses in one line ("memory_search answers only the owner; this turn
-came from …"); otherwise it drops the rows of closed layers, by the same key prefixes, before it
-counts and cuts. A group with another node therefore gets only `L6/` rows by default.
+came from …, and no memory layer is open to it"); otherwise it drops the rows of closed layers, by the same key prefixes, before it
+counts and cuts. A group with another node therefore gets no rows by default (L6 was `shared` until 2026-11-09); mark `L6` shared and it gets `L6/` rows. The refusal says the layers are closed, and a non-owner turn with no open layer logs one INFO line naming its class.
 
 **What `memory_search` prints (step 2 of the board card, 2026-11-09).** The key is the
 document's identity in the index (§3.2), not a path; the address (§10) is what `read_file`

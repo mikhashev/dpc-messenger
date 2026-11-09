@@ -1055,8 +1055,11 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
         audience = turn_audience(ctx)
         layers = audience[1] if audience is not None else frozenset()
         if not layers:
+            cls = audience[0] if audience is not None else None
             return (f"memory_search answers only the owner; this turn came from "
-                    f"{source or 'an unnamed source'}.")
+                    f"{source or 'an unnamed source'}"
+                    f"{f' ({cls})' if cls else ''}, and no memory layer is open to it "
+                    f"(L5, L6, EXT are private or not shared with this turn).")
 
         # The memory switch of this agent's own profile, asked before the index opens.
         # No firewall (tests, bare contexts): as before.

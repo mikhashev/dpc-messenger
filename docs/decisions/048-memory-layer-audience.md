@@ -46,7 +46,7 @@ Each memory layer carries an audience mark, and each turn is classed by who it a
 a turn sees only the layers its class may see, in every channel at once.
 
 1. **The mark.** `agent_profiles.<id>.memory.layer_audience` in `privacy_rules.json`,
-   `{"L5": "private", "L6": "shared", "EXT": "private"}` by default. An absent field or
+   `{"L5": "private", "L6": "private", "EXT": "private"}` by default. An absent field or
    key keeps the default; nothing is migrated. Values are exactly `private` and `shared`.
    L5 covers the agent's `knowledge/` and `memory/` (scratchpad, identity, dialogue
    summary, morning brief, system prompt), so identity closes with L5.
@@ -174,9 +174,12 @@ THE-GROUP-GATE-READS-THE-MEMBER-LIST-WHILE-THE-AGENTS-MAP-STILL-NAMES-NODES-THAT
 - **An agent in a mixed group is a different agent.** With L5 private it has no
   scratchpad, brief or identity there, and cannot write them; its voice may change.
   Splitting a shareable persona out of identity is a separate card.
-- **L6 holds commits born in 1:1 chats.** Marked shared by default, so a group with
-  another node can be offered them; Ark counted 5 of 400 L6 file names that look
-  personal. L6 is owner-curated; a per-file audience is the Teams-era answer.
+- **L6 holds commits born in 1:1 chats.** It was marked shared by default; the default
+  became private on 2026-11-09, Mike's call (a), review by Zcode and Johnny, because L6
+  is the owner's curated knowledge and team knowledge is ADR-049's store. A group with
+  another node now opens no layer by default, and the turn logs one INFO line saying
+  so. Ark counted 5 of 400 L6 file names that look personal; a per-file audience is the
+  Teams-era answer. Marking L6 shared stays possible per agent.
 - **The gate inherits the ownerless roster** (GROUP-ROSTER-HAS-NO-OWNER): a peer that
   edits a group's member list changes whether the group counts as the owner's.
 - **run_shell is not covered.** A turn can still read memory through a command the owner
@@ -194,7 +197,7 @@ THE-GROUP-GATE-READS-THE-MEMBER-LIST-WHILE-THE-AGENTS-MAP-STILL-NAMES-NODES-THAT
 ## Confirmation
 
 - [ ] In group 1234 or Brofish (another node present) a question about an L5- or EXT-only
-  fact gets no such hint and `memory_search` lists only `L6/` keys; `read_file
+  fact gets no such hint and `memory_search` refuses (with L6 marked shared, it lists only `L6/` keys); `read_file
   memory/scratchpad.md` is refused.
 - [ ] In a group of this node and the Linux node only, with `own_node_group` naming a
   group that lists the Linux node, L5 and EXT hints come back.

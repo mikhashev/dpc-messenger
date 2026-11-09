@@ -132,7 +132,16 @@ def test_a_group_of_this_node_and_its_own_nodes_is_the_owner(members):
 def test_a_group_with_another_node_sees_only_the_shared_layers():
     cls = turn_class("group", _group([THIS, LINUX, OTHER]), THIS, {LINUX})
     assert cls == OTHER_NODE_TURN
-    assert open_layers(cls, layer_audience({})) == frozenset({"L6"})
+    assert open_layers(cls, layer_audience({"layer_audience": {"L6": "shared"}})) == frozenset({"L6"})
+
+
+def test_with_default_marks_a_group_with_another_node_opens_no_layer():
+    # L6 became private by default on 2026-11-09 (Mike's call, review by Zcode, Johnny).
+    cls = turn_class("group", _group([THIS, LINUX, OTHER]), THIS, {LINUX})
+    assert cls == OTHER_NODE_TURN
+    assert layer_audience({}) == {"L5": "private", "L6": "private", "EXT": "private"}
+    assert open_layers(cls, layer_audience({})) == frozenset()
+    assert open_layers(cls) == frozenset()
 
 
 def test_a_discord_bridge_is_never_the_owner_even_with_only_this_node():
@@ -162,12 +171,12 @@ def test_a_stranger_sees_no_layer_even_when_all_are_shared(source):
 
 def test_marking_l5_shared_brings_it_back_to_a_mixed_group():
     marks = layer_audience({"layer_audience": {"L5": "shared"}})
-    assert open_layers(OTHER_NODE_TURN, marks) == frozenset({"L5", "L6"})
+    assert open_layers(OTHER_NODE_TURN, marks) == frozenset({"L5"})
 
 
 def test_a_bad_mark_in_memory_keeps_the_default():
     marks = layer_audience({"layer_audience": {"L5": "everyone", "L9": "shared"}})
-    assert marks == {"L5": "private", "L6": "shared", "EXT": "private"}
+    assert marks == {"L5": "private", "L6": "private", "EXT": "private"}
 
 
 def test_the_agent_reads_the_own_group_from_its_profile(world, tmp_path):
@@ -176,7 +185,7 @@ def test_the_agent_reads_the_own_group_from_its_profile(world, tmp_path):
                      _group([THIS, OTHER], gid="group-mixed"))
     agent = _agent(world, fw, groups)
     assert agent.turn_audience("group", "group-own") == (OWNER_TURN, ALL_MEMORY_LAYERS)
-    assert agent.turn_audience("group", "group-mixed") == (OTHER_NODE_TURN, frozenset({"L6"}))
+    assert agent.turn_audience("group", "group-mixed") == (OTHER_NODE_TURN, frozenset())
     assert agent.turn_audience("group", "group-gone")[0] == OTHER_NODE_TURN
     assert agent.turn_audience("telegram", "telegram-5") == (STRANGER_TURN, frozenset())
 
@@ -293,11 +302,36 @@ async def _turn(w, monkeypatch, agent, source, conversation_id):
 @pytest.mark.asyncio
 async def test_a_mixed_group_turn_gets_l6_hints_and_no_l5_hint(world, monkeypatch, tmp_path):
     _index(world)
-    agent = _agent(world, _rules(tmp_path), _Groups(_group([THIS, OTHER], gid="group-m")))
+    fw = _rules(tmp_path, memory={"layer_audience": {"L6": "shared"}})
+    agent = _agent(world, fw, _Groups(_group([THIS, OTHER], gid="group-m")))
     seen = await _turn(world, monkeypatch, agent, "group", "group-m")
     assert "Shared Note" in seen["tail"]
     assert OWN_MARK not in seen["tail"] and "Own Note" not in seen["tail"]
     assert SCRATCH_MARK not in seen["system"]
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_group_turn_with_default_marks_opens_no_layer_and_says_why(
+        world, monkeypatch, tmp_path, caplog):
+    _index(world)
+    agent = _agent(world, _rules(tmp_path), _Groups(_group([THIS, OTHER], gid="group-m")))
+    with caplog.at_level(logging.INFO, logger=agent_mod.__name__):
+        seen = await _turn(world, monkeypatch, agent, "group", "group-m")
+    assert "Shared Note" not in seen["tail"] and "Own Note" not in seen["tail"]
+    assert SCRATCH_MARK not in seen["system"]
+    lines = [r.getMessage() for r in caplog.records if "no memory layer is open" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "group-m" in lines[0] and OTHER_NODE_TURN in lines[0] and "recall skipped" in lines[0]
+    assert "L5, L6, EXT" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_the_owner_s_turn_logs_no_closed_layer_line(world, monkeypatch, tmp_path, caplog):
+    _index(world)
+    agent = _agent(world, _rules(tmp_path), _Groups())
+    with caplog.at_level(logging.INFO, logger=agent_mod.__name__):
+        await _turn(world, monkeypatch, agent, "ui", "conv-1")
+    assert not [r for r in caplog.records if "no memory layer is open" in r.getMessage()]
 
 
 @pytest.mark.asyncio
@@ -364,7 +398,7 @@ def test_memory_search_gives_a_mixed_group_only_l6_rows(world, monkeypatch, tmp_
     real_backend = retrieval_mod.make_backend_for_agent
     monkeypatch.setattr(retrieval_mod, "make_backend_for_agent",
                         lambda root, **kw: real_backend(root, dimensions=8))
-    fw = _rules(tmp_path)
+    fw = _rules(tmp_path, memory={"layer_audience": {"L6": "shared"}})
     mixed = memory_search(_ctx(world, fw, OTHER_NODE_TURN, frozenset({"L6"})), QUERY)
     owner = memory_search(_ctx(world, fw, OWNER_TURN, ALL_MEMORY_LAYERS, "ui"), QUERY)
     assert "L6/shared-note.md" in mixed and "knowledge/own-note.md" not in mixed, mixed
@@ -378,6 +412,7 @@ def test_memory_search_refuses_a_group_with_nothing_shared(world, monkeypatch, t
     monkeypatch.setattr(retrieval_mod, "make_backend_for_agent", _no_index)
     answer = memory_search(_ctx(world, _rules(tmp_path), OTHER_NODE_TURN, frozenset()), QUERY)
     assert answer.startswith("memory_search answers only the owner"), answer
+    assert "other_node" in answer and "no memory layer is open" in answer, answer
 
 
 def test_memory_search_still_refuses_a_stranger(world, monkeypatch, tmp_path):
