@@ -89,6 +89,9 @@ a turn sees only the layers its class may see, in every channel at once.
      when EXT is shared and shared knowledge only when L6 is. Every other file such a turn
      opens in the agent's directory is logged at INFO, without content. The session
      archive tools open, for a stranger, only its own `telegram-<chat id>` conversation.
+     The git tools follow the same gate: on a turn that is not the owner's no git write
+     touches the agent directory's own repository, and a `repo_path` read or write obeys
+     the extended-path rule above.
 5. **Prompt cache.** No per-turn audience text goes into the system block beyond the
    closed sections falling out. Since step 1 a stranger's Telegram turn runs in its own
    conversation, so each conversation keeps one class and one system block.

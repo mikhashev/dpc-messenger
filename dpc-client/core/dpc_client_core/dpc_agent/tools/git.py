@@ -194,6 +194,46 @@ def _closed_git_read(ctx: ToolContext, path: str, repo_path: Optional[str],
     return None
 
 
+def _repo_of(target, root):
+    """The repository a sandbox path belongs to: the nearest folder below the agent
+    root that holds .git, else the agent root's own repository."""
+    for folder in (target, *target.parents):
+        if folder == root:
+            return root
+        if (folder / ".git").exists():
+            return folder
+    return root  # outside the root: _run_git refuses it anyway
+
+
+def _closed_git_write(ctx: ToolContext, path: str, repo_path: Optional[str],
+                      init: bool = False) -> Optional[str]:
+    """The refusal of a git write this turn may not make (ADR-048), else None.
+
+    A write in the agent's own repository (add, commit, checkout, reset, merge) moves
+    the whole tree, memory included, so a turn that is not the owner's writes only in
+    a repository of its own below the root that the file gate opens to it. An
+    external repository is an extended path.
+    """
+    from pathlib import Path
+    from .core import _not_owner, closed_to_this_turn, note_non_owner_open
+    if _not_owner(ctx) is None:
+        return None
+    if repo_path is not None:
+        reason = closed_to_this_turn(ctx, Path(repo_path).expanduser().resolve())
+        return f"⚠️ Access denied: {reason}" if reason else None
+    root = ctx.agent_root.resolve()
+    target = (ctx.agent_root / (path or ".")).resolve()
+    repo = target if init else _repo_of(target, root)
+    if repo == root:
+        return ("⚠️ Access denied: this turn is not the owner's; a git write in the agent "
+                "directory's own repository moves its private memory too.")
+    reason = closed_to_this_turn(ctx, repo)
+    if reason:
+        return f"⚠️ Access denied: {reason}"
+    note_non_owner_open(ctx, repo, "wrote with git in")
+    return None
+
+
 def git_status(ctx: ToolContext, path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     Check git status of a directory.
@@ -324,6 +364,9 @@ def git_add(ctx: ToolContext, files: List[str], path: str = ".", repo_path: Opti
     if not files:
         return "⚠️ No files specified"
 
+    refusal = _closed_git_write(ctx, path, repo_path)
+    if refusal:
+        return refusal
     if repo_path is not None:
         ctx.validate_extended_path(repo_path, require_write=True)
         result = _run_git_external(repo_path, ["add"] + files)
@@ -367,6 +410,10 @@ def git_commit(ctx: ToolContext, message: str, path: str = ".", repo_path: Optio
             f"Got: {message!r}"
         )
 
+    refusal = _closed_git_write(ctx, path, repo_path)
+    if refusal:
+        return refusal
+
     if repo_path is not None:
         ctx.validate_extended_path(repo_path, require_write=True)
         result = _run_git_external(repo_path, ["commit", "-m", message])
@@ -395,6 +442,9 @@ def git_branch(ctx: ToolContext, path: str = ".", repo_path: Optional[str] = Non
     Returns:
         Branch list
     """
+    refusal = _closed_git_read(ctx, path, repo_path)
+    if refusal:
+        return refusal
     if repo_path is not None:
         result = _run_git_external(repo_path, ["branch", "-a"])
     else:
@@ -421,6 +471,9 @@ def git_init(ctx: ToolContext, path: str = ".") -> str:
     Returns:
         Result message
     """
+    refusal = _closed_git_write(ctx, path, None, init=True)
+    if refusal:
+        return refusal
     result = _run_git(ctx, ["init"], cwd=path)
 
     if not result["success"]:
@@ -447,6 +500,10 @@ def git_checkout(ctx: ToolContext, branch: str, create: bool = False, path: str 
     """
     if repo_path is not None and create:
         return "⚠️ Cannot create new branches in external repositories (create=True not allowed with repo_path)"
+
+    refusal = _closed_git_write(ctx, path, repo_path)
+    if refusal:
+        return refusal
 
     args = ["checkout"]
     if create:
@@ -478,6 +535,9 @@ def git_merge(ctx: ToolContext, branch: str, no_ff: bool = False, path: str = ".
     Returns:
         Result message (includes conflict details if merge failed)
     """
+    refusal = _closed_git_write(ctx, path, repo_path)
+    if refusal:
+        return refusal
     args = ["merge"]
     if no_ff:
         args.append("--no-ff")
@@ -516,6 +576,9 @@ def git_tag(ctx: ToolContext, name: str, message: Optional[str] = None, path: st
     Returns:
         Result message
     """
+    refusal = _closed_git_write(ctx, path, repo_path)
+    if refusal:
+        return refusal
     if message:
         args = ["tag", "-a", name, "-m", message]
     else:
@@ -558,6 +621,9 @@ def git_reset(
     Returns:
         Result message
     """
+    refusal = _closed_git_write(ctx, path, None)
+    if refusal:
+        return refusal
     if files:
         # Restore specific files only — safest option
         args = ["checkout", ref, "--"] + files
@@ -598,6 +664,9 @@ def git_snapshot(ctx: ToolContext, path: str = ".", repo_path: Optional[str] = N
     """
     import datetime as _dt
 
+    refusal = _closed_git_write(ctx, path, repo_path)
+    if refusal:
+        return refusal
     timestamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     message = f"snapshot: {timestamp}"
 
@@ -634,6 +703,9 @@ def git_push(ctx: ToolContext, repo_path: str, remote: str = "origin", branch: O
     Returns:
         Result message
     """
+    refusal = _closed_git_write(ctx, ".", repo_path)
+    if refusal:
+        return refusal
     ctx.validate_extended_path(repo_path, require_write=True)
 
     args = ["push", remote]
