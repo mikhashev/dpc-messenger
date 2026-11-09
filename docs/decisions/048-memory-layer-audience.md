@@ -140,10 +140,19 @@ kept on this node beside its history.
    so a bare filename is looked up in the current conversation only. A conversation the
    rule does not open is refused in one sentence.
 
-Consequence: until the Linux node is in `own_node_group`, DPC Project counts as a group
-with another node, so its sessions archived before this change close on its group turns.
-Archives written by a sync that drops records older than a reset boundary carry no
-`group` either and close the same way.
+Consequence: in a group with another node the sessions archived before this change close
+on its group turns. On this node on 2026-11-09 that is 1234 (the owner's Linux node is a
+member and not in `own_node_group`), Brofish and the Discord bridges. DPC Project's
+roster holds this node only, so it counts as the owner's and keeps every archive open; a
+note written the same day said otherwise and was wrong (found by Johnny). Archives
+written by a sync that drops records older than a reset boundary carry no `group` either
+and close the same way.
+
+The roster and the agents map can disagree. The class of a turn, this filter and the
+group's own message fan-out read `members`, while `agents` can still list nodes that are
+no longer members (DPC Project lists two, 1234 one). Those nodes receive no group message,
+so nothing is shown to them today; which list is a group's audience is
+THE-GROUP-GATE-READS-THE-MEMBER-LIST-WHILE-THE-AGENTS-MAP-STILL-NAMES-NODES-THAT-LEFT.
 
 ## Considered Options
 
@@ -171,7 +180,10 @@ Archives written by a sync that drops records older than a reset boundary carry 
 - **The gate inherits the ownerless roster** (GROUP-ROSTER-HAS-NO-OWNER): a peer that
   edits a group's member list changes whether the group counts as the owner's.
 - **run_shell is not covered.** A turn can still read memory through a command the owner
-  approves.
+  approves. Mike's direction, 2026-11-09: the shell gate's dangerous-command check should
+  also refuse the paths closed to the turn and those the firewall denies
+  (THE-SHELL-GATE-DOES-NOT-KNOW-WHICH-PATHS-ARE-CLOSED-TO-THIS-TURN). That gate reads
+  literal paths only, so it will narrow the hole, not close it.
 - **CC quoting what it read** in a stranger's chat is a residual risk DPC cannot enforce.
 - **The mixed stores stay closed to every non-owner group turn** even with L5 marked
   shared: they hold EXT and L6 text side by side and cannot be sorted by layer.

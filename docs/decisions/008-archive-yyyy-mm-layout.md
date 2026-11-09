@@ -205,3 +205,7 @@ Proposed (2026-04-11, S25). Awaiting Mike + Ark review.
 - Backlog entries (CLOSED): `ARCH-17`, `ARCH-18`, `ARCH-19` in `backlog.md`
 - Related open backlog items: `ARCH-12` (image visibility)
 - S24 lesson: "write-side optimized, read-side neglected" — motivated lockstep reader update
+- Who may read an archive, and the `group` record a group archive carries since
+  2026-11-09: [ADR-048, Session archives](048-memory-layer-audience.md#session-archives).
+  An index beside each archive (option B, BM25 first) is the next step of the
+  `ARCHIVE-GROUP-ACCESS` entry; ADR-019 keeps text indexes local.
