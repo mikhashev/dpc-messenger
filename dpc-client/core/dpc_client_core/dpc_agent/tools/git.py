@@ -166,6 +166,34 @@ def _run_git_external(repo_path: str, args: List[str], timeout: int = 30) -> Dic
         return {"success": False, "error": f"Git error: {e}"}
 
 
+def _closed_git_read(ctx: ToolContext, path: str, repo_path: Optional[str],
+                     whole_repo: bool = False) -> Optional[str]:
+    """The refusal of a git read this turn may not make (ADR-048), else None.
+
+    An external repository is an extended path. In the agent's own repository a
+    read of the whole tree (status, or diff/log of the root) shows the agent's
+    memory, so a turn that is not the owner's reads only a path its file tools
+    may open.
+    """
+    from pathlib import Path
+    from .core import _not_owner, closed_to_this_turn, note_non_owner_open
+    if _not_owner(ctx) is None:
+        return None
+    if repo_path is not None:
+        reason = closed_to_this_turn(ctx, Path(repo_path).expanduser().resolve())
+        return f"⚠️ Access denied: {reason}" if reason else None
+    root = ctx.agent_root.resolve()
+    target = (ctx.agent_root / (path or ".")).resolve()
+    if whole_repo or target == root:
+        return ("⚠️ Access denied: this turn is not the owner's; the agent directory's git "
+                "history as a whole spans its private memory. Name a work folder instead.")
+    reason = closed_to_this_turn(ctx, target)
+    if reason:
+        return f"⚠️ Access denied: {reason}"
+    note_non_owner_open(ctx, target, "read the git history of")
+    return None
+
+
 def git_status(ctx: ToolContext, path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     Check git status of a directory.
@@ -179,6 +207,9 @@ def git_status(ctx: ToolContext, path: str = ".", repo_path: Optional[str] = Non
     Returns:
         Git status output
     """
+    refusal = _closed_git_read(ctx, path, repo_path, whole_repo=True)
+    if refusal:
+        return refusal
     if repo_path is not None:
         ctx.validate_extended_path(repo_path, require_write=False)
         result = _run_git_external(repo_path, ["status", "--short", "--branch"])
@@ -210,6 +241,9 @@ def git_diff(ctx: ToolContext, path: str = ".", staged: bool = False, repo_path:
     Returns:
         Git diff output
     """
+    refusal = _closed_git_read(ctx, path, repo_path)
+    if refusal:
+        return refusal
     args = ["diff"]
     if staged:
         args.append("--staged")
@@ -249,6 +283,9 @@ def git_log(ctx: ToolContext, path: str = ".", count: int = 10, repo_path: Optio
     Returns:
         Git log output with full commit subjects and bodies
     """
+    refusal = _closed_git_read(ctx, path, repo_path)
+    if refusal:
+        return refusal
     args = ["log", f"-{count}", "--format=%C(yellow)%h%C(reset) %C(cyan)%D%C(reset)%n%s%n%b"]
     if branch:
         args.append(branch)

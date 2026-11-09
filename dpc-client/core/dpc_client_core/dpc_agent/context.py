@@ -729,6 +729,36 @@ def _build_sandbox_paths_section(
     return "\n".join(lines)
 
 
+# The extended-access section on a turn that may not see EXT (ADR-048): no path names.
+EXTENDED_ACCESS_CLOSED = ("## Extended access\n"
+                          "Extended paths are not open on this turn: it is not the owner's.")
+
+_ALL_LAYERS = frozenset({"L5", "L6", "EXT"})
+_RECALL_BLOCK_RE = re.compile(
+    r"Active Recall\n(?:--- ACTIVE RECALL ---\n.*?--- END RECALL ---\n"
+    r"|--- RECALL HINTS: .*? ---\n)(?:\n\n)?", re.S)
+_HINT_KEY_RE = re.compile(r"\[(?:EXT|L\d+)\]\s+(\S+)")
+_EXTENDED_LIST_RE = re.compile(
+    r"## Extended access\n(?:  - `[^`\n]*` \((?:read-only|read-write)\)(?:\n|$))+")
+
+
+def strip_closed_layers(tail: str, open_layers: frozenset) -> str:
+    """A replayed tail without the recall blocks that name a closed layer, and
+    without extended path names when EXT is closed."""
+    from .active_recall import layer_of
+
+    def _recall(match: "re.Match") -> str:
+        keys = _HINT_KEY_RE.findall(match.group(0))
+        closed = any(layer_of({"source_file": k.rstrip(",:")}) not in open_layers for k in keys)
+        return "" if closed else match.group(0)
+
+    out = _RECALL_BLOCK_RE.sub(_recall, tail)
+    if "EXT" not in open_layers:
+        out = _EXTENDED_LIST_RE.sub(
+            lambda m: EXTENDED_ACCESS_CLOSED + ("\n" if m.group(0).endswith("\n") else ""), out)
+    return out
+
+
 def derive_history_role(
     hist_msg: Dict[str, Any],
     reader_identity: Dict[str, str],
@@ -893,6 +923,7 @@ def build_llm_messages(
     active_recall_enabled: bool = True,
     max_recall_results: int = 3,
     recall_results: Optional[list] = None,
+    open_layers: Optional[frozenset] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -936,6 +967,12 @@ def build_llm_messages(
         recall_results: This turn's fused recall candidates, already searched by the
                         caller off the event loop (recall_off_loop); [] means none.
                         None searches here, inline, on the calling thread.
+        open_layers: The memory layers this turn may see (agent.open_layers, ADR-048).
+                     Without L5 the memory sections (Scratchpad, Identity, Morning
+                     Brief, Dialogue Summary) and the knowledge index stay out and
+                     the brief is not consumed; without EXT no extended path is
+                     named; recall rows and replayed hint tails of closed layers are
+                     dropped. None is every layer (callers before the marks).
         sent_annotations: message id -> the turn-context tail that was appended to
                           that user message when it was the current one. Replayed
                           byte-identically behind the message so the prompt stays a
@@ -975,11 +1012,14 @@ def build_llm_messages(
 
     # Semi-stable content: identity, scratchpad, knowledge, capabilities, skills
     semi_stable_parts = []
-    semi_stable_parts.extend(_build_memory_sections(memory))
+    l5_open = open_layers is None or "L5" in open_layers
+    ext_open = open_layers is None or "EXT" in open_layers
+    if l5_open:
+        semi_stable_parts.extend(_build_memory_sections(memory))
 
     # Knowledge base index
     kb_index_path = memory.knowledge_index_path()
-    if kb_index_path.exists():
+    if l5_open and kb_index_path.exists():
         kb_index = read_text(kb_index_path)
         if kb_index.strip():
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
@@ -1006,6 +1046,7 @@ def build_llm_messages(
                 extended_read_enabled=extended_read_enabled,
                 shared_knowledge_enabled=shared_knowledge_enabled,
                 extended_path_allowed=extended_path_allowed,
+                open_layers=open_layers,
                 # The identity tools.jsonl writes for the same turn — join key,
                 # not decoration.
                 task_id=str(task.get("id") or ""),
@@ -1050,7 +1091,8 @@ def build_llm_messages(
     turn_parts.append(
         _build_runtime_section(agent_root, task, session_state, billing_model=billing_model,
                                provider_facts=provider_facts))
-    turn_parts.append(_build_sandbox_paths_section(sandbox_read_only, sandbox_read_write))
+    turn_parts.append(_build_sandbox_paths_section(sandbox_read_only, sandbox_read_write)
+                      if ext_open else EXTENDED_ACCESS_CLOSED)
     turn_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
 
     # Context breakdown for UI tooltip (token estimates per component)
@@ -1086,6 +1128,10 @@ def build_llm_messages(
     # that once carried a turn-context tail gets the same tail back, byte for byte:
     # the tail is what the engine saw, and only that shape is a prefix of this prompt.
     _annotations = sent_annotations or {}
+    if open_layers is not None and open_layers != _ALL_LAYERS:
+        # A tail sent on an earlier turn may name a layer this turn may not see
+        # (D3): it goes without that part, at the cost of one cold prefill.
+        _annotations = {k: strip_closed_layers(v, open_layers) for k, v in _annotations.items()}
     _replayed = 0
     if conversation_history:
         is_group = str(task.get("id") or "").startswith("group-")

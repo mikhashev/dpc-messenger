@@ -44,7 +44,9 @@ OWN_MARK = "OWN-BODY-MARK-5b1e"
 EXT_MARK = "EXT-BODY-MARK-90c4"
 PACKAGE = pathlib.Path(agent_mod.__file__).resolve().parents[1]
 
-OWNER = ["ui", "external_agent", "group"]
+# A group is no longer an owner's door: its members decide (ADR-048, and
+# test_a_turn_sees_only_the_memory_layers_its_audience_may.py).
+OWNER = ["ui", "external_agent"]
 NOT_OWNER = ["telegram", "discord", None, "telegram_public", "somewhere-else"]
 
 
@@ -200,13 +202,24 @@ def test_a_discord_turn_reads_no_extended_path(world):
     assert EXT_MARK not in answer
 
 
-def test_a_discord_turn_still_reads_its_sandbox(world):
-    assert OWN_MARK in read_file(_ctx(world, "discord"), "knowledge/own-note.md")
+def test_a_discord_turn_no_longer_reads_the_agent_s_memory(world):
+    """ADR-048: a stranger opens nothing in the agent directory but its turn's tool results."""
+    answer = read_file(_ctx(world, "discord"), "knowledge/own-note.md")
+    assert OWN_MARK not in answer and "not the owner's" in answer
 
 
-@pytest.mark.parametrize("source", ["telegram", "ui"])
-def test_a_telegram_or_ui_turn_reads_an_extended_path_as_before(world, source):
-    assert EXT_MARK in read_file(_ctx(world, source), str(world["ext"]))
+def test_a_ui_turn_reads_an_extended_path_as_before(world):
+    assert EXT_MARK in read_file(_ctx(world, "ui"), str(world["ext"]))
+
+
+def test_a_telegram_turn_that_is_not_the_owner_s_reads_no_extended_path(world):
+    """ADR-048: EXT is closed to strangers whatever its mark."""
+    answer = read_file(_ctx(world, "telegram"), str(world["ext"]))
+    assert EXT_MARK not in answer and "not the owner's" in answer
+
+
+def test_a_group_turn_is_no_longer_an_owner_s_door(world, monkeypatch):
+    assert agent_mod.is_owner_caller("group") is False
 
 
 # -- scheduled tasks keep the source -----------------------------------------

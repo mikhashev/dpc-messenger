@@ -34,6 +34,25 @@ def _get_archive_dir(ctx: ToolContext) -> Optional[Path]:
     return monitor._get_history_path().parent / "archive"
 
 
+def _closed_to_a_stranger(ctx: ToolContext) -> Optional[str]:
+    """The refusal for a stranger's turn outside its own Telegram chat, else None.
+
+    A Telegram turn that is not the owner's runs in `telegram-<chat id>` (step 1 of
+    ADR-048), and that chat's archive is its own; any other archive is the owner's.
+    """
+    from .core import turn_audience
+    from ..agent import STRANGER_TURN
+    audience = turn_audience(ctx)
+    if audience is None or audience[0] != STRANGER_TURN:
+        return None
+    conv = str(getattr(ctx, "conversation_id", None) or "")
+    chat = getattr(ctx, "reply_telegram_chat_id", None)
+    if conv.startswith("telegram-") and (not chat or conv == f"telegram-{chat}"):
+        return None
+    return ("⚠️ Session archives are not read on this turn: it is not the owner's, and "
+            "only a Telegram chat's own archive opens to it.")
+
+
 def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0) -> str:
     """
     Read summaries of the last N archived sessions, optionally skipping the
@@ -55,6 +74,9 @@ def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0) -> 
     """
     last_n = min(max(1, last_n), 50)
     offset = max(0, offset)
+    refusal = _closed_to_a_stranger(ctx)
+    if refusal:
+        return refusal
     archive_dir = _get_archive_dir(ctx)
     if archive_dir is None:
         return _NO_CONVERSATION
@@ -177,6 +199,9 @@ def read_session_detail(
     max_messages = min(max(1, max_messages), 200)
     offset = max(0, offset)
     max_message_chars = max(100, max_message_chars)
+    refusal = _closed_to_a_stranger(ctx)
+    if refusal:
+        return refusal
     archive_dir = _get_archive_dir(ctx)
     if archive_dir is None:
         return _NO_CONVERSATION
@@ -288,6 +313,9 @@ def search_session_archives(
     offset = max(0, offset)
     snippet_chars = max(20, snippet_chars)
 
+    refusal = _closed_to_a_stranger(ctx)
+    if refusal:
+        return refusal
     archive_dir = _get_archive_dir(ctx)
     if archive_dir is None:
         return _NO_CONVERSATION

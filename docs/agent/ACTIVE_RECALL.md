@@ -321,6 +321,21 @@ non-empty. Any exception outside the graph step skips recall for that turn: the 
 ordinary turn with no recall block, and the log records it — at INFO when the embedding model is
 not cached locally, at WARNING with the traceback for anything else.
 
+**Whose turn (ADR-048, 2026-11-08).** Before any query, `agent.py` classes the turn by who it
+answers and takes the memory layers that class may see (`turn_audience`): the owner's doors
+(`ui`, `telegram_owner`, `external_agent`) and a group whose members are all this node or nodes
+of the agent's **`own_node_group`** see L5, L6 and EXT; any other group (another node, a Discord
+bridge, a group not found, an empty roster) sees only the layers its profile marks `shared` in
+**`layer_audience`** (by default L6 alone); a stranger (`telegram`, `discord`, no source) sees
+none. With no layer open there is no recall work at all. Otherwise `get_recall_block` drops
+candidates whose layer is closed, before decay and the cut, so a closed document neither takes a
+slot nor weighs in the decay's scaling. A candidate's layer is its key prefix — `knowledge/` is
+L5, `L6/` is L6, `EXT/` is EXT — so a graph hit labelled L7 counts as the layer of its document,
+and a key with none of these prefixes is closed to such a turn. An owner's turn is not filtered.
+The same set closes the Scratchpad, Identity, Morning Brief, Dialogue Summary and knowledge index
+of the prompt when L5 is closed, names no extended path when EXT is closed, and strips a replayed
+tail's recall block that names a closed layer (§10).
+
 The graph step (§6.4) has its own handler. An exception there — while opening the graph store or
 during the expansion — is caught at DEBUG with the fixed text `Active Recall Graph L7:
 unavailable (cold start or no graph DB)` and no traceback, and the turn continues with the vector
@@ -551,6 +566,11 @@ and a `max_recall_results` outside 1..10. The permissions screen greys Active Re
 memory system is off. `memory_search` refuses when the memory system is off, drops external
 rows whose path is no longer granted, and skips the vector channel on a stale index.
 `memory.enabled = false` still stops the startup sync.
+
+**Audience (ADR-048).** `memory_search` asks the turn's open layers (§6.1) before any index
+opens: with none open it refuses in one line ("memory_search answers only the owner; this turn
+came from …"); otherwise it drops the rows of closed layers, by the same key prefixes, before it
+counts and cuts. A group with another node therefore gets only `L6/` rows by default.
 
 ## 10. Rendering and placement
 

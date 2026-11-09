@@ -39,6 +39,11 @@ class MemoryConfig:
     # but "auto" there overrides this field for every agent (memory.py,
     # _resolve_embedding_device), and this field decides only under "auto".
     embedding_device: Optional[str] = None
+    # Who sees each layer, {"L5"|"L6"|"EXT": "private"|"shared"}; None or a missing key
+    # keeps agent.DEFAULT_LAYER_AUDIENCE. And the node_groups entry naming the owner's
+    # own nodes. ADR-048; read live by agent.DpcAgent.turn_audience.
+    layer_audience: Optional[dict] = None
+    own_node_group: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "MemoryConfig":

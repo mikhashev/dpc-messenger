@@ -18,7 +18,8 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional
 
 from .hybrid_search import SearchResult
-from .index_keys import L5_PREFIX as L5_KEY_PREFIX, L6_PREFIX as L6_KEY_PREFIX
+from .index_keys import (EXT_PREFIX as EXT_KEY_PREFIX, L5_PREFIX as L5_KEY_PREFIX,
+                         L6_PREFIX as L6_KEY_PREFIX)
 from .tool_ledger import EvidenceReadFailed, is_outcome
 from .utils import utc_now_iso
 
@@ -63,6 +64,30 @@ def is_shared_layer(meta: Dict) -> bool:
     """Does this document belong to the shared human layer, by key or by label?"""
     return (str(meta.get("source_file", "")).startswith(f"{L6_KEY_PREFIX}/")
             or meta.get("source_layer") == "L6")
+
+
+def layer_of(meta: Dict) -> Optional[str]:
+    """The memory layer a row belongs to, by its key alone: knowledge/ is L5, L6/ is
+    L6, EXT/ is EXT. A graph hit is labelled L7 but keyed by the document it came
+    from, so the key decides it too. Anything else is None: no audience can open it
+    (ADR-048)."""
+    key = str(meta.get("source_file", ""))
+    for prefix, layer in ((f"{L5_KEY_PREFIX}/", "L5"), (f"{L6_KEY_PREFIX}/", "L6"),
+                          (f"{EXT_KEY_PREFIX}/", "EXT")):
+        if key.startswith(prefix):
+            return layer
+    return None
+
+
+def in_open_layers(meta: Dict, open_layers: Optional[frozenset]) -> bool:
+    """May a turn with these open layers see this row? None, or every layer open (the
+    owner), means no audience filter: an owner's turn keeps rows of any key, as before."""
+    if open_layers is None or _EVERY_LAYER <= open_layers:
+        return True
+    return layer_of(meta) in open_layers
+
+
+_EVERY_LAYER = frozenset({"L5", "L6", "EXT"})
 
 
 def hint_address(meta: Dict, extended_read_enabled: bool = True,
@@ -275,11 +300,13 @@ def get_recall_block(
     task_id: str = "",
     shared_knowledge_enabled: bool = True,
     extended_path_allowed: Optional[Callable[[str], bool]] = None,
+    open_layers: Optional[frozenset] = None,
 ) -> RecallInjection:
     """Get the appropriate recall block based on context budget and decay scoring.
 
     `extended_path_allowed` is read_file's per-path check for this agent, asked now;
-    None skips it (callers with no firewall).
+    None skips it (callers with no firewall). `open_layers` is the set of memory
+    layers this turn may see (agent.open_layers); None skips the audience filter.
     """
     mode = should_inject(context_usage_ratio)
     if mode == "skip":
@@ -287,7 +314,8 @@ def get_recall_block(
     # Before decay and the cut: a revoked document is out of the pool, so it neither
     # takes a slot nor weighs in the decay's per-result-set scaling.
     results = [r for r in results
-               if _extended_path_still_allowed(r.chunk_meta, extended_path_allowed)]
+               if in_open_layers(r.chunk_meta, open_layers)
+               and _extended_path_still_allowed(r.chunk_meta, extended_path_allowed)]
     if agent_root and results:
         results = _apply_decay(results, agent_root)
     results = [r for r in results

@@ -57,18 +57,76 @@ CONTEXT_ROUND_RESERVE_TOKENS = 16384
 # The string is Mike's word, 2026-11-08; it lives here alone, so a rename is this line.
 TELEGRAM_OWNER_MESSAGE_SOURCE = "telegram_owner"
 
-# Turns that may use the owner's memory (Mike's call, 2026-11-07). Bridges count as
-# the owner. A group keeps today's behaviour; its policy is pending under
-# A-GROUP-TURN-CAN-SHOW-THE-OWNERS-PRIVATE-MEMORY-TO-OTHER-NODES.
-_OWNER_MESSAGE_SOURCES = frozenset({"ui", "external_agent", "group",
-                                    TELEGRAM_OWNER_MESSAGE_SOURCE})
+# The owner's own doors (Mike's call, 2026-11-07). Bridges count as the owner. A group
+# turn is not decided by its source: its members decide (turn_class below).
+_OWNER_MESSAGE_SOURCES = frozenset({"ui", "external_agent", TELEGRAM_OWNER_MESSAGE_SOURCE})
 
 
 def is_owner_caller(message_source: Optional[str]) -> bool:
-    """May this turn use the owner's memory? Telegram (other than the owner's own
-    private chat), Discord and an unnamed or unknown source may not: a caller that
-    names no source fails closed."""
+    """Is this turn from one of the owner's own doors? Telegram (other than the owner's
+    own private chat), Discord, a group and an unnamed or unknown source are not: a
+    caller that names no source fails closed. A group can still count as the owner,
+    by its members (turn_class)."""
     return message_source in _OWNER_MESSAGE_SOURCES
+
+
+# The audience of each memory layer (ADR-048; Mike's call, 2026-11-08, review by
+# Zcode, Johnny, Ark). Read from agent_profiles.<id>.memory.layer_audience; an absent
+# field or key keeps the default. memory/ counts as L5.
+MEMORY_LAYERS = ("L5", "L6", "EXT")
+ALL_MEMORY_LAYERS = frozenset(MEMORY_LAYERS)
+LAYER_AUDIENCE_VALUES = ("private", "shared")
+DEFAULT_LAYER_AUDIENCE = {"L5": "private", "L6": "shared", "EXT": "private"}
+
+# Who a turn is, for the layers it may see. Code words only.
+OWNER_TURN = "owner"            # the owner's doors, or a group of this node and own nodes
+OTHER_NODE_TURN = "other_node"  # a group with anyone else, a Discord bridge, an unknown group
+STRANGER_TURN = "stranger"      # telegram, discord, no source, anything unknown
+
+
+def turn_class(message_source: Optional[str], group: Optional[Any] = None,
+               this_node_id: Optional[str] = None,
+               own_nodes: Optional[Any] = None) -> str:
+    """Whose turn this is: OWNER_TURN, OTHER_NODE_TURN or STRANGER_TURN.
+
+    A group is the owner's only when every member is this node or one of its own
+    nodes and it is not a Discord bridge. The class comes from the members, not
+    from who wrote the mention: the answer goes to all of them. An empty roster or
+    a group that cannot be found is never the owner's.
+    """
+    if is_owner_caller(message_source):
+        return OWNER_TURN
+    if message_source != "group":
+        return STRANGER_TURN
+    if group is None or getattr(group, "is_discord_bridge", False) or not this_node_id:
+        return OTHER_NODE_TURN
+    members = set(getattr(group, "members", None) or [])
+    if not members:
+        return OTHER_NODE_TURN
+    if members <= {this_node_id} | set(own_nodes or ()):
+        return OWNER_TURN
+    return OTHER_NODE_TURN
+
+
+def layer_audience(memory_settings: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """The audience of each layer: the defaults, overridden by valid entries only."""
+    audience = dict(DEFAULT_LAYER_AUDIENCE)
+    marks = (memory_settings or {}).get("layer_audience")
+    if isinstance(marks, dict):
+        for layer, value in marks.items():
+            if layer in audience and value in LAYER_AUDIENCE_VALUES:
+                audience[layer] = value
+    return audience
+
+
+def open_layers(cls: str, audience: Optional[Dict[str, str]] = None) -> frozenset:
+    """The memory layers a turn of this class may see."""
+    if cls == OWNER_TURN:
+        return ALL_MEMORY_LAYERS
+    if cls == OTHER_NODE_TURN:
+        marks = audience or DEFAULT_LAYER_AUDIENCE
+        return frozenset(layer for layer in MEMORY_LAYERS if marks.get(layer) == "shared")
+    return frozenset()
 
 
 def tokens_block(usage: Dict[str, Any]) -> Dict[str, Any]:
@@ -310,6 +368,91 @@ class DpcAgent:
         self._last_cap_info: Optional[Dict[str, Any]] = None
 
         log.info(f"DpcAgent initialized with storage at {self.agent_root}")
+        self._log_own_nodes()
+
+    def _memory_settings(self) -> Dict[str, Any]:
+        """This agent's own profile `memory` block, read now; {} without one."""
+        if getattr(self, "_firewall", None) is None:
+            return {}
+        try:
+            profile = self._firewall.get_agent_profile_settings(getattr(self, "_firewall_profile", None)) or {}
+        except Exception:
+            return {}
+        mem = profile.get("memory")
+        return mem if isinstance(mem, dict) else {}
+
+    def _own_nodes(self) -> tuple:
+        """(the own node group's name or None, its node ids, why it gives none)."""
+        name = self._memory_settings().get("own_node_group")
+        if not name:
+            return None, frozenset(), "memory.own_node_group is not set"
+        if not isinstance(name, str):
+            return None, frozenset(), "memory.own_node_group is not a group name"
+        groups = getattr(getattr(self, "_firewall", None), "node_groups", None) or {}
+        if name not in groups:
+            # Save refuses this; a hand edit can still leave it.
+            return name, frozenset(), f"'{name}' is not in node_groups"
+        return name, frozenset(groups.get(name) or ()), ""
+
+    def _this_node_id(self) -> Optional[str]:
+        gm = getattr(getattr(self, "_service", None), "group_manager", None)
+        node_id = getattr(gm, "node_id", None) or getattr(
+            getattr(getattr(self, "_service", None), "p2p_manager", None), "node_id", None)
+        return node_id if isinstance(node_id, str) and node_id else None
+
+    def turn_audience(self, message_source: Optional[str],
+                      conversation_id: Optional[str]) -> tuple:
+        """(turn class, open layers) of a turn, from its source, its conversation's
+        members and this agent's marks, read now (a save applies to the next turn)."""
+        group = None
+        if message_source == "group" and conversation_id:
+            gm = getattr(getattr(self, "_service", None), "group_manager", None)
+            try:
+                group = gm.get_group(conversation_id) if gm is not None else None
+            except Exception:
+                group = None
+        _name, own, _why = self._own_nodes()
+        cls = turn_class(message_source, group, self._this_node_id(), own)
+        return cls, open_layers(cls, layer_audience(self._memory_settings()))
+
+    def _log_own_nodes(self) -> None:
+        """One line: the own node group this agent uses and how each chat group resolves.
+
+        A typo in the group name means no own nodes, silently; this line is the
+        only place that says so (Johnny's review, 2026-11-08). The roster it reads
+        has no owner (GROUP-ROSTER-HAS-NO-OWNER).
+        """
+        try:
+            name, own, why = self._own_nodes()
+            this_node = self._this_node_id()
+            uses = (f"own node group '{name}' ({len(own)} nodes)" if not why
+                    else f"no own nodes ({why})")
+            gm = getattr(getattr(self, "_service", None), "group_manager", None)
+            groups = list(gm.get_all_groups()) if gm is not None else []
+            own_groups, other_groups = [], []
+            for g in groups:
+                cls = turn_class("group", g, this_node, own)
+                label = f"{g.group_id} ({getattr(g, 'name', '') or '-'}"
+                if cls == OWNER_TURN:
+                    own_groups.append(label + ": every member is this node"
+                                      + (f" or in '{name}')" if own else ")"))
+                else:
+                    if getattr(g, "is_discord_bridge", False):
+                        reason = "a Discord bridge"
+                    elif not g.members:
+                        reason = "no members"
+                    elif not this_node:
+                        reason = "this node's id is unknown"
+                    else:
+                        outside = sorted(set(g.members) - {this_node} - set(own))
+                        reason = f"{len(outside)} member(s) not own, first {outside[0][:16]}"
+                    other_groups.append(f"{label}: {reason})")
+            log.info("Agent %s layer audience: %s; chat groups resolved as own: %s; not own: %s",
+                     self.agent_root.name, uses, ", ".join(own_groups) or "none",
+                     ", ".join(other_groups) or "none")
+        except Exception:
+            log.warning("Agent %s: could not resolve its own node group", self.agent_root.name,
+                        exc_info=True)
 
     def _runtime_billing_model(self) -> Optional[str]:
         """The configured billing word for the runtime block, or None when nothing configured it."""
@@ -498,8 +641,12 @@ class DpcAgent:
             memory_system = bool(mem_cfg.enabled)
             active_recall = bool(mem_cfg.active_recall)
             max_recall = mem_cfg.max_recall_results
-        # The owner's memory gives no hints to anyone else's turn.
-        active_recall = active_recall and is_owner_caller(message_source)
+        # Who this turn is decides which memory layers it may see (ADR-048), asked now,
+        # for scheduled tasks too: the class is recomputed from the stored source and
+        # the conversation's members at run time.
+        audience_class, layers_open = self.turn_audience(message_source, conversation_id)
+        # No open layer, no hints; otherwise the closed layers' rows are dropped below.
+        active_recall = active_recall and bool(layers_open)
 
         # Searched in a worker thread under a bound: the loop keeps serving guests,
         # the gateway and the UI while the queries are encoded.
@@ -533,6 +680,7 @@ class DpcAgent:
             active_recall_enabled=active_recall,
             max_recall_results=max_recall,
             recall_results=recall_results,
+            open_layers=layers_open,
         )
 
         # Remember the tail exactly as it went out, keyed by the message it went out
@@ -613,6 +761,9 @@ class DpcAgent:
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
             message_source=message_source,
+            # Which memory layers this turn may see (ADR-048); the file tools ask it.
+            turn_class=audience_class,
+            open_layers=layers_open,
             # Where this run came from, for anything that has to ask a person
             # something (tier-1 shell approval today). The title is whatever the
             # caller already resolved — group chats carry it in chat_context;

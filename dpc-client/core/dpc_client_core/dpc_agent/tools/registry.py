@@ -325,6 +325,12 @@ class ToolContext:
     # extended paths and schedule_task read it; None is nobody's turn.
     message_source: Optional[str] = None
 
+    # Whose turn this is and which memory layers it may see (agent.turn_class,
+    # agent.open_layers; ADR-048). DpcAgent.process sets both on every turn; a bare
+    # context with neither and no source is a test or a probe, not a turn.
+    turn_class: Optional[str] = None
+    open_layers: Optional[frozenset] = None
+
     # Skill store for execute_skill tool (set by DpcAgent.process())
     skill_store: Optional[Any] = None
 

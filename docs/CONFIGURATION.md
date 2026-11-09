@@ -1595,6 +1595,21 @@ Multi-device support would require Hub database schema changes to support one-to
 
 ---
 
+### The owner's own nodes and what an agent says in a group (`privacy_rules.json`)
+
+Two keys in an agent's profile, `agent_profiles.<id>.memory` in `privacy_rules.json`, not in
+`config.ini` ([ADR-048](decisions/048-memory-layer-audience.md); Mike's call, 2026-11-08):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `layer_audience` | `{"L5": "private", "L6": "shared", "EXT": "private"}` | Who sees each memory layer. `private`: the owner's turns only; `shared`: also a group with another person's node. A stranger's turn (Telegram other than the owner's private chat, Discord, no source) sees none. L5 includes the agent's `memory/` folder, so with L5 private the agent has no scratchpad, identity or morning brief in such a group. An absent key keeps its default; another key or value is refused on save |
+| `own_node_group` | absent | The name of a group in the top-level `node_groups` listing your own other nodes (a Linux box, an old PC). A chat group of this node and those nodes only counts as you. Save refuses a name not in `node_groups`; at startup each agent logs the group it uses and which chat groups resolve as own |
+
+To count the Linux node as yours: Firewall Rules → Node Groups → add a group under any name (say `home-boxes`)
+holding its node id, save, then set `"own_node_group": "home-boxes"` in the agent's memory block and
+save again. The membership a group reports is not owned by anyone (GROUP-ROSTER-HAS-NO-OWNER):
+a member list a peer changed changes the answer.
+
 ### OAuth Provider Choice
 
 The `default_provider` configuration (Google vs GitHub) is about **which OAuth account you authenticate with**, not about using multiple devices.

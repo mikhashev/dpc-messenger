@@ -504,7 +504,7 @@ class TestAPersonsStop:
             return await real_closing(prompt, **kwargs)
 
         blind.generate_response = counted
-        turn = asyncio.ensure_future(asyncio.wait_for(agent.process("look", "chat", stop_event=stop), 20))
+        turn = asyncio.ensure_future(asyncio.wait_for(agent.process("look", "chat", message_source="ui", stop_event=stop), 20))
         await _until(lambda: _in_line() == [B])
 
         stop.set()
@@ -536,7 +536,7 @@ class TestAPersonsStop:
             return answer
 
         _tool(agent, "look", look)
-        answer = await asyncio.wait_for(agent.process("look", "chat", stop_event=stop), 20)
+        answer = await asyncio.wait_for(agent.process("look", "chat", message_source="ui", stop_event=stop), 20)
 
         assert agent._last_trace.get("turn_end") == "stopped" and "Stopped by user" in answer
         assert "No summary" not in answer, "no call was tried, and none failed"
@@ -555,7 +555,7 @@ class TestAPersonsStop:
             leave_card_queue("chat")
 
         blind.before_round[1] = stop_between_rounds
-        answer = await asyncio.wait_for(agent.process("look", "chat", stop_event=stop), 20)
+        answer = await asyncio.wait_for(agent.process("look", "chat", message_source="ui", stop_event=stop), 20)
 
         assert agent._last_trace.get("turn_end") == "stopped"
         assert "Stopped by user" not in answer, "the closing call wrote the answer"
@@ -601,7 +601,7 @@ class TestWhatOutlivesItsRequest:
             assert swaps == [], "nobody may stop the alias under this turn"
 
         blind.before_round[2] = between_the_rounds
-        answer = await asyncio.wait_for(agent.process("look", "chat"), 20)
+        answer = await asyncio.wait_for(agent.process("look", "chat", message_source="ui"), 20)
 
         assert answer == "the answer" and agent._last_trace.get("turn_end") is None
         assert answers[0].startswith("⚠️ Vision query failed:"), "the tool's own failure, not its timeout"
@@ -666,7 +666,7 @@ class TestTheWayBack:
 
         _tool(agent, "look", look)
         agent.tools.get_timeout = lambda name: 0.8
-        answer = await asyncio.wait_for(agent.process("look", "chat"), 30)
+        answer = await asyncio.wait_for(agent.process("look", "chat", message_source="ui"), 30)
 
         assert agent._last_trace.get("turn_end") == "failed"
         assert f"alias '{B}', busy for" in answer and "gave up" in answer
@@ -697,7 +697,7 @@ class TestTheWayBack:
 
         _tool(agent, "look", look)
         agent.tools.get_timeout = lambda name: 1.2
-        answer = await asyncio.wait_for(agent.process("look", "chat"), 30)
+        answer = await asyncio.wait_for(agent.process("look", "chat", message_source="ui"), 30)
 
         assert answer == "the answer" and agent._last_trace.get("turn_end") is None
         assert blind.round == 3 and eyes.looks == 1
@@ -1318,7 +1318,7 @@ class TestTheDescriptionIsKeptForTheTurn:
             return await describe_image(ctx, name)
 
         _tool(agent, "look", look)
-        await asyncio.wait_for(agent.process("look", "chat"), 30)
+        await asyncio.wait_for(agent.process("look", "chat", message_source="ui"), 30)
 
         assert eyes.asked == 2 and eyes.looks == 2
 
@@ -1546,7 +1546,7 @@ class TestTheTool:
             return answer
 
         _tool(agent, "look", look)
-        answer = await asyncio.wait_for(agent.process("look at your render", "chat"), 30)
+        answer = await asyncio.wait_for(agent.process("look at your render", "chat", message_source="ui"), 30)
 
         assert answer == "the answer"
         assert [json.loads(text)["description"] for text in answers] == [DESCRIPTION] * 3
@@ -1572,7 +1572,7 @@ class TestTheTool:
             return answers[-1]
 
         _tool(agent, "look", look)
-        answer = await asyncio.wait_for(agent.process("look at your render", "chat"), 30)
+        answer = await asyncio.wait_for(agent.process("look at your render", "chat", message_source="ui"), 30)
 
         assert answer == "the answer"
         assert answers[0].startswith("⚠️ Vision query failed:") and "parked conversations" in answers[0]

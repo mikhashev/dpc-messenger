@@ -76,6 +76,137 @@ def _dpc_home() -> Path:
     return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 
 
+# ---------------------------------------------------------------------------
+# Who may open what (ADR-048; Mike's call, 2026-11-08, review by Zcode, Johnny, Ark)
+# ---------------------------------------------------------------------------
+#
+# A separate check, not part of validate_extended_path: run_shell's path gate calls
+# that one, and run_shell stays as it is (Mike, 2026-11-08: a separate story).
+
+# Inside the agent root, closed on a turn that may not see L5.
+_L5_DIRS = frozenset({"memory", "knowledge"})
+# Stores that mix every layer (the word index holds EXT and L6 text, the logs and
+# task results quote whatever a turn read): closed on every turn that is not the owner's.
+_MIXED_DIRS = frozenset({"state", "logs", "task_results"})
+_MIXED_PREFIXES = ("knowledge_graph", "config.json")
+
+
+def turn_audience(ctx: ToolContext) -> Optional[tuple]:
+    """(turn class, open layers) of this call's turn, or None for a bare context.
+
+    DpcAgent.process sets both on every turn. A context that carries a source but no
+    class is classed by the source alone; one with neither is a test or a probe
+    (agent._extended_path_allowed) and is not gated here.
+    """
+    from ..agent import DEFAULT_LAYER_AUDIENCE, open_layers, turn_class
+    cls = getattr(ctx, "turn_class", None)
+    layers = getattr(ctx, "open_layers", None)
+    if cls is not None and layers is not None:
+        return cls, frozenset(layers)
+    source = getattr(ctx, "message_source", None)
+    if cls is None and source is None:
+        return None
+    cls = cls or turn_class(source)
+    return cls, (frozenset(layers) if layers is not None
+                 else open_layers(cls, DEFAULT_LAYER_AUDIENCE))
+
+
+def _not_owner(ctx: ToolContext) -> Optional[tuple]:
+    """turn_audience, but None also when the turn is the owner's (nothing to gate)."""
+    from ..agent import OWNER_TURN
+    audience = turn_audience(ctx)
+    if audience is None or audience[0] == OWNER_TURN:
+        return None
+    return audience
+
+
+def _current_tool_results(ctx: ToolContext, rel_parts: tuple) -> bool:
+    """Is this path the current turn's own tool-output directory (loop.TOOL_OUTPUT_DIR)?"""
+    turn = getattr(ctx, "tool_output_turn", None)
+    return bool(turn) and rel_parts[:3] == ("state", "tool_results", turn)
+
+
+def closed_to_this_turn(ctx: ToolContext, resolved: Path) -> Optional[str]:
+    """Why this turn may not open `resolved`, in one line, or None when it may.
+
+    Strangers (telegram, discord, no source): nothing in the agent root but this
+    turn's own tool results, no extended path, no shared knowledge. A group with
+    another node: the agent's memory unless L5 is marked shared, the mixed stores
+    always, extended paths and shared knowledge as their marks say. Owner and
+    own-node turns: nothing is closed here.
+    """
+    audience = _not_owner(ctx)
+    if audience is None:
+        return None
+    from ..agent import STRANGER_TURN
+    cls, layers = audience
+    root = ctx.agent_root.resolve()
+    try:
+        rel_parts = resolved.relative_to(root).parts
+    except ValueError:
+        rel_parts = None
+    if rel_parts is not None:
+        shown = "/".join(rel_parts) or "the agent directory"
+        if _current_tool_results(ctx, rel_parts):
+            return None
+        if cls == STRANGER_TURN:
+            return (f"this turn is not the owner's; {shown} is inside the agent's own "
+                    f"directory, which only the owner's turns open")
+        top = (rel_parts[0] if rel_parts else "").lower()  # Windows paths ignore case
+        if top in _L5_DIRS and "L5" not in layers:
+            return f"this turn is not the owner's; {shown} is in the agent's private memory"
+        if top in _MIXED_DIRS or top.startswith(_MIXED_PREFIXES):
+            return (f"this turn is not the owner's; {shown} is one of the agent's stores "
+                    f"that mix private memory with the rest")
+        return None
+    try:
+        resolved.relative_to((_dpc_home() / "knowledge").resolve())
+        in_shared = True
+    except ValueError:
+        in_shared = False
+    if in_shared:
+        if "L6" in layers:
+            return None
+        return f"this turn is not the owner's; {resolved} is shared knowledge, not open to it"
+    if "EXT" in layers:
+        return None
+    return f"this turn is not the owner's; {resolved} is an extended path, private to the owner"
+
+
+def note_non_owner_open(ctx: ToolContext, resolved: Path, how: str = "opened") -> None:
+    """INFO for a work file a non-owner turn opens in the agent root, without content.
+
+    A week of these decides an allow-list (Johnny's review, 2026-11-08)."""
+    if _not_owner(ctx) is None:
+        return
+    try:
+        rel = resolved.relative_to(ctx.agent_root.resolve())
+    except ValueError:
+        return
+    if _current_tool_results(ctx, rel.parts):
+        return
+    log.info("non-owner turn %s %s (agent %s, %s)", how, rel.as_posix() or ".",
+             ctx.agent_root.name, getattr(ctx, "message_source", None))
+
+
+def gate_path(ctx: ToolContext, resolved: Path, how: str = "opened") -> Path:
+    """`resolved` if this turn may open it (noting a non-owner open), else PermissionError."""
+    reason = closed_to_this_turn(ctx, resolved)
+    if reason:
+        raise PermissionError(reason)
+    note_non_owner_open(ctx, resolved, how)
+    return resolved
+
+
+def l5_closed_refusal(ctx: ToolContext, what: str) -> Optional[str]:
+    """The one-line refusal of a memory write on a turn that may not see L5, else None."""
+    audience = _not_owner(ctx)
+    if audience is None or "L5" in audience[1]:
+        return None
+    return (f"⚠️ Not written: this turn is not the owner's, and {what} is the agent's "
+            f"private memory; it is written only on the owner's turns.")
+
+
 def _is_shared_knowledge_read(ctx: ToolContext, path: str) -> bool:
     """Is this a read of the shared human knowledge layer the agent already indexes?
 
@@ -112,7 +243,15 @@ def _is_shared_knowledge_read(ctx: ToolContext, path: str) -> bool:
 
 
 def _resolve_file_path(ctx: ToolContext, path: str, require_write: bool = False) -> Path:
-    """Resolve path to a file: relative → sandbox, absolute → firewall-checked extended path."""
+    """Resolve path to a file: relative → sandbox, absolute → firewall-checked extended path.
+
+    Then the audience gate (closed_to_this_turn): what the gates above admit, a turn
+    that is not the owner's may still not open."""
+    how = "wrote" if require_write else "opened"
+    return gate_path(ctx, _resolve_file_path_ungated(ctx, path, require_write), how)
+
+
+def _resolve_file_path_ungated(ctx: ToolContext, path: str, require_write: bool = False) -> Path:
     import os
     if os.path.isabs(path):
         if not require_write and _is_shared_knowledge_read(ctx, path):
@@ -294,6 +433,7 @@ def list_dir(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
             dir_path = ctx.validate_extended_path(path, require_write=False)
         else:
             dir_path = ctx.repo_path(path)
+        gate_path(ctx, dir_path, "listed")
 
         if not dir_path.exists():
             return f"⚠️ Directory not found: {path}"
@@ -301,8 +441,13 @@ def list_dir(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
             return f"⚠️ Not a directory: {path}"
 
         items = []
+        closed = 0
+        gated = _not_owner(ctx) is not None
         if recursive:
             for item in dir_path.rglob("*"):
+                if gated and closed_to_this_turn(ctx, item):
+                    closed += 1  # not even its name: a recursive walk reaches memory/
+                    continue
                 rel = item.relative_to(dir_path)
                 if item.is_dir():
                     items.append(f"📁 {rel}/")
@@ -317,10 +462,13 @@ def list_dir(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
                     size = item.stat().st_size
                     items.append(f"📄 {item.name} ({size:,} bytes)")
 
+        closed_note = (f"\n\n({closed} entries not listed: this turn is not the owner's)"
+                       if closed else "")
         if not items:
-            return f"Directory '{path}' is empty"
+            return f"Directory '{path}' is empty" + closed_note
 
-        return "\n".join(items[:200]) + (f"\n\n... ({len(items)} total items)" if len(items) > 200 else "")
+        return ("\n".join(items[:200]) + (f"\n\n... ({len(items)} total items)" if len(items) > 200 else "")
+                + closed_note)
 
     except PermissionError as e:
         return f"⚠️ Access denied: {e}"
@@ -447,6 +595,16 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
     """
     try:
         target = ctx.repo_path(path)
+        try:
+            gate_path(ctx, target, "deleted")
+            if target.is_dir() and _not_owner(ctx) is not None:
+                # A folder holding something this turn may not open is not its to delete.
+                for f in target.rglob("*"):
+                    reason = closed_to_this_turn(ctx, f)
+                    if reason:
+                        raise PermissionError(reason)
+        except PermissionError as e:
+            return f"⚠️ Not deleted: {e}"
 
         if not target.exists():
             return f"⚠️ Not found: {path}"
@@ -491,6 +649,9 @@ def update_scratchpad(ctx: ToolContext, content: str, mode: str = "append") -> s
     Returns:
         Result message
     """
+    refusal = l5_closed_refusal(ctx, "the scratchpad")
+    if refusal:
+        return refusal
     try:
         scratchpad_path = ctx.memory_path("scratchpad.md")
 
@@ -554,6 +715,9 @@ def deduplicate_identity(ctx: ToolContext) -> str:
     Returns:
         Summary of duplicates removed
     """
+    refusal = l5_closed_refusal(ctx, "the identity")
+    if refusal:
+        return refusal
     try:
         identity_path = ctx.memory_path("identity.md")
 
@@ -643,6 +807,9 @@ def update_identity(
     Returns:
         Result message
     """
+    refusal = l5_closed_refusal(ctx, "the identity")
+    if refusal:
+        return refusal
     try:
         identity_path = ctx.memory_path("identity.md")
 
@@ -846,10 +1013,12 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
 def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
     """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
     try:
-        # Whose turn this is, asked before any index opens (agent.is_owner_caller).
-        from ..agent import is_owner_caller
+        # Whose turn this is, asked before any index opens: the layers it may see
+        # (ADR-048). None open, nothing searched; a bare context is nobody's.
         source = getattr(ctx, "message_source", None)
-        if not is_owner_caller(source):
+        audience = turn_audience(ctx)
+        layers = audience[1] if audience is not None else frozenset()
+        if not layers:
             return (f"memory_search answers only the owner; this turn came from "
                     f"{source or 'an unnamed source'}.")
 
@@ -931,6 +1100,9 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
 
             merged = [r for r in merged
                       if _extended_path_still_allowed(r.chunk_meta, _granted)]
+        # Rows of a layer this turn may not see go before the count and the cut.
+        from ..active_recall import in_open_layers
+        merged = [r for r in merged if in_open_layers(r.chunk_meta, layers)]
         lines = [f"Found {len(merged)} results for '{query}':\n"]
         if vector_stale:
             lines.insert(0, "Vector index is stale for the current embedding model/window; "
@@ -956,6 +1128,9 @@ def knowledge_list(ctx: ToolContext) -> str:
     """
     try:
         knowledge_dir = ctx.agent_root / "knowledge"
+        reason = closed_to_this_turn(ctx, knowledge_dir)
+        if reason:
+            return f"⚠️ Access denied: {reason}"
 
         if not knowledge_dir.exists():
             return "Knowledge base is empty"
@@ -1019,6 +1194,12 @@ def get_task_board(ctx: ToolContext) -> str:
     """
     import re
     from datetime import datetime, timezone
+
+    # Task previews from logs/ and progress from knowledge/: both closed to a turn
+    # that is not the owner's.
+    reason = closed_to_this_turn(ctx, ctx.agent_root / "logs" / "events.jsonl")
+    if reason:
+        return f"⚠️ Access denied: {reason}"
 
     output_parts: list[str] = []
 
@@ -1153,6 +1334,12 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
         read_file would open it for this agent.
     """
     try:
+        # personal.json is the owner's: no turn but his reads it, whatever
+        # personal_context_access says (ADR-048).
+        if context_type == "personal" and _not_owner(ctx) is not None:
+            return ("⚠️ Personal context is not read on this turn: it is not the owner's "
+                    "(a group with another node, Telegram, Discord or an unnamed source).")
+
         # Check firewall if available via DPC service (per-agent profile if set)
         if ctx.dpc_service and hasattr(ctx.dpc_service, 'firewall'):
             firewall = ctx.dpc_service.firewall
@@ -1828,6 +2015,10 @@ def list_extended_sandbox_paths(ctx: ToolContext) -> str:
         Formatted list of allowed paths
     """
     try:
+        audience = _not_owner(ctx)
+        if audience is not None and "EXT" not in audience[1]:
+            return ("⚠️ Extended paths are not listed on this turn: it is not the owner's, "
+                    "and they are private to the owner.")
         paths = ctx.list_extended_paths()
 
         lines = ["## Extended Sandbox Paths\n"]
@@ -1939,6 +2130,7 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
         else:
             # Relative path - use sandbox
             search_dir = ctx.repo_path(path) if path else ctx.agent_root
+        gate_path(ctx, search_dir, "searched")
 
         if not search_dir.exists():
             return f"⚠️ Directory not found: {path or 'sandbox root'}"
@@ -1961,9 +2153,14 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
         stop_reason = None  # "read_limit" or "result_limit"
         first_unread = None
         files_not_searched = 0
+        closed_files = 0  # files this turn may not open (ADR-048), skipped unread
+        gated = _not_owner(ctx) is not None
 
         candidates = _iter_search_candidates(search_dir, include_pattern)
         for file_path, rel_path in candidates:
+            if gated and closed_to_this_turn(ctx, file_path):
+                closed_files += 1
+                continue
             try:
                 if not file_path.is_file():
                     continue
@@ -2010,6 +2207,9 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
         if stop_reason is not None:
             # Listing the rest is cheap once vendor trees are pruned.
             for _file_path, rel_path in candidates:
+                if gated and closed_to_this_turn(ctx, _file_path):
+                    closed_files += 1
+                    continue
                 if first_unread is None:
                     first_unread = rel_path
                 files_not_searched += 1
@@ -2036,6 +2236,8 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
                 msg += f" ({skipped_large_files} large files skipped)"
             if unreadable_files > 0:
                 msg += f" ({unreadable_files} files could not be read)"
+            if closed_files:
+                msg += f" ({closed_files} files skipped: this turn is not the owner's)"
             return msg
 
         result = [f"## Search Results for '{pattern}'"]
@@ -2046,6 +2248,8 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
             result.append(f"_Note: {skipped_large_files} files >1MB were skipped to conserve memory_")
         if unreadable_files > 0:
             result.append(f"_Note: {unreadable_files} files could not be read_")
+        if closed_files:
+            result.append(f"_Note: {closed_files} files skipped: this turn is not the owner's_")
         result.append("")
 
         # Group by file for better readability
@@ -2090,6 +2294,7 @@ def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines
         else:
             # Relative path - use sandbox
             full_path = ctx.repo_path(file_path)
+        gate_path(ctx, full_path, "searched")
 
         if not full_path.exists():
             return f"⚠️ File not found: {file_path}"

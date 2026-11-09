@@ -2795,6 +2795,34 @@ class ContextFirewall:
                                             errors.append(
                                                 f"'{where}.max_recall_results' must be a whole number from 1 to 10 "
                                                 "(to turn the hints off, clear Active Recall)")
+                                    # Who sees each memory layer (ADR-048). A wrong mark
+                                    # would silently open or close a layer, so refuse it.
+                                    if 'layer_audience' in mem:
+                                        marks = mem['layer_audience']
+                                        if not isinstance(marks, dict):
+                                            errors.append(f"'{where}.layer_audience' must be a dictionary")
+                                        else:
+                                            for layer, value in marks.items():
+                                                if layer not in ('L5', 'L6', 'EXT'):
+                                                    errors.append(
+                                                        f"'{where}.layer_audience' has key '{layer}'; "
+                                                        "the keys are L5, L6 and EXT")
+                                                elif value not in ('private', 'shared'):
+                                                    errors.append(
+                                                        f"'{where}.layer_audience.{layer}' must be "
+                                                        "'private' or 'shared'")
+                                    # A typo here would mean "no own nodes" with nobody told.
+                                    if 'own_node_group' in mem and mem['own_node_group'] is not None:
+                                        name = mem['own_node_group']
+                                        known = {k for k in (config_dict.get('node_groups') or {})
+                                                 if isinstance(k, str) and not k.startswith('_')} \
+                                            if isinstance(config_dict.get('node_groups'), dict) else set()
+                                        if not isinstance(name, str) or not name:
+                                            errors.append(f"'{where}.own_node_group' must be the name of a node group")
+                                        elif name not in known:
+                                            errors.append(
+                                                f"'{where}.own_node_group' names '{name}', which is not in "
+                                                "node_groups (add it under Firewall Rules → Node Groups first)")
 
             # Validate image_transfer section
             if 'image_transfer' in config_dict:
