@@ -9672,16 +9672,21 @@ class CoreService:
         self._cc_ark_chain_depths.pop(conversation_id, None)
 
     @slow_command
-    async def send_cc_agent_response(self, conversation_id: str, text: str, _skip_broadcast: bool = False, **kwargs) -> dict:
-        """Inject CC's response into an agent conversation.
+    async def send_cc_agent_response(self, conversation_id: str, text: str, _skip_broadcast: bool = False,
+                                     sender_name: Optional[str] = None, **kwargs) -> dict:
+        """Inject an external agent's response into an agent conversation.
 
-        Called by CC (Claude Code) after reading agent chat history and
-        formulating a response. The message appears as a user message
-        with the configured CC display name so the agent can see it in conversation context.
+        Called by the 1:1 bridge (Claude Code, ZCode or another harness) after
+        reading agent chat history and formulating a response. The message
+        appears as a user message under `sender_name` — the bridge's `--as` —
+        or, when none is sent, the configured cc_display_name, so the agent can
+        see it in conversation context. The sender id stays 'cc', the 1:1 mark
+        of an external agent's record; the name is what tells two harnesses apart.
 
         Args:
             conversation_id: Agent conversation ID (e.g. 'agent_001')
-            text: CC's response text
+            text: The external agent's response text
+            sender_name: The name to post under; None or blank means cc_display_name
             _skip_broadcast: If True, skip agent_chat_message broadcast
                 (used when caller already delivers content via execute_ai_query response)
         """
@@ -9710,13 +9715,15 @@ class CoreService:
             timestamp = utc_now_iso()
             message_id = str(uuid.uuid4())
 
-            cc_name = self.get_cc_display_name()
+            cc_name = (sender_name or "").strip() or self.get_cc_display_name()
 
-            # Guard against duplicate CC messages (e.g. concurrent paths)
+            # Guard against a duplicate from the same sender (e.g. concurrent paths).
+            # Keyed on the name too: two harnesses giving the same short answer both land.
             if monitor.message_history:
                 last = monitor.message_history[-1]
-                if last.get("sender_node_id") == "cc" and last.get("content") == text:
-                    logger.warning("Skipping duplicate CC message in %s", conversation_id)
+                if (last.get("sender_node_id") == "cc" and last.get("sender_name") == cc_name
+                        and last.get("content") == text):
+                    logger.warning("Skipping duplicate message from %s in %s", cc_name, conversation_id)
                     return {"status": "success", "message_id": message_id, "deduplicated": True}
 
             # Add CC's response to conversation history
@@ -9822,13 +9829,16 @@ class CoreService:
         """
         try:
             from .dpc_agent.agent import is_owner_caller
-            cc_name = self.get_cc_display_name()
             # The turn CC carries takes the source of the chat that woke CC: the records
             # since CC's previous message. One that is not the owner's (an unmarked
             # Telegram user record counts as not) makes the turn that source; only
             # the owner's records leave it external_agent. Fail closed.
             monitor = getattr(agent_manager, "_agent_monitors", {}).get(conversation_id)
             history = list(monitor.message_history) if monitor else []
+            # The turn is asked for under the name the external agent posted as.
+            cc_name = ((history[-1].get("sender_name") if history
+                        and history[-1].get("sender_node_id") == "cc" else None)
+                       or self.get_cc_display_name())
             i = len(history) - 1
             while i >= 0 and history[i].get("sender_node_id") == "cc":
                 i -= 1  # CC's message that asked for this turn

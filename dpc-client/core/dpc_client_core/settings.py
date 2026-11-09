@@ -418,7 +418,7 @@ class Settings:
         # Uses the main Telegram bot (from [telegram] section), not a separate bot
 
         self._config['agent_chat'] = {
-            'cc_display_name': 'CC'  # The name Claude Code goes by in agent and group chats (mentions match it)
+            'cc_display_name': 'CC'  # The name an external agent (Claude Code, ZCode or another harness) goes by in 1:1 agent chats without --as, and in groups where this node registered no tag (mentions match it)
         }
 
         # Discord bot (off until enabled). The token is never pre-filled: name an

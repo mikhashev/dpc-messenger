@@ -1,9 +1,9 @@
 """The 1:1 agent-chat bridge scans for and prints the configured display name, not CC.
 
 cc_agent_bridge.py is a standalone CLI, loaded by file path and pointed at a fake
-DPC_HOME. A 1:1 chat has no Group Settings registration, so the only identity is
-[agent_chat] cc_display_name (fallback "CC"); the backend still stamps the sender
-(AN-EXTERNAL-AGENT-HAS-NO-IDENTITY-IN-A-ONE-TO-ONE-CHAT), which is not tested here.
+DPC_HOME. A 1:1 chat has no Group Settings registration, so without --as the
+identity is [agent_chat] cc_display_name (fallback "CC"); --as is tested in
+test_an_external_agent_answers_a_one_to_one_chat_under_its_own_name.py.
 """
 
 import importlib.util

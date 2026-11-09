@@ -2183,13 +2183,21 @@
           </div>
 
         {:else if selectedTab === 'dpc-agent'}
+          <!-- Node-wide, not per agent: [agent_chat] cc_display_name (key name is historical) -->
           <div class="section">
-            <h3>DPC Agent Permissions</h3>
-            <p class="help-text">Control what the embedded AI agent can access and which tools it can use.</p>
-
-            <!-- CC Display Name Setting -->
+            <h3>External agents</h3>
+            <p class="help-text">
+              Name an external agent (Claude Code, ZCode or another harness) goes by in this node's
+              1:1 agent chats when its bridge passes no <code>--as</code>, and in groups where this
+              node registered no tag. Setup:
+              <a
+                href="https://github.com/mikhashev/dpc-messenger/blob/main/docs/agent/EXTERNAL_HARNESS_INTEGRATION_GUIDE.md#which-name-it-answers-to"
+                target="_blank"
+                rel="noopener noreferrer"
+              >External Agent Integration Guide</a>.
+            </p>
             <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
-              <label for="cc-display-name" style="font-weight: 600; white-space: nowrap;">CC Display Name:</label>
+              <label for="cc-display-name" style="font-weight: 600; white-space: nowrap;">External agent name:</label>
               <input
                 id="cc-display-name"
                 type="text"
@@ -2199,11 +2207,15 @@
                 on:change={saveCcDisplayName}
                 on:keydown={(e) => { if (e.key === 'Enter') saveCcDisplayName(); }}
               />
-              <span style="color: var(--text-secondary); font-size: 0.85rem;">Name shown for Claude Code messages in agent chat</span>
               {#if ccDisplayNameSaved}
                 <span style="color: var(--success-color, #4caf50); font-size: 0.85rem;">Saved</span>
               {/if}
             </div>
+          </div>
+
+          <div class="section">
+            <h3>DPC Agent Permissions</h3>
+            <p class="help-text">Control what the embedded AI agent can access and which tools it can use.</p>
 
             <!-- Agent Selector -->
             <div class="profile-selector" style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">

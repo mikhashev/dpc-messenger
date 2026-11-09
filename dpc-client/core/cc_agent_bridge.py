@@ -6,11 +6,15 @@ DPC agent chat and sends responses. File name is historical.
 - WRITE: WebSocket to localhost:9999 (send_cc_agent_response command)
 - ANALYZE: Ark thinking/tools/behavioral patterns
 
+Identity: --as, else [agent_chat] cc_display_name. A 1:1 chat has no Group
+Settings registration, so the name given is the name posted under.
+
 Usage:
     python cc_agent_bridge.py                       # poll mode (5s interval)
     python cc_agent_bridge.py --once --last 5       # show last 5 messages
     python cc_agent_bridge.py --mentions             # mentions of this bridge's name
     python cc_agent_bridge.py --send "hello"         # send a response
+    python cc_agent_bridge.py --as TAG --send "hi"   # send/scan under another name
     python cc_agent_bridge.py --thinking             # show Ark thinking
     python cc_agent_bridge.py --analyze              # Ark behavioral analysis
 """
@@ -146,6 +150,11 @@ def _configured_display_name() -> str:
     return _get_cc_display_name()
 
 
+def _identity_name(override=None) -> str:
+    """The name this bridge posts and scans under: --as, else the configured name."""
+    return override or _configured_display_name()
+
+
 def _is_mention(content: str, name: str) -> bool:
     """@<name> in content, case-insensitively; Cyrillic @сс only when the name is CC."""
     low = (content or "").lower()
@@ -205,9 +214,10 @@ def read_history(last_n: int = 0, conversation_id: str = None) -> list:
     return _last_messages[-last_n:] if last_n else _last_messages
 
 
-def find_mentions(messages: list, since_index: int = 0) -> list:
-    """Mentions of the configured display name after since_index: [(index, msg), ...]."""
-    name = _configured_display_name()
+def find_mentions(messages: list, since_index: int = 0, name: str = None) -> list:
+    """Mentions of `name` (default: the configured display name) after since_index:
+    [(index, msg), ...]."""
+    name = name or _configured_display_name()
     mentions = []
     for i, msg in enumerate(messages):
         if i < since_index:
@@ -253,8 +263,23 @@ def check_backend_status(conversation_id: str = None) -> dict:
 # WRITE — WebSocket send
 # ─────────────────────────────────────────────────────────────
 
-async def send_response(text: str, conversation_id: str = None) -> dict:
-    """Send a response to the 1:1 agent chat via WebSocket; the backend stamps the sender."""
+def _build_send_command(conversation_id: str, text: str, name: str = None) -> dict:
+    """The send_cc_agent_response command; the backend copies sender_name into the
+    record, and stamps cc_display_name when it is absent (no --as)."""
+    import uuid
+    payload = {"conversation_id": conversation_id, "text": text}
+    if name:
+        payload["sender_name"] = name
+    return {
+        "id": str(uuid.uuid4())[:8],
+        "command": "send_cc_agent_response",
+        "payload": payload,
+    }
+
+
+async def send_response(text: str, conversation_id: str = None, name: str = None) -> dict:
+    """Send a response to the 1:1 agent chat via WebSocket, as `name` (--as);
+    without one the backend stamps the configured display name."""
     if conversation_id is None:
         conversation_id = _get_default_conversation_id()
     try:
@@ -263,17 +288,9 @@ async def send_response(text: str, conversation_id: str = None) -> dict:
         print("[ERROR] websockets not installed. Run: pip install websockets")
         return {"status": "error", "message": "websockets not installed"}
 
-    import uuid
-    # Command name and the sender id 'cc' are the backend's (local_api.py:140,
-    # service.py:7413/:7459) — no sender field exists on this path yet.
-    command = {
-        "id": str(uuid.uuid4())[:8],
-        "command": "send_cc_agent_response",
-        "payload": {
-            "conversation_id": conversation_id,
-            "text": text,
-        }
-    }
+    if name and name != _configured_display_name():
+        print(f"[INFO] posting as {name}")
+    command = _build_send_command(conversation_id, text, name)
 
     # Read the local API auth token written by the backend at startup.
     # The bridge is a privileged local helper running as the same user, so it
@@ -322,9 +339,9 @@ async def send_response(text: str, conversation_id: str = None) -> dict:
         return {"status": "error", "message": str(e)}
 
 
-def send_response_sync(text: str, conversation_id: str = None) -> dict:
+def send_response_sync(text: str, conversation_id: str = None, name: str = None) -> dict:
     """Synchronous wrapper for send_response."""
-    return asyncio.run(send_response(text, conversation_id))
+    return asyncio.run(send_response(text, conversation_id, name))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -427,11 +444,12 @@ def format_message(i: int, msg: dict, show_thinking: bool = False, show_tools: b
 # POLL — main loop
 # ─────────────────────────────────────────────────────────────
 
-def poll(show_thinking: bool = False, show_tools: bool = False, conversation_id: str = None):
+def poll(show_thinking: bool = False, show_tools: bool = False, conversation_id: str = None,
+         name: str = None):
     """Poll loop: watch for new messages and mentions of this bridge's name."""
     messages = read_history(conversation_id=conversation_id)
     last_count = len(messages)
-    name = _configured_display_name()
+    name = name or _configured_display_name()
     print(f"[Agent Bridge] Started as {name}. History: {last_count} msgs. Poll every {POLL_INTERVAL}s.")
     print(f"[Agent Bridge] Path: {_get_history_path(conversation_id)}")
     print(f"[Agent Bridge] Ctrl+C to stop.\n")
@@ -487,6 +505,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Scan full content for mentions of this bridge's name "
                              "since message index")
     parser.add_argument("--full", action="store_true", help="Show full message content without truncation")
+    parser.add_argument("--as", type=str, dest="as_name", metavar="TAG",
+                        help="Post/scan as this name (default: the configured "
+                             "display name, [agent_chat] cc_display_name)")
     parser.add_argument("--conversation-id", type=str, default=None,
                         help="Target a specific agent chat by display name "
                              "(e.g. 'Ark') or folder id (e.g. 'agent_001'). "
@@ -534,8 +555,10 @@ def main():
             print()
         return
 
+    name = _identity_name(args.as_name)
+
     if args.send:
-        send_response_sync(args.send, conversation_id=conv_id)
+        send_response_sync(args.send, conversation_id=conv_id, name=args.as_name)
         return
 
     if args.send_file:
@@ -545,7 +568,7 @@ def main():
             print(f"[ERROR] Cannot read --send-file at {args.send_file}: {e}",
                   file=sys.stderr)
             sys.exit(1)
-        send_response_sync(text, conversation_id=conv_id)
+        send_response_sync(text, conversation_id=conv_id, name=args.as_name)
         return
 
     if args.check is not None:
@@ -555,8 +578,8 @@ def main():
         messages = read_history(conversation_id=conv_id)
         count = len(messages)
         print(f"TOTAL: {count}")
-        mentions = find_mentions(messages, since_index=args.check)
-        needle = "@" + _configured_display_name().lower()
+        mentions = find_mentions(messages, since_index=args.check, name=name)
+        needle = "@" + name.lower()
         for i, msg in mentions:
             sender = msg.get("sender_name", "?")
             content = msg.get("content", "")
@@ -581,8 +604,8 @@ def main():
         return
 
     if args.mentions:
-        mentions = find_mentions(messages)
-        print(_mentions_banner(_configured_display_name(), len(mentions)))
+        mentions = find_mentions(messages, name=name)
+        print(_mentions_banner(name, len(mentions)))
         for i, msg in mentions:
             print(format_message(i, msg, args.thinking, args.tools, args.full))
         return
@@ -593,7 +616,7 @@ def main():
             print(format_message(i, msg, args.thinking, args.tools, args.full))
         return
 
-    poll(show_thinking=args.thinking, show_tools=args.tools, conversation_id=conv_id)
+    poll(show_thinking=args.thinking, show_tools=args.tools, conversation_id=conv_id, name=name)
 
 
 if __name__ == "__main__":

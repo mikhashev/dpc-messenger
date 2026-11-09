@@ -134,9 +134,11 @@ read the same config and follow.
   External agents** (stored in the group's `metadata.json` under `agents` /
   `agent_names`, keyed by `~/.dpc/node.id`). This is the identity — see
   "One name, several machines" below for why registration matters.
-- **Fallback, and the only identity in a 1:1 chat:** the configured display
-  name, `[agent_chat] cc_display_name` in `~/.dpc/config.ini` (default `CC`;
-  editable in the DPC UI under Firewall → Agent Permissions → CC Display Name).
+- **In a 1:1 chat:** the name passed with `--as TAG`; there is no registration
+  to read, so the name given is the name posted under.
+- **Fallback, in both:** the configured display name, `[agent_chat]
+  cc_display_name` in `~/.dpc/config.ini` (default `CC`; editable in the DPC UI
+  under Firewall → Agent Permissions → External agent name).
 
 Every user-visible line the bridges print — the `--mentions` banner, the
 `[INFO] posting as <tag>` line, the `--listen` status — names the resolved tag.
@@ -184,6 +186,7 @@ Two bridge scripts cover 1:1 agent chats and group chats:
 | `uv run python cc_agent_bridge.py --send "text"` | Post a response to the current agent conversation. |
 | `uv run python cc_agent_bridge.py --status` | Check whether the backend is up and when `history.json` last changed. |
 | `uv run python cc_agent_bridge.py --mentions` | Show only messages that `@` mention the configured display name. |
+| `uv run python cc_agent_bridge.py --as TAG --send "text"` | Post (or, with `--mentions` / `--check`, scan) under `TAG` instead of the configured display name. |
 | `uv run python cc_agent_bridge.py` | Poll mode — watch for new messages in a terminal (5-second interval). |
 
 ### Picking a conversation
@@ -329,12 +332,14 @@ several tags and no `--as`, sending refuses and the scan matches all of them.
 The node's own `[agent_chat] cc_display_name` in `~/.dpc/config.ini` still
 decides what an unregistered node answers to.
 
-**In a one-to-one chat you cannot separate them at all, and registration does not
-help.** That send path carries no sender field, so both bridges arrive under the
-node's single `cc_display_name`, and a de-duplication check drops the second
-one's identical reply with nothing but a log line. Group settings register a tag
-for a *group*; a 1:1 conversation has no such list. Until that changes: one
-external agent per 1:1 chat.
+**In a one-to-one chat each bridge names itself with `--as`.** A 1:1
+conversation has no list of registered tags, so the agent-chat bridge sends the
+`--as` name with the message and the record keeps it as its `sender_name`; the
+same `--as` decides which `@<name>` its `--mentions` and `--check` scan for.
+Without `--as` the bridge posts under the node's single `cc_display_name`, as
+before — so two bridges in one 1:1 chat need two different `--as` names, or they
+are one participant. The de-duplication check drops a reply only when the same
+name sent the same text last; two harnesses' identical replies both land.
 
 ### Sending markdown
 
@@ -485,8 +490,8 @@ own setup can use the external agent differently (or not use one at all).
 
 3. For a group chat, open the group's **Group Settings → External agents**
    in the DPC UI and register the tag this machine should answer to. For a
-   1:1 chat there is nothing to register; the bridge answers to
-   `[agent_chat] cc_display_name` (default `CC`).
+   1:1 chat there is nothing to register; the bridge answers to `--as TAG`,
+   else `[agent_chat] cc_display_name` (default `CC`).
 
 4. Set up the check loop, any path:
 

@@ -749,7 +749,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **32 sections, 181 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **33 sections, 185 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -757,7 +757,7 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `cc_display_name` | `CC` | The name Claude Code goes by in agent and group chats (mentions match it) |
+| `cc_display_name` | `CC` | The name an external agent (Claude Code, ZCode or another harness) goes by in 1:1 agent chats without --as, and in groups where this node registered no tag (mentions match it) |
 
 #### `[agent_telegram]`
 
@@ -935,6 +935,15 @@ An empty default means the key is written blank and the feature stays off until 
 |---|---|---|
 | `backend` | `sqlite` | Agent graph store: sqlite or grafeo; an agent's own kg_backend in its config.json overrides it |
 | `gliner_device` | `auto` | Where the GLiNER entity model runs: auto, cpu or cuda. auto = an agent's own gliner_device in its config.json, else cuda when torch sees a card; any other value overrides the agents |
+
+#### `[local_engines]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `model_files_dir` | *(empty)* | Empty = ~/.dpc/models. Set from the Providers editor ("Model files folder"); must be an absolute path to a writable folder |
+| `swap_when_idle` | `false` | Off until the card queue is live-checked: an idle-by-call holder was swapped out mid agent loop (ADR-044 amendment 2026-11-02) |
+| `swap_wait_s` | `300` | How long a swap waits for a busy holder before refusing; 0 = do not wait |
+| `caller_idle_s` | `120` | A peer or gateway client counts as busy this long after its last call; 0 = no window |
 
 #### `[local_transcription]`
 

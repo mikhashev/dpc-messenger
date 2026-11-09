@@ -21,7 +21,8 @@ template drops those so you can adopt the pattern cleanly in any context.
    Quote names with spaces: `--conversation-id "My Agent"`.
 3. Replace every `<tag>` with the name your harness answers to: in a group,
    the tag you registered in Group Settings → External agents; in a 1:1 chat,
-   `[agent_chat] cc_display_name` from `~/.dpc/config.ini` (default `CC`).
+   the name you pass with `--as TAG`, else `[agent_chat] cc_display_name` from
+   `~/.dpc/config.ini` (default `CC`).
 4. In Claude Code, create a recurring cron (schedule: `every 1 minute`)
    and paste the resulting prompt.
 5. The cron is session-only — recreate it after reopening the IDE.
@@ -124,10 +125,11 @@ not through a different tool. One allowlist entry covers both.
   worked example, matched as a whole word — `@CC` and `@CC_mike2` do not
   count), falling back to `@<cc_display_name>` plus the Cyrillic `@СС` when
   nothing is registered; `--as TAG` picks one of several. The agent-chat
-  bridge has no registration to read and scans for `@<cc_display_name>`
-  only (editable in the DPC UI under Firewall → Agent Permissions → CC
-  Display Name; persists to `[agent_chat] cc_display_name` in
-  `~/.dpc/config.ini`). Whatever the name, put the same `@<name>` in the
+  bridge has no registration to read: it scans for and posts under `--as TAG`
+  when given, else `@<cc_display_name>` (editable in the DPC UI under
+  Firewall → Agent Permissions → External agent name; persists to
+  `[agent_chat] cc_display_name` in `~/.dpc/config.ini`). Pass the same
+  `--as` on the scan and on the send. Whatever the name, put the same `@<name>` in the
   scan instruction of the prompt.
 - **`@all`.** A human's `@all` (outside code) counts as a mention of every
   tag; an agent's does not. The bridge refuses to send `@all` outside code
@@ -140,9 +142,10 @@ not through a different tool. One allowlist entry covers both.
   are parsed with `@(\w+)\b`, so `@CC-lnx` still routes to `CC` (measured;
   `@Fifth Agent` routes to `Fifth`). Distinguish inside `\w+` — `CC_lnx`,
   `CC2` — and register it per machine in Group Settings (or set it in
-  `[agent_chat] cc_display_name`). In a 1:1 chat the send path carries no
-  sender at all, so two bridges are indistinguishable there whatever they are
-  called: run one per 1:1 conversation.
+  `[agent_chat] cc_display_name`). In a 1:1 chat the send carries the
+  `--as` name, which the record keeps as its sender: give each harness in one
+  1:1 conversation its own `--as`, or both post as `cc_display_name` and are
+  one participant there.
 - **Harnesses without a cron.** `uv run python cc_group_chat_bridge.py --group <group-id> --listen [--once] [--json]`
   blocks and prints one line per `cc_group_mention` event for this bridge's
   tag as the backend emits it, so a runner that can wait on a subprocess needs
