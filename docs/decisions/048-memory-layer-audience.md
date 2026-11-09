@@ -139,6 +139,14 @@ kept on this node beside its history.
    a file of another conversation the rule opens; filenames repeat across conversations,
    so a bare filename is looked up in the current conversation only. A conversation the
    rule does not open is refused in one sentence.
+4. **Search ranks from an index beside each archive.** `search_session_archives` ranks by
+   BM25 from `archive/bm25/` of each conversation the rule opens (location: Mike's call,
+   2026-11-09). The rule applies first: the index of a conversation the turn does not
+   open is never read, and a hit in a session the turn may not read is neither returned
+   nor counted. The index is derived data on this node (ADR-019, ADR-008). Vectors wait
+   on a measurement: on 2026-11-09 BM25 found every message the substring search found
+   for the seven test names over the three largest archives here, and every top-20 hit
+   contained the name.
 
 Consequence: in a group with another node the sessions archived before this change close
 on its group turns. On this node on 2026-11-09 that is 1234 (the owner's Linux node is a

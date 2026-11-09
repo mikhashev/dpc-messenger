@@ -197,7 +197,7 @@ def run_audit(agent_id: str, repo_root: Path) -> Dict:
     knowledge_inv = _inventory(DPC_HOME / "knowledge", "*.md")
     adr_inv = _inventory(repo_adr_dir, "*.md")
     sessions_root = DPC_HOME / "conversations" / agent_id / "archive"
-    session_inv = _inventory(sessions_root, "*.json", recursive=True)
+    session_inv = _inventory(sessions_root, "*_session.json", recursive=True)
 
     kg = _kg_stats(agent_root)
 

@@ -1135,6 +1135,18 @@ class AgentService:
                 except Exception as e:
                     logger.warning("Failed to delete archive %s: %s", p.name, e)
 
+            # The search index keeps the text of every session it read, so a deleted
+            # session must not outlive itself there; the next search rebuilds it. Queued
+            # behind any search still writing it, and not awaited: this runs on the UI
+            # socket's read loop.
+            from .dpc_agent.tools.archive import INDEX_DIR
+            index_dir = archive_dir / INDEX_DIR
+            if deleted and index_dir.exists():
+                import shutil
+                from .dpc_agent.index_writer import writer_for
+                writer_for(index_dir).submit(
+                    lambda: shutil.rmtree(index_dir, ignore_errors=True))
+
             remaining = len(archives) - deleted
             logger.info("Cleared %d archives for %s (%d remaining)", deleted, conversation_id, remaining)
             return {"status": "success", "deleted_count": deleted, "remaining": remaining}

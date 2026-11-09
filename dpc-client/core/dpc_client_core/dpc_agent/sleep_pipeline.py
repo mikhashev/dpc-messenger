@@ -413,7 +413,7 @@ def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[
             group_id = group_dir.name
     else:
         group_id = group_dir.name
-    for archive_path in sorted(archive_dir.rglob("*.json")):
+    for archive_path in sorted(archive_dir.rglob("*_session.json")):
         try:
             data = json.loads(archive_path.read_text(encoding="utf-8"))
             messages = data.get("messages", [])

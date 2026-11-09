@@ -4,6 +4,8 @@ DPC Agent — Session Archive Tools.
 Provides read-only access to session archives for self-analysis.
 Archives are stored outside the agent sandbox in ~/.dpc/conversations/{id}/archive/.
 This tool bridges that gap, giving the agent structured access to its own history.
+`search_session_archives` ranks from a BM25 index kept beside each archive, in
+`archive/bm25/`: derived data, local, rebuilt from the session files (ADR-008).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..bm25_index import TOKENIZE_FILE, TOKENIZE_VERSION, BM25Index, tokenize
 from .registry import ToolEntry, ToolContext
 
 log = logging.getLogger(__name__)
@@ -268,6 +271,134 @@ def _skipped_session(filename: str, reason: str) -> str:
     return f"⚠️ Session {filename} is not open on this turn: {why}."
 
 
+# ---------------------------------------------------------------------------
+# The keyword index beside each archive (step 2 of ARCHIVE-GROUP-ACCESS)
+# ---------------------------------------------------------------------------
+#
+# One BM25 store per conversation archive, in `archive/bm25/`; text indexes stay on
+# this node (ADR-019). One row per non-empty field of a message, so `scope` filters
+# rows. The rows themselves are the manifest: each names its session file, and a file
+# no row names is read and added. Session files are immutable, so nothing else is
+# re-read; a file gone from disk takes its rows with it.
+
+INDEX_DIR = "bm25"
+_FIELDS = ("content", "thinking")
+
+
+def _rows(data: Optional[Dict[str, Any]], filename: str) -> tuple:
+    """(texts, metas) of one session file, one row per non-empty field of a message."""
+    texts: List[str] = []
+    metas: List[Dict[str, Any]] = []
+    messages = data.get("messages") if isinstance(data, dict) else None
+    if not isinstance(messages, list):
+        return texts, metas
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict):
+            continue
+        for field in _FIELDS:
+            text = m.get(field)
+            if isinstance(text, str) and text.strip():
+                texts.append(text)
+                metas.append({"source_file": f"{filename}#{i}#{field}", "filename": filename,
+                              "message_index": i, "scope_matched": field})
+    return texts, metas
+
+
+def _stored_tokenize_version(index_dir: Path) -> Optional[int]:
+    try:
+        doc = json.loads((index_dir / TOKENIZE_FILE).read_text(encoding="utf-8"))
+        return int(doc.get("tokenize_version"))
+    except Exception:
+        return None
+
+
+def _index_of(archive_dir: Path) -> BM25Index:
+    """The archive's index brought up to date with its session files. Runs on the
+    folder's index writer, which serialises every load and save of it."""
+    index_dir = archive_dir / INDEX_DIR
+    sessions = {p.relative_to(archive_dir).as_posix(): p
+                for p in archive_dir.rglob("*_session.json")}
+    index = BM25Index(index_dir)
+    indexed: Dict[str, List[str]] = {}
+    # The tokenizer file is written last by `save` and removed before it, so a store
+    # cut mid-save reads as another version and is rebuilt.
+    current = _stored_tokenize_version(index_dir) == TOKENIZE_VERSION and index.load()
+    if current:
+        try:
+            for meta in index._chunk_metas:
+                indexed.setdefault(meta["filename"], []).append(meta["source_file"])
+        except (TypeError, KeyError, AttributeError):
+            current = False
+    gone = [f for f in indexed if f not in sessions] if current else []
+    new = [f for f in sorted(sessions) if f not in indexed] if current else sorted(sessions)
+    if current and not gone and not new:
+        return index
+    if current and index.sources_missing_full_text():
+        current, gone, new = False, [], sorted(sessions)
+
+    texts: List[str] = []
+    metas: List[Dict[str, Any]] = []
+    for filename in new:
+        t, m = _rows(_read_json(sessions[filename]), filename)
+        texts += t
+        metas += m
+    if current:
+        if not gone and not texts:
+            return index  # new files with nothing to index; read again next time
+        if gone:
+            index.remove_by_sources({key for f in gone for key in indexed[f]})
+        if texts:
+            index.add(texts, metas)
+    else:
+        index = BM25Index(index_dir)
+        if texts:
+            index.build(texts, metas)
+    index_dir.mkdir(parents=True, exist_ok=True)
+    (index_dir / TOKENIZE_FILE).unlink(missing_ok=True)
+    index.save()
+    return index
+
+
+def _ranked_hits(rule: "_OpenArchives", archive_files: List[tuple], query: str,
+                 fields: tuple) -> List[tuple]:
+    """(score, conversation id, path, message index, field) of every message BM25 finds
+    in the sessions this turn may read, best first. Raises when an index fails."""
+    from ..index_writer import write_index
+    dirs = dict((cid, d) for cid, d in reversed(rule.sources))
+    visible: Dict[tuple, Path] = {}
+    for cid, path, _ in archive_files:
+        visible[(cid, path.relative_to(dirs[cid]).as_posix())] = path
+    hits: Dict[tuple, tuple] = {}
+    for cid, archive_dir in rule.sources:
+        if not any(c == cid for c, _ in visible):
+            continue  # nothing of it is open on this turn: its index is not read
+        index_dir = archive_dir / INDEX_DIR
+        # Created first, so the writer is keyed by the folder's identity from the start.
+        index_dir.mkdir(parents=True, exist_ok=True)
+        index = write_index(index_dir, lambda d=archive_dir: _index_of(d))
+        for meta, score in index.search(query, top_k=max(1, index.total_documents)):
+            if meta.get("scope_matched") not in fields:
+                continue
+            path = visible.get((cid, meta.get("filename")))
+            if path is None:
+                continue  # a session this turn may not read is neither shown nor counted
+            key = (cid, meta["filename"], meta.get("message_index"))
+            if key not in hits:
+                hits[key] = (score, cid, path, meta.get("message_index"), meta["scope_matched"])
+    return sorted(hits.values(), key=lambda h: (-h[0], h[2].name, h[1], h[3]))
+
+
+def _snippet(text: str, at: int, length: int, snippet_chars: int) -> str:
+    start = max(0, at - snippet_chars)
+    end = min(len(text), at + length + snippet_chars)
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(text):
+        snippet = snippet + "..."
+    return snippet
+
+
 def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0) -> str:
     """
     Read summaries of the last N archived sessions, optionally skipping the
@@ -519,17 +650,23 @@ def search_session_archives(
     snippet_chars: int = 100,
 ) -> str:
     """
-    Search across all archived sessions for messages matching a substring query.
+    Search across all archived sessions for messages matching a query, best first.
 
-    Case-insensitive substring match on `content` (default), `thinking`, or
-    `both` scope. Returns matched messages with filename, message_index,
-    snippet (±snippet_chars around first match), timestamp, and which scope
-    field matched, each with its conversation_id. Use read_session_detail(filename,
-    offset=message_index, conversation_id=...) to follow up on specific matches.
+    Ranked by BM25 over the words of the query in `content` (default), `thinking`,
+    or `both` scope, from the index beside each archive. Returns matched messages
+    with filename, message_index, score, snippet (±snippet_chars around the first
+    query word found), timestamp, and which scope field matched, each with its
+    conversation_id. Use read_session_detail(filename, offset=message_index,
+    conversation_id=...) to follow up on specific matches.
+
+    Falls back to the case-insensitive substring match, in archive order and without
+    a score, when the query has no word the tokenizer keeps (punctuation, stop words),
+    when the index finds nothing, or when an index cannot be built or loaded (`note`
+    says so).
 
     Args:
         ctx: Tool context
-        query: Substring to search for (case-insensitive, min 2 chars)
+        query: Words to search for (case-insensitive, min 2 chars)
         scope: "content" (default), "thinking", or "both"
         last_n: Maximum matches to return per call (1-50, default 20)
         offset: Skip first N matches across all archives (default 0)
@@ -559,50 +696,75 @@ def search_session_archives(
     if not rule.files():
         return json.dumps({"error": "No archived sessions found", "matches": []})
     archive_files = rule.visible()
+    loaded = {(cid, path): data for cid, path, data in archive_files}
 
-    query_lower = query.lower()
+    def session(cid: str, path: Path) -> Optional[Dict[str, Any]]:
+        if loaded.get((cid, path)) is None:
+            loaded[(cid, path)] = _read_json(path)
+        return loaded[(cid, path)]
+
     fields = ("content", "thinking") if scope == "both" else (scope,)
-    all_matches: List[Dict[str, Any]] = []
-
-    for conversation_id, archive_path, loaded in archive_files:
-        data = loaded
-        if data is None:
-            try:
-                with open(archive_path, encoding="utf-8") as f:
-                    data = json.load(f)
-            except (json.JSONDecodeError, OSError):
+    words = tokenize(query)
+    page: List[Dict[str, Any]] = []
+    fallback: Optional[str] = None
+    hits: List[tuple] = []
+    if words:
+        try:
+            hits = _ranked_hits(rule, archive_files, query, fields)
+        except Exception as e:
+            log.warning("session archive index unavailable, substring match used: %s", e)
+            fallback = "The keyword index could not be built or loaded"
+    if hits:
+        total_matches = len(hits)
+        for score, conversation_id, path, msg_idx, field in hits[offset:offset + last_n]:
+            messages = (session(conversation_id, path) or {}).get("messages") or []
+            m = messages[msg_idx] if 0 <= msg_idx < len(messages) else {}
+            m = m if isinstance(m, dict) else {}
+            text = m.get(field) or ""
+            low = text.lower()
+            found = [(at, w) for w in words for at in (low.find(w),) if at >= 0]
+            at, word = min(found) if found else (0, "")
+            page.append({
+                "conversation_id": conversation_id,
+                "filename": path.name,
+                "message_index": msg_idx,
+                "scope_matched": field,
+                "role": m.get("role", ""),
+                "sender_name": m.get("sender_name", ""),
+                "timestamp": m.get("timestamp", ""),
+                "score": round(score, 3),
+                "snippet": _snippet(text, at, len(word), snippet_chars),
+            })
+    else:
+        query_lower = query.lower()
+        all_matches: List[Dict[str, Any]] = []
+        for conversation_id, archive_path, _ in archive_files:
+            data = session(conversation_id, archive_path)
+            if data is None:
                 continue
-
-        messages = data.get("messages", [])
-        for msg_idx, m in enumerate(messages):
-            for field in fields:
-                text = m.get(field, "") or ""
-                if not text:
-                    continue
-                hit = text.lower().find(query_lower)
-                if hit < 0:
-                    continue
-                start = max(0, hit - snippet_chars)
-                end = min(len(text), hit + len(query) + snippet_chars)
-                snippet = text[start:end]
-                if start > 0:
-                    snippet = "..." + snippet
-                if end < len(text):
-                    snippet = snippet + "..."
-                all_matches.append({
-                    "conversation_id": conversation_id,
-                    "filename": archive_path.name,
-                    "message_index": msg_idx,
-                    "scope_matched": field,
-                    "role": m.get("role", ""),
-                    "sender_name": m.get("sender_name", ""),
-                    "timestamp": m.get("timestamp", ""),
-                    "snippet": snippet,
-                })
-                break  # one hit per message is enough
-
-    total_matches = len(all_matches)
-    page = all_matches[offset:offset + last_n]
+            for msg_idx, m in enumerate(data.get("messages", [])):
+                for field in fields:
+                    text = m.get(field, "") or ""
+                    if not text:
+                        continue
+                    hit = text.lower().find(query_lower)
+                    if hit < 0:
+                        continue
+                    all_matches.append({
+                        "conversation_id": conversation_id,
+                        "filename": archive_path.name,
+                        "message_index": msg_idx,
+                        "scope_matched": field,
+                        "role": m.get("role", ""),
+                        "sender_name": m.get("sender_name", ""),
+                        "timestamp": m.get("timestamp", ""),
+                        "snippet": _snippet(text, hit, len(query), snippet_chars),
+                    })
+                    break  # one hit per message is enough
+        total_matches = len(all_matches)
+        page = all_matches[offset:offset + last_n]
+        if fallback:
+            fallback += "; these are substring matches in archive order, not ranked."
 
     out = {
         "query": query,
@@ -612,9 +774,9 @@ def search_session_archives(
         "showing": len(page),
         "matches": page,
     }
-    skipped = rule.skipped_note()
-    if skipped:
-        out["note"] = skipped
+    note = " ".join(n for n in (fallback, rule.skipped_note()) if n)
+    if note:
+        out["note"] = note
     return json.dumps(out, ensure_ascii=False)
 
 
@@ -740,12 +902,16 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "search_session_archives",
                 "description": (
-                    "Search across all archived sessions for messages matching a "
-                    "substring query. Case-insensitive. Returns snippets with "
-                    "conversation_id + filename + message_index so you can follow up via "
-                    "read_session_detail(filename, offset=message_index, conversation_id=...). "
-                    "Use this when looking for when/where a topic was discussed "
-                    "across many sessions. It searches the same archives "
+                    "Search across all archived sessions for messages containing the "
+                    "words of a query, ranked by relevance (BM25, best first, with a "
+                    "`score`). Case-insensitive; punctuation around a word does not hide "
+                    "it. Returns snippets with conversation_id + filename + message_index "
+                    "so you can follow up via read_session_detail(filename, "
+                    "offset=message_index, conversation_id=...). When the ranked search "
+                    "cannot answer (no word left after stop words, or no hit), matches "
+                    "come from a substring search in archive order, without a `score`. "
+                    "Use this when looking for when/where a topic was "
+                    "discussed across many sessions. It searches the same archives "
                     "read_session_archive lists on this turn."
                 ),
                 "parameters": {
@@ -753,7 +919,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Substring to search for (case-insensitive, min 2 chars)",
+                            "description": "Words to search for (case-insensitive, min 2 chars)",
                         },
                         "scope": {
                             "type": "string",

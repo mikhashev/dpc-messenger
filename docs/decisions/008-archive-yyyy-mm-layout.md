@@ -82,6 +82,16 @@ return len(archives)
 - `read_session_detail`: `archive_dir.glob(f"**/{filename}")` with first match, plus `offset` / `max_message_chars` / `include_thinking` (ARCH-17)
 - `search_session_archives`: new tool (ARCH-18) for case-insensitive substring search across archives (scope: `content` | `thinking` | `both`)
 
+**The search index beside each archive (2026-11-09, `ARCHIVE-GROUP-ACCESS` step 2).**
+`archive/bm25/` holds the BM25 index of that conversation's session files, and
+`search_session_archives` ranks from it; the substring search stays as its fallback.
+The index is derived data: it is built on the first search, gains only the session files
+none of its rows names yet, drops the rows of a file that is gone, and is rebuilt from
+the sessions whenever it is missing, unreadable or of another tokenizer version — so it
+can be deleted at any time, and `clear_session_archives` deletes it. It stays on this
+node (ADR-019). Every reader of an archive folder globs `*_session.json`, never `*.json`,
+so the index files are never read as sessions.
+
 ### Backend service
 
 `service.py:get_session_archive_info` and `clear_session_archives` use recursive glob + `shutil.rmtree` with the new default/clamp pattern (0 = unlimited).
@@ -207,5 +217,5 @@ Proposed (2026-04-11, S25). Awaiting Mike + Ark review.
 - S24 lesson: "write-side optimized, read-side neglected" — motivated lockstep reader update
 - Who may read an archive, and the `group` record a group archive carries since
   2026-11-09: [ADR-048, Session archives](048-memory-layer-audience.md#session-archives).
-  An index beside each archive (option B, BM25 first) is the next step of the
-  `ARCHIVE-GROUP-ACCESS` entry; ADR-019 keeps text indexes local.
+  The index beside each archive (option B, BM25 first) is step 2 of the
+  `ARCHIVE-GROUP-ACCESS` entry, under Reader path above; ADR-019 keeps text indexes local.
