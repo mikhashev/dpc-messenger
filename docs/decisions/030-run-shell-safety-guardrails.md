@@ -89,6 +89,8 @@ _validate_command(command: str, cwd: str) -> tuple[str, str] | None
 
 `cwd` parameter restricted to agent sandbox paths as defined by the firewall: agent_root + `sandbox_extensions.indexed_paths` from `privacy_rules.json`. Same paths that govern read/write file access. Commands targeting paths outside these firewall-defined boundaries are denied.
 
+**Amendment, 2026-11-11.** The boundary has one default read grant beyond `agent_root` and `sandbox_extensions`: the `files/` folder of the agent's own one-to-one conversation and of each group whose `metadata.json` lists the agent under this node (`ToolContext.validate_extended_path`, via `reads_own_chat_files`), so that an agent can open what was sent to it. Reads only; `history.json` and every other folder of a conversation, other agents' chats and unlisted groups stay outside, and a Discord turn still reads nothing outside the agent directory. Mike's call, 2026-11-11.
+
 ### Logging
 
 - Tier 0 (allowed): `DEBUG` — audit trail without noise

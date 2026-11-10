@@ -456,6 +456,12 @@ class ToolContext:
                 f"reads only inside it"
             )
 
+        # Mike's call, 2026-11-11: what was sent into this agent's own chats is readable
+        # without a profile entry (its 1:1 chat and the groups it is listed in; never a write).
+        from .archive import reads_own_chat_files
+        if not require_write and reads_own_chat_files(self, resolved):
+            return resolved
+
         # Check extended sandbox
         if self.is_extended_path_allowed(str(resolved), require_write):
             return resolved

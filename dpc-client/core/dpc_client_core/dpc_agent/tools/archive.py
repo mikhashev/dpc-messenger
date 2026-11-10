@@ -146,6 +146,45 @@ def _included_groups(ctx: ToolContext, base: Path, current_dir: Path) -> List[tu
     return found
 
 
+def reads_own_chat_files(ctx: ToolContext, resolved: Path) -> bool:
+    """Whether `resolved` lies in the `files/` of a chat this agent belongs to.
+
+    Pictures and files a person pastes into a chat are written to
+    `~/.dpc/conversations/<conversation folder>/files/`, outside the agent's
+    directory, and the agent has to be able to open what was sent to it (Mike's
+    call, 2026-11-11). Two chats qualify: the agent's own one-to-one chat (its
+    conversation id is the agent id) and every group whose metadata.json lists this
+    agent under this node, the membership the session archives use. Nothing else in
+    those folders (history.json, metadata.json, archive/) and no other chat.
+    `resolved` is a resolved path, so a link inside `files/` that leads elsewhere
+    is judged by where it leads. Read access only: the caller never asks this for a write.
+    """
+    from dpc_client_core import conversation_paths
+    base = (Path.home() / ".dpc" / "conversations").resolve()
+    try:
+        rel = resolved.relative_to(base).parts
+    except ValueError:
+        return False
+    if len(rel) < 2 or rel[1].lower() != "files":
+        return False
+    folder = base / rel[0]
+    agent_id = ctx.agent_root.name
+    if conversation_paths.is_store_dir_name(rel[0], agent_id):
+        return True
+    if not rel[0].lower().startswith("group-") or not folder.is_dir():
+        return False
+    meta = _group_metadata(folder)
+    if meta is None or not _agents_map_holds_this_agent(meta, ctx):
+        return False
+    group_id = meta["group_id"]
+    if not conversation_paths.is_store_dir_name(rel[0], group_id):
+        return False
+    try:
+        return conversation_paths.resolve_store_dir(base, group_id).resolve() == folder.resolve()
+    except ValueError:
+        return False
+
+
 class _OpenArchives:
     """The archives a turn opens and, for a turn in a group with another node, the
     members every session must record."""
