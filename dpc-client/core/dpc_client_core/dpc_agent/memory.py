@@ -877,7 +877,10 @@ class Memory:
     def save_identity(self, content: str) -> None:
         """Save identity content."""
         write_text(self.identity_path(), content)
-        auto_commit_agent_change(self.agent_root, "identity: updated self-understanding")
+        # This file only: a bare `git add -A` sweeps the whole sandbox into the commit.
+        auto_commit_agent_change(
+            self.agent_root, "identity: updated self-understanding",
+            paths=[self.identity_path().relative_to(self.agent_root).as_posix()])
 
     def load_dialogue_summary(self) -> str:
         """Load dialogue summary if exists."""

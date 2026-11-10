@@ -21,7 +21,7 @@ import os
 import pathlib
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -163,9 +163,17 @@ def init_agent_git_repo(agent_id: str) -> None:
         log.warning(f"Failed to initialize git repo for agent {agent_id}: {e}")
 
 
-def auto_commit_agent_change(agent_root: pathlib.Path, message: str) -> None:
+# One git call of the auto-commit may take this long; the helper makes two (add, commit).
+AUTO_COMMIT_GIT_TIMEOUT_SEC = 30
+
+
+def auto_commit_agent_change(
+    agent_root: pathlib.Path,
+    message: str,
+    paths: Optional[Sequence[str]] = None,
+) -> None:
     """
-    Best-effort auto-commit all changes in the agent sandbox.
+    Best-effort auto-commit of changes in the agent sandbox.
 
     Only runs if a .git repo exists. Logs a warning on failure but never
     raises — callers must not depend on this succeeding.
@@ -173,21 +181,27 @@ def auto_commit_agent_change(agent_root: pathlib.Path, message: str) -> None:
     Args:
         agent_root: Agent sandbox root (e.g. ~/.dpc/agents/agent_001/)
         message: Commit message (use prefix convention: knowledge:, identity:, etc.)
+        paths: Files (relative to agent_root) this change is about. When given, only
+            they are staged and committed — a sandbox holds thousands of files and a
+            bare `git add -A` sweeps every unrelated edit into this commit and takes
+            seconds to do it. None keeps the whole-sandbox behaviour.
     """
     if not (agent_root / ".git").exists():
         return
 
     try:
+        only = ["--", *paths] if paths else []
         _git_helper(
-            ["git", "add", "-A"],
-            cwd=str(agent_root), timeout=30, check=False,
+            ["git", "add", *(only or ["-A"])],
+            cwd=str(agent_root), timeout=AUTO_COMMIT_GIT_TIMEOUT_SEC, check=False,
         )
         result = _git_helper(
-            ["git", "commit", "-m", message],
-            cwd=str(agent_root), text=True, timeout=30, check=False,
+            ["git", "commit", "-m", message, *only],
+            cwd=str(agent_root), text=True, timeout=AUTO_COMMIT_GIT_TIMEOUT_SEC, check=False,
         )
-        combined = (result.stdout or "") + (result.stderr or "")
-        if result.returncode != 0 and "nothing to commit" not in combined.lower():
+        combined = ((result.stdout or "") + (result.stderr or "")).lower()
+        nothing_new = "nothing to commit" in combined or "no changes added to commit" in combined
+        if result.returncode != 0 and not nothing_new:
             log.warning(f"Auto-commit failed for {agent_root.name}: {result.stderr.strip()}")
     except Exception as e:
         log.warning(f"Auto-commit failed for {agent_root.name}: {e}")

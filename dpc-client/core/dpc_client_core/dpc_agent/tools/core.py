@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 from ..run_gate import turn_waits_for
 from ..memory import _BACKFILL_SKIP
-from ..utils import auto_commit_agent_change, clip_text
+from ..utils import AUTO_COMMIT_GIT_TIMEOUT_SEC, auto_commit_agent_change, clip_text
 
 log = logging.getLogger(__name__)
 
@@ -702,6 +702,38 @@ def update_scratchpad(ctx: ToolContext, content: str, mode: str = "append") -> s
         return f"⚠️ Error updating scratchpad: {e}"
 
 
+# The identity file as git sees it, relative to the agent sandbox (= `ctx.memory_path("identity.md")`).
+IDENTITY_REL_PATH = "memory/identity.md"
+
+# deduplicate_identity refuses to write when it would remove more than this share of the
+# file: a duplicate is a small part of it, a larger cut means the ranges are wrong.
+DEDUPLICATE_MAX_REMOVED_SHARE = 0.5
+
+# An identity tool writes, then commits (two git calls); its timeout must outlast both,
+# or the agent is told "timed out" about a write that still happens and retries it.
+IDENTITY_TOOL_TIMEOUT_SEC = 2 * AUTO_COMMIT_GIT_TIMEOUT_SEC + 15
+
+
+def _split_identity_content(content: str) -> tuple:
+    """`content` for an identity section, as (body, stripped headings, inner heading).
+
+    The tool writes the `## <section>` header itself and a section ends at the next
+    `## ` line, so a `## ` line of the content's own would double the header on the
+    first write and split the section on the next. Leading ones are dropped; one that
+    comes after text is returned as `inner` (the caller refuses).
+    """
+    lines = content.split("\n")
+    stripped = []
+    while True:
+        first = next((i for i, line in enumerate(lines) if line.strip()), None)
+        if first is None or not lines[first].lstrip().startswith("## "):
+            break
+        stripped.append(lines[first].lstrip()[3:].strip())
+        del lines[:first + 1]
+    inner = next((line.strip() for line in lines if line.startswith("## ")), None)
+    return ("\n".join(lines).strip("\n") if stripped else content), stripped, inner
+
+
 def deduplicate_identity(ctx: ToolContext) -> str:
     """
     Remove duplicate sections from the agent's identity file.
@@ -728,41 +760,47 @@ def deduplicate_identity(ctx: ToolContext) -> str:
         original_len = len(existing)
         lines = existing.split("\n")
 
-        # Find all section headers and their positions
-        sections = {}  # normalized_name -> [(line_idx, original_header), ...]
-        for i, line in enumerate(lines):
-            if line.strip().startswith("## "):
-                header = line.strip()[3:].strip()
-                normalized = header.lower()
-                if normalized not in sections:
-                    sections[normalized] = []
-                sections[normalized].append((i, header))
+        # Every range is measured on the original lines, before anything is deleted:
+        # a deletion moves the lines after it, and ranges taken after it would point
+        # at other text (the lessons block of 21,667 chars went that way, 2026-11-10).
+        starts = [i for i, line in enumerate(lines) if line.startswith("## ")]
+        ends = starts[1:] + [len(lines)]
+        groups: Dict[str, List[tuple]] = {}  # normalized_name -> [(start, end, header), ...]
+        for start, end in zip(starts, ends):
+            header = lines[start][3:].strip()
+            groups.setdefault(header.lower(), []).append((start, end, header))
 
-        # Find sections with duplicates
-        duplicates = {k: v for k, v in sections.items() if len(v) > 1}
+        duplicates = {k: v for k, v in groups.items() if len(v) > 1}
 
         if not duplicates:
             return "✓ No duplicate sections found in identity"
 
-        # Get section bounds
-        def get_section_bounds(start_idx):
-            end_idx = len(lines)
-            for i in range(start_idx + 1, len(lines)):
-                if lines[i].startswith("## "):
-                    end_idx = i
-                    break
-            return start_idx, end_idx
+        def has_body(rng):
+            return any(line.strip() for line in lines[rng[0] + 1:rng[1]])
 
-        # Remove duplicates from end to start to preserve indices
-        total_removed = 0
+        # Keep the first copy that carries text (the first one when none does); the
+        # rest go. Copies are never merged.
+        doomed = []
         sections_cleaned = []
-        for _normalized_name, occurrences in duplicates.items():
-            # Keep first occurrence, remove rest
-            for start_idx, _original_header in reversed(occurrences[1:]):
-                _, end_idx = get_section_bounds(start_idx)
-                del lines[start_idx:end_idx]
-                total_removed += 1
-            sections_cleaned.append(occurrences[0][1])  # Keep original header name
+        for occurrences in duplicates.values():
+            keep = next((rng for rng in occurrences if has_body(rng)), occurrences[0])
+            doomed.extend((s_, e_) for s_, e_, _h in occurrences if s_ != keep[0])
+            sections_cleaned.append(keep[2])
+
+        removed_chars = sum(len("\n".join(lines[s_:e_])) + 1 for s_, e_ in doomed)
+        if existing and removed_chars / len(existing) > DEDUPLICATE_MAX_REMOVED_SHARE:
+            return (
+                f"⚠️ Not deduplicated: this would remove {removed_chars} of {original_len} chars "
+                f"({removed_chars * 100 // len(existing)}%), more than the "
+                f"{int(DEDUPLICATE_MAX_REMOVED_SHARE * 100)}% a duplicate clean-up may take, so nothing was "
+                f"written. Rewrite the sections with update_identity, one call per section."
+            )
+
+        # Delete from the last range to the first, in one pass over the original lines.
+        total_removed = 0
+        for start, end in sorted(doomed, reverse=True):
+            del lines[start:end]
+            total_removed += 1
 
         # Update timestamp (replace old, don't accumulate)
         for i, line in enumerate(lines):
@@ -774,6 +812,10 @@ def deduplicate_identity(ctx: ToolContext) -> str:
 
         new_content = "\n".join(lines)
         identity_path.write_text(new_content, encoding="utf-8")
+
+        # So a bad clean-up can be rolled back (best-effort, this file only).
+        auto_commit_agent_change(ctx.agent_root, "chore(identity): deduplicate sections",
+                                 paths=[IDENTITY_REL_PATH])
 
         return f"✓ Deduplicated identity: removed {total_removed} duplicate section(s) from: {', '.join(sections_cleaned)}\nSize reduced: {original_len} → {len(new_content)} chars ({original_len - len(new_content)} chars saved)"
 
@@ -813,6 +855,25 @@ def update_identity(
     try:
         identity_path = ctx.memory_path("identity.md")
 
+        content, stripped_headings, inner_heading = _split_identity_content(content)
+        if inner_heading is not None:
+            return (
+                f"⚠️ Not written: the content has a section heading of its own ('{inner_heading}'). "
+                f"Content must not carry `## ` lines; call update_identity once per section, "
+                f"with the section name in `section`."
+            )
+        heading_note = ""
+        if stripped_headings:
+            if mode != "deduplicate" and not content.strip():
+                return (
+                    f"⚠️ Not written: the content was only a heading ('{stripped_headings[0]}'). "
+                    f"The tool writes `## {section.title()}` itself; send the text for the section."
+                )
+            heading_note = f" (dropped the content's own heading: {', '.join(repr(h) for h in stripped_headings)}"
+            if any(h.strip().lower() != section.strip().lower() for h in stripped_headings):
+                heading_note += f"; it differs from section '{section}', which is the one written"
+            heading_note += ")"
+
         if not identity_path.exists():
             # Create initial identity
             initial_content = f"""# Agent Identity
@@ -827,7 +888,7 @@ This file tracks the agent's self-understanding and evolving identity.
 """
             identity_path.parent.mkdir(parents=True, exist_ok=True)
             identity_path.write_text(initial_content, encoding="utf-8")
-            return f"✓ Created identity with {section} section"
+            return f"✓ Created identity with {section} section{heading_note}"
 
         existing = identity_path.read_text(encoding="utf-8")
         lines = existing.split("\n")
@@ -932,11 +993,12 @@ This file tracks the agent's self-understanding and evolving identity.
 
         # Auto-commit identity changes (best-effort)
         msg = commit_message or f"chore(identity): update {section}"
-        auto_commit_agent_change(ctx.agent_root, msg)
+        auto_commit_agent_change(ctx.agent_root, msg, paths=[IDENTITY_REL_PATH])
 
         msg = f"✓ Updated identity section '{section}'"
         if duplicates_removed > 0:
             msg += f" (removed {duplicates_removed} duplicate(s))"
+        msg += heading_note
 
         return msg
 
@@ -2598,7 +2660,11 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "content": {
                             "type": "string",
-                            "description": "Section content"
+                            "description": (
+                                "Section content, text only. The tool writes the '## <section>' header "
+                                "itself, so the content must not carry '## ' heading lines (a leading one "
+                                "is dropped, one inside the text rejects the call): call once per section."
+                            )
                         },
                         "mode": {
                             "type": "string",
@@ -2619,7 +2685,7 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=update_identity,
-            timeout_sec=10,
+            timeout_sec=IDENTITY_TOOL_TIMEOUT_SEC,
             default_enabled=False,
         ),
 
@@ -2635,7 +2701,7 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=deduplicate_identity,
-            timeout_sec=10,
+            timeout_sec=IDENTITY_TOOL_TIMEOUT_SEC,
             default_enabled=False,
         ),
 
