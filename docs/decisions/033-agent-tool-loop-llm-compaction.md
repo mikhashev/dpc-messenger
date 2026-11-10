@@ -8,7 +8,7 @@ deciders: [Mike]
 consulted: [CC, Ark, Warren]
 informed: []
 depends_on: []
-related: [ADR-010, ADR-014]
+related: [ADR-010, ADR-014, ADR-045]
 supersedes: []
 session: S40
 ---
@@ -128,6 +128,7 @@ Scope is the agent loop only; the human chat (hard-block at 100%) is not touched
   bypasses the budget entirely, so the circuit breaker is the only bound there. Compaction is
   auxiliary spend, not the agent's primary work, so it should be **logged as a distinct metric**
   for visibility (see Scope).
+  *(Corrected 2026-11-10: see the amendment below.)*
 
 ## Validation
 
@@ -177,6 +178,7 @@ Bench scripts: `docs/decisions/adr-033-benches/`.
   mirroring the Snapshot fields.
 - Session stats / `budget.py` — log compaction token spend as a distinct `compaction_tokens_spent`
   metric so auxiliary compaction cost is visible separately from the agent's primary work.
+  *(Not implemented as of 2026-11-10: see the amendment below.)*
 
 **Summary template (single, shared across agents):** `Goal / Progress / Decisions / Next / Files /
 Findings / Errors`. Tool-result handling is heterogeneous: `read_file` results summarize to the
@@ -226,3 +228,16 @@ losing data — before finally falling back to lossy prefix truncation.
 - `docs/decisions/adr-033-benches/` — the five validation bench scripts
 - Compaction survey of 14 open-source coding agents (2026-07-16), verified against source for Goose, Qwen Code, Hermes, Gemini CLI, Crush, Roo Code, Cline
 - Original compaction research (the two source documents this ADR's survey verifies against) by [vakovalskii](https://github.com/vakovalskii)
+
+## Amendment, 2026-11-10 — budget flow corrected, the window named
+
+The original text above stands. Parts of it, said or left unsaid, do not match the code, and ADR-045 now amends how a cut is made.
+
+- **The summariser's spend is not counted against the session budget.** The *Budget flow* paragraph says compaction on a remote provider "already flows through the existing `BudgetLimitGuard` and counts against the session budget". It does not. `apply_compaction` returns only the message list, and `loop.py` assigns it to `messages` alone (`loop.py:2482`), so no usage reaches `accumulated_usage`. `compact_tool_history_llm` (`context.py:1621`) returns only messages, and it calls `llm_manager.query(...)` without `return_metadata`, which gives back the reply text and nothing else. Usage is recorded in one place only: the provider's own `_log_usage` writes an INFO line and keeps `_last_usage`, which the next call overwrites (`providers/anthropic_provider.py:95`, and the same method in the Gemini, Ollama and Z.AI providers). `llm_manager.py` has no `_log_usage`. So the number exists in the provider log and in `_last_usage`, and never in `ctx.accumulated_cost_usd`, which is what `BudgetLimitGuard` reads. That guard is also off whenever `budget_remaining_usd` is `None` or not positive (`guards.py:394`), and not every task carries a budget.
+- **What bounds summariser spend, on any provider.** The local path is not a corner case: agents run on local aliases today (ADR-040, ADR-044), and there the budget guard bounds nothing, as the original paragraph already said. Two things bound it: the per-call timeout, 180 s (`timeout_s`, `context.py:1626`), and the circuit breaker, which stops calling the model after 3 consecutive failures (`CompactionState.max_fails`, `context.py:1717`; the broken branch, `context.py:1930-1931`). Neither bounds the number of *successful* calls. That is bounded by how often a cut fires (the hysteresis deadband and `CUT_MIN_BATCH`) and by the size guard `CUT_MIN_FREED_TOKENS` (`context.py:1728-1738`), and one cut issues one call per large result.
+- **`compaction_tokens_spent` is not implemented.** The Scope promise of a distinct metric has no code behind it: the name appears nowhere in `dpc-client/core`. The only trace of a compaction run is `log.debug("ADR-033 compaction: ...")` (`context.py:1887-1899`). Tracked as the board card ADR-033-BUDGET-METRIC.
+- **Compaction off is not "no cut".** With `compaction_enabled` false there is no summariser, yet `apply_compaction` still runs every round and cuts deterministically (`compact_tool_history`), at `UNDER_PRESSURE` 0.85 of the window with no deadband (`context.py:1696`, `1847-1849`, `1883`), and also once `OFF_ROUND_BOUND` (24) uncut rounds have piled up (`context.py:1730`, `1817`), subject to the same size guard. Four limits act on one window and have four sources: `compaction_threshold`, default 0.8 (`agent_service.py:916`; the summariser's setting, release 0.2 below it); `UNDER_PRESSURE` 0.85; `CONTEXT_LIMIT_RATIO` 0.95, where `ContextLimitGuard` refuses the next round (`guards.py:426`); and the pre-turn check in `agent.py:741-759`, which estimates the prompt as chars/4 and refuses when less than a reserve is left (the larger of 5 % of the window and `CONTEXT_ROUND_RESERVE_TOKENS`, capped at 20 %).
+- **Which window the ratio divides by.** `CompactionState.window` is the agent's `context_window` from `config.json`; when that is null, `loop.py` fills it from `alias_context_window` of the alias the loop runs on (`loop.py:2215-2223`, the providers-config value); when that too is unknown it falls back to 204800 (`context.py:1715`; the pre-turn check in `agent.py:716` has the same fallback). Sleep synthesis on a local engine reads the engine's own reported window instead (ADR-044, amendment of 2026-11-09). For one alias the two can differ, so a cut and a synthesis may judge "full" against different sizes.
+- **The order "compaction first, `ContextLimitGuard` last" was never decided here.** ADR-033 is dated 2026-07-16 and the guard arrived on 2026-08-23 (`guards.py:432`). That order is decision 6 of [ADR-045](045-agent-context-is-a-projection-of-a-kept-transcript.md), accepted 2026-11-10, which also amends how a cut is made when compaction is off.
+
+Mike's call, 2026-11-10.

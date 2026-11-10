@@ -1,7 +1,7 @@
 ---
 adr: 045
 title: "Build the agent's request as a projection of a kept transcript, never lose a cut result without an address"
-status: proposed
+status: accepted
 date: 2026-10-18
 axis: knowledge, network
 deciders: [Mike]
@@ -15,6 +15,8 @@ session: "DPC Project group chat, 2026-10-18 — epic AN-AGENT-TURN-LOSES-TOOL-O
 
 # ADR-045 — The agent's context is a projection of a kept transcript
 
+> **Accepted 2026-11-10, Mike's call.**
+>
 > **Proposed, 2026-10-18.** Amends ADR-033 for the compaction-off setting and for how any
 > cut is made. ADR-033's summariser (compaction on) stays as decided there. The human chat
 > is out of scope: it is not cut and still blocks at a full window.
