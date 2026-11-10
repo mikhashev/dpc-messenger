@@ -1665,6 +1665,20 @@ _COMPACT_RESULT_PROMPT = (
 )
 
 
+class PartialCompaction(RuntimeError):
+    """A summary call failed part-way; ``result`` keeps the summaries already bought.
+
+    Messages not summarised are left exactly as they were (unmarked), so the
+    caller's deterministic fallback treats only those and a later batch does not
+    ask the model for a summary that already exists.
+    """
+
+    def __init__(self, cause: BaseException, result: List[Dict[str, Any]]):
+        super().__init__(str(cause) or type(cause).__name__)
+        self.cause = cause
+        self.result = result
+
+
 async def compact_tool_history_llm(
     messages: List[Dict[str, Any]],
     llm_manager: Any,
@@ -1681,9 +1695,11 @@ async def compact_tool_history_llm(
     (one result), which is what makes it fast — a single batch summary of the whole old
     history can exceed the model's own context window (see ADR-033 Validation bench-2).
 
-    Raises on model failure (error, timeout, or empty summary) so the caller can apply
-    the strategy fallback ladder. Never swallows — a silent failure would leave the
-    context uncompacted and overflow the window.
+    Raises ``PartialCompaction`` on model failure (error, timeout, or empty summary) so
+    the caller can apply the strategy fallback ladder. Never swallows — a silent failure
+    would leave the context uncompacted and overflow the window. The exception carries
+    the list with every summary already paid for; after the first failure the model is
+    not called again in this pass and the rest are left untouched for the fallback.
     """
     tool_round_starts = [
         i for i, m in enumerate(messages)
@@ -1694,6 +1710,7 @@ async def compact_tool_history_llm(
 
     rounds_to_compact = set(tool_round_starts[:-keep_recent])
     result: List[Dict[str, Any]] = []
+    failure: Optional[BaseException] = None
 
     for i, msg in enumerate(messages):
         if i in rounds_to_compact and msg.get("role") == "assistant" and not msg.get("_compacted"):
@@ -1715,14 +1732,22 @@ async def compact_tool_history_llm(
             if parent_round in rounds_to_compact:
                 content = str(msg.get("content") or "")
                 if len(content) > _KEEP_ASIS_CHARS:
-                    prompt = _COMPACT_RESULT_PROMPT.format(body=content)
-                    summary = await asyncio.wait_for(
-                        llm_manager.query(prompt, provider_alias=provider_alias),
-                        timeout=timeout_s,
-                    )
-                    summary = (summary or "").strip()
-                    if not summary:
-                        raise RuntimeError("compaction model returned an empty summary")
+                    if failure is not None:  # no more paid calls after a failure
+                        result.append(msg)
+                        continue
+                    try:
+                        prompt = _COMPACT_RESULT_PROMPT.format(body=content)
+                        summary = await asyncio.wait_for(
+                            llm_manager.query(prompt, provider_alias=provider_alias),
+                            timeout=timeout_s,
+                        )
+                        summary = (summary or "").strip()
+                        if not summary:
+                            raise RuntimeError("compaction model returned an empty summary")
+                    except Exception as e:
+                        failure = e
+                        result.append(msg)
+                        continue
                     if msg.get("_output_at"):  # ADR-045: a summary is a cut too
                         summary += f"\n[Full output: {msg['_output_at']} (read_file reads it).]"
                     result.append({**msg, "content": summary, "_compacted": True})
@@ -1733,6 +1758,8 @@ async def compact_tool_history_llm(
 
         result.append(msg)
 
+    if failure is not None:
+        raise PartialCompaction(failure, result)
     return result
 
 
@@ -1965,6 +1992,11 @@ async def apply_compaction(
             log.debug("ADR-033 compaction: done (round=%d, usage was %.1f%%)", round_idx, ratio * 100)
             return out
         except Exception as e:
+            # Summaries already bought stay in the transcript (marked, so the
+            # next batch skips them); the ladder below treats only the rest.
+            if isinstance(e, PartialCompaction):
+                messages = e.result
+                e = e.cause
             # Strategy fallback ladder (not a model switch): keep MORE verbatim as a
             # data-integrity step, and notify the user.
             state.fail_streak += 1
